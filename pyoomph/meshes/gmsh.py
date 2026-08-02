@@ -68,6 +68,21 @@ import math
 if TYPE_CHECKING:
     from ..generic.problem import Problem
 
+
+# Geometrical entities as the geometry methods below take them: either the object returned when the
+# entity was created, or the name it was created with (both are resolved by _resolve_name, which
+# also skips None -- line() and circle_arc() return None for a degenerate entity).
+GmshCurve:TypeAlias = Union[Line, Spline, BSpline, CircleArc, EllipseArc]
+GmshSurface:TypeAlias = Union[PlaneSurface, Surface]
+GmshCurveArg:TypeAlias = Union[GmshCurve, str, None]
+GmshSurfaceArg:TypeAlias = Union[GmshSurface, str, None]
+# Nested sequences are accepted as well, since the creating methods hand back lists: plane_surface
+# returns one surface per disjunct domain, line() one segment per point pair, and passing such a
+# result straight on to the next method is the usual case.
+NestedGmshCurveArg:TypeAlias = Union[GmshCurveArg, Sequence["NestedGmshCurveArg"]]
+NestedGmshSurfaceArg:TypeAlias = Union[GmshSurfaceArg, Sequence["NestedGmshSurfaceArg"]]
+
+
 class GmshSizeCallback:
     def __init__(self,default_resolution:float=1.0):
         self.gmsh:"GmshTemplate"
@@ -505,6 +520,12 @@ class GmshTemplate(MeshedMeshTemplate):
         for a in args:
             if a is None:
                 continue
+            if isinstance(a, (list,tuple)):
+                # Flattened, so that the list-returning creators (plane_surface, multi-point line,
+                # create_lines, ...) can be fed straight into the methods taking entities. Only
+                # ordered containers, since the caller's order decides e.g. the curve loop.
+                res.extend(self._resolve_name(typ, *a)) #type:ignore
+                continue
             if isinstance(a, str):
                 if not (a in self._named_entities.keys()):
                     # Test for glob
@@ -524,6 +545,12 @@ class GmshTemplate(MeshedMeshTemplate):
                 res.append(a)
         return res
 
+    @overload
+    def line(self, start:Sequence[ExpressionOrNum] | Point, end:Sequence[ExpressionOrNum] | Point, /, *, name:str | None=None)->Line | None: ...
+
+    @overload
+    def line(self, start:Sequence[ExpressionOrNum] | Point, second:Sequence[ExpressionOrNum] | Point, third:Sequence[ExpressionOrNum] | Point, /, *further:Sequence[ExpressionOrNum] | Point, name:str | None=None)->list[Line]: ...
+
     def line(self, *args:Sequence[ExpressionOrNum] | Point, name:str | None=None)->Line | list[Line] | None:
         """
         Create a line (segment-wise) line for the mesh. When given a name, it can be used to identify the line later, e.g. for boundary conditions.
@@ -533,7 +560,7 @@ class GmshTemplate(MeshedMeshTemplate):
             name: Name of the line entity.
 
         Returns:
-            The created line entity, or None if the line is degenerate.
+            The created line entity, or None if the line is degenerate. When more than two points are passed, one line per point pair is returned instead.
 
         Raises:
             RuntimeError: If the geometry is not defined inside the 'define_geometry' function.
@@ -586,11 +613,30 @@ class GmshTemplate(MeshedMeshTemplate):
                     resg.append(ll)
             return resg
 
-    def make_lines_transfinite(self,*linesIn:Line | str,numnodes:Literal["auto"] | int="auto",mode:str="Progression",coeff:float | None=None,dry_run:bool=False) -> list[tuple[int, float]]:
+    def make_lines_transfinite(self,*linesIn:NestedGmshCurveArg,numnodes:Literal["auto"] | int="auto",mode:str="Progression",coeff:float | None=None,dry_run:bool=False) -> list[tuple[int, float]]:
+        """
+        Distributes the nodes on the given curves explicitly, instead of letting Gmsh size them from the point sizes.
+
+        Args:
+            *linesIn: The curves, by name or object, also as (nested) lists of these.
+            numnodes: Number of nodes on each curve, or "auto" to take it from the point sizes of the individual curve.
+            mode: Node distribution, e.g. "Progression" or "Bump", passed on to Gmsh.
+            coeff: Coefficient of the distribution, i.e. the grading. If None, it is calculated from the point sizes at both ends.
+            dry_run: Only calculate and return the numbers, without applying them to the curves.
+
+        Returns:
+            One (numnodes, coeff) entry per curve, in the order the curves were resolved.
+        """
         lines=self._resolve_name("lines", *linesIn)
         res_info:list[tuple[int,float]]=[]
         for line in lines:
-            if numnodes == "auto":
+            # Per line, deliberately: the automatic node count and coefficient are properties of the
+            # line being processed. Assigning them back to the arguments would leave the first line's
+            # values in place for all the remaining ones, so "auto" over several lines would size
+            # only the first of them and give every other line that same count.
+            line_numnodes:Literal["auto"] | int=numnodes
+            line_coeff:float | None=coeff
+            if line_numnodes == "auto":
                 if isinstance(line,(pygmsh.geo.geometry.common.geometry.Line, pygmsh.geo.geometry.common.geometry.Spline,pygmsh.geo.geometry.common.geometry.BSpline)):
                     lastpt = line.points[0] #type:ignore
                     line_len=0
@@ -624,45 +670,54 @@ class GmshTemplate(MeshedMeshTemplate):
 
                 sstart=self._point_size_hash[line.points[0]]  #type:ignore
                 send=self._point_size_hash[line.points[-1]]  #type:ignore
-                numnodes = math.ceil(0.5 * (line_len /sstart + line_len / send) - 1e-12)  #type:ignore
-                if coeff is None:
-                    coeff = ( send/sstart) ** (1.0 / ((2 if numnodes < 2 else numnodes) - 1))  #type:ignore
+                line_numnodes = math.ceil(0.5 * (line_len /sstart + line_len / send) - 1e-12)  #type:ignore
+                if line_coeff is None:
+                    line_coeff = ( send/sstart) ** (1.0 / ((2 if line_numnodes < 2 else line_numnodes) - 1))  #type:ignore
                     #if send < sstart:
                     #    if coeff > 1:
                     #        coeff = 1 / coeff
                     #if line._id<0:
                     #    coeff=1/coeff
 
-            if coeff is None:
-                coeff=1.0
-            res_info.append((numnodes,coeff,))
+            if line_coeff is None:
+                line_coeff=1.0
+            res_info.append((line_numnodes,line_coeff,))
             if not dry_run:
-                self._geom.set_transfinite_curve(line,numnodes,mesh_type=mode,coeff=coeff) #type:ignore
+                self._geom.set_transfinite_curve(line,line_numnodes,mesh_type=mode,coeff=line_coeff) #type:ignore
         return res_info
 
-    def make_surface_transfinite(self,*surfsIn:str | PlaneSurface,corners:list[Point]=[],arrangement:str=""):
+    def make_surface_transfinite(self,*surfsIn:NestedGmshSurfaceArg,corners:Sequence[Point]=[],arrangement:str=""):
+        """
+        Meshes the given surfaces with a structured (transfinite) grid, i.e. by interpolating the node distribution of the bounding curves.
+
+        Args:
+            *surfsIn: The surfaces, by name or object, also as (nested) lists of these, e.g. the return value of plane_surface.
+            corners: The four corner points spanning the grid. If empty, they are taken from the bounding curves, which requires a surface with exactly four edges and no holes.
+            arrangement: How the elements are arranged, e.g. "Left", "Right" or "Alternate", passed on to Gmsh.
+        """
         surfs=self._resolve_name("surfaces", *surfsIn)
-        for surf in surfs:
-            for s in surf: #type:ignore
-                if len(corners) == 0:
-                    if s.num_edges!=4: #type:ignore
-                        raise RuntimeError("Please set corners explicitly, surface has more than 4 corners")
-                    if len(s.holes)>0: #type:ignore
-                        raise RuntimeError("Please set corners explicitly, surface has holes")
-                    corners=[c.points[0] for c in s.curve_loop.curves] #type:ignore
-                    linfos=[self.make_lines_transfinite(l,dry_run=True)[0] for l in s.curve_loop.curves] #type:ignore
-                    N1=int(numpy.ceil( (linfos[0][0]+linfos[2][0]-1e-10)/2))
-                    N2 = int(numpy.ceil((linfos[1][0] + linfos[3][0] - 1e-10) / 2))
-                    NS=[N1,N2,N1,N2]
-                    #Progs = [N1, N2, N1, N2]
-                    for i,l in enumerate(s.curve_loop.curves): #type:ignore
-                        print(i,l,linfos[i][1]) #type:ignore
-                        coeff=linfos[i][1] #type:ignore
-                        #if l._id<0:
-                        #    coeff=1/coeff
-                        self.make_lines_transfinite(l,numnodes=NS[i],coeff=coeff) #type:ignore
-                    #exit()
-                self._geom.set_transfinite_surface(s,arrangement,corner_pts=corners) #type:ignore
+        for s in surfs:
+            # Per surface, deliberately: corners passed in by the caller apply to every surface,
+            # but the ones detected below belong to the surface they were read from. Assigning
+            # them back to the argument would hand the first surface's corners to all the rest.
+            surf_corners=list(corners)
+            if len(surf_corners) == 0:
+                if s.num_edges!=4: #type:ignore
+                    raise RuntimeError("Please set corners explicitly, surface has more than 4 corners")
+                if len(s.holes)>0: #type:ignore
+                    raise RuntimeError("Please set corners explicitly, surface has holes")
+                surf_corners=[c.points[0] for c in s.curve_loop.curves] #type:ignore
+                # Opposite sides of a transfinite surface must carry the same number of nodes, so
+                # the automatic counts of each pair are averaged. Note that this overrides any
+                # transfinite setting made on these curves beforehand -- pass the corners
+                # explicitly if the curves have already been set up by hand.
+                linfos=[self.make_lines_transfinite(l,dry_run=True)[0] for l in s.curve_loop.curves] #type:ignore
+                N1=int(numpy.ceil( (linfos[0][0]+linfos[2][0]-1e-10)/2))
+                N2 = int(numpy.ceil((linfos[1][0] + linfos[3][0] - 1e-10) / 2))
+                NS=[N1,N2,N1,N2]
+                for i,l in enumerate(s.curve_loop.curves): #type:ignore
+                    self.make_lines_transfinite(l,numnodes=NS[i],coeff=linfos[i][1]) #type:ignore
+            self._geom.set_transfinite_surface(s,arrangement,corner_pts=surf_corners) #type:ignore
 
 
     # Add lines as p1, <name>, p2, <name>, p3, <name>, p4...
@@ -789,6 +844,12 @@ class GmshTemplate(MeshedMeshTemplate):
             lines.append(arc)
         return lines
             
+
+    @overload
+    def circle_arc(self, startpt:Point | Sequence[ExpressionOrNum], endpt:Point | Sequence[ExpressionOrNum], *, center:Point | Sequence[ExpressionOrNum], through_point:None=None, name:str | None=None, with_macro_element:bool=True)->CircleArc: ...
+
+    @overload
+    def circle_arc(self, startpt:Point | Sequence[ExpressionOrNum], endpt:Point | Sequence[ExpressionOrNum], *, center:None=None, through_point:Point | Sequence[ExpressionOrNum], name:str | None=None, with_macro_element:bool=True)->Line | CircleArc | None: ...
 
     def circle_arc(self, startpt:Point | Sequence[ExpressionOrNum], endpt:Point | Sequence[ExpressionOrNum], *, center:Point | Sequence[ExpressionOrNum] | None=None, through_point:Point | Sequence[ExpressionOrNum] | None=None, name:str | None=None, with_macro_element:bool=True)->Line | CircleArc | None:
         """
@@ -1015,7 +1076,7 @@ class GmshTemplate(MeshedMeshTemplate):
         gmsh.option.setNumber(n, v) #type:ignore
 
 
-    def plane_surface(self, *args:str | Line | Spline | BSpline | CircleArc | None, name:str | None=None,holes:list[Sequence[str | Line | Spline | BSpline | CircleArc]] | None=None,reversed_order:bool=False) -> list[PlaneSurface]:
+    def plane_surface(self, *args:NestedGmshCurveArg, name:str | None=None,holes:Sequence[Sequence[NestedGmshCurveArg]] | None=None,reversed_order:bool=False) -> list[PlaneSurface]:
         """
         Creates a planar surface in the mesh. You must supply the enclosing boundaries (either by name or the line/circle_arc/spline/bspline objects) as arguments.
         If you give it a name, it can be used to add equations to the domain.
@@ -1167,7 +1228,7 @@ class GmshTemplate(MeshedMeshTemplate):
             "boundary does not pin the sphere down. Pass map_to_sphere=(cx,cy,cz) to state the "
             "centre explicitly.")
 
-    def ruled_surface(self, *args:str | Line | Spline | BSpline | CircleArc, name:str | None=None,reversed_order:bool=False,map_to_sphere:bool | Sequence[float]=False) -> list[Surface]:
+    def ruled_surface(self, *args:NestedGmshCurveArg, name:str | None=None,reversed_order:bool=False,map_to_sphere:bool | Sequence[float]=False) -> list[Surface]:
         """
         Adds a ruled surface spanned by the given bounding curves.
 
@@ -1208,7 +1269,7 @@ class GmshTemplate(MeshedMeshTemplate):
             allres.append(res)
         return allres
 
-    def volume(self, *args:str | Surface | PlaneSurface, name:str | None=None,reversed_order:bool=False) -> list[Volume]:
+    def volume(self, *args:NestedGmshSurfaceArg, name:str | None=None,reversed_order:bool=False) -> list[Volume]:
         resolved = self._resolve_name("surfaces", *args) #type:ignore
         #print(resolved)
         srted=resolved # TODO: Sort?
@@ -1242,15 +1303,17 @@ class GmshTemplate(MeshedMeshTemplate):
         #exit()
         return allres
 
-    def set_recombined_surfaces(self, surfs:list[PlaneSurface | Surface | str] | str | PlaneSurface | Surface):
-        if isinstance(surfs, list):
-            for e in surfs:
-                self.set_recombined_surfaces(e)
-        elif isinstance(surfs, str):
-            resolve = self._resolve_name("surfaces", surfs)
-            self.set_recombined_surfaces(resolve) #type:ignore
-        else:
-            self._geom.set_recombined_surfaces([surfs]) #type:ignore
+    def set_recombined_surfaces(self, surfs:NestedGmshSurfaceArg, *more_surfs:NestedGmshSurfaceArg):
+        """
+        Marks the given surfaces for recombination, i.e. Gmsh will merge the triangles it meshed them with into quadrilaterals.
+
+        Args:
+            surfs: The surfaces, by name or object, also as a (nested) list of these, e.g. the return value of plane_surface.
+            *more_surfs: Further surfaces in the same form.
+        """
+        resolved = self._resolve_name("surfaces", surfs, *more_surfs)
+        if len(resolved)>0:
+            self._geom.set_recombined_surfaces(resolved) #type:ignore
 
     def define_geometry(self):
         """
@@ -2144,4 +2207,15 @@ class GmshTemplate(MeshedMeshTemplate):
         See https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields for more information on the available field types and their parameters.
         """
         gmsh.model.mesh.field.setAsBackgroundMesh(field_id)
+
+    def set_mesh_size_boundary_layer_field(self,field_id:int):
+        """
+        Registers the given field (which must be of type "BoundaryLayer") as a boundary layer field,
+        i.e. gmsh grows graded, wall-normal element layers from the curves the field was given.
+        This is deliberately not the same as set_mesh_size_background_field: a boundary layer field
+        does not describe a mesh size to be sampled, but a structured region to be extruded from the
+        wall, so gmsh treats it separately.
+        See https://gmsh.info/doc/texinfo/#Gmsh-mesh-size-fields for the available parameters.
+        """
+        gmsh.model.mesh.field.setAsBoundaryLayer(field_id)
     

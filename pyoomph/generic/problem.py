@@ -579,6 +579,21 @@ class Problem(_pyoomph.Problem):
         self.min_permitted_error:float=0.0001	#Some defaults for the meshes
         #: Maximum error of all meshes for spatial adaptivity. If the error is above this threshold, we must refine locally.
         self.max_permitted_error:float=0.001
+        #: If set to an int, adaptation aims at this problem size instead of at a fixed error tolerance:
+        #: the elements with the largest estimated errors are refined (or the smallest unrefined) until
+        #: :py:meth:`ndof` is approximately ``desired_ndof``. While it is set, min_permitted_error and
+        #: max_permitted_error are *outputs* of the controller rather than inputs - they are recomputed
+        #: before every adaptation and restored when this is set back to None.
+        self.desired_ndof:int | None=None
+        #: Relative dead band of the desired_ndof controller. Inside it nothing is refined or unrefined,
+        #: which is what makes the adaptation loops terminate instead of oscillating about the target.
+        self.desired_ndof_tolerance:float=0.1
+        #: Fraction of the remaining gap the desired_ndof controller closes per adaptation step. Below 1
+        #: because 2:1 balancing refines further elements of its own accord, so a step that aimed exactly
+        #: at the target would systematically overshoot.
+        self.desired_ndof_damping:float=0.7
+        #: Largest factor by which the desired_ndof controller may grow ndof in a single adaptation step.
+        self.desired_ndof_max_growth:float=4.0
         #: Maximum number of refinements of all meshes. After initialization, use set_max_refinement_level instead of this property.
         self.max_refinement_level:int=8
         #: Minimum refinement level of all meshes.       
@@ -1796,7 +1811,18 @@ class Problem(_pyoomph.Problem):
                 repair_hanging(mesh)
             _pyoomph.set_use_eigen_Z2_error_estimators(False)
             #print("RESET")
-            
+
+        # The desired_ndof controller runs HERE, on the raw estimator errors and before any override
+        # stage, and the position is not a matter of taste. The overrides below encode their verdict
+        # as a magic error value relative to the thresholds -- must_refine = 100*max_permitted_error,
+        # may_not_unrefine = 0.5*(max+min) -- so a controller that moved the thresholds afterwards
+        # would leave those sentinels sitting in the wrong place. "May not unrefine" in particular
+        # only stays above min_permitted_error while the thresholds keep roughly their original
+        # ratio, so lowering max after the fact silently unrefines every element an interface or a
+        # RefineAccordingToElement callback asked to protect. Deciding the thresholds first means the
+        # sentinels are computed from the new values and the invariant holds by construction.
+        # See dev_docs/spatial_error_estimators.md sections 4 and 5.
+        self._apply_desired_ndof_controller()
 
         if True:
             #Now, we first have to go through all meshes at the deepest level in the tree
@@ -1960,6 +1986,213 @@ class Problem(_pyoomph.Problem):
             self.assign_initial_values_impulsive() # We messed around. So me must reassign the initial values
         self._adapt_eigenindex=None
         return nref,nuref
+
+    def _desired_ndof_meshes(self) -> list[tuple[str,"AnySpatialMesh"]]:
+        """The meshes the desired_ndof controller may act on: the bulk meshes that can actually be
+        refined. Interface meshes are excluded because they are never adapted in their own right -
+        they follow the bulk mesh, via the error overrides."""
+        res:list[tuple[str,AnySpatialMesh]]=[]
+        for name,mesh in self._meshdict.items():
+            if isinstance(mesh,ODEStorageMesh): continue
+            assert not isinstance(mesh,InterfaceMesh)
+            if mesh.refinement_possible():
+                res.append((name,mesh))
+        return res
+
+    def _global_error_order_statistic(self,errors:"NPFloatArray",count:int,largest:bool) -> float:
+        """The value of the `count`-th largest (or smallest) error over ALL processes.
+
+        Serial takes a partial sort. Under MPI the errors live on different ranks, so instead of
+        gathering them the threshold itself is bisected, counting on each rank and MPI-summing the
+        counts: a fixed number of cheap collective reductions, independent of how the mesh happens to
+        be distributed, and giving every rank the same answer by construction."""
+        import numpy
+        if count<=0:
+            return numpy.inf if largest else -numpy.inf
+        if get_mpi_nproc()<=1:
+            if count>=len(errors):
+                return float(numpy.min(errors)) if largest else float(numpy.max(errors))
+            srt=numpy.partition(errors,-count if largest else count-1)
+            return float(srt[-count] if largest else srt[count-1])
+        lo=float(get_mpi_min(numpy.min(errors) if len(errors) else numpy.inf))
+        hi=float(get_mpi_max(numpy.max(errors) if len(errors) else -numpy.inf))
+        if not (hi>lo):
+            return hi
+        # 60 bisections take the bracket to ~1e-18 of its width, far below any tie the caller could
+        # act on differently. Every rank runs the same loop on the same summed counts, so they all
+        # come out with the same threshold - which they must, since it becomes a mesh-wide tolerance.
+        for _ in range(60):
+            mid=0.5*(lo+hi)
+            if largest:
+                # count(err > mid) is decreasing in mid: keep the half where at least `count` remain.
+                n=int(get_mpi_sum(int(numpy.count_nonzero(errors>mid))))
+                lo,hi=(mid,hi) if n>=count else (lo,mid)
+            else:
+                # count(err < mid) is increasing in mid: keep the half where at most `count` are below.
+                n=int(get_mpi_sum(int(numpy.count_nonzero(errors<mid))))
+                lo,hi=(lo,mid) if n>=count else (mid,hi)
+        return 0.5*(lo+hi)
+
+    def _restore_thresholds_before_desired_ndof(self):
+        """Put back the min/max_permitted_error the user chose, once desired_ndof is unset again."""
+        saved=getattr(self,"_desired_ndof_saved_thresholds",None)
+        if not saved:
+            return
+        for name,(mn,mx) in saved.items():
+            mesh=self.get_mesh(name,return_None_if_not_found=True)
+            if mesh is not None:
+                mesh.min_permitted_error=mn
+                mesh.max_permitted_error=mx
+        self._desired_ndof_saved_thresholds=None
+
+    def _apply_desired_ndof_controller(self):
+        """Turn a target problem size into refine/unrefine thresholds for this adaptation step.
+
+        The controller is *ordinal*: it picks an order statistic of the error distribution and puts
+        the threshold there. It never uses the magnitude of an error, so on a single mesh it does not
+        care how the estimator is normalised. The normalisation only matters when the ranking is
+        pooled across several meshes, which is what makes the errors of one mesh comparable with
+        another's - see SpatialErrorEstimator's normalize_relative and weight, and
+        dev_docs/spatial_error_estimators.md section 7.
+        """
+        import numpy
+        if self.desired_ndof is None:
+            self._restore_thresholds_before_desired_ndof()
+            return
+        meshes=self._desired_ndof_meshes()
+        if not meshes:
+            return
+        if getattr(self,"_desired_ndof_saved_thresholds",None) is None:
+            self._desired_ndof_saved_thresholds={n:(m.min_permitted_error,m.max_permitted_error) for n,m in meshes}
+
+        # Only elements that can still move count towards the model. An element already at
+        # max_refinement_level cannot be refined however large its error, and one at
+        # min_refinement_level cannot be merged away; counting either would make the controller aim
+        # at a change it has no way to produce.
+        errs_refinable:list[float]=[]
+        errs_unrefinable:list[float]=[]
+        nelem_local=0
+        dim=2
+        for _name,mesh in meshes:
+            dim=max(dim,mesh.get_dimension())
+            maxlev=mesh.max_refinement_level
+            minlev=mesh.min_refinement_level
+            for e in mesh.elements():
+                # Halo copies are the same element as one owned elsewhere. Counting them would
+                # inflate both the element count and every MPI-summed count in the bisection.
+                if e.is_halo(): continue
+                nelem_local+=1
+                lev=e.refinement_level()
+                err=e._elemental_error_max_override
+                if lev<maxlev: errs_refinable.append(err)
+                if lev>minlev: errs_unrefinable.append(err)
+        nelem=int(get_mpi_sum(nelem_local))
+        ndof=self.ndof()
+        if nelem==0 or ndof==0:
+            return
+
+        target=float(self.desired_ndof)
+        rel_gap=(target-ndof)/target
+        sons=float(2**dim)
+
+        # A step that asked for a change and got none means the request was not something the mesh
+        # can act on -- overwhelmingly the unrefinement veto, since oomph merges a father only if all
+        # of its sons agree and the smallest-error elements do not come in complete families. Asking
+        # for the same amount again would stall forever, so escalate; a step that did move resets it.
+        # Bounded, because past some point the answer really is "this mesh cannot go any coarser".
+        #
+        # Only steps that actually asked for something count. The dead band deliberately leaves ndof
+        # where it is, and letting that escalate would mean a run that idles at the target arrives at
+        # the next genuine adaptation with a 32x request behind it.
+        last=getattr(self,"_desired_ndof_last_ndof",None)
+        boost=getattr(self,"_desired_ndof_boost",1.0)
+        if last is not None:
+            boost=min(boost*2.0,32.0) if last==ndof else 1.0
+        self._desired_ndof_boost=boost
+
+        def set_thresholds(mx:float,mn:float):
+            for _n,mesh in meshes:
+                # oomph-lib throws outright if refine_tol <= unrefine_tol, and the two sentinel values
+                # the override stages use are placed relative to this pair, so they have to stay a
+                # sane, strictly ordered bracket even when the controller wants "nothing at all".
+                mesh.max_permitted_error=mx
+                mesh.min_permitted_error=min(mn,0.5*mx)
+
+        if abs(rel_gap)<=self.desired_ndof_tolerance:
+            # Inside the dead band: flag nothing, so this adaptation reports nref==nunref==0, which is
+            # the signal every calling loop already breaks on. Equidistributing at constant ndof
+            # (refining the worst elements while merging an equal dof-cost of the best) would be the
+            # natural extension and is what a moving feature in a transient run wants; it is not done
+            # here because it has no such termination signal.
+            # A threshold above every error and an unrefine threshold below every error: nothing is
+            # selected in either direction. Both are still a strictly ordered pair, which oomph-lib
+            # insists on.
+            set_thresholds(1e300,-1.0)
+            # Nothing was requested, so there is nothing for the next call to conclude from ndof
+            # having stayed put.
+            self._desired_ndof_last_ndof=None
+            self._desired_ndof_boost=1.0
+            if not self.is_quiet():
+                print("DESIRED NDOF: "+str(ndof)+" is within "+str(self.desired_ndof_tolerance*100)+"% of "+str(self.desired_ndof)+", not adapting")
+            return
+
+        # Nothing this controller can act on in the direction it wants to go: every element is
+        # already at max_refinement_level (growing), or the mesh is at its coarsest and no element
+        # has a father to be merged into (shrinking, which is what a target below the initial mesh
+        # size asks for). Say so and leave the thresholds where they are - a target the mesh cannot
+        # reach is a statement about the mesh, not an error.
+        navail_grow=int(get_mpi_sum(len(errs_refinable)))
+        navail_shrink=int(get_mpi_sum(len(errs_unrefinable)))
+        if (rel_gap>0 and navail_grow==0) or (rel_gap<0 and navail_shrink==0):
+            set_thresholds(1e300,-1.0)
+            self._desired_ndof_last_ndof=None
+            self._desired_ndof_boost=1.0
+            if not self.is_quiet():
+                print("DESIRED NDOF: "+str(self.desired_ndof)+" not reachable from ndof="+str(ndof)+
+                      (": every element is already at max_refinement_level" if rel_gap>0
+                       else ": the mesh is already at its coarsest"))
+            return
+
+        if rel_gap>0:
+            # Grow. Refining one element replaces it by 2**dim, i.e. adds (2**dim - 1) elements, and
+            # ndof follows the element count closely enough for a controller that re-measures every
+            # step. Damped, because 2:1 balancing refines further elements this model knows nothing of.
+            wanted=nelem*min(target/ndof,self.desired_ndof_max_growth)-nelem
+            k=int(self.desired_ndof_damping*wanted/(sons-1.0))
+            k=max(1,min(k,navail_grow))
+            self._desired_ndof_last_ndof=ndof
+            thresh=self._global_error_order_statistic(numpy.array(errs_refinable),k,largest=True)
+            # Strictly below the k-th largest, since oomph refines on error > refine_tol.
+            set_thresholds(thresh*(1.0-1e-9) if thresh>0 else 0.0,-1.0)
+            if not self.is_quiet():
+                print("DESIRED NDOF: "+str(ndof)+" -> "+str(self.desired_ndof)+", refining the "+str(k)+" worst of "+str(nelem)+" elements (max_permitted_error="+str(thresh)+")")
+        else:
+            # Shrink. Merging one father removes (2**dim - 1) elements but needs ALL 2**dim of its
+            # sons flagged, and a single dissenting son vetoes the whole father, so the number of
+            # elements below the threshold is only an upper bound on what actually merges. The
+            # controller therefore undershoots in this direction and takes more steps than it does
+            # growing; that is expected, not a bug to tune away.
+            wanted=nelem-nelem*target/ndof
+            # Not damped, unlike the growth direction: the 2:1-balancing overshoot that damping exists
+            # to absorb is a refinement effect, and unrefinement already undershoots on its own.
+            navail=navail_shrink
+            m=int(boost*wanted*sons/(sons-1.0))
+            if m>=navail and navail>0 and boost>1.0:
+                # Everything that could merge is already flagged and it still is not moving. Say so
+                # once rather than looping in silence: this is the mesh telling us the target is not
+                # reachable by unrefinement alone (min_refinement_level, or sons that never agree).
+                if not self.is_quiet():
+                    print("DESIRED NDOF: cannot shrink below ndof="+str(ndof)+" (target "+str(self.desired_ndof)+"): every mergeable element is already flagged")
+            m=max(1,min(m,navail))
+            self._desired_ndof_last_ndof=ndof
+            thresh=self._global_error_order_statistic(numpy.array(errs_unrefinable),m,largest=False)
+            # Strictly above the m-th smallest, since oomph unrefines on error < unrefine_tol. The
+            # refine threshold goes far above every error so that nothing refines while we are over
+            # budget -- but the must_refine sentinel is 100x it, so mandatory refinements still fire.
+            unref=thresh*(1.0+1e-9)
+            set_thresholds(max(abs(unref),1e-300)*1e6,unref)
+            if not self.is_quiet():
+                print("DESIRED NDOF: "+str(ndof)+" -> "+str(self.desired_ndof)+", unrefining the "+str(m)+" best of "+str(nelem)+" elements (min_permitted_error="+str(thresh)+")")
 
     def _adapt(self) -> tuple[int, int]:
         nref,nunref=self._adapt_with_interfacial_errors()

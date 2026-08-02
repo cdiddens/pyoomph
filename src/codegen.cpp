@@ -5876,7 +5876,10 @@ namespace pyoomph
 		auto print_named_ex_map = [&](const std::map<std::string, GiNaC::ex> &m)
 		{ for (auto &kv : m) { os << kv.first << "="; print_ex(kv.second); } };
 
-		os << "FMT8\n"; // Bump whenever this function's coverage/format changes
+		os << "FMT9\n"; // Bump whenever this function's coverage/format changes
+		// FMT9: the Z2 compound-flux grouping and its per-group normalization/weight are covered
+		// (see the Z2 block below). Before that, the same estimator expressions in different groups
+		// or with a different normalize_relative/weight shared one fingerprint.
 		// FMT8: the printed form of a shape expansion now carries its time history level and whether
 		// its Eulerian shape derivative is taken on that level's geometry, and the normal/element-size
 		// symbols carry their history level. Before that, evaluate_in_past() variants of the same
@@ -6030,6 +6033,27 @@ namespace pyoomph
 		os << "Z2_fluxes_for_eigen:\n";
 		for (auto &e : Z2_fluxes_for_eigen)
 			print_ex(e);
+		// The compound-flux grouping: the same flux expressions split over different groups, or one
+		// group normalized/weighted differently, emit different Z2_flux_group_index/
+		// Z2_group_normalize_relative/Z2_group_weight arrays (see write_group_arrays() in
+		// write_code()) while the expressions above are identical - which is exactly the Tier-2
+		// shadow-mode mismatch the grouping introduced. The settings are printed the same way
+		// write_code() prints them into the arrays, so equal fingerprints mean equal code. Group
+		// *names* are deliberately not included: they only pick the index and never reach the
+		// generated code, so hashing them would split the cache for no reason.
+		auto print_Z2_groups = [&](const std::vector<unsigned> &groups, const std::vector<double> &normrel, const std::vector<double> &wgt, const std::string &sfx)
+		{
+			os << "Z2_flux_groups" << sfx << "=";
+			for (unsigned g : groups)
+				os << g << ",";
+			os << "\n";
+			os << "Z2_group_settings" << sfx << "=";
+			for (unsigned int g = 0; g < normrel.size(); g++)
+				os << std::to_string(normrel[g]) << ":" << std::to_string(wgt[g]) << ",";
+			os << "\n";
+		};
+		print_Z2_groups(Z2_flux_groups, Z2_group_normalize_relative, Z2_group_weight, "");
+		print_Z2_groups(Z2_flux_groups_for_eigen, Z2_group_normalize_relative_for_eigen, Z2_group_weight_for_eigen, "_for_eigen");
 
 		os << "integral_expressions:\n";
 		print_named_ex_map(integral_expressions);

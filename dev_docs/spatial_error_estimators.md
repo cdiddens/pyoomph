@@ -9,7 +9,8 @@ third fell out of writing up §7 and turned a documented constraint into a knob.
    estimated has a co-dimension (a curve in 2D, a surface in 3D). Status: **implemented**; §2.4
    records what building it turned up that §2.1 did not predict.
 2. **`Problem.desired_ndof`** — steer adaptation towards a target problem size instead of towards a
-   fixed error tolerance. Status: **planned only.** §3-§6 are the design record; nothing is built.
+   fixed error tolerance. Status: **implemented**; §5.1 records what building it turned up, §5.2 what
+   was deliberately left out. §6 (moving the error overrides into C++) remains design only.
 3. **Per-criterion error normalisation** (compound-flux groups) — grew out of §7, which was written
    as a constraint to design around. Status: **implemented**; see §7.2.
 
@@ -270,31 +271,98 @@ re-measures on the next adapt step.
 
 ---
 
-## 5. The controller
+## 5. The controller — **implemented**
 
-- **Model.** With `N` refineable elements (excluding those already at `max_refinement_level`) and
-  current `ndof`, refining `k` of them gives roughly `ndof·(1 + k(2^d − 1)/N)`. Invert for `k`.
-- **Threshold.** Take the *k*-th largest raw error over all refineable meshes. Under MPI, obtain it by
-  bisecting on the threshold with MPI-summed counts rather than gathering every error: cheap,
-  deterministic, and it does not care how the mesh is distributed.
-- **Apply.** Set each refineable mesh's `max_permitted_error` to that value and `min_permitted_error`
-  preserving the user's original ratio.
-- **Dead band.** If `|ndof − desired| / desired < tolerance`, pick thresholds that flag nothing.
-  `nref == nunref == 0` is exactly the signal every calling loop already breaks on
-  ([problem.py:2850-2853](pyoomph/generic/problem.py#L2850-L2853),
-  [:3116-3121](pyoomph/generic/problem.py#L3116-L3121),
-  [:6511-6514](pyoomph/generic/problem.py#L6511-L6514)), so the loop terminates instead of oscillating
-  between over- and undershoot.
-- **Damping.** Close only a fraction of the gap per step and cap growth per step. `adapt_finalise`'s
-  2:1 balancing ([src/mesh.hpp:719-733](src/mesh.hpp#L719-L733)) refines *further* elements of its own
-  accord on simplex meshes, so this is a controller converging over several steps, not a one-shot
-  solve. Overshoot is corrected by unrefinement on the next step.
-- **Caps stay caps.** `max_refinement_level` is never raised to reach the target. If everything is at
-  max level the target is unreachable; `nrefinement_overruled()` already counts that, so warn once
-  rather than spin.
-- **Restore on unset.** Keep the user's original thresholds so setting `desired_ndof` back to `None`
-  restores them. While it is set, `min/max_permitted_error` are *outputs*, not inputs. That must be
-  said plainly in the docstring, because it inverts the meaning of two long-standing attributes.
+`Problem.desired_ndof` (default `None`), with `desired_ndof_tolerance` (0.1),
+`desired_ndof_damping` (0.7) and `desired_ndof_max_growth` (4.0). Implemented in
+`Problem._apply_desired_ndof_controller`, called from `_adapt_with_interfacial_errors` at exactly the
+point §4 argues for.
+
+**It is ordinal.** This turned out to be the clarifying property. The controller picks an order
+statistic of the error distribution and puts the threshold there; it never uses the *magnitude* of an
+error. So on a single mesh it does not care how the estimator is normalised at all. The whole of §7
+only bears on it when the ranking is pooled across several meshes — which narrows a worry that looked
+foundational down to the multi-domain case, and makes the single-mesh case unconditionally sound.
+
+**The model.** With `N` elements that can still move and current `ndof`, refining `k` of them gives
+roughly `ndof·(1 + k(2^d − 1)/N)`; invert for `k`, damp, cap the growth per step. Elements already at
+`max_refinement_level` are excluded from `N` when growing and those at `min_refinement_level` when
+shrinking — counting either would make the controller aim at a change it has no way to produce.
+Halo copies are skipped, or every shared element would be counted once per process holding it.
+
+**The threshold.** Serially a `numpy.partition`. Under MPI the errors live on different ranks, so
+rather than gathering them the threshold itself is bisected — 60 rounds of "count locally, MPI-sum,
+halve the bracket". Fixed cost, independent of the distribution, and every rank comes out with the
+same number by construction, which it must, since it becomes a mesh-wide tolerance. `get_mpi_min` and
+`get_mpi_max` were added alongside `get_mpi_sum` for the initial bracket.
+
+**The dead band** flags nothing, so the adaptation reports `nref == nunref == 0` — the signal every
+calling loop already breaks on. Without it the controller would hunt about the target forever and
+every loop would run to its step limit.
+
+### 5.1 What building it turned up
+
+**Unrefinement is not the mirror of refinement, and the first version stalled on it.** oomph merges a
+father only if *all* of its sons agree, and the smallest-error elements do not come in complete
+families, so the count below the threshold is only an upper bound on what actually merges — often a
+loose one. Measured: shrinking 18790 → target 4000 took 8 steps and *terminated at 4512*, outside the
+dead band, having asked for unrefinement and been vetoed. Terminating outside the target with no
+explanation is the worst of both worlds.
+
+Fixed by making the controller respond to being ignored: a step that asked for a change and got none
+doubles its next request (capped at 32×), and a step that moved resets it. The same 18790 → 4000 now
+takes **3 steps** and lands at 4388, inside the dead band. When even the escalated request cannot be
+met it says so once rather than looping in silence.
+
+**The escalation had to be taught to ignore the dead band.** First version escalated on any step where
+`ndof` did not change — including the dead band, where standing still is the whole point. A run idling
+at its target would have arrived at the next genuine adaptation with a 32× request behind it. The
+counter is now only armed by steps that actually asked for something.
+
+**A target below the initial mesh crashed.** At the coarsest level no element has a father, so the
+unrefinement candidate list is globally empty and the order statistic reduced over a zero-size array.
+Both directions now check availability first and report that the target is unreachable, which is a
+statement about the mesh rather than an error.
+
+**Measured, on a peaked Poisson source on an 8×8 quad mesh:**
+
+| | |
+|---|---|
+| target 3000 | 780 → 2766 in 4 steps, terminates |
+| target 20000 | 780 → 18790 in 6 steps, terminates |
+| 18790 → target 4000 | 4388 in 3 steps |
+| target 10 (below the coarse mesh) | stays at 272, reports unreachable |
+| via `solve(spatial_adapt=12)`, target 8000 | 7458 |
+| target 1200 **plus** `RefineToLevel(3)@top` | 1652, top row all at level 3 |
+
+That last row is §4 in action: the directive wins over the budget, because the thresholds were
+decided before the sentinel was computed from them.
+
+**Refinement placement**, which the budget alone says nothing about: with target 8000, mean refinement
+level 3.5 within `r < 0.15` of the source peak against 1.2 beyond `r > 0.4`.
+
+### 5.2 Not done: equidistribution at constant ndof
+
+Inside the dead band the controller does nothing. The natural extension is a dof-neutral swap —
+refine the worst elements while merging an equal dof cost of the best — which is what a *moving*
+feature in a transient run wants, since otherwise a mesh that has reached its target stops following
+the solution. It is left out because it has no termination signal: `nref == nunref == 0` is what ends
+every adaptation loop, and a controller that keeps swapping never produces it. Doing it properly
+needs a separate convergence criterion (swap only while the top-to-bottom error ratio exceeds some
+factor, which is self-limiting because refining lowers the top and merging raises the bottom — and
+which works far better with `normalize_relative=0`, since relative errors barely move under
+refinement).
+
+### 5.3 Decisions taken without being asked
+
+- **The ranking is pooled globally** across all refineable meshes, not per-mesh budgets. It matches
+  the fact that a single Problem-level threshold pair has always been broadcast to every mesh, and
+  §7.2's per-mesh weighting knob now exists (`weight` on `SpatialErrorEstimator`), so tilting the
+  split no longer needs its own mechanism.
+- **`desired_ndof` counts `Problem.ndof()`**, i.e. everything, including ODE domains and global
+  Lagrange multipliers that no amount of refinement will change. The alternative — counting only
+  adaptable dofs — would make the number the user sets differ from the number the solver reports,
+  which seemed the worse surprise.
 
 ---
 
@@ -555,15 +623,16 @@ elementwise max of each alone, adding a criterion can only raise the error, sepa
 agree with one joint group, a factor inside a group cancels while `weight` does not, and two criteria
 naming one group but disagreeing about it are rejected.
 
-**Feature 2** — `tests/test_desired_ndof.py`, when it happens:
+**Feature 2** — `tests/test_desired_ndof.py`, 8 tests, all passing: a peaked-source Poisson reaches
+each of two targets within tolerance **and terminates**; the budget is spent where the error is
+(refinement level 3.5 at the peak against 1.2 away from it); lowering the target from an
+already-refined state shrinks back into tolerance; a target below the initial mesh is left alone; the
+thresholds are handed back when `desired_ndof` is unset; the ordinary `solve(spatial_adapt=...)` entry
+point works; and — the §4 sentinel hazard, pinned — a `RefineToLevel` directive under a deliberately
+too-small budget still gets its mandatory refinement.
 
-- a peaked-source Poisson reaches the target within tolerance **and the loop terminates**;
-- refinement lands where the error is, not uniformly;
-- lowering the target from an already-refined state unrefines back down;
-- a target below the coarse-mesh ndof does not misbehave;
-- MPI: all ranks agree on the threshold;
-- a case with a `RefineToLevel` directive and a tight budget, asserting the mandatory refinement still
-  happens — the §4 sentinel hazard, pinned.
+Not covered: **MPI**. The threshold bisection is written to be rank-agnostic and the halo skip is in
+place, but neither has been run under `mpirun`.
 
 ---
 

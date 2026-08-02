@@ -61,6 +61,12 @@ if no_mpi_file.exists():
 	def get_mpi_sum(value, comm=None): #type:ignore
 		return value #type:ignore
 
+	def get_mpi_min(value, comm=None): #type:ignore
+		return value #type:ignore
+
+	def get_mpi_max(value, comm=None): #type:ignore
+		return value #type:ignore
+
 	def get_mpi_any(flag:bool, comm=None)->bool: #type:ignore
 		return bool(flag) #type:ignore
 
@@ -96,6 +102,12 @@ else:
   
 	def get_mpi_sum(value, comm=MPI.COMM_WORLD):
 		return comm.allreduce(value, op=MPI.SUM) #type:ignore
+
+	def get_mpi_min(value, comm=MPI.COMM_WORLD):
+		return comm.allreduce(value, op=MPI.MIN) #type:ignore
+
+	def get_mpi_max(value, comm=MPI.COMM_WORLD):
+		return comm.allreduce(value, op=MPI.MAX) #type:ignore
 
 	def get_mpi_any(flag:bool, comm=MPI.COMM_WORLD)->bool: #type:ignore
 		return bool(comm.allreduce(bool(flag), op=MPI.LOR)) #type:ignore

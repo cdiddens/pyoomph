@@ -231,7 +231,7 @@ def tier2_shadow_enabled() -> bool:
 
 # Bump whenever get_precodegen_fingerprint_text()'s coverage/format changes (keep
 # in sync with the "FMTn" tag inside that C++ function).
-FINGERPRINT_FORMAT_VERSION = 7
+FINGERPRINT_FORMAT_VERSION = 8
 
 
 class JITCache:

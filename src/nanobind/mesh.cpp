@@ -588,6 +588,9 @@ void PyReg_Mesh(nb::module_ &m)
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return 0;
 			return be->refinement_level(); }, "Returns the refinement level of this element in the adaptive mesh refinement tree (0 for the coarsest/un-refined elements)")
+		.def("is_halo", [](oomph::GeneralisedElement *self) -> bool
+			 { return self->is_halo(); },
+			 "Whether this element is a halo copy of an element owned by another process. Always False in serial or on a non-distributed mesh. Anything that counts or reduces over elements has to skip these, or every shared element is counted once per process that holds a copy.")
 		.def("ncont_interpolated_values", [](oomph::GeneralisedElement *self) -> unsigned int
 			 {
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
