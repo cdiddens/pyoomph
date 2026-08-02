@@ -4,8 +4,9 @@ Status: **implemented and tested.** `tests/test_mpi_eigenvalues.py` (7 tests) co
 situations, the complex (azimuthal) path, the matrix-manipulator path and the refusal path. File and
 line references are to the tree state at the time of writing.
 
-**Goal.** Solve `J v = lambda M v` on a problem whose mesh has been distributed with `--distribute`,
-in parallel, via SLEPc. scipy/ARPACK cannot participate: it only ever sees one process' matrices.
+**Goal.** Solve `J v = lambda M v` in parallel via SLEPc whenever pyoomph runs on more than one
+process — with `--distribute`, and equally without it, since the eigensolve parallelises either way.
+scipy/ARPACK cannot participate: it only ever sees one process' matrices.
 
 ---
 
@@ -44,6 +45,9 @@ MatMPIAIJSetPreallocationCSR() ... Argument out of range
 Row too large: row 255 max 254
 ```
 
+That nobody had hit this is itself informative: it means eigenproblems had never been run under
+`mpirun` at all, with or without `--distribute`.
+
 **2.2 `get_J_M_n_and_type` built `csr_matrix(..., shape=(n,n))`** from an `indptr` of length
 `nrow_local+1`. Under `--distribute` that raises inside scipy, before the eigensolver is reached.
 
@@ -58,16 +62,33 @@ conditions at `m != 0` — rewrites whole rows of a square global matrix. No ran
 
 ## 3. Design
 
-**Two MPI situations, two communicators** (`SlepcEigenSolver._eigen_comm`):
+**Under `mpirun -n>1` the eigenproblem is always solved in parallel, on COMM_WORLD**, whether or not
+the mesh was distributed. The two cases differ only in where the row split comes from
+(`SlepcEigenSolver._eigen_parallel_layout`):
 
-| | matrices | EPS comm | who solves |
+| | what a rank holds | row split from | sliced? |
 |---|---|---|---|
-| `mpirun`, no `--distribute` | oomph redistributes them back to globally replicated | `COMM_SELF` | every rank, redundantly |
-| `mpirun --distribute` | row blocks, global column indices | `COMM_WORLD` | one parallel solve |
+| `mpirun`, no `--distribute` | the whole J and M (oomph assembles in parallel, then replicates) | a contiguous split of `n` imposed here | yes |
+| `mpirun --distribute` | its own row block, global column indices | oomph's dof distribution | no |
 
-The replicated case buys no speedup. It exists because an MPI run that merely *happens* to call
-`solve_eigenproblem()` should not crash, and because solving on `COMM_SELF` needs no communication
-at all.
+Solving redundantly on `COMM_SELF` was the first implementation of the replicated case and is not
+what anyone wants: `mpirun -n 8` is a request for eight processes to share the work, and doing the
+same eigenproblem eight times looks like success while being slower than serial.
+
+What the replicated case does **not** save is matrix memory — every rank still stores the whole J and
+M. The win is the shift-and-invert factorisation, whose factors are typically far larger than the
+matrix and where both the time and the real memory go. Note also that the *assembly* was already
+parallel there: oomph's `get_eigenproblem_matrices` runs `parallel_sparse_assemble` on a temporary
+distributed layout and only then redistributes to a replicated one.
+
+The replicated case is in one respect the safer of the two: each row is contributed by exactly one
+rank, from matrices that are identical across ranks, so the blocks cannot disagree about a shared row.
+
+**A PETSc that cannot do this is an error, not a fallback** (`_require_parallel_capable`). Two things
+are checked when `nproc>1`: that PETSc's own `COMM_WORLD` has the same size pyoomph does (it does not
+if petsc4py was built `--with-mpi=0` or against a different MPI than mpi4py), and — only when the
+spectral transform will actually factorise, so an explicitly iterative `st_ksp` is not second-guessed
+— that MUMPS or SuperLU_DIST is present, since PETSc's own LU is sequential.
 
 **Eigenvectors are gathered back to full global length on every rank**
 (`_vector_to_global_array`, via `PETSc.Scatter.toAll`). This is the decision that keeps the change
@@ -146,6 +167,12 @@ result is **`eigfunc_usqr`**, the integral of the squared eigenfunction over the
 runs the eigenvector back through `set_eigenfunction_as_dofs()` → `set_current_dofs()`, which
 scatters by global equation number, and then integrates over non-halo elements with an
 `MPI_Allreduce`. That is what caught §4.1.
+
+A solve that quietly ran redundantly on every rank is likewise invisible in the answer — same
+eigenvalues, same eigenvectors, none of the benefit — so the worker reports the row block the
+eigensolver actually used and `_assert_solve_was_split` checks that the blocks tile `[0, ndof)`
+exactly: contiguous, non-overlapping, no gaps. Measured without `--distribute` at `np=3`: 255 dofs as
+85/85/85.
 
 Three traps worth recording, because each cost a debugging cycle:
 

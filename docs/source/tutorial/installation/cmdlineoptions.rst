@@ -80,12 +80,20 @@ Output and code generation
 ``--distribute``
       Distribute the mesh in parallel (MPI).
 
-      Eigenvalue problems work under ``--distribute``, but only with the SLEPc eigensolver (``slepc``
-      or ``slepc_mumps``), and the PETSc it is built against must provide a parallel direct solver
-      (MUMPS or SuperLU_DIST) for the shift-and-invert transform. The ``scipy`` eigensolver cannot be
-      used, since it would only ever see one process' share of the matrices; it refuses with an error
-      rather than returning a wrong answer. Eigenvectors are returned at full length on every
-      process, exactly as in a serial run, so plotting and output of eigenmodes need no changes.
+      Eigenvalue problems are solved in parallel whenever ``mpirun`` is used with more than one
+      process, whether or not ``--distribute`` is given: without it the assembled matrices are
+      replicated on every process, but the eigensolver still splits them by rows and solves once,
+      together. What ``--distribute`` adds for an eigenproblem is distributed *matrix* storage; the
+      parallel shift-and-invert factorisation, which is where the time and most of the memory go, you
+      get either way.
+
+      This requires the SLEPc eigensolver (``slepc`` or ``slepc_mumps``) and a PETSc providing a
+      parallel direct solver (MUMPS or SuperLU_DIST) for the shift-and-invert transform; if either is
+      missing, the run stops with an explanation rather than silently solving the same problem once
+      per process. The ``scipy`` eigensolver cannot be used under ``--distribute``, since it would
+      only ever see one process' share of the matrices; it too refuses rather than returning a wrong
+      answer. Eigenvectors are returned at full length on every process, exactly as in a serial run,
+      so plotting and output of eigenmodes need no changes.
 
       Bifurcation tracking, eigenbranch continuation, periodic orbit tracking / Floquet analysis,
       Lyapunov exponents, the periodic driving response and adapting the mesh to an eigenfunction

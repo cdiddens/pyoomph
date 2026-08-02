@@ -30,12 +30,17 @@
 #
 # There are two distinct MPI situations and they exercise different code, so both are covered:
 #
-#   1. plain `mpirun` with NO --distribute. oomph-lib redistributes the assembled eigenproblem
-#      matrices back to a globally replicated form, so every rank holds the whole thing and solves
-#      it redundantly on COMM_SELF. This used to die outright ("Row too large: row 255 max 254"),
-#      because the solver declared an n-row local block on each of nproc ranks.
-#   2. `--distribute`. Each rank holds a row block with global column indices, the EPS lives on
-#      COMM_WORLD, and the eigenvectors are gathered back to full length afterwards.
+#   1. plain `mpirun` with NO --distribute. oomph-lib assembles in parallel and then redistributes
+#      the eigenproblem matrices back to a globally replicated form, so every rank holds the whole
+#      thing. The eigensolver imposes its own contiguous row split and each rank contributes only
+#      its slice, so the solve is parallel anyway. This used to die outright ("Row too large: row
+#      255 max 254"), because the solver declared an n-row local block on each of nproc ranks.
+#   2. `--distribute`. Each rank holds a row block with global column indices, and the split comes
+#      from oomph's dof distribution instead.
+#
+# Either way the EPS lives on COMM_WORLD and the eigenvectors are gathered back to full length
+# afterwards, so the two paths differ only in where the row split comes from and whether the rows
+# had to be sliced out of a bigger matrix.
 #
 # What each assertion is for:
 #
@@ -166,6 +171,28 @@ def _serial_reference(tmpdir, size=8, neigen=3, azimuthal_m=None, problem="diffu
         sys.path.remove(_HERE)
 
 
+def _assert_solve_was_split(what, per_rank):
+    """The eigensolve must have been genuinely divided over the ranks.
+
+    Worth asserting separately because it is invisible in the answer: a solve that quietly ran
+    redundantly on every rank returns exactly the same eigenvalues and eigenvectors, just without any
+    of the benefit. The row blocks must tile [0, ndof) exactly -- contiguous, non-overlapping, no gaps
+    -- which also rules out the slicing and the matrix construction disagreeing about the split.
+    """
+    ndof = per_rank[0]["ndof"]
+    for r in per_rank:
+        assert r["eigen_parallel"], "%s: rank %d solved on its own, not in parallel" % (what, r["rank"])
+        assert 0 < r["eigen_nrow_local"] < ndof, \
+            "%s: rank %d owns %d of %d rows -- not a split" % (what, r["rank"], r["eigen_nrow_local"], ndof)
+    blocks = sorted((r["eigen_first_row"], r["eigen_nrow_local"]) for r in per_rank)
+    expected = 0
+    for first, nloc in blocks:
+        assert first == expected, \
+            "%s: row blocks do not tile: expected next block at %d, got %d" % (what, expected, first)
+        expected = first + nloc
+    assert expected == ndof, "%s: row blocks cover %d of %d rows" % (what, expected, ndof)
+
+
 def _assert_ranks_agree(per_rank):
     """Every rank must report the same eigenpairs, at full global length."""
     ref = per_rank[0]
@@ -205,11 +232,19 @@ def _assert_matches_serial(what, per_rank, serial):
 
 @pytest.mark.parametrize("nproc", [2, 3])
 def test_replicated_matches_serial(tmp_path, nproc):
-    """mpirun without --distribute: every rank redundantly solves the whole eigenproblem."""
+    """mpirun without --distribute: one parallel eigenproblem over a replicated matrix.
+
+    oomph assembles in parallel and then replicates, so each rank holds the whole J and M; the
+    eigensolver imposes its own contiguous row split and each rank contributes only its slice. The
+    solve is therefore just as parallel as the --distribute one -- what is not saved is matrix
+    memory. Row splitting that disagreed with the slicing would show up as a wrong spectrum here,
+    not as a crash, since every block is individually a valid set of rows.
+    """
     serial = _serial_reference(tmp_path)
     per_rank = _run_mpi(nproc, tmp_path, distribute=False)
     _check_no_errors(per_rank)
-    assert not per_rank[0]["distributed"]
+    assert not per_rank[0]["distributed"], "the mesh should NOT be distributed in this case"
+    _assert_solve_was_split("replicated np=%d" % nproc, per_rank)
     _assert_ranks_agree(per_rank)
     _assert_matches_serial("replicated np=%d" % nproc, per_rank, serial)
 
@@ -221,6 +256,7 @@ def test_distributed_matches_serial(tmp_path, nproc):
     per_rank = _run_mpi(nproc, tmp_path, distribute=True)
     _check_no_errors(per_rank)
     assert per_rank[0]["distributed"], "the run was not actually distributed"
+    _assert_solve_was_split("distributed np=%d" % nproc, per_rank)
     _assert_ranks_agree(per_rank)
     _assert_matches_serial("distributed np=%d" % nproc, per_rank, serial)
 
@@ -240,6 +276,7 @@ def test_distributed_azimuthal_matches_serial(tmp_path):
     per_rank = _run_mpi(2, tmp_path, distribute=True, azimuthal_m=1, problem="azimuthal")
     _check_no_errors(per_rank)
     assert per_rank[0]["distributed"]
+    _assert_solve_was_split("distributed azimuthal m=1", per_rank)
     _assert_ranks_agree(per_rank)
     _assert_matches_serial("distributed azimuthal m=1", per_rank, serial)
 
@@ -280,6 +317,7 @@ def test_distributed_axisymmetric_flow(tmp_path):
     # constrain nothing. What must not happen is NO rank constraining anything.
     assert sum(r["zeromap_size"] for r in per_rank) > 0, \
         "no rank applied the axis constraint -- the distributed manipulator path never ran"
+    _assert_solve_was_split("distributed axisymmetric flow m=1", per_rank)
     _assert_ranks_agree(per_rank)
     _assert_matches_serial("distributed axisymmetric flow m=1", per_rank, serial)
 

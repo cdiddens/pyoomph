@@ -189,7 +189,16 @@ def solve_case(N=8, neigen=3, eigensolver="slepc", azimuthal_m=None, problem="di
         for manip in p.get_eigen_solver().matrix_manipulators:
             zeroed += len(getattr(manip, "zeromap", ()))
 
+        # The row split the EIGENSOLVER actually used, which is not the same question as whether the
+        # mesh was distributed: without --distribute the matrices are replicated and the solver imposes
+        # its own split. Reported because the eigenvalues come out the same whether the solve was split
+        # or redundant, so nothing else in this payload would notice a solve that quietly went serial.
+        layout = getattr(p.get_eigen_solver(), "last_parallel_layout", (0, 0, False))
+
         res = {
+            "eigen_nrow_local": int(layout[0]),
+            "eigen_first_row": int(layout[1]),
+            "eigen_parallel": bool(layout[2]),
             "zeromap_size": int(zeroed),
             # Which branch get_J_M_n_and_type() took. False in an azimuthal case would mean the
             # imaginary contribution never materialised and the complex path went untested.
