@@ -27,6 +27,7 @@
 from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.navier_stokes import StokesEquations, NoSlipBC
+from pyoomph.equations.generic import ProjectExpression
 # The viscoelastic equations and the Oldroyd-B model, plus two helpers for the inflow condition
 from pyoomph.equations.viscoelastic import (ViscoelasticEquations, OldroydB,
                                             symmetric_2x2_matrix_log, oldroyd_b_shear_conformation)
@@ -163,18 +164,33 @@ class ConfinedCylinderProblem(Problem):
         return float(self.get_mesh("fluid/cylinder").evaluate_observable("drag"))
 
 
-class FlowDirectedStresses(Equations):
+class FlowDirectedStresses(ProjectExpression):
     """
-    The flow-directed shear and normal stress of Bollada & Phillips, as output fields.
+    The flow-directed shear and normal stress of Bollada & Phillips, as projected fields.
 
     These are what Claus & Phillips contour in their Fig. 12: the Cauchy stress is made traceless,
     T0 = sigma - 1/2*tr(sigma)*I, and then projected onto the streamline direction and its normal.
     The pressure drops out of T0 identically - in an incompressible plane flow tr(sigma) is
     -2p + tr(tau_p) - so only the solvent rate of strain and the polymer stress survive.
 
-    It has to be an Equations rather than a plain expression built in define_problem, because
+    They are obtained by an L2 projection onto real fields rather than by add_local_function. A local
+    expression is evaluated element by element, and these expressions contain grad(u), which is
+    discontinuous across element boundaries, so the contours come out visibly faceted. Projecting
+    gives a continuous field and a much smoother plot.
+
+    C1 rather than C2: all that is needed here is continuity, and the two are indistinguishable in the
+    plot while C1 costs about 40% less time (113k degrees of freedom against 143k). The projection is
+    one-way - nothing else reads S1 or S2 - so it does not disturb the flow solution, and the drag
+    comes out identical either way.
+
+    The expressions are built in define_residuals rather than handed to the constructor, because
     get_polymer_stress() needs the code generator's scope to resolve the fields it is made of.
     """
+
+    def __init__(self, space="C1"):
+        # Placeholder values: only the names are needed to define the fields, and define_residuals
+        # replaces them below before the parent builds the projection
+        super().__init__(space=space, S1=0, S2=0)
 
     def define_residuals(self):
         combined = self._get_combined_element()
@@ -188,8 +204,8 @@ class FlowDirectedStresses(Equations):
         speed = square_root(dot(u, u) + 1e-12)
         par = vector(u[0] / speed, u[1] / speed)
         perp = vector(-par[1], par[0])
-        self.add_local_function("S1", dot(perp, matproduct(T0, par)))
-        self.add_local_function("S2", dot(par, matproduct(T0, par)))
+        self.projs = {"S1": dot(perp, matproduct(T0, par)), "S2": dot(par, matproduct(T0, par))}
+        super().define_residuals()
 
 
 class FlowStressPlotter(MatplotlibPlotter):

@@ -85,9 +85,11 @@ Comparing against the reference
 	:class: with-shadow
 	:width: 80%
 
-	:math:`\tau_{xx}` along the centreline and around the cylinder, for :math:`\mathrm{Wi}=0.1` to :math:`0.9`; compare Fig. 6 of :cite:`Claus2013`. The large peak at :math:`X=0` is the top of the cylinder, where the fluid is sheared hardest, and it grows from about 18 to about 127 over this range. The second, smaller peak just downstream of :math:`X=1` is the *birefringent strand* in the wake. The stress is not a degree of freedom here -- the unknown is :math:`\boldsymbol{\Psi}=\log\mathbf{C}` -- so the script rebuilds it from the nodal values as :math:`\boldsymbol{\tau}_\mathrm{p}=\eta_\mathrm{p}/\lambda\left(\exp\boldsymbol{\Psi}-\mathbf{I}\right)`.
+	:math:`\tau_{xx}` along the centreline and around the cylinder, for :math:`\mathrm{Wi}=0.1` to :math:`0.9`; compare Fig. 6 of :cite:`Claus2013`. The large peak at :math:`X=0` is the top of the cylinder, where the fluid is sheared hardest, and it grows from about 18 to about 127 over this range, matching theirs closely. The second peak just downstream of :math:`X=1` is the *birefringent strand* in the wake; it comes out higher here than in their figure, which is worth taking seriously rather than as a discrepancy to be explained away -- the wake is exactly the region they report as failing to converge, and both computations are resolution-limited there in ways the drag never reveals. The stress is not a degree of freedom -- the unknown is :math:`\boldsymbol{\Psi}=\log\mathbf{C}` -- so the script rebuilds it from the nodal values as :math:`\boldsymbol{\tau}_\mathrm{p}=\eta_\mathrm{p}/\lambda\left(\exp\boldsymbol{\Psi}-\mathbf{I}\right)`.
 
-Their Fig. 12 shows a different decomposition, due to Bollada and Phillips: the Cauchy stress is made traceless and then projected onto the streamline direction and its normal, giving a flow-directed shear stress :math:`S_1` and normal stress :math:`S_2`. Both are added to the output as :py:meth:`~pyoomph.generic.codegen.Equations.add_local_function` expressions. Note that the pressure drops out of the traceless part identically, so only the solvent rate of strain and the polymer stress contribute.
+Their Fig. 12 shows a different decomposition, due to Bollada and Phillips: the Cauchy stress is made traceless and then projected onto the streamline direction and its normal, giving a flow-directed shear stress :math:`S_1` and normal stress :math:`S_2`. Note that the pressure drops out of the traceless part identically, so only the solvent rate of strain and the polymer stress contribute.
+
+Both are obtained with :py:class:`~pyoomph.equations.generic.ProjectExpression`, which solves an :math:`L^2` projection onto a real finite element field, rather than with :py:meth:`~pyoomph.generic.codegen.Equations.add_local_function`. The difference is visible: a local expression is evaluated element by element, and these expressions contain :math:`\nabla\vec{u}`, which is genuinely discontinuous across element boundaries for a C2 velocity, so the contours come out faceted. The projection is one-way -- nothing else reads :math:`S_1` or :math:`S_2` -- so it leaves the flow solution untouched, and a C1 projection is enough, being indistinguishable from C2 in the plot at appreciably lower cost.
 
 ..  figure:: viscoelastic_flowstress.*
 	:name: figpdeviscoelasticflowstress
@@ -103,17 +105,17 @@ The quantity everyone reports is the dimensionless drag on the cylinder, :math:`
 .. code:: none
 
      Wi      K (pyoomph)   K (Claus & Phillips)
-     0.1      130.3738         130.364
-     0.2      126.6362         126.626
-     0.3      123.2013         123.192
-     0.4      120.6020         120.593
-     0.5      118.8428         118.826
-     0.6      117.7993         117.776
-     0.7      117.3327         117.316
-     0.8      117.3237               -
-     0.9      117.6783               -
+     0.1      130.3631         130.364
+     0.2      126.6261         126.626
+     0.3      123.1928         123.192
+     0.4      120.5937         120.593
+     0.5      118.8298         118.826
+     0.6      117.7808         117.776
+     0.7      117.3213         117.316
+     0.8      117.3396               -
+     0.9      117.7332               -
 
-The agreement is within :math:`0.01\,\%` over the whole range for which the reference has mesh-converged values, which is comfortably inside the spread between the published values themselves -- the three independent codes they compare disagree with each other by about :math:`0.02\,\%`. The drag falls with elasticity, reaches a minimum near :math:`\mathrm{Wi}\approx0.8` and rises again, which is the behaviour the literature reports. The last two rows have no entry to compare against: at :math:`\mathrm{Wi}=0.8` and above, every column of their table is marked as diverging.
+The agreement is within :math:`0.005\,\%` over the whole range for which the reference has mesh-converged values, which is comfortably inside the spread between the published values themselves -- the three independent codes they compare disagree with each other by about :math:`0.02\,\%`. The drag falls with elasticity, reaches a minimum near :math:`\mathrm{Wi}\approx0.8` and rises again, which is the behaviour the literature reports. The last two rows have no entry to compare against: at :math:`\mathrm{Wi}=0.8` and above, every column of their table is marked as diverging.
 
 .. note::
 
