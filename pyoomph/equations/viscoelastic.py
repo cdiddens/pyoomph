@@ -332,6 +332,18 @@ class ViscoelasticEquations(Equations):
         wind: the advection velocity. Defaults to ``var(velocity_name)``.
         add_polymer_stress_to_momentum: whether to add the polymer stress to the momentum equation. Disable to drive the constitutive equation by an imposed velocity field.
         solve_out_of_plane_component: whether to solve for the out-of-plane component in a planar flow. "auto" (default) leaves that to the constitutive model. Has no effect in axisymmetric coordinates, where the azimuthal component is always an unknown.
+        stabilization: None (default) for plain Galerkin, or "SUPG" for streamline-upwind Petrov-Galerkin on the constitutive equation. The latter is residual-based and hence consistent, so it does not change a converged solution, but it damps the oscillations that pure advection with no diffusion produces on an under-resolved mesh.
+        supg_factor: multiplies the SUPG intrinsic time tau. 1 is the standard choice; lower it to stabilise more weakly.
+
+    .. warning::
+
+        A *stationary* solve started from the rest state can fail with SUPG switched on at full
+        strength, while the same solve converges without it. The cause is not the stabilisation: at
+        rest the decomposition of :math:`\nabla\vec{u}` runs entirely through its degenerate branch,
+        whose reported Jacobian is truncated (see the note above), and the SUPG term multiplies that
+        same residual by :math:`\tau\left(\vec{u}\cdot\nabla w\right)`, amplifying the existing
+        Jacobian error. Ramping ``supg_factor`` from 0 up to 1 on an already-converged solution walks
+        past it without trouble, and changes the answer by O(1e-6) once there.
         eigen_epsilon: eigenvalues of :math:`\mathbf{C}` closer than this are considered degenerate, see the note on the initial condition below.
         use_FD: let the eigenvalue decompositions fill their Jacobian by finite differences instead of the analytic expressions.
         use_subexpression: wrap the decomposition results in subexpressions. Considerably reduces the size of the generated code.
@@ -357,6 +369,7 @@ class ViscoelasticEquations(Equations):
                  velocity_name: str = "velocity", wind: ExpressionNumOrNone = None,
                  add_polymer_stress_to_momentum: bool = True,
                  solve_out_of_plane_component: Literal["auto"] | bool = "auto",
+                 stabilization: Literal["SUPG"] | None = None, supg_factor: ExpressionOrNum = 1,
                  eigen_epsilon: float = 1e-7, use_FD: bool | float = False, use_subexpression: bool = True,
                  time_scheme: TimeSteppingScheme | None = None,
                  output_conformation: bool = True,
@@ -375,6 +388,11 @@ class ViscoelasticEquations(Equations):
         self.wind = wind
         self.add_polymer_stress_to_momentum = add_polymer_stress_to_momentum
         self.solve_out_of_plane_component: Literal["auto"] | bool = solve_out_of_plane_component
+        if stabilization not in {None, "SUPG"}:
+            raise ValueError("Viscoelastic equations argument 'stabilization' must be None or "
+                             "'SUPG', got " + str(stabilization))
+        self.stabilization: Literal["SUPG"] | None = stabilization
+        self.supg_factor = supg_factor
         self.eigen_epsilon = eigen_epsilon
         self.use_FD = use_FD
         self.use_subexpression = use_subexpression
@@ -498,6 +516,36 @@ class ViscoelasticEquations(Equations):
         if self.time_scheme is not None:
             residual = time_scheme(self.time_scheme, residual)
         self.add_residual(weak(residual, field_test))
+
+        if self.stabilization == "SUPG":
+            # Streamline-upwind Petrov-Galerkin. The constitutive equation has no diffusion at all,
+            # so plain Galerkin is unstabilised advection and oscillates once the element Peclet
+            # number gets large; this perturbs the test function along the streamline instead.
+            #
+            # It is residual-based, i.e. the perturbation multiplies the *strong* residual, which
+            # vanishes at the exact solution. The scheme is therefore consistent: it changes the
+            # discrete solution but not the equation being solved, and switching it on must not move
+            # a converged answer.
+            #
+            # "cartesian_element_length_h" rather than "element_length_h": the latter takes the
+            # Eulerian element size to the power 1/dim, and in axisymmetric coordinates that size
+            # carries the 2*pi*r factor, so it is not a length.
+            h = var("cartesian_element_length_h")
+            # tau -> h/(2|u|) where advection dominates, and -> relaxation_time where the flow is
+            # slow. The second branch is what keeps it finite at stagnation points and on no-slip
+            # walls, where h/(2|u|) alone would blow up; the relaxation time is the natural time
+            # scale to fall back on, since 1/lambda is the reaction rate of this equation.
+            #
+            # Written with dot(u,u) under the one square root rather than as (2*|u|/h)^2, which is
+            # the same number but not the same expression: squaring square_root(dot(u,u)) leaves the
+            # inner root in place for GiNaC to differentiate, and d|u|/du = u/|u| is 0/0 at rest,
+            # where u vanishes over most of the domain. That put NaNs in the Jacobian and the first
+            # Newton step went to 1e105. Here the radicand is bounded below by (1/lambda)^2, so the
+            # only root has a strictly positive argument and a bounded derivative everywhere.
+            tau = self.supg_factor / square_root(4 * dot(wind, wind) / h ** 2
+                                                 + (1 / self.relaxation_time) ** 2)
+            supg_test = self._assemble(lambda c: tau * dot(wind, grad(testfunction(name + "_" + c))))
+            self.add_residual(weak(residual, supg_test))
 
         # Polymer contribution to the momentum equation. The (Navier-)Stokes equations assemble
         # their momentum residual as weak(stress, grad(v)), with the stress containing -p*identity,

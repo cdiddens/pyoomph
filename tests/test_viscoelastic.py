@@ -64,8 +64,9 @@ class _ImposedVelocity(Equations):
 
 
 class _HomogeneousProblem(Problem):
-    def __init__(self, velocity, model, formulation, relaxation_time, axisymmetric):
+    def __init__(self, velocity, model, formulation, relaxation_time, axisymmetric, stabilization=None):
         super().__init__()
+        self.stabilization = stabilization
         self.velocity = velocity
         self.model = model
         self.formulation = formulation
@@ -83,15 +84,17 @@ class _HomogeneousProblem(Problem):
         eqs = _ImposedVelocity(self.velocity)
         eqs += ViscoelasticEquations(model=self.model, relaxation_time=self.relaxation_time,
                                      polymer_viscosity=1, formulation=self.formulation,
-                                     add_polymer_stress_to_momentum=False, space="C1")
+                                     add_polymer_stress_to_momentum=False, space="C1",
+                                     stabilization=self.stabilization)
         self.add_equations(eqs @ "domain")
 
 
 def _run(tmp_path, velocity, model=None, formulation="log-conf", relaxation_time=1.0,
-         tend=2.0, dt=0.002, axisymmetric=False):
+         tend=2.0, dt=0.002, axisymmetric=False, stabilization=None):
     """Integrates the constitutive equation under an imposed velocity and returns C at one node."""
     model = model if model is not None else OldroydB()
-    with _HomogeneousProblem(velocity, model, formulation, relaxation_time, axisymmetric) as problem:
+    with _HomogeneousProblem(velocity, model, formulation, relaxation_time, axisymmetric,
+                             stabilization) as problem:
         problem.set_output_directory(str(tmp_path))
         problem.initialise()
         problem.run(tend, startstep=dt, maxstep=dt, temporal_error=None, outstep=False)
@@ -222,6 +225,25 @@ def test_steady_planar_extension(tmp_path):
     assert numpy.max(numpy.abs(C - reference)) < 1e-5
 
 
+def test_supg_survives_a_stagnation_point(tmp_path):
+    """
+    SUPG with a velocity field that vanishes somewhere in the domain.
+
+    Planar extension u=(rate*x, -rate*y) on the unit square puts an exact stagnation point at the
+    corner (0,0). The intrinsic time tau has to stay differentiable there: writing it via
+    square_root(dot(u,u)) and squaring leaves d|u|/du = u/|u| in the Jacobian, which is 0/0 at a
+    stagnation point and sent the first Newton step to 1e105 on the cylinder benchmark. The channel
+    flow of test_supg_does_not_move_a_converged_solution cannot catch that, because there u.grad(w)
+    vanishes wherever u does and the singular factor is multiplied by zero.
+    """
+    rate, relaxation_time = 0.2, 1.0
+    velocity = vector(rate * var("coordinate_x"), -rate * var("coordinate_y"))
+    C = _run(tmp_path, velocity, relaxation_time=relaxation_time, tend=25.0, dt=0.01,
+             stabilization="SUPG")
+    reference = numpy.diag([1 / (1 - 2 * relaxation_time * rate), 1 / (1 + 2 * relaxation_time * rate), 1.0])
+    assert numpy.max(numpy.abs(C - reference)) < 1e-5
+
+
 def test_rest_state_is_exactly_preserved(tmp_path):
     """
     Without flow the solution must stay at C=identity.
@@ -341,9 +363,10 @@ _ETA_0 = _ETA_S + _ETA_P
 
 
 class _PoiseuilleProblem(Problem):
-    def __init__(self, elements_across):
+    def __init__(self, elements_across, stabilization=None):
         super().__init__()
         self.elements_across = elements_across
+        self.stabilization = stabilization
 
     def define_problem(self):
         # Periodic in the flow direction, so the fully developed profile is the exact solution of
@@ -354,16 +377,18 @@ class _PoiseuilleProblem(Problem):
                                               bulkforce=vector(_FORCE, 0))
         eqs = navier_stokes
         eqs += ViscoelasticEquations(model=OldroydB(), relaxation_time=_LAMBDA,
-                                     polymer_viscosity=_ETA_P, space="C2")
+                                     polymer_viscosity=_ETA_P, space="C2",
+                                     stabilization=self.stabilization)
         eqs += DirichletBC(velocity_x=0, velocity_y=0) @ "top"
         eqs += DirichletBC(velocity_x=0, velocity_y=0) @ "bottom"
         eqs += navier_stokes.create_pressure_fixation(value=0) @ "bottom"
         self.add_equations(eqs @ "domain")
 
 
-def _poiseuille_errors(tmp_path, elements_across):
-    with _PoiseuilleProblem(elements_across) as problem:
-        problem.set_output_directory(str(tmp_path / ("poiseuille" + str(elements_across))))
+def _poiseuille_errors(tmp_path, elements_across, stabilization=None):
+    with _PoiseuilleProblem(elements_across, stabilization) as problem:
+        problem.set_output_directory(str(tmp_path / ("poiseuille" + str(elements_across)
+                                                     + str(stabilization))))
         problem.initialise()
         # A stationary solve straight from the rest state C=identity, i.e. from the fully
         # degenerate point of the log-conformation decomposition. That it converges at all is the
@@ -402,6 +427,20 @@ def test_poiseuille_flow_reproduces_the_total_viscosity(tmp_path):
     # The discriminating number: with the total viscosity the centreline velocity is F/(8*eta_0).
     # A sign error in the polymer stress would give F/(8*(eta_s-eta_p)), which is negative here.
     assert abs(centreline - _FORCE / (8 * _ETA_0)) < 1e-5
+
+
+def test_supg_does_not_move_a_converged_solution(tmp_path):
+    """
+    SUPG is residual-based, so its perturbation multiplies the strong residual and vanishes at the
+    exact solution. Switching it on must therefore change the discrete solution only where that
+    residual is nonzero -- not the answer a converged computation gives. Poiseuille is the sharpest
+    case for this: the exact velocity and conformation lie in the FE space, so a stabilisation that
+    were inconsistent would show up immediately as a shifted profile.
+    """
+    plain = _poiseuille_errors(tmp_path, 16)
+    supg = _poiseuille_errors(tmp_path, 16, stabilization="SUPG")
+    assert supg[0] < 1e-5 and supg[1] < 1e-3
+    assert abs(supg[2] - plain[2]) < 1e-9, "centreline velocity moved: " + str((plain[2], supg[2]))
 
 
 def test_poiseuille_flow_converges_under_refinement(tmp_path):
