@@ -30,7 +30,7 @@ from __future__ import annotations
 from ..generic.codegen import InterfaceEquations,EquationTree
 from ..expressions import ExpressionOrNum
 from .mesh import InterfaceMesh, ODEStorageMesh
-from .meshdatacache import MeshDataCacheEntry
+from .meshdatacache import MeshDataCacheEntry, MeshDataCacheKey
 import numpy
 from ..typings import *
 
@@ -137,7 +137,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         if isinstance(bmesh,InterfaceMesh):
             raise RuntimeError("Cannot do it, if the parent mesh is not a bulk mesh")
         bind=bmesh.get_boundary_index(mesh.get_name())
-        cache=MeshDataCacheEntry(mesh,True,True)
+        cache=MeshDataCacheEntry(mesh,MeshDataCacheKey(nondimensional=True,tesselate_tri=True))
                 
         pts=cache.get_coordinates()
         segs,_=cache.get_interface_line_segments()        
