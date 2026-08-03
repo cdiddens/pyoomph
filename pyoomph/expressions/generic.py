@@ -39,18 +39,18 @@ import numpy
 
 
 
+GlobalParameter=_pyoomph.GiNaC_GlobalParam
 Expression=_pyoomph.Expression
 # :TypeAlias is required on every one of these (unlike their old Union[...]/Optional[...] form):
 # a bare `NAME = A | B` assignment is not recognized by static type checkers as a type alias on
 # its own, since `|` is an ordinary operator that could just as well be a runtime computation -
 # only `Union[...]`/`Optional[...]` were unambiguous enough for "implicit" alias detection.
-ExpressionOrNum:TypeAlias=Expression|int|float
-ExpressionNumOrNone:TypeAlias=Expression|int|float|None
+ExpressionOrNum:TypeAlias=Expression|GlobalParameter|int|float
+ExpressionNumOrNone:TypeAlias=Expression|GlobalParameter|int|float|None
 #NameStrSequence = Union[Tuple[str], List[str]]
 #ExprStrSequence = Union[Tuple[Expression], List[Expression]]
 NameStrSequence:TypeAlias = tuple[str]|list[str]
 ExprStrSequence:TypeAlias = tuple[Expression]|list[Expression]
-GlobalParameter=_pyoomph.GiNaC_GlobalParam
 SingleOrMultipleExpressions:TypeAlias=Expression|tuple[Expression,...]
 OptionalCoordinateSystem:TypeAlias=_pyoomph.CustomCoordinateSystem|None
 TimeSteppingScheme:TypeAlias=Literal["BDF1","BDF2","Newmark2","TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]
