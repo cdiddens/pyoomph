@@ -350,3 +350,22 @@ no --distribute, where this broadcast is used to share recovered flux coefficien
 of a replicated-mesh error estimation (pyoomph::LagrZ2ErrorEstimator::get_element_errors). Fixing it
 does move the computed elemental errors, by about 5e-7 relative -- but it is NOT the cause of that
 divergence, which remains open: the errors still differ by 60-92% between ranks afterwards.
+
+refineable_mesh.cc (Changed on 3rd August 2026):
+TreeBasedRefineableMeshBase::complete_hanging_nodes flattens each hanging node's recursive master
+chain, accumulates the weights in a std::map<Node*,double> to merge repeated masters, and then copied
+that map straight into the HangInfo. A map keyed by Node* iterates in ADDRESS order, so the master
+list was written in whatever order the nodes happened to be allocated -- which differs from run to
+run and from process to process. Every later sum over masters (hanging values, hanging positions, and
+the constrained rows the assembly builds) therefore added the same terms in a different order, and
+floating-point addition is not associative.
+The masters are now written in a canonical order instead: their index in the mesh's node vector,
+which unlike a heap address is reproducible. A std::map<Node*,unsigned> of that index is built once
+per call and the merged entries are stable_sorted by it.
+This was not a cosmetic ulp. Because an elemental error estimate is built from nodal values, a
+one-ulp difference could flip a refinement decision at a threshold, after which the meshes diverge
+outright -- observed as two MPI ranks refining opposite ends of a rising bubble, disagreeing about
+ndof, and killing the linear solve with "Column too large". It was equally present in SERIAL: the
+same binary on the same input produced different answers on consecutive runs. See
+dev_docs/hanging_value_nondeterminism.md for the reproducer and the full diagnosis.
+Upstream equivalent: none, this is a pyoomph fix.

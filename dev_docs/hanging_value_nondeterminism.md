@@ -1,6 +1,6 @@
-# Hanging-node values: a fixed MPI staleness bug, and an open nondeterminism
+# Hanging-node values: an MPI staleness bug, and a nondeterministic hanging-master order
 
-Status: **one bug fixed and tested; a second, larger one found, characterised and OPEN.** Found while
+Status: **both bugs found, fixed and verified.** Found while
 benchmarking the distributed eigensolver (`mpi_eigenproblems.md`), which is how a chain of unrelated-
 looking symptoms got followed back to its source. File references are to the tree at the time of
 writing.
@@ -59,9 +59,10 @@ bubble under plain mpirun   crashed  ->  runs; eigenvalue matches serial to 4e-1
 regressions                          ->  112 passed
 ```
 
-## 3. The bug that is still open
+## 3. The second bug: nondeterministic hanging-master order (FIXED)
 
-The 22 surviving 1-ulp differences are **not** an MPI problem and not floating-point summation order.
+The 22 surviving 1-ulp differences are **not** an MPI problem. They are a floating-point summation
+ORDER problem, but not one caused by anything in this file:
 
 > `Mesh::interpolate_hanging_values()` returns a different answer each time it is run on the same
 > input, **in a single-process serial run**.
@@ -104,17 +105,48 @@ No MPI, no solve, no adaptation, no eigensolver:
 | pointer/heap-address container order | `setarch -R` (ASLR off) | still differs |
 | Python iteration order → build order | `PYTHONHASHSEED=0` | still differs |
 
-A pure function over bit-identical inputs cannot vary. One of those premises is false and it has not
-been found.
+A pure function over bit-identical inputs cannot vary, so one of those premises had to be false. The
+table is kept because every row is a real, reusable negative result — and because the false premise
+turned out to be an unstated one: "identical inputs" was being read as identical *values*, when what
+differed was the *order* they were summed in. §3.3 has it.
 
-### 3.3 Untested suspects
+### 3.3 The cause, and the fix
 
-- **Threading** in the element loop, or in a library it calls (BLAS/MKL) — a nondeterministic
-  reduction order would fit every observation above.
-- **The JIT code cache** — whether the generated element code is byte-identical between runs, and
-  whether a cache hit and a fresh compile produce the same arithmetic (FMA contraction, vectorisation).
+Logging the expansion of a single call settled it:
 
-Both are cheap to test and neither has been.
+```
+run1:  m0 w=-0.125  m1 w=0.375   m2 w=0.75   ->  0.84541717156758067
+run2:  m0 w= 0.75   m1 w=-0.125  m2 w=0.375  ->  0.84541717156758078
+```
+
+The same three masters, the same three weights, the same three sub-values — **enumerated in a
+different order**. `TreeBasedRefineableMeshBase::complete_hanging_nodes` accumulates the flattened
+master weights in a `std::map<Node*,double>` and copied that map straight into the `HangInfo`. A map
+keyed by `Node*` iterates in **heap address order**, and allocation addresses differ between runs and
+between processes.
+
+That is why every input tested equal: the *set* of terms genuinely was identical, only the order was
+not. It is also why valgrind was clean (no bad memory), why `setarch -R` did not help (the ordering is
+decided by allocation sequence, not by the ASLR base) and why `PYTHONHASHSEED` did not help (nothing
+Python-side is involved).
+
+Fixed in `refineable_mesh.cc` (marked `//FOR PYOOMPH`, recorded in `INFO_oomph-lib`): the masters are
+written in a canonical order — their index in the mesh's node vector, which *is* reproducible — via a
+`std::map<Node*,unsigned>` built once per call and a `stable_sort`.
+
+Verified:
+
+```
+serial, two runs of the same binary   POST: DIFFER -> SAME
+mpirun -n 2, rank0 vs rank1           POST: DIFFER -> SAME
+after a full transient, rank0 vs rank1:
+  dofs 0/4807   nodal values 0/3157 (was 15-22)   positions 0/2014 (was 10-24)
+112 regression tests pass, 365s vs 363s before -- no values moved, no measurable cost.
+```
+
+Sorting at the point of use (in `flattened_value`/`flattened_position`) was considered and rejected:
+it would have made the sync reproducible while leaving the assembly's own constrained rows still
+address-ordered. The hang scheme has to be canonical at construction.
 
 ## 4. Also fixed on the way
 

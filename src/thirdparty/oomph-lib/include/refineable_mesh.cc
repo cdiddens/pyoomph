@@ -34,6 +34,7 @@
 #include <limits>
 
 #include "refineable_mesh.h"
+#include <algorithm>
 // Include to fill in additional_synchronise_hanging_nodes() function
 #include "refineable_mesh.template.cc"
 
@@ -2295,12 +2296,29 @@ namespace oomph
   /// Need to translate this into a scheme where all
   /// hanging  nodes only depend on non-hanging nodes...
   //==================================================================
+  // FOR PYOOMPH: comparator for the canonical master ordering in complete_hanging_nodes below.
+  // Compares only the index, so std::stable_sort keeps the original relative order of any entries
+  // that share one (which only happens for a master that is not a node of this mesh).
+  static bool pyoomph_compare_master_by_index(
+    const std::pair<unsigned, std::pair<Node*, double> >& a,
+    const std::pair<unsigned, std::pair<Node*, double> >& b)
+  {
+    return a.first < b.first;
+  }
+
   void TreeBasedRefineableMeshBase::complete_hanging_nodes(
     const int& ncont_interpolated_values)
   {
     // Number of nodes in mesh
     unsigned long n_node = this->nnode();
     double min_weight = 1.0e-8; // RefineableBrickElement::min_weight_value();
+
+    // FOR PYOOMPH: node -> position in this mesh's node vector, used below to give each hanging
+    // scheme's master list a reproducible order. Built once per call; the node ordering itself is
+    // reproducible across runs, which is what makes it a usable canonical key (heap addresses are not).
+    std::map<Node*, unsigned> pyoomph_canonical_node_index;
+    for (unsigned long n = 0; n < n_node; n++)
+      pyoomph_canonical_node_index[this->node_pt(n)] = static_cast<unsigned>(n);
 
     // Loop over the nodes in the mesh
     for (unsigned long n = 0; n < n_node; n++)
@@ -2339,13 +2357,38 @@ namespace oomph
             // Create new hanging data (we know how many data there are)
             HangInfo* hang_pt = new HangInfo(hang_weights.size());
 
-            unsigned hang_weights_index = 0;
-            // Copy the map into the HangInfo object
+            // FOR PYOOMPH: write the masters in a CANONICAL order (their index in this mesh's node
+            // vector), not in the std::map's order. The map above is keyed by Node*, so iterating it
+            // yields the masters sorted by heap ADDRESS -- which varies from run to run. Every sum
+            // over masters afterwards (hanging values, hanging positions, the constrained rows the
+            // assembly builds) then adds the same terms in a different order, and floating-point
+            // addition is not associative, so results moved by ~1 ulp between two runs of the same
+            // binary. That is small until it flips a refinement decision at a threshold, after which
+            // meshes diverge outright -- observed as two MPI ranks refining opposite ends of a bubble
+            // and disagreeing about ndof. See dev_docs/hanging_value_nondeterminism.md.
+            std::vector<std::pair<unsigned, std::pair<Node*, double> > > ordered_masters;
+            ordered_masters.reserve(hang_weights.size());
             typedef std::map<Node*, double>::iterator IT;
             for (IT it = hang_weights.begin(); it != hang_weights.end(); ++it)
             {
-              hang_pt->set_master_node_pt(
-                hang_weights_index, it->first, it->second);
+              std::map<Node*, unsigned>::const_iterator ix =
+                pyoomph_canonical_node_index.find(it->first);
+              // Masters are nodes of this mesh, so the lookup succeeds. A master from elsewhere would
+              // have no canonical index here; sort those last, keeping their relative map order.
+              const unsigned key = (ix == pyoomph_canonical_node_index.end())
+                                     ? static_cast<unsigned>(n_node)
+                                     : ix->second;
+              ordered_masters.push_back(std::make_pair(key, *it));
+            }
+            std::stable_sort(ordered_masters.begin(), ordered_masters.end(),
+                             pyoomph_compare_master_by_index);
+
+            unsigned hang_weights_index = 0;
+            for (unsigned im = 0; im < ordered_masters.size(); im++)
+            {
+              hang_pt->set_master_node_pt(hang_weights_index,
+                                          ordered_masters[im].second.first,
+                                          ordered_masters[im].second.second);
               ++hang_weights_index;
             }
 
