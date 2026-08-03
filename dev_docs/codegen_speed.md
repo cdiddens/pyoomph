@@ -190,6 +190,60 @@ and all of them compute the same thing. On that basis the memo is enabled by def
 question it does *not* answer is why `expanded_additional_field_cache` was disabled; the memo simply
 never caches anything that went through those hooks.
 
+### The memo did change what was computed, once
+
+"Only GiNaC's canonical sign placement and factor order move" was not the whole story, and the
+mechanical check above could not have caught the rest of it: the difference is one of
+*representation*, so both sides evaluate to the same number and only the generated C source is
+wrong.
+
+GiNaC compares and hashes numbers by value. An exact `-1` and a floating point `-1.0` are therefore
+`is_equal` and land in the same memo bucket, and the memo hands back whichever of the two it met
+first. Harmless for every later computation - and not harmless at all for code emission, because
+`mul::do_print_csrc` *does* distinguish them, and inconsistently: it decides whether to write `1.0/`
+or `/` from `info_flags::negint`, which an inexact `-1` does not satisfy, but decides whether to
+leave the exponent out altogether from `is_equal(-1)`, which it does. A factor `x^(-1.0)` is printed
+as a multiplication by `x`. No error, no warning, a residual wrong by `x^2`.
+
+It was found through `ViscoelasticInflowBC`, which builds a matrix logarithm - hence a reciprocal
+`(lambda_+ - lambda_- + eps)^(-1)` with an exact `-1` - out of a velocity profile whose symbolic
+derivative carries a floating point `-1.0`. The two met in one expression and the exponent came back
+inexact.
+
+Both halves are fixed:
+
+- `ReplaceFieldsToNonDimFields::operator()` never memoises a bare `numeric`. A leaf costs nothing to
+  expand, and this is the only position from which the memo can substitute one number for another.
+- `print_simplest_form` makes any inexact whole-number exponent exact before printing
+  (`ExactifyWholeNumberExponents`), which also covers an `x**(-1.0)` written by hand in Python. It is
+  guarded by a scan that allocates nothing and normally finds nothing.
+
+`tests/test_generated_code_expressions.py` pins what the compiled element computes for both, which is
+the thing that was wrong. It cannot separate the two fixes, because the printer guard masks the memo
+defect: reverting the memo fix alone still passes, reverting the printer guard alone fails the
+hand-written `x**(-1.0)` test, and reverting both fails both.
+
+The lesson for any future cache in this path: `ex::is_equal` is the wrong equality to key one on if
+what comes out of it is going to be printed rather than only evaluated.
+
+The GiNaC half is a plain upstream bug, not something our patches or our build of it cause.
+[dev_docs/examples/ginac_csrc_inexact_negative_exponent.cpp](examples/ginac_csrc_inexact_negative_exponent.cpp)
+reproduces it with no pyoomph involved and exits nonzero while it is present; it is what to send
+upstream. It behaves the same on the 1.8.10 we build from source and on the distribution's stock
+1.8.7 (`libginac-dev`, shared library, `libcln.so.6`) - the two outputs differ in one line only,
+where canonical factor order puts the affected factor first in the product rather than second, which
+between them covers both branches of `mul::do_print_csrc` that ought to emit a division. The one-line change it suggests for `mul::do_print_csrc` was verified by
+compiling a patched `mul.cpp` and linking it ahead of the stock `libginac.a`:
+
+    g++ -c -DHAVE_CONFIG_H -I$G -I$G/config -I$G/ginac -I$P/include -o mul_patched.o mul_patched.cpp
+    g++ -o csrc_bug_patched ginac_csrc_inexact_negative_exponent.cpp mul_patched.o \
+        -I$P/include -L$P/lib -lginac -lcln -lgmp
+
+with `$G` the GiNaC source tree under `build/*/ginac_build/src/ginac_external` and `$P` the
+third-party install prefix next to it. `3*(1+x)^(-1.0)` then prints as `3.0*1.0/( x+1.0)`, the same
+as the exact-exponent form, and every case that was already correct is unchanged. Should that fix
+land upstream, `ExactifyWholeNumberExponents` can go - the memo fix has to stay either way.
+
 ## Smaller items in the emission path
 
 Found while reading `write_code()`; each is dead or redundant work rather than an algorithmic change.

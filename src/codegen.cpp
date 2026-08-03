@@ -27,6 +27,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <limits>
 #include <chrono>
 #include <unordered_set>
+#include <cmath>
 
 namespace pyoomph
 {
@@ -70,6 +71,45 @@ namespace pyoomph
 		};
 		*/
 
+	// An exponent that is a floating point number happening to be a whole number, e.g. -1.0 rather
+	// than -1. GiNaC's C-source printer for products loses such a factor entirely: mul::do_print_csrc
+	// decides whether to emit "1.0/" or "/" from info_flags::negint, which an inexact -1 does not
+	// satisfy, but decides whether to leave the exponent out from is_equal(-1), which - GiNaC's
+	// numeric comparison being by value, not by representation - it does. So x*y^(-1.0) is printed as
+	// "x*y": a silently wrong reciprocal, not an error. Nothing else distinguishes an exact from an
+	// inexact whole-number exponent, so they are made exact before printing.
+	static bool is_inexact_whole_number(const GiNaC::ex &e)
+	{
+		if (!GiNaC::is_a<GiNaC::numeric>(e))
+			return false;
+		const GiNaC::numeric &n = GiNaC::ex_to<GiNaC::numeric>(e);
+		if (n.is_crational() || !n.is_real())
+			return false;
+		const double d = n.to_double();
+		return d == std::floor(d) && std::fabs(d) < 1e15;
+	}
+
+	class ExactifyWholeNumberExponents : public GiNaC::map_function
+	{
+	public:
+		GiNaC::ex operator()(const GiNaC::ex &inp) override
+		{
+			if (GiNaC::is_a<GiNaC::power>(inp) && is_inexact_whole_number(inp.op(1)))
+				return GiNaC::power(inp.op(0).map(*this), GiNaC::numeric((long)GiNaC::ex_to<GiNaC::numeric>(inp.op(1)).to_double()));
+			return inp.map(*this);
+		}
+	};
+
+	// The rewrite above rebuilds the whole expression, so it is only run when this cheaper scan -
+	// which allocates nothing - finds something to rewrite. It normally does not.
+	static bool has_inexact_whole_number_exponent(const GiNaC::ex &e)
+	{
+		for (GiNaC::const_preorder_iterator it = e.preorder_begin(); it != e.preorder_end(); ++it)
+			if (GiNaC::is_a<GiNaC::power>(*it) && is_inexact_whole_number(it->op(1)))
+				return true;
+		return false;
+	}
+
 	// Prints a GiNaC expression as C source code, after applying an optional simplification
 	// strategy selected at runtime via FiniteElementCode::ccode_expression_mode (e.g. "factor",
 	// "normal", "expand", "collect_common_factors" - mostly useful for debugging/benchmarking
@@ -104,6 +144,11 @@ namespace pyoomph
 		else
 			towrite = expr.evalf();
 		//	std::cout << "MODE WAS " << mode << std::endl;
+		if (has_inexact_whole_number_exponent(towrite))
+		{
+			ExactifyWholeNumberExponents exactify;
+			towrite = exactify(towrite);
+		}
 		towrite.print(GiNaC::print_csrc_FEM(os, &csrc_opts));
 	}
 
@@ -620,6 +665,14 @@ namespace pyoomph
 		// models the memo changes how GiNaC orders and signs the factors of a product - verified
 		// numerically equivalent, see dev_docs/codegen_speed.md.
 		if (!__expand_memo_on)
+			return do_replace(inp);
+		// Numbers are never cached. GiNaC compares and hashes them by value, not by representation,
+		// so an exact -1 and an inexact -1.0 are one and the same key here and the memo hands back
+		// whichever of the two was met first. Which is harmless for every later computation and not
+		// harmless at all for the generated C source: an exponent that comes back inexact makes
+		// print_simplest_form's ExactifyWholeNumberExponents necessary, and without it a reciprocal
+		// x^(-1) is printed as a multiplication by x. A leaf costs nothing to expand anyway.
+		if (GiNaC::is_a<GiNaC::numeric>(inp))
 			return do_replace(inp);
 		const unsigned h = inp.gethash();
 		auto it = memo.find(h);
