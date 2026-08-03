@@ -1258,6 +1258,11 @@ void PyReg_Problem(nb::module_ &m)
 				// MPIAIJ; deriving it from an MPI prefix sum in Python would work but only because oomph's
 				// distribution happens to be contiguous, so ask the distribution itself instead.
 				auto *dist = self->dof_distribution_pt();
+				// Before the problem has been built there is no distribution to describe, and reading
+				// through the null pointer segfaults rather than raising -- which is what happened when
+				// this was called on a fresh Problem().
+				if (dist == 0)
+					throw_runtime_error("The problem has no dof distribution yet, so it has no row layout. Build/initialise the problem first.");
 				return std::make_tuple((unsigned)dist->nrow(), (unsigned)dist->nrow_local(),
 									   (unsigned)dist->first_row(), (bool)dist->distributed());
 			},

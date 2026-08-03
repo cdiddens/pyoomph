@@ -5213,6 +5213,27 @@ class Problem(_pyoomph.Problem):
             eqs=resolver.resolve_equations_by_name(d)
             #print("DOF",d,"EQS",eqs)
             zeromap=zeromap.union(eqs)
+        if self.is_distributed():
+            # resolve_equations_by_name() only walks the LOCAL elements, so on a distributed problem
+            # each rank sees only the part of the named mesh it holds -- and a rank holding none of it
+            # gets nothing back at all. This function promises GLOBAL equation numbers, and its callers
+            # use them to index globally replicated vectors (rotate_eigenvectors on an eigenvector, the
+            # bifurcation zero-dof lists), so every rank has to end up with the same set.
+            #
+            # Without the union, np=4 on the rising-bubble tutorial died in rotate_eigenvectors with
+            # "zero-size array to reduction operation maximum" on the rank owning none of
+            # domain/interface. The quieter half was worse: at np=2 both ranks held part of the
+            # interface, so nothing raised and each rank rotated the eigenvector by a phase computed
+            # from its own subset -- a silently different eigenvector per rank.
+            #
+            # Collective, so it must be reached by every rank. It is: the callers are eigen-solve and
+            # bifurcation setup paths, which are collective already.
+            from .mpi import get_mpi_nproc,get_mpi_world_comm
+            if get_mpi_nproc()>1:
+                comm=get_mpi_world_comm()
+                assert comm is not None
+                for part in comm.allgather(sorted(zeromap)):
+                    zeromap.update(part)
         return zeromap
             
 
@@ -5825,19 +5846,65 @@ class Problem(_pyoomph.Problem):
         """
         neweigen=[]
         dofs=self.dof_strings_to_global_equations(dofs_to_real)
-        dofs=numpy.array(list(dofs),dtype=numpy.int64)
+        if len(dofs)==0:
+            # Rather than let numpy report "zero-size array to reduction operation maximum" from the
+            # averaging below, several frames away from the name that resolved to nothing.
+            raise RuntimeError("rotate_eigenvectors: "+str(dofs_to_real)+" does not resolve to any degree of freedom, so there is nothing to fix the eigenvector's phase by. Check the name(s).")
+        # Sorted, so that the averaging below adds the same values in the same order everywhere. The
+        # set comes back identical on every rank (see dof_strings_to_global_equations), but a set's
+        # iteration order is not part of that guarantee, and this feeds a floating-point sum.
+        dofs=numpy.array(sorted(dofs),dtype=numpy.int64)
+        from .mpi import get_mpi_nproc,get_mpi_sum,get_mpi_max
+        # Both numbers below scale the WHOLE eigenvector, so ranks that disagree about them end up
+        # holding different eigenvectors -- silently, since the eigenvalue is unaffected.
+        #
+        # Which of the two branches applies depends on what the eigensolver handed us. The PETSc one
+        # currently replicates each eigenvector to full global length on every rank
+        # (_vector_to_global_array), so we normally take the first branch: every rank already has
+        # every selected dof, reduces over the identical sorted set, and needs no communication --
+        # which also keeps the result bit-identical to the serial run. Under --distribute a solver may
+        # instead hand back only the locally owned row block, and then the reduction has to span the
+        # ranks.
+        n_global,nrow_local,first_row,_row_distributed=self._get_dof_distribution_info()
         for ev in eigenvectors:
-            avg_angle=numpy.angle(numpy.average(ev[dofs]))
-            #print("AVERAGE ANGLE",avg_angle)
-            if normalize_dofs:
-                if normalize_max:
-                    magnitude=numpy.amax(numpy.absolute(ev[dofs]))
+            if get_mpi_nproc()>1 and len(ev)!=n_global:
+                if len(ev)!=nrow_local:
+                    raise RuntimeError("rotate_eigenvectors: the eigenvector has length "+str(len(ev))+
+                                       ", which is neither the global dof count "+str(n_global)+" nor "
+                                       "this rank's local row count "+str(nrow_local)+".")
+                # Only the owned block is here, so each rank contributes the selected dofs that fall in
+                # its row range -- restricting to owned rows is what stops shared/halo rows from being
+                # counted more than once. Each quantity then has to be combined with the operator it is
+                # actually made of: a maximum reduces with MAX, an average with a summed numerator AND a
+                # summed count (averaging the per-rank averages would silently weight the ranks equally
+                # however unevenly the dofs are spread over them). The mean whose angle we take is
+                # complex, so both of its components have to travel.
+                sel=dofs[(dofs>=first_row)&(dofs<first_row+nrow_local)]-first_row
+                vals=ev[sel]
+                count=get_mpi_sum(len(sel))
+                total=complex(get_mpi_sum(float(numpy.sum(vals.real))),get_mpi_sum(float(numpy.sum(vals.imag))))
+                avg_angle=numpy.angle(total/count)
+                if normalize_dofs:
+                    absvals=numpy.absolute(vals)
+                    if normalize_max:
+                        # 0.0 is the identity for a maximum of magnitudes, so a rank owning none of the
+                        # selected dofs contributes nothing rather than tripping amax on an empty array.
+                        magnitude=get_mpi_max(float(numpy.amax(absvals)) if len(sel) else 0.0)
+                    else:
+                        magnitude=get_mpi_sum(float(numpy.sum(absvals)))/count
                 else:
-                    magnitude=numpy.average(numpy.absolute(ev[dofs]))
+                    magnitude=1
             else:
-                magnitude=1
+                avg_angle=numpy.angle(numpy.average(ev[dofs]))
+                if normalize_dofs:
+                    if normalize_max:
+                        magnitude=numpy.amax(numpy.absolute(ev[dofs]))
+                    else:
+                        magnitude=numpy.average(numpy.absolute(ev[dofs]))
+                else:
+                    magnitude=1
             #print("AMPLITUDE",normalize_amplitude/magnitude)
-            neweigen.append(ev*numpy.exp(-1j*avg_angle)/magnitude*normalize_amplitude)            
+            neweigen.append(ev*numpy.exp(-1j*avg_angle)/magnitude*normalize_amplitude)
         return numpy.array(neweigen)
 
     

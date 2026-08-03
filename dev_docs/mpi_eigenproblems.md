@@ -118,7 +118,7 @@ for a long time and called from nowhere. `Problem._solve_eigenproblem_helper` no
 `ScipyEigenSolver` answers no — otherwise scipy would solve each rank's row block as if it were the
 whole eigenproblem and return numbers that look entirely reasonable.
 
-## 4. Two bugs found on the way, both outside the eigensolver
+## 4. Three bugs found on the way, all outside the eigensolver
 
 **4.1 `set_current_dofs()` never synchronised halo nodes** (`src/problem.cpp`). `set_dofs()` writes
 only `Dof_pt`, i.e. this rank's owned dofs; oomph-lib's own routines that update dofs all follow it
@@ -137,6 +137,36 @@ fields. The old code raised — on *some* ranks, which is not an error but a **s
 unwound while the owner walked into the next collective alone. It presented as `MPI_ERR_BUFFER` out
 of PETSc, several frames from the name that could not be resolved. A distributed run now resolves
 such a name to nothing, trading the mistyped-field-name diagnostic for the ability to run.
+
+**4.3 `rotate_eigenvectors()` worked from a per-rank dof set** (`pyoomph/generic/problem.py`). It
+fixes an eigenvector's phase from the dofs named by `dofs_to_real`, resolved through
+`dof_strings_to_global_equations()`. Distributed, that resolves to *this rank's* dofs, so a rank
+owning none of them got an empty set and died in `numpy.amax` with "zero-size array to reduction
+operation maximum" — the rising-bubble benchmark at `np=4 --distribute`, and only there, since with
+fewer ranks every rank happened to own some. `dof_strings_to_global_equations()` now `allgather`s the
+set when distributed, so the selection is the global union everywhere.
+
+Two things follow from that, and both are easy to get wrong:
+
+- The union is a `set`, whose iteration order is not part of the guarantee that the ranks agree about
+  its *contents*, and it feeds a floating-point sum. Sorted before use.
+- The phase and the magnitude scale the **whole** eigenvector, so ranks that compute them from
+  different data hold different eigenvectors — silently, because the eigenvalue is untouched. Today
+  the PETSc eigensolver replicates each eigenvector to full global length
+  (`_vector_to_global_array`), so every rank reduces over the identical set and no communication is
+  needed; that path is also bit-identical to serial, which is why it is the one taken whenever the
+  vector arrives full-length. When only the owned row block arrives, each rank restricts to its own
+  rows (otherwise shared rows are counted twice) and each quantity is combined with the operator it
+  is *made of*: the magnitude with `MAX` or with a summed numerator **and** a summed count, the phase
+  from the summed complex numerator and count. Averaging per-rank averages weights the ranks equally
+  however unevenly the dofs are spread over them, and is wrong by percent — `test_rotate_eigenvectors_reduces_correctly`
+  fails by 1e-2 under exactly that mutation.
+
+Note the phase itself is ill-conditioned by construction: it is the angle of the *mean* over the
+selected dofs, so an antisymmetric mode makes that mean a near-total cancellation whose angle is
+meaningless — serially too. The test measures the cancellation and scales its tolerance by it rather
+than picking a loose constant: at cancellation 1 the two paths agree **exactly**, at 4e-10 they
+differ by 9e-8, which is round-off divided by the cancellation and not a property of the reduction.
 
 ## 5. Still serial-only
 
@@ -196,6 +226,34 @@ Measured agreement across serial / `np=2` / `np=3`, including the azimuthal `m=1
 the axisymmetric-flow manipulator path: eigenvalues to ~6e-9 (shift-invert Krylov-Schur stops at its
 own tolerance, and a different factorisation ordering moves the result within it), eigenfunction
 integrals to ~1e-15 relative.
+
+The suite is marked `slow` and is **skipped without `--full`** — worth knowing, because
+`pytest tests/test_mpi_eigenvalues.py -q` reports `11 skipped` in under a second and reads, at a
+glance, exactly like a suite that ran.
+
+`test_rotate_eigenvectors_reduces_correctly` (§4.3) is the one test here whose code path nothing in
+the normal flow reaches, since the eigensolver replicates its eigenvectors. It manufactures the input
+instead: solve normally, slice each eigenvector down to the rank's own rows, feed that back in, and
+require the answer to match the full-vector one restricted to the same rows. Both wrong-operator
+mutations (`MAX` → mean-of-maxes, mean → average-of-per-rank-averages) fail it by ~1e-2.
+
+### Verified on the rising-bubble benchmark
+
+17925 dofs, leading eigenvalue, all five configurations agreeing to **4.4e-12**:
+
+| config | rank 0's eigen rows | eigenvalue |
+|---|---|---|
+| serial | 18175 | `-0.106212230504436 + 0.761243489826195i` |
+| `np=2` plain | 9088 | `-0.106212230503254 + 0.761243489829197i` |
+| `np=2 --distribute` | 12124 | `-0.106212230506938 + 0.761243489829080i` |
+| `np=4` plain | 4544 | `-0.106212230500189 + 0.761243489825755i` |
+| `np=4 --distribute` | 10920 | `-0.106212230501172 + 0.761243489829077i` |
+
+Without `--distribute` the eigensolver imposes its own even split of the replicated matrix, and 9088
+/ 4544 are exactly `ceil(18175/nproc)`. With `--distribute` the split is oomph's own dof distribution
+and is uneven, so rank 0's share is not `n/nproc`; the benchmark records only rank 0, so these two
+rows say nothing about how the remainder is spread. `_assert_solve_was_split` in the test suite is
+what actually checks the blocks tile `[0, ndof)`.
 
 ## 7. Not done
 

@@ -240,6 +240,59 @@ def guard_case(N=8, eigensolver="scipy", outdir=None):
         return {"raised": False, "message": "", "distributed": bool(p.is_distributed())}
 
 
+def rotate_case(N=8, normalize_max=True, outdir=None):
+    """rotate_eigenvectors() must give the same answer from a local row block as from a full vector.
+
+    The PETSc eigensolver replicates eigenvectors (see _vector_to_global_array), so nothing in the
+    normal flow reaches rotate_eigenvectors' distributed branch and it would go untested. Slicing a
+    replicated eigenvector down to the rank's own rows and feeding that back in is exactly the input
+    that branch is written for, and the full-vector answer restricted to the same rows is the
+    reference it has to reproduce.
+
+    The point of the comparison is the reduction operators: the phase comes from a complex MEAN and
+    the magnitude from either a MAX or a mean, and a partition where the ranks own unequal numbers of
+    the selected dofs -- the normal case -- gives a different answer if any of them is combined as
+    though it were one of the others.
+    """
+    prob = DiffusionProblem(N=N)
+    with prob as p:
+        if outdir is not None:
+            p.set_output_directory(outdir)
+        p.quiet()
+        p.set_linear_solver("petsc_mumps")
+        p.set_eigensolver("slepc")
+        p.initialise()
+        p.solve()
+        p.solve_eigenproblem(2, quiet=True)
+        evs = numpy.array(p.get_last_eigenvectors())
+        n_global, nrow_local, first_row, distributed = p._get_dof_distribution_info()
+
+        full = p.rotate_eigenvectors(evs, "domain/u", normalize_dofs=True,
+                                     normalize_max=normalize_max)
+        sliced = p.rotate_eigenvectors(evs[:, first_row:first_row + nrow_local], "domain/u",
+                                       normalize_dofs=True, normalize_max=normalize_max)
+        ref = full[:, first_row:first_row + nrow_local]
+        sel = numpy.array(sorted(p.dof_strings_to_global_equations("domain/u")), dtype=numpy.int64)
+        per_ev, cancel = [], []
+        for k in range(ref.shape[0]):
+            scale = float(numpy.amax(numpy.absolute(ref[k])))
+            err = float(numpy.amax(numpy.absolute(sliced[k] - ref[k])))
+            per_ev.append(err / scale if scale > 0 else err)
+            # |mean| / mean|.| over the selected dofs. The phase is the angle of the MEAN, so when the
+            # eigenmode is antisymmetric over those dofs the mean is a near-total cancellation and its
+            # angle amplifies any difference in summation order enormously -- which is a property of
+            # what rotate_eigenvectors is asked to compute, not of how it is reduced. Reported so a
+            # loose tolerance below is visibly tied to the cancellation rather than just tolerated.
+            vals = evs[k][sel]
+            denom = float(numpy.sum(numpy.absolute(vals)))
+            cancel.append(float(numpy.absolute(numpy.sum(vals))) / denom if denom > 0 else 0.0)
+        return {"distributed": bool(distributed), "nrow_local": int(nrow_local),
+                "first_row": int(first_row), "n_global": int(n_global),
+                "n_selected_local": int(numpy.sum((sel >= first_row) * (sel < first_row + nrow_local))),
+                "rel_err_per_ev": per_ev, "cancellation_per_ev": cancel,
+                "rel_err": max(per_ev) if per_ev else 0.0}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--size", type=int, default=8)
@@ -247,7 +300,8 @@ def main():
     ap.add_argument("--eigensolver", default="slepc")
     ap.add_argument("--azimuthal-m", type=int, default=-1)
     ap.add_argument("--problem", default="diffusion", choices=sorted(_PROBLEMS))
-    ap.add_argument("--mode", default="eigen", choices=["eigen", "guard"])
+    ap.add_argument("--mode", default="eigen", choices=["eigen", "guard", "rotate"])
+    ap.add_argument("--normalize-max", type=int, default=1)
     ap.add_argument("--outdir", required=True)
     args, _ = ap.parse_known_args()
 
@@ -257,6 +311,9 @@ def main():
     try:
         if args.mode == "guard":
             payload.update(guard_case(N=args.size, eigensolver=args.eigensolver, outdir=args.outdir))
+        elif args.mode == "rotate":
+            payload.update(rotate_case(N=args.size, normalize_max=bool(args.normalize_max),
+                                       outdir=args.outdir))
         else:
             payload.update(solve_case(N=args.size, neigen=args.neigen,
                                       eigensolver=args.eigensolver, azimuthal_m=azi,

@@ -113,7 +113,7 @@ _RANK_RTOL = 1e-12
 
 
 def _run_mpi(nproc, tmpdir, distribute, mode="eigen", eigensolver="slepc", size=8, neigen=3,
-             azimuthal_m=None, problem="diffusion", timeout=900):
+             azimuthal_m=None, problem="diffusion", timeout=900, extra=None):
     """Launch the worker under mpirun and return the list of per-rank result dicts."""
     cmd = ["mpirun", "-n", str(nproc)]
     if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
@@ -123,6 +123,7 @@ def _run_mpi(nproc, tmpdir, distribute, mode="eigen", eigensolver="slepc", size=
             "--eigensolver", eigensolver, "--size", str(size), "--neigen", str(neigen),
             "--problem", problem,
             "--azimuthal-m", str(-1 if azimuthal_m is None else azimuthal_m)]
+    cmd += list(extra or [])
     if distribute:
         cmd += ["--distribute"]
     # Importing pyoomph calls MPI_Init, so THIS pytest process is already a (singleton) MPI job and
@@ -259,6 +260,44 @@ def test_distributed_matches_serial(tmp_path, nproc):
     _assert_solve_was_split("distributed np=%d" % nproc, per_rank)
     _assert_ranks_agree(per_rank)
     _assert_matches_serial("distributed np=%d" % nproc, per_rank, serial)
+
+
+@pytest.mark.parametrize("nproc", [2, 4])
+@pytest.mark.parametrize("normalize_max", [1, 0])
+def test_rotate_eigenvectors_reduces_correctly(tmp_path, nproc, normalize_max):
+    """rotate_eigenvectors() must give the same rotation from a local row block as from a full vector.
+
+    The phase and the magnitude scale the WHOLE eigenvector, so ranks that compute them from
+    different data end up holding different eigenvectors -- and nothing downstream notices, because
+    the eigenVALUE is untouched. The phase is the angle of a complex MEAN and the magnitude is either
+    a MAX or a mean, so combining any of them across ranks with the wrong operator (or by averaging
+    per-rank averages, which weights the ranks equally however unevenly the dofs are spread) gives a
+    wrong answer that still looks plausible.
+
+    Nothing in the normal flow reaches that branch today -- the PETSc eigensolver replicates its
+    eigenvectors -- so the worker feeds it a deliberately sliced vector; see rotate_case().
+    """
+    per_rank = _run_mpi(nproc, tmp_path, distribute=True, mode="rotate",
+                        extra=["--normalize-max", str(normalize_max)])
+    _check_no_errors(per_rank)
+    assert per_rank[0]["distributed"], "the run was not actually distributed"
+    # A partition that gave some rank every selected dof would make the reduction trivially right.
+    for r in per_rank:
+        assert 0 < r["n_selected_local"] < r["n_global"], \
+            "rank %d owns %d of %d selected dofs, so the reduction spans no ranks" % (
+                r["rank"], r["n_selected_local"], r["n_global"])
+    for r in per_rank:
+        for k, (err, cancel) in enumerate(zip(r["rel_err_per_ev"], r["cancellation_per_ev"])):
+            # Where the mean does not cancel the two paths agree EXACTLY -- same values, and the only
+            # freedom is summation order. Where it does, the angle of a near-zero mean amplifies that
+            # round-off by 1/cancel, which is a property of what is being computed (an antisymmetric
+            # dof set has no well-defined mean phase, serially either) and not of the reduction. So
+            # the tolerance is round-off divided by the measured cancellation, which stays far below
+            # the O(1) error a mis-paired reduction operator produces.
+            tol = 1e-13 / max(cancel, 1e-12)
+            assert err <= tol, (
+                "rank %d, eigenvector %d: local-block rotation differs from the full-vector one by "
+                "%.3e (tolerance %.3e at cancellation %.3e)" % (r["rank"], k, err, tol, cancel))
 
 
 def test_distributed_azimuthal_matches_serial(tmp_path):

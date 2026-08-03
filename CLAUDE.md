@@ -61,14 +61,22 @@ analysis needs the complex build.
 **The path differs per machine, so look it up rather than pasting one from here** - and check it, because
 a nonexistent entry in `PYTHONPATH` is not an error, it just leaves you without PETSc:
 
-    find ~/code -maxdepth 4 -name petsc4py -type d      # the arch dir is its parent's parent
+    find ~/code -maxdepth 5 -name petsc4py -type d      # the arch dir is its parent's parent
     PYTHONPATH=<candidate> python3 -c "from petsc4py import PETSc; import numpy; \
         assert PETSc.ScalarType is numpy.complex128; import slepc4py; print('complex PETSc ok')"
 
 On `duarte` that is `/home/cdiddens/code/petsc/pyoomph_petsc_arch_complex/lib`, with
-`pyoomph_petsc_arch_real` next to it as the real-scalar one. On `walhalla` it is somewhere else.
+`pyoomph_petsc_arch_real` next to it as the real-scalar one. On `walhalla` it is
+`/home/cdiddens/code/packages/petsc_complex/arch-linux-c-debug/lib`, with
+`packages/petsc/arch-linux-c-debug/lib` as the real-scalar one.
 (An earlier revision of this file hardcoded `packages/petsc_pyoomph/pyoomph_petsc_opt/lib`, which
-exists on neither.)
+exists on neither. On walhalla that wrong path is especially quiet: the real-scalar petsc4py is
+importable with no `PYTHONPATH` at all and even reports MUMPS support, so nothing fails - you just
+silently run the real build.)
+
+The MPI and 3D-adaptivity suites are marked `slow` and are **skipped** without `--full`:
+
+    python3 -m pytest tests/test_mpi_eigenvalues.py -q --full
 
 Do not force a linear solver on the tutorials to make a comparison uniform. It changes what is being
 computed: `petsc_mumps` collapses `hopf_switch`'s arclength continuation, and plain `petsc` (iterative
