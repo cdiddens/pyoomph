@@ -87,7 +87,7 @@ namespace pyoomph
 	class PyProblemTrampoline : public pyoomph::Problem
 	{
 	public:
-		NB_TRAMPOLINE(pyoomph::Problem, 16);
+		NB_TRAMPOLINE(pyoomph::Problem, 18);
 
 		void setup_pinning() override
 		{
@@ -147,6 +147,16 @@ namespace pyoomph
 		void actions_after_adapt() override
 		{
 			NB_OVERRIDE(actions_after_adapt);
+		}
+
+		void _adaptive_solve_checkpoint(int isolve, bool just_adapted) override
+		{
+			NB_OVERRIDE(_adaptive_solve_checkpoint, isolve, just_adapted);
+		}
+
+		bool _recover_from_failed_adaptive_resolve(bool linear_solver_error, int iterations) override
+		{
+			NB_OVERRIDE(_recover_from_failed_adaptive_resolve, linear_solver_error, iterations);
 		}
 
 		void actions_before_distribute() override
@@ -915,6 +925,15 @@ void PyReg_Problem(nb::module_ &m)
 			 "``epsilon`` is the desired magnitude of the global temporal error at each time step. Always shifts the time history values. "
 			 "Returns the suggested next time step, to be passed again as ``dt_desired``.")
 		.def("_adapt", &pyoomph::Problem::_adapt, "Perform a single spatial adaptation step (mesh refinement/unrefinement). Returns (n_refined, n_unrefined).")
+		.def("_adaptive_solve_checkpoint", &pyoomph::Problem::_adaptive_solve_checkpoint,
+			 nb::arg("isolve"), nb::arg("just_adapted"),
+			 "Called by oomph-lib immediately before (``just_adapted=False``) and after every mesh adaptation inside an adaptive Newton solve. "
+			 "Override in Python to snapshot the state; the pre-adapt call is the last moment at which the (converged) pre-adapt state exists.")
+		.def("_recover_from_failed_adaptive_resolve", &pyoomph::Problem::_recover_from_failed_adaptive_resolve,
+			 nb::arg("linear_solver_error"), nb::arg("iterations"),
+			 "Called by oomph-lib when the Newton solve after a mesh adaptation failed, instead of abandoning the run. "
+			 "Return True after restoring a consistent state to have the failure reported as a catchable SpatialAdaptResolveError; "
+			 "return False (the default) to keep the old, fatal behaviour.")
 		.def("adaptive_unsteady_newton_solve", (double(pyoomph::Problem::*)(const double &, const double &, const bool &)) & pyoomph::Problem::adaptive_unsteady_newton_solve,
 			 nb::arg("dt_desired"), nb::arg("epsilon"), nb::arg("shift_values"),
 			 "Same as the two-argument overload, but ``shift_values`` controls whether the time history values are shifted.")

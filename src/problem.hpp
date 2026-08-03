@@ -801,6 +801,23 @@ namespace pyoomph
     void ensure_dummy_values_to_be_dummy(); // Resets helper/dummy Data values (e.g. unused position dofs) back to their sentinel dummy values after a solve
     void unpin_Dirichlet_dofs_for_matrix_manipulation(); // Counterpart to the matrix-manipulation Dirichlet strategy: temporarily unpins the Dirichlet dofs so they are assembled as normal dofs
     void actions_after_adapt() override;
+
+    // Recovery from a Newton failure after a spatial adaptation. oomph-lib calls the two hooks below
+    // (see dev_docs/adaptive_resolve_recovery.md); the _-prefixed pair is what Python overrides,
+    // because the const unsigned&/const bool& signatures oomph-lib uses are awkward through the
+    // trampoline -- the same reason adapt() forwards to _adapt() above. The defaults keep the
+    // inherited no-op behaviour, so a problem without a recovery policy is entirely unaffected.
+    void adaptive_solve_checkpoint(const unsigned &isolve, const bool &just_adapted) override
+    {
+      this->_adaptive_solve_checkpoint(static_cast<int>(isolve), just_adapted);
+    }
+    bool recover_from_failed_adaptive_resolve(const bool &linear_solver_error, const unsigned &iterations) override
+    {
+      return this->_recover_from_failed_adaptive_resolve(linear_solver_error, static_cast<int>(iterations));
+    }
+    virtual void _adaptive_solve_checkpoint(int isolve, bool just_adapted) {}
+    virtual bool _recover_from_failed_adaptive_resolve(bool linear_solver_error, int iterations) { return false; }
+
     unsigned long assign_eqn_numbers(const bool& assign_local_eqn_numbers = true) override; // Also (re)builds the defined-field list and pins fields with empty Jacobian rows/columns
     virtual void setup_pinning() {} // Hook for problem-specific pinning of dofs, called during equation numbering; overridden in Python
     void set_initial_condition() override; // Hook to set up initial conditions; overridden in Python (default calls the mesh-level setup_initial_conditions)

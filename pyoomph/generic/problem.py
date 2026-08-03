@@ -62,8 +62,12 @@ from ..meshes.meshdatacache import MeshDataCacheStorage, MeshDataCacheOperatorBa
 from .ccompiler import BaseCCompiler,SystemCCompiler
 from .jit_cache import get_jit_cache,tier2_shadow_enabled
 
-import types 
+import types
+import io
+import contextlib
+from typing import IO
 
+from .adaptive_recovery import AdaptiveResolveRecovery, SpatialAdaptResolveError
 from ..typings import *
 
 if TYPE_CHECKING:
@@ -596,6 +600,13 @@ class Problem(_pyoomph.Problem):
         self.desired_ndof_max_growth:float=4.0
         #: Maximum number of refinements of all meshes. After initialization, use set_max_refinement_level instead of this property.
         self.max_refinement_level:int=8
+        #: What to do when the Newton solve *after* a spatial adaptation fails. By default ``None``,
+        #: i.e. such a failure ends the run, since the pre-adapt mesh is gone by then and nothing can
+        #: be recovered. Set an :py:class:`~pyoomph.generic.adaptive_recovery.AdaptiveResolveRecovery`
+        #: to snapshot the state before each adaptation and fall back to it instead.
+        self.adaptive_resolve_recovery:"AdaptiveResolveRecovery | None"=None
+        self._state_snapshot_counter:int=0
+        self._adapt_recovery_transient:bool=False # whether the solve being recovered is a timestep
         #: Minimum refinement level of all meshes.       
         self.min_refinement_level:int=0
         #: Add a .gitignore with content "*" to output folders
@@ -6202,7 +6213,8 @@ class Problem(_pyoomph.Problem):
             self.actions_before_stationary_solve()
             if not self.is_quiet():
                 print("STATIONARY SOLVE"+paramstr)
-            self.steady_newton_solve(spatial_adapt)
+            self._solve_with_adapt_recovery(spatial_adapt,False,True,
+                                            lambda adapt_level,_shift: self.steady_newton_solve(adapt_level))
             self._last_step_was_stationary = True
             if self.get_bifurcation_tracking_mode()!="":
                 if self._bifurcation_tracking_parameter_name=="<LAMBDA_TRACKING>":
@@ -6251,9 +6263,11 @@ class Problem(_pyoomph.Problem):
                     self._resetting_first_step=False
                 if temporal_error is None:
                     desired_dt=timestep
-                    self.unsteady_newton_solve(timestep,spatial_adapt,self._first_step,shift_values)
+                    self._solve_with_adapt_recovery(spatial_adapt,True,shift_values,
+                        lambda adapt_level,shift: self.unsteady_newton_solve(timestep,adapt_level,self._first_step,shift))
                 else:
-                    desired_dt=self.doubly_adaptive_unsteady_newton_solve(timestep,temporal_error,spatial_adapt,int(suppress_resolve_after_adapt),self._first_step,shift_values)
+                    desired_dt=self._solve_with_adapt_recovery(spatial_adapt,True,shift_values,
+                        lambda adapt_level,shift: self.doubly_adaptive_unsteady_newton_solve(timestep,temporal_error,adapt_level,int(suppress_resolve_after_adapt),self._first_step,shift))
                 self._first_step=False
                 self._override_for_this_solve(**oldsettings)
                 self.timestepper.increment_num_unsteady_steps_done()
@@ -7151,24 +7165,38 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         
 
 
-    def save_state(self, fname:str,relative_to_output:bool=False)->None:
+    def save_state(self, fname:str | IO[bytes],relative_to_output:bool=False,quiet:bool=False)->None:
         """Write the full state of the problem to a file, so that it can be restored with load_state.
+
+        ``fname`` may also be an open binary stream (e.g. an ``io.BytesIO``), which is what
+        :py:meth:`_snapshot_state` uses to keep a state in memory instead of on disk.
 
         On a distributed problem this is **collective**: every rank contributes its part of the mesh,
         the data is merged into one partition-independent file (see dev_docs/distributed_state_files.md)
         and rank 0 writes it. The resulting file is the same one a serial run would write and can be
         read back on any number of processes."""
         distributed=self.is_distributed()
-        if (not distributed) and get_mpi_rank()>0:
-            return # every rank holds the whole problem, so one of them writing is enough
+        if (not distributed) and get_mpi_rank()>0 and isinstance(fname,str):
+            return # every rank holds the whole problem, so one of them writing the FILE is enough
+        # A stream is per-rank private, so there is no redundant writer to skip - and a snapshot that
+        # only rank 0 held could not be restored, since every rank has to read the whole state back.
 
-        if not self.is_quiet() and get_mpi_rank()==0:
+        if not self.is_quiet() and not quiet and get_mpi_rank()==0:
             print("Saving state ", fname)
         if relative_to_output:
+            assert isinstance(fname,str), "relative_to_output makes no sense when writing to a stream"
             fname=os.path.join(self.get_output_directory(),fname)
-        # All ranks walk through define_state_file - that is where they hand their part of the mesh
-        # over - but only rank 0 writes anything, the others send their bytes to /dev/null.
-        dump = DumpFile(fname if get_mpi_rank()==0 else os.devnull, True,compression_level=self.states_compression_level)
+        # On a DISTRIBUTED problem all ranks walk through define_state_file - that is where they hand
+        # their part of the mesh over - but only rank 0 writes anything, the others send their bytes
+        # to /dev/null, because the result is one merged, partition-independent stream.
+        #
+        # When the problem is NOT distributed there is no merge: every rank holds the whole problem
+        # and writes a complete stream of its own. Sending the others to /dev/null here would be
+        # wrong for a stream - the guard above already dropped the redundant writers of a FILE, so
+        # the only ranks still here are ones that need their own copy. (They used to be dropped
+        # unconditionally, which is why this line could assume rank 0.)
+        writes_here = (get_mpi_rank()==0) or (not distributed)
+        dump = DumpFile(fname if writes_here else os.devnull, True,compression_level=self.states_compression_level)
         error=None
         try:
             self.define_state_file(dump)
@@ -7190,12 +7218,13 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             raise error
 
 
-    def load_state(self, fname:str,ignore_outstep:bool=False,relative_to_output:bool=False,ignore_eigendata:bool=False,ignore_continuation_data:bool=False,additional_info:dict[Any,Any]={}):
+    def load_state(self, fname:str | IO[bytes],ignore_outstep:bool=False,relative_to_output:bool=False,ignore_eigendata:bool=False,ignore_continuation_data:bool=False,additional_info:dict[Any,Any]={},quiet:bool=False):
         if not self.is_initialised():
             self.initialise()
         # No guard for distributed problems: every rank reads the whole file and picks out the part of
         # the mesh it holds, halo copies included, which needs no communication at all.
         if relative_to_output:
+            assert isinstance(fname,str), "relative_to_output makes no sense when reading from a stream"
             fname=os.path.join(self.get_output_directory(),fname)
 
         _pyoomph.set_interpolate_new_interface_dofs(False) # We may not interpolate the additional dofs on newly constructed interface nodes
@@ -7203,7 +7232,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         dump = DumpFile(fname, False)
         good=dump.check_footer("EOF_pyoomph")
         if not good:
-            raise RuntimeError("Unsupported state file: "+fname)
+            raise RuntimeError("Unsupported state file: "+dump.fname)
         for m in self._interfacemeshes:
             m.clear_before_adapt()
         oldoutstep=self._output_step
@@ -7223,7 +7252,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             self._taken_already_an_unsteady_step=True
             self._first_step=False
             self._last_step_was_stationary=False
-        print("State file "+fname+" loaded")
+        if not quiet:
+            print("State file "+dump.fname+" loaded")
         for m in self._interfacemeshes:
             m.clear_before_adapt()
         self.invalidate_cached_mesh_data()
@@ -7250,6 +7280,122 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             self.actions_before_stationary_solve()
         _pyoomph.set_interpolate_new_interface_dofs(True) # Activate the interpolation again, good for spatial adaptivity
         return True
+
+    ############################################################################################
+    # State snapshots for the failed-resolve-after-adaptation recovery.
+    # See pyoomph/generic/adaptive_recovery.py and dev_docs/adaptive_resolve_recovery.md.
+    ############################################################################################
+
+    def _snapshot_state(self,to_memory:bool=True)->bytes | str:
+        """Take a full state snapshot, without touching the user's output directory.
+
+        Returns whatever :py:meth:`_restore_state` needs to put it back: the raw bytes when
+        ``to_memory``, otherwise the name of a temporary file. Everything a restore needs is in
+        there - the refinement pattern, the dofs, the history values, the pinned values, the current
+        time and all dts - because this is the very same stream ``save_state`` writes."""
+        if not to_memory:
+            fname=os.path.join(self.get_output_directory(),"_states",
+                               "_snapshot_{:d}_{:d}.dump".format(os.getpid(),self._state_snapshot_counter))
+            self._state_snapshot_counter+=1
+            os.makedirs(os.path.dirname(fname),exist_ok=True)
+            self.save_state(fname,quiet=True)
+            return fname
+        buf=io.BytesIO()
+        self.save_state(buf,quiet=True)
+        if self.is_distributed():
+            # save_state merges the mesh into ONE partition-independent stream that only rank 0 ends
+            # up holding, while load_state needs every rank to read the whole thing. So the buffer
+            # has to travel; that broadcast is the only extra cost a distributed snapshot has.
+            comm=get_mpi_world_comm()
+            assert comm is not None
+            return cast(bytes,comm.bcast(buf.getvalue() if get_mpi_rank()==0 else None,root=0))
+        # Not distributed: every rank holds the whole problem and wrote its own complete buffer
+        # (save_state skips the redundant-writer guard for streams), so there is nothing to share.
+        return buf.getvalue()
+
+    def _restore_state(self,snapshot:bytes | str)->None:
+        """Put back a state taken by :py:meth:`_snapshot_state`."""
+        self.load_state(snapshot if isinstance(snapshot,str) else io.BytesIO(snapshot),quiet=True)
+
+    def _discard_state_snapshot(self,snapshot:bytes | str)->None:
+        if isinstance(snapshot,str) and os.path.exists(snapshot):
+            os.remove(snapshot)
+
+    @contextlib.contextmanager
+    def _suppress_unrefinement(self):
+        """Let the adaptation refine but never unrefine, for the duration of the block.
+
+        Unrefinement is what usually breaks the re-solve: it removes resolution exactly where the
+        solution is stiff, and the interpolation onto the coarser mesh then lands outside the Newton
+        basin. Refinement alone is nearly always benign for the conditioning.
+
+        Errors are non-negative and oomph-lib unrefines on ``error < min_permitted_error``, so a
+        negative threshold takes unrefinement out entirely."""
+        saved:list[tuple[Any,float]]=[]
+        saved_desired_ndof=self.desired_ndof
+        # The desired_ndof controller recomputes BOTH thresholds on every adaptation, so it would
+        # simply overwrite what we set here. Unset it and let it hand the user's thresholds back
+        # right away, before we override them.
+        self.desired_ndof=None
+        self._restore_thresholds_before_desired_ndof()
+        for _name,mesh in self._meshdict.items():
+            if isinstance(mesh,ODEStorageMesh) or not mesh.refinement_possible():
+                continue
+            saved.append((mesh,mesh.min_permitted_error))
+            mesh.min_permitted_error=-1.0
+        try:
+            yield
+        finally:
+            for mesh,val in saved:
+                mesh.min_permitted_error=val
+            self.desired_ndof=saved_desired_ndof
+
+    @contextlib.contextmanager
+    def _temporary_newton_settings(self,**overrides:Any):
+        """Apply Newton solver overrides for the duration of the block and put the old ones back."""
+        old=self._override_for_this_solve(**overrides)
+        try:
+            yield
+        finally:
+            self._override_for_this_solve(**old)
+
+    def _adapt_recovery_unsolved_result(self)->Any:
+        """What solve() should return when a recovery accepted a state instead of solving.
+
+        For a stationary solve that is 0, exactly as the normal path returns; for a transient one it
+        is the timestep that was actually taken, which is the one the restored state carries."""
+        if self._adapt_recovery_transient:
+            return self.timestepper.time_pt().dt(0)
+        return 0
+
+    def _solve_with_adapt_recovery(self,spatial_adapt:int,transient:bool,shift_values:bool,do_solve:Callable[[int,bool],Any])->Any:
+        """Run the oomph-lib solve call, letting :py:attr:`adaptive_resolve_recovery` handle a failed
+        re-solve after an adaptation. Without a policy this is just ``do_solve(...)``."""
+        policy=self.adaptive_resolve_recovery
+        if policy is None or not policy.active or spatial_adapt<=0:
+            return do_solve(spatial_adapt,shift_values)
+        return policy.run(self,do_solve,spatial_adapt,shift_values,transient)
+
+    def _adaptive_solve_checkpoint(self,isolve:int,just_adapted:bool)->None:
+        """Called from oomph-lib immediately before and after every adapt() in an adaptive solve."""
+        policy=self.adaptive_resolve_recovery
+        if policy is not None:
+            policy.checkpoint(self,isolve,just_adapted)
+
+    def _recover_from_failed_adaptive_resolve(self,linear_solver_error:bool,iterations:int)->bool:
+        """Called from oomph-lib instead of abandoning the run. See AdaptiveResolveRecovery."""
+        policy=self.adaptive_resolve_recovery
+        if policy is None:
+            return False
+        try:
+            return policy.handle_failure(self,linear_solver_error,iterations)
+        except Exception as e:
+            # A handler that throws would replace a diagnosable Newton failure with a confusing one
+            # raised from inside a C++ catch block, so report it and fall back to the old, fatal
+            # behaviour rather than letting it escape.
+            print("The failed-adaptation recovery handler itself failed ("+type(e).__name__+": "+str(e)+
+                  "); reporting the original Newton failure instead.")
+            return False
 
 
     def continue_from_outdir(self,old_out_dir:str,statenumber:int=-1,ignore_outstep:bool=True):

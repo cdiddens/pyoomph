@@ -123,6 +123,37 @@ diagnostic printed only by the terminate handler, and suppress_exception_error_m
 clears it when an error is caught. The null guards matter separately, since an OomphLibError can be
 raised when no Problem is alive at all. See pyoomph's tests/test_multiple_problems.py.
 
+problem.h / problem.cc (Changed on 3rd August 2026, adaptive-resolve recovery):
+Added two empty virtual hooks and one exception class so that a Newton failure in an ADAPTIVE solve
+loop no longer has to end the run. Both hooks are no-ops by default, so a Problem that does not
+override them behaves exactly as before, byte for byte.
+
+  - Problem::adaptive_solve_checkpoint(isolve, just_adapted), called immediately before and
+    immediately after every adapt() inside an adaptive solve. Called at five sites: both branches of
+    the adaptation loops in newton_solve(max_adapt) and unsteady_newton_solve(dt,max_adapt,...), and
+    before/after the single adapt() in doubly_adaptive_unsteady_newton_solve_helper(). The
+    just_adapted==false call is the only moment at which the pre-adapt state still exists; since
+    these loops always SOLVE first and adapt afterwards, that state is a converged solution (or a
+    completed timestep), which is what makes a rollback worth taking.
+  - Problem::recover_from_failed_adaptive_resolve(linear_solver_error, iterations), called from the
+    three catch(NewtonSolverError) blocks that would otherwise "die horribly" -- in
+    steady_newton_solve(), unsteady_newton_solve(dt,shift_values) and newton_solve(max_adapt). If it
+    returns true the caller throws AdaptiveResolveRecovered instead of the fatal OomphLibError.
+  - AdaptiveResolveRecovered, declared next to NewtonSolverError. Derived from std::runtime_error
+    and deliberately NOT from OomphLibError or NewtonSolverError, because it has to fly past every
+    catch block in oomph-lib: steady_newton_solve() wraps newton_solve(max_adapt) in
+    catch(NewtonSolverError), so an exception of either of those types would simply be turned back
+    into a fatal error one frame up.
+
+The arclength path (arc_length_step_solve_helper) was deliberately left alone: it keeps Dof_pt-indexed
+dof_current/dof_derivative vectors live across its adapt(), so a rollback there would have to
+re-establish them, and its non-linear-solver failures already recover by shrinking Ds.
+
+pyoomph overrides both hooks (Problem::_adaptive_solve_checkpoint /
+_recover_from_failed_adaptive_resolve, forwarded to Python) to snapshot the state before each
+adaptation and restore it on failure. See pyoomph's dev_docs/adaptive_resolve_recovery.md and
+tests/test_adaptive_resolve_recovery.py.
+
 problem.cc (Changed on 30th July 2026, second change):
 Fixed two out-of-bounds writes on the distributed path, in Problem::get_dofs(DoubleVector&) and
 Problem::set_dofs(const DoubleVector&). Both looped to ndof(), which is the GLOBAL number of dofs,

@@ -28,6 +28,7 @@ from __future__ import annotations
  
  
 import struct
+from typing import IO
 from ..typings import *
 import numpy
 import numpy.lib.format
@@ -36,10 +37,17 @@ import zlib
 import io
 
 class DumpFile:
-    def __init__(self,fname:str,save:bool,compression_level:int | None=None):
+    # fname may also be an already-open binary stream (anything with read/write/seek/tell, e.g. an
+    # io.BytesIO). Nothing in here ever touched the file system beyond the open() below, so an
+    # in-memory state costs one branch: that is what Problem._snapshot_state uses to keep a state
+    # around for rollback without writing to the output directory.
+    def __init__(self,fname:str | IO[bytes],save:bool,compression_level:int | None=None):
         self.save=save
-        self.file=open(fname,"wb" if save else "rb")
-        self.fname=fname
+        # A stream is NOT closed by close() - we do not own it, and the caller still has to read the
+        # bytes back out of it.
+        self._owns_file=isinstance(fname,str)
+        self.file=open(fname,"wb" if save else "rb") if isinstance(fname,str) else fname
+        self.fname=fname if isinstance(fname,str) else "<stream>"
         # Version of the format being written or read. Set by Problem._define_state_header, so the
         # sections below can tell an old file from a current one.
         self.version:str=""
@@ -54,7 +62,8 @@ class DumpFile:
         
 
     def close(self):
-        self.file.close()
+        if self._owns_file:
+            self.file.close()
 
     def version_at_least(self,*parts:int) -> bool:
         """Whether the version of this file is at least the given one, compared componentwise.

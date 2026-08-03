@@ -182,6 +182,16 @@ namespace pyoomph
         return lookup_python_type_once("pyoomph.solvers.generic", "SolverError", cached, resolved);
     }
 
+    // Counterpart for oomph::AdaptiveResolveRecovered. Same lazy resolution and same fallback: if the
+    // class cannot be found, a plain RuntimeError still carries the message.
+    static PyObject *spatial_adapt_resolve_error_type()
+    {
+        static PyObject *cached = nullptr;
+        static bool resolved = false;
+        return lookup_python_type_once("pyoomph.generic.adaptive_recovery",
+                                       "SpatialAdaptResolveError", cached, resolved);
+    }
+
 #ifdef __APPLE__
     // The per-backend subclass, so a caller can still tell which solver gave up. Falls back to the
     // base class if it cannot be resolved -- the retry, not the exact type, is the point.
@@ -471,6 +481,16 @@ void PyReg_Solvers(nb::module_ &m)
                                 "The Newton solve failed and no caller was in a position to retry it with a "
                                 "smaller step (see the reason printed above). A stationary solve, or a linear "
                                 "solve outside any Newton solve, has nothing to fall back on.");
+            }
+            // The Newton solve after a mesh adaptation failed AND a recovery handler restored a
+            // consistent state (see Problem::recover_from_failed_adaptive_resolve). Reported as its
+            // own Python class rather than as the RuntimeError std::runtime_error would map to, so
+            // that Problem.solve()'s retry loop can tell this apart from every other failure -- it
+            // is the one case in which the problem is still usable afterwards.
+            catch (const oomph::AdaptiveResolveRecovered &e)
+            {
+                PyObject *type = pyoomph::spatial_adapt_resolve_error_type();
+                PyErr_SetString(type ? type : PyExc_RuntimeError, e.what());
             }
         },
         nullptr);

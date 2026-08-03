@@ -1136,6 +1136,29 @@ namespace oomph
     /// Actions that are to be performed after a mesh adaptation.
     virtual void actions_after_adapt() {}
 
+    //FOR PYOOMPH: hooks that let a subclass survive a Newton failure in an adaptive solve loop
+    // instead of the run ending there. Both are no-ops by default, so a Problem that does not
+    // override them behaves exactly as it did before. See dev_docs/adaptive_resolve_recovery.md.
+
+    /// Called immediately before and immediately after every adapt() inside an adaptive Newton
+    /// solve. just_adapted==false is the only moment at which the pre-adapt state still exists --
+    /// and, because these loops always solve first and adapt afterwards, that state is a converged
+    /// one, which is what makes a rollback worth anything.
+    virtual void adaptive_solve_checkpoint(const unsigned& isolve,
+                                           const bool& just_adapted)
+    {
+    }
+
+    /// Called from the catch blocks that would otherwise abandon the run. Return true if a
+    /// consistent state has been restored, in which case the caller throws
+    /// AdaptiveResolveRecovered -- which nothing in oomph-lib catches -- instead of the fatal
+    /// OomphLibError.
+    virtual bool recover_from_failed_adaptive_resolve(
+      const bool& linear_solver_error, const unsigned& iterations)
+    {
+      return false;
+    }
+
   protected:
     /// Any actions that are to be performed before a complete
     /// Newton solve (e.g. adjust boundary conditions). CAREFUL: This
@@ -3235,6 +3258,23 @@ namespace oomph
         maxres(Passed_maxres)
     {
     }
+  };
+
+
+  //=======================================================================
+  //FOR PYOOMPH: thrown once Problem::recover_from_failed_adaptive_resolve has restored a
+  /// consistent state after a Newton failure in an adaptive solve loop, in place of the fatal
+  /// OomphLibError that would otherwise end the run.
+  ///
+  /// Deliberately derived from std::runtime_error and NOT from OomphLibError or NewtonSolverError:
+  /// it has to fly past every catch block in here. In particular steady_newton_solve() wraps
+  /// newton_solve(max_adapt) in catch(NewtonSolverError), so an exception of either of those types
+  /// thrown from the inner loop would simply be converted back into a fatal error one frame up.
+  //=======================================================================
+  class AdaptiveResolveRecovered : public std::runtime_error
+  {
+  public:
+    AdaptiveResolveRecovered(const std::string& what) : std::runtime_error(what) {}
   };
 
 

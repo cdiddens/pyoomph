@@ -302,11 +302,18 @@ def _sorted_records(local: dict[str, NPAnyArray], distributed: bool, check: bool
 
 
 def save_mesh_state(mesh: "AnySpatialMesh", state: "DumpFile", check_consistency: bool = True) -> None:
-    """Write the mesh part of a state file. Collective on a distributed mesh; only rank 0 writes."""
+    """Write the mesh part of a state file.
+
+    Collective on a distributed mesh, where the contributions are gathered onto rank 0 and only rank
+    0 has anything to write. On a mesh that is NOT distributed every rank holds the whole thing and
+    _sorted_records hands each of them the complete set, so each writes its own copy - which matters
+    for an in-memory snapshot (Problem._snapshot_state), where the streams are per-rank private and a
+    rank that wrote nothing would be left unable to restore. It does not matter when writing a file,
+    because save_state drops the redundant writers before reaching here."""
     distributed = _mesh_is_distributed(mesh)
     local = _local_contribution(mesh)
     records = _sorted_records(local, distributed, check_consistency)
-    if get_mpi_rank() != 0:
+    if distributed and get_mpi_rank() != 0:
         return
     assert records is not None
     for name in ("roots", "sig_lens", "sig_data", "node_keys", "node_lens", "node_data",

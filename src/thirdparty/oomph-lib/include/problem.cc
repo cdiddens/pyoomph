@@ -9631,6 +9631,15 @@ namespace oomph
     // Catch any exceptions thrown in the Newton solver
     catch (NewtonSolverError& error)
     {
+      //FOR PYOOMPH: offer the failure to a recovery handler before it becomes fatal.
+      if (recover_from_failed_adaptive_resolve(error.linear_solver_error,
+                                               error.iterations))
+      {
+        throw AdaptiveResolveRecovered(
+          "The Newton solve after a spatial adaptation failed; a consistent state "
+          "was restored (see Problem::recover_from_failed_adaptive_resolve).");
+      }
+
       oomph_info << std::endl
                  << "USER-DEFINED ERROR IN NEWTON SOLVER " << std::endl;
       // Check whether it's the linear solver
@@ -11275,6 +11284,17 @@ namespace oomph
     // Catch any exceptions thrown in the Newton solver
     catch (NewtonSolverError& error)
     {
+      //FOR PYOOMPH: offer the failure to a recovery handler before it becomes fatal. The enclosing
+      // adaptive loop (unsteady_newton_solve(dt,max_adapt,...)) has no catch of its own, so the
+      // marker exception unwinds straight out to the caller.
+      if (recover_from_failed_adaptive_resolve(error.linear_solver_error,
+                                               error.iterations))
+      {
+        throw AdaptiveResolveRecovered(
+          "The Newton solve after a spatial adaptation failed; a consistent state "
+          "was restored (see Problem::recover_from_failed_adaptive_resolve).");
+      }
+
       oomph_info << std::endl
                  << "USER-DEFINED ERROR IN NEWTON SOLVER " << std::endl;
       // Check whether it's the linear solver
@@ -11712,6 +11732,9 @@ namespace oomph
     // Adapt problem/mesh
     unsigned n_refined = 0;
     unsigned n_unrefined = 0;
+    //FOR PYOOMPH: the pre-adapt state -- the timestep just ACCEPTED above, on the mesh as it is --
+    // exists only until the next line. See dev_docs/adaptive_resolve_recovery.md.
+    adaptive_solve_checkpoint(0, false);
     adapt(n_refined, n_unrefined);
 
     // Check if mesh has been adapted on other processors
@@ -11781,6 +11804,10 @@ namespace oomph
             shift = true;
           }
         }
+
+        //FOR PYOOMPH: the exact state the re-solve below starts from (new mesh, interpolated
+        // field, time back at the start of the step).
+        adaptive_solve_checkpoint(0, true);
 
         // Now take the step again on the refined mesh, using the same
         // timestep as used before.
@@ -16309,6 +16336,10 @@ namespace oomph
         unsigned n_refined;
         unsigned n_unrefined;
 
+        //FOR PYOOMPH: the pre-adapt state -- a COMPLETED timestep on the mesh as it is -- exists
+        // only until the next line. See dev_docs/adaptive_resolve_recovery.md.
+        adaptive_solve_checkpoint(isolve, false);
+
         // Adapt problem
         adapt(n_refined, n_unrefined);
 
@@ -16369,6 +16400,11 @@ namespace oomph
             shift_it = false;
           }
         }
+
+        //FOR PYOOMPH: the exact state the re-solve below starts from -- new mesh, interpolated
+        // field, time back at the start of the step -- so that a retry on this mesh has something
+        // to start from once the failed Newton has overwritten the dofs.
+        adaptive_solve_checkpoint(isolve, true);
       }
 
       // Now do the actual unsteady timestep
@@ -16429,6 +16465,10 @@ namespace oomph
         unsigned n_refined;
         unsigned n_unrefined;
 
+        //FOR PYOOMPH: the pre-adapt state -- the CONVERGED solution on the mesh as it is -- exists
+        // only until the next line. See dev_docs/adaptive_resolve_recovery.md.
+        adaptive_solve_checkpoint(isolve, false);
+
         // Adapt problem
         adapt(n_refined, n_unrefined);
 
@@ -16472,6 +16512,10 @@ namespace oomph
                      << "Problem::newton_solver(). \n \n ";
           break;
         }
+
+        //FOR PYOOMPH: the exact state the re-solve below starts from (new mesh, interpolated
+        // field), which the failed Newton would otherwise overwrite beyond recovery.
+        adaptive_solve_checkpoint(isolve, true);
       }
 
 
@@ -16490,6 +16534,16 @@ namespace oomph
         // Catch any exceptions thrown in the Newton solver
         catch (NewtonSolverError& error)
         {
+          //FOR PYOOMPH: offer the failure to a recovery handler before it becomes fatal.
+          if (recover_from_failed_adaptive_resolve(error.linear_solver_error,
+                                                   error.iterations))
+          {
+            throw AdaptiveResolveRecovered(
+              "The Newton solve after a spatial adaptation failed; a consistent "
+              "state was restored (see "
+              "Problem::recover_from_failed_adaptive_resolve).");
+          }
+
           oomph_info << std::endl
                      << "USER-DEFINED ERROR IN NEWTON SOLVER " << std::endl;
           // Check to see whether we have reached Max_iterations
