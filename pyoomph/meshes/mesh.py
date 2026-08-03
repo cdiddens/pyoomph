@@ -31,7 +31,7 @@ import inspect
 import os.path
 import weakref
 
-from ..generic.mpi import mpi_barrier
+from ..generic.mpi import mpi_barrier, get_mpi_nproc
 
 from ..typings import *
 
@@ -1237,6 +1237,28 @@ class MeshFromTemplateBase(BaseMesh):
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
 
+        if state.save or state.version>="0.1.0":
+            # Structurally addressed format: the refinement is stored as the shape of each root's tree
+            # and every node/element by a key that does not mention the partition, so the file is the
+            # same whether it was written serially or on any number of processes, and either can read
+            # the other. See pyoomph/meshes/meshstate.py and dev_docs/distributed_state_files.md.
+            from .meshstate import save_mesh_state, load_mesh_state
+            # The base element numbers have to exist before anything can be addressed by them. On a
+            # distributed mesh they were assigned before the distribution and must not be touched here,
+            # where only the local share is visible. Otherwise assign them now: besides being
+            # idempotent for a mesh that has them, this covers the meshes that did not exist when the
+            # problem was initialised - the ones a remesh built, and the ones the loader itself builds
+            # when the state file carries a different mesh template. Both are built from a template, in
+            # its element order, so writer and reader agree on the numbers.
+            if not self.is_mesh_distributed():
+                self.assign_global_base_element_indices()
+            if state.save:
+                save_mesh_state(self,state)
+            else:
+                load_mesh_state(self,state)
+            self._define_tracer_state_file(state)
+            return
+
         old_ordering = True
         # Refinement pattern
         if state.save:
@@ -1286,6 +1308,17 @@ class MeshFromTemplateBase(BaseMesh):
             # print("LOAD DATA",mdata)
             self._load_state(mdata)  # type:ignore
 
+        self._define_tracer_state_file(state)
+
+    def _define_tracer_state_file(self, state: "DumpFile"):
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
+        if len(self._tracers) and self.is_mesh_distributed() and get_mpi_nproc()>1:
+            # Tracer particles are spread over the processes in no particular order, so they would have
+            # to be given an identity (or be sorted) before they can be gathered into one file. Nothing
+            # needs them under MPI yet, so this refuses rather than writing a file that silently holds
+            # only rank 0's particles.
+            raise RuntimeError("Tracers are not supported in state files of distributed problems yet")
         numtracercols = len(self._tracers)
         state.int_data(lambda: numtracercols,
                        lambda n: state.assert_equal(n, numtracercols))
@@ -1302,8 +1335,9 @@ class MeshFromTemplateBase(BaseMesh):
                 pdata = state.numpy_data(lambda: 0, lambda v: v)  # type:ignore
                 tdata = state.numpy_data(lambda: 0, lambda v: v)  # type:ignore
                 tcol._load_state(pdata, tdata)  # type:ignore
-    
-    
+
+
+
     def _evaluate_extremum_wrapper(self,name:str | list[str],sign:int,dimensional:bool=True,as_float:bool=False,return_x:bool=True):
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))

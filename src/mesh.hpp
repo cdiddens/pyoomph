@@ -203,6 +203,18 @@ namespace pyoomph
 		// Row indices, in to_numpy's node ordering, of the nodes shared with process p, index-matched to process p's
 		// own list for this rank (empty without MPI). Used to merge the per-rank meshes into one global mesh.
 		virtual std::vector<int> get_shared_node_numpy_indices(unsigned p);
+
+		// --- Partition-independent addressing, for state files (dev_docs/distributed_state_files.md) ---
+		void assign_global_base_element_indices();            // number the roots; must run before distribute()
+		std::vector<long> get_element_structural_keys();      // (root index, packed tree path) per element
+		std::vector<long> get_root_element_indices();         // global index of every root held here
+		std::vector<int> get_refinement_signature(long root_index); // preorder son counts, 0 = leaf
+		std::vector<int> get_element_node_indices(unsigned &stride); // nelement x stride, -1 padded
+		void save_nodal_state(std::vector<double> &data, std::vector<int> &lengths);      // node_pt order
+		void load_nodal_state(const std::vector<double> &data, const std::vector<int> &lengths);
+		void save_elemental_state(std::vector<double> &data, std::vector<int> &lengths);  // element order
+		void load_elemental_state(const std::vector<double> &data, const std::vector<int> &lengths);
+		void refine_selected_elements_by_index(const std::vector<unsigned> &indices);
 		// Fill flat buffers with node coordinates and per-element connectivity/type info for numpy-based plotting/export.
 		// tesselate_tri splits quads/general elements into triangles; discontinuous keeps per-element (DG-style) node copies.
 		void to_numpy(double *xbuffer, int *eleminds, unsigned elemstride, int *elemtypes, bool tesselate_tri, bool nondimensional, double *D0_data, double *DL_data, unsigned history_index, bool discontinuous);

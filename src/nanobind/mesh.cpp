@@ -1206,6 +1206,57 @@ void PyReg_Mesh(nb::module_ &m)
 			 { m->generate_interface_elements(bn, im->mesh(), jitcode); }), nb::arg("boundary_name"), nb::arg("interface_mesh"), nb::arg("code_instance"), "Creates interface elements attached to the given boundary of this (bulk) mesh, using the given compiled equation code, and adds them to the given interface mesh")
 		.def("is_mesh_distributed",mesh_method([](pyoomph::Mesh *m)
 			 { return m->is_mesh_distributed(); }), "Returns whether this mesh is distributed across multiple MPI processes")
+		.def("assign_global_base_element_indices",mesh_method([](pyoomph::Mesh *m)
+			 { m->assign_global_base_element_indices(); }),
+			 "Numbers this mesh's root (base) elements in their current order and stores the number on the elements themselves. "
+			 "Must be called before the problem is distributed, while the mesh still holds all of them: afterwards each process "
+			 "only sees its own share. The numbers address elements independently of the partition and are what makes state files "
+			 "interchangeable between serial and distributed runs")
+		.def("get_element_structural_keys",mesh_method([](pyoomph::Mesh *m)
+			 {
+			 auto v=m->get_element_structural_keys();
+			 auto arr=vector_to_ndarray(v);
+			 return arr; }),
+			 "For every element, in local element order, the pair (index of its root element in the undistributed base mesh, "
+			 "packed path through the refinement tree) as a flat array of 2*nelement entries. This addresses an element "
+			 "independently of the partition; see assign_global_base_element_indices")
+		.def("get_root_element_indices",mesh_method([](pyoomph::Mesh *m)
+			 { return vector_to_ndarray(m->get_root_element_indices()); }),
+			 "The global (undistributed) index of every root element this mesh holds, ascending")
+		.def("get_refinement_signature",mesh_method([](pyoomph::Mesh *m, long root_index)
+			 { return vector_to_ndarray(m->get_refinement_signature(root_index)); }), nb::arg("root_index"),
+			 "The refinement tree of the given root element as a preorder walk of son counts (0 marks a leaf). Describes the "
+			 "shape of the tree instead of oomph-lib's level-wise element numbers, so it can be replayed on any partition")
+		.def("get_element_node_indices",mesh_method([](pyoomph::Mesh *m)
+			 {
+			 unsigned stride=0;
+			 auto v=m->get_element_node_indices(stride);
+			 return std::make_tuple(vector_to_ndarray(v),stride); }),
+			 "For every element, the indices of its nodes in this mesh's node ordering, padded with -1 to the widest element. "
+			 "Returns the flat array and the stride")
+		.def("save_nodal_state",mesh_method([](pyoomph::Mesh *m)
+			 {
+			 std::vector<double> data; std::vector<int> lengths;
+			 m->save_nodal_state(data,lengths);
+			 return std::make_tuple(vector_to_ndarray(data),vector_to_ndarray(lengths)); }),
+			 "Serializes every node's positions (all history levels), Lagrangian coordinates and values (all history levels) in "
+			 "node_pt order, returning the flat data and the per-node block length. Unlike _save_state this ordering can be "
+			 "addressed from outside, which is what state files of distributed problems need")
+		.def("load_nodal_state",mesh_method([](pyoomph::Mesh *m, const std::vector<double> &data, const std::vector<int> &lengths)
+			 { m->load_nodal_state(data,lengths); }), nb::arg("data"), nb::arg("lengths"),
+			 "Restores what save_nodal_state wrote, in the same node_pt order")
+		.def("save_elemental_state",mesh_method([](pyoomph::Mesh *m)
+			 {
+			 std::vector<double> data; std::vector<int> lengths;
+			 m->save_elemental_state(data,lengths);
+			 return std::make_tuple(vector_to_ndarray(data),vector_to_ndarray(lengths)); }),
+			 "Serializes every element's internal data (all history levels) and its geometric reference scalars, in element order")
+		.def("load_elemental_state",mesh_method([](pyoomph::Mesh *m, const std::vector<double> &data, const std::vector<int> &lengths)
+			 { m->load_elemental_state(data,lengths); }), nb::arg("data"), nb::arg("lengths"),
+			 "Restores what save_elemental_state wrote, in the same element order")
+		.def("refine_selected_elements_by_index",mesh_method([](pyoomph::Mesh *m, const std::vector<unsigned> &indices)
+			 { m->refine_selected_elements_by_index(indices); }), nb::arg("element_indices"),
+			 "Refines (splits) the elements with the given local indices by one level. Used to replay a refinement signature")
 		.def("get_numpy_element_source_indices",mesh_method([](pyoomph::Mesh *m, bool tesselate_tri, bool discontinuous)
 			 { return vector_to_ndarray(m->get_numpy_element_source_indices(tesselate_tri, discontinuous)); }),
 			 nb::arg("tesselate_tri"), nb::arg("discontinuous") = false,

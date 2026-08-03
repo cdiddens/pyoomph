@@ -653,7 +653,10 @@ class Problem(_pyoomph.Problem):
         self._where_expression="True"
 
         self._dump_header = "pyoomph_dump"
-        self._dump_version = "0.0.1"
+        # 0.1.0 stores the mesh structurally (see pyoomph/meshes/meshstate.py) instead of by rank-local
+        # element/node numbering, which is what makes states of distributed problems possible at all
+        # and lets serial and distributed runs read each other's files. Older files still load.
+        self._dump_version = "0.1.0"
         self._last_bc_setting="init"
 
         self._output_step:int=0
@@ -3337,9 +3340,16 @@ class Problem(_pyoomph.Problem):
         self.reapply_boundary_conditions()
 
 
+        # Number the base elements while the meshes are still whole. State files address elements and
+        # nodes relative to these numbers, which is what makes them independent of the partition - and
+        # a serial run assigns exactly the same numbers here, so both write the same file.
+        for _mn,_msh in self._meshdict.items():
+            if not isinstance(_msh,ODEStorageMesh):
+                _msh.assign_global_base_element_indices()
+
         if self.cmdlineargs.distribute:
             print("DISTRIBUTING THE PROBLEM")
-            self.actions_before_distribute()            
+            self.actions_before_distribute()
             self.distribute()
             self.actions_after_distribute()
             print("DISTRIBUTING DONE")
@@ -6931,6 +6941,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # Header
         state.string_data(lambda: self._dump_header, lambda s: state.assert_equal(s, self._dump_header))
         _version_str = state.string_data(lambda: self._dump_version, lambda s: state.assert_leq(s, self._dump_version))
+        state.version=_version_str # the mesh section reads differently before and after 0.1.0
 
         # Current time
         state.float_data(lambda: self.get_current_time(dimensional=True, as_float=True),lambda t: self.set_current_time(t, dimensional=True, as_float=True))
@@ -7056,6 +7067,12 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
 
         # Eigendata if desired
+        if state.save and self.is_distributed() and (self.eigen_data_in_states is not False or self.continuation_data_in_states is not False):
+            # Both are indexed by dof number, which distribute() permutes AND splits over the ranks, so
+            # they cannot be written in a partition-independent way the way the mesh can. The way out is
+            # to key them by the node/element storage they belong to, which is designed but not built;
+            # until then this refuses rather than writing something that reads back scrambled.
+            raise RuntimeError("Eigen and continuation data cannot be stored in the state file of a distributed problem yet. Set eigen_data_in_states=False and continuation_data_in_states=False, see dev_docs/distributed_state_files.md")
         write_eigen=1 if (self.eigen_data_in_states is not False) else 0
         has_eigendata=state.int_data(lambda : write_eigen,lambda n : n)
         if has_eigendata:
@@ -7118,26 +7135,49 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
 
     def save_state(self, fname:str,relative_to_output:bool=False)->None:
-        if self.is_distributed():
-            raise RuntimeError("Distributed save state does not work. Consider to set write_states=False in the Problem class for the time being")
-        elif get_mpi_rank()>0:
-            return
+        """Write the full state of the problem to a file, so that it can be restored with load_state.
 
-        if not self.is_quiet():
+        On a distributed problem this is **collective**: every rank contributes its part of the mesh,
+        the data is merged into one partition-independent file (see dev_docs/distributed_state_files.md)
+        and rank 0 writes it. The resulting file is the same one a serial run would write and can be
+        read back on any number of processes."""
+        distributed=self.is_distributed()
+        if (not distributed) and get_mpi_rank()>0:
+            return # every rank holds the whole problem, so one of them writing is enough
+
+        if not self.is_quiet() and get_mpi_rank()==0:
             print("Saving state ", fname)
         if relative_to_output:
             fname=os.path.join(self.get_output_directory(),fname)
-        dump = DumpFile(fname, True,compression_level=self.states_compression_level)
-        self.define_state_file(dump)
-        dump.write_footer("EOF_pyoomph")
-        dump.close()
+        # All ranks walk through define_state_file - that is where they hand their part of the mesh
+        # over - but only rank 0 writes anything, the others send their bytes to /dev/null.
+        dump = DumpFile(fname if get_mpi_rank()==0 else os.devnull, True,compression_level=self.states_compression_level)
+        error=None
+        try:
+            self.define_state_file(dump)
+            dump.write_footer("EOF_pyoomph")
+            dump.close()
+        except BaseException as e:
+            error=e
+        if distributed:
+            # Symmetric on purpose: a rank that failed here would otherwise leave the others waiting in
+            # the next collective, and the run would hang instead of reporting the failure.
+            comm=get_mpi_world_comm()
+            assert comm is not None
+            descriptions=comm.allgather(None if error is None else (type(error).__name__+": "+str(error)))
+            if error is None:
+                for r,d in enumerate(descriptions):
+                    if d is not None:
+                        raise RuntimeError("Rank "+str(r)+" failed while writing the state file ("+d+")")
+        if error is not None:
+            raise error
 
 
     def load_state(self, fname:str,ignore_outstep:bool=False,relative_to_output:bool=False,ignore_eigendata:bool=False,ignore_continuation_data:bool=False,additional_info:dict[Any,Any]={}):
         if not self.is_initialised():
             self.initialise()
-        if self.is_distributed():
-            raise RuntimeError("Distributed load state")
+        # No guard for distributed problems: every rank reads the whole file and picks out the part of
+        # the mesh it holds, halo copies included, which needs no communication at all.
         if relative_to_output:
             fname=os.path.join(self.get_output_directory(),fname)
 

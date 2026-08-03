@@ -40,6 +40,9 @@ class DumpFile:
         self.save=save
         self.file=open(fname,"wb" if save else "rb")
         self.fname=fname
+        # Version of the format being written or read. Set by Problem.define_state_file right after
+        # the header, so the sections below can tell an old file from a current one.
+        self.version:str=""
         #self.file=zipfile.ZipFile(fname,"w" if save else "r",allowZip64=True)
         self._float_size=struct.calcsize("<d")
         self.compression_level=compression_level

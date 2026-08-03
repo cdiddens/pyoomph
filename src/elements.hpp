@@ -433,6 +433,12 @@ namespace pyoomph
     // indices i for which get_element_index_to_nodal_space_index_map()[3][i]==-1.
     virtual const std::vector<unsigned> & non_vertex_node_indices() const=0;
     unsigned _numpy_index;
+    // Index of this element in the UNDISTRIBUTED base mesh, assigned before Problem::distribute() and
+    // carried along by the element itself (oomph backs the element objects up and re-adds them rather
+    // than recreating them). Only meaningful on root elements; -1 until assigned. Together with the
+    // tree path this addresses an element independently of the partition, which is what lets state
+    // files be written and read back on any number of processes. See dev_docs/distributed_state_files.md
+    long global_base_index = -1;
     // Transient (per tesselated-numpy pass, cleared by Mesh::to_numpy / get_num_numpy_elemental_indices):
     // for each finer-neighbour hanging node registered on THIS element, its LOCAL coordinate in this element,
     // computed TOPOLOGICALLY by the finer neighbour from the tree neighbour finder (no physical geometry, no

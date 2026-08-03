@@ -127,6 +127,258 @@ namespace pyoomph
     return res;
   }
 
+  // --- Partition-independent addressing of elements and nodes -------------------------------------
+  //
+  // State files must not contain anything rank-local, so elements are addressed by (index of their
+  // root in the undistributed base mesh, path through the refinement tree) and nodes by the smallest
+  // such address among the elements holding them. See dev_docs/distributed_state_files.md.
+
+  // The root element of e, or e itself on a mesh that was never refined (no tree).
+  static BulkElementBase *root_element_of(oomph::GeneralisedElement *e)
+  {
+    oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(e);
+    if (!re || !re->tree_pt())
+      return dynamic_cast<BulkElementBase *>(e);
+    return dynamic_cast<BulkElementBase *>(re->tree_pt()->root_pt()->object_pt());
+  }
+
+  // Number the root elements in their current order. Must run BEFORE the problem is distributed,
+  // while the mesh still holds all of them - afterwards each rank only sees its own share and would
+  // number them 0..n_local, which is exactly the rank-local numbering this is meant to avoid.
+  void Mesh::assign_global_base_element_indices()
+  {
+    oomph::TreeBasedRefineableMeshBase *tb = dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(this);
+    if (tb && tb->forest_pt())
+    {
+      unsigned ntree = tb->forest_pt()->ntree();
+      for (unsigned i = 0; i < ntree; i++)
+      {
+        BulkElementBase *be = dynamic_cast<BulkElementBase *>(tb->forest_pt()->tree_pt(i)->object_pt());
+        if (be)
+          be->global_base_index = (long)i;
+      }
+    }
+    else
+    {
+      for (unsigned i = 0; i < this->nelement(); i++)
+      {
+        BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(i));
+        if (be)
+          be->global_base_index = (long)i;
+      }
+    }
+  }
+
+  // (root index, packed tree path) for every element, in local element order. The path packs the
+  // index of each element within its father's sons, 3 bits per level, with a leading 1 so that "root"
+  // and "first son of the root" do not collide. 3 bits cover an octree; an int64 then holds ~20
+  // levels, far beyond any reachable refinement depth.
+  std::vector<long> Mesh::get_element_structural_keys()
+  {
+    std::vector<long> res(2 * this->nelement(), -1);
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *root = root_element_of(this->element_pt(ie));
+      res[2 * ie] = (root ? root->global_base_index : -1);
+      long path = 1;
+      oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+      if (re && re->tree_pt())
+      {
+        std::vector<long> steps;
+        for (oomph::Tree *t = re->tree_pt(); t->father_pt(); t = t->father_pt())
+        {
+          oomph::Tree *f = t->father_pt();
+          long which = -1;
+          for (unsigned s = 0; s < f->nsons(); s++)
+          {
+            if (f->son_pt(s) == t)
+            {
+              which = (long)s;
+              break;
+            }
+          }
+          if (which < 0)
+            throw_runtime_error("Refinement tree is inconsistent: an element is not among its father's sons");
+          steps.push_back(which);
+        }
+        // steps runs leaf -> root, the path has to read root -> leaf
+        for (auto it = steps.rbegin(); it != steps.rend(); ++it)
+          path = path * 8 + (*it + 1);
+      }
+      res[2 * ie + 1] = path;
+    }
+    return res;
+  }
+
+  // Global index of every root element this mesh holds (each one once, ascending).
+  std::vector<long> Mesh::get_root_element_indices()
+  {
+    std::set<long> roots;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *root = root_element_of(this->element_pt(ie));
+      if (root)
+        roots.insert(root->global_base_index);
+    }
+    return std::vector<long>(roots.begin(), roots.end());
+  }
+
+  // Refinement tree of one root, as a preorder walk: the number of sons of each element, 0 for a
+  // leaf. Describing the tree by its shape rather than by oomph's level-wise element numbers keeps it
+  // independent of how many elements the other ranks hold, so the same description can be replayed on
+  // any partition (and serially).
+  std::vector<int> Mesh::get_refinement_signature(long root_index)
+  {
+    oomph::Tree *root = NULL;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *r = root_element_of(this->element_pt(ie));
+      if (r && r->global_base_index == root_index)
+      {
+        oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+        if (re && re->tree_pt())
+          root = re->tree_pt()->root_pt();
+        break;
+      }
+    }
+    std::vector<int> sig;
+    if (!root)
+    {
+      sig.push_back(0); // unrefined, and not tree-based at all
+      return sig;
+    }
+    std::function<void(oomph::Tree *)> walk = [&](oomph::Tree *t)
+    {
+      unsigned ns = t->nsons();
+      sig.push_back((int)ns);
+      for (unsigned s = 0; s < ns; s++)
+        walk(t->son_pt(s));
+    };
+    walk(root);
+    return sig;
+  }
+
+  // Node indices (into this mesh's node_pt ordering) of every element's nodes, padded with -1 to the
+  // widest element. Together with the element keys this gives every node an address.
+  std::vector<int> Mesh::get_element_node_indices(unsigned &stride)
+  {
+    std::map<oomph::Node *, unsigned> nodemap;
+    this->fill_node_map(nodemap);
+    stride = 0;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+      stride = std::max(stride, dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie))->nnode());
+    std::vector<int> res((size_t)this->nelement() * stride, -1);
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(this->element_pt(ie));
+      for (unsigned j = 0; j < fe->nnode(); j++)
+      {
+        auto it = nodemap.find(fe->node_pt(j));
+        if (it != nodemap.end())
+          res[(size_t)ie * stride + j] = (int)it->second;
+      }
+    }
+    return res;
+  }
+
+  // Nodal state (positions at all history levels, Lagrangian coordinates, values at all history
+  // levels) in node_pt order, with the length of each node's block - unlike _save_state, which uses
+  // the traversal-dependent get_node_reordering and therefore cannot be addressed from outside.
+  void Mesh::save_nodal_state(std::vector<double> &data, std::vector<int> &lengths)
+  {
+    data.clear();
+    lengths.clear();
+    lengths.reserve(this->nnode());
+    for (unsigned ni = 0; ni < this->nnode(); ni++)
+    {
+      pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      size_t before = data.size();
+      unsigned ntstor = n->ntstorage();
+      for (unsigned iv = 0; iv < n->ndim(); iv++)
+        for (unsigned ti = 0; ti < ntstor; ti++)
+          data.push_back(n->variable_position_pt()->value(ti, iv));
+      for (unsigned iv = 0; iv < n->nlagrangian(); iv++)
+        data.push_back(n->xi(iv));
+      for (unsigned iv = 0; iv < n->nvalue(); iv++)
+        for (unsigned ti = 0; ti < ntstor; ti++)
+          data.push_back(n->value(ti, iv));
+      lengths.push_back((int)(data.size() - before));
+    }
+  }
+
+  void Mesh::load_nodal_state(const std::vector<double> &data, const std::vector<int> &lengths)
+  {
+    if (lengths.size() != this->nnode())
+      throw_runtime_error("Nodal state has " + std::to_string(lengths.size()) + " entries, but the mesh has " + std::to_string(this->nnode()) + " nodes");
+    size_t s = 0;
+    for (unsigned ni = 0; ni < this->nnode(); ni++)
+    {
+      pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      size_t before = s;
+      unsigned ntstor = n->ntstorage();
+      for (unsigned iv = 0; iv < n->ndim(); iv++)
+        for (unsigned ti = 0; ti < ntstor; ti++)
+          n->variable_position_pt()->set_value(ti, iv, data[s++]);
+      for (unsigned iv = 0; iv < n->nlagrangian(); iv++)
+        n->xi(iv) = data[s++];
+      for (unsigned iv = 0; iv < n->nvalue(); iv++)
+        for (unsigned ti = 0; ti < ntstor; ti++)
+          n->set_value(ti, iv, data[s++]);
+      if ((int)(s - before) != lengths[ni])
+        throw_runtime_error("Nodal state block " + std::to_string(ni) + " has the wrong length: the node now stores " + std::to_string(s - before) + " values, the state file has " + std::to_string(lengths[ni]));
+    }
+  }
+
+  // Elemental state: internal data at all history levels, plus the two geometric reference scalars.
+  void Mesh::save_elemental_state(std::vector<double> &data, std::vector<int> &lengths)
+  {
+    data.clear();
+    lengths.clear();
+    lengths.reserve(this->nelement());
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      size_t before = data.size();
+      for (unsigned ied = 0; ied < e->ninternal_data(); ied++)
+        for (unsigned iv = 0; iv < e->internal_data_pt(ied)->nvalue(); iv++)
+          for (unsigned t = 0; t < e->internal_data_pt(ied)->ntstorage(); t++)
+            data.push_back(e->internal_data_pt(ied)->value(t, iv));
+      data.push_back(e->initial_cartesian_nondim_size);
+      data.push_back(e->initial_quality_factor);
+      lengths.push_back((int)(data.size() - before));
+    }
+  }
+
+  void Mesh::load_elemental_state(const std::vector<double> &data, const std::vector<int> &lengths)
+  {
+    if (lengths.size() != this->nelement())
+      throw_runtime_error("Elemental state has " + std::to_string(lengths.size()) + " entries, but the mesh has " + std::to_string(this->nelement()) + " elements");
+    size_t s = 0;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      for (unsigned ied = 0; ied < e->ninternal_data(); ied++)
+        for (unsigned iv = 0; iv < e->internal_data_pt(ied)->nvalue(); iv++)
+          for (unsigned t = 0; t < e->internal_data_pt(ied)->ntstorage(); t++)
+            e->internal_data_pt(ied)->set_value(t, iv, data[s++]);
+      e->initial_cartesian_nondim_size = data[s++];
+      e->initial_quality_factor = data[s++];
+    }
+  }
+
+  // Refine the elements with the given local indices (one level). Used to replay a refinement
+  // signature; each rank replays only what applies to the roots it holds.
+  void Mesh::refine_selected_elements_by_index(const std::vector<unsigned> &indices)
+  {
+    oomph::TreeBasedRefineableMeshBase *tb = dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(this);
+    if (!tb)
+      throw_runtime_error("Cannot refine this mesh: it is not tree-based");
+    oomph::Vector<unsigned> v(indices.size());
+    for (size_t i = 0; i < indices.size(); i++)
+      v[i] = indices[i];
+    tb->refine_selected_elements(v);
+  }
+
   // Row indices, in the node ordering to_numpy uses, of the nodes this mesh shares with process p.
   // Entry j corresponds to entry j of process p's own list for this rank: oomph-lib builds
   // Shared_node_pt in a matched order on both sides (Mesh::setup_shared_node_scheme), which makes
