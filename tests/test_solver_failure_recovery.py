@@ -247,9 +247,15 @@ def test_a_stationary_solve_still_fails(tmp_path):
 def test_a_singular_matrix_really_does_raise():
     """The premise of the above: Pardiso reports, rather than papers over, a singular matrix.
 
-    Only with the iterative refinement of solve_checked(). Left to itself Pardiso perturbs the tiny
-    pivot, refines twice and returns error 0 with a solution of order 1e13 -- the documented static-
-    pivoting behaviour, and the reason this used to reach the time stepper as an ordinary divergence.
+    Only through solve_checked(). Left to itself Pardiso perturbs the tiny pivot and returns error 0
+    with a solution of order 1e13 -- the documented static-pivoting behaviour, and the reason this
+    used to reach the time stepper as an ordinary divergence.
+
+    Which MKL error carries the refusal is a version detail and is deliberately not asserted: on MKL
+    2025.0 the refined solve still comes back with error 0, the backward error of 1.0 is what
+    condemns it, and the escalated refactorisation then fails in its reordering with -6; the -4 in
+    phase 33 that this test originally matched on belongs to another MKL. What must hold on all of
+    them is that the huge solution is refused, and refused as a retryable SolverError.
     """
     try:
         from pyoomph.solvers.pardiso import pardisoSolver, PardisoError
@@ -273,5 +279,5 @@ def test_a_singular_matrix_really_does_raise():
 
     checked = pardisoSolver(A, mtype=11)
     checked.factor()
-    with pytest.raises(PardisoError, match="error -4"):
+    with pytest.raises(PardisoError, match="singular"):
         checked.solve_checked(rhs)

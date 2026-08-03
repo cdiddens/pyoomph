@@ -334,12 +334,21 @@ class pardisoSolver(object):
         for k,v in iparm_override.items():
             self.iparm[k-1]=v
 
-        # Whether _escalate_pivoting has already been spent. It is one-shot: there is only one
-        # stronger setting to fall back to, so a second attempt would repeat the first and turn a
-        # failure into an infinite loop. Starting True when the caller already asked for any part of
-        # it (via iparm_override, including the carry-over in PardisoSolver.solve) both skips the
-        # pointless retry and leaves a deliberate choice of these two knobs alone.
+        # Two separate things, which used to be one flag and must not be:
+        #
+        #   _escalation_spent -- the escalation is one-shot. There is only one stronger setting to
+        #       fall back to, so a second attempt would repeat the first and turn a failure into an
+        #       infinite loop.
+        #   _escalated_iparm  -- the escalated settings are in force RIGHT NOW. This is what the
+        #       carry-over in PardisoSolver.solve reads, so it has to go back to False when an
+        #       escalation is withdrawn again (see _deescalate_pivoting).
+        #
+        # Both start True when the caller already asked for any part of it (via iparm_override,
+        # including that carry-over), which skips the pointless retry and leaves a deliberate choice
+        # of these two knobs alone.
         self._escalated_iparm = any(self.iparm[k] == v for k, v in _ESCALATED_IPARM.items())
+        self._escalation_spent = self._escalated_iparm
+        self._pre_escalation_iparm:dict[int,int] | None = None
 
         self.last_mem_used_in_kb:int | None=None
 
@@ -458,26 +467,64 @@ class pardisoSolver(object):
     # phase 12, and the handle must be released first or MKL leaks its internal workspace. Returns
     # False when the escalation has already been spent, so callers stop instead of looping.
     def _escalate_pivoting(self)->bool:
-        if self._escalated_iparm:
+        if self._escalation_spent:
             return False
-        self._escalated_iparm = True
+        self._escalation_spent = True
+        self._pre_escalation_iparm = {k: int(self.iparm[k]) for k in _ESCALATED_IPARM}
         self.run_pardiso(phase=-1)
         for k, v in _ESCALATED_IPARM.items():
             self.iparm[k] = v
-        self.factor()
+        try:
+            self.factor()
+        except PardisoError:
+            # Leave the handle the way it was found. The caller turns this into a retryable
+            # SolverError, so oomph-lib comes back with a smaller step and factorises this same
+            # object again -- with settings that at least got as far as producing an answer last
+            # time, rather than the ones that just failed to factorise at all.
+            for k, v in self._pre_escalation_iparm.items():
+                self.iparm[k] = v
+            raise
+        self._escalated_iparm = True
         if self.msglvl:
             print("PARDISO: escalated to IPARM(13)=2, IPARM(10)=8 and refactorised")
         return True
 
+    # Put back the settings _escalate_pivoting replaced, for the case where the escalation did not
+    # help. Withdrawing it matters far more than the wasted refactorisation costs: the escalated
+    # settings otherwise stay in force for every later solve on this handle AND get folded into the
+    # problem's iparm_override, so one marginal solve permanently changes how the rest of the run is
+    # factorised. Measured on two tutorials -- two_layer_flow_single_domain died with an infinite
+    # Newton residual on the next step, and droplet_spread_marangoni_and_gravity stalled every
+    # subsequent arclength step at a residual of 1.1e-8 instead of reaching 1e-14, until the arc
+    # length fell below its minimum. Neither had anything wrong with it that the escalation fixed.
+    # The one-shot guard is deliberately NOT cleared: the escalation has been tried and failed.
+    def _deescalate_pivoting(self)->None:
+        if not self._escalated_iparm or self._pre_escalation_iparm is None:
+            return
+        self.run_pardiso(phase=-1)
+        for k, v in self._pre_escalation_iparm.items():
+            self.iparm[k] = v
+        self.factor()
+        self._escalated_iparm = False
+        if self.msglvl:
+            print("PARDISO: the escalation did not help, went back to IPARM(13)=%d, IPARM(10)=%d"
+                  % (self.iparm[12], self.iparm[9]))
+
     def solve_checked(self, rhs:Any, max_steps:int=20)->Any:
         try:
             x = self._solve_refined(rhs, max_steps)
-        except PardisoError:
+        except PardisoError as first:
             # A hard failure leaves nothing usable, so there is no fallback answer to keep: either
-            # the escalation produces one or the original exception stands.
-            if not self._escalate_pivoting():
-                raise
-            return self._solve_refined(rhs, max_steps)
+            # the escalation produces one or an exception stands. It is the FIRST one that stands:
+            # on a genuinely singular matrix the escalated reordering (two-level weighted matching)
+            # gives up with -6 "reordering failed", which describes the retry rather than the matrix,
+            # while the original -4 names the zero pivot that is the actual problem.
+            try:
+                if self._escalate_pivoting():
+                    return self._solve_refined(rhs, max_steps)
+            except PardisoError:
+                pass
+            raise first
 
         err = self._backward_error(x, rhs)
         if self.msglvl:
@@ -485,21 +532,41 @@ class pardisoSolver(object):
                   % (self.iparm[13], self.iparm[6], err))
         if err is None or err <= _BACKWARD_ERROR_LIMIT:
             return x
-        if not self._escalate_pivoting():
+        try:
+            escalated = self._escalate_pivoting()
+        except PardisoError as e:
+            # The escalated REORDERING could not even factorise: on a singular matrix the two-level
+            # weighted matching gives up with -6. There is no answer to fall back on -- x is known
+            # wrong, which is why we are here -- so this is one of the hard failures. Report what was
+            # measured, because -6 on its own describes the retry rather than the matrix.
+            raise PardisoError("MKL Pardiso returned a solution with a backward error of %.3e, and "
+                               "refactorising with stronger pivoting then failed outright (%s). The "
+                               "matrix is singular or nearly so at this state." % (err, e)) from e
+        if not escalated:
             return x
 
         x2 = self._solve_refined(rhs, max_steps)
         err2 = self._backward_error(x2, rhs)
-        if err2 is not None and err2 > _BACKWARD_ERROR_LIMIT:
-            # Warn rather than raise: before this check existed such a solve was returned silently,
-            # and refusing it outright would turn a badly-converging run into a crashing one on
-            # problems that never reported anything wrong. Whichever answer is less wrong is still
-            # the best available, and now it says so.
+        if err2 is None or err2 > err:
+            # No improvement, so the escalation was a false alarm on this matrix -- undo it before it
+            # becomes the setting for the whole run, and keep the answer that was less wrong.
+            self._deescalate_pivoting()
+            if err2 is not None:
+                # Factual rather than alarming: this fires on marginal solves too (4.4e-4 against the
+                # 1e-4 limit on droplet_spread_marangoni_and_gravity), which Newton then absorbs
+                # without trouble. The number is what tells the two apart.
+                print("PARDISO WARNING: backward error %.3e exceeds the %.0e limit, and stronger "
+                      "pivoting made it %.3e, so that was withdrawn and the original solution kept. "
+                      "If the run does not converge, a dynamically pivoting solver (umfpack) is the "
+                      "alternative." % (err, _BACKWARD_ERROR_LIMIT, err2))
+            return x
+        if err2 > _BACKWARD_ERROR_LIMIT:
+            # Better but still bad. Warn rather than raise: before this check existed such a solve was
+            # returned silently, and refusing it outright would turn a badly-converging run into a
+            # crashing one on problems that never reported anything wrong.
             print("PARDISO WARNING: backward error %.3e after escalation (was %.3e); the solution is "
                   "not trustworthy. A dynamically pivoting solver (umfpack) may be needed here."
                   % (err2, err))
-            if err2 > err:
-                return x
         return x2
 
     # MKL's documented meanings for the `error` output. Every value is a hard failure -- Pardiso has no
@@ -541,8 +608,11 @@ class pardisoSolver(object):
         Raising does not end a run that could have recovered. This is a PardisoError, i.e. a
         SolverError, and the solver shim (src/nanobind/solver.cpp) reports those to oomph-lib as a
         failed Newton solve, so an adaptive time step or an arclength step rejects and retries with a
-        smaller one -- which matters here because solve_checked() makes a singular matrix report
-        error -4 rather than return a huge solution. Note this deliberately does not extend to the MPI
+        smaller one -- which matters here because solve_checked() makes a singular matrix raise rather
+        than return a huge solution. Which code carries that depends on the MKL: 2025.0 perturbs the
+        zero pivot, refines, returns error 0 and a solution of order 1e13, and it is the backward
+        error that catches it; the -4 in phase 33 that this was written for is one MKL's way of saying
+        the same thing, not the only one. Note this deliberately does not extend to the MPI
         rejection in PardisoSolver.__init__: no smaller step makes Pardiso MPI-parallel.
 
         The release phase is the one exception, and it is deliberate: clear() is called from __del__,
@@ -818,9 +888,11 @@ class PardisoSolver(GenericLinearSystemSolver):
                     sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve_checked(rhs), b) #type:ignore
                 else:
                     sol = self._current_pardiso.solve_checked(self.get_b(n,b))
-                # Once a factorisation has had to escalate its pivoting, the next one on this problem
-                # almost certainly will too -- under spatial adaptivity the mesh only gets harder from
-                # here. Folding it into iparm_override means the following pardisoSolver starts there
+                # Once a factorisation has had to escalate its pivoting AND KEPT IT, the next one on
+                # this problem almost certainly will too -- under spatial adaptivity the mesh only
+                # gets harder from here. (An escalation that did not help withdraws itself and clears
+                # the flag again, precisely so that it does not get carried over: see
+                # _deescalate_pivoting.) Folding it in means the following pardisoSolver starts there
                 # instead of rediscovering it through another failed solve and refactorisation.
                 if self._current_pardiso._escalated_iparm:
                     for k, v in _ESCALATED_IPARM.items():

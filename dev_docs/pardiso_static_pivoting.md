@@ -102,18 +102,20 @@ Two changes in `pardisoSolver`:
   with `_ESCALATED_IPARM` and the solve retried. `IPARM(13)` is read by the *reordering* phase, so
   this cannot reuse the existing analysis — it must go back through phase 12, releasing the handle
   first or MKL leaks its workspace.
-- `PardisoSolver.solve` folds a spent escalation into `iparm_override`, so the next factorisation
+- `PardisoSolver.solve` folds a *kept* escalation into `iparm_override`, so the next factorisation
   starts there. Under spatial adaptivity the mesh only gets harder, so rediscovering the need through
-  another failed solve on every refinement would be pure waste.
+  another failed solve on every refinement would be pure waste. (It originally folded in every spent
+  escalation, whether or not it had helped. That is §7.)
 
 The threshold is **1e-4**: healthy solves peak at 1e-6 and broken ones sit at 1e0, so anything in
 between separates them, and 1e-4 keeps two orders of margin on the side that must not fire — a false
 positive costs a full refactorisation.
 
 If the escalation does not help, the code **warns and returns the better of the two answers rather
-than raising**. Before this check existed such a solve was returned silently, so refusing it outright
-would convert badly-converging runs elsewhere into crashing ones. That is a deliberate asymmetry: the
-`-4` path, which had no usable answer to begin with, still re-raises.
+than raising**, and (since §7) puts the previous `IPARM` back. Before this check existed such a solve
+was returned silently, so refusing it outright would convert badly-converging runs elsewhere into
+crashing ones. That is a deliberate asymmetry: the `-4` path, which had no usable answer to begin
+with, still re-raises.
 
 ### Measured afterwards, all with the default solver and no overrides
 
@@ -144,3 +146,71 @@ factorisations reporting exactly that. Fixed in place.
   it cannot influence the mesh at all.
 - **The tutorial is unaffected** at its shipped budget of 80 000, so no tutorial change was needed;
   `set_linear_solver("umfpack")` is correctly absent from it.
+
+---
+
+## 7. Follow-up: an escalation that did not help must be withdrawn
+
+Written 2026-08-03, from the first nightly (`citools/nightly_develop.sh`) to run with §4 in it. It
+failed three tutorials that had passed the night before — `two_layer_flow_single_domain`,
+`droplet_spread_marangoni_and_gravity` and `eigenbranch_continuation` — and all three were the same
+defect, in the escalation rather than in the check that triggers it.
+
+### What went wrong
+
+`_escalated_iparm` was doing two jobs at once: *the escalation has been tried* (a one-shot guard, so
+it cannot loop) and *the escalated settings are in force* (which is what the `iparm_override`
+carry-over reads). Once set, it was never cleared. So a **single** marginal solve escalated, found
+the escalation no better, correctly returned the pre-escalation answer — and then left
+`IPARM(13)=2, IPARM(10)=8` in force on that handle *and* folded them into `iparm_override` for every
+factorisation the problem would ever build afterwards. §3 already recorded that these knobs can cause
+a Newton stall where they are not needed (`IPARM(10)=20` did exactly that at budget 250 000); this
+made one bad solve impose them on the rest of the run.
+
+The three failures are the same story at three severities, and in each the trigger was a solve barely
+over the 1e-4 line:
+
+| tutorial | backward error | after escalating | what happened next |
+|---|---|---|---|
+| `droplet_spread_marangoni_and_gravity` | 4.4e-04 | 5.3e-04 | every later arclength step stalled at a residual of 1.1e-8 instead of reaching 1e-14, `ds` halved to below its 1e-10 minimum |
+| `two_layer_flow_single_domain` | 1.6e-01 | 2.1e+26 | the next Newton step's residual was `inf`, at t=0.5 of 50 |
+| `eigenbranch_continuation` | 1.7e-04 | 5.9e+08 | ran on for another 3 000 log lines and then diverged, at the fifth of seven `create_Bond_curve` calls |
+
+Worth noting what makes this hard to see from a log: the carry-over fired **silently** whenever the
+escalation *succeeded*, and the warning that did print named only the retry's error. In the
+eigenbranch log the one `PARDISO WARNING` sits 3 300 lines before the traceback, with nothing in
+between connecting them.
+
+Note also *where* it triggers: the eigenbranch escalation happens on an arclength step that is
+already diverging (residual 5e9, `L` = −34), i.e. the backward error is being measured on an iterate
+the step is about to reject anyway. The trigger is doing its job; the matrix really is bad. It is the
+permanence that was wrong.
+
+### The fix
+
+- The two meanings are now two flags. `_escalation_spent` keeps the one-shot guard; `_escalated_iparm`
+  means only *in force right now*, and the carry-over reads that.
+- `_deescalate_pivoting()` restores the saved `IPARM` and refactorises when the escalated solve's
+  backward error is not an improvement. Costs one extra factorisation in the false-positive case, and
+  the settings never leave the solve that asked for them.
+- `_escalate_pivoting()` also restores them if its own `factor()` raises, so a retryable
+  `SolverError` hands back a handle that can still be factorised on the next, smaller step.
+- The `-4` path no longer loses its diagnosis. On a singular matrix the escalated reordering gives up
+  with `-6 (reordering failed)`, which describes the retry and not the matrix; the original error is
+  what is raised now. `tests/test_solver_failure_recovery.py` had been matching on `error -4` and was
+  failing for a *third* reason — MKL 2025.0 refines the perturbed pivot away and returns error 0 with
+  a solution of order 1e13, so no `-4` is produced on this machine at all (it failed with
+  "DID NOT RAISE" the night before §4 landed). It now asserts what is version-independent: the huge
+  solution is refused, as a retryable `SolverError`.
+
+### Measured
+
+- All three tutorials pass, with the complex PETSc the nightly uses. The escalations still fire, at
+  the same solves, and are withdrawn: `droplet_spread` 4.4e-04 → one withdrawal → rc 0;
+  `two_layer_flow` 1.6e-01 → one withdrawal → runs to t=50; `eigenbranch_continuation` 1.9e-04 and
+  1.7e-04 → two withdrawals → rc 0, all seven curves written.
+- `tests/test_solver_failure_recovery.py` 9 passed; `test_structural_assembly.py` +
+  `test_newton_abort.py` 46 passed.
+- Not re-run here: the heated-cylinder budget sweep of §4 (its 250 000-dof cases are over this
+  machine's 200 000-dof working limit) and `test_adaptive_3d_campaign --full`. The escalation itself
+  is unchanged for the case where it *helps*, which is the case those measured.
