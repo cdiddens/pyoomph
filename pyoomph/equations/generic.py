@@ -572,14 +572,28 @@ class RemeshMeshSize(BaseEquations):
 
 
 class ProjectExpression(Equations):
-    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",field_type:Literal["scalar","vector"]="scalar",coordinate_system:"BaseCoordinateSystem | None"=None, **projs:ExpressionOrNum):
+    """
+    Projects an expression onto a finite element space. 
+    The projected field can be used in the equations as a variable.
+    
+    Args:
+        scale: Scaling factor for the projected field. Can be a number or a string representing a variable name. Defaults to 1.
+        space: Finite element space to project onto. Defaults to "C2".
+        destination: Residuals destination for the projection. If None, the projection will be added to the default residuals. Defaults to None.
+        field_type: Type of the projected field. Can be "scalar" or "vector". Defaults to "scalar".
+        coordinate_system: Coordinate system for the projection. If None, the coordinate system of the domain/problem will be used. Defaults to None.
+        **projs: Keyword arguments representing the expressions to project. The keys are the names of the projected fields, and the values are the expressions to project.
+        
+    """
+    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",destination:str | None=None,field_type:Literal["scalar","vector"]="scalar",coordinate_system:"BaseCoordinateSystem | None"=None, **projs:ExpressionOrNum):
         super(ProjectExpression, self).__init__()
         self.space:FiniteElementSpaceEnum=space
         self.scale:ExpressionOrNum=scale_factor(scale) if isinstance(scale,str) else scale
         self.field_type=field_type
         self.projs=projs.copy()
         self.coordinate_system=coordinate_system
-
+        self.destination=destination
+        
     def define_fields(self):
         for n,_ in self.projs.items():
             if self.field_type=="scalar":
@@ -593,8 +607,8 @@ class ProjectExpression(Equations):
         from ..expressions.generic import weak
         for n,e in self.projs.items():
             f,ftest=var_and_test(n)
-            self.add_residual(weak(f,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system))
-            self.add_residual(weak(-e,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system))
+            self.add_residual(weak(f,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system),destination=self.destination)
+            self.add_residual(weak(-e,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system),destination=self.destination)
 
 class InitialCondition(BaseEquations):
     """
