@@ -1592,6 +1592,9 @@ class MatplotLibColorbar(MatplotLibOverlayBase):
         self._vmax:float | None=None
         self._clamp_min:float | None=None
         self._clamp_max:float | None=None
+        #: Whether a clamp actually cut the range off, i.e. whether there is data outside the colorbar
+        self._clamped_min:bool=False
+        self._clamped_max:bool=False
         self.cb=None
         self.title="Colorbar"
         self.range:"MatplotLibBaseRange | None"=None
@@ -1623,9 +1626,13 @@ class MatplotLibColorbar(MatplotLibOverlayBase):
                     
         if self._clamp_min is not None:
             if self._vmin is not None:
+                if self._vmin<self._clamp_min:
+                    self._clamped_min=True
                 self._vmin=max(self._vmin,self._clamp_min)
         if self._clamp_max is not None:
             if self._vmax is not None:
+                if self._vmax>self._clamp_max:
+                    self._clamped_max=True
                 self._vmax=min(self._vmax,self._clamp_max)
 
     def discrete_cmap(self, N:int | Sequence[float], base_cmap:str | None=None)->matplotlib.colors.LinearSegmentedColormap:
@@ -1683,6 +1690,11 @@ class MatplotLibColorbar(MatplotLibOverlayBase):
             else:
                 mi=False
                 ma=False
+            # A clamp is the other way of ending up with data outside the colorbar, and by the time
+            # we get here the range no longer shows it: clamping lowered _vmax to the clamp itself,
+            # so the comparison above cannot see that anything was cut off.
+            mi=mi or self._clamped_min
+            ma=ma or self._clamped_max
             if mi and ma:
                 kw["extend"] = "both"
             elif mi:
@@ -2539,7 +2551,7 @@ class MatplotlibPlotter(BasePlotter):
             return res
 
 
-    def add_colorbar(self,title:str | None=None,cmap:str | None=None,xpos:float | None=None,ypos:float | None=None,position:str | tuple[float, float] | None=None,orientation:str | None=None,factor:float | None=1.0,unit:ExpressionNumOrNone | str=None,offset:float | None=0.0,length:float | None=None,thickness:float | None=None,norm:Any | None=None,vmin:float | None=None,vmax:float | None=None)->MatplotLibColorbar:
+    def add_colorbar(self,title:str | None=None,cmap:str | None=None,xpos:float | None=None,ypos:float | None=None,position:str | tuple[float, float] | None=None,orientation:str | None=None,factor:float | None=1.0,unit:ExpressionNumOrNone | str=None,offset:float | None=0.0,length:float | None=None,thickness:float | None=None,norm:Any | None=None,vmin:float | None=None,vmax:float | None=None,clamp_min:float | None=None,clamp_max:float | None=None,extend:str | None=None)->MatplotLibColorbar:
         """
         Adds a colorbar to the plot with a given title, colormap, position either by coordinates or by positional string and a lot of other options.        
 
@@ -2558,11 +2570,14 @@ class MatplotlibPlotter(BasePlotter):
             norm (Optional[Any], optional): How to normalize the data, can be e.g. matplotlib.norm.LogNorm(...). Defaults to None.
             vmin (Optional[float], optional): minimum data range. Defaults to None.
             vmax (Optional[float], optional): maximum data range. Defaults to None.
+            clamp_min (Optional[float], optional): lower bound on the range actually shown. Unlike vmin, which can only widen the range, this cuts it off: data below it is drawn in the lowest colour and, with extend="auto", the colorbar grows an arrow at that end. Defaults to None.
+            clamp_max (Optional[float], optional): the same at the upper end. Defaults to None.
+            extend (Optional[str], optional): "neither", "min", "max" or "both" to draw arrows on the colorbar where data lies outside it. Defaults to "auto", which decides from the requested range and the clamps.
 
         Returns:
             MatplotLibColorbar: The colorbar object to be used in e.g. add_plot("...",colorbar=...)
         """
-        allkwargs = {"title": title,"cmap":cmap,"xpos":xpos,"ypos":ypos,"position":position,"orientation":orientation,"factor":factor,"offset":offset,"length":length,"thickness":thickness,"unit":unit,"norm":norm,"_vmin":vmin,"_vmax":vmax}
+        allkwargs = {"title": title,"cmap":cmap,"xpos":xpos,"ypos":ypos,"position":position,"orientation":orientation,"factor":factor,"offset":offset,"length":length,"thickness":thickness,"unit":unit,"norm":norm,"_vmin":vmin,"_vmax":vmax,"_clamp_min":clamp_min,"_clamp_max":clamp_max,"extend":extend}
         res=self._add_part("colorbar",**allkwargs)
         assert isinstance(res,MatplotLibColorbar)
         return res
