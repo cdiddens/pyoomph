@@ -760,11 +760,12 @@ class PardisoSolver(GenericLinearSystemSolver):
         symbolic phase. Returns False if that is not possible, in which case the caller must build a
         fresh solver.
 
-        The pattern is *verified* rather than merely trusted. problem.jacobian_structure_id already
-        promises it is unchanged, but a stale id would mean Pardiso applies an old elimination tree to
-        a new pattern -- a silently wrong answer rather than a crash. Comparing the index arrays costs
-        O(nnz) integer compares (~1 ms for 1.8M nonzeros) against the ~180 ms the symbolic phase takes,
-        so the insurance is essentially free.
+        The pattern is *verified* rather than merely trusted. problem.jacobian_structure_id promises it
+        is unchanged, but that promise does not hold everywhere -- an augmented system's pattern is
+        value-filtered, see _report_structure_id_mismatch -- and believing a stale id would mean
+        Pardiso applies an old elimination tree to a new pattern, a silently wrong answer rather than a
+        crash. Comparing the index arrays costs O(nnz) integer compares (~1 ms for 1.8M nonzeros)
+        against the ~180 ms the symbolic phase takes, so the insurance is essentially free.
         """
         if not self.reuse_symbolic_factorisation:
             return False
@@ -780,9 +781,7 @@ class PardisoSolver(GenericLinearSystemSolver):
         if not A.has_sorted_indices:
             A.sort_indices()
         if not numpy.array_equal(ps.ia, A.indptr) or not numpy.array_equal(ps.ja, A.indices):
-            print("WARNING: the Jacobian sparsity pattern changed although problem.jacobian_structure_id "
-                  "did not. Falling back to a full factorisation. This is a bug in the pattern "
-                  "invalidation -- please report it.")
+            self._report_structure_id_mismatch("the symbolic factorisation")
             return False
         ps.a[:] = A.data[:]
         return True

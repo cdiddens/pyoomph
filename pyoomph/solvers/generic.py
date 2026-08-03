@@ -169,6 +169,40 @@ class GenericLinearSystemSolver:
 	def setup_solver(self)->None:
 		pass
 
+	def _report_structure_id_mismatch(self,what:str)->None:
+		"""Say that the sparsity pattern moved under an unchanged ``problem.jacobian_structure_id``.
+
+		Both reuse paths (Pardiso's symbolic factorisation and PETSc's preallocated Mat) verify the
+		pattern rather than trusting the id, and fall back correctly when it does not match, so this
+		is never a correctness problem -- but whether it is a *defect* depends on the system.
+
+		On an augmented one -- bifurcation, eigenbranch or periodic-orbit tracking -- it is expected:
+		the elemental block there is larger than the field description, so no symbolic mask applies
+		and the pattern falls back to being value-filtered, which the id cannot promise anything
+		about. eigenbranch_continuation.py produces hundreds of these. On a plain system it really is
+		a missing invalidation, and the wording used to say so unconditionally, which turned that
+		tutorial's log into hundreds of requests to report a non-bug.
+
+		Reported once per solver object either way: the second occurrence adds nothing the first did
+		not, and staying silent altogether would hide the case that IS worth reporting.
+		"""
+		if getattr(self,"_structure_id_mismatch_reported",False):
+			return
+		self._structure_id_mismatch_reported=True
+		try:
+			augmented=self.problem._get_n_unaugmented_dofs()!=self.problem.ndof() #type:ignore
+		except Exception:
+			augmented=False
+		msg=("the Jacobian sparsity pattern changed although problem.jacobian_structure_id did not, "
+			 "so "+what+" was rebuilt instead of reused. ")
+		if augmented:
+			msg="NOTE: "+msg+("Expected on this augmented (tracking) system, whose pattern is "
+							  "value-filtered. Costs a rebuild per solve; not an error. Reported once.")
+		else:
+			msg="WARNING: "+msg+("This system is not augmented, so it is a bug in the pattern "
+								 "invalidation -- please report it. Reported once.")
+		print(msg)
+
 	def _before_assigning_equation_numbers(self)->None:		
 		pass
 

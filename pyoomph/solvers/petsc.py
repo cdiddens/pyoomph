@@ -244,9 +244,7 @@ class PETSCSolver(GenericLinearSystemSolver):
         h.update(numpy.ascontiguousarray(indices).view(numpy.uint8))
         if h.digest() == self._structure_digest:
             return True
-        print("WARNING: the Jacobian sparsity pattern changed although problem.jacobian_structure_id "
-              "did not. Rebuilding the PETSc matrix instead of reusing it. This is a bug in the "
-              "pattern invalidation -- please report it.")
+        self._report_structure_id_mismatch("the PETSc matrix")
         return False
 
     def _can_reuse_structure(self,n:int,nnz:int,indptr:Any=None,indices:Any=None)->bool:
