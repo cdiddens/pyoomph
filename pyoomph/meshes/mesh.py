@@ -1237,7 +1237,7 @@ class MeshFromTemplateBase(BaseMesh):
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
 
-        if state.save or state.version>="0.1.0":
+        if state.save or state.version_at_least(0,1,0):
             self._define_state_file_structural(state)
         else:
             self._define_state_file_legacy(state)

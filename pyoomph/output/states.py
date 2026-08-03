@@ -40,9 +40,14 @@ class DumpFile:
         self.save=save
         self.file=open(fname,"wb" if save else "rb")
         self.fname=fname
-        # Version of the format being written or read. Set by Problem.define_state_file right after
-        # the header, so the sections below can tell an old file from a current one.
+        # Version of the format being written or read. Set by Problem._define_state_header, so the
+        # sections below can tell an old file from a current one.
         self.version:str=""
+        # How the mesh data in this file is spread over files: "global" means this one file holds the
+        # whole problem, which is all that is written today. A per-rank sharded variant would say so
+        # here, so that a reader can tell the two apart instead of desynchronizing on the first array
+        # (see dev_docs/distributed_state_files.md).
+        self.sharding:str="global"
         #self.file=zipfile.ZipFile(fname,"w" if save else "r",allowZip64=True)
         self._float_size=struct.calcsize("<d")
         self.compression_level=compression_level
@@ -50,6 +55,19 @@ class DumpFile:
 
     def close(self):
         self.file.close()
+
+    def version_at_least(self,*parts:int) -> bool:
+        """Whether the version of this file is at least the given one, compared componentwise.
+
+        Not a string comparison: "0.10.0" < "0.2.0" lexicographically, which would silently pick the
+        wrong branch the first time a component reaches double digits."""
+        try:
+            mine=tuple(int(p) for p in self.version.split("."))
+        except ValueError:
+            return False # something that does not look like a version at all is treated as ancient
+        want=tuple(parts)
+        length=max(len(mine),len(want))
+        return mine+(0,)*(length-len(mine)) >= want+(0,)*(length-len(want))
 
     def write_footer(self,footer:str):
         if not self.save:
@@ -61,10 +79,21 @@ class DumpFile:
             raise RuntimeError("Can only do this while loading")
         conv=footer.encode("ascii")
         offs=len(conv)+8
+        # Everything is checked before anything is read: on a file that is not a state file at all, the
+        # length prefix is whatever those eight bytes happen to mean, and reading that many bytes used
+        # to end in a MemoryError instead of "this is not a state file".
+        self.file.seek(0, io.SEEK_END)
+        if self.file.tell()<offs:
+            self.file.seek(0, io.SEEK_SET)
+            return False
         self.file.seek(-offs,io.SEEK_END)
-        test=self.read_string_data()
+        length=self.read_int_data()
+        if length!=len(conv):
+            self.file.seek(0, io.SEEK_SET)
+            return False
+        test=self.file.read(length)
         self.file.seek(0, io.SEEK_SET)
-        return test==footer
+        return test==conv
 
     def assert_equal(self,val:Any, expected:Any)->Any:
         if val!=expected:

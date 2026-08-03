@@ -105,9 +105,44 @@ that no values are scattered.
 
 ## 4. File layout
 
-`_dump_version` goes 0.0.1 → 0.1.0. The reader branches on it and keeps reading old files; the writer
-only writes the new format, for serial runs too. That is the point — a serial and a distributed run
-must produce interchangeable files, which also means the format is exercised by every serial test.
+### 4.1 Header
+
+Every state file starts with three strings and ends with a footer, and all four are checked on load
+(`Problem._define_state_header`, `DumpFile.check_footer`):
+
+```
+  "pyoomph_dump"   magic; anything else is not a state file
+  version          e.g. "0.1.1"; a file newer than this build is refused
+  sharding         "global" = this one file holds the whole problem
+  ...
+  "EOF_pyoomph"    footer; also catches a truncated (still-being-written) file
+```
+
+None of those checks is decoration: a file from another program desynchronizes on the first array and
+dies somewhere inside numpy, a newer file reads plausible-looking garbage, and one part of a sharded
+set would restore a fraction of the mesh without complaining. The footer is checked from the last
+bytes without trusting the length prefix it finds there — reading whatever those eight bytes happened
+to encode used to end in `MemoryError` rather than "this is not a state file".
+
+The **sharding** field is what makes §7 additive: nothing writes anything but `"global"` today, and a
+reader that meets `"sharded"` refuses with a clear message instead of silently loading a fraction of
+the problem. It carries no process count — a global file must not depend on how many processes wrote
+it, which is exactly what the byte-identity test of §10 pins down.
+
+`_define_state_header` is shared with `_get_time_of_state_file`, which peeks at the first entries of a
+file without reading the rest; the order of the header entries is therefore part of the format and the
+two must not drift apart.
+
+Versions are compared componentwise (`DumpFile.version_at_least`), not as strings: `"0.10.0" <
+"0.2.0"` lexicographically, which would pick the wrong format branch the first time a component
+reaches double digits.
+
+### 4.2 Mesh section
+
+`_dump_version` goes 0.0.1 → 0.1.0 (structural mesh section) → 0.1.1 (sharding field in the header).
+The reader branches on it and keeps reading old files; the writer only writes the new format, for
+serial runs too. That is the point — a serial and a distributed run must produce interchangeable
+files, which also means the format is exercised by every serial test.
 
 Per bulk mesh (interface meshes are not saved; `define_state_file` asserts that), instead of
 "refinement pattern + one flat nodal blob":
@@ -191,7 +226,9 @@ gather and the sort. Reading N parts is reading their concatenation, so **the re
 and a serial process can read a sharded set just as well (which was the fatal drawback of per-rank
 files in the classic oomph-lib scheme). Adding it later means:
 
-* a `state_file_sharding = "global" | "sharded"` switch, defaulting to `"global"`;
+* a `state_file_sharding = "global" | "sharded"` switch, defaulting to `"global"`. The **header field
+  already exists** (§4.1) and today's reader refuses anything but `"global"`, so a sharded file cannot
+  be mistaken for a whole one in the meantime;
 * a manifest written last as the commit point, so a crash cannot leave `--runmode continue` reading a
   half-written checkpoint;
 * part discovery in `continue`/replot (a part set is one state, not n states);
@@ -253,6 +290,11 @@ a load that quietly does nothing cannot pass.
    loaded into runs that never adapted (324 nodes), serially and on 3 processes. A uniformly refined
    mesh would pass even with a broken signature; this does not.
 5. **distributed adaptive round trip** — written on 3 ranks, read serially.
+
+`tests/test_state_file_header.py` (7 tests, serial, not marked slow, ~2 s) covers what the file says
+about itself: the magic/version/sharding header and the footer are present; a foreign file, a
+truncated file and a file from a newer version are all refused; a file declaring itself sharded is
+refused with a message naming the reason; and the version comparison is componentwise.
 
 Still worth adding: `--runmode continue` under `--distribute` end to end, and a 3d mesh.
 

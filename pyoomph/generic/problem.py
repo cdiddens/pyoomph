@@ -655,8 +655,9 @@ class Problem(_pyoomph.Problem):
         self._dump_header = "pyoomph_dump"
         # 0.1.0 stores the mesh structurally (see pyoomph/meshes/meshstate.py) instead of by rank-local
         # element/node numbering, which is what makes states of distributed problems possible at all
-        # and lets serial and distributed runs read each other's files. Older files still load.
-        self._dump_version = "0.1.0"
+        # and lets serial and distributed runs read each other's files. 0.1.1 adds the sharding field
+        # to the header. Older files still load.
+        self._dump_version = "0.1.1"
         self._last_bc_setting="init"
 
         self._output_step:int=0
@@ -6925,10 +6926,28 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
 
 
+    def _define_state_header(self,state:DumpFile)->str:
+        """Read or write the header of a state file: what it is, which format version, and how it is sharded.
+
+        Shared by define_state_file and _get_time_of_state_file, which peeks at the first entries
+        without reading the rest - so the order of these entries is part of the format and the two must
+        not drift apart. Returns the version."""
+        state.string_data(lambda: self._dump_header, lambda s: state.assert_equal(s, self._dump_header))
+        state.version = state.string_data(lambda: self._dump_version, lambda s: state.assert_leq(s, self._dump_version))
+        if state.save or state.version_at_least(0,1,1):
+            sharding=state.string_data(lambda: state.sharding, lambda s: s)
+            if not state.save:
+                if sharding!="global":
+                    # Deliberately explicit: a sharded state is a set of files, and reading one of them
+                    # as if it were the whole problem would not fail on the spot, it would restore a
+                    # fraction of the mesh (see dev_docs/distributed_state_files.md §7)
+                    raise RuntimeError("The state file '"+state.fname+"' says its mesh data is sharded ('"+sharding+"'), and reading sharded state files is not supported yet. Only 'global' files, which hold the whole problem, can be read")
+                state.sharding=sharding
+        return state.version
+
     def _get_time_of_state_file(self,fname:str):
         state=DumpFile(fname,False)
-        state.string_data(lambda: self._dump_header, lambda s: state.assert_equal(s, self._dump_header))
-        _version_str = state.string_data(lambda: self._dump_version, lambda s: state.assert_leq(s, self._dump_version))
+        self._define_state_header(state)
         # Current time
         t=state.float_data(lambda: self.get_current_time(dimensional=True, as_float=True),lambda t: t)
         s = state.int_data(lambda: self._output_step, lambda s: s)
@@ -6937,11 +6956,9 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
     # This function defines the state file, i.e. storing or reading all relevant information of the current status of the simulations
     def define_state_file(self, state:DumpFile,ignore_loading_eigendata:bool=False,ignore_continuation_data=False,additional_info={}):
-        # Please do not modify the first part, it is required in that order for peeking the current time  in _get_time_of_state_file()
-        # Header
-        state.string_data(lambda: self._dump_header, lambda s: state.assert_equal(s, self._dump_header))
-        _version_str = state.string_data(lambda: self._dump_version, lambda s: state.assert_leq(s, self._dump_version))
-        state.version=_version_str # the mesh section reads differently before and after 0.1.0
+        # The header comes first and in that order, because _get_time_of_state_file peeks at the entries
+        # up to the output step without reading the rest. Both go through _define_state_header.
+        self._define_state_header(state)
 
         # Current time
         state.float_data(lambda: self.get_current_time(dimensional=True, as_float=True),lambda t: self.set_current_time(t, dimensional=True, as_float=True))
