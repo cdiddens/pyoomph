@@ -5,7 +5,7 @@ Beads on a string: a free surface driven by a polymer stress
 
 The Rayleigh-Plateau filament of :numref:`secalegmshfields` was Newtonian, and it did what a Newtonian filament does: the neck thins ever faster and pinches off. If the liquid is a polymer solution instead, the outcome changes completely. The thread between two forming drops is a uniaxial extensional flow, which is exactly the flow in which the Oldroyd-B chains of :numref:`secpdeviscoelastic` stretch without bound, and the axial stress they build up arrests the pinch-off. What is left is a *beads-on-a-string* structure: nearly spherical drops joined by threads that keep thinning exponentially instead of breaking :cite:`Clasen2006`.
 
-This section combines the two ingredients -- the moving mesh with reconstruction-based remeshing from the previous section, and the log-conformation viscoelasticity of :numref:`secpdeviscoelastic` -- to reproduce the corresponding verification model of the COMSOL Polymer Flow Module.
+This section combines the two ingredients -- the moving mesh with reconstruction-based remeshing from the previous section, and the log-conformation viscoelasticity of :numref:`secpdeviscoelastic` -- to reproduce the corresponding verification model of the `COMSOL Polymer Flow Module <https://www.comsol.com/model/download/1236061/models.polymer.beads_on_string.pdf>`_.
 
 Lengths are scaled by the unperturbed filament radius :math:`R_0`, stresses by :math:`\sigma/R_0` and time by the inertio-capillary time :math:`\tau=\sqrt{\rho R_0^3/\sigma}`, which leaves three dimensionless numbers,
 
@@ -33,13 +33,9 @@ The equations are where the two chapters meet:
    :start-at: def define_problem(self):
    :end-at: self.add_equations(eqs @ "liquid")
 
-Three points about this are worth making.
+Again, the viscosity handed to the :py:class:`~pyoomph.equations.navier_stokes.NavierStokesEquations` is the *solvent* viscosity only. The polymer enters exclusively through the :py:class:`~pyoomph.equations.viscoelastic.ViscoelasticEquations`, which add both the evolution equation for :math:`\log\mathbf{C}` and the polymer stress in the momentum equation.
 
-First, the viscosity handed to the :py:class:`~pyoomph.equations.navier_stokes.NavierStokesEquations` is the *solvent* viscosity only. The polymer enters exclusively through the :py:class:`~pyoomph.equations.viscoelastic.ViscoelasticEquations`, which add both the evolution equation for :math:`\log\mathbf{C}` and the polymer stress in the momentum equation.
-
-Second, and this is the point of the example, the free surface needs no polymer term of its own. :py:class:`~pyoomph.equations.navier_stokes.NavierStokesFreeSurface` imposes :math:`\vec{n}\cdot\boldsymbol{\sigma}=-\sigma\kappa\vec{n}` weakly, and the momentum residual it completes is the weak form assembled in the bulk. The polymer contributes to that bulk residual through :math:`\langle\boldsymbol{\tau}_\mathrm{p},\nabla\vec{v}\rangle` exactly as the solvent does, so the traction the interface sees is already the total one. Adding the polymer traction explicitly would count it twice.
-
-Third, the two ends are treated as symmetry planes, while the reference uses a periodic flow condition to mimic an infinite filament. The initial perturbation has a maximum at both :math:`z=0` and :math:`z=8\pi`, so the periodic solution is mirror-symmetric there anyway, and free slip together with a mesh that may only slide radially imposes the same thing at a fraction of the cost. The interfacial :math:`\zeta` coordinates are set exactly as in the previous section, since the remeshing machinery is identical.
+The two ends are treated as symmetry planes, while the reference uses a periodic flow condition to mimic an infinite filament. The initial perturbation has a maximum at both :math:`z=0` and :math:`z=8\pi`, so the periodic solution is mirror-symmetric there anyway.
 
 The run itself just steps through the output times, letting the adaptive time stepping choose the steps in between, and records the minimum radius through the :py:class:`~pyoomph.equations.generic.ExtremumObservables` as before:
 

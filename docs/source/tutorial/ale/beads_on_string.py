@@ -28,11 +28,8 @@ from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.navier_stokes import *
 from pyoomph.equations.ALE import *
-from pyoomph.equations.viscoelastic import ViscoelasticEquations, OldroydB
-# The interface zeta coordinates give a smooth interpolation of the interface upon remeshing
+from pyoomph.equations.viscoelastic import *
 from pyoomph.meshes.zeta import *
-from pyoomph.meshes.gmsh import GmshTemplate
-from math import pi
 import numpy
 
 
@@ -48,14 +45,14 @@ class FilamentMesh(GmshTemplate):
         pr = cast("BeadsOnStringProblem", self.get_problem())
         # Never finer than the thinnest thread we intend to resolve, never coarser than the
         # unperturbed radius, and fine enough to follow the curvature of the beads
-        self.gmsh_options["Mesh.MeshSizeMin"] = pr.thinnest_thread / pr.elements_per_radius
-        self.gmsh_options["Mesh.MeshSizeMax"] = 1.0 / pr.max_elements_per_radius
-        self.gmsh_options["Mesh.MeshSizeFromCurvature"] = 8 * pr.elements_per_radius
+        self.set_gmsh_parameter("Mesh.MeshSizeMin", pr.thinnest_thread / pr.elements_per_radius)
+        self.set_gmsh_parameter("Mesh.MeshSizeMax", 1.0 / pr.max_elements_per_radius)
+        self.set_gmsh_parameter("Mesh.MeshSizeFromCurvature", 8 * pr.elements_per_radius)
 
         p_axis_bot, p_axis_top = self.point(0, 0), self.point(0, pr.L)
         if self.is_first_time():
-            zs = numpy.linspace(0, pr.L, pr.interface_spline_points)
-            pts = [self.point(float(pr.initial_radius(z)), float(z)) for z in zs]
+            zs = numpy.linspace(0, float(pr.L), pr.interface_spline_points)
+            pts = [self.point(pr.initial_radius(z), z) for z in zs]
         else:
             # Remeshing: rebuild the interface from its current shape
             segments = self.get_boundary_coordinates("liquid/interface", sort_along_axis="y+")
@@ -110,7 +107,7 @@ class BeadsOnStringProblem(Problem):
         self.tend, self.outstep, self.maxstep = 300.0, 5.0, 1.0
 
     def initial_radius(self, z):
-        return 1 + self.perturbation * numpy.cos(self.wavenumber * z)
+        return 1 + self.perturbation * cos(self.wavenumber * z)
 
     def define_problem(self):
         self.add_mesh(FilamentMesh())

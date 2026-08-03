@@ -47,7 +47,7 @@ The standard benchmark for viscoelastic flow solvers is creeping flow past a cyl
 .. literalinclude:: viscoelastic_cylinder.py
    :language: python
    :start-at: class ConfinedCylinderProblem(Problem):
-   :end-at: return float(self.get_mesh("fluid/cylinder").evaluate_observable("drag"))
+   :end-at: self += eqs @ "fluid"
 
 Four details are worth pointing out.
 
