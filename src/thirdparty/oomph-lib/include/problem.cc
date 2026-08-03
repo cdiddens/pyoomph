@@ -9140,6 +9140,18 @@ namespace oomph
       // hence the size of the DoubleVector might have changed
       Linear_solver_pt->reset_gradient();
     }
+    //FOR PYOOMPH: and switch it off again otherwise. Without this the enable above is permanent:
+    // nothing else ever clears Compute_gradient, so every LATER solve keeps computing the gradient
+    // into Gradient_for_glob_conv_newton_solve -- and reset_gradient(), which is what would resize
+    // it, is only reached through the branch above. multiply_transpose() sizes its output only when
+    // it is not already built, so the first solve after the dof count grows (a spatial adaptation,
+    // say) writes past the end of a buffer still sized for the problem as it was. That is a heap
+    // overflow whose crash lands somewhere else entirely and much later -- in MKL's allocator, or as
+    // a null nodal position during the next assembly.
+    else
+    {
+      Linear_solver_pt->disable_computation_of_gradient();
+    }
 
     // Update anything that needs updating
     actions_before_newton_solve();

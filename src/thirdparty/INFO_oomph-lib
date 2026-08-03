@@ -123,6 +123,31 @@ diagnostic printed only by the terminate handler, and suppress_exception_error_m
 clears it when an error is caught. The null guards matter separately, since an OomphLibError can be
 raised when no Problem is alive at all. See pyoomph's tests/test_multiple_problems.py.
 
+problem.cc / matrices.cc (Changed on 4th August 2026, globally convergent Newton heap overflow):
+Fixed a heap overflow that any solve with the globally convergent Newton method armed for the rest
+of the session. Problem::newton_solve() calls Linear_solver_pt->enable_computation_of_gradient()
+when Use_globally_convergent_newton_method is set, and NOTHING ever cleared it again -- so every
+later solve kept computing the gradient into LinearSolver::Gradient_for_glob_conv_newton_solve,
+while reset_gradient(), which is what resizes it, is only reached through that same branch. Since
+CRDoubleMatrix::multiply_transpose() sizes its output only when it is not already built, the first
+solve after the dof count grew (a spatial adaptation, say) accumulated into soln_pt[j] for j up to
+the new ncol()-1, past the end of a buffer still sized for the problem as it was.
+
+Reproduced by p.solve(globally_convergent_newton=True) followed by p.solve(spatial_adapt=1).
+Confirmed with valgrind: "Invalid write of size 8 ... 0 bytes after a block of size 4,680 alloc'd",
+allocated by multiply_transpose during the gcn solve (585 dofs) and written during the adaptive one.
+The crash it produces lands nowhere near the cause and is not reproducible in one place -- observed
+as a SIGSEGV inside MKL Pardiso's mkl_serv_free on one run and as a null oomph::Node::position()
+during the next residual assembly on another.
+
+Two changes, either of which is sufficient; both are in because they fix different things:
+  - problem.cc: an else-branch to the enable, so a solve that does not use the method switches the
+    gradient computation back off. This is the actual asymmetry.
+  - matrices.cc: CRDoubleMatrix::multiply_transpose() also rebuilds soln when the size does not
+    match, instead of only when it is unbuilt. This turns any other stale-soln caller from a silent
+    buffer overflow into a correct result; it costs nothing when the size already agrees.
+See pyoomph's tests/test_globally_convergent_newton.py.
+
 problem.h / problem.cc (Changed on 3rd August 2026, adaptive-resolve recovery):
 Added two empty virtual hooks and one exception class so that a Newton failure in an ADAPTIVE solve
 loop no longer has to end the run. Both hooks are no-ops by default, so a Problem that does not

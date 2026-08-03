@@ -1919,7 +1919,14 @@ namespace oomph
 #endif
 
     // if soln is not setup then setup the distribution
-    if (!soln.built())
+    //FOR PYOOMPH: ... or if what is already there is the wrong size. soln is often a variable that
+    // outlives a single call -- LinearSolver::Gradient_for_glob_conv_newton_solve is a member -- so
+    // a later call, after the matrix changed shape, found it "built" and accumulated into
+    // soln_pt[j] for j up to ncol()-1 of the NEW matrix, straight past the end of the buffer still
+    // sized for the old one. Silent, and fatal only much later and somewhere else. Rebuilding costs
+    // nothing when the size already matches, and the initialise(0.0) just below means nothing is
+    // lost by rebuilding when it does not.
+    if (!soln.built() || soln.nrow() != this->ncol())
     {
       LinearAlgebraDistribution* dist_pt =
         new LinearAlgebraDistribution(x.distribution_pt()->communicator_pt(),

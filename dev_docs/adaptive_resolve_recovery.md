@@ -282,16 +282,28 @@ The exception is `arc_length_step_solve_helper`, which is why §3 leaves it alon
 
 ## 7. Two things found on the way, both pre-existing
 
-### 7.1 `globally_convergent_newton` in a retry aborts the process
+### 7.1 `globally_convergent_newton` armed a heap overflow (found here, FIXED)
 
-Enabling the globally convergent Newton method for the `keep_adapted` retry reliably segfaults -
-`SIGSEGV` inside `mkl_pds_lp64_free_c_structure` / `mkl_serv_free`, i.e. MKL Pardiso's own teardown,
-which PETSc then turns into an `MPI_ABORT` that kills the whole job. The same strategy with that
-option off works.
+Enabling the globally convergent Newton method for the `keep_adapted` retry crashed the process.
+Root-caused with valgrind and fixed in `problem.cc` / `matrices.cc`; see
+`src/thirdparty/INFO_oomph-lib`, "globally convergent Newton heap overflow", and
+`tests/test_globally_convergent_newton.py`.
 
-This is not something the recovery introduces - it is that code path - but the recovery must not
-walk into it, so `retry_globally_convergent_newton` defaults to `False`. It is also not a promising
-cure for this failure anyway (§1.1). **Not root-caused; worth a look on its own.**
+In short: `Problem::newton_solve()` switched the linear solver's gradient computation on and nothing
+ever switched it off, so every *later* solve kept computing the gradient into a vector that
+`multiply_transpose()` only resizes when it is unbuilt - and the first solve after the dof count grew
+wrote past the end of it. Any `solve(globally_convergent_newton=True)` followed by a solve that adds
+dofs did it; the recovery just happened to be a way to reach that sequence.
+
+Worth recording as a debugging lesson, because it cost two wrong diagnoses: the overflow is silent,
+and the crash lands nowhere near the cause and in a *different place on different runs* - inside MKL
+Pardiso's allocator on one run, as a null `oomph::Node::position()` during the next residual assembly
+on another. Both looked like self-contained bugs in the place they surfaced, and neither was. What
+settled it was one valgrind run, which found exactly two errors, both at the real line.
+
+`retry_globally_convergent_newton` still defaults to `False`, now for the original reason only: it is
+not a promising cure for this particular failure (§1.1), since the interpolated state is usually
+outside the basin rather than merely too far along a good direction.
 
 ### 7.2 `load_state` can renumber the dofs
 
@@ -308,6 +320,14 @@ of a refined mesh round-tripped in the same order. **Not investigated further he
 ---
 
 ## 8. What is not done
+
+* **User-facing documentation.** There is no tutorial chapter on this, so nobody will find it. That,
+  plus a general troubleshooting chapter for non-convergence and the undocumented
+  `--largest_residuals` flag, is written up in `dev_docs/nonconvergence_diagnostics.md` together with
+  the diagnostics that would be worth building (condition-number estimation, Lagrange-multiplier
+  consistency checks, and a structural inconsistency analysis on the equation tree - the "Stokes with
+  pure Dirichlet boundaries and no pressure constraint" class of problem, which pyoomph could detect
+  symbolically at setup time instead of as a divergence later).
 
 * **Recovery from a rank-local linear-solver error under `--distribute`** - declined on purpose,
   §4.3. Making it work needs the agreement established at the point of failure, the way
