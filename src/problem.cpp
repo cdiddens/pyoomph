@@ -1464,19 +1464,53 @@ namespace pyoomph
 	// matrix-manipulation Dirichlet strategy is active, a subsequent zeroing of the Dirichlet rows via
 	// remove_dirichlets_by_matrix_manipulation), or the user-supplied custom residual when
 	// use_custom_residual_jacobian is set.
-	// On a DISTRIBUTED mesh, make each hanging node's own (raw) value storage consistent with the value
-	// interpolated from its masters BEFORE assembling. The elemental (JIT) assembly reads a node's raw value,
-	// but a hanging node's raw storage is only made consistent with its masters when this is called -- and the
-	// masters (halo nodes) are freshly value-synchronised at the end of every Newton step. Without this, a
-	// NONLINEAR residual/Jacobian would be assembled from stale hanging values on every iteration (a single
-	// linear step happens to converge regardless, which is why the bug only showed up in the final values).
-	// Must therefore run every iteration, not just once after the solve. No-op on serial meshes.
-	static inline void sync_hanging_values_if_distributed(pyoomph::Problem *prob)
+	// Before assembling, make each hanging node's own (raw) storage consistent with what its masters
+	// say. The elemental (JIT) assembly reads a node's RAW value/position, but a hanging node's raw
+	// storage is only a cache of its masters, refreshed as a side effect of an assembly or output pass
+	// over the elements that contain it. Anything that does not touch those elements leaves it stale.
+	//
+	// That bites on ANY MPI run with more than one process, not only a distributed one, because
+	// oomph-lib splits the assembly by element across the ranks (First_el_for_assembly /
+	// Last_el_plus_one_for_assembly) in both cases. Each rank therefore only ever refreshes the hanging
+	// nodes inside its own element range. The two cases need different repairs:
+	//
+	//  - DISTRIBUTED: collapse_hanging_node_values(). The masters are halo nodes, freshly
+	//    value-synchronised at the end of every Newton step; without this a NONLINEAR residual/Jacobian
+	//    would be assembled from stale hanging values on every iteration (a single linear step happens
+	//    to converge regardless, which is why that bug only showed up in the final values).
+	//
+	//  - REPLICATED (plain `mpirun`, no --distribute): the whole mesh is present on every rank, but only
+	//    the elements this rank assembles got their hanging nodes refreshed -- so the OTHER ranks' region
+	//    kept whatever was there before, which for a freshly adapted mesh is zero. This one has to go
+	//    through interpolate_hanging_values(), not collapse_hanging_node_values(): it also restores the
+	//    hanging POSITIONS, which are equally stale on a moving mesh and which the node-only routine does
+	//    not touch.
+	//    Found via the spatial error estimator: two ranks handed the identical solution computed
+	//    elemental errors differing by 60-92% on every element, because the raw FE flux is built from
+	//    nodal values and each rank had correct hanging values only inside its own assembly range. The
+	//    ranks then refined different regions and their meshes diverged outright.
+	//
+	// Must run every iteration, not just once after the solve. No-op on a single process.
+	//
+	// This makes the ranks agree to ~1e-13, NOT bit-for-bit. The residue is a SEPARATE and still open
+	// defect, and not an MPI one: Mesh::interpolate_hanging_values() returns a different answer each time
+	// it runs on the same input, in a single-process serial run (~13 of 2014 positions, one ulp). MPI only
+	// supplies a second observer. Uninitialised memory (valgrind clean), heap-address container order
+	// (differs under setarch -R) and Python iteration order (differs under PYTHONHASHSEED=0) are all ruled
+	// out; threading and the JIT cache are untested. Reproducer, full elimination table and the wrong
+	// turns: dev_docs/hanging_value_nondeterminism.md.
+	//
+	// Shipping regardless: without this, 120 hanging nodes sit at ZERO on the ranks that do not assemble
+	// them, elemental errors differ by 60-92%, and the meshes diverge outright.
+	static inline void sync_hanging_values_if_parallel(pyoomph::Problem *prob)
 	{
 #ifdef OOMPH_HAS_MPI
+		if (!prob->communicator_pt() || prob->communicator_pt()->nproc() < 2) return;
 		auto do_mesh = [](oomph::Mesh *mp) {
 			pyoomph::Mesh *m = dynamic_cast<pyoomph::Mesh *>(mp);
-			if (m && m->is_mesh_distributed()) m->collapse_hanging_node_values();
+			if (!m) return;
+			if (m->is_mesh_distributed()) m->collapse_hanging_node_values();
+			else m->interpolate_hanging_values();
 		};
 		const unsigned nm = prob->nsub_mesh();
 		if (nm == 0) { if (prob->mesh_pt()) do_mesh(prob->mesh_pt()); }
@@ -1540,7 +1574,7 @@ namespace pyoomph
 			// "abandon the solve" when no solve is running.
 			throw oomph::NewtonSolverError(0, std::numeric_limits<double>::max());
 		}
-		sync_hanging_values_if_distributed(this);
+		sync_hanging_values_if_parallel(this);
 		if (!use_custom_residual_jacobian)
 		{
 			get_residuals_by_elemental_assembly(residuals);
@@ -1609,7 +1643,7 @@ namespace pyoomph
 	// Top-level Jacobian assembly entry point; same dispatch/Dirichlet-handling pattern as get_residuals()
 	void Problem::get_jacobian(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian)
 	{
-		sync_hanging_values_if_distributed(this);
+		sync_hanging_values_if_parallel(this);
 		if (!use_custom_residual_jacobian)
 		{
 			get_jacobian_by_elemental_assembly(residuals, jacobian);

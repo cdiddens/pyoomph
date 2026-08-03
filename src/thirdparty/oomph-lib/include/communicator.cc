@@ -59,8 +59,12 @@ namespace oomph
     }
 
     // Broadcast to everybody how many entries to expect
-    MPI_Bcast(&nrow, 1, MPI_UNSIGNED_LONG, source, this->mpi_comm());
-    MPI_Bcast(&ncol, 1, MPI_UNSIGNED_LONG, source, this->mpi_comm());
+    // FOR PYOOMPH: MPI_UNSIGNED, not MPI_UNSIGNED_LONG. nrow and ncol are `unsigned` (4 bytes) while
+    // MPI_UNSIGNED_LONG describes an 8-byte datum, so every receiver wrote 8 bytes into a 4-byte
+    // object -- past the end of nrow into ncol, and past the end of ncol into whatever the compiler
+    // put next on the stack.
+    MPI_Bcast(&nrow, 1, MPI_UNSIGNED, source, this->mpi_comm());
+    MPI_Bcast(&ncol, 1, MPI_UNSIGNED, source, this->mpi_comm());
 
     if (ncol != 0 && nrow != 0)
     {

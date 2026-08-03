@@ -335,3 +335,18 @@ otherwise turn a survivable garbage step into an abort. Cost, measured on a 60x6
 240 interleaved Jacobian assemblies per arm: disabled is indistinguishable from a build without
 the check, enabled is about +2%.
 Upstream equivalent: oomph-lib commit of 14th February 2024.
+
+communicator.cc (Changed on 3rd August 2026):
+OomphCommunicator::broadcast(const int&, DenseMatrix<double>&) sent the matrix dimensions with
+MPI_UNSIGNED rather than MPI_UNSIGNED_LONG. The two locals being broadcast are declared `unsigned`,
+which is four bytes, while MPI_UNSIGNED_LONG describes an eight-byte datum -- so every receiving
+rank wrote eight bytes into a four-byte object, running off the end of nrow into ncol and off the
+end of ncol into whatever the compiler had placed next on the stack. Undefined behaviour on any MPI
+run that broadcasts a DenseMatrix.
+It survived because on little-endian x86 the extra four bytes are the zero half of the value, so
+nrow and ncol themselves usually came out right and only the neighbouring stack slot was clobbered.
+Found while chasing a different bug: spatial adaptation diverging between ranks under `mpirun` with
+no --distribute, where this broadcast is used to share recovered flux coefficients between the ranks
+of a replicated-mesh error estimation (pyoomph::LagrZ2ErrorEstimator::get_element_errors). Fixing it
+does move the computed elemental errors, by about 5e-7 relative -- but it is NOT the cause of that
+divergence, which remains open: the errors still differ by 60-92% between ranks afterwards.
