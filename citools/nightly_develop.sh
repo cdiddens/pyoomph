@@ -481,6 +481,7 @@ fi
 TUT_RC=0
 TUT_SECS=0
 TUT_FAILURES=""
+TUT_SKIPS=""
 TUT_BAD=0
 if [ "$BUILD_RC" -eq 0 ]; then
     run_step tutorials "$RUN_DIR/tutorials.log" "$TIMEOUT_TUTORIALS" \
@@ -490,6 +491,11 @@ if [ "$BUILD_RC" -eq 0 ]; then
 
     # The runner always exits 0; the verdict is in its output.
     TUT_FAILURES="$(grep -E '=+ FAILED ' "$RUN_DIR/tutorials.log" 2>/dev/null)"
+    # Scripts the runner did not count against the verdict because an optional package is missing
+    # (preCICE). Not a failure, but not coverage either, so it goes in the report the same way the
+    # pytest skips do.
+    TUT_SKIPS="$(sed -n '/^SKIPPED FOR MISSING OPTIONAL DEPENDENCIES:/,/^$/p' "$RUN_DIR/tutorials.log" \
+                 2>/dev/null | grep -E '^ +\S+ needs ')"
     [ "$TUT_RC" -ne 0 ] && TUT_BAD=1
     [ -n "$TUT_FAILURES" ] && TUT_BAD=1
     grep -q '^SOME TESTS FAILED' "$RUN_DIR/tutorials.log" 2>/dev/null && TUT_BAD=1
@@ -520,14 +526,20 @@ fi
 # --------------------------------------------------------------------- report ---
 
 # A run where the MPI modules skipped themselves is not a green run, it is an untested
-# one, and it must not look identical to a real pass in the subject line.
+# one, and it must not look identical to a real pass in the subject line. The same goes for
+# tutorial scripts the runner had to skip for want of an optional package.
 MPI_SKIPPED=0
 printf '%s' "$PYTEST_SKIPS" | grep -q 'test_mpi_' && MPI_SKIPPED=1
 
 if [ ${#FAILED_STEPS[@]} -eq 0 ]; then
     VERDICT="PASS"
-    if [ "$MPI_SKIPPED" -ne 0 ]; then
-        SUBJECT="[pyoomph nightly] $BRANCH ${REMOTE_SHA:0:12} PASS -- but the MPI tests were SKIPPED"
+    SKIPNOTE=""
+    [ "$MPI_SKIPPED" -ne 0 ] && SKIPNOTE="the MPI tests"
+    if [ -n "$TUT_SKIPS" ]; then
+        SKIPNOTE="${SKIPNOTE:+$SKIPNOTE and }$(printf '%s\n' "$TUT_SKIPS" | wc -l) tutorial script(s)"
+    fi
+    if [ -n "$SKIPNOTE" ]; then
+        SUBJECT="[pyoomph nightly] $BRANCH ${REMOTE_SHA:0:12} PASS -- but $SKIPNOTE were SKIPPED"
     else
         SUBJECT="[pyoomph nightly] $BRANCH ${REMOTE_SHA:0:12} PASS"
     fi
@@ -572,6 +584,12 @@ if [ "$BUILD_RC" -eq 0 ]; then
         printf '%s\n' "$PYTEST_SKIPS" | sed 's/^/    /' >>"$REPORT"
     else
         say "  skipped by pytest: nothing"
+    fi
+    if [ -n "$TUT_SKIPS" ]; then
+        say "  tutorial scripts skipped for a missing optional package:"
+        printf '%s\n' "$TUT_SKIPS" | sed 's/^ */    /' >>"$REPORT"
+    else
+        say "  tutorial scripts skipped: nothing"
     fi
 fi
 
