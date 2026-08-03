@@ -53,10 +53,22 @@ Maximum number of dofs should be 200000.
 
 ### Eigenvalue and stability problems need a complex PETSc
 
-The default `PYTHONPATH` points at a real-scalar PETSc build. Anything using eigensolvers, azimuthal
-stability or Floquet analysis needs the complex one:
+`PYTHONPATH` is unset in a non-login shell, so petsc4py is not importable at all there and pyoomph
+falls back to the scipy eigensolver without saying much about it - a tutorial that should exercise
+SLEPc then quietly tests something else. Anything using eigensolvers, azimuthal stability or Floquet
+analysis needs the complex build.
 
-    export PYTHONPATH=/home/cdiddens/code/packages/petsc_pyoomph/pyoomph_petsc_opt/lib
+**The path differs per machine, so look it up rather than pasting one from here** - and check it, because
+a nonexistent entry in `PYTHONPATH` is not an error, it just leaves you without PETSc:
+
+    find ~/code -maxdepth 4 -name petsc4py -type d      # the arch dir is its parent's parent
+    PYTHONPATH=<candidate> python3 -c "from petsc4py import PETSc; import numpy; \
+        assert PETSc.ScalarType is numpy.complex128; import slepc4py; print('complex PETSc ok')"
+
+On `duarte` that is `/home/cdiddens/code/petsc/pyoomph_petsc_arch_complex/lib`, with
+`pyoomph_petsc_arch_real` next to it as the real-scalar one. On `walhalla` it is somewhere else.
+(An earlier revision of this file hardcoded `packages/petsc_pyoomph/pyoomph_petsc_opt/lib`, which
+exists on neither.)
 
 Do not force a linear solver on the tutorials to make a comparison uniform. It changes what is being
 computed: `petsc_mumps` collapses `hopf_switch`'s arclength continuation, and plain `petsc` (iterative
