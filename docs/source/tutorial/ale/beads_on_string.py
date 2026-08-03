@@ -104,7 +104,7 @@ class BeadsOnStringProblem(Problem):
         self.thinnest_thread = 0.02       # thinnest thread the mesh is allowed to resolve
         self.interface_spline_points = 81
         # Run control, all overridable from the command line with e.g. -P tend=100
-        self.tend, self.outstep, self.maxstep = 300.0, 5.0, 1.0        
+        self.tend, self.outstep, self.maxstep = 50.0, 5.0, 1.0        
         
 
     def initial_radius(self, z):

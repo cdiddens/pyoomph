@@ -20,7 +20,7 @@ i.e. the Ohnesorge number, the Deborah number and the solvent fraction of the to
 .. literalinclude:: beads_on_string.py
    :language: python
    :start-at: def __init__(self):
-   :end-at: self.tend, self.outstep, self.maxstep = 300.0, 5.0, 1.0
+   :end-at: self.tend, self.outstep, self.maxstep = 50.0, 5.0, 1.0
 
 on a domain of two wavelengths, :math:`0\le z\le 8\pi`, starting from :math:`r(z,0)=1+0.05\cos(z/2)` at rest. Note that these are plain attributes of the problem class, so each of them can be overridden on the command line with ``-P``, which is used for the second parameter set at the end of this section.
 
