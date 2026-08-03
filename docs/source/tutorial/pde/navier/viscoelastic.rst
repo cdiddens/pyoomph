@@ -96,9 +96,11 @@ Both are obtained with :py:class:`~pyoomph.equations.generic.ProjectExpression`,
 	:align: center
 	:alt: Flow-directed shear and normal stress around the cylinder.
 	:class: with-shadow
-	:width: 100%
+	:width: 90%
 
-	The flow-directed stresses :math:`S_1` and :math:`S_2`; compare Fig. 12 of :cite:`Claus2013`, whose colour scale is used here. Only the upper half is solved and only the upper half is shown. The colour range is held fixed across the three rows, so the comparison between them is meaningful: :math:`S_1` barely changes with :math:`\mathrm{Wi}`, while :math:`S_2` grows strongly on the cylinder surface. The dark region ahead of the cylinder is the low normal stress at the front stagnation point that the reference also notes.
+	The flow-directed stresses :math:`S_1` and :math:`S_2`; compare Fig. 12 of :cite:`Claus2013`, whose colour scale is used here. Only the upper half is solved and only the upper half is shown. The colour range is held fixed across the three rows, so the comparison between them is meaningful: :math:`S_1` barely changes with :math:`\mathrm{Wi}`, while :math:`S_2` grows strongly on the cylinder surface. The :math:`S_2` scale is cut off at 35 rather than following its maximum, which runs to about 55 at :math:`\mathrm{Wi}=0.7` and would flatten everything else on the bar into the same blue; the arrow at the end of the colorbar marks where that happens. The dark region ahead of the cylinder is the low normal stress at the front stagnation point that the reference also notes.
+
+	The panels are assembled into the grid by :math:`\text{Ti}k\text{Z}` from the PDFs matplotlib writes, not from rasterised images, so they stay vector all the way through -- see ``assemble_panels`` in the script.
 
 The quantity everyone reports is the dimensionless drag on the cylinder, :math:`K=F_x/(\eta_0\langle u\rangle)`, obtained here by integrating the total traction over the cylinder surface. The script walks up in :math:`\mathrm{Wi}` with :py:meth:`~pyoomph.generic.problem.Problem.go_to_param`, which halves its step whenever Newton fails, and prints the drag next to the values of Claus and Phillips :cite:`Claus2013`:
 
