@@ -104,7 +104,8 @@ class BeadsOnStringProblem(Problem):
         self.thinnest_thread = 0.02       # thinnest thread the mesh is allowed to resolve
         self.interface_spline_points = 81
         # Run control, all overridable from the command line with e.g. -P tend=100
-        self.tend, self.outstep, self.maxstep = 300.0, 5.0, 1.0
+        self.tend, self.outstep, self.maxstep = 300.0, 5.0, 1.0        
+        
 
     def initial_radius(self, z):
         return 1 + self.perturbation * cos(self.wavenumber * z)
@@ -140,20 +141,19 @@ class BeadsOnStringProblem(Problem):
         eqs += AssignZetaCoordinatesByArclength(sort_along_axis="y+") @ "interface"
 
         self.add_equations(eqs @ "liquid")
-
+        # output file of the minimum
+        self.minimum_out = problem.create_text_file_output("minimum.txt", header=["t", "r_min", "z_min"])
+        
+        
     def minimum_radius_and_position(self):
         return self.get_mesh("liquid/interface").evaluate_minimum("min_r", return_x=True)[1]
+            
+    def output(self, stage= "", quiet= None):
+        super().output(stage, quiet)
+        self.minimum_out.add_row(self.get_current_time(), *self.minimum_radius_and_position())    
 
 
 if __name__ == "__main__":
     with BeadsOnStringProblem() as problem:
-        problem.initialise()
-        problem.output()
-        minimum_out = problem.create_text_file_output("minimum.txt", header=["t", "r_min", "z_min"])
-        minimum_out.add_row(0.0, *problem.minimum_radius_and_position())
-        t = 0.0
-        while t < problem.tend - 1e-8:
-            t = min(t + problem.outstep, problem.tend)
-            problem.run(t, outstep=False, maxstep=problem.maxstep, temporal_error=1)
-            problem.output()
-            minimum_out.add_row(problem.get_current_time(), *problem.minimum_radius_and_position())
+        problem.initialise()                
+        problem.run(problem.tend, outstep=problem.outstep, maxstep=problem.maxstep, temporal_error=1)        

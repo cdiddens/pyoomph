@@ -37,12 +37,7 @@ Again, the viscosity handed to the :py:class:`~pyoomph.equations.navier_stokes.N
 
 The two ends are treated as symmetry planes, while the reference uses a periodic flow condition to mimic an infinite filament. The initial perturbation has a maximum at both :math:`z=0` and :math:`z=8\pi`, so the periodic solution is mirror-symmetric there anyway.
 
-The run itself just steps through the output times, letting the adaptive time stepping choose the steps in between, and records the minimum radius through the :py:class:`~pyoomph.equations.generic.ExtremumObservables` as before:
-
-.. literalinclude:: beads_on_string.py
-   :language: python
-   :start-at: if __name__ == "__main__":
-   :end-at: minimum_out.add_row(problem.get_current_time(), *problem.minimum_radius_and_position())
+The run itself just steps through the output times, letting the adaptive time stepping choose the steps in between, and records the minimum radius through the :py:class:`~pyoomph.equations.generic.ExtremumObservables` as before.
 
 :py:class:`~pyoomph.equations.generic.RemeshWhen` rebuilds the mesh whenever the elements have deformed too much, which over these 300 time units happens six times.
 
