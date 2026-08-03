@@ -7211,6 +7211,18 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.invalidate_cached_mesh_data()
         if ignore_outstep:
             self._output_step=oldoutstep
+        # A problem that was mid-transient when the state was written must know that it is mid-transient
+        # now. Otherwise the next solve(timestep=...) takes the branch for the very first unsteady step:
+        # it re-initialises dt, re-applies the initial condition and resets the step counter, so the
+        # step is taken with the degraded first-order start instead of continuing the scheme. The state
+        # is restored exactly either way - the difference only shows in the NEXT step, as an O(dt^2)
+        # deviation from an uninterrupted run, and not at all on a problem that has reached a steady
+        # state, which is what made it easy to miss.
+        # Derived from the step counter rather than stored separately, so old state files behave too.
+        if self.timestepper.get_num_unsteady_steps_done()>0:
+            self._taken_already_an_unsteady_step=True
+            self._first_step=False
+            self._last_step_was_stationary=False
         print("State file "+fname+" loaded")
         for m in self._interfacemeshes:
             m.clear_before_adapt()

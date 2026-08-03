@@ -291,6 +291,50 @@ a load that quietly does nothing cannot pass.
    mesh would pass even with a broken signature; this does not.
 5. **distributed adaptive round trip** — written on 3 ranks, read serially.
 
+`tests/test_state_file_restart.py` (3 tests, serial, ~2 s) covers what a restart is actually for:
+that the reloaded problem is in the writer's state *and* continues as if never interrupted. The
+residual vector, every history level, the pinned values and the **Jacobian** must be bit-identical
+right after loading — they are, for a plain transient, for temporal adaptivity (including the adapted
+`dt`) and for a moving mesh. After continuing, each side has run its own Newton solves, so round-off
+is allowed and nothing more.
+
+That second half found a real defect, which had nothing to do with the file format. A freshly built
+problem has `_taken_already_an_unsteady_step` unset, so the first `solve(timestep=...)` after a load
+took the branch for the very first unsteady step: re-initialise `dt`, re-apply the initial condition,
+reset the step counter — and take the step with the **degraded first-order start** instead of
+continuing the scheme. The state was restored perfectly; the run then drifted from an uninterrupted
+one by O(dt²). `load_state` now derives "we are mid-transient" from the restored step counter (so old
+files behave too).
+
+It is worth knowing why this survived: on a problem that has settled, `du/dt → 0` and BDF1 agrees with
+BDF2, so a diffusion problem run to near-steady state reproduces to 1e-16 either way. The deviation
+only appears when the solution is genuinely still moving — 4.9e-4 on the moving-mesh case with a
+boundary that keeps oscillating. A restart test built from a settled problem would have passed
+throughout, which is why the moving-mesh case is in that file on purpose.
+
+**How exactly the continuation matches depends on the linear solver**, and the test covers both:
+
+| solver | state after loading | continuation, moving mesh |
+| --- | --- | --- |
+| SuperLU (scipy) | bitwise | **bitwise**, over 1 and over 3 further steps |
+| Pardiso (default here) | bitwise | 2.2e-16 |
+| Pardiso, `reuse_symbolic_factorisation=False` | bitwise | **bitwise** |
+
+SuperLU factorises from scratch every time, so its solve is a pure function of the matrix and a
+correctly restarted run reproduces the uninterrupted one exactly — which makes it the sharpest
+available check that nothing about the restart differs.
+
+Pardiso's residue comes from its **symbolic** reuse: when the sparsity pattern is unchanged it runs
+MKL phase 22 instead of phase 12 (`PardisoSolver.reuse_symbolic_factorisation`, on by default), and a
+restarted run reaches that analysis with a different matrix than an uninterrupted one, so the reused
+analysis is not the same one and the numeric factorisation differs in the last bits. Established by
+elimination, not by inspection: switching that flag off makes Pardiso bitwise as well. It is **not**
+thread nondeterminism — unchanged with `MKL_NUM_THREADS=1` — and `try_to_reuse_solver`, which would
+reuse the *numeric* factors, is off by default and plays no part.
+
+So if bitwise reproducibility across a restart is ever wanted with Pardiso, that one flag buys it, at
+the cost of a full reordering on every factorisation.
+
 `tests/test_state_file_header.py` (7 tests, serial, not marked slow, ~2 s) covers what the file says
 about itself: the magic/version/sharding header and the footer are present; a foreign file, a
 truncated file and a file from a newer version are all refused; a file declaring itself sharded is
