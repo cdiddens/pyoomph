@@ -47,8 +47,10 @@ import pytest
 from pyoomph import Problem, Equations, DirichletBC
 from pyoomph.expressions import var, vector, matrix, matproduct
 from pyoomph.equations.navier_stokes import NavierStokesEquations
-from pyoomph.equations.viscoelastic import (ViscoelasticEquations, OldroydB, Giesekus, PTT, FENE_CR, FENE_P,
-                                            symmetric_2x2_matrix_log, oldroyd_b_shear_conformation)
+from pyoomph.equations.viscoelastic import (ViscoelasticEquations, ViscoelasticInflowBC, OldroydB,
+                                            Giesekus, PTT, FENE_CR, FENE_P,
+                                            symmetric_2x2_matrix_log, oldroyd_b_shear_conformation,
+                                            steady_shear_conformation)
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 
 
@@ -452,6 +454,190 @@ def test_poiseuille_flow_converges_under_refinement(tmp_path):
     fine = _poiseuille_errors(tmp_path, 16)
     assert coarse[0] / fine[0] > 4.0, "velocity errors: " + str((coarse[0], fine[0]))
     assert coarse[1] / fine[1] > 4.0, "conformation errors: " + str((coarse[1], fine[1]))
+
+
+# ----------------------------------------------------------------------------------------------
+# The inflow condition
+# ----------------------------------------------------------------------------------------------
+
+# ViscoelasticInflowBC claims to put the fully developed conformation tensor on an inflow boundary.
+# There are two independent things to check: that the closed-form viscometric solutions the models
+# hand it are right, and that the boundary condition built from them actually reaches the boundary
+# nodes -- including for the one model that has no closed form and is instead handled by enforcing
+# the constitutive equation on the boundary.
+
+
+def _viscometric_conformation(model, weissenberg, tend=40.0):
+    """C in steady simple shear, from the model's closed form if it has one, else by integration."""
+    try:
+        expression = steady_shear_conformation(model, weissenberg)
+    except NotImplementedError:
+        L = numpy.zeros((3, 3))
+        L[0, 1] = weissenberg
+        return _reference_conformation(model, L, 1.0, tend)
+    return numpy.array([[float(expression[i, j]) for j in range(3)] for i in range(3)])
+
+
+@pytest.mark.parametrize("name,model", _MODELS + [("oldroyd-b", OldroydB())],
+                         ids=[n for n, _ in _MODELS] + ["oldroyd-b"])
+@pytest.mark.parametrize("weissenberg", [0.0, 0.4, 2.0, 8.0])
+def test_steady_shear_solves_the_constitutive_equation(name, model, weissenberg):
+    """
+    The closed forms, checked against the equation they claim to solve rather than against a table.
+
+    In steady simple shear the conformation equation reduces to L*C + C*L^t = g(C), with L the only
+    nonzero entry of the velocity gradient, so substituting the model's own g leaves nothing to be
+    taken on trust. Wi=0 is in the list because a channel's symmetry line sits there, and several of
+    these formulas are 0/0 at zero shear rate unless written the way they are.
+    """
+    if isinstance(model, PTT) and model.kind == "exponential":
+        with pytest.raises(NotImplementedError):
+            steady_shear_conformation(model, weissenberg)
+        return
+    C = _viscometric_conformation(model, weissenberg)
+    L = numpy.zeros((3, 3))
+    L[0, 1] = weissenberg
+    residual = L @ C + C @ L.T - _relaxation(model, C)
+    assert numpy.max(numpy.abs(residual)) < 1e-10 * max(1.0, numpy.max(numpy.abs(C)))
+
+
+def test_giesekus_reduces_to_oldroyd_b_at_zero_mobility():
+    """
+    alpha=0 is Oldroyd-B, and the viscometric solution has to say so.
+
+    Not a curiosity: the textbook form of that solution divides by alpha(1-alpha)Wi^2, so the whole
+    expression is 0/0 there and has to be rearranged to survive it.
+    """
+    for weissenberg in (0.0, 0.5, 3.0):
+        giesekus = _viscometric_conformation(Giesekus(alpha=0), weissenberg)
+        oldroyd = _viscometric_conformation(OldroydB(), weissenberg)
+        assert numpy.max(numpy.abs(giesekus - oldroyd)) < 1e-12 * max(1.0, numpy.max(numpy.abs(oldroyd)))
+
+
+class _InflowProblem(Problem):
+    """A channel with an imposed, fully developed velocity profile and the inflow condition on it."""
+
+    def __init__(self, model, mode, axisymmetric=False, peak_velocity=0.5):
+        super().__init__()
+        self.model, self.mode = model, mode
+        self.axisymmetric = axisymmetric
+        self.peak_velocity = peak_velocity
+
+    def profile(self):
+        # Zero shear rate on the symmetry line and its largest value on the wall, i.e. the two ends
+        # of the range the condition has to cover.
+        transverse = var("coordinate_x") if self.axisymmetric else var("coordinate_y")
+        return self.peak_velocity * (1 - transverse ** 2)
+
+    def shear_rate(self, transverse):
+        return -2 * self.peak_velocity * transverse
+
+    def velocity(self):
+        return vector(0, self.profile()) if self.axisymmetric else vector(self.profile(), 0)
+
+    def define_problem(self):
+        if self.axisymmetric:
+            # r from 0 to 1 and the flow along z, so that the flow and gradient directions are the
+            # other way round than in the planar case: the condition has to take that from the
+            # profile alone.
+            self.set_coordinate_system("axisymmetric")
+        self.add_mesh(RectangularQuadMesh(N=[6, 4], size=[1.0, 1.0]))
+        eqs = _ImposedVelocity(self.velocity())
+        eqs += ViscoelasticEquations(model=self.model, relaxation_time=1, polymer_viscosity=1,
+                                     add_polymer_stress_to_momentum=False, space="C2")
+        eqs += ViscoelasticInflowBC(self.velocity(), mode=self.mode) @ ("bottom" if self.axisymmetric else "left")
+        self.add_equations(eqs @ "domain")
+
+
+def _inflow_errors(tmp_path, model, mode, axisymmetric=False, tend=0.2, dt=0.05):
+    """
+    Deviation from the viscometric solution on the inflow boundary and far downstream.
+
+    Transient, and deliberately stopped long before the polymer has relaxed: a stationary solve
+    would be no test at all here, because the fully developed profile solves the constitutive
+    equation everywhere in the domain and would come out of the interior alone, whatever the inflow
+    condition did. Started from rest the interior is still far from it, so the inflow boundary is
+    the only place where it can be right.
+    """
+    with _InflowProblem(model, mode, axisymmetric) as problem:
+        problem.set_output_directory(str(tmp_path))
+        problem.initialise()
+        problem.run(tend, startstep=dt, maxstep=dt, temporal_error=None, outstep=False)
+        mesh = problem.get_mesh("domain")
+        indices = mesh.get_nodal_field_indices()
+        # The flow is along the second axis in the axisymmetric case, so the roles of the two
+        # in-plane directions are swapped with respect to the canonical shear frame.
+        permutation = [1, 0, 2] if axisymmetric else [0, 1, 2]
+        streamwise, transverse = (1, 0) if axisymmetric else (0, 1)
+        on_inflow, downstream = 0.0, 0.0
+        for node in mesh.nodes():
+            psi = numpy.zeros((3, 3))
+            for component, (i, j) in (("xx", (0, 0)), ("xy", (0, 1)), ("yy", (1, 1)),
+                                      ("zz", (2, 2)), ("aa", (2, 2))):
+                name = "log_conformation_" + component
+                if name in indices:
+                    psi[i, j] = psi[j, i] = node.value(indices[name])
+            eigenvalues, eigenvectors = numpy.linalg.eigh(psi)
+            C = eigenvectors @ numpy.diag(numpy.exp(eigenvalues)) @ eigenvectors.T
+            reference = _viscometric_conformation(problem.model,
+                                                  problem.shear_rate(node.x(transverse)))
+            reference = reference[permutation][:, permutation]
+            deviation = numpy.max(numpy.abs(C - reference))
+            if node.x(streamwise) < 1e-9:
+                on_inflow = max(on_inflow, deviation)
+            elif node.x(streamwise) > 1 - 1e-9:
+                downstream = max(downstream, deviation)
+        return on_inflow, downstream
+
+
+_INFLOW_MODELS = _MODELS + [("oldroyd-b", OldroydB())]
+
+
+@pytest.mark.parametrize("name,model", _INFLOW_MODELS, ids=[n for n, _ in _INFLOW_MODELS])
+def test_inflow_condition_imposes_the_viscometric_solution(tmp_path, name, model):
+    """
+    Every model, in the mode the condition picks for it by itself.
+
+    Exponential PTT is the interesting one: it has no closed-form viscometric solution, so it goes
+    through the Lagrange multiplier branch, where the condition is the constitutive equation itself
+    rather than its solution. That branch only holds the condition weakly, hence the coarser
+    tolerance.
+    """
+    weak = isinstance(model, PTT) and model.kind == "exponential"
+    on_inflow, downstream = _inflow_errors(tmp_path, model, "auto")
+    assert on_inflow < (5e-3 if weak else 1e-6)
+    # ... and the interior has not got there by itself yet, which is what makes the above a test.
+    assert downstream > 0.05
+
+
+@pytest.mark.parametrize("mode", ["dirichlet", "enforced"])
+def test_inflow_condition_modes_agree(tmp_path, mode):
+    """
+    The two mechanisms impose the same condition, so for a model that supports both they must give
+    the same boundary values -- up to the discretisation error of the weakly enforced one.
+    """
+    on_inflow, downstream = _inflow_errors(tmp_path, OldroydB(), mode)
+    assert on_inflow < (1e-8 if mode == "dirichlet" else 5e-3)
+    assert downstream > 0.05
+
+
+def test_inflow_condition_in_axisymmetric_coordinates(tmp_path):
+    """
+    A pipe inlet, where the flow is along z and the gradient along r.
+
+    Nothing tells the condition that: it takes both directions from the velocity profile it is
+    given, which is what the frame-free form of the viscometric solution is for. Getting the two
+    directions the wrong way round would put the polymer stretch across the pipe instead of along it.
+    """
+    on_inflow, downstream = _inflow_errors(tmp_path, OldroydB(), "auto", axisymmetric=True)
+    assert on_inflow < 1e-6
+    assert downstream > 0.05
+
+
+def test_inflow_condition_rejects_a_model_without_a_closed_form(tmp_path):
+    """mode='dirichlet' cannot be honoured for the exponential PTT, and says so rather than guessing."""
+    with pytest.raises(RuntimeError, match="closed-form"):
+        _inflow_errors(tmp_path, PTT(epsilon=0.25, kind="exponential"), "dirichlet")
 
 
 # ----------------------------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from __future__ import annotations
 import math
 
 from ..generic import Equations
+from ..meshes.bcs import EnforcedBC
 from ..expressions import *  # Import grad et al
 from ..expressions.coordsys import AxisymmetricCoordinateSystem, AxisymmetryBreakingCoordinateSystem, CartesianCoordinateSystem
 from ..expressions.tensor_funcs import (DiagonalizeSymmetricTensor, LogConfTensorDecompositionAxisymmetric,
@@ -63,6 +64,29 @@ def _exp(x: ExpressionOrNum) -> ExpressionOrNum:
     return exp(x) if isinstance(x, Expression) else math.exp(x)
 
 
+def _root(x: ExpressionOrNum, order: int = 2) -> ExpressionOrNum:
+    return square_root(x, order) if isinstance(x, Expression) else x ** (1.0 / order)
+
+
+def _shear_thinning_root(u: ExpressionOrNum) -> ExpressionOrNum:
+    r"""
+    The unique real root :math:`Y\ge1` of :math:`Y^3-Y^2=2u` for :math:`u\ge0`.
+
+    Both trace-dependent models whose steady shear solution is not already explicit end up here:
+    linear PTT with :math:`u=\epsilon\mathrm{Wi}^2` and FENE-P with :math:`Y=f/a`, see their
+    ``steady_shear_coefficients``.
+
+    The discriminant of that cubic is negative for every u>0 and zero only at u=0, so there is
+    exactly one real root and Cardano's formula can be used with real cube roots throughout -- no
+    branch selection and no trigonometric form. Written in terms of s rather than as the textbook
+    sum of two cube roots because the two Cardano radicands multiply to a constant, so the second
+    is 1/s; that also makes the value exactly 1 at u=0 rather than 1+O(1e-16), which matters
+    because u=0 is not a corner case but the symmetry line of every channel.
+    """
+    s = _root(1 + 27 * u + _root(54 * u + 729 * u ** 2), 3)
+    return (1 + s + 1 / s) / 3
+
+
 class ViscoelasticConstitutiveModel:
     """
     Base class for the differential constitutive models used by :py:class:`ViscoelasticEquations`.
@@ -92,6 +116,37 @@ class ViscoelasticConstitutiveModel:
         """h(C), i.e. the polymer stress up to the factor polymer_viscosity/relaxation_time."""
         raise NotImplementedError("Implement stress_matrix in " + self.__class__.__name__)
 
+    def steady_shear_coefficients(self, weissenberg_squared: ExpressionOrNum) -> tuple[ExpressionOrNum, ExpressionOrNum, ExpressionOrNum, ExpressionOrNum] | None:
+        r"""
+        The steady viscometric solution of the model, i.e. the conformation tensor in simple shear.
+
+        Rather than the tensor itself, this returns the four coefficients of
+
+        .. math::
+
+            \mathbf{C} = c_\mathrm{I}\mathbf{I} + c_\mathrm{s}\lambda\left(\mathbf{L}+\mathbf{L}^t\right)
+                + c_\mathrm{f}\lambda^2\mathbf{L}\mathbf{L}^t + c_\mathrm{g}\lambda^2\mathbf{L}^t\mathbf{L}
+
+        where :math:`\mathbf{L}=\nabla\vec{u}` is the (nilpotent) velocity gradient of the shear
+        flow. That form is frame-free -- it does not have to be told which direction the flow is in
+        and which one the gradient is in -- which is what lets
+        :py:class:`ViscoelasticInflowBC` build the condition from the inflow profile alone, in
+        planar as well as in axisymmetric coordinates. In the canonical frame (flow along x,
+        gradient along y) it reads
+        :math:`C_{xx}=c_\mathrm{I}+c_\mathrm{f}\mathrm{Wi}^2`, :math:`C_{xy}=c_\mathrm{s}\mathrm{Wi}`,
+        :math:`C_{yy}=c_\mathrm{I}+c_\mathrm{g}\mathrm{Wi}^2` and :math:`C_{zz}=c_\mathrm{I}`.
+
+        The argument is :math:`\mathrm{Wi}^2`, not :math:`\mathrm{Wi}`: every one of the four
+        coefficients is an even function of the shear rate, and passing the square is what keeps
+        them free of a 0/0 at zero shear rate -- which is where a channel's symmetry line sits, so
+        it is the ordinary case rather than a corner one.
+
+        Returns None if the model has no closed-form viscometric solution, in which case
+        :py:class:`ViscoelasticInflowBC` falls back to enforcing the constitutive equation itself
+        on the inflow boundary.
+        """
+        return None
+
 
 class OldroydB(ViscoelasticConstitutiveModel):
     r"""
@@ -116,6 +171,10 @@ class OldroydB(ViscoelasticConstitutiveModel):
 
     def stress_matrix(self, C: Expression, trace: ExpressionOrNum, identity: Expression) -> Expression:
         return C - identity
+
+    def steady_shear_coefficients(self, weissenberg_squared: ExpressionOrNum):
+        # C = [[1+2Wi^2, Wi], [Wi, 1]], the textbook viscometric solution.
+        return 1, 1, 2, 0
 
 
 class Giesekus(ViscoelasticConstitutiveModel):
@@ -147,6 +206,28 @@ class Giesekus(ViscoelasticConstitutiveModel):
 
     def stress_matrix(self, C: Expression, trace: ExpressionOrNum, identity: Expression) -> Expression:
         return C - identity
+
+    def steady_shear_coefficients(self, weissenberg_squared: ExpressionOrNum):
+        # Giesekus' own viscometric solution, in the notation of Bird, Armstrong & Hassager. The
+        # quadratic relaxation term couples the gradient direction to the shear stress, so this is
+        # the only model here that stretches C along that direction at all and hence the only one
+        # with a nonzero fourth coefficient.
+        alpha = self.alpha
+        S = _root(1 + 16 * alpha * (1 - alpha) * weissenberg_squared)
+        # Lambda^2, written as 2/(1+S) rather than as the usual (S-1)/(8*alpha*(1-alpha)*Wi^2):
+        # the two are the same number, but the latter is 0/0 both at zero shear rate and at
+        # alpha=0, and neither is a case that may be excluded here.
+        Lam = _root(2 / (1 + S))
+        # chi divided by alpha*Wi^2, to which it is proportional. Same reason: alpha=0 is the
+        # Oldroyd-B limit of the model and must come out of these formulas rather than blow up.
+        chi_reduced = 16 * (1 - alpha) / ((S + 1) ** 2 * (1 + Lam) * (1 + (1 - 2 * alpha) * Lam))
+        chi = alpha * weissenberg_squared * chi_reduced
+        # The reduced shear viscosity, which is C_xy/Wi. Giesekus shear thins, so this is below 1.
+        eta = (1 - chi) ** 2 / (1 + (1 - 2 * alpha) * chi)
+        c_gradient = -2 * alpha * eta ** 2 / (1 + _root(1 - 4 * alpha ** 2 * weissenberg_squared * eta ** 2))
+        # C_xx - C_yy is the first normal stress difference of the model, hence the c_gradient term.
+        c_flow = c_gradient + 2 * chi_reduced * (1 - alpha * chi) / (1 - chi)
+        return 1, eta, c_flow, c_gradient
 
 
 class PTT(ViscoelasticConstitutiveModel):
@@ -195,6 +276,17 @@ class PTT(ViscoelasticConstitutiveModel):
     def stress_matrix(self, C: Expression, trace: ExpressionOrNum, identity: Expression) -> Expression:
         return C - identity
 
+    def steady_shear_coefficients(self, weissenberg_squared: ExpressionOrNum):
+        # In shear the PTT solution is Oldroyd-B with Wi replaced by Wi/Y, and tr(C)-3 = 2Wi^2/Y^2
+        # closes the model: Y^3-Y^2 = 2*epsilon*Wi^2 for the linear kind.
+        if self.kind != "linear":
+            # Exponential PTT gives Y = exp(2*epsilon*Wi^2/Y^2), whose solution is a Lambert W and
+            # not an elementary expression. ViscoelasticInflowBC enforces the constitutive equation
+            # on the boundary instead.
+            return None
+        Y = _shear_thinning_root(self.epsilon * weissenberg_squared)
+        return 1, 1 / Y, 2 / Y ** 2, 0
+
 
 class FENE_CR(ViscoelasticConstitutiveModel):
     r"""
@@ -228,6 +320,13 @@ class FENE_CR(ViscoelasticConstitutiveModel):
 
     def stress_matrix(self, C: Expression, trace: ExpressionOrNum, identity: Expression) -> Expression:
         return self._f(trace) * (C - identity)
+
+    def steady_shear_coefficients(self, weissenberg_squared: ExpressionOrNum):
+        # As for PTT, shear gives Oldroyd-B with Wi/f, and tr(C)-3 = 2Wi^2/f^2 closes it -- but here
+        # that is only a quadratic, f^2-f = 2Wi^2/(L^2-3), because f depends on the trace through
+        # (L^2-trC)^-1 rather than linearly. Hence the closed form where PTT needs a cubic.
+        f = (1 + _root(1 + 8 * weissenberg_squared / (self.L ** 2 - 3))) / 2
+        return 1, 1 / f, 2 / f ** 2, 0
 
 
 class FENE_P(ViscoelasticConstitutiveModel):
@@ -272,6 +371,15 @@ class FENE_P(ViscoelasticConstitutiveModel):
 
     def stress_matrix(self, C: Expression, trace: ExpressionOrNum, identity: Expression) -> Expression:
         return self.relaxation_matrix(C, trace, identity)
+
+    def steady_shear_coefficients(self, weissenberg_squared: ExpressionOrNum):
+        # f*C - a*I = 0 in every component that the shear does not drive, so C_yy = C_zz = a/f is
+        # pulled below 1 here, unlike in any other model. Substituting the resulting trace back into
+        # f gives (f/a)^3 - (f/a)^2 = 2*Wi^2/(a^3*(L^2-3)).
+        a = self._a()
+        ratio = _shear_thinning_root(weissenberg_squared / (a ** 3 * (self.L ** 2 - 3)))
+        f = a * ratio
+        return a / f, a / f ** 2, 2 * a / f ** 3, 0
 
 
 ##############################################################################
@@ -479,6 +587,7 @@ class ViscoelasticEquations(Equations):
                 # C=identity at rest. In the log-conformation formulation the corresponding
                 # Psi=0 is already the default, so nothing has to be set there.
                 self.set_initial_condition(name + "_" + comp, 0 if comp == "xy" else 1)
+        self.define_field_by_substitution("polymer_stress", self.get_polymer_stress())
 
     def define_scaling(self):
         if self.spatial_error_estimators:
@@ -693,6 +802,200 @@ class ViscoelasticEquations(Equations):
 
 
 ##############################################################################
+# Boundary conditions
+##############################################################################
+
+class ViscoelasticInflowBC(EnforcedBC):
+    r"""
+    .. _ViscoelasticInflowBC:
+
+    The fully developed conformation tensor on an inflow boundary, for the constitutive model of the
+    :ref:`ViscoelasticEquations <ViscoelasticEquations>` of the adjacent bulk domain:
+
+    .. code-block:: python
+
+        inflow = 1.5*(1 - var("coordinate_y")**2/4)
+        eqs += DirichletBC(velocity=vector(inflow, 0)) @ "inlet"
+        eqs += ViscoelasticInflowBC(vector(inflow, 0)) @ "inlet"
+
+    Prescribing only the velocity at an inlet leaves the polymer unstretched there, so the solution
+    spends the whole upstream length relaxing towards the profile it should have had on entry. This
+    imposes that profile instead. The argument is the same inflow velocity that the
+    :py:class:`~pyoomph.meshes.bcs.DirichletBC` above uses; the velocity gradient is obtained from it
+    by differentiating symbolically with respect to the coordinates. A fully developed profile is a
+    function of the transverse coordinate alone, so that gives the shear rate and nothing else. Pass
+    ``velocity_gradient`` instead to give :math:`\nabla\vec{u}` directly.
+
+    Both the planar and the axisymmetric case are covered, and in either one it is the inflow
+    profile that says which direction the flow is in -- an axisymmetric pipe inlet is
+    ``ViscoelasticInflowBC(vector(0, w))`` with ``w`` a function of ``var("coordinate_x")``.
+
+    There are two ways of imposing the condition, selected by ``mode``:
+
+    * ``"dirichlet"`` pins the components of the (log-)conformation tensor to the model's
+      viscometric solution, which :py:meth:`ViscoelasticConstitutiveModel.steady_shear_coefficients`
+      supplies in closed form. This costs no additional degrees of freedom and is what
+      ``mode="auto"`` uses whenever the model has such a solution. It assumes the inflow to be
+      unidirectional, i.e. an actual shear flow.
+    * ``"enforced"`` instead demands, through a field of Lagrange multipliers on the boundary, that
+      the constitutive equation itself hold there with the imposed velocity gradient and no
+      variation in the flow direction. That is the same condition, but stated rather than solved,
+      so it needs no closed form and is not restricted to a unidirectional profile. It is what
+      ``mode="auto"`` falls back to -- for the exponential :py:class:`PTT`, whose viscometric
+      solution is a Lambert W function, and for any model of your own that does not implement
+      ``steady_shear_coefficients``.
+
+    The two are not equally sharp. The Dirichlet mode is exact at the nodes; the enforced one holds
+    the condition only in the weak sense, since the constraint is integrated against the Lagrange
+    multiplier's test functions and is not a polynomial, so it carries a discretisation error of the
+    order of the finite element space (measured at O(h^3) on a C2 space). It is also a genuine
+    unknown of the problem rather than a pinned value, and therefore rather less forgiving of a cold
+    start: a stationary solve from rest at a large Weissenberg number may need continuation where
+    the Dirichlet mode would converge straight away. Where a model offers both, prefer the default.
+
+    Note that this does not touch the velocity itself: add the usual
+    :py:class:`~pyoomph.meshes.bcs.DirichletBC` for that, with the same profile.
+
+    Args:
+        velocity: the imposed inflow velocity profile, as a vector expression.
+        velocity_gradient: the velocity gradient, as a 3x3 matrix, instead of ``velocity``.
+        mode: "auto" (default), "dirichlet" or "enforced", see above.
+        space: the finite element space of the Lagrange multipliers of the enforced mode. Defaults to the space of the conformation tensor.
+    """
+
+    required_parent_type = ViscoelasticEquations
+
+    def __init__(self, velocity: Expression | None = None, *,
+                 velocity_gradient: Expression | None = None,
+                 mode: Literal["auto", "dirichlet", "enforced"] = "auto",
+                 space: FiniteElementSpaceEnum | None = None):
+        super().__init__(space=space)
+        if (velocity is None) == (velocity_gradient is None):
+            raise ValueError("ViscoelasticInflowBC must be given either the inflow velocity profile "
+                             "or its gradient, but not both")
+        if mode not in {"auto", "dirichlet", "enforced"}:
+            raise ValueError("ViscoelasticInflowBC argument 'mode' must be 'auto', 'dirichlet' or "
+                             "'enforced', got " + str(mode))
+        self.velocity = velocity
+        self.velocity_gradient = velocity_gradient
+        self.mode: Literal["auto", "dirichlet", "enforced"] = mode
+
+    def _viscoelastic(self) -> ViscoelasticEquations:
+        equations = self.get_parent_equations()
+        if not isinstance(equations, ViscoelasticEquations):
+            raise RuntimeError("ViscoelasticInflowBC must be attached to a boundary of a domain "
+                               "with exactly one set of ViscoelasticEquations")
+        return equations
+
+    def _gradient(self) -> Expression:
+        if self.velocity_gradient is not None:
+            return self.velocity_gradient
+        assert self.velocity is not None
+        # Differentiated symbolically with respect to the coordinates, not with grad(). grad() would
+        # resolve the derivative through the shape functions of the boundary element, and the result
+        # is then no longer a pointwise expression, which a strong Dirichlet value has to be.
+        # Symbolic differentiation also has nothing to say about the flow direction: the profile is
+        # a function of the transverse coordinate alone, so its streamwise derivative comes out as
+        # zero by itself, which is exactly the fully developed assumption.
+        def derivative(component: int, coordinate: str) -> ExpressionOrNum:
+            return symbolic_diff(self.velocity[component], coordinate, hold_until_codegen=False)
+
+        entries: list[list[ExpressionOrNum]] = [
+            [derivative(i, "coordinate_x"), derivative(i, "coordinate_y"), 0] for i in range(2)]
+        entries.append([0, 0, 0])
+        coordinate_system = self.get_coordinate_system()
+        if isinstance(coordinate_system, AxisymmetricCoordinateSystem):
+            # The azimuthal entry of the axisymmetric velocity gradient, u_r/r. It vanishes for the
+            # unidirectional inflow the closed-form mode assumes, but not for a general one.
+            radial = 1 if coordinate_system.use_x_as_symmetry_axis else 0
+            radius = var("coordinate_y" if coordinate_system.use_x_as_symmetry_axis else "coordinate_x")
+            entries[2][2] = self.velocity[radial] / radius
+        return matrix(entries)
+
+    # The model's viscometric solution, rebuilt in whatever frame the inflow profile happens to be
+    # in, or None if the model has no closed form for it.
+    def _closed_form_conformation(self) -> Expression | None:
+        equations = self._viscoelastic()
+        L = self._gradient()
+        Lt = transpose(L)
+        relaxation_time = equations.relaxation_time
+        # tr(L*L^t) is the squared Frobenius norm of the velocity gradient, i.e. the squared shear
+        # rate of a unidirectional flow. Taking the Weissenberg number from it rather than from a
+        # named component is what keeps this free of any assumption about the orientation.
+        coefficients = equations.model.steady_shear_coefficients(relaxation_time ** 2 * trace(matproduct(L, Lt)))
+        if coefficients is None:
+            return None
+        c_isotropic, c_shear, c_flow, c_gradient = coefficients
+        return (c_isotropic * identity_matrix(3) + c_shear * relaxation_time * (L + Lt)
+                + c_flow * relaxation_time ** 2 * matproduct(L, Lt)
+                + c_gradient * relaxation_time ** 2 * matproduct(Lt, L))
+
+    # (row, column) of each component of the symmetric conformation tensor, mirroring
+    # ViscoelasticEquations._component_map.
+    _component_indices = {"xx": (0, 0), "xy": (0, 1), "yy": (1, 1), "zz": (2, 2), "aa": (2, 2)}
+
+    def _constrained_components(self) -> list[str]:
+        # Which of them exist is read off the bulk domain rather than asked of the bulk equations:
+        # their _component_map goes through the coordinate system and hence through their own code
+        # generator, which is not the current one while an interface condition is being defined.
+        name = self._viscoelastic().field_name
+        domain = self.get_parent_domain()
+        return [component for component in self._component_indices
+                if domain.get_space_of_field(name + "_" + component) != ""]
+
+    def _uses_lagrange_multipliers(self) -> bool:
+        if self.mode == "dirichlet":
+            return False
+        return self.mode == "enforced" or self._closed_form_conformation() is None
+
+    def define_fields(self):
+        if self._uses_lagrange_multipliers():
+            equations = self._viscoelastic()
+            # Only the names of the constrained fields are needed to create the Lagrange multipliers;
+            # the constraints themselves are assembled in define_residuals, since building the
+            # conformation tensor out of the bulk fields belongs there.
+            self.constraints = {equations.field_name + "_" + component: Expression(0)
+                                for component in self._constrained_components()}
+        super().define_fields()
+
+    def define_residuals(self):
+        equations = self._viscoelastic()
+        name = equations.field_name
+        conformation = None if self._uses_lagrange_multipliers() else self._closed_form_conformation()
+
+        if conformation is None:
+            if self.mode == "dirichlet":
+                raise RuntimeError("The constitutive model " + type(equations.model).__name__ +
+                                   " has no closed-form solution for steady shear, so "
+                                   "ViscoelasticInflowBC cannot use mode='dirichlet' with it. Use "
+                                   "mode='enforced' (or the default 'auto') instead.")
+            C = equations.get_conformation_tensor()
+            L = self._gradient()
+            relaxation = equations.model.relaxation_matrix(C, trace(C), identity_matrix(3))
+            # Fully developed means that C does not change along the flow, so its material
+            # derivative vanishes and the constitutive equation collapses to the algebraic balance
+            # between the upper-convected stretching and the relaxation. Multiplied by the
+            # relaxation time, since the constraint has to be dimensionless.
+            residual = equations.relaxation_time * (matproduct(L, C) + matproduct(C, transpose(L))) - relaxation
+            self.constraints = {name + "_" + component: residual[self._component_indices[component]]
+                                for component in self._constrained_components()}
+            super().define_residuals()
+            return
+
+        if equations.formulation == "log-conf":
+            # The out-of-plane direction is an eigendirection of the shear solution, so only the
+            # in-plane block needs the matrix logarithm.
+            in_plane = symmetric_2x2_matrix_log(conformation)
+            values = {"xx": in_plane[0, 0], "xy": in_plane[0, 1], "yy": in_plane[1, 1]}
+            out_of_plane = log(conformation[2, 2])
+        else:
+            values = {"xx": conformation[0, 0], "xy": conformation[0, 1], "yy": conformation[1, 1]}
+            out_of_plane = conformation[2, 2]
+        for component in self._constrained_components():
+            self.set_Dirichlet_condition(name + "_" + component, values.get(component, out_of_plane))
+
+
+##############################################################################
 # Utilities
 ##############################################################################
 
@@ -739,6 +1042,38 @@ def oldroyd_b_shear_conformation(weissenberg: ExpressionOrNum) -> Expression:
 
     Useful to impose a fully developed inflow profile: combine with
     :py:func:`symmetric_2x2_matrix_log` for the log-conformation formulation. The shear direction
-    is x, the gradient direction y.
+    is x, the gradient direction y. See :py:func:`steady_shear_conformation` for the same thing for
+    an arbitrary constitutive model, and :py:class:`ViscoelasticInflowBC` for the boundary condition
+    that this is usually wanted for.
     """
     return matrix([[1 + 2 * weissenberg ** 2, weissenberg], [weissenberg, 1]], fill_to_max_vector_dim=False)
+
+
+def steady_shear_conformation(model: ViscoelasticConstitutiveModel, weissenberg: ExpressionOrNum) -> Expression:
+    r"""
+    The steady conformation tensor of a constitutive model in simple shear at
+    :math:`\mathrm{Wi}=\lambda\dot\gamma`, as a full 3x3 matrix, with the flow along x and the
+    velocity gradient along y.
+
+    This generalises :py:func:`oldroyd_b_shear_conformation` to the other models. Note that
+    :math:`C_{zz}` is 1 for all of them except :py:class:`FENE_P`, whose relaxation does not vanish
+    at an eigenvalue of 1, and that :math:`C_{yy}` is 1 for all of them except :py:class:`Giesekus`
+    and again FENE-P.
+
+    Args:
+        model: the constitutive model.
+        weissenberg: the Weissenberg number, i.e. the shear rate times the relaxation time.
+
+    Raises:
+        NotImplementedError: if the model has no closed-form viscometric solution, as is the case
+            for the exponential :py:class:`PTT`. :py:class:`ViscoelasticInflowBC` can still impose
+            the inflow condition there, by enforcing the constitutive equation on the boundary.
+    """
+    coefficients = model.steady_shear_coefficients(weissenberg ** 2)
+    if coefficients is None:
+        raise NotImplementedError("The constitutive model " + type(model).__name__ + " does not "
+                                  "provide a closed-form solution for steady shear")
+    c_isotropic, c_shear, c_flow, c_gradient = coefficients
+    return matrix([[c_isotropic + c_flow * weissenberg ** 2, c_shear * weissenberg, 0],
+                   [c_shear * weissenberg, c_isotropic + c_gradient * weissenberg ** 2, 0],
+                   [0, 0, c_isotropic]])

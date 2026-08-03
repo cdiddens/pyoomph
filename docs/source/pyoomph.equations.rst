@@ -29,6 +29,7 @@ Submodules
    pyoomph.equations.solid
    pyoomph.equations.topological_changes
    pyoomph.equations.tracers
+   pyoomph.equations.viscoelastic
 
 Module contents
 ---------------
