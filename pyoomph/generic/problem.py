@@ -818,9 +818,15 @@ class Problem(_pyoomph.Problem):
         return var(name,domain=domain),testfunction(name,domain=domain)
 
 
-    def get_cached_mesh_data(self,msh:str | AnySpatialMesh,nondimensional:bool=False,tesselate_tri:bool=True,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:MeshDataCacheOperatorBase | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True) -> "MeshDataCacheEntry":
-        """Return the current data (i.e. values) of a mesh. These are cached in case they are required multiple times, e.g. for plotting and output. 
-        The cache is invalidated whenever we solve the problem or set some initial condition.  
+    @overload
+    def get_cached_mesh_data(self,msh:str | AnySpatialMesh,nondimensional:bool=...,tesselate_tri:bool=...,eigenvector:int | Sequence[int] | None=...,eigenmode:MeshDataEigenModes=...,history_index:int=...,with_halos:bool=...,operator:MeshDataCacheOperatorBase | None=...,discontinuous:bool=...,add_eigen_to_mesh_positions:bool=...,global_mesh:Literal[False]=...) -> "MeshDataCacheEntry": ...
+
+    @overload
+    def get_cached_mesh_data(self,msh:str | AnySpatialMesh,nondimensional:bool=...,tesselate_tri:bool=...,eigenvector:int | Sequence[int] | None=...,eigenmode:MeshDataEigenModes=...,history_index:int=...,with_halos:bool=...,operator:MeshDataCacheOperatorBase | None=...,discontinuous:bool=...,add_eigen_to_mesh_positions:bool=...,global_mesh:bool=...) -> "MeshDataCacheEntry | None": ...
+
+    def get_cached_mesh_data(self,msh:str | AnySpatialMesh,nondimensional:bool=False,tesselate_tri:bool=True,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:MeshDataCacheOperatorBase | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,global_mesh:bool=False) -> "MeshDataCacheEntry | None":
+        """Return the current data (i.e. values) of a mesh. These are cached in case they are required multiple times, e.g. for plotting and output.
+        The cache is invalidated whenever we solve the problem or set some initial condition.
 
         Args:
             msh (Union[str,AnySpatialMesh]): Mesh object or mesh name
@@ -831,15 +837,16 @@ class Problem(_pyoomph.Problem):
             history_index (int, optional): Set to 1 or 2 to access the previous time steps. Defaults to 0.
             with_halos (bool, optional): Include halos to the output. Defaults to False.
             operator (Optional[MeshDataCacheOperatorBase], optional): Apply an operator on the cache, e.g. to add eigenvectors or extrude it in 3d. Defaults to None.
+            global_mesh (bool, optional): Get the whole mesh instead of this process' partition. Only makes a difference on a mesh distributed with --distribute, where it is a collective call that returns the merged data on rank 0 and None on all other ranks. Every rank must reach it - either by calling this with the same arguments, or by being inside a :py:func:`~pyoomph.meshes.meshdatamerge.run_with_global_mesh_data` block while rank 0 asks. Defaults to False.
 
         Returns:
-            MeshDataCacheEntry: The combined information of the mesh cache
+            MeshDataCacheEntry: The combined information of the mesh cache. None on the non-root ranks of a distributed mesh when global_mesh is set.
         """
-        
+
         if isinstance(msh,str):
             msh=self.get_mesh(msh)
-        
-        return self._mesh_data_cache.get_data(msh,nondimensional=nondimensional,tesselate_tri=tesselate_tri,eigenvector=eigenvector,eigenmode=eigenmode,history_index=history_index,with_halos=with_halos,operator=operator,discontinuous=discontinuous,add_eigen_to_mesh_positions=add_eigen_to_mesh_positions)
+
+        return self._mesh_data_cache.get_data(msh,nondimensional=nondimensional,tesselate_tri=tesselate_tri,eigenvector=eigenvector,eigenmode=eigenmode,history_index=history_index,with_halos=with_halos,operator=operator,discontinuous=discontinuous,add_eigen_to_mesh_positions=add_eigen_to_mesh_positions,global_mesh=global_mesh)
 
     def invalidate_cached_mesh_data(self,only_eigens:bool=False):
         """Mesh data is cached for potentially multiple usage (e.g. plotting and output to file). Whenever we change anything (e.g. changing values), we must hence invalidate the cache.

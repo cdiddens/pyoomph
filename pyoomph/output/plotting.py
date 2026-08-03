@@ -148,11 +148,18 @@ class BasePlotter:
         pass
 
     def plot(self):
+        # Plot definitions are written without any notion of MPI ranks, and a distributed mesh must be
+        # drawn as a whole, so rank 0 does the plotting while the others answer its requests for the
+        # merged mesh data. Without --distribute (and in serial) this is just a direct call.
+        from ..meshes.meshdatamerge import run_with_global_mesh_data
+        run_with_global_mesh_data(self._named_problems,self._do_plot,context="plotting")
+
+    def _do_plot(self):
         if not self._initialised:
             self.initialise()
             self._initialised=True
         self._has_invalid_triangulation=False
-        self._reset_before_plot()        
+        self._reset_before_plot()
         if self.eigenvector is not None:
             if self.eigenvector >= len(self._problem._last_eigenvectors): #type:ignore
                 #print("SKIPPING PLOT :"+str(self._problem._last_eigenvectors))
@@ -2464,16 +2471,26 @@ class MatplotlibPlotter(BasePlotter):
 
 
     def _get_mesh_data(self,msh:str | AnySpatialMesh,problem_name:str="",ignore_eigenfactors:bool=False,mirror_x:bool=False):
-        
-        if ignore_eigenfactors or (self._eigenfactor_right is None or self._eigenfactor_left is None or self._eigenvector_for_animation is None):            
-            return self.get_problem(problem_name=problem_name).get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=True,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
+
+        if ignore_eigenfactors or (self._eigenfactor_right is None or self._eigenfactor_left is None or self._eigenvector_for_animation is None):
+            res=self.get_problem(problem_name=problem_name).get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=True,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,global_mesh=True)
+            assert res is not None # only rank 0 plots, and that is the rank the merged data ends up on
+            return res
         else:
-            self.get_problem(problem_name=problem_name).invalidate_cached_mesh_data()
-            olddofs,_=self.get_problem(problem_name=problem_name).get_current_dofs()
+            # The dofs are perturbed and restored around the extraction, which only this rank does -
+            # so on a distributed mesh the other ranks would contribute their unperturbed data to the
+            # merge and the animation would silently show a mixture of both.
+            problem=self.get_problem(problem_name=problem_name)
+            mesh_obj=problem.get_mesh(msh) if isinstance(msh,str) else msh
+            from ..meshes.meshdatamerge import needs_merging
+            if needs_merging(mesh_obj):
+                raise NotImplementedError("Eigendynamics animations are not supported on a mesh distributed with --distribute yet")
+            problem.invalidate_cached_mesh_data()
+            olddofs,_=problem.get_current_dofs()
             ef=self._eigenfactor_left if mirror_x else self._eigenfactor_right
-            self.get_problem(problem_name=problem_name).set_current_dofs(olddofs+numpy.real(ef*self._eigenvector_for_animation))
-            res=self.get_problem(problem_name=problem_name).get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=True,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
-            self.get_problem(problem_name=problem_name).set_current_dofs(olddofs)
+            problem.set_current_dofs(olddofs+numpy.real(ef*self._eigenvector_for_animation))
+            res=problem.get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=True,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
+            problem.set_current_dofs(olddofs)
             return res
 
 

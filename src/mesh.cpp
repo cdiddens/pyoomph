@@ -54,6 +54,15 @@ namespace pyoomph
   // (inform_coarser_neighbors_for_tesselated_numpy) before the per-element sub-element counts are summed.
   int Mesh::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nelem, bool discontinuous) // Gets the number of required elemental indices
   {
+    return this->get_num_numpy_elemental_indices(tesselate_tri, nelem, discontinuous, NULL);
+  }
+
+  // As above, but optionally also records, for each of the nelem output rows, the index of the mesh
+  // element it stems from. The two must be produced by the same pass: an element's sub-element count
+  // depends on the hanging-neighbour information gathered below, so a second, independent loop over
+  // the elements would be one more thing that can silently drift out of sync with to_numpy's rows.
+  int Mesh::get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nelem, bool discontinuous, std::vector<int> *source_element_indices)
+  {
     unsigned nelement = this->nelement();
 
     unsigned cnt=0;
@@ -86,19 +95,60 @@ namespace pyoomph
 
     int res = 0;
     nelem = 0;
+    if (source_element_indices)
+      source_element_indices->clear();
     for (unsigned int ne = 0; ne < nelement; ne++)
     {
 /*
 #ifdef OOMPH_HAS_MPI
       if (this->element_pt(ne)->is_halo()) continue; // Skip halo elements, as they will be handled by the owning process
-#endif      
+#endif
 */
       BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
       unsigned nsubelem = 0;
       res = std::max(res, be->get_num_numpy_elemental_indices(tesselate_tri, nsubelem, additional_elemental_tri_nodes));
       nelem += nsubelem;
+      if (source_element_indices)
+        source_element_indices->insert(source_element_indices->end(), nsubelem, (int)ne);
     }
     return res;
+  }
+
+  // For each element row that to_numpy(tesselate_tri, ..., discontinuous) produces, the index of the
+  // mesh element it was generated from. Needed because the rows are sub-elements, not elements: with
+  // tesselate_tri a quad becomes two triangles (more if hanging neighbours force extra ones), so the
+  // rows cannot be zipped with element_pt() -- which is what any per-element decision on the Python
+  // side (halo filtering, in particular) has to go through.
+  std::vector<int> Mesh::get_numpy_element_source_indices(bool tesselate_tri, bool discontinuous)
+  {
+    std::vector<int> res;
+    unsigned nelem = 0;
+    this->get_num_numpy_elemental_indices(tesselate_tri, nelem, discontinuous, &res);
+    return res;
+  }
+
+  // Row indices, in the node ordering to_numpy uses, of the nodes this mesh shares with process p.
+  // Entry j corresponds to entry j of process p's own list for this rank: oomph-lib builds
+  // Shared_node_pt in a matched order on both sides (Mesh::setup_shared_node_scheme), which makes
+  // this the exact node correspondence needed to merge the per-rank meshes into a global one - no
+  // geometric tolerance involved.
+  std::vector<int> Mesh::get_shared_node_numpy_indices(unsigned p)
+  {
+#ifdef OOMPH_HAS_MPI
+    std::map<oomph::Node *, unsigned> nodemap;
+    this->fill_node_map(nodemap);
+    unsigned n = this->nshared_node(p);
+    std::vector<int> res(n, -1);
+    for (unsigned j = 0; j < n; j++)
+    {
+      auto it = nodemap.find(this->shared_node_pt(p, j));
+      if (it != nodemap.end())
+        res[j] = (int)it->second;
+    }
+    return res;
+#else
+    return std::vector<int>();
+#endif
   }
 
   // Lazily construct (at Lagrangian coordinates, history index 0) and cache the KD-tree used for
@@ -1959,10 +2009,18 @@ namespace pyoomph
     for (unsigned int ne = 0; ne < nelement; ne++)
     {
       BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
-      elemtypes[ne] = be->get_meshio_type_index();
       unsigned nsubelem = 0;
 
       unsigned nindices = be->get_num_numpy_elemental_indices(tesselate_tri, nsubelem, additional_elemental_tri_nodes); // nindices
+      // The type belongs to the output ROW, not to the element: with tesselate_tri an element covers
+      // several rows (a Quad9 becomes 8 triangles). Writing it at elemtypes[ne] left every row beyond
+      // the element count filled with whatever was in the buffer, and gave the first row of a split
+      // element the parent's type although it only carries the sub-element's nodes.
+      // Only 2d elements are ever split, and always into linear triangles (see the tesselate_tri
+      // branches of BulkElementQuad2d*/Tri2d*::get_num_numpy_elemental_indices), hence type 3.
+      int etype = (int)(nsubelem > 1 ? 3 : be->get_meshio_type_index());
+      for (unsigned isub = 0; isub < nsubelem; isub++)
+        elemtypes[current_subelem + isub] = etype;
       std::vector<unsigned> local_ni_to_elemindex;
       for (unsigned isubelem = 0; isubelem < nsubelem; isubelem++)
       {
@@ -4615,6 +4673,32 @@ namespace pyoomph
       }
     }
     return result;
+  }
+
+  // pyoomph builds interface meshes itself, so oomph-lib never sets up a shared node scheme on them
+  // and the base class version would return nothing. The nodes are the bulk mesh's nodes, so take the
+  // bulk scheme - which both ranks agree on entry by entry - and translate it into this mesh's own
+  // node numbering. Bulk nodes this interface does not contain become -1 rather than being dropped:
+  // removing them would shift the entries and destroy the correspondence with the other rank's list.
+  std::vector<int> InterfaceMesh::get_shared_node_numpy_indices(unsigned p)
+  {
+#ifdef OOMPH_HAS_MPI
+    if (!bulkmesh)
+      return std::vector<int>();
+    std::map<oomph::Node *, unsigned> nodemap;
+    this->fill_node_map(nodemap);
+    unsigned n = bulkmesh->nshared_node(p);
+    std::vector<int> res(n, -1);
+    for (unsigned j = 0; j < n; j++)
+    {
+      auto it = nodemap.find(bulkmesh->shared_node_pt(p, j));
+      if (it != nodemap.end())
+        res[j] = (int)it->second;
+    }
+    return res;
+#else
+    return std::vector<int>();
+#endif
   }
 
   // Counts nodes touched by this interface mesh's elements: unique nodes (shared

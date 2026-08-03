@@ -195,6 +195,14 @@ namespace pyoomph
 		void set_output_scale(std::string fname, GiNaC::ex s, DynamicBulkElementInstance *_code);
 		double get_output_scale(std::string fname);
 		int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nelem, bool discontinuous); // Gets the number of required elemental indices
+		// Same, but also fills source_element_indices (if non-NULL) with the mesh element index behind each output row
+		int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nelem, bool discontinuous, std::vector<int> *source_element_indices);
+		// Mesh element index behind each element row produced by to_numpy with the same arguments. The rows are
+		// sub-elements (tesselate_tri splits a quad into triangles), so they cannot be zipped with element_pt().
+		std::vector<int> get_numpy_element_source_indices(bool tesselate_tri, bool discontinuous);
+		// Row indices, in to_numpy's node ordering, of the nodes shared with process p, index-matched to process p's
+		// own list for this rank (empty without MPI). Used to merge the per-rank meshes into one global mesh.
+		virtual std::vector<int> get_shared_node_numpy_indices(unsigned p);
 		// Fill flat buffers with node coordinates and per-element connectivity/type info for numpy-based plotting/export.
 		// tesselate_tri splits quads/general elements into triangles; discontinuous keeps per-element (DG-style) node copies.
 		void to_numpy(double *xbuffer, int *eleminds, unsigned elemstride, int *elemtypes, bool tesselate_tri, bool nondimensional, double *D0_data, double *DL_data, unsigned history_index, bool discontinuous);
@@ -357,6 +365,7 @@ namespace pyoomph
 		Node *get_some_node() override { return (this->nelement() ? dynamic_cast<Node *>(dynamic_cast<oomph::FiniteElement *>(this->element_pt(0))->node_pt(0)) : NULL); }
 		void fill_node_map(std::map<oomph::Node *, unsigned> &nodemap) override;
 		std::vector<oomph::Node *> fill_reversed_node_map(bool discontinuous = false) override;
+		std::vector<int> get_shared_node_numpy_indices(unsigned p) override; // Delegates to the bulk mesh's scheme
 		int has_interface_dof_id(std::string n) override { return bulkmesh->has_interface_dof_id(n); }
 		unsigned resolve_interface_dof_id(std::string n) override { return bulkmesh->resolve_interface_dof_id(n); }
 		virtual void setup_boundary_information(pyoomph::Mesh *parent);

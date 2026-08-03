@@ -1206,6 +1206,21 @@ void PyReg_Mesh(nb::module_ &m)
 			 { m->generate_interface_elements(bn, im->mesh(), jitcode); }), nb::arg("boundary_name"), nb::arg("interface_mesh"), nb::arg("code_instance"), "Creates interface elements attached to the given boundary of this (bulk) mesh, using the given compiled equation code, and adds them to the given interface mesh")
 		.def("is_mesh_distributed",mesh_method([](pyoomph::Mesh *m)
 			 { return m->is_mesh_distributed(); }), "Returns whether this mesh is distributed across multiple MPI processes")
+		.def("get_numpy_element_source_indices",mesh_method([](pyoomph::Mesh *m, bool tesselate_tri, bool discontinuous)
+			 { return vector_to_ndarray(m->get_numpy_element_source_indices(tesselate_tri, discontinuous)); }),
+			 nb::arg("tesselate_tri"), nb::arg("discontinuous") = false,
+			 "For each element row that to_numpy produces with the same arguments, the index of the mesh element it stems from. "
+			 "The rows are sub-elements (with tesselate_tri, a quad yields two triangles, more if hanging neighbours require it), "
+			 "so they must not be zipped with element_pt() directly - use this to look up the element behind a row, e.g. to decide "
+			 "whether the row belongs to a halo element")
+		.def("get_shared_node_numpy_indices",mesh_method([](pyoomph::Mesh *m, unsigned proc)
+			 { return vector_to_ndarray(m->get_shared_node_numpy_indices(proc)); }),
+			 nb::arg("proc"),
+			 "In parallel (MPI) runs, the row indices - in the node ordering used by to_numpy - of the nodes this mesh shares with "
+			 "process proc. Entry j is the same node as entry j of process proc's own list for this rank, which makes this an exact "
+			 "node correspondence for merging the distributed mesh data into one global mesh. An entry is -1 if the shared node is "
+			 "not contained in this mesh (interface meshes take the scheme from their bulk mesh, and keep the -1 placeholders so the "
+			 "correspondence is not shifted). Empty on a non-distributed mesh")
 		.def("_save_state",mesh_method([](pyoomph::Mesh *m)
 			 {std::vector<double> data; m->_save_state(data); return vector_to_ndarray(data); }), "Serializes the current state of this mesh (nodal positions/values, refinement pattern, ...) into a flat array of doubles, for checkpointing")
 		.def("_setup_information_from_old_mesh",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh){ self->_setup_information_from_old_mesh(old_mesh->mesh()); }), nb::arg("old_mesh"), "Prepares this (new) mesh to inherit information (e.g. for state restoration) from an old mesh")

@@ -26,90 +26,217 @@ from __future__ import annotations
 #
 # ========================================================================
  
+from dataclasses import dataclass, fields as dataclass_fields, replace as dataclass_replace
+
 from .. import _pyoomph_core as _pyoomph
 from ..typings import *
 import numpy
 
 
-from .mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d, MeshFromTemplateBase 
+from .mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d, MeshFromTemplateBase
 from ..expressions import ExpressionOrNum,Expression
 from ..expressions.units import unit_to_string
 
 MeshDataEigenModes:TypeAlias=Literal["abs","real","imag","merge","angle"]
 
+
+@dataclass(frozen=True)
+class MeshDataCacheKey:
+    """Identifies one option set of extracted mesh data, i.e. one slot in the :py:class:`MeshDataCacheStorage`.
+
+    Everything that changes the *content* of a :py:class:`MeshDataCacheEntry` must be a field here -
+    otherwise two different requests would share a cache slot and the second one would silently get
+    the first one's data. Do not access the fields positionally; that is what this class replaced.
+
+    ``operator`` is an arbitrary object and is hashed by identity, so two structurally identical
+    operator instances still get separate cache slots.
+    """
+    nondimensional:bool=False
+    tesselate_tri:bool=True
+    eigenvector:int | tuple[int,...] | None=None
+    eigenmode:MeshDataEigenModes="abs"
+    history_index:int=0
+    with_halos:bool=False
+    operator:"MeshDataCacheOperatorBase | None"=None
+    discontinuous:bool=False
+    add_eigen_to_mesh_positions:bool=True
+    global_mesh:bool=False
+
+    @classmethod
+    def create(cls,eigenvector:int | Sequence[int] | None=None,**kwargs:Any) -> "MeshDataCacheKey":
+        """Builds a key, normalizing the eigenvector selection. Sequences become a sorted tuple: they
+        must be hashable to serve as a key, and [1,0] must land in the same slot as [0,1]."""
+        if isinstance(eigenvector,(list,set,tuple)):
+            eigenvector=tuple(sorted(set(eigenvector)))
+        return cls(eigenvector=eigenvector,**kwargs)
+
+    def as_kwargs(self) -> dict[str,Any]:
+        # Not dataclasses.asdict: that deep-copies everything that is not itself a dataclass, i.e. it
+        # would clone the operator and thereby break its identity (and any state it carries).
+        return {f.name:getattr(self,f.name) for f in dataclass_fields(self)}
+
+    @property
+    def depends_on_eigen(self) -> bool:
+        """Whether the data behind this key changes when the eigenvectors change, i.e. whether
+        ``invalidate_cached_mesh_data(only_eigens=True)`` must flush it."""
+        return self.eigenvector is not None or (self.operator is not None and self.operator.depends_on_eigen())
+
+
 class MeshDataCacheEntry:
-    def __init__(self,msh:AnySpatialMesh,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
+    def __init__(self,msh:AnySpatialMesh,key:MeshDataCacheKey):
         assert isinstance(msh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh))
-        
+
         self.mesh=msh
-        self.eigenvector = eigenvector
-        self.eigenmode = eigenmode
-        self.history_index=history_index
-        self.with_halos=with_halos
+        self.key=key
+        # Mirrored as attributes since operators and output classes read them off the entry
+        self.nondimensional=key.nondimensional
+        self.tesselate_tri=key.tesselate_tri
+        self.eigenvector:int | tuple[int,...] | None = key.eigenvector
+        self.eigenmode = key.eigenmode
+        self.history_index=key.history_index
+        self.with_halos=key.with_halos
+        self.operator=key.operator
+        self.discontinuous=key.discontinuous
+        self.add_eigen_to_mesh_positions=key.add_eigen_to_mesh_positions
         self.merged_eigendata:dict[int,dict[str,Any]]={}
-        self.discontinuous=discontinuous
-        self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
         if self.eigenmode not in {"abs","real","imag","merge","angle"}:
             raise RuntimeError("Unknown eigenmode "+str(self.eigenmode))
         if isinstance(self.eigenvector,int):
-            if eigenmode=="merge":
-                self.eigenvector=[self.eigenvector]
+            if self.eigenmode=="merge":
+                self.eigenvector=(self.eigenvector,)
             else:
                 backup_dofs, backup_pinned = self.mesh.get_problem().set_eigenfunction_as_dofs(self.eigenvector, mode=self.eigenmode,additive_mesh_positions=self.add_eigen_to_mesh_positions)
 
-        if isinstance(self.eigenvector,(list,set)):
-            if eigenmode!="merge":
+        if isinstance(self.eigenvector,tuple):
+            # Tuples arrive here from MeshDataCacheKey.create, which normalizes any sequence of
+            # eigenvector indices. Before the key was normalized this check only looked at list/set
+            # and was therefore dead: a list of eigenvectors with a non-merge eigenmode used to
+            # produce plain (non-eigen) data instead of raising.
+            if self.eigenmode!="merge":
                 raise RuntimeError("Multiple eigenvectors in MeshDataCache only works if eigenmode is set to 'merge'")
 
-        if eigenmode=="merge" and eigenvector!=None:
+        if self.eigenmode=="merge" and self.eigenvector is not None:
             backup_dofs:NPFloatArray | None=None
             backup_pinned:NPFloatArray | None=None
-            for ev in cast(list[int],self.eigenvector):
+            for ev in cast(Sequence[int],self.eigenvector):
                 backup = self.mesh.get_problem().set_eigenfunction_as_dofs(ev,mode="real",additive_mesh_positions=self.add_eigen_to_mesh_positions)
                 if backup_dofs is None:
                     backup_dofs, backup_pinned=backup
-                real_nodal_values, elem_indices, elem_types, nodal_field_inds, real_D0_data, real_DL_data, elemental_field_inds = msh.to_numpy(tesselate_tri, nondimensional, history_index,discontinuous) #type:ignore
+                real_nodal_values, elem_indices, elem_types, nodal_field_inds, real_D0_data, real_DL_data, elemental_field_inds = msh.to_numpy(key.tesselate_tri, key.nondimensional, key.history_index,key.discontinuous) #type:ignore
                 self.mesh.get_problem().set_eigenfunction_as_dofs(ev, mode="imag",additive_mesh_positions=self.add_eigen_to_mesh_positions)
-                imag_nodal_values, elem_indices, elem_types, nodal_field_inds, imag_D0_data, imag_DL_data, elemental_field_inds = msh.to_numpy(tesselate_tri, nondimensional, history_index,discontinuous) #type:ignore
-                self.merged_eigendata[ev]={"nodal_values":(real_nodal_values,imag_nodal_values),"DL_data":(real_DL_data,imag_DL_data),"D0_data":(real_D0_data,real_D0_data)}
+                imag_nodal_values, elem_indices, elem_types, nodal_field_inds, imag_D0_data, imag_DL_data, elemental_field_inds = msh.to_numpy(key.tesselate_tri, key.nondimensional, key.history_index,key.discontinuous) #type:ignore
+                self.merged_eigendata[ev]={"nodal_values":(real_nodal_values,imag_nodal_values),"DL_data":(real_DL_data,imag_DL_data),"D0_data":(real_D0_data,imag_D0_data)}
             if backup_dofs is not None:
                 assert backup_pinned is not None
                 self.mesh.get_problem().set_all_values_at_current_time(backup_dofs, backup_pinned, not self.add_eigen_to_mesh_positions)
         assert isinstance(msh,(MeshFromTemplateBase,InterfaceMesh))
-        
-        self.nodal_values, self.elem_indices, self.elem_types, self.nodal_field_inds, self.D0_data, self.DL_data, self.elemental_field_inds = msh.to_numpy(tesselate_tri,nondimensional,history_index,discontinuous)
-        
+
+        self.nodal_values, self.elem_indices, self.elem_types, self.nodal_field_inds, self.D0_data, self.DL_data, self.elemental_field_inds = msh.to_numpy(key.tesselate_tri,key.nondimensional,key.history_index,key.discontinuous)
+
+        self._dropped_node_rows:NPBoolArray | None=None # set below if halo node rows were removed
         if (not self.with_halos) and msh.is_mesh_distributed():
-            newei:list[list[int]]=[]
-            newet:list[int]=[]
-            for i,(ei,et) in enumerate(zip(self.elem_indices,self.elem_types)):
-                #print("Element",i,"has proc ID",i,ei,et)
-                if msh.element_pt(i).non_halo_proc_ID()<0:
-                    newei.append(ei)
-                    newet.append(et)
-            self.elem_indices:NPIntArray =numpy.array(newei,dtype=numpy.int32)  #type:ignore
-            self.elem_types:NPIntArray=numpy.array(newet,dtype=numpy.int32) #type:ignore
+            # A row of elem_indices is a SUB-element, not a mesh element: with tesselate_tri a Quad9
+            # becomes 8 triangles. So the owning element of a row must be looked up (it used to be
+            # assumed to be element_pt(row), which indexed past nelement() as soon as anything was
+            # split). D0/DL are indexed by the same rows and are dropped along with them - otherwise
+            # the elemental fields end up belonging to different elements than the connectivity.
+            src=msh.get_numpy_element_source_indices(key.tesselate_tri,key.discontinuous)
+            owned=numpy.array([msh.element_pt(i).non_halo_proc_ID()<0 for i in range(msh.nelement())],dtype=bool)
+            keep=owned[src] if len(src) else numpy.zeros((0,),dtype=bool)
+            self.elem_indices=self.elem_indices[keep]
+            self.elem_types=self.elem_types[keep]
+            if not key.discontinuous:
+                self.D0_data=self.D0_data[keep]
+                self.DL_data=self.DL_data[keep]
+                for eigendata in self.merged_eigendata.values():
+                    eigendata["D0_data"]=tuple(d[keep] for d in eigendata["D0_data"])
+                    eigendata["DL_data"]=tuple(d[keep] for d in eigendata["DL_data"])
+            else:
+                # Here every element has its own private copy of its nodes, so the node rows (and D0/DL,
+                # which are indexed by them) belong to one element each and the halo elements' blocks
+                # have to go as well - they are referenced by nothing once their elements are dropped.
+                node_keep=numpy.repeat(owned,[msh.element_pt(i).nnode() for i in range(msh.nelement())]) if msh.nelement() else numpy.zeros((0,),dtype=bool)
+                self._dropped_node_rows=node_keep # local expressions are evaluated later and must follow suit
+                renumber=numpy.cumsum(node_keep)-1
+                valid=(self.elem_indices>=0)&(self.elem_indices<len(node_keep))
+                self.elem_indices=numpy.where(valid,renumber[numpy.clip(self.elem_indices,0,max(len(node_keep)-1,0))],0)
+                self.nodal_values=self.nodal_values[node_keep]
+                self.D0_data=self.D0_data[node_keep]
+                self.DL_data=self.DL_data[node_keep]
+                for eigendata in self.merged_eigendata.values():
+                    for what in ("nodal_values","D0_data","DL_data"):
+                        eigendata[what]=tuple(d[node_keep] for d in eigendata[what])
 
 
         if isinstance(self.eigenvector, int) :
             self.mesh.get_problem().set_all_values_at_current_time(backup_dofs, backup_pinned, not self.add_eigen_to_mesh_positions) #type:ignore
 
-        self.nondimensional=nondimensional
         self.interface_lines_segs:list[list[int]] | None=None
         self.interface_lines_segs_ninter:int | None=None
 
         self.nodal_local_exprs:dict[str,NPFloatArray]={}
         self.local_expr_indices:dict[str,int]={n:i for i,n in enumerate(self.mesh.list_local_expressions())}
 
-        self.operator=operator
-        self.tesselate_tri=tesselate_tri
-
         vector_fields = msh.get_eqtree().get_equations().get_list_of_vector_fields(self.mesh.get_eqtree().get_code_gen())
         self.vector_fields:dict[str,list[str]] = {k: v for a in vector_fields for k, v in a.items()}
 
         self._additional_eigendata:dict[int,tuple[str,str,str]]={} # Index to pair of Re,Im
+        self.is_global=False # This entry holds this rank's part of a distributed mesh, see from_arrays
         if self.operator is not None:
             self.operator.apply(self)
+
+    @classmethod
+    def from_arrays(cls,msh:AnySpatialMesh,key:MeshDataCacheKey,nodal_values:NPFloatArray,elem_indices:NPIntArray,elem_types:NPIntArray,nodal_field_inds:dict[str,int],D0_data:NPFloatArray,DL_data:NPFloatArray,elemental_field_inds:dict[str,int],merged_eigendata:dict[int,dict[str,Any]],nodal_local_exprs:dict[str,NPFloatArray],local_expr_indices:dict[str,int],vector_fields:dict[str,list[str]]) -> "MeshDataCacheEntry":
+        """Builds an entry from ready-made arrays instead of extracting them from the mesh.
+
+        Used for the globally merged data of a distributed mesh (see
+        :py:mod:`pyoomph.meshes.meshdatamerge`), whose arrays span all processes and therefore cannot
+        come out of any single rank's mesh. ``msh`` is still kept, for the equation tree, the code
+        generator and the units - all of which are the same on every rank.
+
+        Local expressions must be passed in already evaluated: evaluating them lazily would ask the
+        local mesh, i.e. return this rank's partition, silently misaligned with the merged nodes.
+        """
+        self=cls.__new__(cls)
+        self.mesh=msh
+        self.key=key
+        self.nondimensional=key.nondimensional
+        self.tesselate_tri=key.tesselate_tri
+        self.eigenvector=key.eigenvector
+        self.eigenmode=key.eigenmode
+        self.history_index=key.history_index
+        self.with_halos=key.with_halos
+        self.operator=key.operator
+        self.discontinuous=key.discontinuous
+        self.add_eigen_to_mesh_positions=key.add_eigen_to_mesh_positions
+        self.nodal_values=nodal_values
+        self.elem_indices=elem_indices
+        self.elem_types=elem_types
+        self.nodal_field_inds=nodal_field_inds
+        self.D0_data=D0_data
+        self.DL_data=DL_data
+        self.elemental_field_inds=elemental_field_inds
+        self.merged_eigendata=merged_eigendata
+        self.nodal_local_exprs=nodal_local_exprs
+        self.local_expr_indices=local_expr_indices
+        self.vector_fields=vector_fields
+        self.interface_lines_segs=None
+        self.interface_lines_segs_ninter=None
+        self._additional_eigendata={}
+        self.is_global=True
+        return self
+
+    def _evaluate_local_expression(self,name:str)->NPFloatArray:
+        """Evaluates a local expression at the nodes, in the same row layout as ``nodal_values``.
+
+        The mesh always evaluates over all of its node rows, so on a distributed mesh with
+        discontinuous data the halo elements' node blocks - which were dropped from nodal_values as
+        their elements are not ours - have to be dropped here too, or the values line up with the
+        wrong nodes."""
+        values=numpy.array(self.mesh.evaluate_local_expression_at_nodes(self.local_expr_indices[name],self.nondimensional,self.discontinuous)) #type:ignore
+        if self._dropped_node_rows is not None and len(values)==len(self._dropped_node_rows):
+            values=values[self._dropped_node_rows]
+        return values #type:ignore
 
     def get_coordinates(self,lagrangian:bool=False)->NPFloatArray:
         if lagrangian:
@@ -271,20 +398,25 @@ class MeshDataCacheEntry:
         elif name in self.local_expr_indices.keys():
             if name in self.nodal_local_exprs.keys():
                 data=self.nodal_local_exprs[name]
+            elif self.is_global:
+                # Evaluating it here would ask the local mesh, i.e. deliver this rank's partition for
+                # a node array that spans all of them. Merged entries get all local expressions filled
+                # in eagerly, so a missing one means it was not evaluated at merge time.
+                raise RuntimeError("The local expression '"+name+"' was not gathered into this globally merged mesh data and cannot be evaluated on it afterwards")
             else:
                 if isinstance(self.eigenvector, int):
-                    base = self.mesh.evaluate_local_expression_at_nodes(self.local_expr_indices[name], self.nondimensional,self.discontinuous)
+                    base = self._evaluate_local_expression(name)
                     eps=1e-8
                     if self.eigenmode=="real" or self.eigenmode=="imag":
                         backup_dofs, backup_pinned,aampl = self.mesh.get_problem().set_eigenfunction_as_dofs(self.eigenvector,mode=self.eigenmode,perturb_amplitude=eps)
-                        perturbed = self.mesh.evaluate_local_expression_at_nodes(self.local_expr_indices[name],self.nondimensional,self.discontinuous)
+                        perturbed = self._evaluate_local_expression(name)
                         self.mesh.get_problem().set_all_values_at_current_time(backup_dofs, backup_pinned, not self.add_eigen_to_mesh_positions)
                         self.nodal_local_exprs[name] = (numpy.array(perturbed) - numpy.array(base)) * aampl / eps #type:ignore
                     else:
                         backup_dofs, backup_pinned, aampl_real = self.mesh.get_problem().set_eigenfunction_as_dofs(self.eigenvector, mode="real", perturb_amplitude=eps)
-                        real_perturbed = self.mesh.evaluate_local_expression_at_nodes(self.local_expr_indices[name],self.nondimensional,self.discontinuous)
+                        real_perturbed = self._evaluate_local_expression(name)
                         _, _, aampl_imag = self.mesh.get_problem().set_eigenfunction_as_dofs(self.eigenvector, mode="imag", perturb_amplitude=eps)
-                        imag_perturbed = self.mesh.evaluate_local_expression_at_nodes(self.local_expr_indices[name],self.nondimensional,self.discontinuous)
+                        imag_perturbed = self._evaluate_local_expression(name)
                         self.mesh.get_problem().set_all_values_at_current_time(backup_dofs, backup_pinned , not self.add_eigen_to_mesh_positions)
                         le_real=(numpy.array(real_perturbed) - numpy.array(base)) * aampl_real / eps #type:ignore
                         le_imag = (numpy.array(imag_perturbed) - numpy.array(base)) * aampl_imag / eps #type:ignore
@@ -299,7 +431,7 @@ class MeshDataCacheEntry:
 
 
                 else:
-                    self.nodal_local_exprs[name]=numpy.array(self.mesh.evaluate_local_expression_at_nodes(self.local_expr_indices[name],self.nondimensional,self.discontinuous)) #type:ignore
+                    self.nodal_local_exprs[name]=numpy.array(self._evaluate_local_expression(name)) #type:ignore
                 data=self.nodal_local_exprs[name]
         #elif name in self.elemental_field_inds.keys():
         #    if self.discontinuous:
@@ -396,70 +528,101 @@ class MeshDataCacheEntry:
         
 
 class MeshDataCache:
-    def __init__(self,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
-        self._cache=dict()
-        self.tesselate_tri=tesselate_tri
-        self.nondimensional=nondimensional
-        self.eigenvector=eigenvector
-        self.eigenmode:MeshDataEigenModes=eigenmode
-        self.history_index=history_index
-        self.with_halos=with_halos
-        self.operator=operator
-        self.discontinuous=discontinuous
-        self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
+    """Holds the extracted data of one option set (:py:class:`MeshDataCacheKey`), one entry per mesh."""
+    def __init__(self,tesselate_tri:bool=True,nondimensional:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,global_mesh:bool=False):
+        # None as a value marks "merged elsewhere": with global_mesh the merged data only exists on
+        # rank 0, but every rank stores something so that the hit/miss decision stays the same on all
+        # of them - a rank that silently skipped the merge would leave the others in a dead gather.
+        self._cache:dict[AnySpatialMesh,MeshDataCacheEntry | None]=dict()
+        self.key=MeshDataCacheKey.create(tesselate_tri=tesselate_tri,nondimensional=nondimensional,eigenvector=eigenvector,eigenmode=eigenmode,history_index=history_index,with_halos=with_halos,operator=operator,discontinuous=discontinuous,add_eigen_to_mesh_positions=add_eigen_to_mesh_positions,global_mesh=global_mesh)
+
+    # The options live in self.key; these keep the previous attribute access working
+    @property
+    def tesselate_tri(self)->bool: return self.key.tesselate_tri
+    @property
+    def nondimensional(self)->bool: return self.key.nondimensional
+    @property
+    def eigenvector(self)->int | tuple[int,...] | None: return self.key.eigenvector
+    @property
+    def eigenmode(self)->MeshDataEigenModes: return self.key.eigenmode
+    @property
+    def history_index(self)->int: return self.key.history_index
+    @property
+    def with_halos(self)->bool: return self.key.with_halos
+    @property
+    def operator(self)->"MeshDataCacheOperatorBase | None": return self.key.operator
+    @property
+    def discontinuous(self)->bool: return self.key.discontinuous
+    @property
+    def add_eigen_to_mesh_positions(self)->bool: return self.key.add_eigen_to_mesh_positions
+    @property
+    def global_mesh(self)->bool: return self.key.global_mesh
 
     def clear(self):
-        self._cache:dict[AnySpatialMesh,MeshDataCacheEntry]=dict()
+        self._cache=dict()
 
-    def get_data(self,msh:AnySpatialMesh) -> MeshDataCacheEntry:
-        
+    def get_data(self,msh:AnySpatialMesh) -> MeshDataCacheEntry | None:
+
         if not (msh in self._cache.keys()):
-            #print("CREATING MESH DATA",msh.get_full_name(),self.tesselate_tri,self.nondimensional)
+            #print("CREATING MESH DATA",msh.get_full_name(),self.key)
             msh._setup_output_scales()
-            
-            self._cache[msh] = MeshDataCacheEntry(msh,tesselate_tri=self.tesselate_tri,nondimensional=self.nondimensional,eigenvector=self.eigenvector,eigenmode=self.eigenmode,history_index=self.history_index,with_halos=self.with_halos,operator=self.operator,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
+
+            if self.key.global_mesh:
+                from .meshdatamerge import merge_global_mesh_data # imported here so a serial run never pulls in mpi4py through this path
+                self._cache[msh] = merge_global_mesh_data(msh,self.key)
+            else:
+                self._cache[msh] = MeshDataCacheEntry(msh,self.key)
         else:
             pass
-            #print("REUSING MESH DATA",msh.get_full_name(),self.tesselate_tri,self.nondimensional)
+            #print("REUSING MESH DATA",msh.get_full_name(),self.key)
         #print(self._cache[msh].get_data("theta"))
         return self._cache[msh]
 
 
 class MeshDataCacheStorage:
     def __init__(self):
-        self._storage:dict[tuple[Any,...],MeshDataCache]={}
+        self._storage:dict[MeshDataCacheKey,MeshDataCache]={}
 
 
     def clear(self,only_eigens:bool=False):
-        remkeys:list[str]=[]
+        remkeys:list[MeshDataCacheKey]=[]
         for k,v in self._storage.items():
             if only_eigens:
-                if k[2] is not None or (k[6] is not None and k[6].depends_on_eigen()):
+                if k.depends_on_eigen:
                     v.clear()
-                    remkeys.append(k) #type:ignore
+                    remkeys.append(k)
             else:
                 v.clear()
         if only_eigens:
             for k in remkeys:
-                self._storage.pop(k, None) #type:ignore
+                self._storage.pop(k, None)
         else:
             self._storage={}
         #print("STORAGE AFTER CLEAR",self._storage)
 
-    def get_data(self,msh:AnySpatialMesh,nondimensional:bool,tesselate_tri:bool,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True) -> MeshDataCacheEntry:
-        if isinstance(eigenvector,list):
-            eigenvector=tuple(set(eigenvector))
-        key:tuple[Any, ...] = (nondimensional, tesselate_tri,eigenvector,eigenmode,history_index,with_halos,operator,discontinuous,add_eigen_to_mesh_positions)
-        if not key in self._storage.keys():                        
+    def get_data(self,msh:AnySpatialMesh,nondimensional:bool,tesselate_tri:bool,eigenvector:int | Sequence[int] | None=None,eigenmode:MeshDataEigenModes="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,global_mesh:bool=False) -> MeshDataCacheEntry | None:
+        key=MeshDataCacheKey.create(nondimensional=nondimensional,tesselate_tri=tesselate_tri,eigenvector=eigenvector,eigenmode=eigenmode,history_index=history_index,with_halos=with_halos,operator=operator,discontinuous=discontinuous,add_eigen_to_mesh_positions=add_eigen_to_mesh_positions,global_mesh=global_mesh)
+        if key.global_mesh:
+            from .meshdatamerge import needs_merging
+            if not needs_merging(msh):
+                # Serial, or mpirun without --distribute: every rank holds the entire mesh already, so
+                # the global data IS the local data. Redirected to the same cache slot rather than
+                # duplicating it, and no communication happens at all in this case.
+                key=dataclass_replace(key,global_mesh=False)
+            elif key.with_halos:
+                raise RuntimeError("global_mesh=True cannot be combined with with_halos=True: halos only exist to stand in for the parts of the mesh a rank does not own, and the merged mesh is not missing any")
+            elif key.operator is not None:
+                raise NotImplementedError("Mesh data operators are not yet supported together with global_mesh=True. They must be applied to the merged data (an extrusion of one partition is not a part of the extrusion of the whole mesh), and the eigenfunction operator issues nested cache requests that would have to be resolved collectively first")
+        if not key in self._storage.keys():
             #print("CREATING",key)
             msh._setup_output_scales()
-            
-            self._storage[key]=MeshDataCache(tesselate_tri=tesselate_tri, nondimensional=nondimensional,eigenvector=eigenvector,eigenmode=eigenmode,history_index=history_index,with_halos=with_halos,operator=operator,discontinuous=discontinuous,add_eigen_to_mesh_positions=add_eigen_to_mesh_positions)
-            
+
+            self._storage[key]=MeshDataCache(**key.as_kwargs())
+
         else:
             pass
             #print("REUSING",key)
-        
+
         return self._storage[key].get_data(msh)
 
 
@@ -1082,7 +1245,6 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
         
 
         #print(field_operators)
-        print("DONE HRE",base.nodal_field_inds)
         #exit()
         
         

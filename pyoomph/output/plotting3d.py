@@ -65,8 +65,10 @@ class PyVistaPlotter(BasePlotter):
         self.add_eigen_to_mesh_positions=False
         self._output_dir="_plots"
 
-    def _get_mesh_data(self,msh:"str | AnySpatialMesh",problem_name:str=""):        
-        return self.get_problem(problem_name=problem_name).get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=False,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions)
+    def _get_mesh_data(self,msh:"str | AnySpatialMesh",problem_name:str=""):
+        res=self.get_problem(problem_name=problem_name).get_cached_mesh_data(msh,nondimensional=False,tesselate_tri=False,eigenvector=self.eigenvector,eigenmode=self.eigenmode,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,global_mesh=True)
+        assert res is not None # only rank 0 plots, and that is the rank the merged data ends up on
+        return res
         
                 
     def add_plot(self,what:str):
