@@ -47,6 +47,19 @@ namespace nb = nanobind;
 namespace pyoomph
 {
 
+	// Wraps a buffer this class owns as a numpy array for a Python callback, WITHOUT copying it.
+	// The owner matters: nanobind casts an ndarray built from a bare pointer under
+	// rv_policy::automatic_reference, and ndarray_export() decides to copy from
+	// `th->owner == nullptr && th->self == nullptr`. Handing Python a copy is invisible for an
+	// argument buffer and silently fatal for a result buffer - whatever the callback writes lands in
+	// the copy and the caller reads back its zero-initialised original. The capsule's deleter is
+	// empty because the buffer belongs to the C++ object, not to the array; it exists only to make
+	// the owner non-null.
+	static inline nb::ndarray<nb::numpy, double> callback_buffer_view(double *data, std::initializer_list<size_t> shape)
+	{
+		return nb::ndarray<nb::numpy, double>(data, shape, nb::capsule(data, [](void *) noexcept {}));
+	}
+
 	// A scalar custom math function y=f(x0,x1,...) implemented in Python (overriding eval()
 	// below) but usable inside symbolic GiNaC expressions (see GiNaC_python_cb_function()). The
 	// _call() wrapper below is what the generated C code actually calls; it marshals the raw
@@ -70,7 +83,7 @@ namespace pyoomph
 				argbuffer.resize(nargs);
 			for (unsigned int i = 0; i < nargs; i++)
 				argbuffer[i] = args[i];
-			nb::ndarray<nb::numpy, double> argview(argbuffer.data(), {argbuffer.size()});
+			nb::ndarray<nb::numpy, double> argview = callback_buffer_view(argbuffer.data(), {argbuffer.size()});
 			return this->eval(argview);
 		}
 
@@ -171,9 +184,9 @@ namespace pyoomph
 			}
 			for (unsigned int i = 0; i < nargs; i++)
 				argbuffer[i] = args[i];
-			nb::ndarray<nb::numpy, double> argview(argbuffer.data(), {argbuffer.size()});
-			nb::ndarray<nb::numpy, double> resview(resbuffer.data(), {resbuffer.size()});
-			nb::ndarray<nb::numpy, double> derivview(derivbuffer.data(), {deriv_nres, deriv_nargs});
+			nb::ndarray<nb::numpy, double> argview = callback_buffer_view(argbuffer.data(), {argbuffer.size()});
+			nb::ndarray<nb::numpy, double> resview = callback_buffer_view(resbuffer.data(), {resbuffer.size()});
+			nb::ndarray<nb::numpy, double> derivview = callback_buffer_view(derivbuffer.data(), {deriv_nres, deriv_nargs});
 			this->eval(flag, argview, resview, derivview);
 			for (unsigned int i = 0; i < nres; i++)
 			{
@@ -225,9 +238,9 @@ namespace pyoomph
 			}
 			for (unsigned int i = 0; i < nargs; i++)
 				argbuffer[i] = args[i];
-			nb::ndarray<nb::numpy, double> argview(argbuffer.data(), {argbuffer.size()});
-			nb::ndarray<nb::numpy, double> resview(resbuffer.data(), {resbuffer.size()});
-			nb::ndarray<nb::numpy, double> derivview(derivbuffer.data(), {deriv_nres, deriv_nargs});
+			nb::ndarray<nb::numpy, double> argview = callback_buffer_view(argbuffer.data(), {argbuffer.size()});
+			nb::ndarray<nb::numpy, double> resview = callback_buffer_view(resbuffer.data(), {resbuffer.size()});
+			nb::ndarray<nb::numpy, double> derivview = callback_buffer_view(derivbuffer.data(), {deriv_nres, deriv_nargs});
 			this->eval(flag, argview, resview, derivview);
 			for (unsigned int i = 0; i < nres; i++)
 				res[i] = resbuffer[i];
