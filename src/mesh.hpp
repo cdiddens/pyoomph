@@ -207,8 +207,8 @@ namespace pyoomph
 		// --- Partition-independent addressing, for state files (dev_docs/distributed_state_files.md) ---
 		void assign_global_base_element_indices();            // number the roots; must run before distribute()
 		std::vector<long> get_element_structural_keys();      // (root index, packed tree path) per element
-		std::vector<long> get_root_element_indices();         // global index of every root held here
-		std::vector<int> get_refinement_signature(long root_index); // preorder son counts, 0 = leaf
+		// Refinement trees of all roots held here, ascending: preorder son counts (0 = leaf), concatenated
+		void get_all_refinement_signatures(std::vector<long> &roots, std::vector<int> &lengths, std::vector<int> &data);
 		std::vector<int> get_element_node_indices(unsigned &stride); // nelement x stride, -1 padded
 		void save_nodal_state(std::vector<double> &data, std::vector<int> &lengths);      // node_pt order
 		void load_nodal_state(const std::vector<double> &data, const std::vector<int> &lengths);

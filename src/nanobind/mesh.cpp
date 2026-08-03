@@ -1220,13 +1220,15 @@ void PyReg_Mesh(nb::module_ &m)
 			 "For every element, in local element order, the pair (index of its root element in the undistributed base mesh, "
 			 "packed path through the refinement tree) as a flat array of 2*nelement entries. This addresses an element "
 			 "independently of the partition; see assign_global_base_element_indices")
-		.def("get_root_element_indices",mesh_method([](pyoomph::Mesh *m)
-			 { return vector_to_ndarray(m->get_root_element_indices()); }),
-			 "The global (undistributed) index of every root element this mesh holds, ascending")
-		.def("get_refinement_signature",mesh_method([](pyoomph::Mesh *m, long root_index)
-			 { return vector_to_ndarray(m->get_refinement_signature(root_index)); }), nb::arg("root_index"),
-			 "The refinement tree of the given root element as a preorder walk of son counts (0 marks a leaf). Describes the "
-			 "shape of the tree instead of oomph-lib's level-wise element numbers, so it can be replayed on any partition")
+		.def("get_all_refinement_signatures",mesh_method([](pyoomph::Mesh *m)
+			 {
+			 std::vector<long> roots; std::vector<int> lengths, data;
+			 m->get_all_refinement_signatures(roots,lengths,data);
+			 return std::make_tuple(vector_to_ndarray(roots),vector_to_ndarray(lengths),vector_to_ndarray(data)); }),
+			 "The refinement tree of every root element this mesh holds, ascending by global index: the roots, the length of "
+			 "each one's description, and the descriptions concatenated. A tree is described by a preorder walk of son counts "
+			 "(0 marks a leaf), i.e. by its shape rather than by oomph-lib's level-wise element numbers, so it can be replayed "
+			 "on any partition")
 		.def("get_element_node_indices",mesh_method([](pyoomph::Mesh *m)
 			 {
 			 unsigned stride=0;

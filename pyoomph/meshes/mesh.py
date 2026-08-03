@@ -1238,27 +1238,40 @@ class MeshFromTemplateBase(BaseMesh):
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
 
         if state.save or state.version>="0.1.0":
-            # Structurally addressed format: the refinement is stored as the shape of each root's tree
-            # and every node/element by a key that does not mention the partition, so the file is the
-            # same whether it was written serially or on any number of processes, and either can read
-            # the other. See pyoomph/meshes/meshstate.py and dev_docs/distributed_state_files.md.
-            from .meshstate import save_mesh_state, load_mesh_state
-            # The base element numbers have to exist before anything can be addressed by them. On a
-            # distributed mesh they were assigned before the distribution and must not be touched here,
-            # where only the local share is visible. Otherwise assign them now: besides being
-            # idempotent for a mesh that has them, this covers the meshes that did not exist when the
-            # problem was initialised - the ones a remesh built, and the ones the loader itself builds
-            # when the state file carries a different mesh template. Both are built from a template, in
-            # its element order, so writer and reader agree on the numbers.
-            if not self.is_mesh_distributed():
-                self.assign_global_base_element_indices()
-            if state.save:
-                save_mesh_state(self,state)
-            else:
-                load_mesh_state(self,state)
-            self._define_tracer_state_file(state)
-            return
+            self._define_state_file_structural(state)
+        else:
+            self._define_state_file_legacy(state)
 
+    def _define_state_file_structural(self, state: "DumpFile"):
+        # The refinement is stored as the shape of each root's tree and every node/element by a key
+        # that does not mention the partition, so the file is the same whether it was written serially
+        # or on any number of processes, and either can read the other.
+        # See pyoomph/meshes/meshstate.py and dev_docs/distributed_state_files.md.
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
+        from .meshstate import save_mesh_state, load_mesh_state
+        # The base element numbers have to exist before anything can be addressed by them. On a
+        # distributed mesh they were assigned before the distribution and must not be touched here,
+        # where only the local share is visible. Otherwise assign them now: besides being
+        # idempotent for a mesh that has them, this covers the meshes that did not exist when the
+        # problem was initialised - the ones a remesh built, and the ones the loader itself builds
+        # when the state file carries a different mesh template. Both are built from a template, in
+        # its element order, so writer and reader agree on the numbers.
+        if not self.is_mesh_distributed():
+            self.assign_global_base_element_indices()
+        if state.save:
+            save_mesh_state(self,state)
+        else:
+            load_mesh_state(self,state)
+        self._define_tracer_state_file(state)
+
+    def _define_state_file_legacy(self, state: "DumpFile"):
+        # Reader for state files written before version 0.1.0: the refinement as oomph-lib's level-wise
+        # element numbers and one flat nodal blob in the mesh's own traversal order, both of which only
+        # mean anything to a process holding exactly this mesh. Still writes as well (nothing calls it
+        # to write any more, but that is what makes the two formats comparable in a benchmark).
+        assert isinstance(
+            self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         old_ordering = True
         # Refinement pattern
         if state.save:

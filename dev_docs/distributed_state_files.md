@@ -255,3 +255,68 @@ a load that quietly does nothing cannot pass.
 5. **distributed adaptive round trip** — written on 3 ranks, read serially.
 
 Still worth adding: `--runmode continue` under `--distribute` end to end, and a 3d mesh.
+
+## 11. Cost against the old format
+
+Serial, in-process, 100 save/load pairs per arm, interleaved (A,B,A,B) because wall-clock A/B on this
+machine is easily corrupted by load. The legacy path is still there and still writes, which is what
+makes the comparison possible at all (`_define_state_file_legacy`).
+
+| mesh | save legacy | save structural | load legacy | load structural | file |
+| --- | --- | --- | --- | --- | --- |
+| 3721 nodes / 900 elements | 11.2 ms | 19.1 ms (1.7x) | 64.6 ms | 71.7 ms (1.11x) | 82.6 kB -> 93.6 kB |
+| 14641 nodes / 3600 elements | 53.4 ms | 87.9 ms (1.64x) | 315.7 ms | 341.2 ms (1.08x) | 349 kB -> 390 kB |
+
+Medians. The ratios are the same at 4x the size, i.e. the extra work is linear, not quadratic.
+
+Where the extra time goes on the larger mesh: ~21 ms computing the addresses in C++ (element node
+indices 7.3, nodal state 3.9, signatures 3.9, keys 2.9, elemental state 3.0), ~10 ms sorting and
+deduplicating, 0.7 ms writing the three extra key arrays. Loading barely moves because it is dominated
+by rebuilding the mesh, which both formats pay.
+
+The file grows by ~13%: that is the keys, and it is what buys addressing that does not depend on the
+partition.
+
+**One quadratic path was found and removed while measuring this.** `get_refinement_signature(root)`
+re-scanned the whole element vector to find the root, so writing a state cost `O(nroots * nelement)`:
+222 ms of a 228 ms save on the small mesh, and the 22x regression that provoked this comparison. It is
+now one pass for all roots (`get_all_refinement_signatures`).
+
+If more is ever needed: the element node indices build a `std::map<Node*,unsigned>` that the key
+computation builds again, and the two C++ calls could be merged - worth perhaps another 10 ms on the
+larger mesh, which is not obviously worth the coupling.
+
+## 12. Possible later: move the state handling into C++
+
+The whole mesh section currently lives in Python (`meshstate.py`), and every double of the state
+crosses the boundary twice on the way out and twice on the way back: C++ fills a `std::vector`, that
+becomes a numpy array, numpy reorders it into key order, and `DumpFile` writes it. The addressing
+itself - element keys, node keys, the tree signatures - is computed in C++ already, but the sorting,
+the deduplication and the variable-length block indexing are numpy.
+
+Porting it would buy roughly what §11 measured as the non-C++ part: ~10 ms of sort/dedup plus the
+array copies on a 14641-node mesh, so on the order of a third of the extra cost, and rather more on a
+large 3d mesh where the nodal blob dominates. It would also let the raw values go straight from the
+nodes into the file without ever being materialised as a numpy array.
+
+What makes it more than a mechanical port:
+
+* **The file format is Python.** `DumpFile` writes `numpy.lib.format` blocks and zlib-compressed
+  buffers, and the surrounding sections (templates, timestepper, global parameters, eigendata) stay in
+  Python either way. So a port either reimplements the numpy block format in C++ - it is simple and
+  stable, but it is a second implementation of the container - or keeps the writing in Python and moves
+  only the computation, handing over one finished array per section. **The second is the sensible
+  first step**: it keeps `define_state_file` readable as the definition of the format, and the arrays
+  handed over are exactly the ones §4 lists.
+* **The MPI would change hands.** The gather and the key reconciliation currently go through mpi4py;
+  in C++ they would go through oomph-lib's communicator (`MPI_Gatherv`, `MPI_Alltoall`). That is not
+  harder, but it moves the collective structure - the part that hangs a run when it is wrong - out of
+  the place where it is easy to read and instrument. Whatever is ported should keep §3.1's
+  reconciliation as one clearly named function, not scattered through the writer.
+* **Nothing about the format changes.** The keys, the sort order and the sections are what make the
+  file partition-independent; a port must reproduce them byte for byte, and the byte-identity test of
+  §10 is what would prove it. That test is worth keeping precisely for this reason.
+
+Not planned for now: at the sizes this framework runs (the ≤200k-dof rule in `CLAUDE.md`) a state
+costs tens of milliseconds and is written once per output step. It becomes worth doing if states grow
+into the hundreds of MB, or if checkpointing every step ever becomes normal.

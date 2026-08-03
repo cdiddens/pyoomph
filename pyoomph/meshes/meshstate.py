@@ -215,10 +215,10 @@ def _local_contribution(mesh: "AnySpatialMesh") -> dict[str, NPAnyArray]:
     my_node_data, my_node_lens = _block_gather(node_data, node_lens, used)
     my_elem_data, my_elem_lens = _block_gather(elem_data, elem_lens, numpy.flatnonzero(owned))
 
-    roots = numpy.asarray(mesh.get_root_element_indices(), dtype=numpy.int64)
-    signatures = [numpy.asarray(mesh.get_refinement_signature(int(r)), dtype=numpy.int32) for r in roots]
-    sig_lens = numpy.array([len(s) for s in signatures], dtype=numpy.int32)
-    sig_data = numpy.concatenate(signatures) if len(signatures) else numpy.zeros((0,), dtype=numpy.int32)
+    roots, sig_lens, sig_data = mesh.get_all_refinement_signatures()
+    roots = numpy.asarray(roots, dtype=numpy.int64)
+    sig_lens = numpy.asarray(sig_lens, dtype=numpy.int32)
+    sig_data = numpy.asarray(sig_data, dtype=numpy.int32)
 
     return {"roots": roots, "sig_lens": sig_lens, "sig_data": sig_data,
             "node_keys": node_keys[used], "node_lens": my_node_lens, "node_data": my_node_data,

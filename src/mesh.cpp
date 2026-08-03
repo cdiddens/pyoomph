@@ -210,52 +210,50 @@ namespace pyoomph
     return res;
   }
 
-  // Global index of every root element this mesh holds (each one once, ascending).
-  std::vector<long> Mesh::get_root_element_indices()
+  // Refinement tree of every root this mesh holds, as a preorder walk of son counts (0 for a leaf),
+  // with the roots ascending by global index. Describing a tree by its shape rather than by oomph's
+  // level-wise element numbers keeps it independent of how many elements the other ranks hold, so the
+  // same description can be replayed on any partition (and serially).
+  //
+  // One pass over the elements for all roots together: doing it per root meant re-scanning the whole
+  // element vector to find that root, which is quadratic and dominated the writing of a state file
+  // (222 ms of 228 ms on a 900-element mesh).
+  void Mesh::get_all_refinement_signatures(std::vector<long> &roots, std::vector<int> &lengths, std::vector<int> &data)
   {
-    std::set<long> roots;
+    roots.clear();
+    lengths.clear();
+    data.clear();
+    std::map<long, oomph::Tree *> tree_of_root; // ordered, so the roots come out ascending
     for (unsigned ie = 0; ie < this->nelement(); ie++)
     {
       BulkElementBase *root = root_element_of(this->element_pt(ie));
-      if (root)
-        roots.insert(root->global_base_index);
-    }
-    return std::vector<long>(roots.begin(), roots.end());
-  }
-
-  // Refinement tree of one root, as a preorder walk: the number of sons of each element, 0 for a
-  // leaf. Describing the tree by its shape rather than by oomph's level-wise element numbers keeps it
-  // independent of how many elements the other ranks hold, so the same description can be replayed on
-  // any partition (and serially).
-  std::vector<int> Mesh::get_refinement_signature(long root_index)
-  {
-    oomph::Tree *root = NULL;
-    for (unsigned ie = 0; ie < this->nelement(); ie++)
-    {
-      BulkElementBase *r = root_element_of(this->element_pt(ie));
-      if (r && r->global_base_index == root_index)
-      {
-        oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
-        if (re && re->tree_pt())
-          root = re->tree_pt()->root_pt();
-        break;
-      }
-    }
-    std::vector<int> sig;
-    if (!root)
-    {
-      sig.push_back(0); // unrefined, and not tree-based at all
-      return sig;
+      if (!root)
+        continue;
+      oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
+      oomph::Tree *t = (re && re->tree_pt() ? re->tree_pt()->root_pt() : NULL);
+      auto it = tree_of_root.find(root->global_base_index);
+      if (it == tree_of_root.end())
+        tree_of_root[root->global_base_index] = t;
+      else if (!it->second)
+        it->second = t;
     }
     std::function<void(oomph::Tree *)> walk = [&](oomph::Tree *t)
     {
       unsigned ns = t->nsons();
-      sig.push_back((int)ns);
+      data.push_back((int)ns);
       for (unsigned s = 0; s < ns; s++)
         walk(t->son_pt(s));
     };
-    walk(root);
-    return sig;
+    for (auto &entry : tree_of_root)
+    {
+      roots.push_back(entry.first);
+      size_t before = data.size();
+      if (entry.second)
+        walk(entry.second);
+      else
+        data.push_back(0); // no tree at all, i.e. a mesh that cannot be refined
+      lengths.push_back((int)(data.size() - before));
+    }
   }
 
   // Node indices (into this mesh's node_pt ordering) of every element's nodes, padded with -1 to the
