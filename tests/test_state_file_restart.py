@@ -65,6 +65,45 @@ class DiffusionEqs(Equations):
                           - weak(1 + 10 * exp(-30 * ((x - 0.3) ** 2 + (y - 0.7) ** 2)), v))
 
 
+class Line1dEqs(Equations):
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+
+    def define_residuals(self):
+        u, v = var_and_test("u")
+        x = var("coordinate_x")
+        self.add_residual(weak(grad(u), grad(v)) - weak(1 + 50 * exp(-200 * (x - 0.35) ** 2), v))
+
+
+class Line1dProblem(Problem):
+    def define_problem(self):
+        self += LineMesh(N=20, size=1)
+        self += (Line1dEqs() + DirichletBC(u=0) @ "left" + SpatialErrorEstimator(u=1)) @ "domain"
+        self.max_refinement_level = 3
+        self.write_states = False
+
+
+def test_state_of_an_adaptively_refined_1d_mesh(tmp_path):
+    # A refined 1d mesh addressed its elements through their tree root, and every son of a binary tree
+    # reported root_pt()==NULL: the 2d and 3d son constructors inherit Root_pt from the father, the 1d
+    # one did not (src/mesh1d.hpp). Writing a state segfaulted, which is how it was found - through the
+    # gcl_glycerol_water_capillary tutorial, a 1d mesh with initial adaptivity.
+    fname = str(tmp_path / "line.dump")
+    with Line1dProblem() as writer:
+        writer.set_output_directory(str(tmp_path / "w1d"))
+        writer.solve(spatial_adapt=3)
+        refined_elements = writer.get_mesh("domain").nelement()
+        assert refined_elements > 20, "the mesh was not refined, so this proves nothing"
+        reference = numpy.asarray(writer.get_history_dofs(0))
+        writer.save_state(fname)
+
+    with Line1dProblem() as reader:
+        reader.set_output_directory(str(tmp_path / "r1d"))
+        reader.load_state(fname)
+        assert reader.get_mesh("domain").nelement() == refined_elements
+        assert numpy.array_equal(numpy.asarray(reader.get_history_dofs(0)), reference)
+
+
 class MovingMeshEqs(Equations):
     def define_fields(self):
         self.define_scalar_field("u", "C2")

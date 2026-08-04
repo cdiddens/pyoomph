@@ -40,6 +40,13 @@ namespace pyoomph
       this->Father_pt = father_pt;
       this->Son_type = son_type;
       Level = father_pt->level() + 1;
+      // Trees are virtual bases here, so the one that actually runs is oomph::Tree(object_pt) - the
+      // ROOT form, which sets Root_pt to 0 and leaves it to the TreeRoot constructor. A son therefore
+      // has to inherit it from its father explicitly, exactly as the 2d and 3d versions do
+      // (mesh2d.hpp, mesh3d.hpp). Without this every refined 1d element reported root_pt()==NULL:
+      // oomph-lib's own binary tree neighbour finding reads it (binary_tree.cc), and anything asking
+      // a refined 1d element for its root element segfaulted.
+      this->Root_pt = father_pt->root_pt();
     }
 
     // Factory used by oomph-lib's tree-refinement code to create a son tree of the correct dynamic type.

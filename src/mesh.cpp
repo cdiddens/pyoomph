@@ -139,7 +139,13 @@ namespace pyoomph
     oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(e);
     if (!re || !re->tree_pt())
       return dynamic_cast<BulkElementBase *>(e);
-    return dynamic_cast<BulkElementBase *>(re->tree_pt()->root_pt()->object_pt());
+    // Checked rather than assumed: a tree whose Root_pt was never filled in reports NULL here, and
+    // dereferencing it segfaults somewhere unrelated. Returning NULL instead surfaces as the explicit
+    // "elements without a global base index" error when a state file is written.
+    oomph::TreeRoot *root = re->tree_pt()->root_pt();
+    if (!root || !root->object_pt())
+      return NULL;
+    return dynamic_cast<BulkElementBase *>(root->object_pt());
   }
 
   // Number the root elements in their current order. Must run BEFORE the problem is distributed,
