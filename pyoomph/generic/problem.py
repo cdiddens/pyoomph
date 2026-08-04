@@ -3872,6 +3872,34 @@ class Problem(_pyoomph.Problem):
         return doflist, dofnames
 
 
+    def analyse_jacobian_singularity(self,k:int=2,ntop:int=6,quiet:bool=False,**kwargs:Any):
+        """
+        Find out which degrees of freedom and which equations make the Jacobian singular, which is
+        the usual reason why Newton's method stalls after a boundary condition has been applied
+        twice, e.g. an :py:class:`~pyoomph.meshes.bcs.EnforcedDirichlet` on a contact line where a
+        kinematic boundary condition is already acting.
+
+        It prints the dofs left undetermined, the equations that conflict, and everything sitting on
+        the node that carries the singular mode. The problem must be initialised, but it does not
+        have to be solved first: an over-constraint is present in the Jacobian of the initial
+        condition already.
+
+        The cost is one sparse LU plus a few triangular solves, so a good deal less than a nullspace
+        computation. See :py:func:`~pyoomph.utils.jacobian_analysis.analyse_jacobian_singularity` for
+        the remaining arguments.
+
+        Args:
+            k: Number of singular modes to report.
+            ntop: Maximum number of dofs listed per singular vector.
+            quiet: Only return the result instead of printing a report.
+
+        Returns:
+            The modes and the verdict, see :py:class:`~pyoomph.utils.jacobian_analysis.JacobianSingularityInfo`.
+        """
+        from ..utils.jacobian_analysis import analyse_jacobian_singularity
+        return analyse_jacobian_singularity(self,k=k,ntop=ntop,quiet=quiet,**kwargs)
+
+
     def search_dof_in_mesh(self,mesh:AnyMesh,dofindex:int):
         location = None
         typ = None
