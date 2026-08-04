@@ -60,7 +60,7 @@ def _mkl_rt_from_package()->CDLL | None:
     cands:list[str]=[]
     for p in files:
         base=os.path.basename(str(p))
-        if base.startswith(("libmkl_rt.so","libmkl_rt.dylib","mkl_rt")):
+        if base.startswith(("libmkl_rt","mkl_rt")):
             loc=os.path.realpath(p.locate())  # p.locate() is un-normalized (has ../..)
             if os.path.exists(loc):
                 cands.append(loc)
