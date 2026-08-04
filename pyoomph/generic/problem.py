@@ -2491,6 +2491,10 @@ class Problem(_pyoomph.Problem):
         self.cmdlineparser.add_argument('--suppress_code_writing',help="do not write FEM codes. Useful for debugging",action='store_true')
         self.cmdlineparser.add_argument('--suppress_compilation',help="do not compile FEM codes. Useful for debugging",action='store_true')
         self.cmdlineparser.add_argument('--no-cache',help="Do not use the JIT code cache (pyoomph.generic.jit_cache) - always regenerate/recompile FEM codes from scratch",action='store_true')
+        # -P is pyoomph's only SHORT flag, and short flags are indistinguishable from PETSc options:
+        # petsc4py is handed the command line, and PETSc reports every dash-prefixed token nothing read
+        # as a possible spelling mistake. pyoomph/solvers/petsc.py therefore keeps -P out of what PETSc
+        # is shown, by name -- a second short flag added here has to be added there as well.
         self.cmdlineparser.add_argument('-P','--parameter', help="Override some problem parameters",nargs='+', type=str)
         self.cmdlineparser.add_argument("--runmode",help="Selects the runmode ([d]elete and run, [o]verride and run, [c]ontinue, [p]lot again",type=str)
         self.cmdlineparser.add_argument("--recompile_on_continue",help="When using --runmode c, compilation and code writing is usually suppressed. You can recompile the code anyhow with this flag",action="store_true")
@@ -2738,7 +2742,13 @@ class Problem(_pyoomph.Problem):
         for hook in self._hooks:
             hook.before_assigning_equation_numbers(dof_selector,False)
         self.get_la_solver()._before_assigning_equation_numbers()
-        self.get_eigen_solver()._before_assigning_equation_numbers()
+        # Only an eigensolver that has already been built: get_eigen_solver() would CONSTRUCT the
+        # default one here, and that default is slepc_mumps wherever PETSc has MUMPS, so every run --
+        # including one that solves with pardiso and never touches an eigenproblem -- imported
+        # petsc4py/slepc4py, initialised PETSc and filled its options database, to call a hook that no
+        # eigensolver overrides. One built later has nothing cached from before this reassignment.
+        if isinstance(self._eigensolver,GenericEigenSolver):
+            self._eigensolver._before_assigning_equation_numbers()
 
 
     def actions_before_remeshing(self,active_remeshers:list["RemesherBase"]):

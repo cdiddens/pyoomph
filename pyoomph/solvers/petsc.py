@@ -27,16 +27,31 @@ from __future__ import annotations
 # ========================================================================
  
 from .generic import GenericLinearSystemSolver, GenericEigenSolver, EigenSolverWhich,DefaultMatrixType, SolverError
+import atexit
 import hashlib
 from collections import OrderedDict
 import petsc4py #type:ignore
 import sys
 
-petsc4py.init(sys.argv) #type:ignore
+# The command line is handed on so that PETSc/SLEPc options can be given on it -- but only the
+# single-dashed part of it. PETSc records EVERY dash-prefixed token it is given, whether or not it
+# knows the name, and lists the ones nothing read at PetscFinalize as possible spelling mistakes; with
+# the raw argv that meant a plain `python3 script.py --petsc_mumps --outdir out` ended in a warning
+# about pyoomph's own flags. Dropping the double-dashed ones costs nothing, because PETSc files
+# `--ksp_type` under a name its own lookups never match (hasName("ksp_type") is False for it), so a
+# double-dashed PETSc option has never taken effect anyway.
+#
+# Every other single-dashed token is passed through untouched -- that is how PETSc options are written
+# -- except pyoomph's one short flag, -P (i.e. --parameter), which is indistinguishable from a PETSc
+# option and would be reported on every run that uses it. Only the flag itself has to go: PETSc ignores
+# tokens that do not start with a dash, so the values left behind by a dropped flag are already inert.
+_petsc_argv=[arg for arg in sys.argv if not (arg.startswith("--") or arg=="-P")]
+
+petsc4py.init(_petsc_argv) #type:ignore
 
 import slepc4py #type:ignore
 
-slepc4py.init(sys.argv) #type:ignore
+slepc4py.init(_petsc_argv) #type:ignore
 
 from petsc4py import PETSc #type:ignore
 from slepc4py import SLEPc #type:ignore
@@ -779,6 +794,11 @@ class PETSCMUMPSSolver(PETSCSolver):
         self.use_mumps()
 
 
+# Every option pyoomph itself puts into PETSc's global database, as opposed to the ones the user typed
+# on the command line. See _account_for_own_petsc_options.
+_own_petsc_options:set[str]=set()
+
+
 def _SetDefaultPetscOption(key:str, val:Any,force:bool=False):
     if force or (not PETSc.Options().hasName(key)): #type:ignore
         if isinstance(val, complex):
@@ -786,6 +806,43 @@ def _SetDefaultPetscOption(key:str, val:Any,force:bool=False):
             val=str(val.real)+("+" if val.imag>=0 else "")+str(val.imag)+"i"
             print("CASTED TO",val)
         PETSc.Options().setValue(key, val) #type:ignore
+        _own_petsc_options.add(key)
+
+
+def _account_for_own_petsc_options()->None:
+    """Take responsibility for pyoomph's own options before PetscFinalize audits the database.
+
+    PetscFinalize warns about every option that was set but never read ("There are N unused database
+    options ... could be spelling mistake"). That check is a typo detector for what the USER typed, and
+    it is worth keeping. What it should not do is report pyoomph's own defaults, which are set
+    speculatively and quite often go unread: use_mumps() configures SLEPc's spectral transform when the
+    eigensolver is CONSTRUCTED, and slepc_mumps is the autodetected default wherever PETSc has MUMPS,
+    so a run that solves with pardiso or superlu and never touches an eigenproblem ended with five
+    st_-prefixed options the user never asked for and cannot act on.
+
+    Reading each of them here marks it used, which is the truthful thing to say -- pyoomph put them
+    there and pyoomph is done with them -- and leaves everything else, including the whole database
+    under -options_view, exactly as it was. (If a future PETSc stops marking on lookup, the warning
+    simply comes back; opts.delValue(key) would be the heavier fallback.)
+
+    An explicit -options_left asks for the unabridged report, so it is left alone.
+
+    Runs before petsc4py's own atexit handler: that one was registered when petsc4py.PETSc was
+    imported, i.e. before this module could register anything, and atexit unwinds last-in-first-out.
+    """
+    if not _own_petsc_options:
+        return
+    try:
+        opts=PETSc.Options() #type:ignore
+        if opts.hasName("options_left"): #type:ignore
+            return
+        for key in _own_petsc_options:
+            opts.hasName(key)   # the lookup itself is what marks the option as read #type:ignore
+    except Exception:
+        pass   # PETSc already finalized: nothing left to account for, and nothing worth reporting.
+
+
+atexit.register(_account_for_own_petsc_options)
 
 
 @GenericEigenSolver.register_solver()
