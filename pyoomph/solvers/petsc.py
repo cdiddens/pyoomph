@@ -642,7 +642,10 @@ class PETSCSolver(GenericLinearSystemSolver):
                 if not self.problem.is_quiet():
                     print("PETSc KSP solve time:", end_time - start_time, "seconds")
                 xv = self.x.getArray() #type:ignore
-            b[:] = xv[:] #type:ignore
+            # On a complex PETSc build (the one the eigensolvers need) the solution vector is complex
+            # even though this system is real, so the imaginary part is pure roundoff -- drop it
+            # explicitly instead of letting numpy discard it with a ComplexWarning.
+            b[:] = xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv #type:ignore
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 
@@ -730,7 +733,10 @@ class PETSCSolver(GenericLinearSystemSolver):
                 if not self.problem.is_quiet():
                     print("PETSc KSP solve time:", end_time - start_time, "seconds")
                 xv = self.x.getArray() #type:ignore
-            b[:] = xv[:] #type:ignore
+            # On a complex PETSc build (the one the eigensolvers need) the solution vector is complex
+            # even though this system is real, so the imaginary part is pure roundoff -- drop it
+            # explicitly instead of letting numpy discard it with a ComplexWarning.
+            b[:] = xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv #type:ignore
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 

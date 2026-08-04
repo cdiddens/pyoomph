@@ -46,7 +46,7 @@
 
 import numpy
 import pytest
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, identity
 
 from pyoomph import *
 from pyoomph.expressions import *
@@ -415,9 +415,12 @@ def test_tier_b_assembles_exactly_the_masked_pattern(with_scalar):
         p.solve()
         M, J = _eigen_matrices(p)
 
-        expect_J = (_masked_pattern(p, "jacobian") > 0).astype(int)
-        for i in range(J.shape[0]):
-            expect_J[i, i] = 1           # force_jacobian_diagonal_entries
+        # force_jacobian_diagonal_entries: add the diagonal to the pattern. Done as a matrix sum
+        # rather than entry by entry -- assigning into a csr_matrix reallocates the whole thing per
+        # entry (and warns about it).
+        expect_J = ((_masked_pattern(p, "jacobian") > 0).astype(int)
+                    + identity(J.shape[0], dtype=int, format="csr"))
+        expect_J.data[:] = 1             # sum, not union: the overlap counted twice
         assert J.nnz == expect_J.nnz
         assert ((J != 0).astype(int) - expect_J > 0).nnz == 0
 
