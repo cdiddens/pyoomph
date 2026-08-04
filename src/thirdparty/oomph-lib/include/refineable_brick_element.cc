@@ -1110,6 +1110,18 @@ namespace oomph
       // Neighbour exists
       if (neigh_pt != 0)
       {
+        // FOR PYOOMPH: see the identical guard in RefineableQElement<2>::node_created_by_neighbour
+        // (refineable_quad_element.cc) for the failure this prevents -- the brick box map below is
+        // meaningless in a tet/wedge/pyramid neighbour, whose local coordinates nonetheless overlap
+        // the brick's [-1,1]^3, so the lookup can match a node of a different facet by accident.
+        // Unreachable today (a mixed 3d forest gets no octree neighbour pointers at all, and a brick
+        // in one refines through BulkElementBase::build_as_brick_son rather than this path), so this
+        // is a guard against the planned cross-shape face/edge neighbour finder, not a live fix. In a
+        // pure-brick forest the cast always succeeds and nothing changes.
+        if (dynamic_cast<RefineableQElement<3>*>(neigh_pt->object_pt()) == 0)
+        {
+          continue;
+        }
         // Have its nodes been created yet?
         if (neigh_pt->object_pt()->nodes_built())
         {
@@ -1190,6 +1202,16 @@ namespace oomph
         // Neighbour exists
         if (neigh_pt != 0)
         {
+          // FOR PYOOMPH: see the guard in the face loop above.
+          if (dynamic_cast<RefineableQElement<3>*>(neigh_pt->object_pt()) == 0)
+          {
+            i_root_edge_neighbour++;
+            if (i_root_edge_neighbour >= nroot_edge_neighbour)
+            {
+              keep_searching = false;
+            }
+            continue;
+          }
           // Have its nodes been created yet?
           if (neigh_pt->object_pt()->nodes_built())
           {

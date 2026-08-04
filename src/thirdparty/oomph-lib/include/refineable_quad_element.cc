@@ -569,6 +569,20 @@ namespace oomph
       // Neighbour exists
       if (neigh_pt != 0)
       {
+        // FOR PYOOMPH: in a MIXED quad+tri forest the edge neighbour can be a TRIANGLE. The
+        // coordinate map below (s_lo/s_hi/translate_s) is the quad box map and means nothing in a
+        // triangle's reference frame -- yet get_node_at_local_coordinate can still MATCH one of the
+        // triangle's nodes by accident (a triangle's node coordinates live in [0,1]^2 and a quad's
+        // in [-1,1]^2, so the frames overlap) and hand back a node from a completely different edge.
+        // The quad son then adopts that node, so the node is shared by two unrelated places: the mesh
+        // gains a coincident duplicate and the adopted node is dragged onto the quad edge by the
+        // hanging-node position interpolation, folding every triangle that owns it. Cross-shape
+        // sharing is done topologically by pyoomph::BulkElementBase::mixed_quad_shared_node (called
+        // from the pyoomph override of this method), so simply skip a non-quad neighbour here.
+        if (dynamic_cast<RefineableQElement<2>*>(neigh_pt->object_pt()) == 0)
+        {
+          continue;
+        }
         // Have its nodes been created yet?
         // if(neigh_pt->object_pt()->node_pt(0)!=0)
         if (neigh_pt->object_pt()->nodes_built())

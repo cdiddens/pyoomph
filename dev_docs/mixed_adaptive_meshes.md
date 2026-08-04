@@ -1312,6 +1312,67 @@ scheme-agnostic; anisotropy is mostly an *authoring* (patterns) + *selection*
        while pushing to it — the reallocation left a dangling reference and segfaulted on the first
        multi-root hop. Copy the point out of the queue.
 
+   - **§4.20 — oomph's quad neighbour lookup adopted TRIANGLE nodes at a mixed interface, tearing the mesh
+     [FIXED].** Reported as "the final output step has tears in the mesh" on a gmsh KitchenSink run
+     (`mesh_mode="tris"` + a `BoundaryLayer` size field with `Quads=1` along the curved free surface, so gmsh
+     emits a quad band inside a triangular mesh) with `max_refinement_level=1`. **A single `adapt()` on the
+     freshly generated mesh moved two nodes that already existed** — coarse triangle mid-side nodes, by 0.19
+     and 0.086 domain units — and folded eight elements; in the VTK output they are the self-overlapping
+     "banana" triangles at the quad↔tri corner.
+     * **Root cause.** `BulkElementQuad2dC1/C2::node_created_by_neighbour` (`elements.hpp`) calls
+       `oomph::RefineableQElement<2>::node_created_by_neighbour` FIRST and only falls back to the cross-shape
+       `mixed_quad_shared_node` when the base declines. The base maps the son node's fractional position into
+       the edge neighbour with the **quad box map** (`s_lo`/`s_hi`/`translate_s`) and asks it
+       `get_node_at_local_coordinate`. At a mixed interface the neighbour is a **triangle**, for which that
+       coordinate means nothing — but a triangle's node coordinates live in `[0,1]^2` and a quad's in
+       `[-1,1]^2`, so the frames overlap and the lookup **matches a triangle node by accident**: a quad son's
+       E-edge mid node at `s_fraction=(1,0.5)` maps to `s=(1,0)`, which is the triangle's *vertex 0*. The base
+       returned it, so `mixed_quad_shared_node` was never reached (it is only reached when the base returns
+       null — on this run it ran 4 times and correctly returned null every time, which is what pointed at the
+       base call).
+     * **Why it tears rather than merely mis-shares.** The quad son adopts that node, so one node is now
+       claimed by two unrelated places. Two things follow: the triangle side creates its own node at the
+       position the quad's should have had (a **coincident duplicate**), and the adopted node — a real,
+       non-hanging node of the *coarse* triangle — becomes an edge-mid node of the fine quad, hangs on the
+       coarse tri leaf, and is **dragged onto the quad's edge** by `interpolate_hang_values()`, which writes a
+       hanging node's master-interpolated position into its raw storage (§4.18). Every triangle owning that
+       node folds. So the visible damage is geometric while the cause is purely topological, and the final
+       mesh no longer shows the node as hanging — the bad position simply survives the next round.
+     * **Fix** (vendored, `//FOR PYOOMPH` in `src/thirdparty/oomph-lib/include/refineable_quad_element.cc`,
+       recorded in `INFO_oomph-lib`): skip a neighbour that is not a `RefineableQElement<2>`. The quad box
+       map is only meaningful in a quad neighbour, and the cross-shape case already has a correct,
+       topological handler. Pure-quad meshes are unaffected (the cast always succeeds); upstream oomph-lib has
+       no mixed quad+tri forests, so there is no upstream equivalent.
+     * **Why the existing tests missed it.** `tests/test_mixed_mesh.py`'s hand-built `MixedRectMesh` has one
+       relative orientation of quad and triangle roots, and a sweep over 128 variants of it (quad corner
+       rotation × triangle split × refinement order × two mesh sizes) produced **zero** accidental matches —
+       whether the collision happens depends on `neigh_edge`/`translate_s`, i.e. on how the two roots happen
+       to be oriented, and a structured mesh only ever produces a few of those. An unstructured gmsh mesh
+       produces all of them.
+     * **3D: the same trap exists but is currently unreachable — guarded anyway.**
+       `RefineableQElement<3>::node_created_by_neighbour` (`refineable_brick_element.cc`) has the identical
+       shape in both its face loop and its edge loop, and tet/wedge/pyramid local coordinates overlap the
+       brick's `[-1,1]^3` just as a triangle's overlap a quad's. It cannot fire today, for two independent
+       reasons: a **mixed 3d forest gets no octree neighbour pointers at all** (`DynamicOcTreeForest::find_neighbours`
+       returns early — mixed 3d shares via the weight-augmented `Shared_node_registry` and hangs from the
+       mesh-level `post_adapt` pass), and a brick inside a mixed forest refines through
+       `BulkElementBase::build_as_brick_son`, not oomph's octree build. **Verified, not assumed:** an
+       instrumented build reporting every non-brick neighbour reaching that function counted **zero** across
+       `test_adaptive_3d_campaign` (all 11 mixed layouts × 3 refinement states), `test_mixed_3d` and
+       `test_tet_refinement`. The guard was still added, because the trap springs the moment the planned
+       topological cross-shape face/edge neighbour finder (needed for non-uniform wedge/pyramid hanging)
+       starts populating those pointers — and it is a no-op until then.
+     * **Validated.** New `tests/test_mixed_mesh.py::test_mixed_gmsh_boundary_layer_refinement_keeps_mesh_intact`
+       (uniform + error-driven): a compact wavy-spline domain with a `Quads=1` boundary layer, asserting that
+       refinement moves no pre-existing node, leaves no coincident pair and folds no element. Measured before
+       the fix, across resolutions: displacement 0.11–0.18, 5–20 coincident pairs, 49–180 folded elements, and
+       **uniform refinement segfaulted outright**; after, all three are 0 and the run is clean. The reporting
+       KitchenSink case goes from 1 torn node / 1 duplicate / hanging-position inconsistency 1.4e-1 to
+       0 / 0 / 0. `test_mixed_mesh`, `test_triangle_refinement`, `test_adaptivity`,
+       `test_adaptive_2d_campaign`, `test_constrained_adaptivity`, `test_boundary_element_identification`,
+       `test_curved_boundaries`, `test_facet_adjacency`, `test_mixed_3d`, `test_tet_refinement`: 356 passed,
+       3 xfailed, no change.
+
 5. **Variable / anisotropic schemes** (§5): quad 1→2 (both directions), simplex
    bisection; directional error estimator; generalised balance rule.
 6. **MPI hardening** across all shapes; distributed adaptivity tests. [Distributed adaptive SOLVES done — see

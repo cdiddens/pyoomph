@@ -108,6 +108,19 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Fixed
 
+- **Adaptivity, mixed quad+tri meshes**: refining across a quad↔triangle interface could tear the mesh.
+  oomph-lib's quad neighbour lookup maps a new node's position into the edge neighbour with the quad box
+  map and then asks that neighbour whether it holds a node there; across a mixed interface the neighbour is
+  a triangle, whose local coordinates live in `[0,1]²` against the quad's `[-1,1]²`, so the lookup could
+  match a triangle node *by accident* and hand back a node belonging to a completely different edge. The
+  quad son adopted it, which both duplicated a node and dragged a real node of the coarse triangle onto the
+  quad's edge (via the hanging-node position interpolation), folding every triangle that owned it. Seen on
+  gmsh meshes that put a quad boundary layer (`Quads=1`) inside a triangular mesh, where one `adapt()` moved
+  coarse-mesh nodes by a sizeable fraction of an element and produced visibly torn output; uniform
+  refinement of such a mesh could also segfault. Cross-shape node sharing is done topologically instead.
+  The 3D brick lookup carries the same guard; it is unreachable there today (a mixed 3D forest uses no
+  octree neighbour pointers) and was added so the planned cross-shape 3D neighbour finder cannot inherit
+  the problem.
 - **MPI**: per-element error overrides are now agreed between processes by a MAX-reduction over all
   copies of an element, rather than by letting the owner's value win. An override is not always computed
   on the rank that owns the element it applies to: an interface element pushes its error onto the bulk

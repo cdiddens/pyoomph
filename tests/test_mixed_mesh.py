@@ -17,6 +17,7 @@ import pytest
 
 from pyoomph import *
 from pyoomph.expressions import *
+from pyoomph.meshes.gmsh import GmshTemplate
 from pyoomph.meshes.mesh import MeshTemplate
 from pyoomph.equations.poisson import PoissonEquation
 
@@ -183,3 +184,103 @@ def test_mixed_error_based_adaptivity_correct():
         assert torn == 0
         # No interface tear -> the adaptive solution agrees with the reference in the smooth quad region.
         assert abs(probe(m, 0.5, 0.5) - u_ref) < 5e-3
+
+
+# ---------------------------------------------------------------------------------------------
+# The gmsh boundary-layer case: a quad band along a curved line, triangles everywhere else.
+#
+# The hand-built MixedRectMesh above never caught this, because its quad and triangle roots meet in
+# only one relative orientation. A gmsh mesh produces all of them, and one of them is enough:
+# oomph's RefineableQElement<2>::node_created_by_neighbour maps a son node's fractional position
+# into the edge neighbour with the QUAD BOX map (s_lo/s_hi/translate_s) and then asks that
+# neighbour get_node_at_local_coordinate. Across a quad<->tri interface the neighbour is a triangle,
+# for which that coordinate means nothing -- but a triangle's node coordinates live in [0,1]^2 and a
+# quad's in [-1,1]^2, so the lookup can MATCH a triangle node by accident and hand back a node from
+# a completely different edge. The quad son adopts it, and the adopted node -- a real node of the
+# coarse triangle -- is then dragged onto the quad's edge by the hanging-node position
+# interpolation, folding every triangle that owns it. It is fixed in the vendored
+# refineable_quad_element.cc by skipping a non-quad neighbour there (see INFO_oomph-lib); the
+# cross-shape case is handled topologically by BulkElementBase::mixed_quad_shared_node.
+#
+# The oracle is deliberately about the MESH, not the solution: refinement must not move a node that
+# already existed, must not leave two nodes at the same place, and must not bend a mid-side node
+# off its own edge. Before the fix this mesh gave a 0.13 node displacement, 5-20 coincident pairs
+# and 49-180 folded elements, and uniform refinement took the process down outright.
+
+class _CurvedBLMesh(GmshTemplate):
+    # Triangles with a quad boundary layer (Quads=1) along a wavy spline -- the mesh_mode="tris" +
+    # BoundaryLayer combination users get from gmsh, and the smallest one that reproduces.
+    def define_geometry(self):
+        self.default_resolution = 0.2
+        self.mesh_mode = "tris"
+        n = 40
+        pts = [self.point(k / n, 0.6 + 0.25 * np.sin(2 * np.pi * k / n) * np.exp(-2.0 * k / n), size=-2)
+               for k in range(n + 1)]
+        curve = self.spline(pts, name="top")
+        p00, p10 = self.point(0, 0), self.point(1, 0)
+        self.create_lines(pts[-1], "right", p10, "bottom", p00, "left", pts[0])
+        self.plane_surface("top", "right", "bottom", "left", name="domain")
+        self.set_mesh_size_boundary_layer_field(
+            self.add_mesh_size_field("BoundaryLayer", CurvesList=[curve], Quads=1, Thickness=0.1))
+        self.set_gmsh_parameter("Mesh.MeshSizeFromCurvature", 2)
+
+
+class _CurvedBLPoisson(Problem):
+    def define_problem(self):
+        self += _CurvedBLMesh()
+        x, y = var("coordinate_x"), var("coordinate_y")
+        eqs = PoissonEquation(source=40 * exp(-30 * ((x - 0.35) ** 2 + (y - 0.45) ** 2)))
+        eqs += DirichletBC(u=0) @ ["top", "right", "bottom", "left"]
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
+def _mesh_damage(m, before):
+    # (largest displacement of a node that already existed, coincident node pairs, folded elements).
+    nodes = [m.node_pt(i) for i in range(m.nnode())]  # keep the wrappers alive: id() is the identity
+    moved = max([np.hypot(n.x(0) - before[id(n)][0], n.x(1) - before[id(n)][1])
+                 for n in nodes if id(n) in before] + [0.0])
+    seen = {}
+    dup = 0
+    for n in nodes:
+        key = (round(n.x(0), 10), round(n.x(1), 10))
+        dup += key in seen
+        seen[key] = True
+    folded = 0
+    for ie in range(m.nelement()):
+        el = m.element_pt(ie)
+        nn = el.nnode()
+        p = [(el.node_pt(k).x(0), el.node_pt(k).x(1)) for k in range(nn)]
+        # (corner, corner, mid-side) triples; quad9 nodes are in lexicographic order
+        edges = ((0, 1, 3), (1, 2, 4), (2, 0, 5)) if nn == 6 else \
+                (((0, 2, 1), (2, 8, 5), (8, 6, 7), (6, 0, 3)) if nn == 9 else ())
+        for a, b, mid in edges:
+            L = np.hypot(p[b][0] - p[a][0], p[b][1] - p[a][1])
+            off = np.hypot(p[mid][0] - 0.5 * (p[a][0] + p[b][0]), p[mid][1] - 0.5 * (p[a][1] + p[b][1]))
+            # 0.3 of the chord is far beyond any curvature this geometry produces; a mid-side node
+            # that far off its own edge means the element is folded.
+            folded += L > 0 and off / L > 0.3
+    return moved, dup, folded
+
+
+@pytest.mark.parametrize("how", ["uniform", "error_driven"])
+def test_mixed_gmsh_boundary_layer_refinement_keeps_mesh_intact(how):
+    with _CurvedBLPoisson() as problem:
+        problem.max_refinement_level = 2
+        problem.initial_adaption_steps = 0
+        problem.initialise()
+        m = problem.get_mesh("domain")
+        keep = [m.node_pt(i) for i in range(m.nnode())]
+        before = {id(n): (n.x(0), n.x(1)) for n in keep}
+        assert any(m.element_pt(ie).nnode() == 9 for ie in range(m.nelement())), \
+            "no quads in the boundary layer -- the mixed interface is not being exercised"
+        if how == "uniform":
+            m.refine_uniformly()
+            problem.solve()
+        else:
+            problem.solve(spatial_adapt=2)
+        moved, dup, folded = _mesh_damage(problem.get_mesh("domain"), before)
+        assert moved < 1e-12   # was 0.13
+        assert dup == 0        # was 5-20
+        assert folded == 0     # was 49-180
+        assert _max_abs_residual(problem) < 1e-9
