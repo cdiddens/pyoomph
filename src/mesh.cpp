@@ -47,9 +47,6 @@ namespace pyoomph
 
   typedef double (*InitialConditionFctPt)(const double &t);
 
-  // Default on: the migration off MeshAsGeomObject is validated by flipping this, not by keeping
-  // two code paths around indefinitely. See dev_docs/mesh_point_locator.md phase 1.
-  bool Mesh::use_point_locator = true;
   bool Mesh::report_interpolation_timing = false;
 
   // Determine how many "elemental index" entries to_numpy will need to write per element (nelem is
@@ -1910,7 +1907,7 @@ namespace pyoomph
   }
 
   // Currently unimplemented (always throws); the commented-out code below sketches the intended
-  // approach: locate each zeta coordinate in the mesh via oomph::MeshAsGeomObject::locate_zeta and
+  // approach: locate each zeta coordinate in the mesh with a MeshPointLocator and
   // evaluate/interpolate all fields there, optionally applying output_scales, marking entries whose
   // zeta could not be located in masked_lines.
   std::vector<std::vector<double>> Mesh::get_values_at_zetas(const std::vector<std::vector<double>> &, std::vector<bool> &, bool)
@@ -1937,7 +1934,9 @@ namespace pyoomph
     }
 
     masked_lines.resize(zetas.size(), false);
-    oomph::MeshAsGeomObject MaGO(this);
+    LocatorSetup lsetup;
+    lsetup.space = LocatorSpace::Lagrangian;
+    MeshPointLocator locator(this, lsetup);
     for (unsigned int zi = 0; zi < zetas.size(); zi++)
     {
       oomph::Vector<double> zet(zetas[zi].size());
@@ -1949,7 +1948,7 @@ namespace pyoomph
 
       oomph::GeomObject *res_go = NULL;
       oomph::Vector<double> s(el->dim(), 1.0 / 3.0);
-      MaGO.locate_zeta(zet, res_go, s, false);
+      // locator.locate_batch(...) over the whole zetas list, resolved per entry
       BulkElementBase *srcelem = dynamic_cast<BulkElementBase *>(res_go);
       if (!srcelem)
         masked_lines[zi] = true;
@@ -2590,7 +2589,7 @@ namespace pyoomph
 
 
   // For every integration point of every element of this (new) mesh, locate the corresponding point in
-  // oldmesh (wrapped as a MeshAsGeomObject, i.e. via global zeta/Eulerian coordinates) and cache the
+  // oldmesh (via global zeta/Eulerian coordinates) and cache the
   // resulting (old element, old local coordinate) pair in curr_el->coords_oldmesh. This precomputed
   // mapping is later used (e.g. by nodal_interpolate_from/projection) to transfer field values from
   // the old mesh to this mesh's integration points without repeating the (potentially expensive)
@@ -2632,16 +2631,6 @@ namespace pyoomph
         curr_el->coords_oldmesh[ipt].first = NULL;
         curr_el->coords_oldmesh[ipt].second.resize(dim, 0.0);
       }
-    }
-
-    if (!use_point_locator)
-    {
-      oomph::MeshAsGeomObject mesh_as_geom(oldmesh);
-      for (unsigned el = 0; el < nelem; el++)
-      {
-        dynamic_cast<BulkElementBase *>(this->element_pt(el))->prepare_zeta_interpolation(&mesh_as_geom);
-      }
-      return;
     }
 
     // This is the heaviest query in the codebase - one point per integration point per element,
@@ -3203,7 +3192,7 @@ namespace pyoomph
   // Unlike nodal_interpolate_along_boundary's nearest-node matching, this locates each of this mesh's
   // nodes within the `from` mesh by global (Eulerian or, if
   // interpolated_lagrangian_coordinates_at_remeshing, Lagrangian - via zeta_coordinate_type) position
-  // using oomph::MeshAsGeomObject::locate_zeta, and then evaluates/interpolates the `from` element's
+  // using the point locator, and then evaluates/interpolates the `from` element's
   // shape functions at that local coordinate to obtain exact interpolated values, rather than picking
   // the value at a nearby existing node. As in the boundary variant, a field_map translates field
   // indices between the two mesh's JIT-compiled code instances (identity if they are the same code),
@@ -3391,22 +3380,12 @@ namespace pyoomph
       std::cout << "Interpolating " << what << " from " << from->get_full_domain_path() << how << std::endl;
     }
 
-    if (interface_case && !by_zeta && !use_point_locator)
-    {
-      // Projection is new capability, not a reimplementation of something MeshAsGeomObject could
-      // do: asking it to locate a 2-component position among 1d face elements walks off the end of
-      // the coordinate vector. So the A/B switch cannot express this path, and reaching here means
-      // a caller selected projection without checking.
-      throw_runtime_error("Interface interpolation by projection requires the point locator; it has no MeshAsGeomObject equivalent. Either enable Mesh.set_use_point_locator(True) or interpolate along the boundary by zeta / nearest nodes instead.");
-    }
-
     // Pre-locate every node this routine is about to visit, in one batch. Collected in exactly the
     // order and with exactly the filtering of the transfer loop below, so the two agree on which
     // nodes exist; grouped by destination element so the locator's walk can seed each query from
     // the previous match instead of returning to the tree.
     std::map<oomph::Node *, std::pair<BulkElementBase *, oomph::Vector<double>>> prelocated;
     std::unique_ptr<MeshPointLocator> locator;
-    if (use_point_locator)
     {
       std::vector<double> qcoords;
       std::vector<unsigned> qgroups;
@@ -3529,21 +3508,6 @@ namespace pyoomph
       }
     }
 
-    // Only built when the locator is switched off; constructing it is itself expensive.
-    std::unique_ptr<oomph::MeshAsGeomObject> MaGO;
-    double magoo_locate_ms = 0.0;
-    if (!use_point_locator)
-    {
-      const auto t0 = std::chrono::steady_clock::now();
-      MaGO.reset(new oomph::MeshAsGeomObject(from));
-      const auto t1 = std::chrono::steady_clock::now();
-      if (report_interpolation_timing)
-      {
-        std::cout << "  [MeshAsGeomObject] index " << std::chrono::duration<double>(t1 - t0).count() * 1000.0
-                  << " ms" << std::endl;
-      }
-    }
-
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
       BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
@@ -3564,22 +3528,11 @@ namespace pyoomph
         oomph::Vector<double> s(xnode.size(), 0.5 * (deste->s_min() + deste->s_max()));
         BulkElementBase *srcelem = NULL;
 
-        if (use_point_locator)
+        auto pl = prelocated.find(n);
+        if (pl != prelocated.end())
         {
-          auto pl = prelocated.find(n);
-          if (pl != prelocated.end())
-          {
-            srcelem = pl->second.first;
-            s = pl->second.second;
-          }
-        }
-        else
-        {
-          oomph::GeomObject *resgo = 0;
-          const auto tl0 = std::chrono::steady_clock::now();
-          MaGO->locate_zeta(xnode, resgo, s, false);
-          magoo_locate_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - tl0).count() * 1000.0;
-          srcelem = dynamic_cast<BulkElementBase *>(resgo);
+          srcelem = pl->second.first;
+          s = pl->second.second;
         }
         if (!srcelem)
         {
@@ -3650,8 +3603,10 @@ namespace pyoomph
 
         // The element-centre query for DL/D0. One point per destination element, so it is not
         // batched with the nodal pass above; it reuses the same locator, which is where the cost
-        // sits (the index is built once, not once per query).
-        if (locator)
+        // sits (the index is built once, not once per query). It can still be absent here when no
+        // node was in scope at all - an element-wise-only transfer - so build it on demand.
+        if (!locator)
+          locator.reset(new MeshPointLocator(from, lsetup));
         {
           std::vector<double> centre(dmpt.size());
           for (unsigned d = 0; d < dmpt.size(); d++)
@@ -3668,12 +3623,6 @@ namespace pyoomph
           {
             srcelem = NULL;
           }
-        }
-        else
-        {
-          oomph::GeomObject *resgo = 0;
-          MaGO->locate_zeta(dmpt, resgo, s, false);
-          srcelem = dynamic_cast<BulkElementBase *>(resgo);
         }
         if (!srcelem)
         {
@@ -3875,11 +3824,6 @@ namespace pyoomph
       }
     }
 
-    if (report_interpolation_timing && !use_point_locator)
-    {
-      std::cout << "  [MeshAsGeomObject] locate " << magoo_locate_ms << " ms total" << std::endl;
-    }
-
     if (n_fallback || !unset_positions.empty())
     {
       // Deliberately does NOT name a boundary. Only boundary_index < 0 skips boundary nodes; with
@@ -3909,7 +3853,7 @@ namespace pyoomph
 
   // Create new, unattached nodes (not added to any element/mesh storage - just returned to the caller,
   // e.g. for probing/sampling) at the given physical coordinates. For each requested coordinate, the
-  // containing element is located via MeshAsGeomObject::locate_zeta; if found, the new node's field
+  // containing element is located by the point locator; if found, the new node's field
   // values and Eulerian position are set at every time-history level by interpolating the source
   // element's shape functions there. If no containing element is found (point outside the mesh), the
   // node is still created (with only its position set) but left without interpolated values.
@@ -3922,14 +3866,13 @@ namespace pyoomph
     pyoomph::Node * n0=dynamic_cast<pyoomph::Node*>(el0->node_pt(0));
 
     // All the requested points are located in one batch; the index is what costs, and building it
-    // once for the whole list rather than a MeshAsGeomObject per call is the point.
+    // once for the whole list rather than once per call is the point.
     LocatorSetup lsetup;
     lsetup.space = LocatorSpace::Lagrangian; // matches zeta_coordinate_type's default, as before
     std::unique_ptr<MeshPointLocator> locator;
     std::unique_ptr<LocationSet> located;
-    std::unique_ptr<oomph::MeshAsGeomObject> MaGO;
     const unsigned qdim = (coords.empty() ? el0->dim() : coords[0].size());
-    if (use_point_locator && !coords.empty())
+    if (!coords.empty())
     {
       std::vector<double> flat;
       flat.reserve(coords.size() * qdim);
@@ -3939,17 +3882,12 @@ namespace pyoomph
       locator.reset(new MeshPointLocator(this, lsetup));
       located.reset(new LocationSet(locator->locate_batch(flat, coords.size())));
     }
-    else
-    {
-      MaGO.reset(new oomph::MeshAsGeomObject(this));
-    }
 
     unsigned coord_index = 0;
     for ( const auto  & coord : coords)
     {
       oomph::Vector<double> s(el0->dim(), 1.0 / 3.0);
       BulkElementBase *srcelem = NULL;
-      if (located)
       {
         std::vector<double> sloc;
         if (located->resolve_local(coord_index, srcelem, sloc))
@@ -3962,14 +3900,6 @@ namespace pyoomph
         {
           srcelem = NULL;
         }
-      }
-      else
-      {
-        oomph::GeomObject *res_go = NULL;
-        oomph::Vector<double> zet(coord.size());
-        for (unsigned i=0;i<coord.size();i++) zet[i]=coord[i];
-        MaGO->locate_zeta(zet, res_go, s, false);
-        srcelem = dynamic_cast<BulkElementBase *>(res_go);
       }
       coord_index++;
 

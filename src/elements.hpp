@@ -33,7 +33,6 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "refinement_pattern.hpp"
 #include "problem.hpp"
 
-#include "mesh_as_geometric_object.h"
 
 // #include "meshtemplate.hpp"
 
@@ -587,7 +586,6 @@ namespace pyoomph
     // itself depends on the solution).
     virtual void assemble_hessian_and_mass_hessian(oomph::RankThreeTensor<double> &hbuffer, oomph::RankThreeTensor<double> &mbuffer);
     // Taking the old mesh, map an element with the local coordinates associated to each integration point of the new mesh.
-    virtual void prepare_zeta_interpolation(oomph::MeshAsGeomObject *mesh_as_geom);
     // Enable projection
     bool enable_zeta_projection = false;
     // Initialise vector to store.

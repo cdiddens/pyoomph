@@ -5486,58 +5486,6 @@ namespace pyoomph
 		func(&eleminfo, shape_info, NULL, &(mbuffer(0, 0,0)), &(hbuffer(0, 0,0)), 1, 3);		   
    }
    
-	// Fill up the vector pair to connect integration points with respective integration points of old mesh.
-	void BulkElementBase::prepare_zeta_interpolation(oomph::MeshAsGeomObject *mesh_as_geom){
-
-		// NOT enabled here: the flag no longer clears itself on first assembly, so latching it
-		// during preparation would leave every later ordinary solve assembling the projection
-		// residual. Mesh::set_zeta_projection_enabled() switches it around the projection solve.
-
-		// Number of integration points.
-      	const unsigned n_intpt = integral_pt()->nweight();
-
-		// Element's dimension
-		const unsigned int dim = this->dim();
-
-		// Allocate storage for local coordinates
-      	oomph::Vector<double> s(dim);
-
-		// Loop through integration points.
-		for (unsigned int ipt=0; ipt<n_intpt; ipt++){
-
-			// Initialise vector of coordinates at integration point.
-			oomph::Vector<double> zeta(dim, 0.0);
-
-			// Local coordinates of the integration points.
-			for (unsigned int i=0; i<dim; i++){
-				s[i] = integral_pt()->knot(ipt,i);
-				}
-
-			// Coordinates of the integration points.
-			FiniteElement::interpolated_zeta(s, zeta);
-	
-			// Local coordinates of the source element in base mesh.
-			oomph::Vector<double> old_s(zeta.size(), 0.5 * (this->s_min() + this->s_max()));
-			
-			// Source element in base mesh.
-			BulkElementBase *src_elem = NULL;
-
-			// Geometrical object into which the source element will be stored.
-			oomph::GeomObject *res_go = NULL;
-			
-			// Use locate_zeta function to identify the element of the base mesh 
-			// as geometrical object in which the interpolated_x coordinate is at and
-			// the local s coordinate corresponding to it.
-			mesh_as_geom->locate_zeta(zeta, res_go, old_s, false);
-
-			// Cast the element from Geometrical object into BulkElementMesh.
-        	src_elem = dynamic_cast<BulkElementBase *>(res_go);
-
-			// Update vector pair.
-			this->coords_oldmesh[ipt].first=src_elem;
-			this->coords_oldmesh[ipt].second=old_s;
-		}
-	};
 
 	
 	// Residuals passed to fill_in_generic_residual_contribution_jit for solving projection of coordinates and fields.

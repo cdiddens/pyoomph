@@ -250,7 +250,7 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
                 if not self.new.is_boundary_coordinate_defined(bi_new):
                     raise RuntimeError("Boundary coordinate along "+bn+" is defined on the old, but not the new mesh")
                 intermesh_new.nodal_interpolate_from(intermesh_old,bi_new)
-            elif self.project_on_boundary_without_zeta and _pyoomph.Mesh.get_use_point_locator():
+            elif self.project_on_boundary_without_zeta:
                 # No zeta along this boundary. Rather than the nearest-node blend below - which is
                 # not an interpolation and is quadratic in the mesh size - match each new interface
                 # node to the closest point of the OLD interface geometry and evaluate the old
@@ -306,84 +306,3 @@ class ODEInterpolator(BaseMeshToMeshInterpolator):
 
 
 _DefaultInterpolatorClass = InternalInterpolator
-
-if False:
-    from sklearn.neighbors import NearestNeighbors
-
-
-    class KNNInterpolator(BaseMeshToMeshInterpolator):
-        def __init__(self, old, new, nneigh=20):
-            super(KNNInterpolator, self).__init__(old, new)
-
-            self.boundaries_separate = True
-
-            old.prepare_interpolation()
-            # Remove the macro elements, since they are really troublesome for the locate_zeta
-            for e in old.elements():
-                e.set_macro_element(None, False)
-                while e.get_father_element() is not None:
-                    e = e.get_father_element()
-                    e.set_macro_element(None, False)
-
-            self.nneigh = nneigh
-            self.node_to_elem = []
-            pointlist = []
-            for e in old.elements():
-                for i in range(e.nnode()):
-                    self.node_to_elem.append(e)
-                    n = e.node_pt(i)
-                    p = [n.x(j) for j in range(n.ndim())]
-                    pointlist.append(p)
-            pointlist = numpy.array(pointlist)
-            self.KNN = NearestNeighbors(n_neighbors=self.nneigh, )
-            self.KNN.fit(pointlist)
-
-        def interpolate_bulk(self, also_on_bounds=False):
-            xprobe = []
-            destnodes = []
-            for n in self.new.nodes():
-                if also_on_bounds or (not n.is_on_boundary()):
-                    xprobe.append([n.x(j) for j in range(n.ndim())])
-                    destnodes.append(n)
-            xprobe = numpy.array(xprobe)
-            inds = self.KNN.kneighbors(xprobe, return_distance=False)
-            for j in range(len(xprobe)):
-                for i in inds[j]:
-                    el = self.node_to_elem[i]
-                    s = numpy.zeros((el.dim()))
-                    x = xprobe[j]
-                    s = el.locate_zeta(x, s, False)
-                    if len(s) > 0:
-                        nodalvals = el.get_interpolated_nodal_values_at_s(0, s)
-                        for k, v in enumerate(nodalvals):
-                            destnodes[j].set_value(k, v)
-                        break
-                else:
-                    dists, inds = self.KNN.kneighbors([xprobe[j]], return_distance=True)
-                    print("FAILED PROBE RESULT (index,dist,ind,s)")
-                    locs = []
-                    x = xprobe[j]
-                    for i in inds[0]:
-                        s = numpy.zeros((el.dim()))
-                        s = el.locate_zeta(x, s, False)
-                        locs.append(s)
-                    for i, ind in enumerate(inds[0]):
-                        print("", i, dists[0][i], ind, locs[i])
-                    raise RuntimeError("Cannot locate the point at " + str(x))
-
-        def interpolate_boundary(self):
-            for bn in self.new.get_boundary_names():
-                bi_new = self.new.get_boundary_index(bn)
-                bi_old = self.old.get_boundary_index(bn)
-                intermesh_new = self.new.get_mesh(bn, return_None_if_not_found=True)
-                intermesh_old = self.old.get_mesh(bn, return_None_if_not_found=True)
-                self.new.nodal_interpolate_along_boundary(self.old, bi_new, bi_old, intermesh_new, intermesh_old, 0.0)
-
-        def interpolate(self):
-            self.interpolate_bulk(also_on_bounds=not self.boundaries_separate)
-            if self.boundaries_separate:
-                self.interpolate_boundary()
-
-    _DefaultInterpolatorClass = KNNInterpolator
-else:
-    pass

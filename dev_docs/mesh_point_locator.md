@@ -3,8 +3,8 @@
 Status: **phases 0-4b done and in use by default.** `MeshPointLocator` (`src/pointlocator.{hpp,cpp}`)
 has replaced `oomph::MeshAsGeomObject` at every real call site; interfaces without a zeta transfer by
 closest-point projection; closed loops have a periodic zeta; and the projection-based interpolator
-works and conserves. `Mesh.set_use_point_locator(False)` still selects the old backend for
-comparison, and is removed once there is no reason left to compare.
+works and conserves. The A/B switch against the old backend is gone, along with every
+`oomph::MeshAsGeomObject` use in pyoomph (§10).
 
 Open: phase 3b (interface DL/D0 destroyed by adaptation - a live defect, currently only warned about
 and recorded as a strict `xfail` in `tests/test_mesh_point_locator.py`), phase 4 (automatic zeta
@@ -461,7 +461,8 @@ Verified: both zeta tutorials (`beads_on_string`, `rayleigh_plateau`) still run 
 
 **Phase 1 - locator core, serial. Mostly done.**
 
-All the call sites of §2 are migrated, behind `Mesh.set_use_point_locator()`. Measured on a ~9000-node
+All the call sites of §2 are migrated. The measurements below were taken while both backends still
+existed, behind the since-removed `Mesh.set_use_point_locator()`; on a ~9000-node
 axisymmetric triangular remesh, interleaved A,B,A,B, with results **bit-identical** between the two
 backends (largest difference 0.000e+00):
 
@@ -672,11 +673,11 @@ The field ranges over about [0.4, 2.1], so the blend was not merely inaccurate -
 interface field almost entirely. A 2d interface in 3d transfers at 2.2e-16 over 49 nodes with nothing
 unlocated.
 
-One consequence of this being new capability rather than a reimplementation: **the A/B switch cannot
-express it.** Asking `MeshAsGeomObject` to locate a 2-component position among 1d face elements walks
-off the end of the coordinate vector and segfaults, so with `use_point_locator(False)` the
-interpolator falls back to the blend, and `nodal_interpolate_from` throws with an explanation if the
-projection path is reached anyway.
+One consequence of this being new capability rather than a reimplementation: **the A/B switch could
+not express it.** Asking `MeshAsGeomObject` to locate a 2-component position among 1d face elements
+walks off the end of the coordinate vector and segfaults, so while the switch existed the
+interpolator fell back to the blend and `nodal_interpolate_from` threw if the projection path was
+reached anyway. Both guards went with the switch.
 
 Note also that the droplet A/B is a weak test of the boundary path: that remesh reproduces the same
 interface node positions, so the blend and the projection agree trivially. The transfer test above is
@@ -845,22 +846,40 @@ route this through `LocationSet`.
 
 ---
 
-## 10. What gets deleted
+## 10. What got deleted
 
-Every call site is migrated, so this is now a live list of removals rather than a plan - except that
-the A/B switch has to go first, since three of these are what it switches between.
+**Done.** `oomph::MeshAsGeomObject` no longer appears anywhere in pyoomph outside comments that
+explain why the new code looks as it does, and `src/missing_masters.hpp`, which is an oomph header
+kept alongside its upstream:
 
-* `Mesh::use_point_locator` and the `oomph::MeshAsGeomObject` branches it selects, once there is no
-  longer a reason to compare against the old backend;
+* `Mesh::use_point_locator`, its two nanobind bindings, and every branch it selected -
+  in `prepare_zeta_interpolation`, `nodal_interpolate_from` and `add_interpolated_nodes_at`;
+* `BulkElementBase::prepare_zeta_interpolation(oomph::MeshAsGeomObject*)`, the element-level
+  per-integration-point loop the old bulk path used, and the `#include
+  "mesh_as_geometric_object.h"` in `elements.hpp` with it. Nothing else was relying on that include
+  transitively - the build is clean without it;
+* `KNNInterpolator` (`interpolator.py`), dead behind `if False:` and the module's only `sklearn`
+  dependency.
 
-* the `#include "mesh_as_geometric_object.h"` in `elements.hpp` with them;
-* `MeshKDTree` (`mesh.cpp`) - but only in the later tracer campaign, not here; it is its only
-  remaining user, and until then it stays as it is even if this work breaks it (see phase 1);
+One latent bug fell out of the removal. The DL/D0 element-centre query read `if (locator) ... else
+MaGO->locate_zeta(...)`, and `locator` is null when no node was in scope, while `MaGO` was null
+whenever the locator was enabled - so an element-wise-only transfer would have dereferenced null on
+the default path. It now builds the locator on demand.
+
+**Deliberately kept:**
+
+* `MeshKDTree` (`mesh.cpp`) - the tracer campaign's business, not this one; it is its only remaining
+  user;
 * the two-nearest blend in `nodal_interpolate_from`'s `missing_nodes` pass and in
   `nodal_interpolate_along_boundary` - already demoted from silent default to reported last resort,
-  and reachable now only when a point genuinely lies outside the old mesh;
-* `BulkElementBase::zeta_time_history` / `zeta_coordinate_type` as statics (§3.1);
-* `KNNInterpolator` (`interpolator.py`), already dead behind `if False:`.
+  and reachable now only when a point genuinely lies outside the old mesh. §16 is a case where it is
+  the only thing standing between a moved boundary and no values at all;
+* `BulkElementBase::zeta_time_history` / `zeta_coordinate_type` as statics (§3.1). This one is not
+  cleanup. `interpolated_zeta` is an oomph virtual with no room for a parameter, so these statics are
+  how it is told which space and which time level to answer in - the locator sets them itself, under
+  an RAII guard, for exactly that reason. Removing them means giving pyoomph's elements their own
+  non-virtual zeta accessor and rerouting some twenty call sites onto it, which is a design change
+  and wants its own campaign.
 
 ---
 
@@ -1055,8 +1074,51 @@ The only source that holds the right values for those nodes is the **neighbourin
   coordinates on the old and the new mesh, which is how the table above was produced. Every earlier
   attempt at this diagnosis was inference from warnings.
 
-**Not implemented:** searching the *sibling* interfaces of the same bulk mesh when the corresponding
-one cannot place a node. That is the correct fix. The obstacle is bookkeeping rather than concept:
-`field_map` and `inter_field_map` are computed once between this mesh's code instance and the source
-mesh's, so a different source interface needs its own maps.
+### 16.1 What actually resolved that run: the geometry has to follow the mesh
+
+None of the above fixes the run, and none of them can, because nothing in the library is wrong. The
+mesh template asks for a boundary the old mesh does not have. In the script:
+
+```python
+pr0 = self.point(pr.droplet.radius*pi/4, 0, size=...)     # every rebuild, including remeshes
+```
+
+`define_geometry` runs again on every remesh, so that line re-pins the corner to its *initial* place
+while the node it corresponds to has moved. Reading its current position instead is enough:
+
+```python
+pr0_x = pr.droplet.radius*pi/4
+if not self.is_first_time():
+    _seg = self.get_boundary_coordinates("gas/gas_substrate", sort_along_axis="x+")
+    pr0_x = _seg[0][0][0]     # smallest x on gas_substrate == the corner
+pr0 = self.point(pr0_x, 0, size=...)
+```
+
+With that, the smallest x on `gas_substrate` reads 0.8116882860 immediately before *and* immediately
+after the remesh - previously 0.8116883 before and pi/4 after - and the run produces no interpolation
+warnings at all.
+
+The general rule, and the reason this is in the dev doc rather than only in that script: **anything in
+`define_geometry` that a moving mesh can move must be re-read from the old mesh on a remesh, not
+recomputed from a constant.** That script already did exactly this for the droplet interface, which is
+rebuilt from `get_boundary_coordinates("droplet/droplet_gas", ...)` in the `not is_first_time()`
+branch. The corner was the one piece of geometry still pinned to its initial value while the mesh
+around it moved, and a junction between two *named* boundaries is the case where that hurts: the
+strip between the old corner and the new one changes which name it belongs to, and interpolation is
+per-boundary.
+
+A pinned point that sits in the *interior* of one boundary is harmless by comparison - it perturbs
+where nodes land, but every one of them still has the same named boundary to be located on.
+
+**Not implemented, and deliberately so.** The library-side fix would be to search the *sibling*
+interfaces of the same bulk mesh when the corresponding one cannot place a node. It was considered
+and dropped: keeping the rebuilt geometry consistent with the mesh it is rebuilt from is the script's
+job, §16.1 is a two-line change in the script that does it, and the warnings name the nodes clearly
+enough to lead you there. Guessing across boundary names in the library would instead make a genuine
+modelling mistake - naming the same stretch of substrate differently before and after - transfer
+quietly and look correct.
+
+Should it ever be wanted, the obstacle is bookkeeping rather than concept: `field_map` and
+`inter_field_map` are computed once between this mesh's code instance and the source mesh's, so a
+different source interface needs its own maps.
 

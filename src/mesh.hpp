@@ -114,10 +114,6 @@ namespace pyoomph
 		virtual void fill_dof_to_global_field_index_buffer(std::vector<int> &dofs_to_global_field_index);
 		// From the old mesh, map each element with the local coordinates associated to each integration point of the new mesh.
 		virtual void prepare_zeta_interpolation(pyoomph::Mesh *oldmesh);
-		// A/B switch for the migration off oomph::MeshAsGeomObject onto MeshPointLocator
-		// (dev_docs/mesh_point_locator.md phase 1). Set False to get the old path back for comparison;
-		// it is removed once every call site has been migrated and validated.
-		static bool use_point_locator;
 		// Locate a list of points in this mesh and report what happened, without transferring any
 		// values. Exists because the locator is otherwise only reachable through routines that do a
 		// great deal else (and, in add_interpolated_nodes_at's case, cannot be pointed at an
