@@ -496,6 +496,54 @@ namespace pyoomph
     return (it == boundary_zeta_periods.end() ? 0.0 : it->second);
   }
 
+  // Positions of the nodes a transfer could not give a value to. Printed rather than counted,
+  // because "3 nodes got nothing" is not actionable and "the three nodes at these coordinates got
+  // nothing" is - they are almost always in one identifiable place, a corner or a boundary the two
+  // meshes disagree about.
+  static std::string describe_node_positions(const std::vector<std::vector<double>> &pos, unsigned max_shown = 12)
+  {
+    std::ostringstream oss;
+    for (unsigned i = 0; i < pos.size() && i < max_shown; i++)
+    {
+      oss << (i ? ", " : "") << "(";
+      for (unsigned d = 0; d < pos[i].size(); d++)
+        oss << (d ? ", " : "") << pos[i][d];
+      oss << ")";
+    }
+    if (pos.size() > max_shown)
+      oss << ", ... and " << (pos.size() - max_shown) << " more";
+    return oss.str();
+  }
+
+  std::string Mesh::get_full_domain_path()
+  {
+    if (this->nelement())
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+      if (e && e->get_code_instance() && e->get_code_instance()->get_func_table() &&
+          e->get_code_instance()->get_func_table()->domain_name)
+      {
+        return std::string(e->get_code_instance()->get_func_table()->domain_name);
+      }
+    }
+    return "<unnamed mesh>";
+  }
+
+  std::string InterfaceMesh::get_full_domain_path()
+  {
+    const std::string parent = (bulkmesh ? bulkmesh->get_full_domain_path() : std::string("<detached>"));
+    return parent + "/" + interfacename;
+  }
+
+  std::string Mesh::get_boundary_name_or_index(unsigned boundary_index)
+  {
+    if (boundary_index < boundary_names.size() && !boundary_names[boundary_index].empty())
+      return boundary_names[boundary_index];
+    std::ostringstream oss;
+    oss << "boundary " << boundary_index;
+    return oss.str();
+  }
+
   bool Mesh::is_boundary_coordinate_defined(unsigned boundary_index)
   {
     return boundary_index < Boundary_coordinate_exists.size() && Boundary_coordinate_exists[boundary_index];
@@ -2956,6 +3004,7 @@ namespace pyoomph
 
     unsigned n_suspicious = 0;
     double worst_dist = 0.0;
+    std::vector<std::vector<double>> unset_positions;
 
     for (unsigned in = 0; in < newnodes.size(); in++)
     {
@@ -3016,9 +3065,9 @@ namespace pyoomph
       } // TODO
       if (boundary_max_dist > 0 && sqrt(mindist) > boundary_max_dist)
       {
-        std::cerr << "Cannot find a boundary node within the distance of " << boundary_max_dist << "  at " << xn[0] << ", " << xn[1] << std::endl;
+        // Nothing is written for this node at all - it keeps whatever it was built with.
+        unset_positions.push_back(std::vector<double>(xn.begin(), xn.end()));
         continue;
-        // TODO
       }
 
       double mindist2 = 1e40;
@@ -3107,15 +3156,24 @@ namespace pyoomph
     // interpolation - it is not even linear-exact on a general mesh - and it is reached silently
     // whenever no boundary coordinate is defined. Say when it produced a match that is implausibly
     // far away, rather than letting a wrong value pass as a transferred one.
+    const std::string where = (imesh ? imesh->get_full_domain_path()
+                                     : this->get_full_domain_path() + "/" + this->get_boundary_name_or_index(bind));
     if (n_suspicious)
     {
-      std::cout << "WARNING: interpolating boundary " << bind << " of '" << my_ft->domain_name
+      std::cout << "WARNING: interpolating '" << where
                 << "' by nearest-node blending matched " << n_suspicious << " of " << newnodes.size()
                 << " nodes to an old node further than " << suspicious_dist
                 << " away (two element lengths; worst match " << worst_dist
                 << "). Those values come from an unrelated part of the boundary. Assigning a zeta "
                 << "coordinate along this boundary avoids the nearest-node path entirely."
                 << std::endl;
+    }
+    if (!unset_positions.empty())
+    {
+      std::cout << "WARNING: interpolating '" << where << "': " << unset_positions.size() << " of "
+                << newnodes.size() << " nodes received NO value, because no old node lay within the "
+                << "boundary_max_distance of " << boundary_max_dist << ". They keep whatever they "
+                << "were built with. Nodes at: " << describe_node_positions(unset_positions) << std::endl;
     }
   }
 
@@ -3573,7 +3631,8 @@ namespace pyoomph
     // the shape-function evaluation above, and quadratic in the mesh size on top. It used to happen
     // silently for boundaries (the cerr below is guarded by boundary_index<0), so count it and
     // report once at the end.
-    unsigned n_fallback = 0, n_fallback_failed = 0;
+    unsigned n_fallback = 0;
+    std::vector<std::vector<double>> unset_positions;
     for (oomph::Node *n : missing_nodes)
     {
       if (completed_nodes.count(n))
@@ -3687,8 +3746,9 @@ namespace pyoomph
       }
       else
       {
-        n_fallback_failed++;
-        std::cerr << "  NOT EVEN FOUND A NEAREST NODE" << std::endl;
+        // No source node at all: this node keeps whatever it was built with.
+        oomph::Vector<double> xn = n->position();
+        unset_positions.push_back(std::vector<double>(xn.begin(), xn.end()));
       }
     }
 
@@ -3697,15 +3757,20 @@ namespace pyoomph
       std::cout << "  [MeshAsGeomObject] locate " << magoo_locate_ms << " ms total" << std::endl;
     }
 
-    if (n_fallback)
+    if (n_fallback || !unset_positions.empty())
     {
-      std::cout << "WARNING: interpolating ";
-      if (boundary_index < 0) std::cout << "the bulk of '" << my_ft->domain_name << "'";
-      else std::cout << "boundary " << boundary_index << " of '" << my_ft->domain_name << "'";
-      std::cout << ": " << n_fallback << " node(s) could not be located in the old mesh and fell back "
-                << "to nearest-node blending instead of proper interpolation";
-      if (n_fallback_failed) std::cout << ", " << n_fallback_failed << " of which got no value at all";
-      std::cout << "." << std::endl;
+      std::string where = this->get_full_domain_path();
+      if (boundary_index >= 0 && !dynamic_cast<InterfaceMesh *>(this))
+        where += "/" + this->get_boundary_name_or_index((unsigned)boundary_index);
+      std::cout << "WARNING: interpolating " << (boundary_index < 0 ? "the bulk of '" : "'") << where
+                << "': " << n_fallback << " node(s) could not be located in the old mesh and fell back "
+                << "to nearest-node blending instead of proper interpolation." << std::endl;
+      if (!unset_positions.empty())
+      {
+        std::cout << "         Of those, " << unset_positions.size() << " received NO value at all "
+                  << "and keep whatever they were built with. Nodes at: "
+                  << describe_node_positions(unset_positions) << std::endl;
+      }
     }
 
     BulkElementBase::zeta_coordinate_type=old_setting;

@@ -473,3 +473,45 @@ def test_default_interpolator_is_the_nodal_one():
             pass
 
     assert _Trivial().mesh_interpolator is InternalInterpolator
+
+
+# ----------------------------------------------------------------------------------------------
+# 7. diagnostics name the mesh and the nodes
+# ----------------------------------------------------------------------------------------------
+
+def test_full_domain_path():
+    with _BlobProb(extra=_SurfField("c", "C2")) as p:
+        p.quiet()
+        p.initialise()
+        assert p.get_mesh("domain").get_full_domain_path() == "domain"
+        assert p.get_mesh("domain/interface").get_full_domain_path() == "domain/interface"
+
+
+@pytest.mark.slow
+def test_transfer_warnings_name_the_boundary_and_the_unset_nodes(capfd):
+    # A diagnostic that says "boundary 2 of domain" and "3 nodes got nothing" is not actionable: the
+    # index is an internal number, and the nodes that silently kept their initial values are almost
+    # always in one identifiable place. Both are checked here because both were once missing.
+    orig = InternalInterpolator.__init__
+
+    def patched(self, old, new):
+        orig(self, old, new)
+        self.project_on_boundary_without_zeta = False        # force the legacy blend
+        self.boundary_max_distances = {"interface": 1e-4}    # and make it fail to find anything
+
+    InternalInterpolator.__init__ = patched
+    try:
+        with _BlobProb(extra=_SurfField("c", "C2"), res=0.12) as p:
+            p.quiet()
+            p.initialise()
+            m = p.get_mesh("domain")
+            for n in m.nodes():          # move it, so the remesh really does relocate the nodes
+                n.set_x(0, n.x(0) * 0.93)
+            p.force_remesh()
+        out = capfd.readouterr().out
+    finally:
+        InternalInterpolator.__init__ = orig
+
+    assert "domain/interface" in out, out          # the path, not a bare index
+    assert "received NO value" in out, out
+    assert "Nodes at: (" in out, out               # and where they are

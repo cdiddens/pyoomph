@@ -292,6 +292,12 @@ namespace pyoomph
 				errmsg << "  " << boundary_names[i] << std::endl;
 			throw_runtime_error(errmsg.str());
 		}
+		// Human-readable path of this mesh, e.g. "droplet" or "droplet/interface". Diagnostics that
+		// name only a boundary INDEX and the JIT domain name are hard to act on - the index is an
+		// internal number and the domain name alone does not say which boundary of it is meant.
+		virtual std::string get_full_domain_path();
+		// Name of one boundary of this mesh, or "boundary <index>" if it has none.
+		std::string get_boundary_name_or_index(unsigned boundary_index);
 		std::vector<std::string> get_boundary_names()
 		{
 			return boundary_names;
@@ -410,6 +416,7 @@ namespace pyoomph
 		// e.g. after adaptation via rebuild_after_adapt.
 		virtual void set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicBulkElementInstance *jitcode);
 		virtual Mesh *get_bulk_mesh() { return bulkmesh; }
+		std::string get_full_domain_path() override;
 		unsigned count_nnode(bool discontinuous = false) override; // Interface meshes don't have their own nodes...
 		Node *get_some_node() override { return (this->nelement() ? dynamic_cast<Node *>(dynamic_cast<oomph::FiniteElement *>(this->element_pt(0))->node_pt(0)) : NULL); }
 		void fill_node_map(std::map<oomph::Node *, unsigned> &nodemap) override;
