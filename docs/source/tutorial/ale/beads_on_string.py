@@ -142,7 +142,7 @@ class BeadsOnStringProblem(Problem):
 
         self.add_equations(eqs @ "liquid")
         # output file of the minimum
-        self.minimum_out = problem.create_text_file_output("minimum.txt", header=["t", "r_min", "z_min"])
+        self.minimum_out = self.create_text_file_output("minimum.txt", header=["t", "r_min", "z_min"])
         
         
     def minimum_radius_and_position(self):
