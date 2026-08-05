@@ -1,9 +1,15 @@
 # Mesh point location and mesh-to-mesh transfer
 
-Status: **design agreed, implementation started.** `src/pointlocator.hpp` holds the API and
-`src/pointlocator.cpp` the index construction; the matching and evaluation paths still throw. Nothing
-calls into it yet, so the old facility is unchanged and in use. The old facility is deleted, not kept
-as a fallback, once every call site in §3 has been migrated.
+Status: **phases 0-4b done and in use by default.** `MeshPointLocator` (`src/pointlocator.{hpp,cpp}`)
+has replaced `oomph::MeshAsGeomObject` at every real call site; interfaces without a zeta transfer by
+closest-point projection; closed loops have a periodic zeta; and the projection-based interpolator
+works and conserves. `Mesh.set_use_point_locator(False)` still selects the old backend for
+comparison, and is removed once there is no reason left to compare.
+
+Open: phase 3b (interface DL/D0 destroyed by adaptation - a live defect, currently only warned about
+and recorded as a strict `xfail` in `tests/test_mesh_point_locator.py`), phase 4 (automatic zeta
+assignment, now of doubtful value - see §12), phase 5 (MPI, gated on `--distribute` remeshing
+existing), phase 6 (facet/HDG), and the tracer campaign (§ phase 1).
 
 This collects five things that look unrelated and are not:
 
