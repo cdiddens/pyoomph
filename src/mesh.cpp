@@ -2776,6 +2776,32 @@ namespace pyoomph
       }
     }
 
+    // Characteristic size of the OLD boundary's elements, for judging whether a nearest-node match
+    // is close enough to be believable. The previous test compared the squared distance against a
+    // literal 1.0, which is an absolute length in nondimensional units and therefore says nothing
+    // about this mesh: on a domain of size 0.01 it never fires, on one of size 100 it always does.
+    double old_elem_size = 0.0;
+    if (oldimesh)
+    {
+      for (unsigned ie = 0; ie < oldimesh->nelement(); ie++)
+      {
+        oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(oldimesh->element_pt(ie));
+        if (!fe || fe->nnode() < 2)
+          continue;
+        double d2 = 0.0;
+        oomph::Node *a = fe->node_pt(0), *b = fe->node_pt(fe->nnode() - 1);
+        for (unsigned di = 0; di < a->ndim(); di++)
+          d2 += (a->x(di) - b->x(di)) * (a->x(di) - b->x(di));
+        old_elem_size = std::max(old_elem_size, sqrt(d2));
+      }
+    }
+    // Two element lengths: far enough that an ordinary remesh never trips it, close enough that a
+    // node matched against an unrelated part of the interface does.
+    const double suspicious_dist = (old_elem_size > 0.0 ? 2.0 * old_elem_size : -1.0);
+
+    unsigned n_suspicious = 0;
+    double worst_dist = 0.0;
+
     for (unsigned in = 0; in < newnodes.size(); in++)
     {
       oomph::Node *n = newnodes[in];
@@ -2797,8 +2823,13 @@ namespace pyoomph
           mindist = dist;
         }
       }
-      if (mindist > 1.0)
+      if (bestnode)
       {
+        worst_dist = std::max(worst_dist, sqrt(mindist));
+      }
+      if (suspicious_dist > 0.0 && mindist > suspicious_dist * suspicious_dist)
+      {
+        n_suspicious++;
         bestnode = NULL;
         mindist = 1e40;
       }
@@ -2915,6 +2946,21 @@ namespace pyoomph
             dynamic_cast<pyoomph::Node*>(n)->xi(i)=xl;
           }
         }
+    }
+
+    // This whole routine is a two-nearest-node inverse-distance blend, which is not an
+    // interpolation - it is not even linear-exact on a general mesh - and it is reached silently
+    // whenever no boundary coordinate is defined. Say when it produced a match that is implausibly
+    // far away, rather than letting a wrong value pass as a transferred one.
+    if (n_suspicious)
+    {
+      std::cout << "WARNING: interpolating boundary " << bind << " of '" << my_ft->domain_name
+                << "' by nearest-node blending matched " << n_suspicious << " of " << newnodes.size()
+                << " nodes to an old node further than " << suspicious_dist
+                << " away (two element lengths; worst match " << worst_dist
+                << "). Those values come from an unrelated part of the boundary. Assigning a zeta "
+                << "coordinate along this boundary avoids the nearest-node path entirely."
+                << std::endl;
     }
   }
 
@@ -3210,11 +3256,19 @@ namespace pyoomph
       }
     }
 
-    // Handle the nodes which where not found by nearest nodes
+    // Handle the nodes which where not found by nearest nodes.
+    //
+    // Reaching here at all means locate_zeta could not place the node in the source mesh, and what
+    // follows is a two-nearest-node inverse-distance blend - a fallback of much lower quality than
+    // the shape-function evaluation above, and quadratic in the mesh size on top. It used to happen
+    // silently for boundaries (the cerr below is guarded by boundary_index<0), so count it and
+    // report once at the end.
+    unsigned n_fallback = 0, n_fallback_failed = 0;
     for (oomph::Node *n : missing_nodes)
     {
       if (completed_nodes.count(n))
         continue;
+      n_fallback++;
       oomph::Vector<double> xnode = n->position();
       if (boundary_index<0) std::cerr << "FOUND UNTREATED BULK NODE AT\t" << xnode[0] << "\t" << xnode[1] << std::endl;
       double mindist = 1e40;
@@ -3296,8 +3350,20 @@ namespace pyoomph
       }
       else
       {
+        n_fallback_failed++;
         std::cerr << "  NOT EVEN FOUND A NEAREST NODE" << std::endl;
       }
+    }
+
+    if (n_fallback)
+    {
+      std::cout << "WARNING: interpolating ";
+      if (boundary_index < 0) std::cout << "the bulk of '" << my_ft->domain_name << "'";
+      else std::cout << "boundary " << boundary_index << " of '" << my_ft->domain_name << "'";
+      std::cout << ": " << n_fallback << " node(s) could not be located in the old mesh and fell back "
+                << "to nearest-node blending instead of proper interpolation";
+      if (n_fallback_failed) std::cout << ", " << n_fallback_failed << " of which got no value at all";
+      std::cout << "." << std::endl;
     }
 
     BulkElementBase::zeta_coordinate_type=old_setting;
@@ -5291,9 +5357,30 @@ namespace pyoomph
           break;
         }
       }
-      if (has_dg) // || ft->info_D0.numfields
+      if (has_dg)
       {
         throw_runtime_error("Cannot adapt yet when having discontinuous fields added at an interface. Make sure to set Problem.max_refinement_level=0 and/or Problem.initial_adaption_steps=0. Will be hopefully implemented soon.");
+      }
+
+      // The DG check above used to carry a commented-out `|| ft->info_D0.numfields`, and leaving it
+      // out is not harmless: clear_before_adapt() deletes every interface element, so the internal
+      // Data backing interface-owned DL/D0 fields is destroyed and reallocated at zero - current
+      // value AND time history. For a DL/D0 field that its own residual determines algebraically
+      // the next solve repairs the current value, which is why this was never noticed; anything
+      // carrying history across the adaptation is silently wrong. Warn rather than throw, because
+      // the algebraically-determined case is the common one and does work.
+      // Proper transfer is dev_docs/mesh_point_locator.md phase 3b.
+      if (!warned_about_discontinuous_reset && (ft->info_DL.numfields || ft->info_D0.numfields))
+      {
+        warned_about_discontinuous_reset = true;
+        std::cout << "WARNING: the interface '" << interfacename << "' has ";
+        if (ft->info_DL.numfields) std::cout << ft->info_DL.numfields << " DL ";
+        if (ft->info_DL.numfields && ft->info_D0.numfields) std::cout << "and ";
+        if (ft->info_D0.numfields) std::cout << ft->info_D0.numfields << " D0 ";
+        std::cout << "field(s). Interface elements are destroyed and rebuilt on every mesh adaptation, "
+                  << "so these values and their time history are reset to zero here. That is harmless "
+                  << "only if the fields are fully determined by their own residual at the next solve."
+                  << std::endl;
       }
     }
     if (!bulkmesh)

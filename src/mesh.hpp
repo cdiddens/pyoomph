@@ -346,6 +346,7 @@ namespace pyoomph
 		// Same as setup_boundary_information1d but for a 2d interface (attached to a 3d bulk mesh).
 		virtual void setup_boundary_information2d(pyoomph::Mesh *parent, const std::set<unsigned> &possible_bounds);
 		std::vector<double> opposite_offset_vector,reversed_opposite_offset_vector; // Constant offset (e.g. for periodic/translated interfaces) to the opposite side and its reverse
+		bool warned_about_discontinuous_reset = false; // So rebuild_after_adapt's DL/D0 warning is printed once per interface, not once per adaptation
 	public:
 		InterfaceMesh();
 		~InterfaceMesh() override;

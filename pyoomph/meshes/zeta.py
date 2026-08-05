@@ -38,9 +38,88 @@ if TYPE_CHECKING:
     from .interpolator import BaseMeshToMeshInterpolator
 
 
+def _find_closed_segments(cache:MeshDataCacheEntry,segs:list[list[int]])->list[bool]:
+    """Mark which of the segments returned by ``get_interface_line_segments`` are closed loops.
+
+    The segment walk notices the looped case (it falls back to picking an arbitrary start node when
+    no endpoint has a single neighbour) but only prints about it, and it walks the loop all the way
+    round so that the start node appears again at the end. That repeated node is the reliable
+    signal - and also the reason a closed loop currently dies with "NODEMAP AND SEGMENT LENGTH
+    MISMATCH" further down, since the segment then holds one more entry than the mesh has nodes.
+    A loop whose walk happens not to repeat the start node is caught by the adjacency test instead.
+    """
+    endpoint_pairs:set[tuple[int,int]]=set()
+    for e in cache.elem_indices:
+        a,b=int(e[0]),int(e[-1])
+        endpoint_pairs.add((a,b))
+        endpoint_pairs.add((b,a))
+    return [len(seg)>2 and (seg[0]==seg[-1] or (seg[-1],seg[0]) in endpoint_pairs) for seg in segs]
+
+
+def _check_zeta_is_invertible(mesh:InterfaceMesh,bind:int,context:str)->None:
+    """Verify that the zeta values just written to `mesh` actually form a chart.
+
+    The interpolation feeds zeta to oomph's ``locate_zeta`` on the interface mesh (see
+    ``Mesh::nodal_interpolate_from`` in src/mesh.cpp), which treats zeta as a *global* coordinate and
+    inverts it element by element. That only works if zeta is single-valued and monotone within each
+    element. When it is not - a closed loop, or an interface that folds back along the axis chosen
+    for :py:class:`AssignZetaCoordinatesByEulerianCoordinate` - nothing throws: the offending element
+    simply matches queries it has no business matching, and the interpolated values come from the
+    wrong part of the interface. This turns that into an error instead.
+
+    See dev_docs/mesh_point_locator.md for why the real fix is a periodic zeta space rather than a
+    validity check.
+    """
+    ranges:list[tuple[float,float]]=[]  # (zmin, zmax) per element, from its two end nodes
+    for e in mesh.elements():
+        zetas=[e.node_pt(ni).get_coordinates_on_boundary(bind)[0] for ni in range(e.nnode())]
+        if len(zetas)<2:
+            continue
+        # Only the end values order the element; intermediate C2 nodes may legitimately sit anywhere
+        # between them, so a strict sort check over all nodes would be too strong.
+        lo,hi=min(zetas[0],zetas[-1]),max(zetas[0],zetas[-1])
+        if hi-lo<=0:
+            raise RuntimeError("The zeta coordinates assigned by "+context+" are degenerate on an element of '"+mesh.get_name()+"': both ends have zeta="+str(lo)+". zeta must vary along the interface.")
+        ranges.append((lo,hi))
+
+    if len(ranges)<2:
+        return
+
+    # A valid chart tiles its range: the elements' zeta intervals abut without overlapping, so their
+    # widths sum to the total span. A seam element wrapping a closed loop, or an interface folding
+    # back along the chosen axis, re-covers ground the other elements already own, and the sum
+    # exceeds the span. This is a much better detector than "one element is suspiciously wide",
+    # which false-positives on a coarse interface where one element legitimately owns a large share.
+    # Disconnected segments only ever make the sum SMALLER than the span (the jump offsets are gaps
+    # no element covers), so they never trip it.
+    span=max(r[1] for r in ranges)-min(r[0] for r in ranges)
+    if span<=0:
+        return
+    covered=sum(hi-lo for lo,hi in ranges)
+    if covered>1.5*span:
+        raise RuntimeError("The zeta coordinates assigned by "+context+" on '"+mesh.get_name()+"' are not invertible: the "+str(len(ranges))+" elements cover a total zeta length of "+str(covered)+" while spanning only "+str(span)+", so they overlap. This is what a closed loop (the seam element wrapping from the last zeta back to the first, covering the whole range on its own) or an interface folding back along the chosen axis looks like. Interpolation through such a zeta silently takes values from the wrong part of the interface.")
+
+
 class AssignZetaCoordinatesBase(InterfaceEquations):
+    #: Validate after each assignment that zeta is actually invertible. Only turn this off if you
+    #: know the interpolation cannot be misled by the overlap it complains about.
+    validate_zetas:bool=True
+
     def assign_zetas(self,mesh:InterfaceMesh)->None:
         raise RuntimeError("This function must be implemented!")
+
+    def _refuse_if_distributed(self)->None:
+        """Zeta assignment walks the *local* mesh only.
+
+        Under ``--distribute`` that means the arclength restarts on every rank, the segment
+        orientation heuristics act on partial curves, halo nodes never receive a consistent value,
+        and a zeta owned by another rank is not found at interpolation time at all. None of that
+        announces itself, so refuse rather than produce a plausible wrong answer. See
+        dev_docs/mesh_point_locator.md phase 5.
+        """
+        problem=self.get_problem()
+        if problem is not None and problem.is_distributed():
+            raise self.add_exception_info(RuntimeError("Zeta coordinates cannot be assigned on a distributed mesh (mpirun --distribute): the assignment only sees this rank's part of the interface. See dev_docs/mesh_point_locator.md."))
 
     def after_mapping_on_macro_elements(self):
         self.assign_zetas(self.get_mesh())
@@ -86,6 +165,7 @@ class AssignZetaCoordinatesByEulerianCoordinate(AssignZetaCoordinatesBase):
     def assign_zetas(self,mesh:InterfaceMesh):
         if mesh.get_dimension()!=1:
             raise RuntimeError("Currently only implemented for 1d interfaces meshes")
+        self._refuse_if_distributed()
         bmesh=mesh.get_bulk_mesh()
         if isinstance(bmesh,InterfaceMesh):
             raise RuntimeError("Cannot do it, if the parent mesh is not a bulk mesh")
@@ -101,10 +181,17 @@ class AssignZetaCoordinatesByEulerianCoordinate(AssignZetaCoordinatesBase):
                 maxzeta=max(zeta,maxzeta)
                 n.set_coordinates_on_boundary(bind,[zeta])
                 nodes_set+=1
-        bmesh.boundary_coordinate_bool(bind)  
-        mesh.update_zeta_in_buffer()      
+        bmesh.boundary_coordinate_bool(bind)
+        mesh.update_zeta_in_buffer()
         if maxzeta-minzeta<1e-10 and nodes_set>1:
             raise self.add_exception_info(RuntimeError("The assigned zeta coordinates are not meaningful. Probably align along another axis"))
+        if self.validate_zetas:
+            # An interface overhanging in the chosen direction produces a perfectly non-degenerate
+            # zeta that is nonetheless not invertible, which the min/max check above cannot see.
+            try:
+                _check_zeta_is_invertible(mesh,bind,"AssignZetaCoordinatesByEulerianCoordinate(direction="+str(self.direction)+")")
+            except RuntimeError as e:
+                raise self.add_exception_info(e)
 
 
 class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
@@ -133,14 +220,19 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
     def assign_zetas(self,mesh:InterfaceMesh)->None:
         if mesh.get_dimension()!=1:
             raise RuntimeError("Currently only implemented for 1d interfaces meshes")
+        self._refuse_if_distributed()
         bmesh=mesh.get_bulk_mesh()
         if isinstance(bmesh,InterfaceMesh):
             raise RuntimeError("Cannot do it, if the parent mesh is not a bulk mesh")
         bind=bmesh.get_boundary_index(mesh.get_name())
         cache=MeshDataCacheEntry(mesh,MeshDataCacheKey(nondimensional=True,tesselate_tri=True))
-                
+
         pts=cache.get_coordinates()
-        segs,_=cache.get_interface_line_segments()        
+        segs,_=cache.get_interface_line_segments()
+
+        closed=_find_closed_segments(cache,segs)
+        if any(closed):
+            raise self.add_exception_info(RuntimeError("The interface '"+mesh.get_name()+"' contains "+str(sum(closed))+" closed loop(s), which cannot be parameterised by a single-valued zeta: the element closing the loop runs from the last zeta back to the first and therefore spans the whole range, so it matches essentially any query during interpolation and silently returns values from the opposite side of the loop. A periodic zeta space is the fix - see dev_docs/mesh_point_locator.md."))
 
         # Sort and reverse the segments based on the settings
         if self.sort_along_axis is not None:
@@ -216,7 +308,12 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
             n=nodemap[pti]
             n.set_coordinates_on_boundary(bind,[al])
         bmesh.boundary_coordinate_bool(bind)
-        mesh.update_zeta_in_buffer()      
+        mesh.update_zeta_in_buffer()
+        if self.validate_zetas:
+            try:
+                _check_zeta_is_invertible(mesh,bind,"AssignZetaCoordinatesByArclength")
+            except RuntimeError as e:
+                raise self.add_exception_info(e)
 
 
 
