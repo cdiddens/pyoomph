@@ -518,6 +518,46 @@ Self-locating a mesh's own integration points, per point:
 Before this classification existed, quads cost 2.3 us/point - so it is a ~25x saving on structured
 meshes, bringing them level with simplices.
 
+### Newton convergence, and why there are two passes
+
+Single-start Newton on a curved isoparametric map is **not** guaranteed to converge, and no
+formulation of it is: the map can be non-injective on a tangled element, the Jacobian can be singular
+inside it, and a full Newton step can overshoot. Everything below exists because of that, not because
+it was observed to fail.
+
+* The `General` path runs **two passes**. Pass 1 only ever takes one damped Newton per candidate
+  element; only if no candidate accepts the point at all does pass 2 run the expensive multi-start.
+  So deferring the multi-start is a cost optimisation, not a removal of the safety net - a point that
+  pass 1 cannot place still gets it.
+* `polish_local_coordinate` is **damped**: a step that does not reduce the residual is halved, up to
+  ten times, and the iteration stops if no descent is found. It returns its achieved residual, and
+  every caller treats a large one as "not this element" rather than as an answer.
+* Its result is only kept if it converged **and** still lies in the reference domain; otherwise the
+  pre-polish coordinate is kept. Without that guard a polish that diverged on a badly deformed
+  element would silently replace a good `locate_zeta` answer with a worse one.
+* Wedges and pyramids cannot use oomph's multi-start (see below), so they have their own: the affine
+  seed first, then on pass 2 the element's own node local coordinates plus their centroid, each
+  pulled slightly towards the centroid because starting exactly on a vertex of a curved element can
+  sit on a Jacobian degeneracy - the pyramid apex in particular.
+* `search_statistics()` reports how many points needed pass 2, so this is measurable rather than
+  assumed.
+
+Measured against a deliberately hostile warp (non-polynomial, so nothing is affine or bilinear and
+the mid-side nodes are pulled well off their chords), on a mesh of cell size ~1/3:
+
+| warp amplitude | points needing multi-start | unlocated | worst error |
+| --- | --- | --- | --- |
+| 0.05 - 0.20 | 0 | 0 | <= 6.7e-16 |
+| 0.30 | 30 (pyramids only) | 0 | <= 8.3e-16 |
+| 0.42 | 90 wedge / 309 pyramid / 96 mixed | 0 | <= 6.7e-16 |
+| 0.55 | 173 / 533 / 224 | 9 (mixed) | <= 5.0e-16 |
+
+So the seeded single Newton is sufficient well past any deformation a usable mesh would have, the
+fallback genuinely earns its place beyond that, and at amplitude 0.55 - a displacement larger than
+the cell, i.e. a tangled mesh with no unique preimage - nine points are honestly reported as
+unlocated rather than silently given a wrong answer. Accuracy stays at machine precision throughout
+for the points that are found. The 2d T6/Q9 cases never needed pass 2 at any amplitude.
+
 ### Accuracy: the new path is not just faster
 
 Results are bit-identical to `MeshAsGeomObject` wherever the geometry is straight, but on **curved**

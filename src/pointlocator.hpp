@@ -181,6 +181,10 @@ namespace pyoomph
     // falls through to the widening search is a sign that the seeding is not working, which is
     // otherwise invisible because the answer is correct either way.
     unsigned n_by_walk = 0, n_by_nearest_node = 0, n_by_widening = 0;
+    // How many points the cheap single-Newton pass could not place, so that the expensive
+    // multi-start pass had to run. A single Newton on a strongly deformed curved element is not
+    // guaranteed to converge, so this is the number that says whether that matters in practice.
+    unsigned n_needing_multistart = 0;
 
   public:
     unsigned size() const { return npoint; }

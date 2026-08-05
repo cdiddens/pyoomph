@@ -473,15 +473,20 @@ namespace pyoomph
     if (scale <= 0.0)
       scale = 1.0;
 
-    double last = 1.0;
-    for (unsigned iter = 0; iter < 8; iter++)
-    {
+    // Residual of the geometric map at a given local coordinate, and its Jacobian.
+    auto residual_at = [&](const double *st, double *res, std::vector<double> *J) -> double {
       for (unsigned d = 0; d < element_dim; d++)
-        sv[d] = s[d];
-      e->dshape_local(sv, psi, dpsids);
-
-      double res[3] = {0.0, 0.0, 0.0};
-      std::vector<double> J(element_dim * element_dim, 0.0);
+        sv[d] = st[d];
+      if (J)
+      {
+        e->dshape_local(sv, psi, dpsids);
+        std::fill(J->begin(), J->end(), 0.0);
+      }
+      else
+      {
+        e->shape(sv, psi);
+      }
+      double rnorm = 0.0;
       for (unsigned d = 0; d < element_dim; d++)
       {
         double xd = 0.0;
@@ -489,30 +494,62 @@ namespace pyoomph
         {
           const double zn = e->zeta_nodal(n, 0, d);
           xd += psi(n) * zn;
-          for (unsigned k = 0; k < element_dim; k++)
-            J[d * element_dim + k] += dpsids(n, k) * zn;
+          if (J)
+            for (unsigned k = 0; k < element_dim; k++)
+              (*J)[d * element_dim + k] += dpsids(n, k) * zn;
         }
         res[d] = x[d] - xd;
-      }
-
-      double rnorm = 0.0;
-      for (unsigned d = 0; d < element_dim; d++)
         rnorm = std::max(rnorm, std::abs(res[d]));
-      if (rnorm < 1e-15 * scale)
-        return rnorm / scale;
-
-      if (!small_invert(&J[0], element_dim))
-        return rnorm / scale; // degenerate here; leave s where it was
-      for (unsigned d = 0; d < element_dim; d++)
-      {
-        double ds = 0.0;
-        for (unsigned k = 0; k < element_dim; k++)
-          ds += J[d * element_dim + k] * res[k];
-        s[d] += ds;
       }
-      last = rnorm / scale;
+      return rnorm;
+    };
+
+    // Damped Newton. An undamped step is fine on a mildly distorted element and is what runs in
+    // practice, but on a strongly deformed second-order element - where the map may be far from
+    // affine and the Jacobian poorly conditioned - a full step can overshoot and diverge. Halving
+    // the step until the residual actually decreases costs nothing when it is not needed and keeps
+    // the iteration from running away when it is. It is still not a global convergence guarantee:
+    // no such guarantee exists for inverting a curved isoparametric map, which is why the callers
+    // treat a large returned residual as "not this element" rather than as an answer.
+    std::vector<double> J(element_dim * element_dim, 0.0);
+    double res[3] = {0.0, 0.0, 0.0}, trial_res[3] = {0.0, 0.0, 0.0};
+    double rnorm = residual_at(s, res, &J);
+
+    for (unsigned iter = 0; iter < 20; iter++)
+    {
+      if (rnorm < 1e-15 * scale)
+        break;
+      std::vector<double> Jinv = J;
+      if (!small_invert(&Jinv[0], element_dim))
+        break; // singular Jacobian here; leave s where it is and let the caller judge the residual
+
+      double step[3] = {0.0, 0.0, 0.0};
+      for (unsigned d = 0; d < element_dim; d++)
+        for (unsigned k = 0; k < element_dim; k++)
+          step[d] += Jinv[d * element_dim + k] * res[k];
+
+      bool improved = false;
+      double lambda = 1.0;
+      for (unsigned ls = 0; ls < 10; ls++)
+      {
+        double trial[3] = {0.0, 0.0, 0.0};
+        for (unsigned d = 0; d < element_dim; d++)
+          trial[d] = s[d] + lambda * step[d];
+        const double tnorm = residual_at(trial, trial_res, nullptr);
+        if (tnorm < rnorm)
+        {
+          for (unsigned d = 0; d < element_dim; d++)
+            s[d] = trial[d];
+          rnorm = residual_at(s, res, &J);
+          improved = true;
+          break;
+        }
+        lambda *= 0.5;
+      }
+      if (!improved)
+        break; // no descent direction found: this is as close as this element gets
     }
-    return last;
+    return rnorm / scale;
   }
 
   bool MeshPointLocator::inside_reference_domain(unsigned slot, BulkElementBase *e, const double *s) const
@@ -825,12 +862,52 @@ namespace pyoomph
     // then test containment against the reference domain documented on the element class.
     if (element_ref_domain[slot] == RefDomain::Prism || element_ref_domain[slot] == RefDomain::Pyramid)
     {
+      // First the affine seed, which is what succeeds on anything short of a badly deformed
+      // element. On the second pass, fall back to a spread of starting guesses - the element's own
+      // node local coordinates plus their centroid, which are guaranteed to lie in the reference
+      // domain whatever its shape. This is the equivalent of oomph's plot-point multi-start, which
+      // these element families cannot use (nplot_points() is not implemented for them), and it
+      // exists for the same reason: a single Newton on a strongly deformed curved element is not
+      // guaranteed to converge from any particular starting point.
       double sc[3] = {seed[0], seed[1], seed[2]};
-      const double res = polish_local_coordinate(e, x, sc);
-      if (res > 1e-10)
-        return false; // did not converge from this element: it is not the one
-      if (!inside_reference_domain(slot, e, sc))
-        return false;
+      double res = polish_local_coordinate(e, x, sc);
+      bool ok = (res < 1e-10 && inside_reference_domain(slot, e, sc));
+
+      if (!ok && allow_multistart)
+      {
+        oomph::Vector<double> sn(element_dim, 0.0);
+        double centroid[3] = {0.0, 0.0, 0.0};
+        for (unsigned in = 0; in < e->nnode(); in++)
+        {
+          e->local_coordinate_of_node(in, sn);
+          for (unsigned d = 0; d < element_dim; d++)
+            centroid[d] += sn[d] / e->nnode();
+        }
+        for (unsigned attempt = 0; attempt <= e->nnode() && !ok; attempt++)
+        {
+          double start[3] = {0.0, 0.0, 0.0};
+          if (attempt == 0)
+          {
+            for (unsigned d = 0; d < element_dim; d++)
+              start[d] = centroid[d];
+          }
+          else
+          {
+            e->local_coordinate_of_node(attempt - 1, sn);
+            // Pulled a little towards the centroid: starting exactly on a vertex of a curved
+            // element can sit on a Jacobian degeneracy (the pyramid apex, notably).
+            for (unsigned d = 0; d < element_dim; d++)
+              start[d] = 0.9 * sn[d] + 0.1 * centroid[d];
+          }
+          for (unsigned d = 0; d < element_dim; d++)
+            sc[d] = start[d];
+          res = polish_local_coordinate(e, x, sc);
+          ok = (res < 1e-10 && inside_reference_domain(slot, e, sc));
+        }
+      }
+
+      if (!ok)
+        return false; // no starting point converged inside: the point is not in this element
       for (unsigned d = 0; d < element_dim; d++)
         s_out[d] = sc[d];
       if (offset_out)
@@ -880,9 +957,23 @@ namespace pyoomph
     if (!go)
       return false;
 
+    // Polish, but only keep the result if it actually improved things. locate_zeta has already
+    // certified that s is inside the element to its own 1e-7 tolerance; a polish that diverges on a
+    // badly deformed element must not be allowed to replace that with something worse.
+    double polished[3] = {0.0, 0.0, 0.0};
     for (unsigned d = 0; d < element_dim; d++)
-      s_out[d] = s[d];
-    polish_local_coordinate(e, x, s_out);
+      polished[d] = s[d];
+    const double res = polish_local_coordinate(e, x, polished);
+    if (res < 1e-12 && inside_reference_domain(slot, e, polished))
+    {
+      for (unsigned d = 0; d < element_dim; d++)
+        s_out[d] = polished[d];
+    }
+    else
+    {
+      for (unsigned d = 0; d < element_dim; d++)
+        s_out[d] = s[d];
+    }
     if (offset_out)
       *offset_out = 0.0;
     return true;
@@ -930,6 +1021,7 @@ namespace pyoomph
 
       BulkElementBase *hit = NULL;
       int how = -1;
+      unsigned found_on_pass = 0;
 
       // Two passes. The first only ever runs a single Newton per candidate; only if the point is
       // not found at all does the second allow oomph's multi-start, so its cost is paid once per
@@ -1031,6 +1123,8 @@ namespace pyoomph
         }
       }
 
+      if (hit)
+        found_on_pass = pass;
       } // end of the two passes
 
       if (hit)
@@ -1044,6 +1138,7 @@ namespace pyoomph
         if (how == 0) out.n_by_walk++;
         else if (how == 1) out.n_by_nearest_node++;
         else out.n_by_widening++;
+        if (found_on_pass == 1) out.n_needing_multistart++;
         previous = hit;
         if (hint_groups)
           previous_group = (*hint_groups)[i];
@@ -1112,6 +1207,8 @@ namespace pyoomph
     std::ostringstream oss;
     oss << n_by_walk << " walked, " << n_by_nearest_node << " by nearest node, "
         << n_by_widening << " widened, " << n_unlocated() << " unlocated";
+    if (n_needing_multistart)
+      oss << ", " << n_needing_multistart << " needed multistart";
     return oss.str();
   }
 
