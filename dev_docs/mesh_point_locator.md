@@ -825,3 +825,23 @@ blocks, so a generic sparse LU pays fill-in on an `nfields x N` system instead o
 the remaining factor, and it matters at the dof ceiling rather than here. And `coords_oldmesh` still
 stores a raw `BulkElementBase*`, which is exactly what §3 rule 1 forbids, so phase 5 will have to
 route this through `LocationSet`.
+
+---
+
+## 14. Choosing the interpolator
+
+`Problem.mesh_interpolator` selects the class used whenever the meshes are rebuilt:
+
+```python
+problem.mesh_interpolator = ProjectionInternalInterpolator
+```
+
+It has to be a Problem setting rather than only an argument because the paths that matter most do
+not take one: the remesh handler used during continuation calls `force_remesh()` bare. An explicit
+`interpolator=` still wins where one is passed.
+
+**A new simulation does not have to opt in to any of this document except the projection.** The
+default is `InternalInterpolator`, and the locator, the projection-based boundary transfer of §4.2,
+the periodic zeta of §4.3 and every guard in phase 0 are all in that default path. Only the L2
+projection of the bulk fields - which trades pointwise accuracy for conservation - is opt-in, because
+it is the one change that is not simply better.

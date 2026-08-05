@@ -559,6 +559,22 @@ class Problem(_pyoomph.Problem):
         self.max_residuals=1e10
         self.max_newton_iterations=10
         self.newton_solver_tolerance=1e-8
+
+        #: Which mesh-to-mesh interpolator to use whenever the meshes are rebuilt - remeshing,
+        #: :py:meth:`force_remesh`, :py:meth:`redefine_problem`, and the remesh handler used during
+        #: continuation. Defaults to
+        #: :py:class:`~pyoomph.meshes.interpolator.InternalInterpolator`, which transfers by
+        #: interpolation: it evaluates the old solution at each new node, which is fast and
+        #: pointwise accurate.
+        #:
+        #: Set it to :py:class:`~pyoomph.meshes.interpolator.ProjectionInternalInterpolator` to
+        #: transfer by L2 projection instead. That is the better choice when the transferred
+        #: quantity has to keep its integral - the projection conserves it, interpolation does not -
+        #: at the cost of pointwise accuracy and one linear solve per history level. See
+        #: dev_docs/mesh_point_locator.md.
+        #:
+        #: An explicit ``interpolator=`` argument still wins where one is passed.
+        self.mesh_interpolator:type["BaseMeshToMeshInterpolator"]=_DefaultInterpolatorClass
         self._call_output_after_adapt:bool=False
 
         #: Spatial adaption steps for the initial condition. If set to ``None``, we refine initially up to :py:attr:`max_refinement_level`.
@@ -3039,7 +3055,7 @@ class Problem(_pyoomph.Problem):
     def before_defining_problem(self,redefine:bool=False,old_meshes:dict[str, AnyMesh] | None=None,old_mesh_templates:list[MeshTemplate] | None=None):
         pass
 
-    def redefine_problem(self, code_dir:str,interpolator:type["BaseMeshToMeshInterpolator"]=_DefaultInterpolatorClass,num_adapt:int | None=None):
+    def redefine_problem(self, code_dir:str,interpolator:type["BaseMeshToMeshInterpolator"] | None=None,num_adapt:int | None=None):
         """
         Redefines the problem by recompiling equations. 
         This can in principle be used if problem parameters have changed, but it is not recommended to change the problem structure.
@@ -3047,12 +3063,14 @@ class Problem(_pyoomph.Problem):
 
         Args:
             code_dir: Subdirectory in the output directory where the C++ code of the redefined problem will be written.
-            interpolator: Mesh interpolator to map the fields of the old meshes to the new ones.
+            interpolator: Mesh interpolator to map the fields of the old meshes to the new ones. If None, :py:attr:`mesh_interpolator` is used.
             num_adapt: Number of adaption steps after redefining the problem. If None, the number of adaption steps is determined by the max_refinement_level attribute.
 
         Raises:
             RuntimeError: If the problem contains no equations after the redefinition
         """
+        if interpolator is None:
+            interpolator=self.mesh_interpolator
         self._ccode_dir = code_dir
 
         if not self.is_initialised():
@@ -6819,7 +6837,9 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.set_custom_assembler(None)
         return
 
-    def force_remesh(self, only_domains:set[MeshTemplate] | None=None, num_adapt:int | None=None,interpolator:type["BaseMeshToMeshInterpolator"]=_DefaultInterpolatorClass):
+    def force_remesh(self, only_domains:set[MeshTemplate] | None=None, num_adapt:int | None=None,interpolator:type["BaseMeshToMeshInterpolator"] | None=None):
+        if interpolator is None:
+            interpolator=self.mesh_interpolator
         remeshers:list["RemesherBase"] = []
         if only_domains is not None:
             for t in only_domains:

@@ -428,3 +428,48 @@ def test_remeshing_a_closed_boundary_keeps_it_ordered():
                 worst = max(worst, abs(((b - a + math.pi) % (2 * math.pi)) - math.pi))
     # one element spans ~0.25 rad here; an antipodal node shows up as ~pi
     assert worst < 0.5, worst
+
+
+# ----------------------------------------------------------------------------------------------
+# 6. selecting the interpolator on the Problem
+# ----------------------------------------------------------------------------------------------
+
+@pytest.mark.slow
+def test_problem_setting_selects_the_interpolator():
+    # Problem.mesh_interpolator has to reach the paths that do NOT take an argument - the remesh
+    # handler used during continuation calls force_remesh() bare - which is the whole reason for
+    # having it rather than passing interpolator= at each call site.
+    used = []
+
+    class _SpyNodal(InternalInterpolator):
+        def __init__(self, old, new):
+            used.append("nodal")
+            super().__init__(old, new)
+
+    class _SpyProjection(ProjectionInternalInterpolator):
+        def __init__(self, old, new):
+            used.append("projection")
+            super().__init__(old, new)
+
+    with _BlobProb() as p:
+        p.quiet()
+        p.mesh_interpolator = _SpyProjection
+        p.initialise()
+        _stamp_bulk(p.get_mesh("domain"), _linear2)
+        p.force_remesh()                       # deliberately no interpolator= argument
+        assert used == ["projection"], used
+        # an explicit argument must still win over the setting
+        used.clear()
+        p.force_remesh(interpolator=_SpyNodal)
+        assert used == ["nodal"], used
+
+
+def test_default_interpolator_is_the_nodal_one():
+    # Stated explicitly because it is the question every new simulation asks: the locator, the
+    # projection-based boundary transfer and the zeta fixes are all in the DEFAULT path. Only the
+    # L2 projection of the bulk fields is opt-in.
+    class _Trivial(Problem):
+        def define_problem(self):
+            pass
+
+    assert _Trivial().mesh_interpolator is InternalInterpolator
