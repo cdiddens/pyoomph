@@ -669,8 +669,29 @@ the one that discriminates.
 been tuned against a near-touching interface, which is the case it exists for. And the
 bulk-restricted candidate rule of §4.5, needed before the non-manifold skeleton case, is not written.
 
-**Phase 3 - periodic zeta.** §4.3. *Acceptance:* closed-loop remesh with a `sin(2 theta)` surface
-field at interpolation order rather than O(1).
+**Phase 3 - periodic zeta. Implemented, BLOCKED on a remesher defect (see §11).**
+
+In place: a per-boundary period on `Mesh` (`set_boundary_zeta_period`), plumbed into `LocatorSetup`;
+the locator reads each element's node coordinates unwrapped onto that element's own branch, so the
+seam element runs from z_last to z_first + period and is monotone like any other, and shifts each
+query onto the same branch before testing it; a closed-loop mode in `AssignZetaCoordinatesByArclength`
+that measures arclength from a **continuous** geometric seam - the outermost intersection of the loop
+with a ray from its centroid, so two discretisations of the same curve agree on it to O(h^2) rather
+than to one element - with orientation fixed counter-clockwise by the polygon's signed area; and a
+periodic-aware version of the validity check, which now reads element ranges unwrapped and compares
+the covered length against the period.
+
+Two things worth recording from building it:
+
+* **`get_interface_line_segments` must not be used to order a closed loop.** Its walk is written
+  around open curves - it looks for a degree-one endpoint and falls back to an arbitrary node when
+  there is none - and on a loop it can emit a segment whose last entries are not adjacent. Since zeta
+  *is* the accumulated arclength, that inflated the loop length by 1.6x and corrupted the whole
+  parameterisation. `_walk_closed_loop` walks the element connectivity instead, which is unambiguous.
+* The assignment now refuses a loop whose largest step exceeds five times the median, rather than
+  parameterising it. That check is what surfaced §11.
+
+*Acceptance test not yet passable:* the closed-loop remesh cannot be validated while §11 stands.
 
 **Phase 3b - discontinuous data across adaptation.** §8 - the snapshot/restore, covering interface
 DG/DL/D0 for both adaptation and remeshing.
@@ -710,3 +731,37 @@ At the end, and not before every call site is migrated:
   than the silent default;
 * `BulkElementBase::zeta_time_history` / `zeta_coordinate_type` as statics (§3.1);
 * `KNNInterpolator` (`interpolator.py:159`), already dead behind `if False:`.
+
+---
+
+## 11. Open defect: remeshing a CLOSED boundary misplaces one node
+
+Not caused by anything in this document, and not confined to it - it is a property of the remeshed
+mesh, so it affects any use of that mesh, not just zeta.
+
+**Symptom.** After `remesh_handler_during_continuation` on a domain whose boundary is a single closed
+loop, exactly one element of that boundary has its mid-side node placed on the FAR SIDE of the loop.
+The node still lies on the boundary (its radius is right), it is simply at the wrong place along it -
+consistent with an angle being averaged across the 2*pi seam.
+
+**Reproduced on both curved and straight boundaries**, so it is not about curved entities:
+
+| boundary | element after remesh (node coordinates, in order) |
+| --- | --- |
+| circle, `create_circle_lines` | (-0.9877, +0.1564) &nbsp; **(+0.9969, -0.0785)** &nbsp; (-1.0000, 0.0000) |
+| 12-gon of straight `line`s | (0.1351, 0.9638) &nbsp; **(-0.1092, -0.9707)** &nbsp; (0.0833, 0.9777) |
+
+In both the two END nodes are correctly adjacent (one element apart) and the MIDDLE node is the
+antipode of where it belongs. Checked against `element.node_pt(i).x(d)`, i.e. in the mesh itself, not
+in the `MeshDataCache` - `dev_docs`-adjacent scratch scripts `diag_mesh_vs_cache.py` /
+`diag_poly_mesh.py` in the session scratchpad show the check.
+
+**Why it matters beyond zeta.** That element is grossly distorted, so its Jacobian and everything
+assembled on it are wrong. Arclength-based schemes fail loudly (the loop length comes out 1.6x too
+large); the closest-point projection of §4.2 mostly survives it, because it matches by geometry and
+the misplaced node simply receives the value belonging to where it actually sits - which is why the
+projection column of the closed-loop test still reads ~6e-4 rather than O(1).
+
+**Consequence for phase 3.** The periodic zeta machinery cannot be validated end to end until this is
+fixed: every remeshed closed loop currently trips the "not geometrically ordered" guard, which is the
+correct response but leaves the acceptance test unrunnable. The guard should stay afterwards.

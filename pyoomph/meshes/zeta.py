@@ -57,7 +57,93 @@ def _find_closed_segments(cache:MeshDataCacheEntry,segs:list[list[int]])->list[b
     return [len(seg)>2 and (seg[0]==seg[-1] or (seg[-1],seg[0]) in endpoint_pairs) for seg in segs]
 
 
-def _check_zeta_is_invertible(mesh:InterfaceMesh,bind:int,context:str)->None:
+def _walk_closed_loop(cache:MeshDataCacheEntry)->list[int] | None:
+    """Order the nodes of a closed interface loop by walking the element connectivity.
+
+    ``get_interface_line_segments`` is not usable for this. Its walk is written around open curves -
+    it looks for an endpoint of degree one to start from and falls back to an arbitrary node when
+    there is none - and on a loop it can emit a segment whose last entries are not adjacent at all.
+    Measured on a remeshed disc: the returned order jumped half way across the circle twice near the
+    end, inflating the accumulated arclength by a factor 1.6 and, since zeta is that arclength,
+    corrupting the whole parameterisation. Walking the elements is unambiguous, so do that.
+
+    Returns the node indices in order around the loop, each appearing once, or None if the boundary
+    is not a single closed loop.
+    """
+    elems=[[int(i) for i in e] for e in cache.elem_indices]
+    if not elems:
+        return None
+    at_end:dict[int,list[int]]={}
+    for ei,e in enumerate(elems):
+        at_end.setdefault(e[0],[]).append(ei)
+        at_end.setdefault(e[-1],[]).append(ei)
+    # Every node of a closed loop is shared by exactly two elements; anything else is not one.
+    if any(len(v)!=2 for v in at_end.values()):
+        return None
+
+    order:list[int]=[]
+    ei=0
+    node=elems[0][0]
+    visited:set[int]=set()
+    while ei not in visited:
+        visited.add(ei)
+        e=elems[ei]
+        # orient this element so that it starts at `node`
+        chain=e if e[0]==node else list(reversed(e))
+        order.extend(chain[:-1])   # the far end is the next element's start
+        node=chain[-1]
+        nxt=[k for k in at_end[node] if k!=ei]
+        if len(nxt)!=1:
+            return None
+        ei=nxt[0]
+    if len(visited)!=len(elems) or len(set(order))!=len(order):
+        return None  # more than one loop, or the walk did not close cleanly
+    return order
+
+
+def _loop_seam_anchor(loop:list[int],pts,direction:tuple[float,float])->tuple[int,float]:
+    """Where to start measuring arclength around a closed loop.
+
+    It has to be a point on the CURVE, not one of its nodes. A node-quantised seam differs between
+    the old and the new mesh by up to one element, which shifts the whole parameterisation by that
+    much and defeats the purpose of having one. Taking the outermost intersection of the loop with a
+    ray from its centroid gives a point that is defined by the geometry alone, so two discretisations
+    of the same curve agree on it to O(h^2).
+
+    Returns (index into `loop` of the segment containing the anchor, fraction along that segment).
+    """
+    n=len(loop)
+    cx=sum(pts[0,i] for i in loop)/n
+    cy=sum(pts[1,i] for i in loop)/n
+    dx,dy=direction
+    best=None
+    for k in range(n):
+        a,b=loop[k],loop[(k+1)%n]
+        ax,ay=pts[0,a]-cx,pts[1,a]-cy
+        bx,by=pts[0,b]-cx,pts[1,b]-cy
+        # solve  a + u*(b-a) = t*d  for u in [0,1], t > 0
+        ex,ey=bx-ax,by-ay
+        den=dx*ey-dy*ex
+        if abs(den)<1e-300:
+            continue
+        u=(dx*ay-dy*ax)/den
+        if u<0.0 or u>1.0:
+            continue
+        px,py=ax+u*ex,ay+u*ey
+        t=px*dx+py*dy
+        if t<=0.0:
+            continue
+        if best is None or t>best[2]:
+            best=(k,u,t)
+    if best is None:
+        # No crossing at all (the centroid is outside a strongly non-convex loop). Fall back to the
+        # extremal node along the direction, which is still geometric, just only O(h) stable.
+        k=max(range(n),key=lambda i: pts[0,loop[i]]*dx+pts[1,loop[i]]*dy)
+        return k,0.0
+    return best[0],best[1]
+
+
+def _check_zeta_is_invertible(mesh:InterfaceMesh,bind:int,context:str,period:float=0.0)->None:
     """Verify that the zeta values just written to `mesh` actually form a chart.
 
     The interpolation feeds zeta to oomph's ``locate_zeta`` on the interface mesh (see
@@ -76,6 +162,11 @@ def _check_zeta_is_invertible(mesh:InterfaceMesh,bind:int,context:str)->None:
         zetas=[e.node_pt(ni).get_coordinates_on_boundary(bind)[0] for ni in range(e.nnode())]
         if len(zetas)<2:
             continue
+        if period>0:
+            # Read each element on its own branch, exactly as the locator does: the element closing
+            # a loop runs from z_last to z_first + period, not backwards across the whole range.
+            ref=zetas[0]
+            zetas=[z-period*round((z-ref)/period) for z in zetas]
         # Only the end values order the element; intermediate C2 nodes may legitimately sit anywhere
         # between them, so a strict sort check over all nodes would be too strong.
         lo,hi=min(zetas[0],zetas[-1]),max(zetas[0],zetas[-1])
@@ -94,6 +185,8 @@ def _check_zeta_is_invertible(mesh:InterfaceMesh,bind:int,context:str)->None:
     # Disconnected segments only ever make the sum SMALLER than the span (the jump offsets are gaps
     # no element covers), so they never trip it.
     span=max(r[1] for r in ranges)-min(r[0] for r in ranges)
+    if period>0:
+        span=period  # the elements tile the full period, which the min/max above cannot see
     if span<=0:
         return
     covered=sum(hi-lo for lo,hi in ranges)
@@ -217,6 +310,87 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
 
         check_sorting_arguments(sort_along_axis,start_near_point,require_one=True,whom="AssignZetaCoordinatesByArclength")
 
+    def _assign_closed_loop(self,mesh:InterfaceMesh,bmesh,bind:int,cache:MeshDataCacheEntry,pts,loop:list[int])->None:
+        """Parameterise a closed loop by arclength, and declare the result periodic.
+
+        A circle has no single-valued zeta - that is a property of the circle, not of the code - so
+        instead of a chart this records a period. The element closing the loop then runs from the
+        last node's zeta to the first node's zeta + period rather than backwards across the whole
+        range, which is what makes it invertible like any other element.
+
+        Two things have to agree between the old and the new mesh for the parameterisation to be
+        useful at all, and both are fixed by the geometry rather than by the discretisation: the
+        seam, which is where arclength is measured from (see :py:func:`_loop_seam_anchor`), and the
+        orientation, which is taken counter-clockwise via the polygon's signed area.
+        """
+        loop=list(loop)
+        n=len(loop)
+        if n<3:
+            raise self.add_exception_info(RuntimeError("A closed interface loop needs at least three distinct nodes, got "+str(n)))
+
+        # Orientation, so both meshes traverse the loop the same way.
+        area=0.0
+        for k in range(n):
+            a,b=loop[k],loop[(k+1)%n]
+            area+=pts[0,a]*pts[1,b]-pts[0,b]*pts[1,a]
+        if area<0:
+            loop=[loop[0]]+list(reversed(loop[1:]))
+
+        if self.sort_along_axis is not None:
+            direction=({"x+":(1.0,0.0),"x-":(-1.0,0.0),"y+":(0.0,1.0),"y-":(0.0,-1.0)})[str(self.sort_along_axis)]
+        else:
+            cx=sum(pts[0,i] for i in loop)/n
+            cy=sum(pts[1,i] for i in loop)/n
+            dx,dy=float(self.start_near_point[0])-cx,float(self.start_near_point[1])-cy
+            norm=numpy.sqrt(dx*dx+dy*dy)
+            direction=(dx/norm,dy/norm) if norm>0 else (1.0,0.0)
+
+        seam_k,seam_u=_loop_seam_anchor(loop,pts,direction)
+
+        # Cumulative arclength around the loop, node k at cum[k], closing edge included.
+        edge=[0.0]*n
+        for k in range(n):
+            a,b=loop[k],loop[(k+1)%n]
+            edge[k]=float(numpy.sqrt((pts[0,b]-pts[0,a])**2+(pts[1,b]-pts[1,a])**2))
+        # A single wildly oversized step means the loop is not geometrically ordered, and since zeta
+        # IS the accumulated arclength the whole parameterisation would be silently wrong. Seen for
+        # real: a remeshed disc whose closing element carries its mid-side node at the ANTIPODE of
+        # where it belongs (still on the circle, so radius checks pass), which inflated the loop
+        # length by 1.6x. Report it rather than parameterise a broken loop.
+        srt=sorted(edge)
+        median=srt[len(srt)//2]
+        if median>0:
+            worst=max(range(n),key=lambda k:edge[k])
+            if edge[worst]>5.0*median:
+                a,b=loop[worst],loop[(worst+1)%n]
+                raise self.add_exception_info(RuntimeError("The closed loop '"+mesh.get_name()+"' is not geometrically ordered: the step from node at ("+str(pts[0,a])+", "+str(pts[1,a])+") to ("+str(pts[0,b])+", "+str(pts[1,b])+") is "+str(edge[worst])+", more than five times the median step "+str(median)+". A node of this boundary is misplaced, so its arclength - and therefore its zeta - would be meaningless."))
+
+        cum=[0.0]*n
+        for k in range(1,n):
+            cum[k]=cum[k-1]+edge[k-1]
+        total=cum[-1]+edge[-1]
+        if total<=0:
+            raise self.add_exception_info(RuntimeError("The closed interface loop '"+mesh.get_name()+"' has zero length"))
+
+        s_anchor=cum[seam_k]+seam_u*edge[seam_k]
+        period=1.0 if self.normalized else total
+
+        nodemap=mesh.fill_node_index_to_node_map()
+        for k,ptind in enumerate(loop):
+            z=(cum[k]-s_anchor)%total
+            if self.normalized:
+                z/=total
+            nodemap[ptind].set_coordinates_on_boundary(bind,[z])
+
+        bmesh.boundary_coordinate_bool(bind)
+        bmesh.set_boundary_zeta_period(bind,period)
+        mesh.update_zeta_in_buffer()
+        if self.validate_zetas:
+            try:
+                _check_zeta_is_invertible(mesh,bind,"AssignZetaCoordinatesByArclength (closed loop)",period)
+            except RuntimeError as e:
+                raise self.add_exception_info(e)
+
     def assign_zetas(self,mesh:InterfaceMesh)->None:
         if mesh.get_dimension()!=1:
             raise RuntimeError("Currently only implemented for 1d interfaces meshes")
@@ -232,7 +406,14 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
 
         closed=_find_closed_segments(cache,segs)
         if any(closed):
-            raise self.add_exception_info(RuntimeError("The interface '"+mesh.get_name()+"' contains "+str(sum(closed))+" closed loop(s), which cannot be parameterised by a single-valued zeta: the element closing the loop runs from the last zeta back to the first and therefore spans the whole range, so it matches essentially any query during interpolation and silently returns values from the opposite side of the loop. A periodic zeta space is the fix - see dev_docs/mesh_point_locator.md."))
+            if len(segs)!=1:
+                raise self.add_exception_info(RuntimeError("The interface '"+mesh.get_name()+"' has "+str(len(segs))+" segments of which "+str(sum(closed))+" are closed loops. A periodic zeta has one period for the whole boundary, so a closed loop has to be the only segment on it. Split the boundary, or parameterise it some other way."))
+            loop=_walk_closed_loop(cache)
+            if loop is None:
+                raise self.add_exception_info(RuntimeError("The interface '"+mesh.get_name()+"' looks like a closed loop but its elements do not form one single cycle, so it cannot be given a periodic zeta."))
+            self._assign_closed_loop(mesh,bmesh,bind,cache,pts,loop)
+            return
+        bmesh.set_boundary_zeta_period(bind,0.0)
 
         # Sort and reverse the segments based on the settings
         segs=sort_line_segments(pts,segs,sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point,spatial_unit=mesh.get_code_gen().get_scaling("spatial"),whom="AssignZetaCoordinatesByArclength")

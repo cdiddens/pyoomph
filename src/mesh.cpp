@@ -482,6 +482,20 @@ namespace pyoomph
     Boundary_coordinate_exists[boundary_index] = true;
   }
 
+  void Mesh::set_boundary_zeta_period(unsigned boundary_index, double period)
+  {
+    if (period > 0.0)
+      boundary_zeta_periods[boundary_index] = period;
+    else
+      boundary_zeta_periods.erase(boundary_index);
+  }
+
+  double Mesh::get_boundary_zeta_period(unsigned boundary_index) const
+  {
+    auto it = boundary_zeta_periods.find(boundary_index);
+    return (it == boundary_zeta_periods.end() ? 0.0 : it->second);
+  }
+
   bool Mesh::is_boundary_coordinate_defined(unsigned boundary_index)
   {
     return boundary_index < Boundary_coordinate_exists.size() && Boundary_coordinate_exists[boundary_index];
@@ -3193,6 +3207,12 @@ namespace pyoomph
     {
       lsetup.space = LocatorSpace::BoundaryZeta;
       lsetup.boundary_index = boundary_index;
+      // A closed loop is periodic in zeta; the period comes from the bulk mesh the boundary belongs
+      // to, which is where the assignment recorded it.
+      Mesh *bulk_of_this = dynamic_cast<InterfaceMesh *>(this)->get_bulk_mesh();
+      const double period = (bulk_of_this ? bulk_of_this->get_boundary_zeta_period(boundary_index) : 0.0);
+      if (period > 0.0)
+        lsetup.period.assign(1, period);
     }
     if (interface_case && !by_zeta && !use_point_locator)
     {

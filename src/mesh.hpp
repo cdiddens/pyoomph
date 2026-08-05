@@ -77,6 +77,7 @@ namespace pyoomph
 		std::vector<std::string> boundary_names; // Names of the boundaries, indexed like oomph-lib's boundary indices
 		std::map<std::string, GiNaC::ex> initial_conditions; // Symbolic initial condition expressions, keyed by field/IC name
 		std::map<std::string, double> output_scales; // Nondimensionalization output scales, keyed by field name
+		std::map<unsigned, double> boundary_zeta_periods; // boundary index -> period, absent/0 meaning not periodic
 		std::map<std::string, unsigned> interface_dof_ids; // Names of interface-only degrees of freedom mapped to their global index
 		std::vector<bool> dirichlet_active; // Whether each Dirichlet condition (by index) is currently active
 		std::map<pyoomph::Node *, pyoomph::Node *> copied_masters; // Maps a copied node to its master node (see resolve_copy_master)
@@ -256,6 +257,15 @@ namespace pyoomph
 		// Ensure the intrinsic boundary coordinate (arclength/zeta along boundary_index) has been set up on all its nodes.
 		virtual void boundary_coordinates_bool(unsigned boundary_index);
 		virtual bool is_boundary_coordinate_defined(unsigned boundary_index);
+		// Period of the intrinsic boundary coordinate along a boundary, or 0 for a non-periodic one.
+		//
+		// A closed interface loop has no single-valued zeta: the element closing the loop runs from the
+		// last node's zeta back to the first's, so it spans the whole range and matches essentially any
+		// query. Recording the period instead makes that element well behaved - it is read as running
+		// from z_last to z_first + period - and is what lets a closed loop be parameterised at all.
+		// See dev_docs/mesh_point_locator.md.
+		void set_boundary_zeta_period(unsigned boundary_index, double period);
+		double get_boundary_zeta_period(unsigned boundary_index) const;
 		void set_spatial_error_estimator_pt(pyoomph::LagrZ2ErrorEstimator *errest) { this->spatial_error_estimator_pt() = errest; }
 		//  Mesh(Problem * p,MeshTemplate *templ, std::string domain);
 		//	BulkNodeIterator  nodes() { return BulkNodeIterator(this);} //Iterate over all nodes

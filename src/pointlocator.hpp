@@ -334,6 +334,13 @@ namespace pyoomph
     // component 2 of a face in 3d reads out of range. Reading the node directly is both correct on
     // an interface mesh and independent of the static flags.
     double nodal_coordinate(BulkElementBase *e, unsigned n, unsigned d) const;
+    // Shift v by whole periods until it is the branch nearest `ref`. No-op when not periodic.
+    double unwrap(double v, double ref, unsigned d) const;
+    // A node's coordinate as this ELEMENT sees it: unwrapped onto the branch of the element's own
+    // node 0. This is what makes a closed loop work. In canonical form the seam element runs from
+    // z_last back to 0 and so spans the entire range, matching any query; unwrapped it runs from
+    // z_last to z_first + period, which is monotone and invertible like every other element.
+    double element_nodal_coordinate(BulkElementBase *e, unsigned n, unsigned d) const;
 
     // Wrap a query coordinate into the principal period, for periodic spaces. No-op otherwise.
     void wrap_into_period(double *x) const;

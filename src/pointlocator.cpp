@@ -79,6 +79,24 @@ namespace pyoomph
     }
   }
 
+  double MeshPointLocator::unwrap(double v, double ref, unsigned d) const
+  {
+    if (setup.period.empty())
+      return v;
+    const double P = setup.period[d];
+    if (P <= 0.0)
+      return v;
+    return v - P * std::round((v - ref) / P);
+  }
+
+  double MeshPointLocator::element_nodal_coordinate(BulkElementBase *e, unsigned n, unsigned d) const
+  {
+    const double v = nodal_coordinate(e, n, d);
+    if (setup.period.empty() || n == 0)
+      return v;
+    return unwrap(v, nodal_coordinate(e, 0, d), d);
+  }
+
   MeshPointLocator::MeshPointLocator(Mesh *source_mesh, const LocatorSetup &_setup)
       : source(source_mesh), setup(_setup)
   {
@@ -215,10 +233,10 @@ namespace pyoomph
       BulkElementBase *e = elements_by_index[ie];
       for (unsigned d = 0; d < space_dim; d++)
       {
-        double lo = nodal_coordinate(e, 0, d), hi = lo;
+        double lo = element_nodal_coordinate(e, 0, d), hi = lo;
         for (unsigned in = 1; in < e->nnode(); in++)
         {
-          const double v = nodal_coordinate(e, in, d);
+          const double v = element_nodal_coordinate(e, in, d);
           lo = std::min(lo, v);
           hi = std::max(hi, v);
         }
@@ -340,7 +358,7 @@ namespace pyoomph
     }
 
     for (unsigned d = 0; d < space_dim; d++)
-      affine_origin[(size_t)slot * space_dim + d] = nodal_coordinate(e, 0, d);
+      affine_origin[(size_t)slot * space_dim + d] = element_nodal_coordinate(e, 0, d);
     for (unsigned d = 0; d < element_dim; d++)
       affine_s0[(size_t)slot * element_dim + d] = s0[d];
 
@@ -352,7 +370,7 @@ namespace pyoomph
       for (unsigned d = 0; d < element_dim; d++)
         Sdiff[d * element_dim + k] = s[d] - s0[d];
       for (unsigned d = 0; d < space_dim; d++)
-        D[d * element_dim + k] = nodal_coordinate(e, chosen[k], d) - affine_origin[(size_t)slot * space_dim + d];
+        D[d * element_dim + k] = element_nodal_coordinate(e, chosen[k], d) - affine_origin[(size_t)slot * space_dim + d];
     }
 
     // Pseudo-inverse via the normal equations: (D^T D)^-1 D^T. For a square D this is exactly D^-1,
@@ -434,7 +452,7 @@ namespace pyoomph
         double predicted = X0[d];
         for (unsigned k = 0; k < element_dim; k++)
           predicted += D[d * element_dim + k] * u[k];
-        if (std::abs(predicted - nodal_coordinate(e, in, d)) > 1e-10 * scale)
+        if (std::abs(predicted - element_nodal_coordinate(e, in, d)) > 1e-10 * scale)
           return false;
       }
     }
@@ -464,7 +482,7 @@ namespace pyoomph
       const double w[4] = {1.0, s[0], s[1], s[0] * s[1]};
       for (unsigned c = 0; c < 4; c++)
         for (unsigned d = 0; d < 2; d++)
-          b[c][d] += 0.25 * w[c] * nodal_coordinate(e, vk, d);
+          b[c][d] += 0.25 * w[c] * element_nodal_coordinate(e, vk, d);
     }
 
     double scale = 0.0;
@@ -481,7 +499,7 @@ namespace pyoomph
       for (unsigned d = 0; d < 2; d++)
       {
         const double predicted = b[0][d] + b[1][d] * s[0] + b[2][d] * s[1] + b[3][d] * s[0] * s[1];
-        if (std::abs(predicted - nodal_coordinate(e, in, d)) > 1e-10 * scale)
+        if (std::abs(predicted - element_nodal_coordinate(e, in, d)) > 1e-10 * scale)
           return false;
       }
     }
@@ -534,7 +552,7 @@ namespace pyoomph
         double xd = 0.0;
         for (unsigned n = 0; n < nnode; n++)
         {
-          const double zn = nodal_coordinate(e, n, d);
+          const double zn = element_nodal_coordinate(e, n, d);
           xd += psi(n) * zn;
           if (J)
             for (unsigned k = 0; k < element_dim; k++)
@@ -716,7 +734,7 @@ namespace pyoomph
         double xd = 0.0;
         for (unsigned n = 0; n < nnode; n++)
         {
-          const double zn = nodal_coordinate(e, n, d);
+          const double zn = element_nodal_coordinate(e, n, d);
           xd += psi(n) * zn;
           if (want_jacobian)
             for (unsigned k = 0; k < element_dim; k++)
@@ -884,14 +902,24 @@ namespace pyoomph
 
   // Match one query point against one element. The caller has already decided this element is worth
   // trying; this does the bounding-box reject and then the actual inversion.
-  bool MeshPointLocator::try_element(BulkElementBase *e, const double *x, double *s_out, double *offset_out, bool allow_multistart) const
+  bool MeshPointLocator::try_element(BulkElementBase *e, const double *x_in, double *s_out, double *offset_out, bool allow_multistart) const
   {
     auto found = element_index.find(e);
     if (found == element_index.end())
       return false;
-    if (!bbox_contains(found->second, x))
-      return false;
     const unsigned slot = found->second;
+    const double *x = x_in;
+
+    // On a periodic coordinate the query must be read on the same branch as the element's own
+    // geometry, or a point just past the seam looks a whole period away from the element that
+    // actually contains it. Everything below uses `x` through this shifted copy.
+    double xw[3] = {0.0, 0.0, 0.0};
+    for (unsigned d = 0; d < space_dim; d++)
+      xw[d] = unwrap(x[d], nodal_coordinate(e, 0, d), d);
+    x = xw;
+
+    if (!bbox_contains(slot, x))
+      return false;
 
     if (mode == LocatorMode::Project)
     {
