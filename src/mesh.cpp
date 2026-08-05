@@ -21,9 +21,11 @@ The main author may be contacted at c.diddens@utwente.nl
 
 
 #include "mesh.hpp"
+#include "pointlocator.hpp"
 #include "meshtemplate.hpp"
 #include "exception.hpp"
 #include <cassert>
+#include <chrono>
 #include <functional>
 
 #include "elements.hpp"
@@ -44,6 +46,11 @@ namespace pyoomph
 {
 
   typedef double (*InitialConditionFctPt)(const double &t);
+
+  // Default on: the migration off MeshAsGeomObject is validated by flipping this, not by keeping
+  // two code paths around indefinitely. See dev_docs/mesh_point_locator.md phase 1.
+  bool Mesh::use_point_locator = true;
+  bool Mesh::report_interpolation_timing = false;
 
   // Determine how many "elemental index" entries to_numpy will need to write per element (nelem is
   // set to the total number of sub-elements across the mesh, e.g. after triangle tessellation of
@@ -3111,10 +3118,109 @@ namespace pyoomph
     }
 
     std::cout << "INTERPOLATING FROM " << from << std::endl;
-    oomph::MeshAsGeomObject MaGO(from);
 
     std::set<oomph::Node *> completed_nodes;
     std::set<oomph::Node *> missing_nodes;
+
+    // Which coordinate space the location happens in. Note this is NOT what the naming suggests:
+    // zeta_coordinate_type defaults to 0 = Lagrangian, and is flipped to Eulerian only when
+    // interpolated_lagrangian_coordinates_at_remeshing is set. That is deliberate - in the default
+    // case prepare_interpolation() has just reset the OLD mesh's Lagrangian coordinates to its
+    // Eulerian ones (mesh.cpp: set_lagrangian_nodal_coordinates), so locating in Lagrangian space
+    // is locating in Eulerian space; when the Lagrangian coordinates are instead interpolated they
+    // are no longer a copy of x, and the location has to use x explicitly.
+    LocatorSetup lsetup;
+    lsetup.space = (this->interpolated_lagrangian_coordinates_at_remeshing ? LocatorSpace::Eulerian : LocatorSpace::Lagrangian);
+    if (dynamic_cast<InterfaceMesh *>(this) && boundary_index >= 0)
+    {
+      lsetup.space = LocatorSpace::BoundaryZeta;
+      lsetup.boundary_index = boundary_index;
+    }
+
+    // Pre-locate every node this routine is about to visit, in one batch. Collected in exactly the
+    // order and with exactly the filtering of the transfer loop below, so the two agree on which
+    // nodes exist; grouped by destination element so the locator's walk can seed each query from
+    // the previous match instead of returning to the tree.
+    std::map<oomph::Node *, std::pair<BulkElementBase *, oomph::Vector<double>>> prelocated;
+    std::unique_ptr<MeshPointLocator> locator;
+    if (use_point_locator)
+    {
+      std::vector<double> qcoords;
+      std::vector<unsigned> qgroups;
+      std::vector<oomph::Node *> qnodes;
+      std::set<oomph::Node *> seen;
+      unsigned qdim = 0;
+
+      for (unsigned int ie = 0; ie < this->nelement(); ie++)
+      {
+        BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+        for (unsigned int ine = 0; ine < deste->nnode(); ine++)
+        {
+          oomph::Node *n = deste->node_pt(ine);
+          if (n->is_on_boundary() && boundary_index < 0)
+            continue;
+          if (seen.count(n))
+            continue;
+          seen.insert(n);
+
+          oomph::Vector<double> xnode = n->position();
+          if (lsetup.space == LocatorSpace::BoundaryZeta)
+          {
+            xnode.resize(deste->dim());
+            n->get_coordinates_on_boundary(boundary_index, xnode);
+          }
+          if (!qdim)
+            qdim = xnode.size();
+          for (unsigned d = 0; d < qdim; d++)
+            qcoords.push_back(d < xnode.size() ? xnode[d] : 0.0);
+          qgroups.push_back(ie);
+          qnodes.push_back(n);
+        }
+      }
+
+      if (!qnodes.empty())
+      {
+        const auto t0 = std::chrono::steady_clock::now();
+        locator.reset(new MeshPointLocator(from, lsetup));
+        const auto t1 = std::chrono::steady_clock::now();
+        LocationSet located = locator->locate_batch(qcoords, qnodes.size(), &qgroups);
+        const auto t2 = std::chrono::steady_clock::now();
+        if (report_interpolation_timing)
+        {
+          std::cout << "  [locator] " << qnodes.size() << " points: index "
+                    << std::chrono::duration<double>(t1 - t0).count() * 1000.0 << " ms, locate "
+                    << std::chrono::duration<double>(t2 - t1).count() * 1000.0 << " ms ("
+                    << located.search_statistics() << ")" << std::endl;
+        }
+        BulkElementBase *el = NULL;
+        std::vector<double> sloc;
+        for (unsigned i = 0; i < qnodes.size(); i++)
+        {
+          if (located.resolve_local(i, el, sloc))
+          {
+            oomph::Vector<double> sv(sloc.size());
+            for (unsigned d = 0; d < sloc.size(); d++)
+              sv[d] = sloc[d];
+            prelocated[qnodes[i]] = std::make_pair(el, sv);
+          }
+        }
+      }
+    }
+
+    // Only built when the locator is switched off; constructing it is itself expensive.
+    std::unique_ptr<oomph::MeshAsGeomObject> MaGO;
+    double magoo_locate_ms = 0.0;
+    if (!use_point_locator)
+    {
+      const auto t0 = std::chrono::steady_clock::now();
+      MaGO.reset(new oomph::MeshAsGeomObject(from));
+      const auto t1 = std::chrono::steady_clock::now();
+      if (report_interpolation_timing)
+      {
+        std::cout << "  [MeshAsGeomObject] index " << std::chrono::duration<double>(t1 - t0).count() * 1000.0
+                  << " ms" << std::endl;
+      }
+    }
 
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
@@ -3136,14 +3242,28 @@ namespace pyoomph
           //          std::cout << "  XNODE " << xnode[0] << std::endl;
         }
         oomph::Vector<double> s(xnode.size(), 0.5 * (deste->s_min() + deste->s_max()));
-        oomph::GeomObject *resgo = 0;
         BulkElementBase *srcelem = NULL;
 
-        MaGO.locate_zeta(xnode, resgo, s, false);
-        srcelem = dynamic_cast<BulkElementBase *>(resgo);
+        if (use_point_locator)
+        {
+          auto pl = prelocated.find(n);
+          if (pl != prelocated.end())
+          {
+            srcelem = pl->second.first;
+            s = pl->second.second;
+          }
+        }
+        else
+        {
+          oomph::GeomObject *resgo = 0;
+          const auto tl0 = std::chrono::steady_clock::now();
+          MaGO->locate_zeta(xnode, resgo, s, false);
+          magoo_locate_ms += std::chrono::duration<double>(std::chrono::steady_clock::now() - tl0).count() * 1000.0;
+          srcelem = dynamic_cast<BulkElementBase *>(resgo);
+        }
         if (!srcelem)
         {
-          if (boundary_index<0) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << xnode[0] << "\t" << xnode[1] << "  " << completed_nodes.size() * 100.0 / this->nnode() << " % done  | resgo " << resgo  << std::endl;
+          if (boundary_index<0) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << xnode[0] << "\t" << xnode[1] << "  " << completed_nodes.size() * 100.0 / this->nnode() << " % done" << std::endl;
           missing_nodes.insert(n);
           continue;
         }
@@ -3206,14 +3326,38 @@ namespace pyoomph
         oomph::Vector<double> dmpt = deste->get_Eulerian_midpoint_from_local_coordinate(); // TODO: Lagrangian?
 
         oomph::Vector<double> s(dmpt.size(), 0.5 * (deste->s_min() + deste->s_max()));
-        oomph::GeomObject *resgo = 0;
         BulkElementBase *srcelem = NULL;
 
-        MaGO.locate_zeta(dmpt, resgo, s, false);
-        srcelem = dynamic_cast<BulkElementBase *>(resgo);
+        // The element-centre query for DL/D0. One point per destination element, so it is not
+        // batched with the nodal pass above; it reuses the same locator, which is where the cost
+        // sits (the index is built once, not once per query).
+        if (locator)
+        {
+          std::vector<double> centre(dmpt.size());
+          for (unsigned d = 0; d < dmpt.size(); d++)
+            centre[d] = dmpt[d];
+          LocationSet one = locator->locate_batch(centre, 1);
+          std::vector<double> sloc;
+          if (one.resolve_local(0, srcelem, sloc))
+          {
+            s.resize(sloc.size());
+            for (unsigned d = 0; d < sloc.size(); d++)
+              s[d] = sloc[d];
+          }
+          else
+          {
+            srcelem = NULL;
+          }
+        }
+        else
+        {
+          oomph::GeomObject *resgo = 0;
+          MaGO->locate_zeta(dmpt, resgo, s, false);
+          srcelem = dynamic_cast<BulkElementBase *>(resgo);
+        }
         if (!srcelem)
         {
-          if (boundary_index<0) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << dmpt[0] << "\t" << dmpt[1] << "  INTERNAL CENTER " << ie * 100.0 / this->nelement() << " % done  | resgo " << resgo << std::endl;
+          if (boundary_index<0) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << dmpt[0] << "\t" << dmpt[1] << "  INTERNAL CENTER " << ie * 100.0 / this->nelement() << " % done" << std::endl;
           continue;
         }
         // Interpolate all D0 fields
@@ -3353,6 +3497,11 @@ namespace pyoomph
         n_fallback_failed++;
         std::cerr << "  NOT EVEN FOUND A NEAREST NODE" << std::endl;
       }
+    }
+
+    if (report_interpolation_timing && !use_point_locator)
+    {
+      std::cout << "  [MeshAsGeomObject] locate " << magoo_locate_ms << " ms total" << std::endl;
     }
 
     if (n_fallback)

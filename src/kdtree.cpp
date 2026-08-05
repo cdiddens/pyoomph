@@ -134,6 +134,7 @@ namespace pyoomph
 		virtual void addIndices(unsigned start, unsigned end) = 0;
 		virtual int point_present(double x, double y, double z, double epsilon = 1e-8) = 0;
 		virtual int nearest_point(double x, double y, double z, double *distret) = 0;
+		virtual unsigned k_nearest(unsigned k, double x, double y, double z, std::vector<uint32_t> &indices) = 0;
 		virtual std::vector<std::pair<uint32_t, double>> radius_search(double radius, double x, double y, double z) = 0;
 	};
 
@@ -198,6 +199,10 @@ namespace pyoomph
 		}
 
 		// nanoflann's dynamic adaptor does not implement radius queries, so this always throws;
+		unsigned k_nearest(unsigned, double, double, double, std::vector<uint32_t> &) override
+		{
+			throw_runtime_error("Cannot perform a k_nearest search on a dynamic KDTree");
+		}
 		// use a static tree (built from a fixed coordinate array) for radius_search.
 		std::vector<std::pair<uint32_t, double>> radius_search(double, double, double, double) override
 		{
@@ -254,6 +259,29 @@ namespace pyoomph
 			if (distret)
 				*distret = sqrt(out_dist_sqr);
 			return ret_index;
+		}
+		// The k nearest points, nearest first. Used by MeshPointLocator to widen its candidate set
+		// gradually: a radius_search needs a radius chosen up front, and getting that wrong either
+		// misses the answer or returns most of the mesh (which is what MeshKDTree::find_element's
+		// mesh-wide max_search_radius did).
+		unsigned k_nearest(unsigned k, double x, double y, double z, std::vector<uint32_t> &indices) override
+		{
+			indices.clear();
+			if (cloud.pts.empty() || !k)
+				return 0;
+			if (k > cloud.pts.size())
+				k = cloud.pts.size();
+			std::vector<size_t> ret_index(k);
+			std::vector<num_t> out_dist_sqr(k);
+			nanoflann::KNNResultSet<num_t> resultSet(k);
+			resultSet.init(&ret_index[0], &out_dist_sqr[0]);
+			num_t query_pt[3] = {x, y, z};
+			tree.findNeighbors(resultSet, query_pt, {10});
+			const unsigned found = (unsigned)resultSet.size();
+			indices.reserve(found);
+			for (unsigned i = 0; i < found; i++)
+				indices.push_back((uint32_t)ret_index[i]);
+			return found;
 		}
 		std::vector<std::pair<uint32_t, double>> radius_search(double radius, double x, double y, double z) override
 		{
@@ -411,6 +439,11 @@ namespace pyoomph
 	std::vector<std::pair<uint32_t, double>> KDTree::radius_search(double radius, double x, double y, double z)
 	{
 		return tree->radius_search(radius, x, y, z);
+	}
+
+	unsigned KDTree::k_nearest(unsigned k, double x, double y, double z, std::vector<uint32_t> &indices)
+	{
+		return tree->k_nearest(k, x, y, z, indices);
 	}
 
 }

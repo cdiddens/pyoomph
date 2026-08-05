@@ -59,6 +59,10 @@ namespace pyoomph
     int nearest_point(double x, double y = 0.0, double z = 0.0, double *distret = NULL);                 // Return the index of the nearest point, optionally the (Euclidean) distance in *distret
     std::vector<double> get_point_coordinate_by_index(unsigned index);
     std::vector<std::pair<uint32_t, double>> radius_search(double radius, double x, double y = 0.0, double z = 0.0); // All points within `radius`, as (index, distance) pairs; static trees only
+    // The k nearest points, nearest first, appended to `indices`; returns how many were found
+    // (fewer than k if the tree is smaller). Static trees only. Preferred over radius_search when
+    // the right radius is not known in advance, since a too-large one returns most of the tree.
+    unsigned k_nearest(unsigned k, double x, double y, double z, std::vector<uint32_t> &indices);
   };
 
 }

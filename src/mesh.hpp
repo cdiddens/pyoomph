@@ -113,6 +113,14 @@ namespace pyoomph
 		virtual void fill_dof_to_global_field_index_buffer(std::vector<int> &dofs_to_global_field_index);
 		// From the old mesh, map each element with the local coordinates associated to each integration point of the new mesh.
 		virtual void prepare_zeta_interpolation(pyoomph::Mesh *oldmesh);
+		// A/B switch for the migration off oomph::MeshAsGeomObject onto MeshPointLocator
+		// (dev_docs/mesh_point_locator.md phase 1). Set False to get the old path back for comparison;
+		// it is removed once every call site has been migrated and validated.
+		static bool use_point_locator;
+		// Print how long the point-location phase of nodal_interpolate_from took, and how the
+		// candidate sets were arrived at. Off by default; interpolation is called often enough that
+		// unconditional timing output would be noise.
+		static bool report_interpolation_timing;
 		virtual void set_time_level_for_projection(unsigned time_level);
 		// Prepare internal caches (e.g. KD-tree) required before interpolation calls; must be called before nodal_interpolate_*.
 		virtual void prepare_interpolation();

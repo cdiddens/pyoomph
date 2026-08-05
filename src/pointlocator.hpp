@@ -177,9 +177,24 @@ namespace pyoomph
     std::vector<int> send_counts, send_displs, recv_counts, recv_displs;
     std::vector<unsigned> gather_permutation; // remote reply order -> query order
 
+    // How the candidate set was arrived at, per point. Only for reporting - a locate that mostly
+    // falls through to the widening search is a sign that the seeding is not working, which is
+    // otherwise invisible because the answer is correct either way.
+    unsigned n_by_walk = 0, n_by_nearest_node = 0, n_by_widening = 0;
+
   public:
     unsigned size() const { return npoint; }
     const std::vector<LocationHandle> &get_handles() const { return handles; }
+
+    // Resolve query `i` to the source element and local coordinate it was matched to. Only valid
+    // for a handle owned by this rank, which in serial is every located handle; returns false
+    // otherwise (unlocated, or owned elsewhere). This is the ONLY route from a handle back to an
+    // element, and callers must not store what it returns beyond the current operation - see rule 1
+    // in the file header.
+    bool resolve_local(unsigned i, BulkElementBase *&element, std::vector<double> &s) const;
+
+    // "37 walked, 4 by nearest node, 1 widened, 0 unlocated" - for the migration's A/B reporting.
+    std::string search_statistics() const;
 
     // Number of query points that could not be located on any rank. Callers are expected to check
     // this and report rather than fall through to a nearest-node guess unannounced.
@@ -214,6 +229,7 @@ namespace pyoomph
 
     KDTree *tree = nullptr;
     std::vector<pyoomph::Node *> nodes_by_index;
+    std::map<pyoomph::Node *, unsigned> node_lookup; // inverse of nodes_by_index, for the walk
 
     // Node -> element adjacency as CSR rather than map<Node*,set<Element*>>: at ~1e6 queries the
     // container lookups of the latter dominate the actual geometry.
@@ -232,16 +248,16 @@ namespace pyoomph
     std::vector<double> affine_inverse;
     std::vector<bool> element_is_affine;
 
-    // Face-neighbour adjacency, for walking from the previously matched element to the next query
-    // instead of returning to the tree. Query points of one target element are clustered, so this
-    // turns roughly n_intpt tree searches per element into one.
-    std::vector<unsigned> elem_neighbour_offsets;
-    std::vector<unsigned> elem_neighbour_entries;
+    // Slack added to every element bounding box before it is used to reject a candidate, as a
+    // fraction of the box diagonal. Curved elements bulge outside the box spanned by their nodes,
+    // and a query legitimately sitting in that bulge must not be rejected.
+    double bbox_slack = 0.05;
 
     void build_index();
     void build_element_boxes();
     void build_affine_inverses();
-    void build_neighbours();
+
+    bool bbox_contains(unsigned element_slot, const double *x) const;
 
     // Wrap a query coordinate into the principal period, for periodic spaces. No-op otherwise.
     void wrap_into_period(double *x) const;
