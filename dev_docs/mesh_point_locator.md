@@ -845,3 +845,31 @@ default is `InternalInterpolator`, and the locator, the projection-based boundar
 the periodic zeta of §4.3 and every guard in phase 0 are all in that default path. Only the L2
 projection of the bulk fields - which trades pointwise accuracy for conservation - is opt-in, because
 it is the one change that is not simply better.
+
+---
+
+## 15. The boundary pass had no boundary
+
+Found on a real two-domain script (a Leidenfrost droplet in gas), where the transfer warnings read
+"16 node(s) could not be located" for a boundary that has two nodes on it.
+
+The indices were not swapped, which was the natural suspicion. `nodal_interpolate_from` only used
+`boundary_index` to decide whether to skip boundary nodes (`boundary_index < 0`) and which coordinate
+to query with. With an index >= 0 on a BULK mesh it walked **every node of the mesh**. That branch is
+taken for a boundary with no interface mesh of its own - "corners to another domain" - and it runs
+*after* the interface passes, so it re-did their nodes and, for the ones it could not locate,
+overwrote correctly projected values with a nearest-node blend. Restricting it to
+`n->is_on_boundary(boundary_index)` removed every warning that script produced.
+
+Two diagnostics changed with it, both because they had been actively misleading:
+
+* `INTERPOLATING FROM 0x23d45218` is now
+  `Interpolating droplet/droplet_gas from droplet/droplet_gas by projection onto the old interface`,
+  which also states *how* the transfer was done - by zeta, by projection, or plain.
+* The bulk pass and the corner-case pass both land on the same mesh and used to print identically,
+  which read as the same work being done twice. They are now
+  `droplet (interior nodes only)` and `droplet/gas_axisymm (boundary nodes only)`.
+
+Worth knowing when reading such a log: an interface transfers **by zeta only if an
+`AssignZetaCoordinates*` equation was attached to it**. With none, every interface goes by projection,
+which is usually what you want anyway (§12).

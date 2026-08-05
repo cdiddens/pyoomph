@@ -515,3 +515,26 @@ def test_transfer_warnings_name_the_boundary_and_the_unset_nodes(capfd):
     assert "domain/interface" in out, out          # the path, not a bare index
     assert "received NO value" in out, out
     assert "Nodes at: (" in out, out               # and where they are
+
+
+@pytest.mark.slow
+def test_boundary_pass_touches_only_its_own_boundary(capfd):
+    # A boundary with no interface mesh of its own is handled by calling nodal_interpolate_from on
+    # the BULK mesh with that boundary's index. That call used to ignore the index and walk every
+    # node of the mesh - so, running after the interface passes, it re-did their nodes and
+    # OVERWROTE the ones it could not locate with a nearest-node blend, undoing correct work. It also
+    # reported sixteen failures for a boundary with two nodes on it.
+    with _BlobProb() as p:
+        p.quiet()
+        p.initialise()
+        _stamp_bulk(p.get_mesh("domain"), _linear2)
+        capfd.readouterr()
+        p.force_remesh()
+        out = capfd.readouterr().out
+        worst = _bulk_error(p.get_mesh("domain"), _linear2)
+
+    assert "WARNING: interpolating" not in out, out
+    assert worst < 1e-7, worst
+    # and the two passes on the bulk mesh must be distinguishable from each other
+    assert "(interior nodes only)" in out, out
+    assert "(boundary nodes only)" in out, out

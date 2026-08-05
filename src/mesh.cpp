@@ -515,6 +515,27 @@ namespace pyoomph
     return oss.str();
   }
 
+  // Which nodes one call of nodal_interpolate_from is responsible for.
+  //
+  // boundary_index < 0 is the bulk pass: it does the interior and leaves every boundary node to the
+  // per-boundary passes. On an INTERFACE mesh a boundary index only selects the zeta query, and all
+  // of that mesh's nodes are meant.
+  //
+  // On a BULK mesh with a boundary index - the branch the interpolator takes for a boundary that has
+  // no interface mesh, "corners to another domain" - only the nodes ON that boundary are meant. That
+  // restriction was missing, so the call walked the whole mesh: it re-did every node, and for the
+  // ones it could not locate it OVERWROTE, with a nearest-node blend, the values the interface
+  // passes had just transferred correctly. Running last, it undid their work. It also made the
+  // diagnostics unreadable, reporting sixteen failures for a boundary with two nodes on it.
+  static bool node_is_in_scope(oomph::Node *n, int boundary_index, bool on_interface_mesh)
+  {
+    if (boundary_index < 0)
+      return !n->is_on_boundary();
+    if (on_interface_mesh)
+      return true;
+    return n->is_on_boundary((unsigned)boundary_index);
+  }
+
   std::string Mesh::get_full_domain_path()
   {
     if (this->nelement())
@@ -3323,7 +3344,6 @@ namespace pyoomph
       }
     }
 
-    std::cout << "INTERPOLATING FROM " << from << std::endl;
 
     std::set<oomph::Node *> completed_nodes;
     std::set<oomph::Node *> missing_nodes;
@@ -3354,6 +3374,23 @@ namespace pyoomph
       if (period > 0.0)
         lsetup.period.assign(1, period);
     }
+    {
+      // Name the boundary when there is one. Two calls land on the same BULK mesh - the bulk pass
+      // with boundary_index < 0, and one pass per boundary that has no interface mesh of its own -
+      // and without the name they print identically, which reads as the same work being done twice.
+      std::string what = this->get_full_domain_path();
+      if (boundary_index >= 0 && !interface_case)
+        what += "/" + this->get_boundary_name_or_index((unsigned)boundary_index) + " (boundary nodes only)";
+      else if (boundary_index < 0)
+        what += " (interior nodes only)";
+      std::string how;
+      if (by_zeta)
+        how = " by its zeta coordinate";
+      else if (interface_case)
+        how = " by projection onto the old interface";
+      std::cout << "Interpolating " << what << " from " << from->get_full_domain_path() << how << std::endl;
+    }
+
     if (interface_case && !by_zeta && !use_point_locator)
     {
       // Projection is new capability, not a reimplementation of something MeshAsGeomObject could
@@ -3383,7 +3420,7 @@ namespace pyoomph
         for (unsigned int ine = 0; ine < deste->nnode(); ine++)
         {
           oomph::Node *n = deste->node_pt(ine);
-          if (n->is_on_boundary() && boundary_index < 0)
+          if (!node_is_in_scope(n, boundary_index, interface_case))
             continue;
           if (seen.count(n))
             continue;
@@ -3454,8 +3491,8 @@ namespace pyoomph
       for (unsigned int ine = 0; ine < deste->nnode(); ine++)
       {
         oomph::Node *n = deste->node_pt(ine);
-        if (n->is_on_boundary() && boundary_index < 0)
-          continue; // Skip the boundary nodes here
+        if (!node_is_in_scope(n, boundary_index, interface_case))
+          continue;
         if (completed_nodes.count(n) || missing_nodes.count(n))
           continue;
 
@@ -3632,12 +3669,16 @@ namespace pyoomph
     // silently for boundaries (the cerr below is guarded by boundary_index<0), so count it and
     // report once at the end.
     unsigned n_fallback = 0;
-    std::vector<std::vector<double>> unset_positions;
+    std::vector<std::vector<double>> unset_positions, fallback_positions;
     for (oomph::Node *n : missing_nodes)
     {
       if (completed_nodes.count(n))
         continue;
       n_fallback++;
+      {
+        oomph::Vector<double> xf = n->position();
+        fallback_positions.push_back(std::vector<double>(xf.begin(), xf.end()));
+      }
       oomph::Vector<double> xnode = n->position();
       if (boundary_index<0) std::cerr << "FOUND UNTREATED BULK NODE AT\t" << xnode[0] << "\t" << xnode[1] << std::endl;
       double mindist = 1e40;
@@ -3759,12 +3800,18 @@ namespace pyoomph
 
     if (n_fallback || !unset_positions.empty())
     {
+      // Deliberately does NOT name a boundary. Only boundary_index < 0 skips boundary nodes; with
+      // boundary_index >= 0 this routine walks EVERY node of the mesh (that is the only difference
+      // the index makes here, besides selecting the zeta query), so blaming the failures on the
+      // boundary whose name happened to bring us here reads as "16 nodes of a 2-node boundary".
       std::string where = this->get_full_domain_path();
-      if (boundary_index >= 0 && !dynamic_cast<InterfaceMesh *>(this))
+      if (boundary_index >= 0 && !interface_case)
         where += "/" + this->get_boundary_name_or_index((unsigned)boundary_index);
-      std::cout << "WARNING: interpolating " << (boundary_index < 0 ? "the bulk of '" : "'") << where
-                << "': " << n_fallback << " node(s) could not be located in the old mesh and fell back "
-                << "to nearest-node blending instead of proper interpolation." << std::endl;
+      std::cout << "WARNING: interpolating " << where << ": " << n_fallback
+                << " of " << completed_nodes.size() + n_fallback
+                << " node(s) could not be located in the old mesh and fell back to nearest-node "
+                << "blending instead of proper interpolation. Nodes at: "
+                << describe_node_positions(fallback_positions) << std::endl;
       if (!unset_positions.empty())
       {
         std::cout << "         Of those, " << unset_positions.size() << " received NO value at all "
