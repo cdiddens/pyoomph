@@ -22,12 +22,16 @@ This collects five things that look unrelated and are not:
 All five are the same question asked in different coordinate spaces. §2 is the argument for that
 claim; everything after it follows from it.
 
+References here name files and symbols but deliberately not line numbers: the first draft carried
+them and most had rotted before the campaign was over, since the campaign edited the very files it
+was describing.
+
 ---
 
 ## 1. What zeta actually has to satisfy
 
 `pyoomph/meshes/zeta.py` assigns a boundary coordinate per node. That value is not a label - it is fed
-to `Mesh::nodal_interpolate_from(from, boundary_index)` (`src/mesh.cpp:2931`), which wraps the **old**
+to `Mesh::nodal_interpolate_from(from, boundary_index)` (`src/mesh.cpp`), which wraps the **old**
 interface mesh in an `oomph::MeshAsGeomObject` and calls `locate_zeta` with the new node's boundary
 coordinate as the global coordinate.
 
@@ -40,7 +44,7 @@ Three consequences:
 **Closed loops.** The seam element runs from zeta ~ 1 back to zeta = 0, so it spans the entire zeta
 range and `locate_zeta` inverts it for *any* query in [0,1]. An arbitrary node can be matched against
 it and receive values from the opposite side of the loop - not a local error near the seam, a global
-one. Refinement then averages zeta over the generating nodes (`src/elements.cpp:8166`, and the
+one. Refinement then averages zeta over the generating nodes (`src/elements.cpp`, and the
 corresponding sites in `src/refineable_telements.cpp`), so a node created inside the seam element gets
 zeta ~ 0.5, which is geometrically meaningless. There is no fix within a single-valued coordinate:
 a circle needs at least two charts, or an explicit period (§4.3).
@@ -48,14 +52,14 @@ a circle needs at least two charts, or an explicit period (§4.3).
 Measured on a `CircularMesh`, the two assigners behaved differently, which is worth recording because
 it was not the expectation: `AssignZetaCoordinatesByArclength` already **failed** on a closed loop,
 because the segment walk returns the start node again at the end and the resulting length mismatch
-trips the check at `zeta.py:163` - but it failed with `NODEMAP AND SEGMENT LENGTH MISMATCH`, which
+trips the length-mismatch check in `zeta.py` - but it failed with `NODEMAP AND SEGMENT LENGTH MISMATCH`, which
 names neither the loop nor the cause. `AssignZetaCoordinatesByEulerianCoordinate` was the one that
 silently produced a broken chart. Phase 0 replaced both with an explanatory error.
 
 **Overhangs.** `AssignZetaCoordinatesByEulerianCoordinate` has exactly the same non-invertibility if
 the interface folds back along the chosen axis - a circle parameterised by x is precisely this case,
 and is why the guard for it is an overlap test rather than a loop test. Its only previous guard was
-the degenerate all-equal case (`zeta.py:106`).
+the degenerate all-equal case (`zeta.py`).
 
 **Surfaces in 3d.** A two-component chart on a 2-manifold exists globally only for disc-like patches,
 is arbitrary even then, and has no arclength analogue. This is a topological obstruction, not a gap in
@@ -70,15 +74,17 @@ the implementation - see §4.2 for why the answer is to stop needing a chart.
 | `Mesh::nodal_interpolate_from(from,-1)` | every non-boundary node of the new mesh | Lagrangian xi (see below) | yes |
 | the same, `boundary_index >= 0` | interface nodes | boundary zeta | yes |
 | the same, element-centre pass | one point per element, for DL/D0 | as above | yes |
-| `Mesh::prepare_zeta_interpolation` | every **integration point** of every new element | Lagrangian xi | yes |
+| `Mesh::prepare_zeta_interpolation` | every **integration point** of every new element | Eulerian x (see §9, phase 4b) | yes |
 | `Mesh::add_interpolated_nodes_at` | sampling points | Lagrangian xi | yes |
 | `Mesh::get_values_at_zetas` | - | - | **not a call site** |
 
 `get_values_at_zetas` turned out to be dead: its whole body is commented out and it throws
 `"Implement"`. It is listed here only so the next reader does not go looking for it.
 
-"Lagrangian xi" rather than Eulerian x is not a typo, and it is the one subtlety in the migration.
-`zeta_coordinate_type` defaults to **0 = Lagrangian** (`elements.cpp:291`), so the bulk locate
+"Lagrangian xi" rather than Eulerian x is not a typo for the two `nodal_interpolate_from` rows, and
+it is the one subtlety in the migration. (`prepare_zeta_interpolation` is the exception: it locates in
+physical space, for the reason given under phase 4b in §9.)
+`zeta_coordinate_type` defaults to **0 = Lagrangian** (`elements.cpp`), so the bulk locate
 normally happens in Lagrangian space, moving to Eulerian only when
 `interpolated_lagrangian_coordinates_at_remeshing` is set. That works because in the default case
 `prepare_interpolation()` has just copied the old mesh's x into its xi
@@ -99,12 +105,12 @@ that all of them inherit rather than three separate pieces of work. That is the 
 
 ## 2.1 What the current fallback does
 
-Anything `locate_zeta` fails to find is not an error. It goes to `missing_nodes` and is handled at
-`mesh.cpp:3213` by **two full sweeps over every node of the source mesh** - nearest, then
+Anything `locate_zeta` fails to find is not an error. It goes to `missing_nodes` and is handled by
+**two full sweeps over every node of the source mesh** - nearest, then
 second-nearest - followed by an inverse-distance blend of those two values. That is
 O(N_missing x N_from), and the blend is not an interpolation; it is not even linear-exact on a general
-mesh. `Mesh::nodal_interpolate_along_boundary` (`mesh.cpp:2585`) uses the identical two-nearest blend
-for boundaries, with a hard-coded absolute cutoff `mindist > 1.0` (`mesh.cpp:2795`) that encodes an
+mesh. `Mesh::nodal_interpolate_along_boundary` (`mesh.cpp`) uses the identical two-nearest blend
+for boundaries, with a hard-coded absolute cutoff `mindist > 1.0` that encoded an
 assumption about nondimensional scale rather than a local element size.
 
 Under `--distribute` this is the entire problem in one sentence: a point owned by another rank is not
@@ -124,8 +130,13 @@ and built last.
 boundary index, period, projection guard). Built once and cached on the mesh. Backed by the
 already-vendored nanoflann (`src/thirdparty/nanoflann.hpp`, wrapped in `src/kdtree.hpp`).
 
-`LocationSet` - the result of `locate_batch`, and the handle through which `evaluate(EvalRequest)` is
-called. It owns the routing schedule.
+`LocationSet` - the result of `locate_batch`, and the handle through which `evaluate(EvalRequest)`
+is called. It owns the routing schedule.
+
+`evaluate`/`values_per_point` are **declared but still throw**. Nothing needs them yet: every migrated
+call site resolves a handle to a local element through `resolve_local` and evaluates for itself. Phase
+5 does need them, and so does routing the projection solve's `coords_oldmesh` off its raw element
+pointer (rule 1 below).
 
 **Locate and evaluate are split deliberately.** Locating is expensive and happens once; evaluating is
 cheap and repeats. The projection solve evaluates ten times (once per history level) against one set
@@ -139,21 +150,21 @@ by new code even though nothing is distributed yet:
 **Rule 1 - no source element pointers escape.** A located point is a `LocationHandle` (owning rank +
 slot). Under distribution the source element may be on another rank, where a pointer means nothing.
 The projection solve's `coords_oldmesh` currently stores a raw `BulkElementBase*`
-(`src/elements.hpp:594`) - that is the pattern being replaced.
+(`src/elements.hpp`) - that is the pattern being replaced.
 
 **Rule 2 - everything is requested up front and pulled into a local buffer before use.** The
 projection residual currently calls `old_elem->interpolated_zeta(...)` and `interpolated_x(t, old_s,
-...)` *inside* element assembly (`src/elements.cpp:5615`). That can never be a remote call. A consumer
+...)` *inside* element assembly (`src/elements.cpp`). That can never be a remote call. A consumer
 that discovers afterwards that it also wants, say, a derivative forces a second round trip, which is
 why `EvalRequest` is a bitfield with room for quantities not needed yet.
 
 ### 3.1 A latent bug the design forces into the open
 
 `BulkElementBase::zeta_nodal` decides which coordinate it reports from two **static** flags,
-`zeta_time_history` and `zeta_coordinate_type` (`src/elements.hpp:647`). `MeshKDTree` sets them and
-then resets them to **0** rather than to their previous values (`mesh.cpp:6450`, `mesh.cpp:6494`),
+`zeta_time_history` and `zeta_coordinate_type` (`src/elements.hpp`). `MeshKDTree` sets them and
+then resets them to **0** rather than to their previous values (`mesh.cpp`, `mesh.cpp`),
 which silently discards the setting `nodal_interpolate_from` installed around itself
-(`mesh.cpp:2934`). Harmless today only because the two never nest - which this design deliberately
+(`mesh.cpp`). Harmless today only because the two never nest - which this design deliberately
 makes them do. `pointlocator.cpp` scopes them through a save/restore guard; the statics themselves
 should become parameters when `MeshKDTree` is retired.
 
@@ -191,7 +202,7 @@ on the circle. Needs, in addition:
 * a closed-loop mode in `AssignZetaCoordinatesByArclength` with a **continuous** seam anchor - the
   intersection with a ray from the loop centroid, interpolated inside the element, not quantised to a
   node, so the old and new mesh agree on it;
-* periodic-aware zeta averaging at refinement (`elements.cpp:8166` and `refineable_telements.cpp`).
+* periodic-aware zeta averaging at refinement (`elements.cpp` and `refineable_telements.cpp`).
 
 With §4.2 in place this is optional for many cases: projection handles a circle with no chart.
 
@@ -207,13 +218,13 @@ geometries get a warning, not a coin flip. Closed loops additionally need §4.3'
 
 Internal facets *are* real `FaceElement`s (`InterfaceElementBase`) in an `InterfaceMesh` named
 `_internal_facets_`, built from `fill_internal_facet_buffers` and paired with an opposite dummy
-element (`mesh.cpp:1312`). So the class could carry internal data. The obstacle is elsewhere, and
+element (`mesh.cpp`). So the class could carry internal data. The obstacle is elsewhere, and
 splits into three problems worth keeping apart:
 
-**(a) Persistence, not interpolation.** `InterfaceMesh::clear_before_adapt` (`mesh.cpp:5021`)
+**(a) Persistence, not interpolation.** `InterfaceMesh::clear_before_adapt` (`mesh.cpp`)
 `delete`s every interface element, and `generate_interface_elements` rebuilds from scratch. This
 happens on **every mesh adaptation**, not only on remeshing. Facet-owned data dies there long before
-an interpolator sees it. `InterfaceMesh::rebuild_after_adapt` (`mesh.cpp:5279`) already refuses
+an interpolator sees it. `InterfaceMesh::rebuild_after_adapt` (`mesh.cpp`) already refuses
 interface DG spaces with `numfields_new > 0` for exactly this reason - but it checks only DG, so
 interface DL/D0 data is silently reset instead (§8, Phase 0 item).
 
@@ -259,14 +270,14 @@ the routing per field and per time level. Hence:
 1. the schedule is a first-class object, built once, degenerate-local in serial so there is no serial
    cost to carrying it;
 2. `evaluate` batches fields x time levels into one buffer - the current per-field, per-time-index
-   loops (`mesh.cpp:3183`) would become one collective each if translated literally;
+   loops (`mesh.cpp`) would become one collective each if translated literally;
 3. structure-of-arrays buffers, so the send buffer is a slice rather than a gather;
 4. the residue pass for genuinely unlocated points is one `Allgatherv`, everyone searches, then
    `Allreduce(MIN, rank)` for a unique owner - bounded, and a large residue is a bounding-box bug to
    be reported, not absorbed.
 
 This also gives bulk DG transfer for free: D0/DL live on elements, so a remote source element's values
-ride back in the same reply buffer. That removes the reason for the refusal at `mesh.cpp:2961`.
+ride back in the same reply buffer. That removes the reason for the refusal at `mesh.cpp`.
 
 ---
 
@@ -276,7 +287,7 @@ The workload that sets the target is the projection solve: ~1e5-1e6 locate queri
 current per-query cost is dominated by constants, not asymptotics - a bin-array lookup, a Newton solve
 per candidate, several `oomph::Vector<double>` heap allocations, `std::map`/`std::set` lookups, and a
 `zeta_in = zeta` defensive copy carrying a `// Why ever... But without I had issues` comment
-(`mesh.cpp:6503`) that needs root-causing rather than inheriting.
+(`mesh.cpp`) that needs root-causing rather than inheriting.
 
 In rough order of payoff:
 
@@ -297,7 +308,7 @@ In rough order of payoff:
 6. **Zero per-point allocation.**
 
 `MeshKDTree::find_element` additionally falls back to `radius_search(max_search_radius)` where
-`max_search_radius` is 10x the largest node-pair distance **anywhere in the mesh** (`mesh.cpp:6449`),
+`max_search_radius` is 10x the largest node-pair distance **anywhere in the mesh** (`mesh.cpp`),
 so one coarse element inflates the fallback radius globally and the search degenerates to O(N).
 Replace with expanding k-nearest.
 
@@ -308,12 +319,12 @@ none today and the six items above should make it unnecessary.
 
 ## 7. The projection solve
 
-`ProjectionInternalInterpolator` (`pyoomph/meshes/interpolator.py:49`) is **scaffolding, not a working
-path**: it is referenced nowhere (the default is `InternalInterpolator`, `interpolator.py:153`), and
+`ProjectionInternalInterpolator` (`pyoomph/meshes/interpolator.py`) is **scaffolding, not a working
+path**: it is referenced nowhere (the default is `InternalInterpolator`, `interpolator.py`), and
 its `interpolate()` constructs a *fresh empty* `Problem()` and calls `steady_newton_solve()` on it ten
-times (`interpolator.py:58`), which cannot be projecting the actual meshes. The C++ half is real -
-`prepare_zeta_interpolation` (`elements.cpp:5487`) fills `coords_oldmesh` and the projection residual
-(`elements.cpp:5589`) consumes it behind `enable_zeta_projection` - but the driver was never finished.
+times (`interpolator.py`), which cannot be projecting the actual meshes. The C++ half is real -
+`prepare_zeta_interpolation` (`elements.cpp`) fills `coords_oldmesh` and the projection residual
+(`elements.cpp`) consumes it behind `enable_zeta_projection` - but the driver was never finished.
 So "move to a projection-based solve" is *finish it*, and it should be finished on top of the locator
 rather than before it.
 
@@ -321,7 +332,7 @@ Three things it must not inherit from the physical problem.
 
 ### 7.1 A separate linear solver
 
-pyoomph's linear solver is a per-Problem slot (`_lasolver`, `problem.py:1415`) and eigen solvers
+pyoomph's linear solver is a per-Problem slot (`_lasolver`, `problem.py`) and eigen solvers
 already occupy a second slot (`_eigensolver`), so a third is not a new concept.
 
 The projection system is structurally unrelated to the physical one: a mass matrix, SPD, with a
@@ -341,15 +352,15 @@ around itself so a failure does not leave the Problem holding the wrong one.
 ### 7.2 The frozen sparsity must be off
 
 `acquire_frozen_sparsity` keys its cache on `(matrix_index, generation, ndof)` where `generation` is
-`get_jacobian_structure_id()` (`problem.cpp:3381`). `invalidate_jacobian_structure()` is driven by
+`get_jacobian_structure_id()` (`problem.cpp`). `invalidate_jacobian_structure()` is driven by
 `assign_eqn_numbers()`, so a change in *pinning* is caught. A change in **residual** is not: the
-projection swaps the element residual behind `enable_zeta_projection` (`elements.cpp:5263`) while the
+projection swaps the element residual behind `enable_zeta_projection` (`elements.cpp`) while the
 dof structure is untouched, so the cache would hand back the *physical* problem's pattern for a mass
 matrix. Where the projection pattern is a strict subset that only wastes explicit zeros; where it is
 not, entries are dropped and the answer is silently wrong.
 
 The cache is already keyed by `matrix_index` for exactly this kind of situation (see the comment about
-multi-residual problems at `problem.cpp:2202`), so a distinct index is the principled fix. Disabling
+multi-residual problems at `problem.cpp`), so a distinct index is the principled fix. Disabling
 frozen sparsity for the duration via `set_use_frozen_sparsity(false)` and restoring afterwards is the
 cheap and safe one, and is what should be done first.
 
@@ -363,7 +374,7 @@ whose exact Jacobian is a mass matrix. That matrix:
 * is identical for all fields sharing a function space,
 * is SPD.
 
-The current driver solves once per history level (`interpolator.py:60`) - ten assemblies and ten
+The current driver solves once per history level (`interpolator.py`) - ten assemblies and ten
 factorisations of a matrix that never changes. That is a larger waste than the per-field question.
 
 The right structure is to **group by function space** (C1, C2, C1TB, C2TB, and the position
@@ -390,11 +401,11 @@ group, which is still far better than one per history level.
 Spatial adaptation is the same transfer problem with more structure available, and it is currently
 covered for the bulk and not at all for interfaces.
 
-**Bulk, refinement:** handled. `BulkElementBase::further_build` (`elements.cpp:7092`) samples the
+**Bulk, refinement:** handled. `BulkElementBase::further_build` (`elements.cpp`) samples the
 father's DG fields at each son's nodal local coordinate and reconstructs DL from the father's value
 and slope per son type.
 
-**Bulk, unrefinement:** handled. `BulkElementBase::rebuild_from_sons` (`elements.cpp:7257`) averages
+**Bulk, unrefinement:** handled. `BulkElementBase::rebuild_from_sons` (`elements.cpp`) averages
 the sons' DG values at coincident points and the sons' DL/D0 values. The code documents its own
 caveats - `// XXX TODO: ... this does not conserve ... and does not consider axisymmetry` - and the
 DL/D0 branches are written per tree type, so whether the simplex refinement path in
@@ -403,7 +414,7 @@ DL/D0 branches are written per tree type, so whether the simplex refinement path
 **Interfaces and facets: not covered, and confirmed by repro.** `clear_before_adapt` deletes every
 interface element, so any interface-owned internal data is destroyed on every adaptation.
 `rebuild_after_adapt` guards this for DG spaces by refusing outright, but the guard checks only DG -
-and its DG test uses `numfields_new` while `allocate_discontinous_fields` (`elements.cpp:8537`)
+and its DG test uses `numfields_new` while `allocate_discontinous_fields` (`elements.cpp`)
 allocates DL and D0 by the full `numfields`, so nothing covers them. A D0 field pinned to 7 on an
 interface reads back as 0 after `refine_uniformly`, with no error. Phase 0 added a one-time warning
 naming the interface and the field count; it warns rather than throws because the common case - a
@@ -486,7 +497,7 @@ element centre is what makes that iteration cheap.
 
 They are not merely slower on the old path - `oomph::MeshAsGeomObject` **throws** on them. Its
 `locate_zeta` needs two virtuals that `WedgeElementBase` and `PyramidElementBase` do not implement:
-`nplot_points()` for the multi-start grid (`elements.cc:4795`) and `local_coord_is_valid()` for the
+`nplot_points()` for the multi-start grid (`elements.cc`) and `local_coord_is_valid()` for the
 containment check. Both are pure-virtual-by-exception on `FiniteElement`. So mesh-to-mesh
 interpolation on a wedge or pyramid mesh was impossible, not inaccurate.
 
@@ -568,7 +579,7 @@ for the points that are found. The 2d T6/Q9 cases never needed pass 2 at any amp
 
 Results are bit-identical to `MeshAsGeomObject` wherever the geometry is straight, but on **curved**
 elements they now differ, and the new values are the correct ones. oomph's locate_zeta stops at
-`Locate_zeta_helpers::Newton_tolerance = 1e-7` on the residual (`elements.cc:1654`), so the local
+`Locate_zeta_helpers::Newton_tolerance = 1e-7` on the residual (`elements.cc`), so the local
 coordinate it returns was only ever good to about that. Measured on the curved circular mesh:
 
 | test | MeshAsGeomObject | MeshPointLocator |
@@ -588,7 +599,7 @@ by ~1e-8.
 * A distorted 3d hex is two orders of magnitude slower than every other case. If that ever matters,
   the lever is a better seed still, not a closed form - there is none.
 
-**Tracers are explicitly out of scope.** `MeshKDTree` (`mesh.cpp:6395`) stays where it is for now,
+**Tracers are explicitly out of scope.** `MeshKDTree` (`mesh.cpp`) stays where it is for now,
 with the static-flag reset of §3.1 still in it, and `tracers.cpp` keeps using it. Porting tracers onto
 the locator is a **separate campaign for later**, not a loose end of this one.
 
@@ -630,7 +641,7 @@ Three things had to change for this, all of which were latent bugs rather than n
 
 * **Coordinates are now read from the nodes, not through `zeta_nodal`.** On a bulk element
   `zeta_nodal` returns exactly xi or x depending on the static flags, but `InterfaceElementBase`
-  overrides it to `FaceElement::zeta_nodal` (`elements.hpp:2761`), which returns the intrinsic
+  overrides it to `FaceElement::zeta_nodal` (`elements.hpp`), which returns the intrinsic
   *boundary* coordinate - fewer components than the nodal dimension, so asking for component 2 of a
   face in 3d reads out of range and segfaults. Reading `node_pt(n)->x(d)` / `->xi(d)` is correct on
   both and drops the dependence on the static flags entirely.
@@ -831,6 +842,123 @@ blocks, so a generic sparse LU pays fill-in on an `nfields x N` system instead o
 the remaining factor, and it matters at the dof ceiling rather than here. And `coords_oldmesh` still
 stores a raw `BulkElementBase*`, which is exactly what §3 rule 1 forbids, so phase 5 will have to
 route this through `LocationSet`.
+
+---
+
+## 10. What gets deleted
+
+Every call site is migrated, so this is now a live list of removals rather than a plan - except that
+the A/B switch has to go first, since three of these are what it switches between.
+
+* `Mesh::use_point_locator` and the `oomph::MeshAsGeomObject` branches it selects, once there is no
+  longer a reason to compare against the old backend;
+
+* the `#include "mesh_as_geometric_object.h"` in `elements.hpp` with them;
+* `MeshKDTree` (`mesh.cpp`) - but only in the later tracer campaign, not here; it is its only
+  remaining user, and until then it stays as it is even if this work breaks it (see phase 1);
+* the two-nearest blend in `nodal_interpolate_from`'s `missing_nodes` pass and in
+  `nodal_interpolate_along_boundary` - already demoted from silent default to reported last resort,
+  and reachable now only when a point genuinely lies outside the old mesh;
+* `BulkElementBase::zeta_time_history` / `zeta_coordinate_type` as statics (§3.1);
+* `KNNInterpolator` (`interpolator.py`), already dead behind `if False:`.
+
+---
+
+## 11. Two closed-loop defects, both fixed
+
+Neither was caused by this work; both were found by phase 3's guard and both corrupted more than zeta.
+
+### 11.1 Remeshing a closed boundary misplaced one node
+
+After remeshing a domain whose boundary is a single closed loop, exactly one BULK element carried a
+mid-side node at the **antipode** of where it belonged - on the boundary, at the right radius, so
+nothing downstream noticed, while that element was grossly distorted.
+
+Cause: `Remesher2dBoundaryLineCollection` emitted a closed curve to gmsh as **one spline with its
+first point repeated** (`remesher.py`). Such a spline has a seam, and the element straddling it takes
+its second-order node from the average of its endpoints' curve parameters - which at the seam
+averages t~1 and t~0 to t~0.5, i.e. halfway around the loop. Fixed by emitting two open splines
+instead, which leaves no seam. Verified on a circle (worst intra-element angular step after remesh
+3.11 rad -> 0.076) and on a 12-gon of straight lines (bad element -> none), so it was never about
+curved entities.
+
+### 11.2 `get_interface_line_segments` corrupted closed loops
+
+Two bugs in `meshdatacache.py`:
+
+* On completing a loop, the walk appended `currentcurve` to `lines` and **did not reset it** - and
+  `lines` holds a reference, so the next fragment's nodes were tacked onto a curve that had already
+  been emitted. A remeshed circular boundary came back as a loop whose last entries jumped half way
+  across it, inflating any arclength computed from it by 1.6x.
+* The reverse-direction entry of `inbetween_pts` was filed under the key `(e[-1], e[1])` instead of
+  `(e[-1], e[0])`, and built from `reversed(...)`, a one-shot iterator. A backwards traversal
+  therefore fell back to the forward list and inserted intermediate nodes in the wrong order -
+  invisible with one intermediate node per element (C2), wrong for any higher-order space.
+
+Both fixed; the raw segment walk now returns loops with ratio 1.000 and no order breaks.
+`AssignZetaCoordinatesByArclength` still walks the element connectivity itself
+(`_walk_closed_loop`), because that additionally *validates* that the boundary is one single cycle.
+
+### 11.3 And one of mine, for the record
+
+The seam anchor's ray/edge intersection had its numerator's sign flipped, so every genuine crossing
+came out with u in [-1,0], was rejected as "outside the edge", and the search fell through to the
+node-quantised fallback. The seam then landed on a different node in the old and the new mesh and
+the whole parameterisation was offset by about one element - a constant 0.048 rad angular shift in
+the transferred field, uniform enough that only plotting the error against angle made it obvious.
+
+---
+
+## 12. Where closed-loop zeta stands after all that
+
+| transfer across a remesh of a closed loop | worst | mean |
+| --- | --- | --- |
+| circle, projection | 2.311e-05 | 9.562e-06 |
+| circle, periodic zeta | 8.635e-03 | 5.481e-03 |
+| 12-gon, projection | 6.895e-04 | 6.737e-05 |
+| 12-gon, periodic zeta | 4.173e-03 | 2.273e-03 |
+
+Periodic zeta works - it went from O(1) (1.99, i.e. total loss) to O(h^2) - but on a closed loop it
+is **two orders of magnitude worse than projection**, and that gap is structural rather than a
+remaining bug. The seam has to be inferred from the discretised curve, and both the anchor and the
+arclength along a polyline carry O(h^2) error, whereas projection is limited only by the
+interpolation order. For comparison, on an OPEN arc - where the seam is a genuine endpoint and
+nothing has to be inferred - the same zeta path transfers at **4.8e-10**.
+
+So: prefer projection for closed loops. Keep periodic zeta for the cases projection cannot serve -
+a near-touching interface where the closest point is on the wrong sheet, or when arclength semantics
+are wanted for their own sake.
+
+---
+
+## 13. Additional interface dofs
+
+Interface-only fields (those a `InterfaceEquations` adds on top of the bulk's, reached through
+`has_interface_dof_id` / `additional_value_index`) go through their own map, `inter_field_map`, and
+are evaluated with `get_interpolated_interface_field` rather than with the bulk field machinery. So
+they are worth checking separately from the bulk fields. Two interface fields on different spaces,
+each stamped at time level 0 and at history level 1, transferred across a remesh:
+
+| | projection | zeta |
+| --- | --- | --- |
+| C2 field, straight boundary | 2.2e-16 | 1.6e-13 |
+| C2 field, history level 1 | 1.1e-16 | 7.9e-14 |
+| C1 field, straight boundary | 8.3e-14 | 8.3e-14 |
+| C1 field, history level 1 | 4.2e-14 | 4.2e-14 |
+| C2 field, curved boundary | 1.5e-11 | 4.8e-10 |
+| **C1 field, curved boundary** | **1.4e-03** | **1.4e-03** |
+
+Multiple fields, both spaces, and the time history all transfer correctly. The last row is not a
+transfer defect, which is why it is worth spelling out: a C1 field on a *curved* interface is linear
+between vertex nodes, so it cannot represent a linear function of position along an arc at all, and
+the chord-versus-arc gap is ~h^2/8 ~ 6e-4 for this mesh. The tell is that the number is identical on
+both transfer paths and disappears entirely when the same test runs on a straight boundary.
+
+**One real gap, fixed.** `nodal_interpolate_from`'s `missing_nodes` fallback transferred bulk fields,
+position history and Lagrangian coordinates but never `inter_field_map`. An interface node that could
+not be located therefore kept the zero it was built with while its bulk fields arrived normally - the
+interface field simply vanished on that node, silently. It is now blended like everything else in
+that fallback.
 
 ---
 

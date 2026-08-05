@@ -3670,6 +3670,31 @@ namespace pyoomph
     // report once at the end.
     unsigned n_fallback = 0;
     std::vector<std::vector<double>> unset_positions, fallback_positions;
+
+    // Source nodes for the fallback below. An INTERFACE mesh has no node list of its own - its nodes
+    // belong to the bulk and are reachable only through its elements - so from->nnode() is 0 there
+    // and the nearest-node search found nothing at all, leaving those nodes with no value rather
+    // than a poor one. Gather them from the elements when the list is empty.
+    std::vector<oomph::Node *> source_nodes;
+    if (from->nnode())
+    {
+      source_nodes.reserve(from->nnode());
+      for (unsigned mi = 0; mi < from->nnode(); mi++)
+        source_nodes.push_back(from->node_pt(mi));
+    }
+    else
+    {
+      std::set<oomph::Node *> uniq;
+      for (unsigned ie = 0; ie < from->nelement(); ie++)
+      {
+        oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(from->element_pt(ie));
+        if (!fe)
+          continue;
+        for (unsigned in = 0; in < fe->nnode(); in++)
+          uniq.insert(fe->node_pt(in));
+      }
+      source_nodes.assign(uniq.begin(), uniq.end());
+    }
     for (oomph::Node *n : missing_nodes)
     {
       if (completed_nodes.count(n))
@@ -3683,9 +3708,8 @@ namespace pyoomph
       if (boundary_index<0) std::cerr << "FOUND UNTREATED BULK NODE AT\t" << xnode[0] << "\t" << xnode[1] << std::endl;
       double mindist = 1e40;
       oomph::Node *bestnode = NULL;
-      for (unsigned int mi = 0; mi < from->nnode(); mi++)
+      for (oomph::Node *m : source_nodes)
       {
-        oomph::Node *m = from->node_pt(mi);
         oomph::Vector<double> xm = m->position();
         double dist = 0;
         for (unsigned di = 0; di < xm.size(); di++)
@@ -3700,9 +3724,8 @@ namespace pyoomph
       {
         double mindist2 = 1e40;
         oomph::Node *bestnode2 = NULL;
-        for (unsigned int mi = 0; mi < from->nnode(); mi++)
+        for (oomph::Node *m : source_nodes)
         {
-          oomph::Node *m = from->node_pt(mi);
           if (m == bestnode)
             continue;
           oomph::Vector<double> xm = m->position();

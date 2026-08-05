@@ -538,3 +538,23 @@ def test_boundary_pass_touches_only_its_own_boundary(capfd):
     # and the two passes on the bulk mesh must be distinguishable from each other
     assert "(interior nodes only)" in out, out
     assert "(boundary nodes only)" in out, out
+
+
+def test_interface_mesh_has_no_node_list_of_its_own():
+    # Not a curiosity: nodal_interpolate_from's nearest-node fallback looped over from->nnode(), so on
+    # an interface mesh it searched an EMPTY list, found nothing, and left the node with no value at
+    # all rather than a poor one. The fallback now gathers the nodes from the elements instead.
+    class _P(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=4))
+            self.add_equations((PoissonEquation(source=1) + DirichletBC(u=0) @ "left"
+                                + _SurfField("c", "C2") @ "top") @ "domain")
+
+    with _P() as p:
+        p.quiet()
+        p.solve()
+        im = p.get_mesh("domain/top")
+        assert im.nelement() > 0
+        assert im.nnode() == 0, "if this ever gains its own node list, the fallback can be simplified"
+        via_elements = {id(e.node_pt(i)) for e in im.elements() for i in range(e.nnode())}
+        assert len(via_elements) > 0
