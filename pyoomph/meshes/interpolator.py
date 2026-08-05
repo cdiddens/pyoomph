@@ -98,6 +98,19 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
         proj_solver=getattr(problem,"_projection_lasolver",None)
         if proj_solver is not None:
             problem.set_linear_solver(proj_solver)
+        # The current positions are the ones the mesh generator produced for the new mesh and are
+        # the answer already - nothing may move them. But a Newton solve can only solve for CURRENT
+        # dofs, so projecting a history POSITION has to go through them: solve, copy the result into
+        # the history level, and put the generator's positions back. History positions matter because
+        # the mesh velocity on the new mesh is computed from them.
+        generator_positions=[[[n.x(i) for i in range(n.ndim())] for n in m.nodes()] for m in meshes]
+
+        def restore_positions():
+            for m,saved in zip(meshes,generator_positions):
+                for n,xs in zip(m.nodes(),saved):
+                    for i,v in enumerate(xs):
+                        n.set_x(i,v)
+
         try:
             for time_index in reversed(range(n_history)):
                 for m in meshes:
@@ -119,7 +132,9 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
                             coord=n.variable_position_pt()
                             for ci in range(coord.nvalue()):
                                 coord.set_value_at_t(time_index,ci,coord.value(ci))
+                    restore_positions()
         finally:
+            restore_positions()
             problem.use_frozen_sparsity=old_frozen
             if proj_solver is not None and old_solver is not None:
                 problem.set_linear_solver(old_solver)

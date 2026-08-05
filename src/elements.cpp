@@ -5632,57 +5632,46 @@ namespace pyoomph
 				for(unsigned k = 0; k < n_position_type; k++){
 
 					//======= Fill residuals for coordinates =========//
-
-					// Add the residuals for each coordinate's dimension. 
-					for(unsigned i=0; i<dim; i++){
-
-						// Get coordinate's equation number. 
+					//
+					// Only for HISTORY levels. The current positions are the ones the mesh generator
+					// produced for the new mesh and must be left exactly as they are; it is the
+					// history positions that have to be carried over, because the mesh velocity on
+					// the new mesh is computed from them. (The old code also projected positions at
+					// t==0, and did it against the zeta - i.e. by default the Lagrangian - coordinate,
+					// which moved the new mesh off the geometry it had just been generated with.)
+					//
+					// The unknowns available to a Newton solve are the CURRENT position dofs, so the
+					// driver solves for those and then copies the result into history level t,
+					// restoring the generator's positions afterwards.
+					if (t > 0)
+					{
+						for(unsigned i=0; i<dim; i++){
 							local_eqn = this->position_local_eqn(l, k, i);
-						
-							// If it is a degree of freedom.
 							if(local_eqn >= 0){
+								residuals[local_eqn]+=(interpolated_x_curr[i]-interpolated_x_old[i]) * psi(l, k) * W;
 
-								// For projection times>0, we project the x-coordinates for history values.
-								// Otherwise, we use the zeta coordinates.
-								if(t==0){							
-									// Add residuals for zeta.
-									residuals[local_eqn]+=(interpolated_zeta_curr[i]-interpolated_zeta_old[i]) * psi(l, k) * W;
-								}
-								else{
-									// Add residuals for zeta.
-									residuals[local_eqn]+=(interpolated_x_curr[i]-interpolated_x_old[i]) * psi(l, k) * W;
-								}
-
-						// NOTE: this block used to re-add the very same residual a second time, with
-						// the zeta form regardless of the time level, so every position residual was
-						// counted twice while the Jacobian below was counted once - a Newton step of
-						// half the right size, on top of mixing the x and zeta forms for t>0.
-
-						// Calculate the jacobian. This has to stay INSIDE the local_eqn >= 0 test:
-						// it used to sit outside it, so on any problem whose positions are pinned -
-						// anything without a moving mesh - it wrote jacobian(-1, ...) and aborted
-						// inside the sparse assembly.
-						if (do_fill_jacobian == 1)
-						{
-							for (unsigned l2 = 0; l2 < n_node; l2++)
-							{
-								// Loop over position dofs
-								for (unsigned k2 = 0; k2 < n_position_type; k2++)
+								// The Jacobian has to stay INSIDE the local_eqn >= 0 test: it used to
+								// sit outside it, so on any problem whose positions are pinned -
+								// anything without a moving mesh - it wrote jacobian(-1, ...) and
+								// aborted inside the sparse assembly.
+								if (do_fill_jacobian == 1)
 								{
-
-									local_unknown = this->position_local_eqn(l2, k2, i);
-
-									if (local_unknown >= 0)
+									for (unsigned l2 = 0; l2 < n_node; l2++)
 									{
-										//Add Jacobian
-										jacobian(local_eqn, local_unknown) += psi(l2, k2) * psi(l, k) * W;
+										for (unsigned k2 = 0; k2 < n_position_type; k2++)
+										{
+											local_unknown = this->position_local_eqn(l2, k2, i);
+											if (local_unknown >= 0)
+											{
+												jacobian(local_eqn, local_unknown) += psi(l2, k2) * psi(l, k) * W;
+											}
+										}
 									}
-								}	
+								}
 							}
 						}
-						}
-					}
-				}  // End of residuals for coordinates.
+					}  // End of residuals for coordinates.
+				}  // End of the loop over position types: the field block below is per node only.
 
 				
 				//======= Fill residuals for fields =========//

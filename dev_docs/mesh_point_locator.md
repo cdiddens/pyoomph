@@ -724,8 +724,19 @@ meshes being projected rather than one per mesh - solving them one at a time wou
 assembling their physical equations - looping history levels, with frozen sparsity disabled and an
 optional separate solver (`Problem._projection_lasolver`) around it.
 
-**It still aborts inside `sparse_assemble_row_or_column_compressed` and is not usable.** The
-remaining fault has not been found. Everything above is verified inert for existing users: nothing
+**Positions: settled.** The current positions are the ones the mesh generator produced for the new
+mesh and are already the answer - nothing may move them. The HISTORY positions do have to be carried
+over, because the mesh velocity on the new mesh is computed from them. Since a Newton solve can only
+solve for current dofs, a history position is projected through them: solve, copy the result into
+that history level, put the generator's positions back. The residual therefore assembles positions
+only for t > 0. The old code projected them at t == 0 as well, and against the zeta - by default the
+Lagrangian - coordinate, which moved the new mesh off the geometry it had just been generated with.
+
+**It still aborts inside `sparse_assemble_row_or_column_compressed` and is not usable.** Six targeted
+fixes have not cleared it, which is a sign it needs a debugger rather than more inference from stack
+frames. Worth checking first: whether `residuals_for_zeta_projection` is reached with the element's
+`eleminfo` set up at all - it returns from `fill_in_generic_residual_contribution_jit` before the
+`fill_element_info()` / `ndof()` guards that the physical path runs. Everything above is verified inert for existing users: nothing
 sets the projection flag unless the projection interpolator is explicitly selected, and the full
 regression set plus both zeta tutorials are unaffected.
 
