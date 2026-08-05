@@ -245,18 +245,49 @@ namespace pyoomph
     // Precomputed affine inverse for straight-sided simplices, so their inversion is a matrix
     // multiply giving barycentric coordinates rather than an iteration. Zero for elements that
     // genuinely need Newton (curved geometry, quads/hexes).
-    // x(s) = X0 + D * u, where u are the barycentric coordinates relative to vertex 0 and D's
-    // columns are the edge vectors X_k - X0. Storing D^-1 turns the query into u = D^-1 (x - X0),
-    // which is both the containment test (u_k >= 0, sum u_k <= 1) and the route to the local
-    // coordinate s = s0 + Sdiff * u. Kept in terms of u rather than s because oomph's simplex local
-    // coordinates do not follow the convention one would guess - a 2d T-element puts node 0 at
-    // s=(1,0) and node 2 at the origin - and going through u makes the code independent of that.
+    // How an element's geometric map can be inverted. Determined once, per element.
+    enum class GeomKind : unsigned char
+    {
+      General = 0,  // Newton, but seeded from the affine fit below when there is one
+      Affine = 1,   // exact, one matrix multiply
+      Bilinear2d = 2 // exact, one quadratic - a straight-edged but non-parallelogram 2d quad
+    };
+    // Which reference domain a local coordinate has to land in to count as inside.
+    enum class RefDomain : unsigned char
+    {
+      Unknown = 0,
+      Simplex = 1, // s_i >= 0 and sum s_i <= 1
+      Box = 2      // s_min <= s_i <= s_max
+    };
+    std::vector<GeomKind> element_geom_kind;
+    std::vector<RefDomain> element_ref_domain;
+
+    // x(s) = X0 + D * u, where D's columns are the edge vectors X_k - X0 of a chosen affinely
+    // independent node set and u is the coordinate in that basis. Storing D^-1 turns the query into
+    // u = D^-1 (x - X0) and then s = s0 + Sdiff * u. Going through u rather than s directly keeps
+    // the code independent of each element family's local coordinate convention, which is not what
+    // one would guess - a 2d T-element puts node 0 at s=(1,0) and node 2 at the origin.
+    //
+    // Stored for EVERY element whose D is invertible, not only the exactly-affine ones: where the
+    // map is not affine this is its best affine fit, which is a far better Newton starting point
+    // than the element centre for a distorted element.
     std::vector<double> affine_inverse; // D^-1, element_dim x element_dim per element, row-major
     std::vector<double> affine_origin;  // X0, space_dim per element
-    std::vector<double> affine_s0;      // local coordinate of vertex 0, element_dim per element
+    std::vector<double> affine_s0;      // local coordinate of the origin node, element_dim per element
     std::vector<double> affine_sdiff;   // columns s_k - s0, element_dim x element_dim per element
-    std::vector<bool> element_is_affine;
-    unsigned n_affine_elements = 0;
+    std::vector<bool> has_affine_fit;
+
+    // Bilinear coefficients for GeomKind::Bilinear2d, as x(s,t) = b0 + b1 s + b2 t + b3 s t.
+    // 4 * space_dim per element.
+    std::vector<double> bilinear_coeffs;
+
+    unsigned n_affine_elements = 0, n_bilinear_elements = 0;
+
+    bool build_affine_fit_for(BulkElementBase *e, unsigned slot);
+    bool is_exactly_affine(BulkElementBase *e, unsigned slot) const;
+    bool build_bilinear_for(BulkElementBase *e, unsigned slot);
+    bool inside_reference_domain(unsigned slot, BulkElementBase *e, const double *s) const;
+    void polish_local_coordinate(BulkElementBase *e, const double *x, double *s) const;
 
     // Slack added to every element bounding box before it is used to reject a candidate, as a
     // fraction of the box diagonal. Curved elements bulge outside the box spanned by their nodes,
@@ -274,7 +305,8 @@ namespace pyoomph
 
     // Try to match `x` against one element. Dispatches on `mode`; returns false if the point is
     // outside (or, for Project, farther than the offset guard allows).
-    bool try_element(BulkElementBase *e, const double *x, double *s_out, double *offset_out) const;
+    bool try_element(BulkElementBase *e, const double *x, double *s_out, double *offset_out,
+                     bool allow_multistart) const;
 
   public:
     MeshPointLocator(Mesh *source_mesh, const LocatorSetup &setup);
@@ -283,8 +315,9 @@ namespace pyoomph
     Mesh *get_source_mesh() const { return source; }
     const LocatorSetup &get_setup() const { return setup; }
     LocatorMode get_mode() const { return mode; }
-    // "812/814 affine" - how many source elements avoid Newton entirely. A low fraction on a
-    // simplex mesh means the straightness test is rejecting elements it should not.
+    // "812/814 affine, 2 bilinear" - how many source elements avoid Newton entirely. A low fraction
+    // on a simplex or structured mesh means the straightness test is rejecting elements it should
+    // not, which costs an order of magnitude per query without being otherwise visible.
     std::string affine_fraction() const;
 
     // Locate `npoint` query points given as a flat array of npoint*space_dim coordinates.

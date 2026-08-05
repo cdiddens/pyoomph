@@ -458,21 +458,62 @@ The location speedup is ~15x and comes almost entirely from the affine simplex i
 that path existed the same benchmark read 76 ms, i.e. the k-d tree and the single-start Newton alone
 bought ~1.7x and the affine inversion the remaining ~9x.
 
-The per-point cost splits sharply by element type - self-locating a mesh's own integration points:
+### Which geometries avoid Newton
 
-| | affine | per point |
+An element is classified once, at index-build time, into one of three kinds. The classification is
+driven entirely by testing **every** node against a predicted position, never by assuming an element
+family behaves a certain way, which is what makes it work uniformly across orders and shapes.
+
+| geometry | kind | why |
 | --- | --- | --- |
-| triangles | 576/576 | 0.085 us |
-| quads | 0/144 | 2.3 us |
+| straight-sided simplex, any order | Affine | a T6 with mid-edge nodes at the midpoints has its quadratic terms cancel identically |
+| parallelogram / parallelepiped quad or hex, any order | Affine | the bilinear cross term a3 = (X00 - X10 - X01 + X11)/4 vanishes exactly for a parallelogram - *not* only for a rectangle, so sheared structured meshes qualify too |
+| straight-edged 2d quad, non-parallelogram | Bilinear2d | a bilinear map sends the reference square's edges to straight segments, and eliminating one variable leaves a **quadratic** - still a closed form, no iteration |
+| curved anything, distorted 3d hex | General | Newton, seeded from the element's best affine fit |
+
+3d is the genuine exception: a trilinear inverse has no closed form and hex faces are ruled surfaces
+rather than planes, so a distorted hex has to iterate. Seeding from the affine fit rather than the
+element centre is what makes that iteration cheap.
+
+Self-locating a mesh's own integration points, per point:
+
+| | classification | per point |
+| --- | --- | --- |
+| triangles (T6) | 144/144 affine | 0.079 us |
+| quads (Q9), rectangular | 36/36 affine | 0.093 us |
+| quads (Q9), trapezoidal | 36 bilinear | 0.117 us |
+| hexes (Q27), undistorted | 125/125 affine | 0.079 us |
+| hexes (Q27), sheared | 125/125 affine | 0.079 us |
+| hexes (Q27), trilinearly distorted | 125 newton | 10.6 us |
+
+Before this classification existed, quads cost 2.3 us/point - so it is a ~25x saving on structured
+meshes, bringing them level with simplices.
+
+### Accuracy: the new path is not just faster
+
+Results are bit-identical to `MeshAsGeomObject` wherever the geometry is straight, but on **curved**
+elements they now differ, and the new values are the correct ones. oomph's locate_zeta stops at
+`Locate_zeta_helpers::Newton_tolerance = 1e-7` on the residual (`elements.cc:1654`), so the local
+coordinate it returns was only ever good to about that. Measured on the curved circular mesh:
+
+| test | MeshAsGeomObject | MeshPointLocator |
+| --- | --- | --- |
+| interpolate at a node, vs that node's own value | 2.1e-08 | 9.2e-17 |
+| interpolate a linear field at interior points, vs exact | **9.0e-03** | 1.3e-15 |
+
+The second row is the striking one: a linear field is reproduced exactly by an isoparametric FE
+space, so any deviation is pure location error, and the old path was ~1% wrong at arbitrary interior
+points of curved elements. The locator polishes the local coordinate to machine precision after the
+Newton path (`polish_local_coordinate`), which both fixes that and removes the dependence of the
+answer on the starting guess - without it, merely changing the Newton seed moved interpolated values
+by ~1e-8.
 
 **Still open in this phase:**
 
-* Quads and hexes always take the Newton path. A *rectangular* quad has an affine map even though the
-  element is bilinear, and structured meshes are mostly rectangles, so extending the affine test to
-  cover that case is the obvious next 20x for quad meshes. It needs its own straightness test - a
-  general quadrilateral is genuinely bilinear and must keep Newton.
 * `MeshKDTree` is not yet ported onto the locator, so tracers still use it, and the static-flag reset
   of §3.1 still exists there.
+* A distorted 3d hex is two orders of magnitude slower than every other case. If that ever matters,
+  the lever is a better seed still, not a closed form - there is none.
 * `add_interpolated_nodes_at` has no in-tree caller and `prepare_zeta_interpolation`'s only caller is
   the unfinished projection interpolator (§7), so neither is covered by the test suite. Both were
   checked directly instead: the former against the other backend point by point, including a point

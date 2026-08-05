@@ -264,101 +264,323 @@ namespace pyoomph
   // moved onto a curved boundary by the macro-element mapping is a simplex with a non-affine map,
   // and would be inverted wrongly. Every node is therefore tested against the affine prediction,
   // and any element that fails keeps the Newton path.
+  // Build the best affine fit x(s) ~ X0 + D u for one element, whether or not the map really is
+  // affine. The origin is node 0 and the other d basis nodes are chosen greedily for the largest
+  // remaining pivot, so the basis is well conditioned rather than merely non-singular. Returns
+  // false only if no d+1 nodes have affinely independent local coordinates, which would mean a
+  // degenerate element.
+  bool MeshPointLocator::build_affine_fit_for(BulkElementBase *e, unsigned slot)
+  {
+    const unsigned dd = element_dim * element_dim;
+    oomph::Vector<double> s(element_dim, 0.0), s0(element_dim, 0.0);
+    e->local_coordinate_of_node(0, s0);
+
+    std::vector<double> Sdiff(dd, 0.0), D(dd, 0.0);
+    std::vector<unsigned> chosen;
+
+    // Greedy pivoting on the local-coordinate offsets: at each step take the node whose offset has
+    // the largest component orthogonal to what is already chosen. For d <= 3 this is cheap enough
+    // to do by straight Gram-Schmidt.
+    std::vector<std::vector<double>> basis; // orthonormalised local offsets
+    for (unsigned round = 0; round < element_dim; round++)
+    {
+      double best = 0.0;
+      unsigned best_node = 0;
+      std::vector<double> best_res;
+      for (unsigned in = 1; in < e->nnode(); in++)
+      {
+        if (std::find(chosen.begin(), chosen.end(), in) != chosen.end())
+          continue;
+        e->local_coordinate_of_node(in, s);
+        std::vector<double> v(element_dim);
+        for (unsigned d = 0; d < element_dim; d++)
+          v[d] = s[d] - s0[d];
+        for (const auto &b : basis)
+        {
+          double dot = 0.0;
+          for (unsigned d = 0; d < element_dim; d++)
+            dot += v[d] * b[d];
+          for (unsigned d = 0; d < element_dim; d++)
+            v[d] -= dot * b[d];
+        }
+        double nrm = 0.0;
+        for (unsigned d = 0; d < element_dim; d++)
+          nrm += v[d] * v[d];
+        nrm = std::sqrt(nrm);
+        if (nrm > best)
+        {
+          best = nrm;
+          best_node = in;
+          best_res = v;
+        }
+      }
+      if (best < 1e-12)
+        return false; // no independent direction left
+      for (unsigned d = 0; d < element_dim; d++)
+        best_res[d] /= best;
+      basis.push_back(best_res);
+      chosen.push_back(best_node);
+    }
+
+    for (unsigned d = 0; d < space_dim; d++)
+      affine_origin[(size_t)slot * space_dim + d] = e->zeta_nodal(0, 0, d);
+    for (unsigned d = 0; d < element_dim; d++)
+      affine_s0[(size_t)slot * element_dim + d] = s0[d];
+
+    for (unsigned k = 0; k < element_dim; k++)
+    {
+      e->local_coordinate_of_node(chosen[k], s);
+      for (unsigned d = 0; d < element_dim; d++)
+      {
+        Sdiff[d * element_dim + k] = s[d] - s0[d];
+        D[d * element_dim + k] = e->zeta_nodal(chosen[k], 0, d) - affine_origin[(size_t)slot * space_dim + d];
+      }
+    }
+
+    std::vector<double> Dinv = D;
+    if (!small_invert(&Dinv[0], element_dim))
+      return false; // degenerate or inverted element geometry
+
+    for (unsigned d = 0; d < dd; d++)
+    {
+      affine_inverse[(size_t)slot * dd + d] = Dinv[d];
+      affine_sdiff[(size_t)slot * dd + d] = Sdiff[d];
+    }
+    has_affine_fit[slot] = true;
+    return true;
+  }
+
+  // Is the fit exact? Every node - not just the ones spanning the basis - must sit where the affine
+  // map puts it. This is what makes the same test work for every element family: a T6 with mid-edge
+  // nodes at the midpoints passes (its quadratic terms cancel), a T6 bent onto a curved boundary
+  // fails, and a quad passes exactly when it is a parallelogram, because the vertex the basis did
+  // not use is itself one of the nodes being checked.
+  bool MeshPointLocator::is_exactly_affine(BulkElementBase *e, unsigned slot) const
+  {
+    const unsigned dd = element_dim * element_dim;
+    const double *Dinv = &affine_inverse[(size_t)slot * dd];
+    const double *X0 = &affine_origin[(size_t)slot * space_dim];
+    const double *s0 = &affine_s0[(size_t)slot * element_dim];
+    const double *Sdiff = &affine_sdiff[(size_t)slot * dd];
+
+    double scale = 0.0;
+    for (unsigned d = 0; d < space_dim; d++)
+      scale = std::max(scale, element_bbox_max[(size_t)slot * space_dim + d] - element_bbox_min[(size_t)slot * space_dim + d]);
+    if (scale <= 0.0)
+      return false;
+
+    // Sdiff maps u to s - s0; to predict a node's position from its s we need the other direction.
+    std::vector<double> Sinv(Sdiff, Sdiff + dd);
+    if (!small_invert(&Sinv[0], element_dim))
+      return false;
+
+    oomph::Vector<double> s(element_dim, 0.0);
+    for (unsigned in = 0; in < e->nnode(); in++)
+    {
+      e->local_coordinate_of_node(in, s);
+      double u[3] = {0.0, 0.0, 0.0};
+      for (unsigned k = 0; k < element_dim; k++)
+        for (unsigned d = 0; d < element_dim; d++)
+          u[k] += Sinv[k * element_dim + d] * (s[d] - s0[d]);
+      // Rather than re-inverting to get D, the comparison is made in u space: the u implied by the
+      // node's actual position must equal the u implied by its local coordinate.
+      double up[3] = {0.0, 0.0, 0.0};
+      for (unsigned k = 0; k < element_dim; k++)
+        for (unsigned d = 0; d < element_dim; d++)
+          up[k] += Dinv[k * element_dim + d] * (e->zeta_nodal(in, 0, d) - X0[d]);
+      for (unsigned k = 0; k < element_dim; k++)
+      {
+        // u is dimensionless (a fraction of the basis edge vectors), so the tolerance is absolute.
+        if (std::abs(up[k] - u[k]) > 1e-9)
+          return false;
+      }
+    }
+    return true;
+  }
+
+  // A straight-edged 2d quad is exactly bilinear: x(s,t) = b0 + b1 s + b2 t + b3 s t, with
+  // b3 != 0 unless it is a parallelogram. That still admits a closed-form inverse (see
+  // try_element), so a general quadrilateral need not fall back to Newton either.
+  bool MeshPointLocator::build_bilinear_for(BulkElementBase *e, unsigned slot)
+  {
+    if (element_dim != 2 || space_dim != 2)
+      return false;
+    if (e->nvertex_node() != 4)
+      return false;
+
+    // x(s,t) = sum_i X_i (1+s_i s)(1+t_i t)/4 requires the corners to sit at s,t = +-1, which is
+    // oomph's Q convention; check rather than assume.
+    double b[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    oomph::Vector<double> s(2, 0.0);
+    for (unsigned k = 0; k < 4; k++)
+    {
+      const unsigned vk = e->get_node_number(e->vertex_node_pt(k));
+      e->local_coordinate_of_node(vk, s);
+      if (std::abs(std::abs(s[0]) - 1.0) > 1e-12 || std::abs(std::abs(s[1]) - 1.0) > 1e-12)
+        return false;
+      const double w[4] = {1.0, s[0], s[1], s[0] * s[1]};
+      for (unsigned c = 0; c < 4; c++)
+        for (unsigned d = 0; d < 2; d++)
+          b[c][d] += 0.25 * w[c] * e->zeta_nodal(vk, 0, d);
+    }
+
+    double scale = 0.0;
+    for (unsigned d = 0; d < space_dim; d++)
+      scale = std::max(scale, element_bbox_max[(size_t)slot * space_dim + d] - element_bbox_min[(size_t)slot * space_dim + d]);
+    if (scale <= 0.0)
+      return false;
+
+    // Exactness: every node, including the mid-edge and centre nodes of a Q9, must sit where the
+    // bilinear map puts it. A Q9 bent onto a curved boundary fails here and keeps Newton.
+    for (unsigned in = 0; in < e->nnode(); in++)
+    {
+      e->local_coordinate_of_node(in, s);
+      for (unsigned d = 0; d < 2; d++)
+      {
+        const double predicted = b[0][d] + b[1][d] * s[0] + b[2][d] * s[1] + b[3][d] * s[0] * s[1];
+        if (std::abs(predicted - e->zeta_nodal(in, 0, d)) > 1e-10 * scale)
+          return false;
+      }
+    }
+
+    for (unsigned c = 0; c < 4; c++)
+      for (unsigned d = 0; d < 2; d++)
+        bilinear_coeffs[(size_t)slot * 8 + c * 2 + d] = b[c][d];
+    return true;
+  }
+
+  // Refine a local coordinate until the geometric residual is at machine precision.
+  //
+  // oomph's locate_zeta stops at Locate_zeta_helpers::Newton_tolerance = 1e-7 on |x(s) - zeta|
+  // (elements.cc:1654), so the s it returns is only good to about that. That was invisible while
+  // there was one code path, but it makes the answer depend on the starting point: seeding Newton
+  // from the affine fit instead of the element centre changed interpolated values by ~1e-8 on
+  // curved elements. Polishing to convergence removes both the seed dependence and the sloppiness,
+  // so the result is reproducible AND more accurate than before.
+  //
+  // Only needed on the Newton path; the affine and bilinear inverses are exact by construction.
+  void MeshPointLocator::polish_local_coordinate(BulkElementBase *e, const double *x, double *s) const
+  {
+    const unsigned nnode = e->nnode();
+    oomph::Shape psi(nnode);
+    oomph::DShape dpsids(nnode, element_dim);
+    oomph::Vector<double> sv(element_dim, 0.0);
+
+    double scale = 0.0;
+    for (unsigned d = 0; d < space_dim; d++)
+      scale = std::max(scale, std::abs(x[d]));
+    if (scale <= 0.0)
+      scale = 1.0;
+
+    for (unsigned iter = 0; iter < 5; iter++)
+    {
+      for (unsigned d = 0; d < element_dim; d++)
+        sv[d] = s[d];
+      e->dshape_local(sv, psi, dpsids);
+
+      double res[3] = {0.0, 0.0, 0.0};
+      std::vector<double> J(element_dim * element_dim, 0.0);
+      for (unsigned d = 0; d < element_dim; d++)
+      {
+        double xd = 0.0;
+        for (unsigned n = 0; n < nnode; n++)
+        {
+          const double zn = e->zeta_nodal(n, 0, d);
+          xd += psi(n) * zn;
+          for (unsigned k = 0; k < element_dim; k++)
+            J[d * element_dim + k] += dpsids(n, k) * zn;
+        }
+        res[d] = x[d] - xd;
+      }
+
+      double rnorm = 0.0;
+      for (unsigned d = 0; d < element_dim; d++)
+        rnorm = std::max(rnorm, std::abs(res[d]));
+      if (rnorm < 1e-15 * scale)
+        return;
+
+      if (!small_invert(&J[0], element_dim))
+        return; // degenerate here; leave s as locate_zeta left it
+      for (unsigned d = 0; d < element_dim; d++)
+      {
+        double ds = 0.0;
+        for (unsigned k = 0; k < element_dim; k++)
+          ds += J[d * element_dim + k] * res[k];
+        s[d] += ds;
+      }
+    }
+  }
+
+  bool MeshPointLocator::inside_reference_domain(unsigned slot, BulkElementBase *e, const double *s) const
+  {
+    const double tol = 1e-10;
+    if (element_ref_domain[slot] == RefDomain::Simplex)
+    {
+      double sum = 0.0;
+      for (unsigned d = 0; d < element_dim; d++)
+      {
+        if (s[d] < -tol)
+          return false;
+        sum += s[d];
+      }
+      return sum <= 1.0 + tol;
+    }
+    if (element_ref_domain[slot] == RefDomain::Box)
+    {
+      for (unsigned d = 0; d < element_dim; d++)
+        if (s[d] < e->s_min() - tol || s[d] > e->s_max() + tol)
+          return false;
+      return true;
+    }
+    return false;
+  }
+
   void MeshPointLocator::build_affine_inverses()
   {
     ZetaFlagGuard guard(setup.time_index, setup.space == LocatorSpace::Lagrangian);
 
     const unsigned nelem = elements_by_index.size();
     const unsigned dd = element_dim * element_dim;
-    element_is_affine.assign(nelem, false);
+    element_geom_kind.assign(nelem, GeomKind::General);
+    element_ref_domain.assign(nelem, RefDomain::Unknown);
+    has_affine_fit.assign(nelem, false);
     affine_inverse.assign((size_t)nelem * dd, 0.0);
     affine_origin.assign((size_t)nelem * space_dim, 0.0);
     affine_s0.assign((size_t)nelem * element_dim, 0.0);
     affine_sdiff.assign((size_t)nelem * dd, 0.0);
+    bilinear_coeffs.assign((size_t)nelem * 8, 0.0);
     n_affine_elements = 0;
+    n_bilinear_elements = 0;
 
     if (mode != LocatorMode::Invert)
       return; // Project mode has its own (phase 2) path
 
-    std::vector<double> D(dd, 0.0), Dinv(dd, 0.0), Sdiff(dd, 0.0), Sinv(dd, 0.0);
-    oomph::Vector<double> s(element_dim, 0.0), s0(element_dim, 0.0);
-    std::vector<double> X0(space_dim, 0.0), u(element_dim, 0.0);
-
     for (unsigned ie = 0; ie < nelem; ie++)
     {
       BulkElementBase *e = elements_by_index[ie];
-      if (!dynamic_cast<oomph::TElementBase *>(e))
-        continue; // quads/hexes are bi/trilinear, affine only by accident
-      if (e->nvertex_node() != element_dim + 1)
+
+      // Wedges and pyramids are deliberately left as General: their reference domains are neither
+      // a simplex nor a box, so the containment test below would not apply.
+      if (dynamic_cast<oomph::TElementBase *>(e))
+        element_ref_domain[ie] = RefDomain::Simplex;
+      else if (dynamic_cast<oomph::QElementGeometricBase *>(e))
+        element_ref_domain[ie] = RefDomain::Box;
+      else
         continue;
 
-      const unsigned v0 = e->get_node_number(e->vertex_node_pt(0));
-      e->local_coordinate_of_node(v0, s0);
-      for (unsigned d = 0; d < space_dim; d++)
-        X0[d] = e->zeta_nodal(v0, 0, d);
+      if (!build_affine_fit_for(e, ie))
+        continue; // no usable fit: Newton from the element centre, as before
 
-      double scale = 0.0;
-      for (unsigned k = 1; k <= element_dim; k++)
+      if (is_exactly_affine(e, ie))
       {
-        const unsigned vk = e->get_node_number(e->vertex_node_pt(k));
-        e->local_coordinate_of_node(vk, s);
-        for (unsigned d = 0; d < element_dim; d++)
-        {
-          D[d * element_dim + (k - 1)] = e->zeta_nodal(vk, 0, d) - X0[d];
-          Sdiff[d * element_dim + (k - 1)] = s[d] - s0[d];
-          scale = std::max(scale, std::abs(D[d * element_dim + (k - 1)]));
-        }
+        element_geom_kind[ie] = GeomKind::Affine;
+        n_affine_elements++;
       }
-      if (scale <= 0.0)
-        continue;
-
-      Dinv = D;
-      Sinv = Sdiff;
-      if (!small_invert(&Dinv[0], element_dim))
-        continue; // degenerate or inverted element
-      if (!small_invert(&Sinv[0], element_dim))
-        continue; // should not happen: vertex local coordinates are affinely independent
-
-      // Straightness has to be checked, not assumed. A C2 triangle whose mid-edge nodes were moved
-      // onto a curved boundary by the macro-element mapping is a simplex with a non-affine map, and
-      // inverting it affinely would be wrong rather than merely inaccurate. Every node - not just
-      // the vertices - must sit where the affine map puts it.
-      bool affine = true;
-      for (unsigned in = 0; in < e->nnode() && affine; in++)
+      else if (element_ref_domain[ie] == RefDomain::Box && build_bilinear_for(e, ie))
       {
-        e->local_coordinate_of_node(in, s);
-        for (unsigned k = 0; k < element_dim; k++)
-        {
-          u[k] = 0.0;
-          for (unsigned d = 0; d < element_dim; d++)
-            u[k] += Sinv[k * element_dim + d] * (s[d] - s0[d]);
-        }
-        for (unsigned d = 0; d < element_dim; d++)
-        {
-          double predicted = X0[d];
-          for (unsigned k = 0; k < element_dim; k++)
-            predicted += D[d * element_dim + k] * u[k];
-          if (std::abs(predicted - e->zeta_nodal(in, 0, d)) > 1e-10 * scale)
-          {
-            affine = false;
-            break;
-          }
-        }
+        element_geom_kind[ie] = GeomKind::Bilinear2d;
+        n_bilinear_elements++;
       }
-      if (!affine)
-        continue;
-
-      for (unsigned d = 0; d < dd; d++)
-      {
-        affine_inverse[(size_t)ie * dd + d] = Dinv[d];
-        affine_sdiff[(size_t)ie * dd + d] = Sdiff[d];
-      }
-      for (unsigned d = 0; d < space_dim; d++)
-        affine_origin[(size_t)ie * space_dim + d] = X0[d];
-      for (unsigned d = 0; d < element_dim; d++)
-        affine_s0[(size_t)ie * element_dim + d] = s0[d];
-      element_is_affine[ie] = true;
-      n_affine_elements++;
     }
   }
 
@@ -396,7 +618,7 @@ namespace pyoomph
 
   // Match one query point against one element. The caller has already decided this element is worth
   // trying; this does the bounding-box reject and then the actual inversion.
-  bool MeshPointLocator::try_element(BulkElementBase *e, const double *x, double *s_out, double *offset_out) const
+  bool MeshPointLocator::try_element(BulkElementBase *e, const double *x, double *s_out, double *offset_out, bool allow_multistart) const
   {
     auto found = element_index.find(e);
     if (found == element_index.end())
@@ -417,39 +639,124 @@ namespace pyoomph
     // of a precomputed inverse and no Newton solve happens at all. Only accepted when the point
     // lands inside; outside, the fall-through below reproduces the old behaviour exactly rather
     // than relying on this being the last word.
-    if (element_is_affine[slot])
+    const GeomKind kind = element_geom_kind[slot];
+    const unsigned dd = element_dim * element_dim;
+
+    // Exactly affine: one matrix multiply, no iteration. Covers straight-sided simplices of any
+    // order (a T6 with mid-edge nodes at the midpoints included) and parallelogram/parallelepiped
+    // quads and hexes - which is most of a structured mesh, sheared or not.
+    if (kind == GeomKind::Affine)
     {
-      const unsigned dd = element_dim * element_dim;
       const double *Dinv = &affine_inverse[(size_t)slot * dd];
       const double *orig = &affine_origin[(size_t)slot * space_dim];
       const double *s0 = &affine_s0[(size_t)slot * element_dim];
       const double *Sdiff = &affine_sdiff[(size_t)slot * dd];
-
       double u[3] = {0.0, 0.0, 0.0};
-      double usum = 0.0;
       for (unsigned d = 0; d < element_dim; d++)
       {
         double v = 0.0;
         for (unsigned k = 0; k < element_dim; k++)
           v += Dinv[d * element_dim + k] * (x[k] - orig[k]);
         u[d] = v;
-        usum += v;
-        if (v < -1e-10)
-          return false;
       }
-      if (usum > 1.0 + 1e-10)
-        return false;
-
+      double sc[3] = {0.0, 0.0, 0.0};
       for (unsigned d = 0; d < element_dim; d++)
       {
         double v = s0[d];
         for (unsigned k = 0; k < element_dim; k++)
           v += Sdiff[d * element_dim + k] * u[k];
-        s_out[d] = v;
+        sc[d] = v;
       }
+      if (!inside_reference_domain(slot, e, sc))
+        return false; // an exact map has no second answer
+      for (unsigned d = 0; d < element_dim; d++)
+        s_out[d] = sc[d];
       if (offset_out)
         *offset_out = 0.0;
-      return true; // an affine map has no second answer
+      return true;
+    }
+
+    // Straight-edged but non-parallelogram 2d quad. x(s,t) = b0 + b1 s + b2 t + b3 s t is still
+    // exactly invertible: eliminating s leaves a quadratic in t. b3 vanishes only for a
+    // parallelogram, which the affine branch above already took, so here the quadratic is generally
+    // genuine - but the linear case is kept for the nearly-degenerate one.
+    if (kind == GeomKind::Bilinear2d)
+    {
+      const double *b = &bilinear_coeffs[(size_t)slot * 8];
+      const double b1x = b[2], b1y = b[3], b2x = b[4], b2y = b[5], b3x = b[6], b3y = b[7];
+      const double dx = x[0] - b[0], dy = x[1] - b[1];
+
+      const double A = -(b2x * b3y - b2y * b3x);
+      const double B = (b1x * b2y - b1y * b2x) - (b3x * dy - b3y * dx);
+      const double C = -(b1x * dy - b1y * dx);
+
+      double troots[2];
+      unsigned nroot = 0;
+      if (std::abs(A) < 1e-14 * (std::abs(B) + std::abs(C) + 1e-300))
+      {
+        if (std::abs(B) < 1e-300)
+          return false;
+        troots[nroot++] = -C / B;
+      }
+      else
+      {
+        const double disc = B * B - 4.0 * A * C;
+        if (disc < 0.0)
+          return false;
+        const double sq = std::sqrt(disc);
+        // The numerically stable pair: one root from the standard formula with the sign that avoids
+        // cancellation, the other from the product of roots.
+        const double q = -0.5 * (B + (B >= 0.0 ? sq : -sq));
+        troots[nroot++] = q / A;
+        if (std::abs(q) > 1e-300)
+          troots[nroot++] = C / q;
+      }
+
+      // Both roots can land inside the reference square, so the containment test alone is not
+      // enough to choose between them - taking the first one that fits picked the wrong branch and
+      // produced either wrong values or a spurious miss. Evaluate the map at each candidate and
+      // keep the one that actually reproduces the query point.
+      double best_res = -1.0, best_s = 0.0, best_t = 0.0;
+      for (unsigned r = 0; r < nroot; r++)
+      {
+        const double t = troots[r];
+        // s from whichever component has the better conditioned denominator.
+        const double denx = b1x + b3x * t, deny = b1y + b3y * t;
+        double sv;
+        if (std::abs(denx) >= std::abs(deny))
+        {
+          if (std::abs(denx) < 1e-300)
+            continue;
+          sv = (dx - b2x * t) / denx;
+        }
+        else
+        {
+          if (std::abs(deny) < 1e-300)
+            continue;
+          sv = (dy - b2y * t) / deny;
+        }
+        const double cand[2] = {sv, t};
+        if (!inside_reference_domain(slot, e, cand))
+          continue;
+        const double rx = b[0] + b1x * sv + b2x * t + b3x * sv * t - x[0];
+        const double ry = b[1] + b1y * sv + b2y * t + b3y * sv * t - x[1];
+        const double res = std::max(std::abs(rx), std::abs(ry));
+        if (best_res < 0.0 || res < best_res)
+        {
+          best_res = res;
+          best_s = sv;
+          best_t = t;
+        }
+      }
+      if (best_res >= 0.0)
+      {
+        s_out[0] = best_s;
+        s_out[1] = best_t;
+        if (offset_out)
+          *offset_out = 0.0;
+        return true;
+      }
+      return false;
     }
 
     oomph::Vector<double> zeta(space_dim);
@@ -462,15 +769,48 @@ namespace pyoomph
     // Two-stage inversion. oomph's locate_zeta, when not given an initial guess, lays out a grid of
     // plot points over the element and runs a Newton solve from each (elements.cc:4794) - for a 3d
     // element that is on the order of a hundred Newton solves for one query, and it is what the old
-    // path paid every time. Nearly always a single solve from the element centre converges, so try
-    // that first and keep the multi-start only as the fallback, which preserves the old behaviour
-    // exactly for the awkward elements that need it.
-    for (unsigned d = 0; d < element_dim; d++)
-      s[d] = 0.5 * (e->s_min() + e->s_max());
+    // path paid every time. Nearly always a single solve converges, so try that first and keep the
+    // multi-start only as the fallback, which preserves the old behaviour exactly for the awkward
+    // elements that need it.
+    //
+    // The starting point is the element's best affine fit rather than its centre. That matters most
+    // for the elements that end up here at all - curved ones, and 3d hexes, whose trilinear inverse
+    // has no closed form - because those are exactly the ones where the centre is a poor guess.
+    bool seeded = false;
+    if (has_affine_fit[slot])
+    {
+      const double *Dinv = &affine_inverse[(size_t)slot * dd];
+      const double *orig = &affine_origin[(size_t)slot * space_dim];
+      const double *s0 = &affine_s0[(size_t)slot * element_dim];
+      const double *Sdiff = &affine_sdiff[(size_t)slot * dd];
+      double u[3] = {0.0, 0.0, 0.0};
+      for (unsigned d = 0; d < element_dim; d++)
+        for (unsigned k = 0; k < element_dim; k++)
+          u[d] += Dinv[d * element_dim + k] * (x[k] - orig[k]);
+      for (unsigned d = 0; d < element_dim; d++)
+      {
+        double v = s0[d];
+        for (unsigned k = 0; k < element_dim; k++)
+          v += Sdiff[d * element_dim + k] * u[k];
+        // Clamp into the reference element: the fit is only approximate, and Newton started well
+        // outside can wander into a neighbouring element's preimage.
+        s[d] = std::min(std::max(v, e->s_min()), e->s_max());
+      }
+      seeded = true;
+    }
+    if (!seeded)
+    {
+      for (unsigned d = 0; d < element_dim; d++)
+        s[d] = 0.5 * (e->s_min() + e->s_max());
+    }
     e->locate_zeta(zeta, go, s, true);
 
-    if (!go)
+    if (!go && allow_multistart)
     {
+      // oomph's multi-start: a grid of plot-point initial guesses, each with its own Newton solve.
+      // Reserved for the second pass because it is paid per REJECTED candidate otherwise, and the
+      // search tries several candidates per query - on a distorted 3d hex mesh that alone was the
+      // difference between 17 us and 1 us per point.
       for (unsigned d = 0; d < element_dim; d++)
         s[d] = 0.5 * (e->s_min() + e->s_max());
       e->locate_zeta(zeta, go, s, false);
@@ -481,8 +821,9 @@ namespace pyoomph
 
     for (unsigned d = 0; d < element_dim; d++)
       s_out[d] = s[d];
+    polish_local_coordinate(e, x, s_out);
     if (offset_out)
-      *offset_out = 0.0; // exact by construction in Invert mode
+      *offset_out = 0.0;
     return true;
   }
 
@@ -526,9 +867,16 @@ namespace pyoomph
         query[d] = coords[(size_t)i * space_dim + d];
       wrap_into_period(&query[0]);
 
-      tried.clear();
       BulkElementBase *hit = NULL;
       int how = -1;
+
+      // Two passes. The first only ever runs a single Newton per candidate; only if the point is
+      // not found at all does the second allow oomph's multi-start, so its cost is paid once per
+      // genuinely hard query rather than once per rejected candidate.
+      for (unsigned pass = 0; pass < 2 && !hit; pass++)
+      {
+      const bool allow_multistart = (pass == 1);
+      tried.clear();
 
       // (a) The previous match and everything sharing a node with it. Consecutive queries are
       // usually neighbours - all the integration points of one target element, for instance - so
@@ -536,7 +884,7 @@ namespace pyoomph
       const bool same_group = (hint_groups == nullptr) || (previous_group == (*hint_groups)[i]);
       if (previous && same_group)
       {
-        if (try_element(previous, &query[0], &s[0], &offset))
+        if (try_element(previous, &query[0], &s[0], &offset, allow_multistart))
         {
           hit = previous;
           how = 0;
@@ -558,7 +906,7 @@ namespace pyoomph
               if (std::find(tried.begin(), tried.end(), cand) != tried.end())
                 continue;
               tried.push_back(cand);
-              if (try_element(cand, &query[0], &s[0], &offset))
+              if (try_element(cand, &query[0], &s[0], &offset, allow_multistart))
               {
                 hit = cand;
                 how = 0;
@@ -581,7 +929,7 @@ namespace pyoomph
             if (std::find(tried.begin(), tried.end(), cand) != tried.end())
               continue;
             tried.push_back(cand);
-            if (try_element(cand, &query[0], &s[0], &offset))
+            if (try_element(cand, &query[0], &s[0], &offset, allow_multistart))
             {
               hit = cand;
               how = 1;
@@ -609,7 +957,7 @@ namespace pyoomph
               if (std::find(tried.begin(), tried.end(), cand) != tried.end())
                 continue;
               tried.push_back(cand);
-              if (try_element(cand, &query[0], &s[0], &offset))
+              if (try_element(cand, &query[0], &s[0], &offset, allow_multistart))
               {
                 hit = cand;
                 how = 2;
@@ -621,6 +969,8 @@ namespace pyoomph
           }
         }
       }
+
+      } // end of the two passes
 
       if (hit)
       {
@@ -674,6 +1024,11 @@ namespace pyoomph
   {
     std::ostringstream oss;
     oss << n_affine_elements << "/" << elements_by_index.size() << " affine";
+    if (n_bilinear_elements)
+      oss << ", " << n_bilinear_elements << " bilinear";
+    const unsigned rest = elements_by_index.size() - n_affine_elements - n_bilinear_elements;
+    if (rest)
+      oss << ", " << rest << " newton";
     return oss.str();
   }
 
