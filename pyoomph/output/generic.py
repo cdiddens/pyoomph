@@ -33,6 +33,7 @@ from ..expressions.generic import Expression,  ExpressionOrNum, GlobalParameter
 from ..expressions.units import unit_to_string
 
 from ..meshes.mesh import ODEStorageMesh
+from ..meshes.ordering import SortAlongAxis, check_sorting_arguments, sort_line_segments, sort_point_indices
 
 
 from ..generic.codegen import BaseEquations
@@ -148,8 +149,16 @@ class _BaseNumpyOutput(_BaseOutputter):
 ####################
 
 
+def _check_output_sorting_arguments(sort_along_axis:"SortAlongAxis | None",start_near_point:Sequence[ExpressionOrNum] | ExpressionOrNum | None,reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None)->None:
+    # Checked both in TextFileOutput, so that the user hears about it where the argument was typed,
+    # and in _TextOutput, which can be constructed on its own.
+    check_sorting_arguments(sort_along_axis,start_near_point,whom="TextFileOutput")
+    if (sort_along_axis is not None or start_near_point is not None) and (reverse_segment_if is not None or sort_segments_by is not None):
+        raise RuntimeError("TextFileOutput: Cannot combine sort_along_axis/start_near_point with reverse_segment_if/sort_segments_by - each of them determines the very same ordering, so one would just silently overrule the other")
+
+
 class _TextOutput(_BaseNumpyOutput):
-    def __init__(self,mesh:"AnySpatialMesh",*fields:str,ftrunk:str="txtout",in_subdir:bool=True,file_ext:str | list[str] | None=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True):
+    def __init__(self,mesh:"AnySpatialMesh",*fields:str,ftrunk:str="txtout",in_subdir:bool=True,file_ext:str | list[str] | None=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True,sort_along_axis:"SortAlongAxis | None"=None,start_near_point:Sequence[ExpressionOrNum] | ExpressionOrNum | None=None):
         super().__init__(mesh)
         self.fname_trunk=ftrunk
         self._orbit_subdir:str | None=None
@@ -168,13 +177,35 @@ class _TextOutput(_BaseNumpyOutput):
         self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
         self.operator=operator
         self.tesselate_tri=tesselate_tri
+        self.sort_along_axis:"SortAlongAxis | None"=sort_along_axis
+        self.start_near_point=start_near_point
+        _check_output_sorting_arguments(sort_along_axis,start_near_point,reverse_segment_if,sort_segments_by)
 
+    def _sorts_output(self)->bool:
+        return self.sort_along_axis is not None or self.start_near_point is not None
 
+    def _spatial_unit_of_output(self,cache:"MeshDataCacheEntry")->ExpressionOrNum:
+        # What a start_near_point must be divided by to land on the coordinates we write. In
+        # nondimensional mode the cache reports a unit of 1, so ask the domain for its actual
+        # spatial scale instead - otherwise a point given with units could not be used at all there.
+        if self.nondimensional:
+            assert not isinstance(self.mesh,str)
+            return self.mesh.get_code_gen().get_scaling("spatial")
+        return cache.get_unit("spatial")
 
     def init(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None=None,rank:int=0):
         super().init(eqtree,continue_info,rank)
         if isinstance(self.mesh,str):
             self.mesh=self.problem.get_mesh(self.mesh)
+        if self._sorts_output():
+            # Refuse early rather than at the first output: on a 2d or 3d domain there is no curve to
+            # order along, and in discontinuous mode a node occurs once per element, so neither the
+            # line segments nor a unique point order exist.
+            elemdim=self.mesh.get_element_dimension()
+            if elemdim>1:
+                raise RuntimeError("TextFileOutput: sort_along_axis/start_near_point only work on 0d and 1d domains (points and lines, including curved interfaces of 2d or 3d meshes), but '"+self.mesh.get_full_name()+"' has elements of dimension "+str(elemdim))
+            if self.discontinuous:
+                raise RuntimeError("TextFileOutput: sort_along_axis/start_near_point cannot be combined with discontinuous=True")
         if self.in_subdir and rank==0:
                 Path(os.path.join(self.problem.get_output_directory()),self.fname_trunk).mkdir(parents=True, exist_ok=True) 
         if self.file_ext is None:
@@ -254,15 +285,20 @@ class _TextOutput(_BaseNumpyOutput):
             if self.sort_segments_by is not None:
                 sort_fn=self.sort_segments_by
                 lsegs=list(sorted(lsegs,key=lambda k : sort_fn(k,coordsA)))
+            if self._sorts_output():
+                lsegs=sort_line_segments(cache.get_coordinates(),lsegs,sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point,spatial_unit=self._spatial_unit_of_output(cache),whom="TextFileOutput")
 
-
-
-            sortdata:list[NPFloatArray]=[] 
+            sortdata:list[NPFloatArray]=[]
             for i,ls in enumerate(lsegs): 
                 sortdata.append(data[ls]) 
-                if i+1<len(lsegs): 
+                if i+1<len(lsegs):
                     sortdata.append([[numpy.nan]*len(data[0,:])])  #type:ignore
             data:NPFloatArray=numpy.vstack(sortdata) #type:ignore
+        elif mesh.get_element_dimension()==0 and self._sorts_output():
+            # Point domains have no connectivity to follow, so the nodes are just reordered. No NaN
+            # separators are written in between: each row is a separate point anyhow.
+            order=sort_point_indices(cache.get_coordinates(),sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point,spatial_unit=self._spatial_unit_of_output(cache),whom="TextFileOutput")
+            data:NPFloatArray=data[order] #type:ignore
 
 
         params:dict[str,str] = {}
@@ -973,14 +1009,17 @@ class TextFileOutput(GenericOutput):
         eigenmode (MeshDataEigenModes): The eigenmode type ("abs","real","imag"). Default is "abs".
         reverse_segment_if (Optional[Callable[[List[int], NPFloatArray], bool]]): A function to reverse individual segments of a segregated 1d line embedded in higher spaces. Default is None.
         sort_segments_by (Optional[Callable[[List[int], NPFloatArray], float]]): A function to sort such segments based on a condition. Otherwise, the ordering is more or less random. Default is None.
+        sort_along_axis (Optional[SortAlongAxis]): Write the points ordered along a Cartesian direction, i.e. "x+","x-","y+","y-","z+" or "z-". Only for 0d and 1d domains, e.g. an arbitrarily curved 1d interface of a 2d mesh or a 1d co-dimension 2 interface of a 3d mesh. On a 1d domain, only the segment end points decide the orientation and the order of the segments, so the point order follows the curve even where it overhangs. Cannot be combined with start_near_point or with reverse_segment_if/sort_segments_by. Default is None.
+        start_near_point (Optional[Union[Sequence[ExpressionOrNum],ExpressionOrNum]]): Same as sort_along_axis, but ordering by the distance to this point, closest first. May carry units. Default is None.
         discontinuous (bool): Flag indicating whether discontinuous output should be written. In that case, each node can be written multiple times, potential with different values. Default is False.
         add_eigen_to_mesh_positions (bool): When outputting an eigenvector on a moving mesh, do we want to add the original mesh coordinates to the eigensolution or not. Default is True.
     """
 
 
 
-    def __init__(self,filetrunk:str | None=None,filename:str | None=None, nondimensional:bool=False,hide_underscore:bool=True,hide_lagrangian:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True):
+    def __init__(self,filetrunk:str | None=None,filename:str | None=None, nondimensional:bool=False,hide_underscore:bool=True,hide_lagrangian:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True,sort_along_axis:"SortAlongAxis | None"=None,start_near_point:Sequence[ExpressionOrNum] | ExpressionOrNum | None=None):
         super(TextFileOutput, self).__init__()
+        _check_output_sorting_arguments(sort_along_axis,start_near_point,reverse_segment_if,sort_segments_by)
         if filetrunk is not None and filename is not None:
             raise RuntimeError("Please set either filename or filetrunk - both are the same, just for backwards compatibility")
         elif filetrunk is not None:
@@ -998,12 +1037,14 @@ class TextFileOutput(GenericOutput):
         self.add_eigen_to_mesh_positions=add_eigen_to_mesh_positions
         self.operator=operator
         self.tesselate_tri=tesselate_tri
+        self.sort_along_axis:"SortAlongAxis | None"=sort_along_axis
+        self.start_near_point=start_near_point
 
     def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int) -> _TextOutput:
         fn=self._expand_filename(eqtree,self.filename,"",add_problem_outdir=False)
         mesh=eqtree.get_mesh()
         assert not isinstance(mesh,ODEStorageMesh)
-        return _TextOutput(mesh,ftrunk=fn,nondimensional=self.nondimensional,hide_underscore=self.hide_underscore,hide_lagrangian=self.hide_lagrangian,eigenvector=self.eigenvector,eigenmode=self.eigenmode,sort_segments_by=self.sort_segments_by,reverse_segment_if=self.reverse_segment_if,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator,tesselate_tri=self.tesselate_tri)
+        return _TextOutput(mesh,ftrunk=fn,nondimensional=self.nondimensional,hide_underscore=self.hide_underscore,hide_lagrangian=self.hide_lagrangian,eigenvector=self.eigenvector,eigenmode=self.eigenmode,sort_segments_by=self.sort_segments_by,reverse_segment_if=self.reverse_segment_if,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator,tesselate_tri=self.tesselate_tri,sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point)
 
     def _is_ode(self):
         return False

@@ -31,6 +31,7 @@ from ..generic.codegen import InterfaceEquations,EquationTree
 from ..expressions import ExpressionOrNum
 from .mesh import InterfaceMesh, ODEStorageMesh
 from .meshdatacache import MeshDataCacheEntry, MeshDataCacheKey
+from .ordering import SortAlongAxis, check_sorting_arguments, sort_line_segments
 import numpy
 from ..typings import *
 
@@ -205,7 +206,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         segment_jump_offset: This offset is added to the arclength when changing to a new segment of the boundary in case of disconnected curves.
         individual_segments: Mainly concerns normalization. If True, each segment is normalized individually, otherwise all segments are normalized together. 
     """
-    def __init__(self,start_near_point:tuple[ExpressionOrNum, ExpressionOrNum] | None=None,sort_along_axis:Literal["x+", "x-", "y+", "y-"] | None=None,normalized:bool=True,segment_jump_offset:float=1.0,individual_segments:bool=True):
+    def __init__(self,start_near_point:tuple[ExpressionOrNum, ExpressionOrNum] | None=None,sort_along_axis:SortAlongAxis | None=None,normalized:bool=True,segment_jump_offset:float=1.0,individual_segments:bool=True):
         super().__init__()
         self.start_near_point=start_near_point
         self.sort_along_axis=sort_along_axis
@@ -214,8 +215,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         self.segment_jump_offset=segment_jump_offset  # Add this offset to the arclength when a new segment is started
         self.individual_segments=individual_segments # process and potentially normalize each segment individually. The total zeta parametrization is then by concatenation
 
-        if (start_near_point is None and sort_along_axis is None) or (start_near_point is not None and sort_along_axis is not None):
-            raise RuntimeError("Please add one parameter identifying the direction of the zeta parameterization")
+        check_sorting_arguments(sort_along_axis,start_near_point,require_one=True,whom="AssignZetaCoordinatesByArclength")
 
     def assign_zetas(self,mesh:InterfaceMesh)->None:
         if mesh.get_dimension()!=1:
@@ -235,21 +235,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
             raise self.add_exception_info(RuntimeError("The interface '"+mesh.get_name()+"' contains "+str(sum(closed))+" closed loop(s), which cannot be parameterised by a single-valued zeta: the element closing the loop runs from the last zeta back to the first and therefore spans the whole range, so it matches essentially any query during interpolation and silently returns values from the opposite side of the loop. A periodic zeta space is the fix - see dev_docs/mesh_point_locator.md."))
 
         # Sort and reverse the segments based on the settings
-        if self.sort_along_axis is not None:
-            index,sign=({"x+":(0,1),"x-":(0,-1),"y+":(1,1),"y-":(1,-1)})[self.sort_along_axis]
-            for i,seg in enumerate(segs):
-                diff=pts[index,seg[-1]]-pts[index,seg[0]]
-                if diff*sign<0:
-                    segs[i]=list(reversed(seg))
-            segs=sorted(segs,key=lambda s: sign*pts[index,s[0]])
-        elif self.start_near_point is not None:
-            stp=self.start_near_point
-            for i,seg in enumerate(segs):
-                d1=(pts[0,seg[0]]-stp[0])**2+(pts[1,seg[0]]-stp[1])**2
-                d2=(pts[0,seg[-1]]-stp[0])**2+(pts[1,seg[-1]]-stp[1])**2
-                if d2>d1:
-                    segs[i]=list(reversed(seg))
-            segs=sorted(segs,key=lambda s: (pts[0,s[0]]-stp[0])**2+(pts[1,s[0]]-stp[1])**2 )
+        segs=sort_line_segments(pts,segs,sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point,spatial_unit=mesh.get_code_gen().get_scaling("spatial"),whom="AssignZetaCoordinatesByArclength")
 
         nodemap=mesh.fill_node_index_to_node_map()
         if len(nodemap)!=sum(len(seg) for seg in segs):

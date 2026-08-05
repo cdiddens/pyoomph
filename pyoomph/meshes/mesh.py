@@ -42,7 +42,7 @@ from .. import _pyoomph_core as _pyoomph
 
 from ..expressions.generic import Expression, ExpressionOrNum, is_zero, NameStrSequence
 
-
+from .ordering import SortAlongAxis, sort_line_segments
 
 import itertools
 
@@ -878,13 +878,13 @@ class MeshedMeshTemplate(MeshTemplate):
         """
         return not self.is_first_time()
 
-    def get_boundary_coordinates(self, name: str, sort_along_axis: Literal["x+", "x-", "y+", "y-"] | None = None, start_near_point: tuple["ExpressionOrNum", "ExpressionOrNum"] | None = None, nondimensional: bool = False) -> list[list[tuple[float, float]]]:
+    def get_boundary_coordinates(self, name: str, sort_along_axis: "SortAlongAxis | None" = None, start_near_point: tuple["ExpressionOrNum", "ExpressionOrNum"] | None = None, nondimensional: bool = False) -> list[list[tuple[float, float]]]:
         """Returns a list of boundary segments, which are lists of (x,y) coordinates (dimensional or not can be controlled by the nondimensional argument). The segments are sorted and reversed based on the sort_along_axis or start_near_point arguments. If both are None, the order is arbitrary.
 
         Args:
             name: Name of the boundary, e.g. "domain1/boundary1"
             sort_along_axis: Sort the segments along a given axis, e.g. "x+" means sort along x in increasing order, "y-" means sort along y in decreasing order. Defaults to None.
-            start_near_point: Start near point for sorting segments. Defaults to None.
+            start_near_point: Sort the segments by their distance to this point, closest first, and start each segment at its end closer to the point. May carry units. Defaults to None.
             nondimensional: Whether to return nondimensional coordinates. Defaults to False.
 
         Returns:
@@ -899,21 +899,7 @@ class MeshedMeshTemplate(MeshTemplate):
         segs, _ = data.get_interface_line_segments()
 
         # Sort and reverse the segments based on the settings
-        if sort_along_axis is not None:
-            index, sign = ({"x+": (0, 1), "x-": (0, -1), "y+": (1, 1), "y-": (1, -1)})[sort_along_axis]
-            for i, seg in enumerate(segs):
-                diff = pts[index, seg[-1]]-pts[index, seg[0]]
-                if diff*sign < 0:
-                    segs[i] = list(reversed(seg))
-            segs = sorted(segs, key=lambda s: sign*pts[index, s[0]])
-        elif start_near_point is not None:
-            stp = start_near_point
-            for i, seg in enumerate(segs):
-                d1 = (pts[0, seg[0]]-stp[0])**2+(pts[1, seg[0]]-stp[1])**2
-                d2 = (pts[0, seg[-1]]-stp[0])**2+(pts[1, seg[-1]]-stp[1])**2
-                if d2 > d1:
-                    segs[i] = list(reversed(seg))
-            segs = sorted(segs, key=lambda s: (pts[0, s[0]]-stp[0])**2+(pts[1, s[0]]-stp[1])**2)
+        segs = sort_line_segments(pts, segs, sort_along_axis=sort_along_axis, start_near_point=start_near_point, spatial_unit=self.get_problem().get_scaling("spatial"), whom="get_boundary_coordinates()")
 
         res = []
 
