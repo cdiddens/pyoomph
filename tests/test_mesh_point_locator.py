@@ -269,9 +269,6 @@ def test_projection_locates_points_beside_a_surface():
 # 4. interface-owned data across ADAPTATION (phase 3b - still open)
 # ----------------------------------------------------------------------------------------------
 
-@pytest.mark.xfail(reason="dev_docs/mesh_point_locator.md phase 3b: interface elements are destroyed "
-                          "and rebuilt on every adaptation, so interface DL/D0 data is reset to zero. "
-                          "Currently only warned about.", strict=True)
 def test_interface_d0_survives_adaptation():
     class IfaceD0(InterfaceEquations):
         def define_fields(self):
@@ -299,6 +296,90 @@ def test_interface_d0_survives_adaptation():
                 for d in (e.internal_data_pt(i) for i in range(e.ninternal_data()))
                 for j in range(d.nvalue())]
     assert vals and all(v == pytest.approx(7.0) for v in vals), vals
+
+
+def test_interface_dl_reproduces_a_linear_field_across_adaptation():
+    """A DL field can represent x exactly, so a correct transfer leaves it exactly right.
+
+    This is the part a constant cannot test: the snapshot is fitted back per element by least
+    squares, and a fit that collapsed to a constant - or picked up points from the wrong element -
+    would still pass the D0 test above while failing here.
+    """
+    class IfaceDL(InterfaceEquations):
+        def define_fields(self):
+            self.define_scalar_field("idata", "DL")
+
+        def define_residuals(self):
+            u, v = var_and_test("idata")
+            self.add_residual(weak(u - var("coordinate_x"), v))
+
+    class Prob(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=4))
+            eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "left"
+            eqs += (IfaceDL() + IntegralObservables(err=(var("idata") - var("coordinate_x"))**2)) @ "top"
+            eqs += SpatialErrorEstimator(u=1)
+            self.add_equations(eqs @ "domain")
+
+    with Prob() as p:
+        p.quiet()
+        p.max_refinement_level = 2
+        p.solve()
+        before = float(p.get_mesh("domain/top").evaluate_all_observables()["err"])
+        p.refine_uniformly()
+        after = float(p.get_mesh("domain/top").evaluate_all_observables()["err"])
+    assert before < 1e-20, f"the field was not set up exactly to begin with: {before}"
+    # ~1e-8 RMS, not machine zero: the fit is least-squares over points the locator projected onto
+    # the new interface, so it inherits the projection's local-coordinate round-off. A fit that
+    # collapsed to a constant, or drew points from the neighbouring element, lands near 5e-3 - four
+    # orders above this and thirteen above what a correct transfer gives.
+    assert after < 1e-16, f"DL transfer lost the linear field across adaptation: {after}"
+
+
+def test_interface_d0_history_survives_adaptation():
+    """The case that was silently wrong rather than merely reset.
+
+    A D0 field its own residual determines algebraically recovers at the next solve even with no
+    transfer at all, which is why the reset went unnoticed. One carrying a time derivative does not:
+    its history levels are what the next timestep is computed from.
+    """
+    class IfaceRate(InterfaceEquations):
+        def define_fields(self):
+            self.define_scalar_field("idata", "D0")
+
+        def define_residuals(self):
+            u, v = var_and_test("idata")
+            self.add_residual(weak(partial_t(u) - 1, v))
+
+    class Prob(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=4))
+            eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "left"
+            eqs += IfaceRate() @ "top" + SpatialErrorEstimator(u=1)
+            self.add_equations(eqs @ "domain")
+
+    def history(mesh):
+        return [[d.value_at_t(t, 0)
+                 for e in mesh.elements()
+                 for d in (e.internal_data_pt(i) for i in range(e.ninternal_data()))]
+                for t in range(3)]
+
+    with Prob() as p:
+        p.quiet()
+        p.max_refinement_level = 2
+        p.run(0.3, outstep=False, startstep=0.1, temporal_error=None, do_not_set_IC=False)
+        before = history(p.get_mesh("domain/top"))
+        p.refine_uniformly()
+        after = history(p.get_mesh("domain/top"))
+
+    # u = t, so the levels must differ by the timestep - otherwise "history survived" is vacuous,
+    # since every level being zero would pass a same-before-and-after check just as well.
+    # abs=1e-4 because run() stretches the last step slightly to land on the end time.
+    assert before[0] and before[0][0] - before[1][0] == pytest.approx(0.1, abs=1e-4), before
+    assert before[1][0] - before[2][0] == pytest.approx(0.1, abs=1e-9), before
+    for t in range(3):
+        assert all(v == pytest.approx(before[t][0], abs=1e-12) for v in after[t]), \
+            f"time level {t}: {before[t][0]} -> {after[t]}"
 
 
 # ----------------------------------------------------------------------------------------------

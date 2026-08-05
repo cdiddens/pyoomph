@@ -5644,6 +5644,9 @@ namespace pyoomph
   // (shared between adjacent elements), so a seen-set avoids double deletion.
   void InterfaceMesh::clear_before_adapt()
   {
+    // Before anything is deleted: the DL/D0 values live in these elements' internal Data and have
+    // no other home.
+    this->snapshot_discontinuous_data();
     unsigned n_element = this->nelement();
     for (unsigned e = 0; e < n_element; e++)
     {
@@ -5661,6 +5664,284 @@ namespace pyoomph
     }
     opposite_interior_facets.clear();
     this->invalidate_lagrangian_kdtree();
+  }
+
+  // Both the locator and shape_at_s_DL read their buffer sizes out of eleminfo, so an element whose
+  // eleminfo was never filled sizes an oomph::Shape from garbage and the write runs off the end.
+  // Freshly generated interface elements are exactly that case (this cost a segfault inside
+  // restore_discontinuous_data before the guard existed).
+  static void ensure_eleminfo_filled(Mesh *m)
+  {
+    for (unsigned ie = 0; ie < m->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(m->element_pt(ie));
+      if (e && !e->get_eleminfo()->alloced)
+        e->fill_element_info(true);
+    }
+  }
+
+  // Number of DG-space internal Data entries preceding the DL ones, which allocate_discontinous_fields
+  // lays out as [DG spaces][DL fields][D0 fields].
+  static unsigned dg_internal_data_offset(const JITFuncSpec_Table_FiniteElement_t *ft)
+  {
+    unsigned off = 0;
+    for (unsigned i = 0; i < ft->num_present_dg_spaces; i++)
+      off += ft->present_dg_spaces[i]->numfields_new;
+    return off;
+  }
+
+  // Samples every element on a lattice in its own local coordinates. Five per direction rather than
+  // just the nodes: after one refinement each son must still receive enough points to determine a
+  // linear (DL) field on its own, and a father's nodes sit on its sons' shared edges, where they
+  // arbitrate to one son and leave the others empty.
+  static void sample_local_coordinates(BulkElementBase *e, std::vector<oomph::Vector<double>> &out)
+  {
+    out.clear();
+    const unsigned edim = e->dim();
+    if (!edim) // a point interface has a single location and no local coordinate at all
+    {
+      out.push_back(oomph::Vector<double>());
+      return;
+    }
+    const unsigned NS = 5;
+    const double smin = e->s_min(), smax = e->s_max();
+    unsigned total = 1;
+    for (unsigned d = 0; d < edim; d++)
+      total *= NS;
+    for (unsigned k = 0; k < total; k++)
+    {
+      oomph::Vector<double> s(edim);
+      unsigned rem = k;
+      for (unsigned d = 0; d < edim; d++)
+      {
+        s[d] = smin + (smax - smin) * (rem % NS) / (NS - 1.0);
+        rem /= NS;
+      }
+      // Discards the ~half of a tensor lattice that falls outside a simplex.
+      if (e->local_coord_is_valid(s))
+        out.push_back(s);
+    }
+  }
+
+  void InterfaceMesh::snapshot_discontinuous_data()
+  {
+    discontinuous_snapshot.clear();
+    if (!code || !this->nelement())
+      return;
+    auto *ft = code->get_func_table();
+    const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
+    if (!nDL && !nD0)
+      return;
+
+    ensure_eleminfo_filled(this);
+    BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    if (!e0 || !e0->ninternal_data())
+      return;
+
+    auto &snap = discontinuous_snapshot;
+    snap.space_dim = e0->nodal_dimension();
+    snap.nDL = nDL;
+    snap.nD0 = nD0;
+    snap.nDL_modes = e0->get_eleminfo()->nnode_DL;
+    snap.ntstorage = e0->internal_data_pt(0)->time_stepper_pt()->ntstorage();
+
+    std::vector<oomph::Vector<double>> slist;
+    std::vector<double> vDL, vD0;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (!e)
+        continue;
+      sample_local_coordinates(e, slist);
+      for (const auto &sloc : slist)
+      {
+        for (unsigned d = 0; d < snap.space_dim; d++)
+          snap.coords.push_back(e->interpolated_x(sloc, d));
+        for (unsigned t = 0; t < snap.ntstorage; t++)
+        {
+          if (nDL)
+          {
+            e->get_interpolated_fields_DL(sloc, vDL, t);
+            snap.values.insert(snap.values.end(), vDL.begin(), vDL.end());
+          }
+          if (nD0)
+          {
+            e->get_interpolated_fields_D0(sloc, vD0, t);
+            snap.values.insert(snap.values.end(), vD0.begin(), vD0.end());
+          }
+        }
+      }
+    }
+  }
+
+  // Solves the small symmetric system A c = b in place by Gaussian elimination with partial
+  // pivoting. Returns false on a negligible pivot, which is how an underdetermined fit (fewer
+  // sample points in this element than DL modes, or points that happen to be collinear) announces
+  // itself; the caller then falls back to a constant.
+  static bool solve_small_system(std::vector<double> &A, std::vector<double> &b, unsigned n)
+  {
+    for (unsigned col = 0; col < n; col++)
+    {
+      unsigned piv = col;
+      for (unsigned r = col + 1; r < n; r++)
+        if (std::abs(A[r * n + col]) > std::abs(A[piv * n + col]))
+          piv = r;
+      if (std::abs(A[piv * n + col]) < 1e-13)
+        return false;
+      if (piv != col)
+      {
+        for (unsigned c = 0; c < n; c++)
+          std::swap(A[piv * n + c], A[col * n + c]);
+        std::swap(b[piv], b[col]);
+      }
+      for (unsigned r = col + 1; r < n; r++)
+      {
+        const double f = A[r * n + col] / A[col * n + col];
+        if (f == 0.0)
+          continue;
+        for (unsigned c = col; c < n; c++)
+          A[r * n + c] -= f * A[col * n + c];
+        b[r] -= f * b[col];
+      }
+    }
+    for (int r = (int)n - 1; r >= 0; r--)
+    {
+      double acc = b[r];
+      for (unsigned c = r + 1; c < n; c++)
+        acc -= A[r * n + c] * b[c];
+      b[r] = acc / A[r * n + r];
+    }
+    return true;
+  }
+
+  void InterfaceMesh::restore_discontinuous_data()
+  {
+    auto &snap = discontinuous_snapshot;
+    if (snap.empty() || !this->nelement() || !code)
+    {
+      snap.clear();
+      return;
+    }
+    auto *ft = code->get_func_table();
+    if (ft->info_DL.numfields != snap.nDL || ft->info_D0.numfields != snap.nD0)
+    {
+      // The interface was rebuilt against a different code instance; nothing sensible to restore.
+      snap.clear();
+      return;
+    }
+    const unsigned nfield = snap.nDL + snap.nD0;
+    const unsigned npoint = snap.coords.size() / snap.space_dim;
+    const unsigned stride = snap.ntstorage * nfield;
+
+    // Eulerian, because adaptation does not move nodes: a sample point taken on the old interface
+    // lies on the new one to round-off, and the locator is in Project mode anyway (an interface is
+    // codimension 1 in the space its positions live in).
+    ensure_eleminfo_filled(this);
+    LocatorSetup lsetup;
+    lsetup.space = LocatorSpace::Eulerian;
+    MeshPointLocator locator(this, lsetup);
+    LocationSet located = locator.locate_batch(snap.coords, npoint);
+
+    std::map<BulkElementBase *, std::vector<std::pair<unsigned, std::vector<double>>>> per_elem;
+    unsigned n_unplaced = 0;
+    for (unsigned i = 0; i < npoint; i++)
+    {
+      BulkElementBase *e = NULL;
+      std::vector<double> sloc;
+      if (located.resolve_local(i, e, sloc) && e)
+        per_elem[e].push_back(std::make_pair(i, sloc));
+      else
+        n_unplaced++;
+    }
+
+    const unsigned dg_off = dg_internal_data_offset(ft);
+    unsigned n_empty = 0, n_fallback = 0;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (!e)
+        continue;
+      auto found = per_elem.find(e);
+      if (found == per_elem.end() || found->second.empty())
+      {
+        n_empty++;
+        continue;
+      }
+      const auto &pts = found->second;
+      const unsigned nmode = e->get_eleminfo()->nnode_DL;
+
+      // The DL basis at every sample point, and the normal matrix built from it. Both depend only on
+      // the geometry, so they are shared by every field and every time level of this element.
+      std::vector<double> psi_at(pts.size() * (nmode ? nmode : 1), 1.0);
+      std::vector<double> A0(nmode * nmode, 0.0);
+      if (snap.nDL && nmode)
+      {
+        for (unsigned p = 0; p < pts.size(); p++)
+        {
+          oomph::Shape psi(nmode);
+          oomph::Vector<double> sv(pts[p].second.size());
+          for (unsigned d = 0; d < sv.size(); d++)
+            sv[d] = pts[p].second[d];
+          e->shape_at_s_DL(sv, psi);
+          for (unsigned l = 0; l < nmode; l++)
+            psi_at[p * nmode + l] = psi[l];
+        }
+        for (unsigned l = 0; l < nmode; l++)
+          for (unsigned m = 0; m < nmode; m++)
+          {
+            double acc = 0.0;
+            for (unsigned p = 0; p < pts.size(); p++)
+              acc += psi_at[p * nmode + l] * psi_at[p * nmode + m];
+            A0[l * nmode + m] = acc;
+          }
+      }
+
+      for (unsigned t = 0; t < snap.ntstorage; t++)
+      {
+        for (unsigned fi = 0; fi < snap.nDL; fi++)
+        {
+          std::vector<double> A = A0, b(nmode, 0.0);
+          double mean = 0.0;
+          for (unsigned p = 0; p < pts.size(); p++)
+          {
+            const double v = snap.values[(size_t)pts[p].first * stride + t * nfield + fi];
+            mean += v;
+            for (unsigned l = 0; l < nmode; l++)
+              b[l] += psi_at[p * nmode + l] * v;
+          }
+          mean /= pts.size();
+          if (!solve_small_system(A, b, nmode))
+          {
+            // A Lagrange basis is a partition of unity, so every coefficient equal to the mean is
+            // exactly the constant field - the right thing to keep when the fit is underdetermined.
+            b.assign(nmode, mean);
+            n_fallback++;
+          }
+          for (unsigned l = 0; l < nmode; l++)
+            e->internal_data_pt(dg_off + fi)->set_value(t, l, b[l]);
+        }
+        for (unsigned fi = 0; fi < snap.nD0; fi++)
+        {
+          double mean = 0.0;
+          for (unsigned p = 0; p < pts.size(); p++)
+            mean += snap.values[(size_t)pts[p].first * stride + t * nfield + snap.nDL + fi];
+          e->internal_data_pt(dg_off + snap.nDL + fi)->set_value(t, 0, mean / pts.size());
+        }
+      }
+    }
+
+    if ((n_unplaced || n_empty) && !warned_about_discontinuous_reset)
+    {
+      warned_about_discontinuous_reset = true;
+      std::cout << "WARNING: transferring the discontinuous (DL/D0) fields of interface '" << interfacename
+                << "' across an adaptation left " << n_empty << " of " << this->nelement()
+                << " new element(s) without a single sample point";
+      if (n_unplaced)
+        std::cout << " (" << n_unplaced << " of " << npoint << " old sample points could not be placed)";
+      std::cout << ". Those elements keep the zero they were allocated with." << std::endl;
+    }
+    (void)n_fallback;
+    snap.clear();
   }
 
   // Populates Boundary_element_pt/Face_index_at_boundary for a 1d interface mesh
@@ -5920,26 +6201,12 @@ namespace pyoomph
         throw_runtime_error("Cannot adapt yet when having discontinuous fields added at an interface. Make sure to set Problem.max_refinement_level=0 and/or Problem.initial_adaption_steps=0. Will be hopefully implemented soon.");
       }
 
-      // The DG check above used to carry a commented-out `|| ft->info_D0.numfields`, and leaving it
-      // out is not harmless: clear_before_adapt() deletes every interface element, so the internal
-      // Data backing interface-owned DL/D0 fields is destroyed and reallocated at zero - current
-      // value AND time history. For a DL/D0 field that its own residual determines algebraically
-      // the next solve repairs the current value, which is why this was never noticed; anything
-      // carrying history across the adaptation is silently wrong. Warn rather than throw, because
-      // the algebraically-determined case is the common one and does work.
-      // Proper transfer is dev_docs/mesh_point_locator.md phase 3b.
-      if (!warned_about_discontinuous_reset && (ft->info_DL.numfields || ft->info_D0.numfields))
-      {
-        warned_about_discontinuous_reset = true;
-        std::cout << "WARNING: the interface '" << interfacename << "' has ";
-        if (ft->info_DL.numfields) std::cout << ft->info_DL.numfields << " DL ";
-        if (ft->info_DL.numfields && ft->info_D0.numfields) std::cout << "and ";
-        if (ft->info_D0.numfields) std::cout << ft->info_D0.numfields << " D0 ";
-        std::cout << "field(s). Interface elements are destroyed and rebuilt on every mesh adaptation, "
-                  << "so these values and their time history are reset to zero here. That is harmless "
-                  << "only if the fields are fully determined by their own residual at the next solve."
-                  << std::endl;
-      }
+      // Interface-owned DL/D0 fields used only to be reset to zero here - current value AND time
+      // history - because clear_before_adapt() destroys the internal Data holding them. A field its
+      // own residual determines algebraically recovered at the next solve, which is why this went
+      // unnoticed for a long time; anything carrying history across the adaptation was silently
+      // wrong. snapshot_discontinuous_data() sampled them before the deletion, and
+      // restore_discontinuous_data() below fits them back on.
     }
     if (!bulkmesh)
     {
@@ -5956,6 +6223,8 @@ namespace pyoomph
     bulkmesh->generate_interface_elements(interfacename, this, code);
     // this->nullify_selected_bulk_dofs();
     this->invalidate_lagrangian_kdtree();
+    // Only now do the elements to restore into exist.
+    this->restore_discontinuous_data();
   }
 
   // Stores the information needed to (re)build this interface mesh's elements later

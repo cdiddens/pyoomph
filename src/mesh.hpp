@@ -385,6 +385,24 @@ namespace pyoomph
 		virtual void setup_boundary_information2d(pyoomph::Mesh *parent, const std::set<unsigned> &possible_bounds);
 		std::vector<double> opposite_offset_vector,reversed_opposite_offset_vector; // Constant offset (e.g. for periodic/translated interfaces) to the opposite side and its reverse
 		bool warned_about_discontinuous_reset = false; // So rebuild_after_adapt's DL/D0 warning is printed once per interface, not once per adaptation
+
+		// Interface-owned DL/D0 values, carried across an adaptation. The elements themselves cannot
+		// be carried: clear_before_adapt() deletes every one of them and rebuild_after_adapt() makes
+		// new ones from the adapted bulk mesh, so there is no father/son relation to exploit the way
+		// the bulk path does. What survives is the field as a function of position, sampled at
+		// scattered points and fitted back onto whatever elements come out the other side.
+		struct DiscontinuousSnapshot
+		{
+			unsigned space_dim = 0;     // coordinate components per sample
+			unsigned nDL = 0, nD0 = 0;  // field counts at snapshot time, checked again on restore
+			unsigned nDL_modes = 0;     // eleminfo.nnode_DL, i.e. how many coefficients a DL field has
+			unsigned ntstorage = 0;     // time levels stored per sample - history is the whole point
+			std::vector<double> coords; // space_dim per sample
+			std::vector<double> values; // ntstorage*(nDL+nD0) per sample
+			bool empty() const { return coords.empty(); }
+			void clear() { coords.clear(); values.clear(); space_dim = nDL = nD0 = nDL_modes = ntstorage = 0; }
+		};
+		DiscontinuousSnapshot discontinuous_snapshot;
 	public:
 		InterfaceMesh();
 		~InterfaceMesh() override;
@@ -405,6 +423,11 @@ namespace pyoomph
 		virtual void clear_before_adapt();
 		// Regenerate this interface's elements from the (possibly refined/coarsened) bulk mesh after adaptation.
 		virtual void rebuild_after_adapt();
+		// Sample this interface's DL/D0 fields into discontinuous_snapshot before the elements holding
+		// them are destroyed, and fit them back onto the rebuilt elements afterwards. Called by
+		// clear_before_adapt/rebuild_after_adapt; no-ops when the interface has no DL or D0 field.
+		virtual void snapshot_discontinuous_data();
+		virtual void restore_discontinuous_data();
 		// Unpin/null out dofs on this interface that must not be treated as independent (e.g. because they are
 		// algebraically slaved to the bulk mesh across the interface).
 		virtual void nullify_selected_bulk_dofs();

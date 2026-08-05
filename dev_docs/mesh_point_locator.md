@@ -6,8 +6,7 @@ closest-point projection; closed loops have a periodic zeta; and the projection-
 works and conserves. The A/B switch against the old backend is gone, along with every
 `oomph::MeshAsGeomObject` use in pyoomph (§10).
 
-Open: phase 3b (interface DL/D0 destroyed by adaptation - a live defect, currently only warned about
-and recorded as a strict `xfail` in `tests/test_mesh_point_locator.py`), phase 4 (automatic zeta
+Open: phase 4 (automatic zeta
 assignment, now of doubtful value - see §12), phase 5 (MPI, gated on `--distribute` remeshing
 existing), phase 6 (facet/HDG), and the tracer campaign (§ phase 1).
 
@@ -411,21 +410,46 @@ caveats - `// XXX TODO: ... this does not conserve ... and does not consider axi
 DL/D0 branches are written per tree type, so whether the simplex refinement path in
 `refineable_telements.cpp` is covered needs checking rather than assuming.
 
-**Interfaces and facets: not covered, and confirmed by repro.** `clear_before_adapt` deletes every
-interface element, so any interface-owned internal data is destroyed on every adaptation.
-`rebuild_after_adapt` guards this for DG spaces by refusing outright, but the guard checks only DG -
-and its DG test uses `numfields_new` while `allocate_discontinous_fields` (`elements.cpp`)
-allocates DL and D0 by the full `numfields`, so nothing covers them. A D0 field pinned to 7 on an
-interface reads back as 0 after `refine_uniformly`, with no error. Phase 0 added a one-time warning
-naming the interface and the field count; it warns rather than throws because the common case - a
-DL/D0 field its own residual determines algebraically - does recover at the next solve, and only
-history-carrying fields are actually wrong. Proper transfer is Phase 3b.
+**Interface DL/D0: was broken, now transferred (phase 3b).** `clear_before_adapt` deletes every
+interface element, so any interface-owned internal data went with it. `rebuild_after_adapt` guarded
+this for DG spaces by refusing outright, but the guard checked only DG - and its DG test uses
+`numfields_new` while `allocate_discontinous_fields` (`elements.cpp`) allocates DL and D0 by the full
+`numfields`, so nothing covered them. A D0 field pinned to 7 on an interface read back as 0 after
+`refine_uniformly`, with no error. It went unnoticed for a long time because the common case - a
+DL/D0 field its own residual determines algebraically - recovers at the next solve; only
+history-carrying fields were actually wrong, and they were wrong silently.
 
-The fix reuses §4.2 rather than adding a mechanism: take a **snapshot** of the discontinuous interface
-data before `clear_before_adapt` (evaluation points in the coordinate space plus their values - small,
-and serialisable, which is also what a distributed version would need), then restore it after
-`rebuild_after_adapt` by locating those points on the new interface mesh and evaluating. The same
-snapshot object serves remeshing, so adaptation and remeshing stop being two code paths.
+The fix is a **snapshot**, as planned, but the reconstruction runs the other way round from the
+sketch. There is no father/son relation to exploit the way the bulk path does, and by restore time
+the old elements are gone, so nothing can be evaluated *on* them:
+
+* `InterfaceMesh::snapshot_discontinuous_data()`, called at the top of `clear_before_adapt`, samples
+  each element on a 5-per-direction lattice in its own local coordinates and stores the Eulerian
+  position and the DL/D0 values **at every time level**. Points outside a simplex are dropped by
+  `local_coord_is_valid`. Five rather than the nodes, because after one refinement each son must
+  still get enough points to determine a linear field by itself, and a father's nodes sit on its
+  sons' shared edges, where they arbitrate to one son and leave the others empty.
+* `restore_discontinuous_data()`, at the end of `rebuild_after_adapt`, locates the whole sample cloud
+  on the *new* interface mesh in one batch (Eulerian, so Project mode - an interface is codimension 1
+  in the space its positions live in; adaptation does not move nodes, so an old sample lies on the
+  new interface to round-off), then fits per new element: least squares on the DL basis, mean for D0.
+  A singular normal matrix - fewer points than DL modes - falls back to the constant, which for a
+  Lagrange basis is every coefficient equal to the mean.
+
+Both directions work: refinement is one old element feeding several new ones, coarsening is several
+feeding one, and least squares over whatever points land inside handles each without a special case.
+Coarsening additionally averages across the old elements, which is what `rebuild_from_sons` does for
+bulk DL/D0.
+
+Accuracy: a DL field set exactly to `x` comes back with ~1e-8 RMS error rather than machine zero,
+inherited from the local-coordinate round-off of the projection the samples are located by. For
+scale, a fit that collapsed to a constant would sit near 7e-2.
+
+`ensure_eleminfo_filled` guards both ends. Freshly generated interface elements have no `eleminfo`,
+and both the locator and `shape_at_s_DL` size an `oomph::Shape` out of it - this cost a segfault
+before the guard existed, the same failure mode `prepare_zeta_interpolation` documents.
+
+Still refused outright: **DG** spaces on an adapting interface, and facets (§4.5).
 
 ---
 
@@ -711,8 +735,15 @@ Two things worth recording from building it:
 
 *Acceptance test not yet passable:* the closed-loop remesh cannot be validated while §11 stands.
 
-**Phase 3b - discontinuous data across adaptation.** §8 - the snapshot/restore, covering interface
-DG/DL/D0 for both adaptation and remeshing.
+**Phase 3b - discontinuous data across adaptation. DONE for DL and D0.** The snapshot/restore of §8,
+in `InterfaceMesh::snapshot_discontinuous_data`/`restore_discontinuous_data`. Three tests in
+`tests/test_mesh_point_locator.py`: a D0 constant survives (this was the strict `xfail`), a DL field
+equal to `x` is reproduced across a refinement, and a D0 field carrying `partial_t(u) = 1` keeps all
+three of its time levels - the case that was silently wrong rather than merely reset.
+
+DG on an adapting interface is still refused outright, and remeshing still goes through the
+interpolators of §4 rather than this snapshot; unifying the two paths, as originally planned, was
+not needed to close the defect.
 
 **Phase 4 - automatic zeta assignment.** §4.4.
 
