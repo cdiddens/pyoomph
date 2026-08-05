@@ -130,6 +130,12 @@ namespace pyoomph
 		// unconditional timing output would be noise.
 		static bool report_interpolation_timing;
 		virtual void set_time_level_for_projection(unsigned time_level);
+		// Turn the zeta-projection residual on or off for every element of this mesh. It has to stay
+		// on across several assemblies (a Newton solve assembles more than once), so it is switched
+		// explicitly rather than consumed by the first assembly.
+		void set_zeta_projection_enabled(bool yesno);
+		// Whether prepare_zeta_interpolation() has run and left usable integration-point mappings.
+		bool has_zeta_projection_prepared() const;
 		// Prepare internal caches (e.g. KD-tree) required before interpolation calls; must be called before nodal_interpolate_*.
 		virtual void prepare_interpolation();
 		// Write each hanging node's constrained value (interpolated from its masters via the hanging scheme)

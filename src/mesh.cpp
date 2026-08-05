@@ -2566,7 +2566,10 @@ namespace pyoomph
     for (unsigned el = 0; el < nelem; el++)
     {
       BulkElementBase *curr_el = dynamic_cast<BulkElementBase *>(this->element_pt(el));
-      curr_el->enable_zeta_projection = true;
+      // Deliberately does NOT enable the projection residual. The flag no longer clears itself on
+      // first assembly, so setting it here would leave it on for good and every later ordinary
+      // solve would assemble the projection residual instead of the physics. The driver switches it
+      // on around its own solve via set_zeta_projection_enabled().
       const unsigned n_intpt = curr_el->integral_pt()->nweight();
       const unsigned dim = curr_el->dim();
       oomph::Vector<double> s(dim), zeta(dim, 0.0);
@@ -2612,6 +2615,24 @@ namespace pyoomph
         sv[d] = sloc[d];
       qwhere[i].first->coords_oldmesh[qwhere[i].second].second = sv;
     }
+  }
+
+  void Mesh::set_zeta_projection_enabled(bool yesno)
+  {
+    for (unsigned el = 0; el < this->nelement(); el++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(el));
+      if (e)
+        e->enable_zeta_projection = yesno;
+    }
+  }
+
+  bool Mesh::has_zeta_projection_prepared() const
+  {
+    if (!this->nelement())
+      return false;
+    BulkElementBase *e = dynamic_cast<BulkElementBase *>(const_cast<Mesh *>(this)->element_pt(0));
+    return e && !e->coords_oldmesh.empty();
   }
 
   // Update time level for each element.

@@ -5262,8 +5262,11 @@ namespace pyoomph
 
 		if (this->enable_zeta_projection)
 		{
+			// Deliberately NOT cleared here. It used to be, which meant the projection residual was
+			// assembled exactly once per element and every subsequent assembly of the same element -
+			// the second Newton iteration, the residual-only pass, a re-solve - silently returned to
+			// the physical equations. The projection driver clears it when it is done.
 			residuals_for_zeta_projection(residuals, jacobian, flag);
-			this->enable_zeta_projection=false;
 			return;
 		}
 
@@ -5486,8 +5489,9 @@ namespace pyoomph
 	// Fill up the vector pair to connect integration points with respective integration points of old mesh.
 	void BulkElementBase::prepare_zeta_interpolation(oomph::MeshAsGeomObject *mesh_as_geom){
 
-		// Enable projection
-		this->enable_zeta_projection=true;
+		// NOT enabled here: the flag no longer clears itself on first assembly, so latching it
+		// during preparation would leave every later ordinary solve assembling the projection
+		// residual. Mesh::set_zeta_projection_enabled() switches it around the projection solve.
 
 		// Number of integration points.
       	const unsigned n_intpt = integral_pt()->nweight();
@@ -5648,20 +5652,16 @@ namespace pyoomph
 									// Add residuals for zeta.
 									residuals[local_eqn]+=(interpolated_x_curr[i]-interpolated_x_old[i]) * psi(l, k) * W;
 								}
-							
-						}
 
-						// Get coordinate's equation number. 
-						local_eqn = this->position_local_eqn(l, k, i);
-						
-						// If it is a degree of freedom.
-						if(local_eqn >= 0){
-							
-							// Add residuals.
-							residuals[local_eqn]+=(interpolated_zeta_curr[i]-interpolated_zeta_old[i]) * psi(l, k) * W;
-						}
+						// NOTE: this block used to re-add the very same residual a second time, with
+						// the zeta form regardless of the time level, so every position residual was
+						// counted twice while the Jacobian below was counted once - a Newton step of
+						// half the right size, on top of mixing the x and zeta forms for t>0.
 
-						// Calculate the jacobian
+						// Calculate the jacobian. This has to stay INSIDE the local_eqn >= 0 test:
+						// it used to sit outside it, so on any problem whose positions are pinned -
+						// anything without a moving mesh - it wrote jacobian(-1, ...) and aborted
+						// inside the sparse assembly.
 						if (do_fill_jacobian == 1)
 						{
 							for (unsigned l2 = 0; l2 < n_node; l2++)
@@ -5680,6 +5680,7 @@ namespace pyoomph
 								}	
 							}
 						}
+						}
 					}
 				}  // End of residuals for coordinates.
 
@@ -5696,7 +5697,17 @@ namespace pyoomph
 
 				// Loop through every field.
 				for(unsigned field=0; field<field_map.size(); field++){
-					
+
+					// field indexes a nodal VALUE, but field_map is sized by
+					// ncont_interpolated_values(), which counts the fields of the element's function
+					// space and need not equal the number of values a given node carries - a vertex
+					// and a mid-side node of a mixed C2/C1 element do not carry the same set. Asking
+					// nodal_local_eqn for a value the node does not have gives an index that is not a
+					// dof of this element, and writing at it corrupted the assembly (an abort inside
+					// sparse_assemble_row_or_column_compressed).
+					if (field >= elem->node_pt(l)->nvalue())
+						continue;
+
 					// Get local equation number.
 					local_eqn = elem->nodal_local_eqn(l, field);
 
@@ -5713,8 +5724,12 @@ namespace pyoomph
 					{
 						for (unsigned l2 = 0; l2 < n_node; l2++)
 						{
-							// Loop over position dofs
-							local_unknown = elem->nodal_local_eqn(l, field);
+							// The unknown is node l2's dof, not node l's. Indexing it by l made every
+							// entry of the row land in the SAME column, summing psi(l2)*psi(l) over l2
+							// into it - so the assembled matrix was not the mass matrix at all.
+							if (field >= elem->node_pt(l2)->nvalue())
+								continue;
+							local_unknown = elem->nodal_local_eqn(l2, field);
 
 							if (local_unknown >= 0)
 							{	

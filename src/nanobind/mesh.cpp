@@ -1195,6 +1195,8 @@ void PyReg_Mesh(nb::module_ &m)
 			// fall back to the legacy node-membership reconstruction for this mesh.
 			if (auto *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self)) tm->invalidate_face_boundary_tags();
 			self->flush_element_storage();}), "Clears this mesh's list of elements without deleting them (ownership is assumed to be transferred elsewhere)")
+		.def("_set_zeta_projection_enabled",mesh_method([](pyoomph::Mesh *self, bool yesno){self->set_zeta_projection_enabled(yesno);}), nb::arg("yesno"), "Switch the zeta-projection residual on or off for every element of this mesh. Must stay on for the whole projection solve, since a Newton solve assembles more than once.")
+		.def("_has_zeta_projection_prepared",mesh_method([](pyoomph::Mesh *self){return self->has_zeta_projection_prepared();}), "Whether prepare_zeta_interpolation() has run on this mesh and left usable integration-point mappings.")
 		.def("_set_time_level_for_projection",mesh_method([](pyoomph::Mesh *self, unsigned time_level){self->set_time_level_for_projection(time_level);}), nb::arg("time_level"), "Sets the history/time level that is used as the source when projecting field values onto a new mesh")
 		.def("get_field_information",mesh_method([](pyoomph::Mesh *self)
 			 { return self->get_field_information(); }), "Returns a description of all fields (nodal, discontinuous, elemental) available on this mesh")

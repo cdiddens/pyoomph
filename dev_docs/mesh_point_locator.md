@@ -698,9 +698,40 @@ DG/DL/D0 for both adaptation and remeshing.
 
 **Phase 4 - automatic zeta assignment.** §4.4.
 
-**Phase 4b - finish the projection solve.** §7 - a real problem instead of the empty `Problem()`, the
-locator through `LocationSet`, values pulled into a per-(element, ipt) buffer, the separate projection
-linear solver, frozen sparsity off, per-space grouping with one factorisation.
+**Phase 4b - finish the projection solve. IN PROGRESS, does not work yet.**
+
+Several concrete bugs found and fixed - the code had never run, so nothing had ever exercised it:
+
+* `prepare_zeta_interpolation(new)` was passed the NEW mesh as its source, i.e. it located the new
+  mesh's integration points in itself. Must be `old`.
+* The position residual was added **twice**, once with the t==0 / t>0 distinction and again with the
+  zeta form regardless of the level - double the residual against a single Jacobian.
+* The field Jacobian indexed the unknown by `l` instead of `l2`, so every entry of a row landed in
+  the same column and the assembled matrix was not a mass matrix at all.
+* The position Jacobian sat OUTSIDE its `local_eqn >= 0` test, so on any problem with pinned
+  positions - anything without a moving mesh - it wrote `jacobian(-1, ...)`.
+* `field` indexes a nodal value but `field_map` is sized by `ncont_interpolated_values()`, which need
+  not equal a given node's `nvalue()` in a mixed-space element.
+* `enable_zeta_projection` cleared itself on first assembly, so only the first assembly of each
+  element used the projection residual and every later one silently reverted to the physics. It is
+  now switched explicitly by `Mesh::set_zeta_projection_enabled`, and correspondingly *not* latched
+  by `prepare_zeta_interpolation` - latching it there with the self-clear removed would leave every
+  later ordinary solve assembling the projection residual.
+* The history copy wrote to `self.old`, the source mesh.
+
+The driver is written (`ProjectionInternalInterpolator.interpolate`): one global solve over all
+meshes being projected rather than one per mesh - solving them one at a time would leave the others
+assembling their physical equations - looping history levels, with frozen sparsity disabled and an
+optional separate solver (`Problem._projection_lasolver`) around it.
+
+**It still aborts inside `sparse_assemble_row_or_column_compressed` and is not usable.** The
+remaining fault has not been found. Everything above is verified inert for existing users: nothing
+sets the projection flag unless the projection interpolator is explicitly selected, and the full
+regression set plus both zeta tutorials are unaffected.
+
+Still to do beyond making it run: the per-space grouping with one factorisation reused across fields
+and history levels (§7.3), and routing the location through `LocationSet` rather than the raw
+`coords_oldmesh` pointer (§3 rule 1).
 
 **Phase 5 - MPI routing.** §5. Additive if Phases 1 and 4b honour rules 1 and 2. Testing at 4 ranks
 maximum, small problems.

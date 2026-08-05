@@ -48,25 +48,81 @@ class BaseMeshToMeshInterpolator:
         raise NotImplementedError()
 
 class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
+    """Transfer by L2 projection rather than by nodal interpolation.
+
+    Instead of asking "what was the old solution at this new node", this solves
+    ``integral (u_new - u_old) * psi = 0`` over the new mesh, i.e. the new field is the L2-best
+    representation of the old one. That is conservative in a way pointwise interpolation is not,
+    which is why it is worth having even though :py:class:`InternalInterpolator` is cheaper.
+
+    The residual is **linear** in the unknowns, so each solve is one Newton step whose Jacobian is a
+    mass matrix. That matrix does not depend on the field or on the history level, which is where the
+    remaining performance work is (see dev_docs/mesh_point_locator.md phase 4b).
+    """
+
+    #: Meshes whose integration points have been mapped, filled by every instance's constructor
+    #: before any of them runs :py:meth:`interpolate`. The projection is a single global solve over
+    #: all of them - solving one mesh at a time would leave the others assembling their physical
+    #: equations, so the "projection" would be fighting the physics everywhere else.
+    _pending:list["AnySpatialMesh"]=[]
+
     def __init__(self, old: "AnySpatialMesh", new: "AnySpatialMesh"):
         super().__init__(old, new)
         self.old:AnySpatialMesh=old
         self.new:AnySpatialMesh=new
-        new.prepare_zeta_interpolation(new)
+        # The source is the OLD mesh. This used to pass `new`, i.e. it located the new mesh's
+        # integration points in itself, which is a no-op mapping.
+        old.prepare_interpolation()
+        new.prepare_zeta_interpolation(old)
+        ProjectionInternalInterpolator._pending.append(new)
 
     def interpolate(self):
-        # Get problem class here
-        problem = Problem()
-        n_history_values= 10 #self.new.node_pt(0).get_time_stepper
-        for time_index in reversed(range(n_history_values)):
-            problem.steady_newton_solve()
-            if time_index>0: # Copy the history value at the correct position
-                for n in self.old.nodes():
-                    for ni in range(n.nvalue()):
-                        n.set_value_at_t(time_index,ni,n.value(ni)) # Copy from time index 0 to time index
-                    coord=n.variable_position_pt() # Coordinate value storage:
-                    for ci in range(coord.nvalue()):
-                        coord.set_value_at_t(time_index,ci,coord.value(ci))
+        cls=ProjectionInternalInterpolator
+        meshes=[m for m in cls._pending if m._has_zeta_projection_prepared()]
+        if not meshes:
+            return   # another instance already ran the global solve
+        cls._pending=[]
+
+        problem=self.new.get_problem()
+        if problem is None:
+            raise RuntimeError("Cannot run a projection interpolation without a problem")
+
+        n_history=next(iter(meshes[0].nodes())).ntstorage()
+
+        # The projection system is a mass matrix: structurally unrelated to the physical problem, so
+        # it must not inherit the physical problem's solver configuration or its cached sparsity.
+        # See dev_docs/mesh_point_locator.md phase 4b for why each of these matters.
+        old_frozen=problem.use_frozen_sparsity
+        problem.use_frozen_sparsity=False
+        old_solver=problem._lasolver
+        proj_solver=getattr(problem,"_projection_lasolver",None)
+        if proj_solver is not None:
+            problem.set_linear_solver(proj_solver)
+        try:
+            for time_index in reversed(range(n_history)):
+                for m in meshes:
+                    m._set_time_level_for_projection(time_index)
+                    m._set_zeta_projection_enabled(True)
+                try:
+                    problem.steady_newton_solve()
+                finally:
+                    for m in meshes:
+                        m._set_zeta_projection_enabled(False)
+                if time_index>0:
+                    # The solve writes into the current values; move them to the history level they
+                    # were projected from. On the NEW mesh - the old one is the source and must not
+                    # be touched.
+                    for m in meshes:
+                        for n in m.nodes():
+                            for ni in range(n.nvalue()):
+                                n.set_value_at_t(time_index,ni,n.value(ni))
+                            coord=n.variable_position_pt()
+                            for ci in range(coord.nvalue()):
+                                coord.set_value_at_t(time_index,ci,coord.value(ci))
+        finally:
+            problem.use_frozen_sparsity=old_frozen
+            if proj_solver is not None and old_solver is not None:
+                problem.set_linear_solver(old_solver)
 
 
 class InternalInterpolator(BaseMeshToMeshInterpolator):
