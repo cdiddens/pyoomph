@@ -754,20 +754,40 @@ Three more things were needed to get a solve out of it:
   during remeshing, so the solve failed with "The problem has not been set yet" before reaching any
   linear algebra. The driver calls `_activate_solver_callback()`.
 
-**Accuracy, measured.** Transferring a linear field - exactly representable in the FE space, so any
-error is the transfer's - across a remesh:
+**One more fault, and the important one.** The integration points were located in **Lagrangian**
+space, because the query was built with `interpolated_zeta` and zeta defaults to the Lagrangian
+coordinate. On a freshly remeshed mesh those are not the positions, so the query named a point that
+was not the integration point at all. Located in physical space instead (`interpolated_x`, and
+`LocatorSpace::Eulerian`):
 
-| | worst | mean |
+| | worst integration-point mapping error | points worse than 1e-8 |
 | --- | --- | --- |
-| nodal (`InternalInterpolator`) | 9.3e-09 | 6.9e-11 |
-| projection | 3.2e-04 | 1.2e-05 |
+| via zeta (Lagrangian) | 2.3e-04 | 131 of 1862 |
+| via x (Eulerian) | 2.8e-14 | 0 of 1862 |
 
-The projection is four orders of magnitude *less* accurate pointwise, and that is expected rather
-than a defect: an L2 projection is not interpolatory, so it does not reproduce nodal values, and it
-buys conservation with pointwise accuracy. It is the right tool when the transferred quantity must
-integrate correctly and the wrong one when nodal values matter. That an exactly-representable field
-does not come back exactly does suggest the residual quadrature is not exact for the mass matrix,
-which is worth checking before relying on the conservation property.
+`prepare_zeta_interpolation` now reports that mapping error under
+`Mesh.set_report_interpolation_timing`, because it is the one number that says whether a projection
+can possibly be right: the whole scheme rests on (old element, old local coordinate) naming the same
+physical point as the integration point it came from.
+
+**Accuracy, measured.** Across a remesh, for a field the space represents exactly (linear) and one it
+cannot (a Gaussian bump):
+
+| | integral, relative change | pointwise worst |
+| --- | --- | --- |
+| nodal, linear | 1.8e-13 | 9.3e-09 |
+| **projection, linear** | **1.4e-13** | **5.0e-14** |
+| nodal, bump | 3.9e-05 | 3.1e-03 |
+| **projection, bump** | **2.6e-05** | 5.8e-03 |
+
+This is what the two methods are supposed to do. On a representable field the projection returns it
+essentially exactly. On one that is not representable it conserves the integral better than nodal
+interpolation - which is the reason to use it - while being pointwise worse, because an L2 projection
+minimises the integrated error rather than the maximum one. Conservation is not incidental here: an
+exact L2 projection conserves exactly, since constants lie in the space and Galerkin orthogonality
+then gives `integral(u_new - u_old) = 0`. That identity is also the sharpest test of the
+implementation, and it is what showed the mapping was wrong while the pointwise error alone was
+merely "large-ish".
 
 Still to do beyond making it run: the per-space grouping with one factorisation reused across fields
 and history levels (§7.3), and routing the location through `LocationSet` rather than the raw

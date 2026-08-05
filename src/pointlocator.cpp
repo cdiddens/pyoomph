@@ -1249,6 +1249,9 @@ namespace pyoomph
     }
     else
     {
+      // Keep locate_zeta's answer. It is only good to oomph's 1e-7 residual tolerance, but rejecting
+      // the element outright sends the point to the nearest-node blend, which is far worse - tried,
+      // and it cost the nodal interpolator two orders of magnitude on a linear field.
       for (unsigned d = 0; d < element_dim; d++)
         s_out[d] = s[d];
     }

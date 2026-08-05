@@ -2597,7 +2597,12 @@ namespace pyoomph
       {
         for (unsigned i = 0; i < dim; i++)
           s[i] = curr_el->integral_pt()->knot(ipt, i);
-        curr_el->interpolated_zeta(s, zeta);
+        // The PHYSICAL position of the integration point, not interpolated_zeta. zeta is the
+        // Lagrangian coordinate by default, and on a freshly remeshed mesh those need not equal the
+        // positions - so the query named a point that is not the integration point, the located
+        // (element, local coordinate) named yet another, and the projection's premise that the
+        // integrand vanishes where the field is representable failed near curved boundaries.
+        curr_el->interpolated_x(0, s, zeta);
         for (unsigned i = 0; i < dim; i++)
           qcoords.push_back(zeta[i]);
         qgroups.push_back(el);
@@ -2609,9 +2614,10 @@ namespace pyoomph
       return;
 
     LocatorSetup lsetup;
-    lsetup.space = LocatorSpace::Lagrangian; // as before: zeta_coordinate_type's default
+    lsetup.space = LocatorSpace::Eulerian; // physical positions, matching the query above
     const auto t0 = std::chrono::steady_clock::now();
     MeshPointLocator locator(oldmesh, lsetup);
+    const unsigned lsetup_dim = locator.get_space_dim();
     const auto t1 = std::chrono::steady_clock::now();
     LocationSet located = locator.locate_batch(qcoords, qwhere.size(), &qgroups);
     const auto t2 = std::chrono::steady_clock::now();
@@ -2625,6 +2631,9 @@ namespace pyoomph
 
     BulkElementBase *src = NULL;
     std::vector<double> sloc;
+    double worst_map = 0.0;
+    unsigned n_bad_map = 0;
+    std::vector<double> worst_at;
     for (unsigned i = 0; i < qwhere.size(); i++)
     {
       if (!located.resolve_local(i, src, sloc))
@@ -2634,6 +2643,38 @@ namespace pyoomph
       for (unsigned d = 0; d < sloc.size(); d++)
         sv[d] = sloc[d];
       qwhere[i].first->coords_oldmesh[qwhere[i].second].second = sv;
+
+      // The whole projection rests on (old element, old_s) naming the SAME physical point as the
+      // integration point it came from. If it does not, a field the new space can represent exactly
+      // still comes back wrong, because the integrand (u_new - u_old) no longer vanishes pointwise.
+      oomph::Vector<double> back(sv.size(), 0.0);
+      src->interpolated_x(0, sv, back);
+      double d = 0.0;
+      for (unsigned k = 0; k < back.size() && k < lsetup_dim; k++)
+      {
+        const double diff = back[k] - qcoords[(size_t)i * lsetup_dim + k];
+        d += diff * diff;
+      }
+      d = sqrt(d);
+      if (d > worst_map)
+      {
+        worst_map = d;
+        worst_at.assign(qcoords.begin() + (size_t)i * lsetup_dim, qcoords.begin() + (size_t)(i + 1) * lsetup_dim);
+      }
+      if (d > 1e-8)
+        n_bad_map++;
+    }
+    if (report_interpolation_timing)
+    {
+      std::cout << "  [locator] integration-point mapping: worst " << worst_map << ", " << n_bad_map
+                << " of " << qwhere.size() << " worse than 1e-8";
+      if (!worst_at.empty())
+      {
+        std::cout << ", worst at (";
+        for (unsigned k = 0; k < worst_at.size(); k++) std::cout << (k ? ", " : "") << worst_at[k];
+        std::cout << ") radius " << sqrt(worst_at[0]*worst_at[0] + (worst_at.size()>1?worst_at[1]*worst_at[1]:0.0));
+      }
+      std::cout << std::endl;
     }
   }
 
