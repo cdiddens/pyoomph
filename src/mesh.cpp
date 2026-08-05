@@ -3457,6 +3457,7 @@ namespace pyoomph
         }
         BulkElementBase *el = NULL;
         std::vector<double> sloc;
+        std::vector<unsigned> zeta_missed;
         for (unsigned i = 0; i < qnodes.size(); i++)
         {
           if (located.resolve_local(i, el, sloc))
@@ -3465,6 +3466,64 @@ namespace pyoomph
             for (unsigned d = 0; d < sloc.size(); d++)
               sv[d] = sloc[d];
             prelocated[qnodes[i]] = std::make_pair(el, sv);
+          }
+          else if (by_zeta)
+          {
+            zeta_missed.push_back(i);
+          }
+        }
+
+        // Nodes zeta could not place get a second chance by PROJECTION, before anything falls
+        // through to the nearest-node blend.
+        //
+        // zeta is a chart, and the old and the new mesh only agree on it where both cover the same
+        // range. At the end of a boundary - a corner where two differently named boundaries meet -
+        // the new mesh can reach a zeta the old one never had, and every node there is then
+        // unlocatable however good the locator is. That is not a defect in the chart so much as a
+        // property of charts. The geometry, on the other hand, is still there to be projected onto,
+        // and a closest point on the old interface is a far better answer than a blend of the two
+        // nearest nodes.
+        if (!zeta_missed.empty())
+        {
+          LocatorSetup psetup;
+          psetup.space = (this->interpolated_lagrangian_coordinates_at_remeshing ? LocatorSpace::Eulerian
+                                                                                 : LocatorSpace::Lagrangian);
+          std::vector<double> pcoords;
+          unsigned pdim = 0;
+          for (unsigned k : zeta_missed)
+          {
+            oomph::Vector<double> xn = qnodes[k]->position();
+            if (!pdim)
+              pdim = xn.size();
+            for (unsigned d = 0; d < pdim; d++)
+              pcoords.push_back(d < xn.size() ? xn[d] : 0.0);
+          }
+          try
+          {
+            MeshPointLocator plocator(from, psetup);
+            LocationSet plocated = plocator.locate_batch(pcoords, zeta_missed.size());
+            unsigned rescued = 0;
+            for (unsigned k = 0; k < zeta_missed.size(); k++)
+            {
+              if (!plocated.resolve_local(k, el, sloc))
+                continue;
+              oomph::Vector<double> sv(sloc.size());
+              for (unsigned d = 0; d < sloc.size(); d++)
+                sv[d] = sloc[d];
+              prelocated[qnodes[zeta_missed[k]]] = std::make_pair(el, sv);
+              rescued++;
+            }
+            if (rescued)
+            {
+              std::cout << "  " << rescued << " of " << zeta_missed.size()
+                        << " node(s) that the zeta coordinate could not place were located by "
+                        << "projecting onto the old interface instead." << std::endl;
+            }
+          }
+          catch (...)
+          {
+            // The source may not admit a projection locator at all (equal dimensions, say). Leaving
+            // these unplaced is no worse than before.
           }
         }
       }

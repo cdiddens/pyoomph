@@ -1007,3 +1007,40 @@ Two diagnostics changed with it, both because they had been actively misleading:
 Worth knowing when reading such a log: an interface transfers **by zeta only if an
 `AssignZetaCoordinates*` equation was attached to it**. With none, every interface goes by projection,
 which is usually what you want anyway (§12).
+
+---
+
+## 16. When a boundary is not the same boundary any more
+
+Diagnosed on a Leidenfrost run whose warnings named three nodes on `gas/gas_substrate` that could not
+be located, at x = 0.785398, 0.794383, 0.803367 - one C2 element, sitting where `gas_substrate` meets
+`gas_substrate_refined`.
+
+The two meshes do not agree about where that corner is:
+
+| | corner at x |
+| --- | --- |
+| old mesh | 0.8116882859733414 |
+| new mesh | 0.7853981633974483 = pi/4 |
+
+pi/4 is where the geometry puts it (`pr0 = radius*pi/4`, nondimensionalised by the same radius). The
+old mesh's corner had drifted to 0.81169 because the mesh moves and boundary nodes slide along the
+substrate; the remesher then rebuilds the boundary from the fixed geometric point. So the strip
+[0.78540, 0.81169] belonged to `gas_substrate_refined` in the old mesh and to `gas_substrate` in the
+new one. **Those nodes have no counterpart on the old `gas_substrate` at all** - not because the
+locator failed, but because that boundary did not extend there.
+
+Nothing that searches only the corresponding old interface can serve them. Two things follow.
+
+**Implemented:** a node that zeta cannot place is retried by projection onto the old interface before
+anything falls through to the nearest-node blend. zeta is a chart and only agrees where both meshes
+cover the same range, whereas the geometry is still there to be projected onto. That rescued the node
+0.0083 from the old boundary's end; the two further out, 0.0173 and 0.0263, are beyond the projection
+offset guard and still take the blend.
+
+**Not implemented:** the correct answer for the remainder is the old **bulk** mesh, which holds the
+right field values everywhere regardless of how the boundary was carved up. The obstacle is that the
+transfer loop reaches interface-only dofs through
+`dynamic_cast<InterfaceElementBase*>(srcelem)->get_interpolated_interface_field(...)`, which is a
+null dereference on a bulk element - so a bulk-sourced node needs that branch guarded and its
+interface dofs sourced some other way. Worth doing; not worth rushing.
