@@ -3554,6 +3554,33 @@ namespace pyoomph
           }
         }
 
+        // Interface-only dofs. Without this an interface node that could not be located kept
+        // whatever it was built with - zero - while its bulk fields were transferred, so the field
+        // simply vanished on that node with nothing said. Blended the same way as everything else
+        // here, which is crude, but the point of the fallback is to be crude rather than absent.
+        if (!inter_field_map.empty())
+        {
+          auto *bn = dynamic_cast<oomph::BoundaryNodeBase *>(n);
+          auto *bb1 = dynamic_cast<oomph::BoundaryNodeBase *>(bestnode);
+          auto *bb2 = dynamic_cast<oomph::BoundaryNodeBase *>(bestnode2);
+          if (bn && bb1 && bb2)
+          {
+            for (unsigned int time_ind = 0; time_ind < n->time_stepper_pt()->ntstorage(); time_ind++)
+            {
+              for (auto interfield : inter_field_map)
+              {
+                int dest_i = bn->index_of_first_value_assigned_by_face_element(interfield.first);
+                int src_i1 = bb1->index_of_first_value_assigned_by_face_element(interfield.second);
+                int src_i2 = bb2->index_of_first_value_assigned_by_face_element(interfield.second);
+                if (dest_i < 0 || src_i1 < 0 || src_i2 < 0)
+                  continue;
+                n->set_value(time_ind, dest_i,
+                             bestnode->value(time_ind, src_i1) * lambda1 + bestnode2->value(time_ind, src_i2) * lambda2);
+              }
+            }
+          }
+        }
+
         for (unsigned int time_ind = 1; time_ind < n->position_time_stepper_pt()->ntstorage(); time_ind++)
         {
           for (unsigned i = 0; i < xm.size(); i++)

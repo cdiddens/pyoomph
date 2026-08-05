@@ -798,3 +798,34 @@ nothing has to be inferred - the same zeta path transfers at **4.8e-10**.
 So: prefer projection for closed loops. Keep periodic zeta for the cases projection cannot serve -
 a near-touching interface where the closest point is on the wrong sheet, or when arclength semantics
 are wanted for their own sake.
+
+---
+
+## 13. Additional interface dofs
+
+Interface-only fields (those a `InterfaceEquations` adds on top of the bulk's, reached through
+`has_interface_dof_id` / `additional_value_index`) go through their own map, `inter_field_map`, and
+are evaluated with `get_interpolated_interface_field` rather than with the bulk field machinery. So
+they are worth checking separately from the bulk fields. Two interface fields on different spaces,
+each stamped at time level 0 and at history level 1, transferred across a remesh:
+
+| | projection | zeta |
+| --- | --- | --- |
+| C2 field, straight boundary | 2.2e-16 | 1.6e-13 |
+| C2 field, history level 1 | 1.1e-16 | 7.9e-14 |
+| C1 field, straight boundary | 8.3e-14 | 8.3e-14 |
+| C1 field, history level 1 | 4.2e-14 | 4.2e-14 |
+| C2 field, curved boundary | 1.5e-11 | 4.8e-10 |
+| **C1 field, curved boundary** | **1.4e-03** | **1.4e-03** |
+
+Multiple fields, both spaces, and the time history all transfer correctly. The last row is not a
+transfer defect, which is why it is worth spelling out: a C1 field on a *curved* interface is linear
+between vertex nodes, so it cannot represent a linear function of position along an arc at all, and
+the chord-versus-arc gap is ~h^2/8 ~ 6e-4 for this mesh. The tell is that the number is identical on
+both transfer paths and disappears entirely when the same test runs on a straight boundary.
+
+**One real gap, fixed.** `nodal_interpolate_from`'s `missing_nodes` fallback transferred bulk fields,
+position history and Lagrangian coordinates but never `inter_field_map`. An interface node that could
+not be located therefore kept the zero it was built with while its bulk fields arrived normally - the
+interface field simply vanished on that node, silently. It is now blended like everything else in
+that fallback.
