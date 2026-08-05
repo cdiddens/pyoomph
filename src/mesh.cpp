@@ -2528,6 +2528,26 @@ namespace pyoomph
   // point-location search for every quantity being transferred.
   void Mesh::prepare_zeta_interpolation(Mesh *oldmesh)
   {
+    // Both meshes' elements need their eleminfo allocated before anything reads fields off them.
+    // get_interpolated_values() sizes an oomph::Shape from eleminfo.nnode_of_space[...] and then
+    // writes the shape functions into it, so on an element whose eleminfo was never filled that is a
+    // garbage-sized buffer and the write runs off the end - which showed up only much later as
+    // "free(): invalid size" inside the Jacobian assembly. The OLD mesh is the one that matters here:
+    // it is past its own setup by the time a projection reads from it, and unlike interpolated_x(),
+    // which goes straight to the nodes, get_interpolated_values() cannot do without eleminfo.
+    auto ensure_eleminfo = [](Mesh *m) {
+      if (!m)
+        return;
+      for (unsigned ie = 0; ie < m->nelement(); ie++)
+      {
+        BulkElementBase *e = dynamic_cast<BulkElementBase *>(m->element_pt(ie));
+        if (e && !e->get_eleminfo()->alloced)
+          e->fill_element_info(true);
+      }
+    };
+    ensure_eleminfo(oldmesh);
+    ensure_eleminfo(this);
+
     // Number of elements.
     const unsigned nelem = this->nelement();
 

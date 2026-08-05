@@ -5594,6 +5594,12 @@ namespace pyoomph
 
 			// Old element pointer.
 			BulkElementBase *old_elem = coords_oldmesh[ipt].first;
+			// NULL when this integration point could not be located in the old mesh at all - a point
+			// of the new mesh lying outside it, which a remesh of a curved boundary produces. There
+			// is nothing to project from, so the point contributes nothing rather than being
+			// dereferenced.
+			if (!old_elem)
+				continue;
 			oomph::Vector<double> old_s = coords_oldmesh[ipt].second;
 
 			// Shape functions.
@@ -5682,7 +5688,9 @@ namespace pyoomph
 
 				// Get interpolated values for old mesh.
 				oomph::Vector<double> interpolated_values_old;
-				old_elem->get_interpolated_values(t, s, interpolated_values_old);
+				// old_s, not s: s is this element's local coordinate, which means nothing in the old
+				// element. The mapping from one to the other is the whole point of coords_oldmesh.
+				old_elem->get_interpolated_values(t, old_s, interpolated_values_old);
 
 				// Loop through every field.
 				for(unsigned field=0; field<field_map.size(); field++){
@@ -5702,13 +5710,14 @@ namespace pyoomph
 
 					// If it is a degree of freedom.
 					if(local_eqn >= 0){
-						
 						// Add residuals.
 						residuals[local_eqn]+=(interpolated_values_curr[field]-interpolated_values_old[field]) * psi(l) * W;
 
-					}
-
-					// Calculate the jacobian
+					// The Jacobian must be assembled INSIDE the local_eqn >= 0 test. It used to sit
+					// outside it, so for any pinned value - a Dirichlet condition, say - local_eqn is
+					// -1 and jacobian(-1, ...) wrote before the start of the elemental matrix. That
+					// is a heap overwrite, and it surfaced only later and elsewhere, as
+					// "free(): invalid size" inside sparse_assemble_row_or_column_compressed.
 					if (do_fill_jacobian == 1)
 					{
 						for (unsigned l2 = 0; l2 < n_node; l2++)
@@ -5726,6 +5735,7 @@ namespace pyoomph
 								jacobian(local_eqn, local_unknown) += psi(l2) * psi(l) * W;
 							}	
 						}
+					}
 					}
 				}
 			}

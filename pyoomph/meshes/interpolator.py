@@ -83,7 +83,17 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
             return   # another instance already ran the global solve
         cls._pending=[]
 
-        problem=self.new.get_problem()
+        # During remeshing neither mesh is guaranteed to have its problem pointer set - get_problem()
+        # raises rather than returning None - so try the equation trees as well before giving up.
+        problem=None
+        for getter in (lambda: self.old.get_problem(), lambda: self.new.get_problem(),
+                       lambda: self.old.get_eqtree().get_problem(), lambda: self.new.get_eqtree().get_problem()):
+            try:
+                problem=getter()
+            except Exception:
+                problem=None
+            if problem is not None:
+                break
         if problem is None:
             raise RuntimeError("Cannot run a projection interpolation without a problem")
 
@@ -92,6 +102,11 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
         # The projection system is a mass matrix: structurally unrelated to the physical problem, so
         # it must not inherit the physical problem's solver configuration or its cached sparsity.
         # See dev_docs/mesh_point_locator.md phase 4b for why each of these matters.
+        # The C++ solver callback holds a weakref to "the current problem", and during remeshing it
+        # is not pointing at ours - the projection solve would fail with "The problem has not been
+        # set yet" before reaching the linear algebra at all.
+        problem._activate_solver_callback()
+
         old_frozen=problem.use_frozen_sparsity
         problem.use_frozen_sparsity=False
         old_solver=problem._lasolver

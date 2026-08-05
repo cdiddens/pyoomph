@@ -732,13 +732,42 @@ that history level, put the generator's positions back. The residual therefore a
 only for t > 0. The old code projected them at t == 0 as well, and against the zeta - by default the
 Lagrangian - coordinate, which moved the new mesh off the geometry it had just been generated with.
 
-**It still aborts inside `sparse_assemble_row_or_column_compressed` and is not usable.** Six targeted
-fixes have not cleared it, which is a sign it needs a debugger rather than more inference from stack
-frames. Worth checking first: whether `residuals_for_zeta_projection` is reached with the element's
-`eleminfo` set up at all - it returns from `fill_in_generic_residual_contribution_jit` before the
-`fill_element_info()` / `ndof()` guards that the physical path runs. Everything above is verified inert for existing users: nothing
-sets the projection flag unless the projection interpolator is explicitly selected, and the full
-regression set plus both zeta tutorials are unaffected.
+**It runs.** The abort was `free(): invalid size` - heap corruption, not a bad index caught by a
+check - and it came from the field Jacobian being assembled OUTSIDE its `local_eqn >= 0` test. For
+any pinned value (a Dirichlet condition) `local_eqn` is -1 and `jacobian(-1, ...)` writes before the
+start of the elemental matrix; the damage only surfaced later, in an unrelated free inside the
+sparse assembly. The position block had exactly the same bug, fixed earlier, which is what made the
+bisection confusing: skipping the position block did not help because the field block repeated it.
+
+Finding it needed bisection rather than inspection - a switch that disabled each block in turn
+(empty residual / no positions / no fields, then within the field block: no source evaluation, no
+target evaluation, no Jacobian). Only the last one came back clean, and printing the indices at that
+write gave `eqn=-1` immediately.
+
+Three more things were needed to get a solve out of it:
+
+* the source values were read with `s`, this element's local coordinate, instead of `old_s` - the
+  mapping between the two being the entire point of `coords_oldmesh`;
+* `old_elem` is NULL for an integration point that could not be located in the old mesh at all, which
+  a remesh of a curved boundary produces, and was dereferenced;
+* the C++ solver callback holds a weakref to "the current problem" which does not point at ours
+  during remeshing, so the solve failed with "The problem has not been set yet" before reaching any
+  linear algebra. The driver calls `_activate_solver_callback()`.
+
+**Accuracy, measured.** Transferring a linear field - exactly representable in the FE space, so any
+error is the transfer's - across a remesh:
+
+| | worst | mean |
+| --- | --- | --- |
+| nodal (`InternalInterpolator`) | 9.3e-09 | 6.9e-11 |
+| projection | 3.2e-04 | 1.2e-05 |
+
+The projection is four orders of magnitude *less* accurate pointwise, and that is expected rather
+than a defect: an L2 projection is not interpolatory, so it does not reproduce nodal values, and it
+buys conservation with pointwise accuracy. It is the right tool when the transferred quantity must
+integrate correctly and the wrong one when nodal values matter. That an exactly-representable field
+does not come back exactly does suggest the residual quadrature is not exact for the mass matrix,
+which is worth checking before relying on the conservation property.
 
 Still to do beyond making it run: the per-space grouping with one factorisation reused across fields
 and history levels (§7.3), and routing the location through `LocationSet` rather than the raw
