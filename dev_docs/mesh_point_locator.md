@@ -510,10 +510,21 @@ by ~1e-8.
 
 **Still open in this phase:**
 
-* `MeshKDTree` is not yet ported onto the locator, so tracers still use it, and the static-flag reset
-  of §3.1 still exists there.
 * A distorted 3d hex is two orders of magnitude slower than every other case. If that ever matters,
   the lever is a better seed still, not a closed form - there is none.
+
+**Tracers are explicitly out of scope.** `MeshKDTree` (`mesh.cpp:6395`) stays where it is for now,
+with the static-flag reset of §3.1 still in it, and `tracers.cpp` keeps using it. Porting tracers onto
+the locator is a **separate campaign for later**, not a loose end of this one.
+
+That includes the consequence: **if refactoring here breaks the tracers, that is accepted.** Do not
+hold back a change to the locator, to `MeshKDTree`, or to the zeta statics in order to keep
+`tracers.cpp` working, and do not bolt compatibility shims onto the locator for its benefit. The
+tracer campaign will pick up whatever state it finds and fix it there. What *is* worth doing is
+leaving a note in this file when a change is known to have broken them, so that campaign starts from
+a list rather than from a bisect.
+
+Known to be affected so far: nothing yet - `MeshKDTree` is still untouched.
 * `add_interpolated_nodes_at` has no in-tree caller and `prepare_zeta_interpolation`'s only caller is
   the unfinished projection interpolator (§7), so neither is covered by the test suite. Both were
   checked directly instead: the former against the other backend point by point, including a point
@@ -550,6 +561,12 @@ Phases 1-2 and unblocks HDG remeshing); then facet-data persistence keyed by a p
 facet identity (`mesh.hpp:207` has the ingredients) if genuinely independent facet state is needed;
 then facet ownership and halo sync, which follows Phase 5.
 
+**Tracers - a separate campaign, deliberately not scheduled here.** Port `tracers.cpp` off
+`MeshKDTree` onto `MeshPointLocator`, then delete `MeshKDTree` and turn the `zeta_*` statics into
+parameters. It is listed last because nothing else depends on it and because the phases above are
+allowed to break it in passing (see phase 1). Whoever picks it up should expect to repair as well as
+port.
+
 ---
 
 ## 10. What gets deleted
@@ -558,7 +575,8 @@ At the end, and not before every call site is migrated:
 
 * the five `oomph::MeshAsGeomObject` uses of §2 and the `#include "mesh_as_geometric_object.h"` in
   `elements.hpp`;
-* `MeshKDTree` (`mesh.cpp:6395`), once tracers use the locator;
+* `MeshKDTree` (`mesh.cpp:6395`) - but only in the later tracer campaign, not here; it is its only
+  remaining user, and until then it stays as it is even if this work breaks it (see phase 1);
 * the two-nearest blend in `nodal_interpolate_from`'s `missing_nodes` pass (`mesh.cpp:3213`) and in
   `nodal_interpolate_along_boundary` (`mesh.cpp:2585`), which becomes a reported last resort rather
   than the silent default;
