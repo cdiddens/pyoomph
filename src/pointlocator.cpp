@@ -65,6 +65,20 @@ namespace pyoomph
     };
   }
 
+  double MeshPointLocator::nodal_coordinate(BulkElementBase *e, unsigned n, unsigned d) const
+  {
+    switch (setup.space)
+    {
+    case LocatorSpace::Eulerian:
+      return e->node_pt(n)->x(setup.time_index, d);
+    case LocatorSpace::Lagrangian:
+      return dynamic_cast<pyoomph::Node *>(e->node_pt(n))->xi(d);
+    case LocatorSpace::BoundaryZeta:
+    default:
+      return e->zeta_nodal(n, 0, d);
+    }
+  }
+
   MeshPointLocator::MeshPointLocator(Mesh *source_mesh, const LocatorSetup &_setup)
       : source(source_mesh), setup(_setup)
   {
@@ -83,10 +97,12 @@ namespace pyoomph
     switch (setup.space)
     {
     case LocatorSpace::Eulerian:
-      space_dim = e0->nodal_dimension();
+      space_dim = e0->node_pt(0)->ndim();
       break;
     case LocatorSpace::Lagrangian:
-      space_dim = e0->nlagrangian();
+      // The Lagrangian coordinates carried by the NODES, which on an interface mesh is the bulk
+      // nodal dimension rather than the face element's own dimension.
+      space_dim = dynamic_cast<pyoomph::Node *>(e0->node_pt(0))->nlagrangian();
       break;
     case LocatorSpace::BoundaryZeta:
       // The interface's intrinsic boundary coordinate has one component per element dimension.
@@ -165,7 +181,7 @@ namespace pyoomph
           adjacency.resize(index + 1);
           for (unsigned d = 0; d < space_dim; d++)
           {
-            coords.push_back(e->zeta_nodal(in, 0, d));
+            coords.push_back(nodal_coordinate(e, in, d));
           }
         }
         adjacency[index].push_back(e);
@@ -199,10 +215,10 @@ namespace pyoomph
       BulkElementBase *e = elements_by_index[ie];
       for (unsigned d = 0; d < space_dim; d++)
       {
-        double lo = e->zeta_nodal(0, 0, d), hi = lo;
+        double lo = nodal_coordinate(e, 0, d), hi = lo;
         for (unsigned in = 1; in < e->nnode(); in++)
         {
-          const double v = e->zeta_nodal(in, 0, d);
+          const double v = nodal_coordinate(e, in, d);
           lo = std::min(lo, v);
           hi = std::max(hi, v);
         }
@@ -276,7 +292,7 @@ namespace pyoomph
     oomph::Vector<double> s(element_dim, 0.0), s0(element_dim, 0.0);
     e->local_coordinate_of_node(0, s0);
 
-    std::vector<double> Sdiff(dd, 0.0), D(dd, 0.0);
+    std::vector<double> Sdiff(dd, 0.0), D((size_t)space_dim * element_dim, 0.0);
     std::vector<unsigned> chosen;
 
     // Greedy pivoting on the local-coordinate offsets: at each step take the node whose offset has
@@ -324,31 +340,59 @@ namespace pyoomph
     }
 
     for (unsigned d = 0; d < space_dim; d++)
-      affine_origin[(size_t)slot * space_dim + d] = e->zeta_nodal(0, 0, d);
+      affine_origin[(size_t)slot * space_dim + d] = nodal_coordinate(e, 0, d);
     for (unsigned d = 0; d < element_dim; d++)
       affine_s0[(size_t)slot * element_dim + d] = s0[d];
 
+    // D is space_dim x element_dim - square when inverting, tall when projecting.
+    D.assign((size_t)space_dim * element_dim, 0.0);
     for (unsigned k = 0; k < element_dim; k++)
     {
       e->local_coordinate_of_node(chosen[k], s);
       for (unsigned d = 0; d < element_dim; d++)
-      {
         Sdiff[d * element_dim + k] = s[d] - s0[d];
-        D[d * element_dim + k] = e->zeta_nodal(chosen[k], 0, d) - affine_origin[(size_t)slot * space_dim + d];
+      for (unsigned d = 0; d < space_dim; d++)
+        D[d * element_dim + k] = nodal_coordinate(e, chosen[k], d) - affine_origin[(size_t)slot * space_dim + d];
+    }
+
+    // Pseudo-inverse via the normal equations: (D^T D)^-1 D^T. For a square D this is exactly D^-1,
+    // so the same code covers both modes; for a tall D it is the least-squares solve, which for an
+    // affine element IS the exact closest-point projection rather than an approximation to it.
+    std::vector<double> DtD((size_t)element_dim * element_dim, 0.0);
+    for (unsigned a = 0; a < element_dim; a++)
+      for (unsigned b = 0; b < element_dim; b++)
+      {
+        double v = 0.0;
+        for (unsigned d = 0; d < space_dim; d++)
+          v += D[d * element_dim + a] * D[d * element_dim + b];
+        DtD[a * element_dim + b] = v;
       }
-    }
+    if (!small_invert(&DtD[0], element_dim))
+      return false; // degenerate, inverted, or collapsed element geometry
 
-    std::vector<double> Dinv = D;
-    if (!small_invert(&Dinv[0], element_dim))
-      return false; // degenerate or inverted element geometry
+    for (unsigned a = 0; a < element_dim; a++)
+      for (unsigned d = 0; d < space_dim; d++)
+      {
+        double v = 0.0;
+        for (unsigned b = 0; b < element_dim; b++)
+          v += DtD[a * element_dim + b] * D[d * element_dim + b];
+        affine_inverse[(size_t)slot * element_dim * space_dim + a * space_dim + d] = v;
+      }
 
+    for (unsigned d = 0; d < (size_t)space_dim * element_dim; d++)
+      affine_basis[(size_t)slot * space_dim * element_dim + d] = D[d];
     for (unsigned d = 0; d < dd; d++)
-    {
-      affine_inverse[(size_t)slot * dd + d] = Dinv[d];
       affine_sdiff[(size_t)slot * dd + d] = Sdiff[d];
-    }
     has_affine_fit[slot] = true;
     return true;
+  }
+
+  double MeshPointLocator::element_size(unsigned slot) const
+  {
+    double h = 0.0;
+    for (unsigned d = 0; d < space_dim; d++)
+      h = std::max(h, element_bbox_max[(size_t)slot * space_dim + d] - element_bbox_min[(size_t)slot * space_dim + d]);
+    return h;
   }
 
   // Is the fit exact? Every node - not just the ones spanning the basis - must sit where the affine
@@ -359,18 +403,17 @@ namespace pyoomph
   bool MeshPointLocator::is_exactly_affine(BulkElementBase *e, unsigned slot) const
   {
     const unsigned dd = element_dim * element_dim;
-    const double *Dinv = &affine_inverse[(size_t)slot * dd];
+    const double *D = &affine_basis[(size_t)slot * space_dim * element_dim];
     const double *X0 = &affine_origin[(size_t)slot * space_dim];
     const double *s0 = &affine_s0[(size_t)slot * element_dim];
     const double *Sdiff = &affine_sdiff[(size_t)slot * dd];
 
-    double scale = 0.0;
-    for (unsigned d = 0; d < space_dim; d++)
-      scale = std::max(scale, element_bbox_max[(size_t)slot * space_dim + d] - element_bbox_min[(size_t)slot * space_dim + d]);
+    const double scale = element_size(slot);
     if (scale <= 0.0)
       return false;
 
-    // Sdiff maps u to s - s0; to predict a node's position from its s we need the other direction.
+    // Sdiff maps u to s - s0; predicting a node's position from its local coordinate needs the
+    // other direction.
     std::vector<double> Sinv(Sdiff, Sdiff + dd);
     if (!small_invert(&Sinv[0], element_dim))
       return false;
@@ -383,16 +426,15 @@ namespace pyoomph
       for (unsigned k = 0; k < element_dim; k++)
         for (unsigned d = 0; d < element_dim; d++)
           u[k] += Sinv[k * element_dim + d] * (s[d] - s0[d]);
-      // Rather than re-inverting to get D, the comparison is made in u space: the u implied by the
-      // node's actual position must equal the u implied by its local coordinate.
-      double up[3] = {0.0, 0.0, 0.0};
-      for (unsigned k = 0; k < element_dim; k++)
-        for (unsigned d = 0; d < element_dim; d++)
-          up[k] += Dinv[k * element_dim + d] * (e->zeta_nodal(in, 0, d) - X0[d]);
-      for (unsigned k = 0; k < element_dim; k++)
+      // Compared in POSITION rather than in u, because for a codimension-1 element u carries no
+      // information about the component perpendicular to the element - a curved surface would look
+      // affine in u and is not.
+      for (unsigned d = 0; d < space_dim; d++)
       {
-        // u is dimensionless (a fraction of the basis edge vectors), so the tolerance is absolute.
-        if (std::abs(up[k] - u[k]) > 1e-9)
+        double predicted = X0[d];
+        for (unsigned k = 0; k < element_dim; k++)
+          predicted += D[d * element_dim + k] * u[k];
+        if (std::abs(predicted - nodal_coordinate(e, in, d)) > 1e-10 * scale)
           return false;
       }
     }
@@ -422,7 +464,7 @@ namespace pyoomph
       const double w[4] = {1.0, s[0], s[1], s[0] * s[1]};
       for (unsigned c = 0; c < 4; c++)
         for (unsigned d = 0; d < 2; d++)
-          b[c][d] += 0.25 * w[c] * e->zeta_nodal(vk, 0, d);
+          b[c][d] += 0.25 * w[c] * nodal_coordinate(e, vk, d);
     }
 
     double scale = 0.0;
@@ -439,7 +481,7 @@ namespace pyoomph
       for (unsigned d = 0; d < 2; d++)
       {
         const double predicted = b[0][d] + b[1][d] * s[0] + b[2][d] * s[1] + b[3][d] * s[0] * s[1];
-        if (std::abs(predicted - e->zeta_nodal(in, 0, d)) > 1e-10 * scale)
+        if (std::abs(predicted - nodal_coordinate(e, in, d)) > 1e-10 * scale)
           return false;
       }
     }
@@ -492,7 +534,7 @@ namespace pyoomph
         double xd = 0.0;
         for (unsigned n = 0; n < nnode; n++)
         {
-          const double zn = e->zeta_nodal(n, 0, d);
+          const double zn = nodal_coordinate(e, n, d);
           xd += psi(n) * zn;
           if (J)
             for (unsigned k = 0; k < element_dim; k++)
@@ -592,6 +634,162 @@ namespace pyoomph
     return false;
   }
 
+  void MeshPointLocator::clamp_to_reference_domain(unsigned slot, BulkElementBase *e, double *s) const
+  {
+    switch (element_ref_domain[slot])
+    {
+    case RefDomain::Simplex:
+    {
+      // Clamp to {s_i >= 0, sum s_i <= 1}. Not the exact Euclidean projection onto the simplex, but
+      // it lands inside it, which is all the iteration needs from a step limiter.
+      for (unsigned d = 0; d < element_dim; d++)
+        s[d] = std::max(0.0, s[d]);
+      double sum = 0.0;
+      for (unsigned d = 0; d < element_dim; d++)
+        sum += s[d];
+      if (sum > 1.0 && sum > 0.0)
+        for (unsigned d = 0; d < element_dim; d++)
+          s[d] /= sum;
+      break;
+    }
+    case RefDomain::Box:
+      for (unsigned d = 0; d < element_dim; d++)
+        s[d] = std::min(std::max(s[d], e->s_min()), e->s_max());
+      break;
+    case RefDomain::Prism:
+      s[2] = std::min(std::max(s[2], e->s_min()), e->s_max());
+      s[0] = std::max(0.0, s[0]);
+      s[1] = std::max(0.0, s[1]);
+      if (s[0] + s[1] > 1.0)
+      {
+        const double sum = s[0] + s[1];
+        s[0] /= sum;
+        s[1] /= sum;
+      }
+      break;
+    case RefDomain::Pyramid:
+    {
+      s[2] = std::min(std::max(s[2], e->s_min()), e->s_max());
+      const double lim = 1.0 - s[2];
+      s[0] = std::min(std::max(s[0], 0.0), std::max(lim, 0.0));
+      s[1] = std::min(std::max(s[1], 0.0), std::max(lim, 0.0));
+      break;
+    }
+    default:
+      break;
+    }
+  }
+
+  // Closest point on a codimension-1 element: minimise |x(s) - x| over s, by damped Gauss-Newton on
+  // the normal equations (J^T J) ds = J^T r. Every iterate is clamped back into the reference
+  // domain, so when the unconstrained minimiser lies outside the element the iteration settles on
+  // the closest point of its boundary instead of wandering off it - which is what makes the answer
+  // meaningful for a query beside the interface rather than on it.
+  //
+  // Returns the achieved perpendicular offset in coordinate units, so the caller can both reject a
+  // match that is too far away and rank competing elements by it.
+  double MeshPointLocator::project_local_coordinate(BulkElementBase *e, unsigned slot, const double *x, double *s) const
+  {
+    const unsigned nnode = e->nnode();
+    oomph::Shape psi(nnode);
+    oomph::DShape dpsids(nnode, element_dim);
+    oomph::Vector<double> sv(element_dim, 0.0);
+
+    std::vector<double> J((size_t)space_dim * element_dim, 0.0);
+    double r[3] = {0.0, 0.0, 0.0}, rtrial[3] = {0.0, 0.0, 0.0};
+
+    auto residual_at = [&](const double *st, double *res, bool want_jacobian) -> double {
+      for (unsigned d = 0; d < element_dim; d++)
+        sv[d] = st[d];
+      if (want_jacobian)
+      {
+        e->dshape_local(sv, psi, dpsids);
+        std::fill(J.begin(), J.end(), 0.0);
+      }
+      else
+      {
+        e->shape(sv, psi);
+      }
+      double n2 = 0.0;
+      for (unsigned d = 0; d < space_dim; d++)
+      {
+        double xd = 0.0;
+        for (unsigned n = 0; n < nnode; n++)
+        {
+          const double zn = nodal_coordinate(e, n, d);
+          xd += psi(n) * zn;
+          if (want_jacobian)
+            for (unsigned k = 0; k < element_dim; k++)
+              J[d * element_dim + k] += dpsids(n, k) * zn;
+        }
+        res[d] = x[d] - xd;
+        n2 += res[d] * res[d];
+      }
+      return std::sqrt(n2);
+    };
+
+    clamp_to_reference_domain(slot, e, s);
+    double rnorm = residual_at(s, r, true);
+
+    for (unsigned iter = 0; iter < 20; iter++)
+    {
+      // Normal equations. J^T J is element_dim x element_dim and is invertible whenever the element
+      // is not degenerate at s.
+      std::vector<double> JtJ((size_t)element_dim * element_dim, 0.0);
+      double Jtr[3] = {0.0, 0.0, 0.0};
+      for (unsigned a = 0; a < element_dim; a++)
+      {
+        for (unsigned b = 0; b < element_dim; b++)
+        {
+          double v = 0.0;
+          for (unsigned d = 0; d < space_dim; d++)
+            v += J[d * element_dim + a] * J[d * element_dim + b];
+          JtJ[a * element_dim + b] = v;
+        }
+        double g = 0.0;
+        for (unsigned d = 0; d < space_dim; d++)
+          g += J[d * element_dim + a] * r[d];
+        Jtr[a] = g;
+      }
+      if (!small_invert(&JtJ[0], element_dim))
+        break;
+
+      double step[3] = {0.0, 0.0, 0.0};
+      for (unsigned a = 0; a < element_dim; a++)
+        for (unsigned b = 0; b < element_dim; b++)
+          step[a] += JtJ[a * element_dim + b] * Jtr[b];
+
+      double stepnorm = 0.0;
+      for (unsigned a = 0; a < element_dim; a++)
+        stepnorm = std::max(stepnorm, std::abs(step[a]));
+      if (stepnorm < 1e-15)
+        break;
+
+      bool improved = false;
+      double lambda = 1.0;
+      for (unsigned ls = 0; ls < 12; ls++)
+      {
+        double trial[3] = {0.0, 0.0, 0.0};
+        for (unsigned a = 0; a < element_dim; a++)
+          trial[a] = s[a] + lambda * step[a];
+        clamp_to_reference_domain(slot, e, trial);
+        const double tn = residual_at(trial, rtrial, false);
+        if (tn < rnorm * (1.0 - 1e-12))
+        {
+          for (unsigned a = 0; a < element_dim; a++)
+            s[a] = trial[a];
+          rnorm = residual_at(s, r, true);
+          improved = true;
+          break;
+        }
+        lambda *= 0.5;
+      }
+      if (!improved)
+        break; // at the constrained minimum for this element
+    }
+    return rnorm;
+  }
+
   void MeshPointLocator::build_affine_inverses()
   {
     ZetaFlagGuard guard(setup.time_index, setup.space == LocatorSpace::Lagrangian);
@@ -601,7 +799,8 @@ namespace pyoomph
     element_geom_kind.assign(nelem, GeomKind::General);
     element_ref_domain.assign(nelem, RefDomain::Unknown);
     has_affine_fit.assign(nelem, false);
-    affine_inverse.assign((size_t)nelem * dd, 0.0);
+    affine_basis.assign((size_t)nelem * space_dim * element_dim, 0.0);
+    affine_inverse.assign((size_t)nelem * element_dim * space_dim, 0.0);
     affine_origin.assign((size_t)nelem * space_dim, 0.0);
     affine_s0.assign((size_t)nelem * element_dim, 0.0);
     affine_sdiff.assign((size_t)nelem * dd, 0.0);
@@ -609,8 +808,6 @@ namespace pyoomph
     n_affine_elements = 0;
     n_bilinear_elements = 0;
 
-    if (mode != LocatorMode::Invert)
-      return; // Project mode has its own (phase 2) path
 
     for (unsigned ie = 0; ie < nelem; ie++)
     {
@@ -648,13 +845,20 @@ namespace pyoomph
 
   bool MeshPointLocator::bbox_contains(unsigned slot, const double *x) const
   {
-    double diag = 0.0;
+    double diag = 0.0, longest = 0.0;
     for (unsigned d = 0; d < space_dim; d++)
     {
       const double w = element_bbox_max[slot * space_dim + d] - element_bbox_min[slot * space_dim + d];
       diag += w * w;
+      longest = std::max(longest, w);
     }
-    const double slack = bbox_slack * sqrt(diag);
+    double slack = bbox_slack * sqrt(diag);
+    // A codimension-1 element's box is flat in the normal direction, so a slack proportional to the
+    // box diagonal still rejects every off-surface query - which is the whole point of projecting.
+    // Give it at least the distance the offset guard is willing to accept, so this cheap test never
+    // pre-empts the real one.
+    if (mode == LocatorMode::Project)
+      slack = std::max(slack, setup.max_projection_offset_factor * longest);
     for (unsigned d = 0; d < space_dim; d++)
     {
       if (x[d] < element_bbox_min[slot * space_dim + d] - slack)
@@ -687,15 +891,61 @@ namespace pyoomph
       return false;
     if (!bbox_contains(found->second, x))
       return false;
+    const unsigned slot = found->second;
 
     if (mode == LocatorMode::Project)
     {
-      // Phase 2. Deliberately not silently degraded to Invert: on a codimension-1 source the Newton
-      // system is not square and what comes back would be meaningless rather than merely inaccurate.
-      throw_runtime_error("Closest-point projection onto a codimension-1 mesh is not implemented yet (phase 2)");
-    }
+      // Codimension-1 source: there is no chart to invert, so the match is the closest point on the
+      // element. This is what makes 2d surfaces in 3d work at all - see dev_docs/mesh_point_locator.md.
+      const unsigned dd_ = element_dim * element_dim;
+      double sc[3] = {0.0, 0.0, 0.0};
 
-    const unsigned slot = found->second;
+      if (has_affine_fit[slot])
+      {
+        // For a flat element (a straight segment, a planar triangle) the least-squares solve IS the
+        // exact closest point, not a starting guess, so the exactly-affine case needs no iteration.
+        const double *Ainv = &affine_inverse[(size_t)slot * element_dim * space_dim];
+        const double *orig = &affine_origin[(size_t)slot * space_dim];
+        const double *s0 = &affine_s0[(size_t)slot * element_dim];
+        const double *Sdiff = &affine_sdiff[(size_t)slot * dd_];
+        double u[3] = {0.0, 0.0, 0.0};
+        for (unsigned a = 0; a < element_dim; a++)
+          for (unsigned d = 0; d < space_dim; d++)
+            u[a] += Ainv[a * space_dim + d] * (x[d] - orig[d]);
+        for (unsigned d = 0; d < element_dim; d++)
+        {
+          double v = s0[d];
+          for (unsigned k = 0; k < element_dim; k++)
+            v += Sdiff[d * element_dim + k] * u[k];
+          sc[d] = v;
+        }
+      }
+      else
+      {
+        oomph::Vector<double> sn(element_dim, 0.0);
+        for (unsigned in = 0; in < e->nnode(); in++)
+        {
+          e->local_coordinate_of_node(in, sn);
+          for (unsigned d = 0; d < element_dim; d++)
+            sc[d] += sn[d] / e->nnode();
+        }
+      }
+
+      // Clamp and iterate. For an exactly affine element this converges immediately (or does
+      // nothing at all if the clamped point is already the minimum); for a curved one it is a
+      // damped, domain-constrained Gauss-Newton.
+      const double offset = project_local_coordinate(e, slot, x, sc);
+
+      const double h = element_size(slot);
+      if (h > 0.0 && offset > setup.max_projection_offset_factor * h)
+        return false; // too far off this element to be a believable match
+
+      for (unsigned d = 0; d < element_dim; d++)
+        s_out[d] = sc[d];
+      if (offset_out)
+        *offset_out = offset;
+      return true;
+    }
 
     // Straight-sided simplex: the map is affine, so the barycentric coordinates come straight out
     // of a precomputed inverse and no Newton solve happens at all. Only accepted when the point
@@ -1023,6 +1273,14 @@ namespace pyoomph
       int how = -1;
       unsigned found_on_pass = 0;
 
+      // Projection differs from inversion in a way the search has to respect: a query beside a
+      // surface is "in" several nearby elements to differing degrees, so the first acceptable
+      // candidate is not the answer - the one with the smallest perpendicular offset is. In Invert
+      // mode a hit is exact and the first one ends the search, as before.
+      const bool rank_by_offset = (mode == LocatorMode::Project);
+      double best_offset = 0.0;
+      double best_s[3] = {0.0, 0.0, 0.0};
+
       // Two passes. The first only ever runs a single Newton per candidate; only if the point is
       // not found at all does the second allow oomph's multi-start, so its cost is paid once per
       // genuinely hard query rather than once per rejected candidate.
@@ -1041,11 +1299,16 @@ namespace pyoomph
         {
           hit = previous;
           how = 0;
+          best_offset = offset;
+          for (unsigned d = 0; d < element_dim; d++) best_s[d] = s[d];
         }
-        else
+        if (!hit || rank_by_offset)
         {
           tried.push_back(previous);
-          for (unsigned in = 0; in < previous->nnode() && !hit; in++)
+          // In Project mode the scan must continue past the first acceptable element: the answer is
+          // the NEAREST element, not any element within tolerance. Stopping at the first one made an
+          // on-surface query match a neighbour whose closest point was half an element away.
+          for (unsigned in = 0; in < previous->nnode() && (!hit || rank_by_offset); in++)
           {
             pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(previous->node_pt(in));
             if (!n)
@@ -1061,17 +1324,22 @@ namespace pyoomph
               tried.push_back(cand);
               if (try_element(cand, &query[0], &s[0], &offset, allow_multistart))
               {
-                hit = cand;
-                how = 0;
-                break;
+                if (!hit || (rank_by_offset && offset < best_offset))
+                {
+                  hit = cand; how = 0; best_offset = offset;
+                  for (unsigned d = 0; d < element_dim; d++) best_s[d] = s[d];
+                }
+                if (!rank_by_offset)
+                  break;
               }
             }
           }
         }
       }
 
-      // (b) The nearest source node, and the elements around it.
-      if (!hit)
+      // (b) The nearest source node, and the elements around it. Also entered in Project mode when
+      // the walk already found something, since a closer element may not be in the walk's star.
+      if (!hit || rank_by_offset)
       {
         int ni = tree->nearest_point(query[0], space_dim > 1 ? query[1] : 0.0, space_dim > 2 ? query[2] : 0.0);
         if (ni >= 0)
@@ -1084,9 +1352,13 @@ namespace pyoomph
             tried.push_back(cand);
             if (try_element(cand, &query[0], &s[0], &offset, allow_multistart))
             {
-              hit = cand;
-              how = 1;
-              break;
+              if (!hit || (rank_by_offset && offset < best_offset))
+              {
+                hit = cand; how = 1; best_offset = offset;
+                for (unsigned d = 0; d < element_dim; d++) best_s[d] = s[d];
+              }
+              if (!rank_by_offset)
+                break;
             }
           }
         }
@@ -1112,9 +1384,13 @@ namespace pyoomph
               tried.push_back(cand);
               if (try_element(cand, &query[0], &s[0], &offset, allow_multistart))
               {
-                hit = cand;
-                how = 2;
-                break;
+                if (!hit || (rank_by_offset && offset < best_offset))
+                {
+                  hit = cand; how = 2; best_offset = offset;
+                  for (unsigned d = 0; d < element_dim; d++) best_s[d] = s[d];
+                }
+                if (!rank_by_offset)
+                  break;
               }
             }
             if (hit)
@@ -1133,8 +1409,8 @@ namespace pyoomph
         out.handles[i].slot = out.local_elements.size();
         out.local_elements.push_back(hit);
         for (unsigned d = 0; d < element_dim; d++)
-          out.local_s.push_back(s[d]);
-        out.local_offset.push_back(offset);
+          out.local_s.push_back(best_s[d]);
+        out.local_offset.push_back(best_offset);
         if (how == 0) out.n_by_walk++;
         else if (how == 1) out.n_by_nearest_node++;
         else out.n_by_widening++;
@@ -1164,6 +1440,13 @@ namespace pyoomph
         n++;
     }
     return n;
+  }
+
+  double LocationSet::offset_of(unsigned i) const
+  {
+    if (i >= npoint || !handles[i].is_located() || handles[i].owner != 0)
+      return -1.0;
+    return local_offset[handles[i].slot];
   }
 
   double LocationSet::max_projection_offset() const

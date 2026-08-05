@@ -206,6 +206,8 @@ namespace pyoomph
 
     // Largest Project offset over all located points, for diagnostics. Zero for Invert.
     double max_projection_offset() const;
+    // Perpendicular offset recorded for one query; 0 for an exact inversion, -1 if unlocated.
+    double offset_of(unsigned i) const;
 
     // Evaluate `what` at every located point. Returns a flat structure-of-arrays buffer with
     // values_per_point() entries per query, in query order; unlocated points are left at zero.
@@ -277,7 +279,13 @@ namespace pyoomph
     // Stored for EVERY element whose D is invertible, not only the exactly-affine ones: where the
     // map is not affine this is its best affine fit, which is a far better Newton starting point
     // than the element centre for a distorted element.
-    std::vector<double> affine_inverse; // D^-1, element_dim x element_dim per element, row-major
+    // D itself is stored too, not only its inverse: in Project mode the residual x - (X0 + D u) is
+    // the perpendicular offset from the element, which is both the accept/reject criterion and the
+    // way competing candidate elements are ranked.
+    std::vector<double> affine_basis;   // D, space_dim x element_dim per element, row-major
+    // In Invert mode this is D^-1; in Project mode the least-squares pseudo-inverse
+    // (D^T D)^-1 D^T, which is the same thing when D happens to be square.
+    std::vector<double> affine_inverse; // element_dim x space_dim per element, row-major
     std::vector<double> affine_origin;  // X0, space_dim per element
     std::vector<double> affine_s0;      // local coordinate of the origin node, element_dim per element
     std::vector<double> affine_sdiff;   // columns s_k - s0, element_dim x element_dim per element
@@ -293,6 +301,16 @@ namespace pyoomph
     bool is_exactly_affine(BulkElementBase *e, unsigned slot) const;
     bool build_bilinear_for(BulkElementBase *e, unsigned slot);
     bool inside_reference_domain(unsigned slot, BulkElementBase *e, const double *s) const;
+    // Move s to the nearest point of the reference domain. Needed for projection: when the
+    // unconstrained closest point lies outside the element, the true closest point is on its
+    // boundary, and clamping each step is what keeps the iteration there.
+    void clamp_to_reference_domain(unsigned slot, BulkElementBase *e, double *s) const;
+    // Damped, domain-clamped Gauss-Newton for the codimension-1 case: minimise |x(s) - x| over s.
+    // Returns the achieved perpendicular offset (NOT relative), which the caller compares against
+    // the local element size.
+    double project_local_coordinate(BulkElementBase *e, unsigned slot, const double *x, double *s) const;
+    // Representative size of one element in the coordinate space, for scaling tolerances.
+    double element_size(unsigned slot) const;
     // Newton-refines s until |x(s) - x| is at machine precision; returns the achieved relative
     // residual so a caller can tell convergence from a candidate element that simply does not contain x.
     double polish_local_coordinate(BulkElementBase *e, const double *x, double *s) const;
@@ -307,6 +325,15 @@ namespace pyoomph
     void build_affine_inverses();
 
     bool bbox_contains(unsigned element_slot, const double *x) const;
+    // Coordinate of a node in the locator's space.
+    //
+    // Deliberately NOT BulkElementBase::zeta_nodal for the position spaces. On a bulk element that
+    // function returns exactly xi or x depending on two static flags, but InterfaceElementBase
+    // overrides it to FaceElement::zeta_nodal (elements.hpp:2761), which returns the intrinsic
+    // BOUNDARY coordinate instead - fewer components than the nodal dimension, so asking it for
+    // component 2 of a face in 3d reads out of range. Reading the node directly is both correct on
+    // an interface mesh and independent of the static flags.
+    double nodal_coordinate(BulkElementBase *e, unsigned n, unsigned d) const;
 
     // Wrap a query coordinate into the principal period, for periodic spaces. No-op otherwise.
     void wrap_into_period(double *x) const;
@@ -323,6 +350,8 @@ namespace pyoomph
     Mesh *get_source_mesh() const { return source; }
     const LocatorSetup &get_setup() const { return setup; }
     LocatorMode get_mode() const { return mode; }
+    unsigned get_space_dim() const { return space_dim; }
+    unsigned get_element_dim() const { return element_dim; }
     // "812/814 affine, 2 bilinear" - how many source elements avoid Newton entirely. A low fraction
     // on a simplex or structured mesh means the straightness test is rejecting elements it should
     // not, which costs an order of magnitude per query without being otherwise visible.

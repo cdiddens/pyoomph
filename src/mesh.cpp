@@ -3681,6 +3681,55 @@ namespace pyoomph
     return res;
   }
 
+  std::vector<std::vector<double>> Mesh::locate_points(const std::vector<std::vector<double>> &coords, bool lagrangian)
+  {
+    std::vector<std::vector<double>> result;
+    if (coords.empty() || !this->nelement())
+      return result;
+
+    LocatorSetup lsetup;
+    lsetup.space = (lagrangian ? LocatorSpace::Lagrangian : LocatorSpace::Eulerian);
+    MeshPointLocator locator(this, lsetup);
+
+    const unsigned qdim = coords[0].size();
+    std::vector<double> flat;
+    flat.reserve(coords.size() * qdim);
+    for (const auto &c : coords)
+      for (unsigned i = 0; i < qdim; i++)
+        flat.push_back(i < c.size() ? c[i] : 0.0);
+
+    LocationSet located = locator.locate_batch(flat, coords.size());
+    if (report_interpolation_timing)
+    {
+      std::cout << "  [locator] " << coords.size() << " probes, "
+                << (locator.get_mode() == LocatorMode::Project ? "project" : "invert")
+                << " mode, space dim " << locator.get_space_dim() << ", element dim "
+                << locator.get_element_dim() << " (" << located.search_statistics() << ", "
+                << locator.affine_fraction() << ")" << std::endl;
+    }
+
+    BulkElementBase *el = NULL;
+    std::vector<double> sloc;
+    for (unsigned i = 0; i < coords.size(); i++)
+    {
+      std::vector<double> row;
+      if (located.resolve_local(i, el, sloc))
+      {
+        row.push_back(1.0);
+        row.push_back(located.offset_of(i));
+        for (double v : sloc)
+          row.push_back(v);
+      }
+      else
+      {
+        row.push_back(0.0);
+        row.push_back(-1.0);
+      }
+      result.push_back(row);
+    }
+    return result;
+  }
+
   // Determine and store the numeric factor by which field fname's raw (nondimensional) values must be
   // multiplied to convert to the physical scale s requested for output: computed as the field's
   // intrinsic scaling (from the generated code) divided by s, with any symbolic placeholders/global

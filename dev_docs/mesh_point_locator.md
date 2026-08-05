@@ -604,11 +604,43 @@ Known to be affected so far: nothing yet - `MeshKDTree` is still untouched.
 `test_triangle_refinement.py`, `test_mixed_mesh.py` - 264 passed, 3 xfailed; both zeta tutorials under
 `--quick-test`.
 
-**Phase 2 - closest-point projection.** §4.2, 1d and 2d, with the offset guard; primary interface
-path; two-nearest blend demoted to last resort with a warning; also the honest bulk fallback for
-genuinely-outside points. Extended with the bulk-restricted candidate rule of §4.5 so the skeleton
-case works later. *Acceptance:* 3d surface remesh with an analytic surface field, error converging
-under refinement.
+**Phase 2 - closest-point projection. Locator half done; not yet wired into interpolation.**
+
+`LocatorMode::Project` is implemented for both codimension-1 cases. A flat element needs no
+iteration at all - the least-squares solve through the pseudo-inverse `(D^T D)^-1 D^T` *is* the exact
+closest point - and a curved one runs a damped, domain-clamped Gauss-Newton on the normal equations,
+so that when the unconstrained minimiser lies outside the element the iteration settles on the
+closest point of its boundary instead of leaving it. Matches beyond
+`max_projection_offset_factor x element size` are rejected.
+
+Verified through `Mesh.locate_points`, pushing element centroids off the surface along its normal:
+
+| | on surface | +0.01 | -0.03 | +0.5 |
+| --- | --- | --- | --- | --- |
+| 2d surface in 3d (cube face) | 16/16, offset 0 | 16/16, 1.000e-02 | 16/16, 3.000e-02 | 0/16 (rejected) |
+| 1d curve in 2d (square edge) | 6/6, 5.6e-17 | 6/6, 1.000e-02 | 6/6, 3.000e-02 | 0/6 (rejected) |
+
+Three things had to change for this, all of which were latent bugs rather than new work:
+
+* **Coordinates are now read from the nodes, not through `zeta_nodal`.** On a bulk element
+  `zeta_nodal` returns exactly xi or x depending on the static flags, but `InterfaceElementBase`
+  overrides it to `FaceElement::zeta_nodal` (`elements.hpp:2761`), which returns the intrinsic
+  *boundary* coordinate - fewer components than the nodal dimension, so asking for component 2 of a
+  face in 3d reads out of range and segfaults. Reading `node_pt(n)->x(d)` / `->xi(d)` is correct on
+  both and drops the dependence on the static flags entirely.
+* **The bounding-box slack was a fraction of a degenerate box.** A codimension-1 element's box is
+  flat in the normal direction, so a slack proportional to its diagonal rejected every off-surface
+  query - exactly the queries projection exists for. In Project mode the slack is now at least the
+  distance the offset guard would accept, so the cheap test never pre-empts the real one.
+* **The candidate scan stopped at the first acceptable element.** Correct when inverting - a hit is
+  exact - but wrong when projecting, where the answer is the *nearest* element and several are
+  acceptable. An on-surface query matched a neighbour whose closest point was half an element away.
+  The scan now ranks by offset and keeps the minimum.
+
+**Still to do in this phase:** wire it into the interpolation path, so an interface with no zeta
+defined projects instead of falling into `nodal_interpolate_along_boundary`'s two-nearest blend, and
+so 2d interfaces work end to end rather than only under `locate_points`. Then the acceptance test:
+a 3d surface remesh with an analytic surface field, error converging under refinement.
 
 **Phase 3 - periodic zeta.** §4.3. *Acceptance:* closed-loop remesh with a `sin(2 theta)` surface
 field at interpolation order rather than O(1).

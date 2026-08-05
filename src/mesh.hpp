@@ -117,6 +117,13 @@ namespace pyoomph
 		// (dev_docs/mesh_point_locator.md phase 1). Set False to get the old path back for comparison;
 		// it is removed once every call site has been migrated and validated.
 		static bool use_point_locator;
+		// Locate a list of points in this mesh and report what happened, without transferring any
+		// values. Exists because the locator is otherwise only reachable through routines that do a
+		// great deal else (and, in add_interpolated_nodes_at's case, cannot be pointed at an
+		// interface mesh at all - it builds bulk nodes from element_pt(0)). Returns one row per
+		// point: {found, offset, s...}, where offset is the perpendicular distance to the element in
+		// codimension-1 (projection) mode and 0 when the map was inverted exactly.
+		std::vector<std::vector<double>> locate_points(const std::vector<std::vector<double>> &coords, bool lagrangian);
 		// Print how long the point-location phase of nodal_interpolate_from took, and how the
 		// candidate sets were arrived at. Off by default; interpolation is called often enough that
 		// unconditional timing output would be noise.
