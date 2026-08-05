@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
 from ..meshes.mesh import InterfaceMesh, AnyMesh
+from ..meshes.ordering import SortAlongAxis, check_sorting_arguments, sort_line_segments
 from .. import GlobalLagrangeMultiplier, WeakContribution, IntegralConstraint
 from ..generic import Equations,InterfaceEquations,ODEEquations
 from .generic import get_interface_field_connection_space
@@ -514,11 +515,15 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
     
     """
     required_parent_type=BaseMovingMeshEquations
-    def __init__(self,coordinate_system=cartesian,sorting=None):
+    def __init__(self,coordinate_system=cartesian,sorting:"SortAlongAxis | None"=None):
         super().__init__()
         self.coordsys=coordinate_system
         self.verbose=True
-        self.sorting=sorting
+        # Which end of each interface segment gets arclength 0. Worth setting whenever the mesh can
+        # be rebuilt underneath this equation: the segment orientation the mesh happens to deliver
+        # may flip, and the reference arclength would jump with it.
+        self.sorting:"SortAlongAxis | None"=sorting
+        check_sorting_arguments(sorting,None,whom="EnforcedInterfacialLaplaceSmoothing")
         
     def define_fields(self):
         # Get the coordinate space
@@ -571,28 +576,17 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         nodes=mesh.fill_node_index_to_node_map()
         fixed_index=mesh.has_interface_dof_id("_s_fixed_"+iname)
         dyn_index=mesh.has_interface_dof_id("_s_solved_"+iname)                
+        # Orient the segments before walking them, not while walking them: this reversal used to sit
+        # inside the "for s in seg" loop below, where rebinding seg cannot change what the loop
+        # iterates over, so the arclength was always assigned in the mesh's own node order and
+        # sorting had no effect at all.
+        segs=sort_line_segments(coords,segs,sort_along_axis=self.sorting,whom="EnforcedInterfacialLaplaceSmoothing")
         for seg in segs:
             al=0.0
             lastx=coords[0,seg[0]]
             lasty=coords[1,seg[0]]
-            
+
             for s in seg:
-                if self.sorting is not None:
-                    if self.sorting=="x+":
-                        if coords[0,seg[0]]>coords[0,seg[-1]]:
-                            seg=seg[::-1]
-                    elif self.sorting=="x-":
-                        if coords[0,seg[0]]<coords[0,seg[-1]]:
-                            seg=seg[::-1]
-                    elif self.sorting=="y+":
-                        if coords[1,seg[0]]>coords[1,seg[-1]]:
-                            seg=seg[::-1]
-                    elif self.sorting=="y-":
-                        if coords[1,seg[0]]<coords[1,seg[-1]]:
-                            seg=seg[::-1]
-                    else:
-                        raise RuntimeError("Unknown sorting option "+str(self.sorting))
-                            
                 x,y=coords[0,s],coords[1,s]
                 delta=numpy.sqrt((x-lastx)**2+(y-lasty)**2)
                 al+=delta

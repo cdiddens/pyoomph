@@ -107,7 +107,7 @@ class GmshSizeCallback:
                         for entity in entities:
                             self._registered_handlers[2][entity._id]=getattr(self,m) #type:ignore
 
-    def get_points_at_line(self,name:str,merge_connected:bool=True,sort:Literal["x", "y", "z", "rev_x", "rev_y", "rev_z"] | None=None,circle_arc_samples:int=25):
+    def get_points_at_line(self,name:str,merge_connected:bool=True,sort:Literal["x", "y", "z", "rev_x", "rev_y", "rev_z", "x+", "y+", "z+", "x-", "y-", "z-"] | None=None,circle_arc_samples:int=25):
         entities = self.gmsh._named_entities.get(name, None) #type:ignore
         if entities is None:
             raise RuntimeError("No named entity with name "+name)
@@ -177,14 +177,19 @@ class GmshSizeCallback:
                 allpts.append(current_seg)
         #exit()
         if (sort is not None) and len(allpts)>0:
+            # "x+"/"x-" is how the same direction is spelled everywhere else (pyoomph.meshes.ordering);
+            # "x"/"rev_x" is this method's original spelling and stays valid.
+            sort=cast(Literal["x", "y", "z", "rev_x", "rev_y", "rev_z"],{"x+":"x","y+":"y","z+":"z","x-":"rev_x","y-":"rev_y","z-":"rev_z"}.get(sort,sort))
             if sort in {"x","y","z","rev_x","rev_y","rev_z"}:
                 si:int={"x":0,"rev_x":0,"y":1,"rev_y":1,"z":2,"rev_z":2}[sort]
+                # Note that this sorts the points themselves, unlike the mesh-side sorting, which only
+                # orients whole segments: a line that runs backwards in this direction is reordered.
                 allpts=[pts[numpy.argsort(pts[:,si])] for pts in allpts ] #type:ignore
                 allpts=list(sorted(allpts,key=lambda pts:pts[0][si]))
                 if sort in {"rev_x","rev_y","rev_z"}:
                     allpts=[numpy.array(list(reversed(pt))) for pt in reversed(allpts)] #type:ignore
             else:
-                raise ValueError("sort must be one of x,y,z,rev_x,rev_y,rev_z")
+                raise ValueError("sort must be one of x,y,z,rev_x,rev_y,rev_z (or the equivalent x+,y+,z+,x-,y-,z-)")
 
         return allpts
 

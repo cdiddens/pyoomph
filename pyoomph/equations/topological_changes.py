@@ -33,6 +33,7 @@ from ..meshes.mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate2d,Mesh
 from ..meshes.meshdatacache import MeshDataCache, MeshDataCacheEntry
 from ..meshes.remesher import Remesher2d,RemesherBase, RemesherPointEntry
 from ..meshes.interpolator import BaseMeshToMeshInterpolator,InternalInterpolator
+from ..meshes.ordering import sort_line_segments
 from scipy.interpolate import InterpolatedUnivariateSpline,UnivariateSpline #type:ignore
 import numpy
 from ..typings import *
@@ -434,10 +435,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
         data=self._datacache.get_data(mesh)
         segments,_=data.get_interface_line_segments()        
         coords=data.get_coordinates()
-        segments=list(sorted(segments,key=lambda l:min(coords[1,l[0]],coords[1,l[-1]]))) # Sort lines by ascending y start
-        for li,seg in enumerate(segments):
-            if coords[1,seg[0]]>coords[1,seg[-1]]:
-                segments[li]=list(reversed(seg))
+        segments=sort_line_segments(coords,segments,sort_along_axis="y+",whom="check_for_coalescence") # Sort lines by ascending y start
         has_coalescence=self.check_for_coalescence(segments,coords,data,self.coalescence_overlap_factor)
         if has_coalescence:
             print("This step would invoke overlap! Rejecting")            
