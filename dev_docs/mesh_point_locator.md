@@ -59,13 +59,25 @@ the implementation - see §4.2 for why the answer is to stop needing a chart.
 
 ## 2. The five call sites are one query
 
-| site | locates | in which space |
-| --- | --- | --- |
-| `Mesh::nodal_interpolate_from(from,-1)` (`mesh.cpp:3068`) | every non-boundary node of the new mesh | Eulerian x (or Lagrangian xi) |
-| the same, `boundary_index >= 0` | interface nodes | boundary zeta |
-| `Mesh::prepare_zeta_interpolation` (`mesh.cpp:2512`) | every **integration point** of every new element | Eulerian x |
-| `Mesh::get_values_at_zetas` (`mesh.cpp:1850`) | probe points for output | Eulerian x |
-| `Mesh::add_interpolated_nodes_at` (`mesh.cpp:3319`) | sampling points | Eulerian x |
+| site | locates | in which space | migrated |
+| --- | --- | --- | --- |
+| `Mesh::nodal_interpolate_from(from,-1)` | every non-boundary node of the new mesh | Lagrangian xi (see below) | yes |
+| the same, `boundary_index >= 0` | interface nodes | boundary zeta | yes |
+| the same, element-centre pass | one point per element, for DL/D0 | as above | yes |
+| `Mesh::prepare_zeta_interpolation` | every **integration point** of every new element | Lagrangian xi | yes |
+| `Mesh::add_interpolated_nodes_at` | sampling points | Lagrangian xi | yes |
+| `Mesh::get_values_at_zetas` | - | - | **not a call site** |
+
+`get_values_at_zetas` turned out to be dead: its whole body is commented out and it throws
+`"Implement"`. It is listed here only so the next reader does not go looking for it.
+
+"Lagrangian xi" rather than Eulerian x is not a typo, and it is the one subtlety in the migration.
+`zeta_coordinate_type` defaults to **0 = Lagrangian** (`elements.cpp:291`), so the bulk locate
+normally happens in Lagrangian space, moving to Eulerian only when
+`interpolated_lagrangian_coordinates_at_remeshing` is set. That works because in the default case
+`prepare_interpolation()` has just copied the old mesh's x into its xi
+(`set_lagrangian_nodal_coordinates`), so the two spaces coincide; when the Lagrangian coordinates are
+themselves interpolated they are no longer a copy and the location has to use x explicitly.
 
 Every one is *given a target point in some coordinate space, return (source element, local
 coordinate)*. They differ in exactly three ways:
@@ -430,11 +442,46 @@ at all rather than on anything here.
 Verified: both zeta tutorials (`beads_on_string`, `rayleigh_plateau`) still run under `--quick-test`,
 `tests/test_mixed_mesh.py` passes, and open boundaries are unaffected by the new guards.
 
-**Phase 1 - locator core, serial.** `src/pointlocator.{hpp,cpp}`: the API of §3 with all six
-performance items of §6. Port `MeshKDTree` onto it so tracers keep working, and fix the static-flag
-stomping of §3.1. Migrate the five call sites of §2 one at a time behind an A/B switch.
-*Acceptance:* identical results on a remeshing tutorial, plus an in-process interleaved A/B of the
-integration-point locate on a ~1e5-element 3d tet mesh.
+**Phase 1 - locator core, serial. Mostly done.**
+
+All the call sites of §2 are migrated, behind `Mesh.set_use_point_locator()`. Measured on a ~9000-node
+axisymmetric triangular remesh, interleaved A,B,A,B, with results **bit-identical** between the two
+backends (largest difference 0.000e+00):
+
+| | MeshAsGeomObject | MeshPointLocator |
+| --- | --- | --- |
+| index build | 52 50 55 57 ms | 15 17 18 18 ms |
+| location | 128 156 132 132 ms | 8.6 9.1 8.3 9.5 ms |
+
+The location speedup is ~15x and comes almost entirely from the affine simplex inversion; 4536 of
+4615 elements qualify, the 79 exceptions being the curved-boundary elements along the arc. Before
+that path existed the same benchmark read 76 ms, i.e. the k-d tree and the single-start Newton alone
+bought ~1.7x and the affine inversion the remaining ~9x.
+
+The per-point cost splits sharply by element type - self-locating a mesh's own integration points:
+
+| | affine | per point |
+| --- | --- | --- |
+| triangles | 576/576 | 0.085 us |
+| quads | 0/144 | 2.3 us |
+
+**Still open in this phase:**
+
+* Quads and hexes always take the Newton path. A *rectangular* quad has an affine map even though the
+  element is bilinear, and structured meshes are mostly rectangles, so extending the affine test to
+  cover that case is the obvious next 20x for quad meshes. It needs its own straightness test - a
+  general quadrilateral is genuinely bilinear and must keep Newton.
+* `MeshKDTree` is not yet ported onto the locator, so tracers still use it, and the static-flag reset
+  of §3.1 still exists there.
+* `add_interpolated_nodes_at` has no in-tree caller and `prepare_zeta_interpolation`'s only caller is
+  the unfinished projection interpolator (§7), so neither is covered by the test suite. Both were
+  checked directly instead: the former against the other backend point by point, including a point
+  outside the mesh; the latter by self-location, where every integration point must be found in the
+  element it came from (0 unlocated, both element types).
+
+*Verified:* `tests/test_adaptive_interface_coupling.py`, `test_curved_boundaries.py`,
+`test_triangle_refinement.py`, `test_mixed_mesh.py` - 264 passed, 3 xfailed; both zeta tutorials under
+`--quick-test`.
 
 **Phase 2 - closest-point projection.** §4.2, 1d and 2d, with the offset guard; primary interface
 path; two-nearest blend demoted to last resort with a warning; also the honest bulk fallback for

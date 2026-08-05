@@ -2514,38 +2514,90 @@ namespace pyoomph
   // point-location search for every quantity being transferred.
   void Mesh::prepare_zeta_interpolation(Mesh *oldmesh)
   {
-
-    // Mesh as a geometric object.
-    oomph::MeshAsGeomObject mesh_as_geom(oldmesh);
-
     // Number of elements.
     const unsigned nelem = this->nelement();
 
-    // Loop through all elements.
+    // Resize and initialise the per-element storage, whichever path fills it.
     for (unsigned el = 0; el < nelem; el++)
     {
-
-      // Current element
       BulkElementBase *curr_el = dynamic_cast<BulkElementBase *>(this->element_pt(el));
-
-      // Number of integration points.
-      unsigned int n_intpt = curr_el->integral_pt()->nweight();
-
-      // Dimension of element
-      const unsigned int dim = curr_el->dim();
-
-      // Resize and initialise vector pair.
+      const unsigned n_intpt = curr_el->integral_pt()->nweight();
+      const unsigned dim = curr_el->dim();
       curr_el->coords_oldmesh.resize(n_intpt);
       for (unsigned ipt = 0; ipt < n_intpt; ipt++)
       {
         curr_el->coords_oldmesh[ipt].first = NULL;
         curr_el->coords_oldmesh[ipt].second.resize(dim, 0.0);
       }
-
-      // Fill the vector pair.
-      curr_el->prepare_zeta_interpolation(&mesh_as_geom);
     }
-    
+
+    if (!use_point_locator)
+    {
+      oomph::MeshAsGeomObject mesh_as_geom(oldmesh);
+      for (unsigned el = 0; el < nelem; el++)
+      {
+        dynamic_cast<BulkElementBase *>(this->element_pt(el))->prepare_zeta_interpolation(&mesh_as_geom);
+      }
+      return;
+    }
+
+    // This is the heaviest query in the codebase - one point per integration point per element,
+    // so of the order of 1e5-1e6 for a 3d mesh at the dof ceiling - and it is what the locator's
+    // batching and per-element seeding were designed around: the points of one element are
+    // clustered, so all but the first of them resolve by walking from the previous match.
+    std::vector<double> qcoords;
+    std::vector<unsigned> qgroups;
+    std::vector<std::pair<BulkElementBase *, unsigned>> qwhere; // (element, integration point)
+
+    for (unsigned el = 0; el < nelem; el++)
+    {
+      BulkElementBase *curr_el = dynamic_cast<BulkElementBase *>(this->element_pt(el));
+      curr_el->enable_zeta_projection = true;
+      const unsigned n_intpt = curr_el->integral_pt()->nweight();
+      const unsigned dim = curr_el->dim();
+      oomph::Vector<double> s(dim), zeta(dim, 0.0);
+      for (unsigned ipt = 0; ipt < n_intpt; ipt++)
+      {
+        for (unsigned i = 0; i < dim; i++)
+          s[i] = curr_el->integral_pt()->knot(ipt, i);
+        curr_el->interpolated_zeta(s, zeta);
+        for (unsigned i = 0; i < dim; i++)
+          qcoords.push_back(zeta[i]);
+        qgroups.push_back(el);
+        qwhere.push_back(std::make_pair(curr_el, ipt));
+      }
+    }
+
+    if (qwhere.empty())
+      return;
+
+    LocatorSetup lsetup;
+    lsetup.space = LocatorSpace::Lagrangian; // as before: zeta_coordinate_type's default
+    const auto t0 = std::chrono::steady_clock::now();
+    MeshPointLocator locator(oldmesh, lsetup);
+    const auto t1 = std::chrono::steady_clock::now();
+    LocationSet located = locator.locate_batch(qcoords, qwhere.size(), &qgroups);
+    const auto t2 = std::chrono::steady_clock::now();
+    if (report_interpolation_timing)
+    {
+      std::cout << "  [locator] " << qwhere.size() << " integration points: index "
+                << std::chrono::duration<double>(t1 - t0).count() * 1000.0 << " ms, locate "
+                << std::chrono::duration<double>(t2 - t1).count() * 1000.0 << " ms ("
+                << located.search_statistics() << ", " << locator.affine_fraction() << ")" << std::endl;
+    }
+
+    BulkElementBase *src = NULL;
+    std::vector<double> sloc;
+    for (unsigned i = 0; i < qwhere.size(); i++)
+    {
+      if (!located.resolve_local(i, src, sloc))
+        continue; // stays NULL, exactly as an unlocated point did before
+      qwhere[i].first->coords_oldmesh[qwhere[i].second].first = src;
+      oomph::Vector<double> sv(sloc.size());
+      for (unsigned d = 0; d < sloc.size(); d++)
+        sv[d] = sloc[d];
+      qwhere[i].first->coords_oldmesh[qwhere[i].second].second = sv;
+    }
   }
 
   // Update time level for each element.
@@ -3531,17 +3583,60 @@ namespace pyoomph
   std::vector<pyoomph::Node*> Mesh::add_interpolated_nodes_at(const std::vector<std::vector<double> > & coords,bool all_as_boundary_nodes)
   {
     std::vector<pyoomph::Node*> res;
-    oomph::MeshAsGeomObject MaGO(this);
     pyoomph::BulkElementBase* el0=dynamic_cast<pyoomph::BulkElementBase*>(this->element_pt(0));
     pyoomph::Node * n0=dynamic_cast<pyoomph::Node*>(el0->node_pt(0));
+
+    // All the requested points are located in one batch; the index is what costs, and building it
+    // once for the whole list rather than a MeshAsGeomObject per call is the point.
+    LocatorSetup lsetup;
+    lsetup.space = LocatorSpace::Lagrangian; // matches zeta_coordinate_type's default, as before
+    std::unique_ptr<MeshPointLocator> locator;
+    std::unique_ptr<LocationSet> located;
+    std::unique_ptr<oomph::MeshAsGeomObject> MaGO;
+    const unsigned qdim = (coords.empty() ? el0->dim() : coords[0].size());
+    if (use_point_locator && !coords.empty())
+    {
+      std::vector<double> flat;
+      flat.reserve(coords.size() * qdim);
+      for (const auto &coord : coords)
+        for (unsigned i = 0; i < qdim; i++)
+          flat.push_back(i < coord.size() ? coord[i] : 0.0);
+      locator.reset(new MeshPointLocator(this, lsetup));
+      located.reset(new LocationSet(locator->locate_batch(flat, coords.size())));
+    }
+    else
+    {
+      MaGO.reset(new oomph::MeshAsGeomObject(this));
+    }
+
+    unsigned coord_index = 0;
     for ( const auto  & coord : coords)
     {
-      oomph::GeomObject *res_go = NULL;
-      oomph::Vector<double> zet(coord.size());
-      for (unsigned i=0;i<coord.size();i++) zet[i]=coord[i];
       oomph::Vector<double> s(el0->dim(), 1.0 / 3.0);
-      MaGO.locate_zeta(zet, res_go, s, false);
-      BulkElementBase *srcelem = dynamic_cast<BulkElementBase *>(res_go);
+      BulkElementBase *srcelem = NULL;
+      if (located)
+      {
+        std::vector<double> sloc;
+        if (located->resolve_local(coord_index, srcelem, sloc))
+        {
+          s.resize(sloc.size());
+          for (unsigned d = 0; d < sloc.size(); d++)
+            s[d] = sloc[d];
+        }
+        else
+        {
+          srcelem = NULL;
+        }
+      }
+      else
+      {
+        oomph::GeomObject *res_go = NULL;
+        oomph::Vector<double> zet(coord.size());
+        for (unsigned i=0;i<coord.size();i++) zet[i]=coord[i];
+        MaGO->locate_zeta(zet, res_go, s, false);
+        srcelem = dynamic_cast<BulkElementBase *>(res_go);
+      }
+      coord_index++;
 
       pyoomph::Node *newnode;
       if (all_as_boundary_nodes)
