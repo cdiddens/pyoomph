@@ -789,134 +789,39 @@ then gives `integral(u_new - u_old) = 0`. That identity is also the sharpest tes
 implementation, and it is what showed the mapping was wrong while the pointwise error alone was
 merely "large-ish".
 
-Still to do beyond making it run: the per-space grouping with one factorisation reused across fields
-and history levels (§7.3), and routing the location through `LocationSet` rather than the raw
-`coords_oldmesh` pointer (§3 rule 1).
+### Positions are frozen, not projected
 
-**Phase 5 - MPI routing.** §5. Additive if Phases 1 and 4b honour rules 1 and 2. Testing at 4 ranks
-maximum, small problems.
+Solving for the position dofs does not work and has been removed. The integration weights
+`W = J_eulerian(s) * w` depend on the very positions being solved for, and the Jacobian assembled
+here does not include that dependence - so the iteration is a fixed point, not a Newton method. On a
+moving mesh started 3% from the answer it diverged outright: residuals 1.7e-3, 7.1e-4, 4.7e-2,
+1.6e+47, NaN, as elements inverted. Seeding it with the converged nodal answer did not save it.
 
-**Phase 6 - facet/HDG data.** Sequenced as: trace recovery from the bulk first (§4.5c, needs only
-Phases 1-2 and unblocks HDG remeshing); then facet-data persistence keyed by a partition-independent
-facet identity (`mesh.hpp:207` has the ingredients) if genuinely independent facet state is needed;
-then facet ownership and halo sync, which follows Phase 5.
+They are instead given a unit diagonal with zero residual, which leaves them exactly where they are
+and keeps the matrix non-singular where positions are unknowns. Nothing is lost: the current
+positions are the generator's and already the answer, and the history positions - what the mesh
+velocity is built from - come from the nodal transfer at ~6e-13, better than the projection could
+manage. The driver must not copy positions into the history levels afterwards, or it overwrites those
+with the present geometry and flattens the mesh velocity to zero.
 
-**Tracers - a separate campaign, deliberately not scheduled here.** Port `tracers.cpp` off
-`MeshKDTree` onto `MeshPointLocator`, then delete `MeshKDTree` and turn the `zeta_*` statics into
-parameters. It is listed last because nothing else depends on it and because the phases above are
-allowed to break it in passing (see phase 1). Whoever picks it up should expect to repair as well as
-port.
+Freezing them also makes the field system exactly linear, which is what lets one factorisation serve
+every field and every history level.
 
----
+### Cost
 
-## 10. What gets deleted
+The projection is seeded by a full nodal transfer and then solves for the fields. One factorisation
+is built and reused across all history levels; it is rebuilt only if the residual stops falling,
+which with the geometry frozen never happens.
 
-At the end, and not before every call site is migrated:
+| | remesh + transfer, 3186 dofs |
+| --- | --- |
+| nodal | 0.23 s |
+| projection, one solve per level | 0.72 s |
+| projection, one factorisation | 0.45 s |
 
-* the five `oomph::MeshAsGeomObject` uses of §2 and the `#include "mesh_as_geometric_object.h"` in
-  `elements.hpp`;
-* `MeshKDTree` (`mesh.cpp:6395`) - but only in the later tracer campaign, not here; it is its only
-  remaining user, and until then it stays as it is even if this work breaks it (see phase 1);
-* the two-nearest blend in `nodal_interpolate_from`'s `missing_nodes` pass (`mesh.cpp:3213`) and in
-  `nodal_interpolate_along_boundary` (`mesh.cpp:2585`), which becomes a reported last resort rather
-  than the silent default;
-* `BulkElementBase::zeta_time_history` / `zeta_coordinate_type` as statics (§3.1);
-* `KNNInterpolator` (`interpolator.py:159`), already dead behind `if False:`.
-
----
-
-## 11. Two closed-loop defects, both fixed
-
-Neither was caused by this work; both were found by phase 3's guard and both corrupted more than zeta.
-
-### 11.1 Remeshing a closed boundary misplaced one node
-
-After remeshing a domain whose boundary is a single closed loop, exactly one BULK element carried a
-mid-side node at the **antipode** of where it belonged - on the boundary, at the right radius, so
-nothing downstream noticed, while that element was grossly distorted.
-
-Cause: `Remesher2dBoundaryLineCollection` emitted a closed curve to gmsh as **one spline with its
-first point repeated** (`remesher.py`). Such a spline has a seam, and the element straddling it takes
-its second-order node from the average of its endpoints' curve parameters - which at the seam
-averages t~1 and t~0 to t~0.5, i.e. halfway around the loop. Fixed by emitting two open splines
-instead, which leaves no seam. Verified on a circle (worst intra-element angular step after remesh
-3.11 rad -> 0.076) and on a 12-gon of straight lines (bad element -> none), so it was never about
-curved entities.
-
-### 11.2 `get_interface_line_segments` corrupted closed loops
-
-Two bugs in `meshdatacache.py`:
-
-* On completing a loop, the walk appended `currentcurve` to `lines` and **did not reset it** - and
-  `lines` holds a reference, so the next fragment's nodes were tacked onto a curve that had already
-  been emitted. A remeshed circular boundary came back as a loop whose last entries jumped half way
-  across it, inflating any arclength computed from it by 1.6x.
-* The reverse-direction entry of `inbetween_pts` was filed under the key `(e[-1], e[1])` instead of
-  `(e[-1], e[0])`, and built from `reversed(...)`, a one-shot iterator. A backwards traversal
-  therefore fell back to the forward list and inserted intermediate nodes in the wrong order -
-  invisible with one intermediate node per element (C2), wrong for any higher-order space.
-
-Both fixed; the raw segment walk now returns loops with ratio 1.000 and no order breaks.
-`AssignZetaCoordinatesByArclength` still walks the element connectivity itself
-(`_walk_closed_loop`), because that additionally *validates* that the boundary is one single cycle.
-
-### 11.3 And one of mine, for the record
-
-The seam anchor's ray/edge intersection had its numerator's sign flipped, so every genuine crossing
-came out with u in [-1,0], was rejected as "outside the edge", and the search fell through to the
-node-quantised fallback. The seam then landed on a different node in the old and the new mesh and
-the whole parameterisation was offset by about one element - a constant 0.048 rad angular shift in
-the transferred field, uniform enough that only plotting the error against angle made it obvious.
-
----
-
-## 12. Where closed-loop zeta stands after all that
-
-| transfer across a remesh of a closed loop | worst | mean |
-| --- | --- | --- |
-| circle, projection | 2.311e-05 | 9.562e-06 |
-| circle, periodic zeta | 8.635e-03 | 5.481e-03 |
-| 12-gon, projection | 6.895e-04 | 6.737e-05 |
-| 12-gon, periodic zeta | 4.173e-03 | 2.273e-03 |
-
-Periodic zeta works - it went from O(1) (1.99, i.e. total loss) to O(h^2) - but on a closed loop it
-is **two orders of magnitude worse than projection**, and that gap is structural rather than a
-remaining bug. The seam has to be inferred from the discretised curve, and both the anchor and the
-arclength along a polyline carry O(h^2) error, whereas projection is limited only by the
-interpolation order. For comparison, on an OPEN arc - where the seam is a genuine endpoint and
-nothing has to be inferred - the same zeta path transfers at **4.8e-10**.
-
-So: prefer projection for closed loops. Keep periodic zeta for the cases projection cannot serve -
-a near-touching interface where the closest point is on the wrong sheet, or when arclength semantics
-are wanted for their own sake.
-
----
-
-## 13. Additional interface dofs
-
-Interface-only fields (those a `InterfaceEquations` adds on top of the bulk's, reached through
-`has_interface_dof_id` / `additional_value_index`) go through their own map, `inter_field_map`, and
-are evaluated with `get_interpolated_interface_field` rather than with the bulk field machinery. So
-they are worth checking separately from the bulk fields. Two interface fields on different spaces,
-each stamped at time level 0 and at history level 1, transferred across a remesh:
-
-| | projection | zeta |
-| --- | --- | --- |
-| C2 field, straight boundary | 2.2e-16 | 1.6e-13 |
-| C2 field, history level 1 | 1.1e-16 | 7.9e-14 |
-| C1 field, straight boundary | 8.3e-14 | 8.3e-14 |
-| C1 field, history level 1 | 4.2e-14 | 4.2e-14 |
-| C2 field, curved boundary | 1.5e-11 | 4.8e-10 |
-| **C1 field, curved boundary** | **1.4e-03** | **1.4e-03** |
-
-Multiple fields, both spaces, and the time history all transfer correctly. The last row is not a
-transfer defect, which is why it is worth spelling out: a C1 field on a *curved* interface is linear
-between vertex nodes, so it cannot represent a linear function of position along an arc at all, and
-the chord-versus-arc gap is ~h^2/8 ~ 6e-4 for this mesh. The tell is that the number is identical on
-both transfer paths and disappears entirely when the same test runs on a straight boundary.
-
-**One real gap, fixed.** `nodal_interpolate_from`'s `missing_nodes` fallback transferred bulk fields,
-position history and Lagrangian coordinates but never `inter_field_map`. An interface node that could
-not be located therefore kept the zero it was built with while its bulk fields arrived normally - the
-interface field simply vanished on that node, silently. It is now blended like everything else in
-that fallback.
+**Still to do:** the per-space grouping of §7.3 - one factorisation per function space rather than one
+for the whole coupled system - is not done. The coupled system is block diagonal with identical
+blocks, so a generic sparse LU pays fill-in on an `nfields x N` system instead of an `N` one; that is
+the remaining factor, and it matters at the dof ceiling rather than here. And `coords_oldmesh` still
+stores a raw `BulkElementBase*`, which is exactly what §3 rule 1 forbids, so phase 5 will have to
+route this through `LocationSet`.

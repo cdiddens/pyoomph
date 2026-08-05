@@ -5637,46 +5637,34 @@ namespace pyoomph
 				// Loop through position types.
 				for(unsigned k = 0; k < n_position_type; k++){
 
-					//======= Fill residuals for coordinates =========//
+					//======= Coordinates: FROZEN, not projected =========//
 					//
-					// Only for HISTORY levels. The current positions are the ones the mesh generator
-					// produced for the new mesh and must be left exactly as they are; it is the
-					// history positions that have to be carried over, because the mesh velocity on
-					// the new mesh is computed from them. (The old code also projected positions at
-					// t==0, and did it against the zeta - i.e. by default the Lagrangian - coordinate,
-					// which moved the new mesh off the geometry it had just been generated with.)
+					// The positions are not solved for here at all. The current ones are what the mesh
+					// generator produced and are already the answer; the history ones are what the mesh
+					// velocity is built from, and the nodal transfer that seeds this projection already
+					// delivers them to ~1e-13, which is better than this could.
 					//
-					// The unknowns available to a Newton solve are the CURRENT position dofs, so the
-					// driver solves for those and then copies the result into history level t,
-					// restoring the generator's positions afterwards.
-					if (t > 0)
+					// Projecting them was tried and does not work: the integration weights
+					// W = J_eulerian(s) * w depend on the very position dofs being solved for, and the
+					// Jacobian assembled here does not include that dependence, so the iteration is a
+					// fixed point rather than a Newton method. Started 3% away it diverged outright
+					// (1.7e-3, 7.1e-4, 4.7e-2, 1.6e+47, NaN, as elements inverted), and seeding it with
+					// the converged nodal answer did not save it either.
+					//
+					// They still need an equation, or the matrix is singular wherever positions are
+					// unknowns. A unit diagonal with a zero residual is that equation: it leaves them
+					// exactly where they are, and - the reason this matters for cost - it also keeps
+					// the geometry fixed, so the field system below is exactly linear and one
+					// factorisation serves every field and every history level.
+					if (do_fill_jacobian == 1)
 					{
 						for(unsigned i=0; i<dim; i++){
 							local_eqn = this->position_local_eqn(l, k, i);
 							if(local_eqn >= 0){
-								residuals[local_eqn]+=(interpolated_x_curr[i]-interpolated_x_old[i]) * psi(l, k) * W;
-
-								// The Jacobian has to stay INSIDE the local_eqn >= 0 test: it used to
-								// sit outside it, so on any problem whose positions are pinned -
-								// anything without a moving mesh - it wrote jacobian(-1, ...) and
-								// aborted inside the sparse assembly.
-								if (do_fill_jacobian == 1)
-								{
-									for (unsigned l2 = 0; l2 < n_node; l2++)
-									{
-										for (unsigned k2 = 0; k2 < n_position_type; k2++)
-										{
-											local_unknown = this->position_local_eqn(l2, k2, i);
-											if (local_unknown >= 0)
-											{
-												jacobian(local_eqn, local_unknown) += psi(l2, k2) * psi(l, k) * W;
-											}
-										}
-									}
-								}
+								jacobian(local_eqn, local_eqn) += 1.0;
 							}
 						}
-					}  // End of residuals for coordinates.
+					}
 				}  // End of the loop over position types: the field block below is per node only.
 
 				
