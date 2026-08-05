@@ -387,32 +387,45 @@ whose exact Jacobian is a mass matrix. That matrix:
 * is identical for all fields sharing a function space,
 * is SPD.
 
-The current driver solves once per history level (`interpolator.py`) - ten assemblies and ten
-factorisations of a matrix that never changes. That is a larger waste than the per-field question.
+**One factorisation: done.** The driver caches the factorisation across history levels and
+refactorises only when the residual stops falling fast enough, which for pinned positions is never.
+The paragraph that used to stand here said it solved once per level; that stopped being true when
+phase 4b landed.
 
-The right structure is to **group by function space** (C1, C2, C1TB, C2TB, and the position
-components), and per group assemble once, factorise once, and solve `nfields_in_group x nlevels`
-right-hand sides against that one factorisation. Splitting per space rather than solving one coupled
-system matters because the coupled system is block diagonal with identical blocks, which a generic
-sparse LU does not exploit: the fill-in and factorisation cost are those of an `nfields x N` system
-instead of an `N` one, and that grows superlinearly. The per-space matrix is also SPD, which the
-coupled system including position dofs need not be, so Cholesky or CG+AMG become available.
+**Residual-only assembly: done.** Each chord iteration assembled the full Jacobian merely to read the
+residual out of it, and the convergence check that ends every level is the majority of those. It now
+assembles the matrix only when it is about to factorise, and calls `get_residuals()` otherwise.
 
-Two riders. Restricting to one group means pinning the rest and re-running `assign_eqn_numbers()` per
-group - O(ndof) each, cheap next to a factorisation, and it invalidates the frozen sparsity cache,
-which §7.2 wants anyway. And D0/DL need no global solve at all: they are element-local, so their
-projection is a per-element mass matrix inverted in place, never touching the linear solver.
+**Grouping by function space: measured, and not worth doing.** The argument for it was that the
+coupled system is block diagonal with identical blocks and that a generic sparse LU does not exploit
+this, so cost grows superlinearly in the field count. Measured on a 12.6k-node blob remesh with 1, 2
+and 4 decoupled C2 fields:
 
-Whether the backends expose reuse of a factorisation needs checking - oomph's `LinearSolver::resolve()`
-exists but no pyoomph plumbing for it was found. Without it the fallback is one factorisation per
-group, which is still far better than one per history level.
+| fields | `splu` | assembly (before) | assembly (after) | remesh total |
+| --- | --- | --- | --- | --- |
+| 1 | 172 ms | 1312 ms x10 | | 3183 ms |
+| 2 | 367 ms | 1813 ms x10 | | 3940 ms |
+| 4 | 821 ms | 2997 ms x10 | 310 ms x1 + 1806 ms x9 | 5671 -> 4830 ms |
+
+Factorisation at 4 fields is 4.8x the single-field cost, not the blowup the argument predicts - a
+fill-reducing ordering does separate the blocks, so the premise was wrong. The 19% penalty that
+remains is 14% of the remesh, i.e. under 3% of it, while assembly was 53%. Grouping would trade that
+3% for one assembly *per group*, and needs per-group pinning plus an `assign_eqn_numbers()` rerun on
+top. Not implemented, and not planned.
+
+What is left, if this is ever revisited: the residual-only pass is still ~200 ms per call against
+~300 ms for a full Jacobian assembly, so five of the nine calls - one convergence check per level -
+are the next target. With positions pinned the system is exactly linear and that check is provably
+redundant, but it is also what caught the divergence documented in `interpolator.py`, so it stays
+until something else guards that case. D0/DL need no global solve at all: they are element-local, so
+their projection is a per-element mass matrix inverted in place.
 
 ---
 
 ## 8. Adaptation, and where DG/DL/D0 stand
 
-Spatial adaptation is the same transfer problem with more structure available, and it is currently
-covered for the bulk and not at all for interfaces.
+Spatial adaptation is the same transfer problem with more structure available. The bulk has always
+been covered; interface DL/D0 now are too, and DG on an interface still is not.
 
 **Bulk, refinement:** handled. `BulkElementBase::further_build` (`elements.cpp`) samples the
 father's DG fields at each son's nodal local coordinate and reconstructs DL from the father's value

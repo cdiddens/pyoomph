@@ -165,7 +165,16 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
             nonlocal factorisation
             previous=None
             for _ in range(self.max_chord_iterations):
-                res,J=problem.assemble_jacobian(with_residual=True)
+                # Residual only unless the matrix is actually about to be used. Every iteration used
+                # to assemble the full Jacobian just to read the residual out of it, and the
+                # convergence check that ends each level is the majority of those: measured on a
+                # 12.6k-node, 4-field remesh, assembly was 53% of the whole remesh against 14% for
+                # the single factorisation.
+                J=None
+                if factorisation is None:
+                    res,J=problem.assemble_jacobian(with_residual=True)
+                else:
+                    res=numpy.array(problem.get_residuals())
                 norm=float(numpy.max(numpy.absolute(res)))
                 if norm<self.projection_tolerance:
                     return
@@ -176,6 +185,8 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
                 # position dofs describe - and a chord iteration alone stalls, so it refactorises
                 # rather than grinding to the iteration limit.
                 if factorisation is None or (previous is not None and norm>0.5*previous):
+                    if J is None:
+                        res,J=problem.assemble_jacobian(with_residual=True)
                     factorisation=scipy.sparse.linalg.splu(J.tocsc())
                 previous=norm
                 dofs=numpy.array(problem.get_current_dofs()[0])
