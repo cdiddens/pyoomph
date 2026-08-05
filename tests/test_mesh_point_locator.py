@@ -1,0 +1,430 @@
+#  @file
+#  Mesh point location and mesh-to-mesh transfer (dev_docs/mesh_point_locator.md).
+#
+#  Guards the campaign that replaced oomph::MeshAsGeomObject with pyoomph's own MeshPointLocator and
+#  rebuilt the transfer paths on top of it. Nearly every defect that campaign found was SILENT - a
+#  wrong element matched, a field quietly zeroed, a node placed at the antipode of where it belonged -
+#  so the tests here are written to pin numbers down rather than to check that things merely run.
+#
+#  Three kinds of assertion recur, and it is worth knowing why each is used:
+#
+#   * A LINEAR field is reproduced exactly by an isoparametric FE space. Interpolating one and
+#     comparing against its analytic value therefore measures pure transfer error, with no
+#     discretisation error mixed in. This is what exposed the old path being ~1% wrong on curved
+#     elements, and the locator's Lagrangian/Eulerian mix-up in the projection.
+#   * SELF-LOCATION: every integration point of a mesh must be found in that same mesh. Anything less
+#     than "0 unlocated" is a defect, whatever the values look like.
+#   * The INTEGRAL of the field. An exact L2 projection conserves it exactly, because constants lie in
+#     the FE space and Galerkin orthogonality then gives integral(u_new - u_old) = 0. That identity is
+#     far sharper than the pointwise error and is what caught the projection solving in the wrong
+#     coordinate space.
+
+import math
+
+import pytest
+
+from pyoomph import *
+from pyoomph.expressions import *
+from pyoomph.equations.poisson import PoissonEquation
+from pyoomph.equations.generic import IntegralObservables
+from pyoomph.meshes.gmsh import GmshTemplate
+from pyoomph.meshes.remesher import Remesher2d
+from pyoomph.meshes.simplemeshes import RectangularQuadMesh, CircularMesh, CuboidBrickMesh
+from pyoomph.meshes.interpolator import InternalInterpolator, ProjectionInternalInterpolator
+from pyoomph.meshes.zeta import (AssignZetaCoordinatesByArclength,
+                                 AssignZetaCoordinatesByEulerianCoordinate)
+import pyoomph._pyoomph_core as _pyoomph
+
+
+# ----------------------------------------------------------------------------------------------
+# helpers
+# ----------------------------------------------------------------------------------------------
+
+def _linear2(x, y):
+    return 0.4 + 1.7 * x - 1.1 * y
+
+
+class _Blob(GmshTemplate):
+    """Quarter disc: two straight sides and one curved arc, so both element kinds occur."""
+
+    def __init__(self, res=0.09):
+        super().__init__()
+        self.res = res
+
+    def define_geometry(self):
+        self.default_resolution = self.res
+        self.mesh_mode = "tri"
+        p00, p10, p01 = self.point(0, 0), self.point(1, 0), self.point(0, 1)
+        self.line(p00, p10, name="bottom")
+        self.circle_arc(p10, p01, center=p00, name="interface")
+        self.line(p01, p00, name="axis")
+        self.plane_surface("bottom", "interface", "axis", name="domain")
+
+
+class _SurfField(InterfaceEquations):
+    """An interface-ONLY dof, which travels through inter_field_map rather than the bulk path."""
+
+    def __init__(self, name="c", space="C2"):
+        super().__init__()
+        self.fname, self.space = name, space
+
+    def define_fields(self):
+        self.define_scalar_field(self.fname, self.space)
+
+    def define_residuals(self):
+        u, v = var_and_test(self.fname)
+        self.add_residual(weak(partial_t(u), v))
+
+
+def _stamp_bulk(mesh, f, ndim=2):
+    for n in mesh.nodes():
+        n.set_value(0, f(*[n.x(i) for i in range(ndim)]))
+
+
+def _bulk_error(mesh, f, ndim=2):
+    return max(abs(n.value(0) - f(*[n.x(i) for i in range(ndim)])) for n in mesh.nodes())
+
+
+# ----------------------------------------------------------------------------------------------
+# 1. zeta validity guards (phase 0)
+# ----------------------------------------------------------------------------------------------
+
+class _CircleProb(Problem):
+    def __init__(self, zeta_eqs):
+        super().__init__()
+        self.zeta_eqs = zeta_eqs
+
+    def define_problem(self):
+        self.add_mesh(CircularMesh(radius=1.0))
+        eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "circumference"
+        eqs += self.zeta_eqs @ "circumference"
+        self.add_equations(eqs @ "domain")
+
+
+class _RectProb(Problem):
+    def __init__(self, zeta_eqs):
+        super().__init__()
+        self.zeta_eqs = zeta_eqs
+
+    def define_problem(self):
+        self.add_mesh(RectangularQuadMesh(N=6))
+        eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "left"
+        eqs += self.zeta_eqs @ "top"
+        self.add_equations(eqs @ "domain")
+
+
+def test_eulerian_zeta_rejects_a_fold_back():
+    # A circle parameterised by x folds back on itself: two elements claim the same zeta, so
+    # locate_zeta can invert either. Detected as a TILING failure - the element intervals cover more
+    # than they span - which is robust where "one element looks too wide" false-positives on a coarse
+    # interface.
+    with pytest.raises(RuntimeError, match="not invertible"):
+        with _CircleProb(AssignZetaCoordinatesByEulerianCoordinate("x")) as p:
+            p.quiet()
+            p.solve()
+
+
+def test_open_boundaries_still_accept_both_assigners():
+    for eqs in (AssignZetaCoordinatesByArclength(sort_along_axis="x+"),
+                AssignZetaCoordinatesByEulerianCoordinate("x")):
+        with _RectProb(eqs) as p:
+            p.quiet()
+            p.solve()   # must not raise
+
+
+def test_closed_loop_gets_a_periodic_zeta():
+    # A circle has no single-valued zeta. It is parameterised by arclength and declared periodic
+    # instead, so the seam element runs from z_last to z_first + period rather than backwards across
+    # the whole range.
+    with _CircleProb(AssignZetaCoordinatesByArclength(sort_along_axis="x+")) as p:
+        p.quiet()
+        p.solve()
+        m = p.get_mesh("domain")
+        assert m.get_boundary_zeta_period(m.get_boundary_index("circumference")) == pytest.approx(1.0)
+
+
+def test_closed_loop_zeta_is_the_angle():
+    # The seam is a CONTINUOUS geometric anchor (the loop's intersection with a ray from its
+    # centroid), not a node. A node-quantised seam differs between two discretisations by up to one
+    # element, which is exactly the failure a sign error in the ray/edge intersection produced.
+    with _CircleProb(AssignZetaCoordinatesByArclength(sort_along_axis="x+")) as p:
+        p.quiet()
+        p.solve()
+        m, im = p.get_mesh("domain"), p.get_mesh("domain/circumference")
+        bind = m.get_boundary_index("circumference")
+        for n in im.nodes():
+            theta = math.atan2(n.x(1), n.x(0)) % (2 * math.pi)
+            assert n.get_coordinates_on_boundary(bind)[0] * 2 * math.pi == pytest.approx(theta, abs=1e-9)
+
+
+# ----------------------------------------------------------------------------------------------
+# 2. element geometry classification (phase 1)
+# ----------------------------------------------------------------------------------------------
+
+def _self_locate(problem, domain="domain"):
+    """Self-location: every integration point of a mesh must be found in that same mesh."""
+    m = problem.get_mesh(domain)
+    m.prepare_interpolation()
+    m.prepare_zeta_interpolation(m)
+    return m
+
+
+class _PoissonOn(Problem):
+    def __init__(self, mesh, bc):
+        super().__init__()
+        self.m, self.bc = mesh, bc
+
+    def define_problem(self):
+        self.add_mesh(self.m)
+        self.add_equations((PoissonEquation(source=1) + DirichletBC(u=0) @ self.bc) @ "domain")
+
+
+@pytest.mark.parametrize("mesh,bc", [
+    (RectangularQuadMesh(N=6, split_in_tris="crossed"), "left"),   # triangles
+    (RectangularQuadMesh(N=6), "left"),                            # quads
+    (CuboidBrickMesh(N=3), "left"),                                # hexes
+])
+def test_self_location_finds_every_integration_point(mesh, bc, capfd):
+    _pyoomph.Mesh.set_report_interpolation_timing(True)
+    try:
+        with _PoissonOn(mesh, bc) as p:
+            p.quiet()
+            p.solve()
+            _self_locate(p)
+        out = capfd.readouterr().out
+    finally:
+        _pyoomph.Mesh.set_report_interpolation_timing(False)
+    assert "0 unlocated" in out, out
+    # A straight-sided mesh must invert exactly, with no element left to Newton: that is the whole
+    # point of the affine classification, and a regression there is invisible except as a slowdown.
+    assert " newton" not in out, out
+
+
+def test_curved_elements_are_not_classified_affine(capfd):
+    # The converse of the test above: a genuinely curved element MUST be rejected by the straightness
+    # check, or it would be inverted affinely and give a wrong answer rather than a slow one.
+    _pyoomph.Mesh.set_report_interpolation_timing(True)
+    try:
+        with _PoissonOn(CircularMesh(radius=1.0), "circumference") as p:
+            p.quiet()
+            p.solve()
+            _self_locate(p)
+        out = capfd.readouterr().out
+    finally:
+        _pyoomph.Mesh.set_report_interpolation_timing(False)
+    assert "0 unlocated" in out, out
+    assert " newton" in out, out
+
+
+# ----------------------------------------------------------------------------------------------
+# 3. location accuracy (phase 1)
+# ----------------------------------------------------------------------------------------------
+
+def test_linear_field_is_reproduced_exactly_on_a_curved_mesh():
+    # oomph's locate_zeta stops at a residual of 1e-7 (elements.cc:1654), and on curved elements that
+    # left interpolated values ~1e-2 wrong at arbitrary interior points. The locator polishes to
+    # machine precision, so a field the space represents exactly must come back exactly.
+    pts = [[r * math.cos(a), r * math.sin(a)]
+           for r in (0.15, 0.45, 0.7, 0.88) for a in (0.11 + 2 * math.pi * k / 12 for k in range(12))]
+    with _PoissonOn(CircularMesh(radius=1.0), "circumference") as p:
+        p.quiet()
+        p.solve()
+        m = p.get_mesh("domain")
+        m.prepare_interpolation()
+        _stamp_bulk(m, _linear2)
+        got = [nd.value(0) for nd in m.add_interpolated_nodes_at(pts, False)]
+    worst = max(abs(g - _linear2(*q)) for g, q in zip(got, pts))
+    assert worst < 1e-12, worst
+
+
+def test_projection_locates_points_beside_a_surface():
+    # Codimension-1: a 2d surface in 3d has no chart, so location is "nearest point on the surface".
+    # Points pushed off the surface must be found with an offset equal to how far they were pushed,
+    # and points pushed far must be rejected rather than matched to something implausible.
+    class Cube(Problem):
+        def define_problem(self):
+            self.add_mesh(CuboidBrickMesh(N=4))
+            eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "left"
+            eqs += DirichletBC(u=0) @ "top"
+            self.add_equations(eqs @ "domain")
+
+    with Cube() as p:
+        p.quiet()
+        p.solve()
+        im = p.get_mesh("domain/top")
+        im.prepare_interpolation()
+        base = [[sum(e.node_pt(i).x(d) for i in range(e.nnode())) / e.nnode() for d in range(3)]
+                for e in im.elements()]
+        normal = (0.0, 1.0, 0.0)   # the cube's "top" is the y = const face
+        for off, expect in ((0.0, 0.0), (0.01, 0.01), (-0.03, 0.03)):
+            pts = [[b[d] + off * normal[d] for d in range(3)] for b in base]
+            rows = im.locate_points(pts, True)
+            assert all(r[0] > 0.5 for r in rows), off
+            assert max(r[1] for r in rows) == pytest.approx(expect, abs=1e-9)
+        far = [[b[d] + 0.5 * normal[d] for d in range(3)] for b in base]
+        assert not any(r[0] > 0.5 for r in im.locate_points(far, True)), "the offset guard let a far point through"
+
+
+# ----------------------------------------------------------------------------------------------
+# 4. interface-owned data across ADAPTATION (phase 3b - still open)
+# ----------------------------------------------------------------------------------------------
+
+@pytest.mark.xfail(reason="dev_docs/mesh_point_locator.md phase 3b: interface elements are destroyed "
+                          "and rebuilt on every adaptation, so interface DL/D0 data is reset to zero. "
+                          "Currently only warned about.", strict=True)
+def test_interface_d0_survives_adaptation():
+    class IfaceD0(InterfaceEquations):
+        def define_fields(self):
+            self.define_scalar_field("idata", "D0")
+
+        def define_residuals(self):
+            u, v = var_and_test("idata")
+            self.add_residual(weak(u - 7, v))
+
+    class Prob(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=4))
+            eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "left"
+            eqs += IfaceD0() @ "top" + SpatialErrorEstimator(u=1)
+            self.add_equations(eqs @ "domain")
+
+    with Prob() as p:
+        p.quiet()
+        p.max_refinement_level = 2
+        p.solve()
+        p.refine_uniformly()
+        im = p.get_mesh("domain/top")
+        vals = [d.value(j)
+                for e in im.elements()
+                for d in (e.internal_data_pt(i) for i in range(e.ninternal_data()))
+                for j in range(d.nvalue())]
+    assert vals and all(v == pytest.approx(7.0) for v in vals), vals
+
+
+# ----------------------------------------------------------------------------------------------
+# 5. transfer across a remesh (phases 2, 3, 4b) - these build meshes with gmsh, so they are slow
+# ----------------------------------------------------------------------------------------------
+
+class _BlobProb(Problem):
+    def __init__(self, extra=None, res=0.09, with_zeta=None, extra_on="interface"):
+        super().__init__()
+        self.extra, self.res, self.with_zeta = extra, res, with_zeta
+        self.extra_on = extra_on
+
+    def define_problem(self):
+        m = _Blob(self.res)
+        m.remesher = Remesher2d(m)
+        self.add_mesh(m)
+        eqs = PoissonEquation(source=1)
+        eqs += IntegralObservables(u_int=var("u"))
+        if self.extra is not None:
+            eqs += self.extra @ self.extra_on
+        if self.with_zeta is not None:
+            eqs += self.with_zeta @ "interface"
+        self.add_equations(eqs @ "domain")
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("interp", [InternalInterpolator, ProjectionInternalInterpolator])
+def test_bulk_transfer_reproduces_a_linear_field(interp):
+    with _BlobProb() as p:
+        p.quiet()
+        p.initialise()
+        _stamp_bulk(p.get_mesh("domain"), _linear2)
+        p.force_remesh(interpolator=interp)
+        worst = _bulk_error(p.get_mesh("domain"), _linear2)
+    assert worst < 1e-7, worst
+
+
+@pytest.mark.slow
+def test_projection_conserves_the_integral_better_than_interpolation():
+    # The reason to prefer the projection at all. An exact L2 projection conserves exactly (constants
+    # are in the space); nodal interpolation does not. Measured on a field the space CANNOT represent,
+    # since on a representable one both are exact and the question does not arise.
+    def bump(x, y):
+        return math.exp(-30.0 * ((x - 0.45) ** 2 + (y - 0.3) ** 2))
+
+    drift = {}
+    for interp in (InternalInterpolator, ProjectionInternalInterpolator):
+        with _BlobProb() as p:
+            p.quiet()
+            p.initialise()
+            m = p.get_mesh("domain")
+            _stamp_bulk(m, bump)
+            before = float(m.evaluate_all_observables()["u_int"])
+            p.force_remesh(interpolator=interp)
+            after = float(p.get_mesh("domain").evaluate_all_observables()["u_int"])
+        drift[interp] = abs(after - before) / abs(before)
+    assert drift[ProjectionInternalInterpolator] < drift[InternalInterpolator], drift
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("space,tol", [("C2", 1e-8), ("C1", 1e-8)])
+def test_interface_only_dofs_transfer_with_their_history(space, tol):
+    # Interface dofs travel through inter_field_map, not the bulk field path, so they need checking
+    # separately - and the fallback for an unlocated node used to skip them entirely, silently
+    # zeroing the field on that node. Stamped on a STRAIGHT boundary: a C1 field cannot represent a
+    # linear function of position along an arc (chord versus arc, ~h^2/8), which is representation
+    # error and not the transfer's.
+    def hist(v):
+        return -0.5 * v + 0.25
+
+    # "bottom" is straight; see the note above about C1 on an arc.
+    with _BlobProb(extra=_SurfField("c", space), extra_on="bottom") as p:
+        p.quiet()
+        p.initialise()
+        m, im = p.get_mesh("domain"), p.get_mesh("domain/bottom")
+        ifid = m.has_interface_dof_id("c")
+        if ifid is None:
+            pytest.skip("no interface dof id for 'c'")
+        for n in im.nodes():
+            i = n.additional_value_index(ifid)
+            if i >= 0:
+                n.set_value(i, _linear2(n.x(0), n.x(1)))
+                n.set_value_at_t(1, i, hist(_linear2(n.x(0), n.x(1))))
+        p.force_remesh(interpolator=InternalInterpolator)
+        m, im = p.get_mesh("domain"), p.get_mesh("domain/bottom")
+        ifid = m.has_interface_dof_id("c")
+        now, past = [], []
+        for n in im.nodes():
+            i = n.additional_value_index(ifid)
+            if i >= 0:
+                exact = _linear2(n.x(0), n.x(1))
+                now.append(abs(n.value(i) - exact))
+                past.append(abs(n.value_at_t(1, i) - hist(exact)))
+    assert now and max(now) < tol, max(now) if now else None
+    assert past and max(past) < tol, max(past) if past else None
+
+
+@pytest.mark.slow
+def test_remeshing_a_closed_boundary_keeps_it_ordered():
+    # A closed boundary used to go to gmsh as ONE spline with its first point repeated. That spline
+    # has a seam, and the element straddling it took its mid-side node from the average of the
+    # endpoints' curve parameters - placing it HALFWAY AROUND THE LOOP, on the boundary and at the
+    # right radius, so nothing downstream noticed while that element was grossly distorted.
+    class Disc(GmshTemplate):
+        def define_geometry(self):
+            self.default_resolution = 0.25
+            self.mesh_mode = "tri"
+            self.create_circle_lines((0, 0), 1.0, line_name="rim")
+            self.plane_surface("rim", name="domain")
+
+    class Prob(Problem):
+        def define_problem(self):
+            m = Disc()
+            m.remesher = Remesher2d(m)
+            self.add_mesh(m)
+            self.add_equations((PoissonEquation(source=1) + DirichletBC(u=0) @ "rim") @ "domain")
+
+    with Prob() as p:
+        p.quiet()
+        p.solve()
+        p.force_remesh()
+        im = p.get_mesh("domain/rim")
+        worst = 0.0
+        for e in im.elements():
+            th = [math.atan2(e.node_pt(i).x(1), e.node_pt(i).x(0)) for i in range(e.nnode())]
+            for a, b in zip(th, th[1:]):
+                worst = max(worst, abs(((b - a + math.pi) % (2 * math.pi)) - math.pi))
+    # one element spans ~0.25 rad here; an antipodal node shows up as ~pi
+    assert worst < 0.5, worst
