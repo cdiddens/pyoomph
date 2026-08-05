@@ -126,7 +126,13 @@ def _loop_seam_anchor(loop:list[int],pts,direction:tuple[float,float])->tuple[in
         den=dx*ey-dy*ex
         if abs(den)<1e-300:
             continue
-        u=(dx*ay-dy*ax)/den
+        # Solving a + u*e = t*d for u gives u = (dy*ax - dx*ay) / (dx*ey - dy*ex). Getting the
+        # numerator's sign wrong here does not fail loudly: every real crossing comes out with
+        # u in [-1,0], is rejected as "outside the edge", and the search falls through to the
+        # extremal-node fallback below - which is node-quantised, so the seam then lands on a
+        # different node in the old and the new mesh and the whole parameterisation is offset by
+        # about one element.
+        u=(dy*ax-dx*ay)/den
         if u<0.0 or u>1.0:
             continue
         px,py=ax+u*ex,ay+u*ey

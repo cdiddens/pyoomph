@@ -286,6 +286,20 @@ class Remesher2dBoundaryLineCollection:
                 # TODO: Check size variations and possibliy add multiple lines
                 plst = [self.remesher.add_point_entry(c[i].x(0), c[i].x(1),0, size=sizes[i]) for i in [0, len(c) - 1]]
                 self.remesher.add_line_entry(plst, "line",self.name)
+            elif c[0] == c[-1] and len(c) >= 5:
+                # A closed curve must NOT go to gmsh as one spline with its first point repeated.
+                # Such a spline has a seam, and the element that straddles it gets its second-order
+                # mid-side node from the average of its endpoints' curve parameters - which at the
+                # seam averages t~1 and t~0 to t~0.5, placing the node HALFWAY AROUND THE LOOP.
+                # The result is one bulk element per closed boundary with a mid-side node at the
+                # antipode of where it belongs, on the boundary and at the right radius, so nothing
+                # downstream notices; it silently distorts that element and destroys any
+                # arclength-based boundary parameterisation. Emitting two open splines instead
+                # leaves no seam. See dev_docs/mesh_point_locator.md.
+                half = len(c) // 2
+                for seq in (range(0, half + 1), range(half, len(c))):
+                    plst = [self.remesher.add_point_entry(c[i].x(0), c[i].x(1), 0, size=sizes[i]) for i in seq]
+                    self.remesher.add_line_entry(plst, "spline", self.name)
             else:
                 plst = [self.remesher.add_point_entry(c[i].x(0), c[i].x(1),0, size=sizes[i]) for i in range(len(c))]
                 self.remesher.add_line_entry(plst, "spline",self.name)

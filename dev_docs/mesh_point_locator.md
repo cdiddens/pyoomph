@@ -734,34 +734,67 @@ At the end, and not before every call site is migrated:
 
 ---
 
-## 11. Open defect: remeshing a CLOSED boundary misplaces one node
+## 11. Two closed-loop defects, both fixed
 
-Not caused by anything in this document, and not confined to it - it is a property of the remeshed
-mesh, so it affects any use of that mesh, not just zeta.
+Neither was caused by this work; both were found by phase 3's guard and both corrupted more than zeta.
 
-**Symptom.** After `remesh_handler_during_continuation` on a domain whose boundary is a single closed
-loop, exactly one element of that boundary has its mid-side node placed on the FAR SIDE of the loop.
-The node still lies on the boundary (its radius is right), it is simply at the wrong place along it -
-consistent with an angle being averaged across the 2*pi seam.
+### 11.1 Remeshing a closed boundary misplaced one node
 
-**Reproduced on both curved and straight boundaries**, so it is not about curved entities:
+After remeshing a domain whose boundary is a single closed loop, exactly one BULK element carried a
+mid-side node at the **antipode** of where it belonged - on the boundary, at the right radius, so
+nothing downstream noticed, while that element was grossly distorted.
 
-| boundary | element after remesh (node coordinates, in order) |
-| --- | --- |
-| circle, `create_circle_lines` | (-0.9877, +0.1564) &nbsp; **(+0.9969, -0.0785)** &nbsp; (-1.0000, 0.0000) |
-| 12-gon of straight `line`s | (0.1351, 0.9638) &nbsp; **(-0.1092, -0.9707)** &nbsp; (0.0833, 0.9777) |
+Cause: `Remesher2dBoundaryLineCollection` emitted a closed curve to gmsh as **one spline with its
+first point repeated** (`remesher.py`). Such a spline has a seam, and the element straddling it takes
+its second-order node from the average of its endpoints' curve parameters - which at the seam
+averages t~1 and t~0 to t~0.5, i.e. halfway around the loop. Fixed by emitting two open splines
+instead, which leaves no seam. Verified on a circle (worst intra-element angular step after remesh
+3.11 rad -> 0.076) and on a 12-gon of straight lines (bad element -> none), so it was never about
+curved entities.
 
-In both the two END nodes are correctly adjacent (one element apart) and the MIDDLE node is the
-antipode of where it belongs. Checked against `element.node_pt(i).x(d)`, i.e. in the mesh itself, not
-in the `MeshDataCache` - `dev_docs`-adjacent scratch scripts `diag_mesh_vs_cache.py` /
-`diag_poly_mesh.py` in the session scratchpad show the check.
+### 11.2 `get_interface_line_segments` corrupted closed loops
 
-**Why it matters beyond zeta.** That element is grossly distorted, so its Jacobian and everything
-assembled on it are wrong. Arclength-based schemes fail loudly (the loop length comes out 1.6x too
-large); the closest-point projection of §4.2 mostly survives it, because it matches by geometry and
-the misplaced node simply receives the value belonging to where it actually sits - which is why the
-projection column of the closed-loop test still reads ~6e-4 rather than O(1).
+Two bugs in `meshdatacache.py`:
 
-**Consequence for phase 3.** The periodic zeta machinery cannot be validated end to end until this is
-fixed: every remeshed closed loop currently trips the "not geometrically ordered" guard, which is the
-correct response but leaves the acceptance test unrunnable. The guard should stay afterwards.
+* On completing a loop, the walk appended `currentcurve` to `lines` and **did not reset it** - and
+  `lines` holds a reference, so the next fragment's nodes were tacked onto a curve that had already
+  been emitted. A remeshed circular boundary came back as a loop whose last entries jumped half way
+  across it, inflating any arclength computed from it by 1.6x.
+* The reverse-direction entry of `inbetween_pts` was filed under the key `(e[-1], e[1])` instead of
+  `(e[-1], e[0])`, and built from `reversed(...)`, a one-shot iterator. A backwards traversal
+  therefore fell back to the forward list and inserted intermediate nodes in the wrong order -
+  invisible with one intermediate node per element (C2), wrong for any higher-order space.
+
+Both fixed; the raw segment walk now returns loops with ratio 1.000 and no order breaks.
+`AssignZetaCoordinatesByArclength` still walks the element connectivity itself
+(`_walk_closed_loop`), because that additionally *validates* that the boundary is one single cycle.
+
+### 11.3 And one of mine, for the record
+
+The seam anchor's ray/edge intersection had its numerator's sign flipped, so every genuine crossing
+came out with u in [-1,0], was rejected as "outside the edge", and the search fell through to the
+node-quantised fallback. The seam then landed on a different node in the old and the new mesh and
+the whole parameterisation was offset by about one element - a constant 0.048 rad angular shift in
+the transferred field, uniform enough that only plotting the error against angle made it obvious.
+
+---
+
+## 12. Where closed-loop zeta stands after all that
+
+| transfer across a remesh of a closed loop | worst | mean |
+| --- | --- | --- |
+| circle, projection | 2.311e-05 | 9.562e-06 |
+| circle, periodic zeta | 8.635e-03 | 5.481e-03 |
+| 12-gon, projection | 6.895e-04 | 6.737e-05 |
+| 12-gon, periodic zeta | 4.173e-03 | 2.273e-03 |
+
+Periodic zeta works - it went from O(1) (1.99, i.e. total loss) to O(h^2) - but on a closed loop it
+is **two orders of magnitude worse than projection**, and that gap is structural rather than a
+remaining bug. The seam has to be inferred from the discretised curve, and both the anchor and the
+arclength along a polyline carry O(h^2) error, whereas projection is limited only by the
+interpolation order. For comparison, on an OPEN arc - where the seam is a genuine endpoint and
+nothing has to be inferred - the same zeta path transfers at **4.8e-10**.
+
+So: prefer projection for closed loops. Keep periodic zeta for the cases projection cannot serve -
+a near-touching interface where the closest point is on the wrong sheet, or when arclength semantics
+are wanted for their own sake.

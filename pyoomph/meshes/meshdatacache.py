@@ -459,8 +459,15 @@ class MeshDataCacheEntry:
         for e in elms:
             elms_at_points.setdefault(e[0], []).append(e[-1])  #type:ignore
             elms_at_points.setdefault(e[-1], []).append(e[0]) #type:ignore
-            inbetween_pts[(e[0], e[-1])] = e[1:-1] #type:ignore
-            inbetween_pts[(e[-1], e[1])] = reversed(e[1:-1]) #type:ignore
+            inbetween_pts[(e[0], e[-1])] = list(e[1:-1]) #type:ignore
+            # The reverse direction, for when the walk traverses this element from its far end. Two
+            # things were wrong here: the key was (e[-1], e[1]) rather than (e[-1], e[0]), so the
+            # entry was filed under a pair that is not this element's endpoints at all, and
+            # reversed() is a one-shot iterator that yields nothing the second time it is read. The
+            # effect was that a backwards traversal fell back to the FORWARD list and inserted the
+            # intermediate nodes in the wrong order - invisible for one intermediate node per element
+            # (C2), wrong for any higher-order space.
+            inbetween_pts[(e[-1], e[0])] = list(reversed(e[1:-1])) #type:ignore
             if ninter is None:
                 ninter=len(e[1:-1])
             else:
@@ -522,6 +529,20 @@ class MeshDataCacheEntry:
                         break
                 if len(currentcurve) > 0:
                     lines.append(currentcurve)
+                    # Reset. `lines` holds a REFERENCE, so continuing to append here kept growing a
+                    # curve that had already been emitted: after a closed loop was completed, the
+                    # next fragment's nodes were tacked onto it. That is how a remeshed circular
+                    # boundary came back as a loop whose last entries jumped half way across it,
+                    # which in turn inflated any arclength computed from it by ~1.6x.
+                    currentcurve = []
+                if len(elms_at_points) > 0:
+                    for n, neighs in elms_at_points.items():
+                        if len(neighs) == 1:
+                            startnode = n
+                            break
+                    else:
+                        startnode = next(iter(elms_at_points.keys()))
+                    currentnode = startnode
         self.interface_lines_segs=lines
         self.interface_lines_segs_ninter=ninter
         return lines,ninter
