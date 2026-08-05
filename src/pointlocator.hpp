@@ -243,10 +243,20 @@ namespace pyoomph
     std::vector<double> element_bbox_min, element_bbox_max;
 
     // Precomputed affine inverse for straight-sided simplices, so their inversion is a matrix
-    // multiply giving barycentric coordinates rather than an iteration. Empty for elements that
+    // multiply giving barycentric coordinates rather than an iteration. Zero for elements that
     // genuinely need Newton (curved geometry, quads/hexes).
-    std::vector<double> affine_inverse;
+    // x(s) = X0 + D * u, where u are the barycentric coordinates relative to vertex 0 and D's
+    // columns are the edge vectors X_k - X0. Storing D^-1 turns the query into u = D^-1 (x - X0),
+    // which is both the containment test (u_k >= 0, sum u_k <= 1) and the route to the local
+    // coordinate s = s0 + Sdiff * u. Kept in terms of u rather than s because oomph's simplex local
+    // coordinates do not follow the convention one would guess - a 2d T-element puts node 0 at
+    // s=(1,0) and node 2 at the origin - and going through u makes the code independent of that.
+    std::vector<double> affine_inverse; // D^-1, element_dim x element_dim per element, row-major
+    std::vector<double> affine_origin;  // X0, space_dim per element
+    std::vector<double> affine_s0;      // local coordinate of vertex 0, element_dim per element
+    std::vector<double> affine_sdiff;   // columns s_k - s0, element_dim x element_dim per element
     std::vector<bool> element_is_affine;
+    unsigned n_affine_elements = 0;
 
     // Slack added to every element bounding box before it is used to reject a candidate, as a
     // fraction of the box diagonal. Curved elements bulge outside the box spanned by their nodes,
@@ -273,6 +283,9 @@ namespace pyoomph
     Mesh *get_source_mesh() const { return source; }
     const LocatorSetup &get_setup() const { return setup; }
     LocatorMode get_mode() const { return mode; }
+    // "812/814 affine" - how many source elements avoid Newton entirely. A low fraction on a
+    // simplex mesh means the straightness test is rejecting elements it should not.
+    std::string affine_fraction() const;
 
     // Locate `npoint` query points given as a flat array of npoint*space_dim coordinates.
     //

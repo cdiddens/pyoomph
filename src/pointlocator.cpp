@@ -211,13 +211,155 @@ namespace pyoomph
     }
   }
 
+  // Invert an n x n matrix in place (n <= 3). Returns false if it is singular, which for an element
+  // geometry means degenerate or inverted.
+  static bool small_invert(double *m, unsigned n)
+  {
+    if (n == 1)
+    {
+      if (std::abs(m[0]) < 1e-300)
+        return false;
+      m[0] = 1.0 / m[0];
+      return true;
+    }
+    if (n == 2)
+    {
+      const double det = m[0] * m[3] - m[1] * m[2];
+      if (std::abs(det) < 1e-300)
+        return false;
+      const double a = m[0], b = m[1], c = m[2], d = m[3];
+      m[0] = d / det;
+      m[1] = -b / det;
+      m[2] = -c / det;
+      m[3] = a / det;
+      return true;
+    }
+    if (n == 3)
+    {
+      const double a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5], g = m[6], h = m[7], i = m[8];
+      const double A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+      const double det = a * A + b * B + c * C;
+      if (std::abs(det) < 1e-300)
+        return false;
+      m[0] = A / det;
+      m[1] = (c * h - b * i) / det;
+      m[2] = (b * f - c * e) / det;
+      m[3] = B / det;
+      m[4] = (a * i - c * g) / det;
+      m[5] = (c * d - a * f) / det;
+      m[6] = C / det;
+      m[7] = (b * g - a * h) / det;
+      m[8] = (a * e - b * d) / det;
+      return true;
+    }
+    return false;
+  }
+
+  // A straight-sided simplex has an affine geometric map, so inverting it is a matrix multiply
+  // giving barycentric coordinates - no iteration. That matters because oomph's locate_zeta reaches
+  // its answer by Newton, and on these predominantly triangular/tetrahedral meshes nearly every
+  // element qualifies.
+  //
+  // "Straight-sided" has to be checked, not assumed: a C2 triangle whose mid-edge nodes have been
+  // moved onto a curved boundary by the macro-element mapping is a simplex with a non-affine map,
+  // and would be inverted wrongly. Every node is therefore tested against the affine prediction,
+  // and any element that fails keeps the Newton path.
   void MeshPointLocator::build_affine_inverses()
   {
-    // TODO: straight-sided simplices invert exactly through a precomputed matrix, which removes the
-    // Newton solve from the overwhelmingly common case on these meshes. Curved geometry falls back
-    // to Newton seeded from the affine guess. Until this is filled in, element_is_affine stays all
-    // false and try_element always takes the Newton path - correct, just slower.
-    element_is_affine.assign(elements_by_index.size(), false);
+    ZetaFlagGuard guard(setup.time_index, setup.space == LocatorSpace::Lagrangian);
+
+    const unsigned nelem = elements_by_index.size();
+    const unsigned dd = element_dim * element_dim;
+    element_is_affine.assign(nelem, false);
+    affine_inverse.assign((size_t)nelem * dd, 0.0);
+    affine_origin.assign((size_t)nelem * space_dim, 0.0);
+    affine_s0.assign((size_t)nelem * element_dim, 0.0);
+    affine_sdiff.assign((size_t)nelem * dd, 0.0);
+    n_affine_elements = 0;
+
+    if (mode != LocatorMode::Invert)
+      return; // Project mode has its own (phase 2) path
+
+    std::vector<double> D(dd, 0.0), Dinv(dd, 0.0), Sdiff(dd, 0.0), Sinv(dd, 0.0);
+    oomph::Vector<double> s(element_dim, 0.0), s0(element_dim, 0.0);
+    std::vector<double> X0(space_dim, 0.0), u(element_dim, 0.0);
+
+    for (unsigned ie = 0; ie < nelem; ie++)
+    {
+      BulkElementBase *e = elements_by_index[ie];
+      if (!dynamic_cast<oomph::TElementBase *>(e))
+        continue; // quads/hexes are bi/trilinear, affine only by accident
+      if (e->nvertex_node() != element_dim + 1)
+        continue;
+
+      const unsigned v0 = e->get_node_number(e->vertex_node_pt(0));
+      e->local_coordinate_of_node(v0, s0);
+      for (unsigned d = 0; d < space_dim; d++)
+        X0[d] = e->zeta_nodal(v0, 0, d);
+
+      double scale = 0.0;
+      for (unsigned k = 1; k <= element_dim; k++)
+      {
+        const unsigned vk = e->get_node_number(e->vertex_node_pt(k));
+        e->local_coordinate_of_node(vk, s);
+        for (unsigned d = 0; d < element_dim; d++)
+        {
+          D[d * element_dim + (k - 1)] = e->zeta_nodal(vk, 0, d) - X0[d];
+          Sdiff[d * element_dim + (k - 1)] = s[d] - s0[d];
+          scale = std::max(scale, std::abs(D[d * element_dim + (k - 1)]));
+        }
+      }
+      if (scale <= 0.0)
+        continue;
+
+      Dinv = D;
+      Sinv = Sdiff;
+      if (!small_invert(&Dinv[0], element_dim))
+        continue; // degenerate or inverted element
+      if (!small_invert(&Sinv[0], element_dim))
+        continue; // should not happen: vertex local coordinates are affinely independent
+
+      // Straightness has to be checked, not assumed. A C2 triangle whose mid-edge nodes were moved
+      // onto a curved boundary by the macro-element mapping is a simplex with a non-affine map, and
+      // inverting it affinely would be wrong rather than merely inaccurate. Every node - not just
+      // the vertices - must sit where the affine map puts it.
+      bool affine = true;
+      for (unsigned in = 0; in < e->nnode() && affine; in++)
+      {
+        e->local_coordinate_of_node(in, s);
+        for (unsigned k = 0; k < element_dim; k++)
+        {
+          u[k] = 0.0;
+          for (unsigned d = 0; d < element_dim; d++)
+            u[k] += Sinv[k * element_dim + d] * (s[d] - s0[d]);
+        }
+        for (unsigned d = 0; d < element_dim; d++)
+        {
+          double predicted = X0[d];
+          for (unsigned k = 0; k < element_dim; k++)
+            predicted += D[d * element_dim + k] * u[k];
+          if (std::abs(predicted - e->zeta_nodal(in, 0, d)) > 1e-10 * scale)
+          {
+            affine = false;
+            break;
+          }
+        }
+      }
+      if (!affine)
+        continue;
+
+      for (unsigned d = 0; d < dd; d++)
+      {
+        affine_inverse[(size_t)ie * dd + d] = Dinv[d];
+        affine_sdiff[(size_t)ie * dd + d] = Sdiff[d];
+      }
+      for (unsigned d = 0; d < space_dim; d++)
+        affine_origin[(size_t)ie * space_dim + d] = X0[d];
+      for (unsigned d = 0; d < element_dim; d++)
+        affine_s0[(size_t)ie * element_dim + d] = s0[d];
+      element_is_affine[ie] = true;
+      n_affine_elements++;
+    }
   }
 
   bool MeshPointLocator::bbox_contains(unsigned slot, const double *x) const
@@ -267,6 +409,47 @@ namespace pyoomph
       // Phase 2. Deliberately not silently degraded to Invert: on a codimension-1 source the Newton
       // system is not square and what comes back would be meaningless rather than merely inaccurate.
       throw_runtime_error("Closest-point projection onto a codimension-1 mesh is not implemented yet (phase 2)");
+    }
+
+    const unsigned slot = found->second;
+
+    // Straight-sided simplex: the map is affine, so the barycentric coordinates come straight out
+    // of a precomputed inverse and no Newton solve happens at all. Only accepted when the point
+    // lands inside; outside, the fall-through below reproduces the old behaviour exactly rather
+    // than relying on this being the last word.
+    if (element_is_affine[slot])
+    {
+      const unsigned dd = element_dim * element_dim;
+      const double *Dinv = &affine_inverse[(size_t)slot * dd];
+      const double *orig = &affine_origin[(size_t)slot * space_dim];
+      const double *s0 = &affine_s0[(size_t)slot * element_dim];
+      const double *Sdiff = &affine_sdiff[(size_t)slot * dd];
+
+      double u[3] = {0.0, 0.0, 0.0};
+      double usum = 0.0;
+      for (unsigned d = 0; d < element_dim; d++)
+      {
+        double v = 0.0;
+        for (unsigned k = 0; k < element_dim; k++)
+          v += Dinv[d * element_dim + k] * (x[k] - orig[k]);
+        u[d] = v;
+        usum += v;
+        if (v < -1e-10)
+          return false;
+      }
+      if (usum > 1.0 + 1e-10)
+        return false;
+
+      for (unsigned d = 0; d < element_dim; d++)
+      {
+        double v = s0[d];
+        for (unsigned k = 0; k < element_dim; k++)
+          v += Sdiff[d * element_dim + k] * u[k];
+        s_out[d] = v;
+      }
+      if (offset_out)
+        *offset_out = 0.0;
+      return true; // an affine map has no second answer
     }
 
     oomph::Vector<double> zeta(space_dim);
@@ -485,6 +668,13 @@ namespace pyoomph
       m = std::max(m, o);
     }
     return m;
+  }
+
+  std::string MeshPointLocator::affine_fraction() const
+  {
+    std::ostringstream oss;
+    oss << n_affine_elements << "/" << elements_by_index.size() << " affine";
+    return oss.str();
   }
 
   bool LocationSet::resolve_local(unsigned i, BulkElementBase *&element, std::vector<double> &s) const

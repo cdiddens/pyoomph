@@ -3190,7 +3190,7 @@ namespace pyoomph
           std::cout << "  [locator] " << qnodes.size() << " points: index "
                     << std::chrono::duration<double>(t1 - t0).count() * 1000.0 << " ms, locate "
                     << std::chrono::duration<double>(t2 - t1).count() * 1000.0 << " ms ("
-                    << located.search_statistics() << ")" << std::endl;
+                    << located.search_statistics() << ", " << locator->affine_fraction() << ")" << std::endl;
         }
         BulkElementBase *el = NULL;
         std::vector<double> sloc;
