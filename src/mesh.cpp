@@ -530,7 +530,7 @@ namespace pyoomph
   static bool node_is_in_scope(oomph::Node *n, int boundary_index, bool on_interface_mesh)
   {
     if (boundary_index < 0)
-      return !n->is_on_boundary();
+      return !n->is_on_boundary();   // the per-boundary passes own the boundary nodes
     if (on_interface_mesh)
       return true;
     return n->is_on_boundary((unsigned)boundary_index);

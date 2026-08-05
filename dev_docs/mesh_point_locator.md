@@ -1013,34 +1013,50 @@ which is usually what you want anyway (§12).
 ## 16. When a boundary is not the same boundary any more
 
 Diagnosed on a Leidenfrost run whose warnings named three nodes on `gas/gas_substrate` that could not
-be located, at x = 0.785398, 0.794383, 0.803367 - one C2 element, sitting where `gas_substrate` meets
-`gas_substrate_refined`.
+be located. They are one C2 element sitting where `gas_substrate` meets `gas_substrate_refined`.
 
-The two meshes do not agree about where that corner is:
+The corner node **slides**, and the remesher puts it back. From that run's own `TextFileOutput`, the
+smallest x on `gas_substrate`:
 
-| | corner at x |
+| output step | min x of `gas_substrate` (m) |
 | --- | --- |
-| old mesh | 0.8116882859733414 |
-| new mesh | 0.7853981633974483 = pi/4 |
+| three steps before the remesh | 0.0007872699 |
+| two before | 0.0007950924 |
+| one before | 0.0008116883 |
+| **immediately before remeshing** | 0.0008116883 |
+| **immediately after remeshing** | 0.0007853982 = pi/4 mm exactly |
 
-pi/4 is where the geometry puts it (`pr0 = radius*pi/4`, nondimensionalised by the same radius). The
-old mesh's corner had drifted to 0.81169 because the mesh moves and boundary nodes slide along the
-substrate; the remesher then rebuilds the boundary from the fixed geometric point. So the strip
-[0.78540, 0.81169] belonged to `gas_substrate_refined` in the old mesh and to `gas_substrate` in the
-new one. **Those nodes have no counterpart on the old `gas_substrate` at all** - not because the
-locator failed, but because that boundary did not extend there.
+pi/4 is where the geometry puts the point (`pr0 = radius*pi/4`). During the run the node slides along
+the substrate to 0.81169; the remesher rebuilds the boundary from the fixed geometric point, so the
+strip [0.78540, 0.81169] was `gas_substrate_refined` before and is `gas_substrate` now. **Those nodes
+have no counterpart on the old `gas_substrate` at all.**
 
-Nothing that searches only the corresponding old interface can serve them. Two things follow.
+This is not a zeta problem, and it is worth being clear why, because two plausible explanations are
+both wrong. The zeta there is `AssignZetaCoordinatesByEulerianCoordinate("x")`, i.e. zeta *is* x, and
+it is re-derived on both meshes immediately before the transfer - so it neither drifts nor stretches.
+It is the boundary's extent that changed. Equally, the bulk mesh is not the answer: interfaces carry
+their own degrees of freedom, which the bulk knows nothing about.
 
-**Implemented:** a node that zeta cannot place is retried by projection onto the old interface before
-anything falls through to the nearest-node blend. zeta is a chart and only agrees where both meshes
-cover the same range, whereas the geometry is still there to be projected onto. That rescued the node
-0.0083 from the old boundary's end; the two further out, 0.0173 and 0.0263, are beyond the projection
-offset guard and still take the blend.
+The only source that holds the right values for those nodes is the **neighbouring old interface**,
+`gas_substrate_refined`, which did cover that strip and does carry the same interface dofs.
 
-**Not implemented:** the correct answer for the remainder is the old **bulk** mesh, which holds the
-right field values everywhere regardless of how the boundary was carved up. The obstacle is that the
-transfer loop reaches interface-only dofs through
-`dynamic_cast<InterfaceElementBase*>(srcelem)->get_interpolated_interface_field(...)`, which is a
-null dereference on a bulk element - so a bulk-sourced node needs that branch guarded and its
-interface dofs sourced some other way. Worth doing; not worth rushing.
+**Implemented:**
+
+* a node that zeta cannot place is retried by projection onto the old interface before anything falls
+  through to the nearest-node blend. That rescues nodes just past the old boundary's end - one of the
+  three here, the one 0.0083 out.
+* the containment tolerance is `LocatorSetup::inside_tolerance`, 1e-8 in local coordinate units
+  rather than the 1e-10 it was. A query exactly on an element edge inverts to `s = 1 + a few ulp` as
+  readily as to `1 - a few ulp`, and rejecting the first reports a point unlocatable for a purely
+  numerical reason. It does not help the two nodes here - they are 0.017 and 0.026 out, which is
+  physical distance, not rounding.
+* `Problem._debug_remeshing` writes an output immediately before and immediately after every
+  remeshing. With a `TextFileOutput` on the interface, the two files carry the exact interface
+  coordinates on the old and the new mesh, which is how the table above was produced. Every earlier
+  attempt at this diagnosis was inference from warnings.
+
+**Not implemented:** searching the *sibling* interfaces of the same bulk mesh when the corresponding
+one cannot place a node. That is the correct fix. The obstacle is bookkeeping rather than concept:
+`field_map` and `inter_field_map` are computed once between this mesh's code instance and the source
+mesh's, so a different source interface needs its own maps.
+

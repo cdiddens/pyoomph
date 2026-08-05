@@ -575,6 +575,14 @@ class Problem(_pyoomph.Problem):
         #:
         #: An explicit ``interpolator=`` argument still wins where one is passed.
         self.mesh_interpolator:type["BaseMeshToMeshInterpolator"]=_DefaultInterpolatorClass
+
+        #: Write an output immediately before and immediately after every remeshing, so that the
+        #: state on the OLD mesh and the state on the NEW mesh can be compared directly.
+        #:
+        #: Diagnosing a transfer otherwise means guessing from warnings which nodes went wrong. With
+        #: this on, and a ``TextFileOutput`` on the interfaces of interest, both files carry the exact
+        #: interface coordinates and their values, and the question becomes arithmetic on two files.
+        self._debug_remeshing:bool=False
         self._call_output_after_adapt:bool=False
 
         #: Spatial adaption steps for the initial condition. If set to ``None``, we refine initially up to :py:attr:`max_refinement_level`.
@@ -677,14 +685,30 @@ class Problem(_pyoomph.Problem):
 
         self._runmode="delete"
         self._continue_initialized=False
+        #: When resuming with ``--runmode continue``, carry on with the time step stored in the state
+        #: file instead of the ``startstep`` (or any other initial dt) requested by the run statement
+        #: we resume into. Only that one statement is affected; later run statements in the script
+        #: were never entered, so their own initial dt still applies. Set to ``False`` to get the old
+        #: behaviour, where a continued run always restarted from the scripted initial step.
+        self.use_state_dt_when_continue:bool=True
+        # Marks the state load of a --runmode continue as not yet consumed by a run statement. Only
+        # the run statement we resume into may take its dt from the state: the later ones in the
+        # script were never entered, so their startstep is still a genuine request.
+        self._continue_dt_pending=False
+        # Nondimensional dt the temporal error estimator asked for after the last transient step, i.e.
+        # the step the run loop would take next. Stored in the state file (0.1.2 and later), because
+        # time_pt().dt(0) only records the step that was just TAKEN: resuming from that alone repeats
+        # one step and loses one adaptation, so a continued run drifted away from the uninterrupted
+        # one it is supposed to reproduce. None until the first transient solve of the session.
+        self._suggested_next_dt:float | None=None
         self._where_expression="True"
 
         self._dump_header = "pyoomph_dump"
         # 0.1.0 stores the mesh structurally (see pyoomph/meshes/meshstate.py) instead of by rank-local
         # element/node numbering, which is what makes states of distributed problems possible at all
         # and lets serial and distributed runs read each other's files. 0.1.1 adds the sharding field
-        # to the header. Older files still load.
-        self._dump_version = "0.1.1"
+        # to the header. 0.1.2 adds the adaptive time stepper's suggested next dt. Older files still load.
+        self._dump_version = "0.1.2"
         self._last_bc_setting="init"
 
         self._output_step:int=0
@@ -3473,6 +3497,7 @@ class Problem(_pyoomph.Problem):
             else:
                 raise RuntimeError("Cannot load any state file to continue")
             self._continue_initialized=True
+            self._continue_dt_pending=True
             self._output_step+=1
 
         self._initialised = True
@@ -6309,6 +6334,7 @@ class Problem(_pyoomph.Problem):
                 else:
                     desired_dt=self.adaptive_unsteady_newton_solve(timestep,temporal_error,shift_values)
                 self._first_step=False
+                self._suggested_next_dt=desired_dt
                 self._override_for_this_solve(**oldsettings)
                 self.timestepper.increment_num_unsteady_steps_done()
                 return desired_dt*TSCALE
@@ -6325,6 +6351,7 @@ class Problem(_pyoomph.Problem):
                     desired_dt=self._solve_with_adapt_recovery(spatial_adapt,True,shift_values,
                         lambda adapt_level,shift: self.doubly_adaptive_unsteady_newton_solve(timestep,temporal_error,adapt_level,int(suppress_resolve_after_adapt),self._first_step,shift))
                 self._first_step=False
+                self._suggested_next_dt=desired_dt
                 self._override_for_this_solve(**oldsettings)
                 self.timestepper.increment_num_unsteady_steps_done()
                 return desired_dt*TSCALE
@@ -6339,13 +6366,13 @@ class Problem(_pyoomph.Problem):
         Args:
             endtime: The end time of the simulation.
             timestep: The time step size. If not specified, it will be determined automatically, e.g. by the outstep.
-            outstep: The time interval between outputs. If set to True, outputs will be generated at each time step. If set to False, no outputs will be generated. If not specified, it will be set to the value of `timestep`.
+            outstep: The time interval between outputs. If set to True, outputs will be generated at each time step. If set to False, no outputs will be generated. If not specified, it defaults to the value of `timestep`, except with temporal adaptivity (`temporal_error`), where it defaults to `True`. Note that time steps are clamped to hit the output times exactly, so a finite `outstep` is also an upper bound for the adaptive time step.
             numouts: The number of outputs to generate. If specified, it will override the value of `outstep`.
             out_initially: Whether to generate an output at the initial time. If not specified, it will be set to `True` if `outstep` is not `False`, otherwise it will be set to `False`.
             temporal_error: The temporal error tolerance. If specified, it will be used to control the time step size.
             outstep_relative_to_zero: Whether the `outstep` is relative to the initial time or the current time. If set to `True`, the `outstep` will be relative to the initial time. If set to `False`, the `outstep` will be relative to the current time.
             spatial_adapt: The level of spatial adaptation. If specified, it will be used to control the spatial refinement level.
-            startstep: The time step size at the start of the simulation (for temporal adaptivity). If specified, it will override the value of `timestep`.
+            startstep: The time step size at the start of the simulation (for temporal adaptivity). If specified, it will override the value of `timestep`. It is ignored when this run statement is resumed by ``--runmode continue``, unless :py:attr:`~Problem.use_state_dt_when_continue` is set to ``False``.
             maxstep: The maximum time step size. If specified, it will be used to limit the time step size during temporal adaptivity.
             newton_solver_tolerance: The tolerance for the Newton solver. If specified, it will be used to control the convergence of the solver during this run call.
             do_not_set_IC: Whether to set the initial condition. If set to `True`, the initial condition will not be set.
@@ -6442,8 +6469,11 @@ class Problem(_pyoomph.Problem):
                 self.output()
 
         starttime = self.get_current_time()
+        keep_state_dt=False
         _tfactor,_tunit=assert_dimensional_value(starttime-endtime)
         if _tfactor>=0.0:
+            # Deliberately returns without clearing _continue_dt_pending: a run statement the state
+            # file has already passed is not the one we are resuming into.
             print("Skipping run call since starttime "+str(starttime)+" is larger than endtime "+str(endtime))
             self._nondim_time_after_last_run_statement=float(endtime/self.get_scaling("temporal"))
             return 0
@@ -6456,6 +6486,17 @@ class Problem(_pyoomph.Problem):
                 numouts=int(numouts*(1-progress))
             timestep = self.timestepper.time_pt().dt(0) * self.get_scaling("temporal")
             self._first_step=False # TODO This would be better stored in the state file so that a solve from state_000000 will still have it true
+            # This is the run statement being resumed: the dt the run had worked its way up to is the
+            # one to carry on with. Without this, startstep below would throw it away and a continued
+            # adaptive run would restart from the tiny initial step after every interruption.
+            keep_state_dt=self.use_state_dt_when_continue and self._continue_dt_pending
+            self._continue_dt_pending=False
+            if keep_state_dt and self._suggested_next_dt is not None:
+                # Not dt(0): that is the step already taken, and resuming with it would take one extra
+                # step at the old size before the estimator catches up again, so the continued run
+                # would no longer step where the uninterrupted one did. The suggestion is the step the
+                # interrupted run was about to take, so picking it up here reproduces it exactly.
+                timestep = self._suggested_next_dt * self.get_scaling("temporal")
 
         #TODO Further checking for the end time
         single_step_desired=False
@@ -6469,18 +6510,23 @@ class Problem(_pyoomph.Problem):
             if _tdiff>0:
                 timestep=endtime-starttime
                 single_step_desired=True
-        if startstep is not None:
+        if startstep is not None and not keep_state_dt:
             timestep=startstep
 
 
         if outstep is None:
-            outstep = timestep
+            if temporal_error is not None and numouts is None:
+                # Every step is clamped to land exactly on the next output time, so dt can never
+                # exceed outstep. Defaulting to outstep=timestep would therefore turn the *initial*
+                # step (usually a deliberately tiny startstep) into a permanent cap and make
+                # temporal_error look completely ineffective. Output after each accepted step instead.
+                outstep = True
+            else:
+                outstep = timestep
         TS = self.get_scaling("temporal")
         ndouttimes:NPFloatArray | None = None 
         if not isinstance(outstep, bool):
             currentdt = min(float(timestep / TS), float(outstep / TS)) * TS
-            if maxstep is not None:
-                currentdt=min(float(currentdt/TS),float(maxstep/TS))*TS
             if outstep_relative_to_zero:
                 if numouts:
                     dtout = (endtime - starttime) / numouts
@@ -6490,9 +6536,13 @@ class Problem(_pyoomph.Problem):
                 else:
                     dtout=outstep
                     numouts=int(float((endtime - starttime)/dtout))
-                    soffs = math.ceil(float(starttime / dtout)) * dtout
-                    endout = soffs + numouts * dtout
-                    ndouttimes = numpy.linspace(float(soffs / TS), float(endout / TS), num=numouts + 1) #type:ignore
+                    # Absolute multiples of dtout, not a linspace anchored at the current time. That is
+                    # what outstep_relative_to_zero means, and it makes the grid independent of where a
+                    # run was resumed: since the time steps are clamped onto this grid, a linspace from
+                    # the resume time put the output instants an ulp beside the uninterrupted run's and
+                    # the continued run stopped being a bit-for-bit reproduction of it.
+                    k0 = math.ceil(float(starttime / dtout))
+                    ndouttimes = (numpy.arange(numouts + 1) + k0) * float(dtout / TS) #type:ignore
 
             else:
                 if numouts:
@@ -6504,6 +6554,20 @@ class Problem(_pyoomph.Problem):
         else:
             currentdt = timestep
 
+        # Applies to both branches: maxstep is the maximum step, and with outstep=True the clamp used
+        # to be missing here entirely. That went unnoticed while the first step of a run was always a
+        # small startstep, but a run resumed from its state file starts from the dt it had reached,
+        # which is routinely at maxstep and whose successor the estimator wants four times larger.
+        if maxstep is not None:
+            currentdt=min(float(currentdt/TS),float(maxstep/TS))*TS
+        if keep_state_dt:
+            # The end-of-iteration clamps below shorten the last step so it lands on endtime. The
+            # interrupted run applied them to this very dt after the step whose state we loaded, so
+            # repeat them here rather than letting the resumed run overshoot where the original did not.
+            remaining=float(endtime/TS)-self.get_current_time(as_float=True, dimensional=False)
+            if remaining<float(currentdt/TS):
+                currentdt=1.00001*remaining*TS
+
         nextdt_was_clamped_for_output:ExpressionNumOrNone=None # When clamping a time step to hit the next output dt, enlarge it afterwards
         first_step=True
         while self.get_current_time(as_float=True, dimensional=False) < float(endtime / TS):
@@ -6511,14 +6575,12 @@ class Problem(_pyoomph.Problem):
                 self._abort_current_run=False
                 return currentdt
             tnd = self.get_current_time(as_float=True, dimensional=False)
-            possibly_larger_dt:ExpressionNumOrNone=None
             if ndouttimes is not None:
                 # Check if the current timestep would exceed the next output
                 currind:int = numpy.nonzero(ndouttimes <= tnd)[0] #type:ignore
-                currind = -1 if len(currind) == 0 else currind[-1] #type:ignore                
+                currind = -1 if len(currind) == 0 else currind[-1] #type:ignore
                 nextndout = ndouttimes[currind + 1] #type:ignore
                 if tnd + float(currentdt / TS) * 1.01 > nextndout:
-                    possibly_larger_dt=currentdt
                     currentdt = (nextndout - tnd) * TS
 
             self._in_transient_newton_solve=True
@@ -6538,15 +6600,7 @@ class Problem(_pyoomph.Problem):
                 if len(last_res)>max_newton_to_increase_time_step:
                     print("Do not increase time step, since we used too many iterations")
                     nextdt=currentdt
-            
-        
-            if possibly_larger_dt is not None:
-                if float(possibly_larger_dt/nextdt)>1.0:
-                    pass
-                    #print("Taking larger dt",nextdt,possibly_larger_dt)
-                    #nextdt=possibly_larger_dt
-            # problem._ofile.write("\t".join(map(str, [tnd, currentdt,nextdt]))+"\n")
-            # problem._ofile.flush()
+
             if isinstance(outstep,bool) and outstep == True:
                 self.output()
                 if nextdt_was_clamped_for_output is not None:
@@ -6840,6 +6894,11 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
     def force_remesh(self, only_domains:set[MeshTemplate] | None=None, num_adapt:int | None=None,interpolator:type["BaseMeshToMeshInterpolator"] | None=None):
         if interpolator is None:
             interpolator=self.mesh_interpolator
+        if self._debug_remeshing:
+            # The state on the OLD mesh, written before anything is rebuilt.
+            if not self.is_quiet():
+                print("Writing an output BEFORE remeshing (_debug_remeshing)")
+            self.output()
         remeshers:list["RemesherBase"] = []
         if only_domains is not None:
             for t in only_domains:
@@ -6938,6 +6997,11 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         def perform_interpolation():
             for _, interp in interpolators.items(): 
                 interp.interpolate() 
+            if self._debug_remeshing:
+                # And the state on the NEW mesh, so the two outputs bracket the transfer exactly.
+                if not self.is_quiet():
+                    print("Writing an output AFTER remeshing (_debug_remeshing)")
+                self.output()
 
 
         if has_continuation_data:
@@ -7132,6 +7196,21 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             self.timestepper.set_weights()
 
         state.int_data(lambda: self.timestepper.get_num_unsteady_steps_done(),lambda t: self.timestepper.set_num_unsteady_steps_done(t))
+
+        # The step the adaptive time stepper asked for next, which is not recoverable from the dts
+        # above (those are the steps already taken). Written as a NaN when there is none yet, so the
+        # entry keeps a fixed size. Old files have no such entry at all, hence the version guard.
+        # (state.version is the version being written when saving, so this one condition covers both
+        # directions - unlike the "state.save or ..." form used above, lowering _dump_version to write
+        # an old-format file on purpose stays consistent between writer and reader.)
+        if state.version_at_least(0,1,2):
+            _next_dt=state.float_data(lambda: float("nan") if self._suggested_next_dt is None else self._suggested_next_dt, lambda v: v)
+            if not state.save:
+                self._suggested_next_dt=None if math.isnan(_next_dt) else _next_dt
+        elif not state.save:
+            # An older file has no suggestion in it, and whatever this session is holding belongs to a
+            # different point in time. Clear it, so run() falls back to the dt that was last taken.
+            self._suggested_next_dt=None
 
         # Mesh list
         nummeshes = len(self._meshdict)

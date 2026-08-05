@@ -614,7 +614,7 @@ namespace pyoomph
 
   bool MeshPointLocator::inside_reference_domain(unsigned slot, BulkElementBase *e, const double *s) const
   {
-    const double tol = 1e-10;
+    const double tol = setup.inside_tolerance;
     if (element_ref_domain[slot] == RefDomain::Simplex)
     {
       double sum = 0.0;

@@ -104,6 +104,16 @@ namespace pyoomph
     // silent failure that motivated this class.
     std::vector<double> period;
 
+    // How far outside its reference domain a local coordinate may land and still count as inside,
+    // in LOCAL coordinate units (which are O(1), so this is a fraction of an element).
+    //
+    // It must not be at machine epsilon. A query that sits exactly on an element's edge - the end of
+    // a boundary, a node shared with the neighbouring element - inverts to s = 1 + a few ulp as
+    // often as to s = 1 - a few ulp, and rejecting the first means the point is reported unlocatable
+    // for a purely numerical reason. At 1e-8 the geometric slack is 1e-8 of an element, far below
+    // anything physical, and a point genuinely outside is still outside by orders of magnitude.
+    double inside_tolerance = 1e-8;
+
     // Reject a Project match whose residual offset exceeds this multiple of the local source
     // element size. Guards against a near-touching interface matching the wrong sheet, which a pure
     // nearest-point search cannot distinguish. Ignored for Invert.

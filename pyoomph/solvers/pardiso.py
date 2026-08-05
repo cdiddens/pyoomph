@@ -264,9 +264,13 @@ _BACKWARD_ERROR_LIMIT = 1e-4
 
 class pardisoSolver(object):
     
-    def __init__(self, matA:Any, mtype:int=11, verbose:bool=False,iparm_override:dict[int,int]={}):
+    def __init__(self, matA:Any, mtype:int=11, verbose:bool=False,iparm_override:dict[int,int]={},check_solution:bool=True):
             #mode  11 : real, nonsymmetric
             #mode  13 : complex,  nonsymmetric
+
+        # Whether solve_checked() verifies its own answer (see there). Off means the residual is never
+        # formed and the pivoting escalation never fires, i.e. whatever MKL returns is handed on.
+        self.check_solution = check_solution
 
         self.mtype = mtype
         if mtype in [1, 3]:
@@ -511,6 +515,20 @@ class pardisoSolver(object):
                   % (self.iparm[12], self.iparm[9]))
 
     def solve_checked(self, rhs:Any, max_steps:int=20)->Any:
+        if not self.check_solution:
+            # Opted out (PardisoSolver.check_solution): a bare phase-33 solve, i.e. exactly what
+            # Pardiso did before any of this existed. No residual, no escalation, no de-escalation.
+            #
+            # The extra iterative refinement goes with it, and deliberately so, even though it is a
+            # repair rather than a check: on a singular matrix MKL reports the damage it cannot repair
+            # as error -4 out of phase 33, so refining is itself a way of raising. Left unrefined the
+            # same matrix comes back as error 0 and a solution of order 1e13. That is the price of the
+            # opt-out -- and the reason the refinement was added is still live: without it the ALE box
+            # of tests/test_adaptive_3d_campaign.py stalls at a Newton residual of 1e-8.
+            #
+            # A factorisation that fails outright (phases 12/22, e.g. out of memory) still raises from
+            # run_pardiso; there is no solution vector to hand on in that case. See _check_pardiso_error.
+            return self.solve(rhs)
         try:
             x = self._solve_refined(rhs, max_steps)
         except PardisoError as first:
@@ -709,6 +727,15 @@ class PardisoSolver(GenericLinearSystemSolver):
         self.try_to_reuse_solver=False
         self.verbose=verbose
         self.iparm_override:dict[int,int]={}
+        # Whether each solve is checked against its own residual, extra iterative refinement given when
+        # MKL reports perturbed pivots, and stronger pivoting tried when the answer still comes back
+        # wrong (all of it in pardisoSolver.solve_checked). False gets MKL's answer unexamined, which
+        # is what Pardiso did before any of this existed: the check costs one sparse matrix-vector
+        # product per solve, and a solve just over the limit costs a refactorisation to find out it was
+        # a false alarm. The price is that a singular Jacobian then reaches Newton as a solution of
+        # order 1e13 rather than as a retryable SolverError, so a run that is not converging is worth
+        # re-examining with this back on. A factorisation that fails outright still raises either way.
+        self.check_solution=True
         # Skip Pardiso's reordering/symbolic phase (11) whenever the Jacobian sparsity pattern is
         # unchanged since the last factorisation, i.e. run phase 22 instead of phase 12. This requires
         # problem.keep_structural_zeros to be on -- otherwise the pattern follows the dof values and
@@ -807,7 +834,7 @@ class PardisoSolver(GenericLinearSystemSolver):
             if self.try_to_reuse_solver:
                 self._lastA=A
                 if self._current_pardiso is None:    
-                    self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override)
+                    self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,check_solution=self.check_solution)
                     if self.verbose: print("CREATED NEW PARDISO AND FACTOR")
                     self._current_pardiso.factor()
                     self.n_full_factorisations+=1
@@ -826,7 +853,7 @@ class PardisoSolver(GenericLinearSystemSolver):
                     self.n_numeric_reuses+=1
                 else:
                     self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed                
-                    self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override)
+                    self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,check_solution=self.check_solution)
                     if self.verbose: print("CREATED NEW PARDISO AND FACTOR")
                     self._current_pardiso.factor()                    
                     self.n_full_factorisations+=1
@@ -834,7 +861,7 @@ class PardisoSolver(GenericLinearSystemSolver):
             else:
                 if self._current_pardiso:
                     self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed                
-                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override)
+                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,check_solution=self.check_solution)
                 self._current_pardiso.factor()
                 self.n_full_factorisations+=1
                 if self.verbose:
@@ -871,7 +898,7 @@ class PardisoSolver(GenericLinearSystemSolver):
                         if self._current_pardiso:
                             self._current_pardiso.clear()
                         mode=11
-                        self._current_pardiso = pardisoSolver(self._lastA, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override)
+                        self._current_pardiso = pardisoSolver(self._lastA, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,check_solution=self.check_solution)
                         self._current_pardiso.factor()
                         self.n_full_factorisations+=1
                     sol=self._current_pardiso.solve(bv)
@@ -941,7 +968,7 @@ class PardisoSolver(GenericLinearSystemSolver):
                 if self._current_pardiso:
                     self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed
                 mode = 11
-                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=False)
+                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=False,check_solution=self.check_solution)
                 self._current_pardiso.factor()
 
                 
