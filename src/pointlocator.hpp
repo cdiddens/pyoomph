@@ -255,9 +255,11 @@ namespace pyoomph
     // Which reference domain a local coordinate has to land in to count as inside.
     enum class RefDomain : unsigned char
     {
-      Unknown = 0,
+      Unknown = 0, // no containment test available: Newton only, though still affinely seeded
       Simplex = 1, // s_i >= 0 and sum s_i <= 1
-      Box = 2      // s_min <= s_i <= s_max
+      Box = 2,     // s_min <= s_i <= s_max
+      Prism = 3,   // wedge: s0,s1 >= 0, s0+s1 <= 1, s2 in [s_min,s_max]
+      Pyramid = 4  // s2 in [s_min,s_max], s0 and s1 in [0, 1-s2]
     };
     std::vector<GeomKind> element_geom_kind;
     std::vector<RefDomain> element_ref_domain;
@@ -287,7 +289,9 @@ namespace pyoomph
     bool is_exactly_affine(BulkElementBase *e, unsigned slot) const;
     bool build_bilinear_for(BulkElementBase *e, unsigned slot);
     bool inside_reference_domain(unsigned slot, BulkElementBase *e, const double *s) const;
-    void polish_local_coordinate(BulkElementBase *e, const double *x, double *s) const;
+    // Newton-refines s until |x(s) - x| is at machine precision; returns the achieved relative
+    // residual so a caller can tell convergence from a candidate element that simply does not contain x.
+    double polish_local_coordinate(BulkElementBase *e, const double *x, double *s) const;
 
     // Slack added to every element bounding box before it is used to reject a candidate, as a
     // fraction of the box diagonal. Curved elements bulge outside the box spanned by their nodes,

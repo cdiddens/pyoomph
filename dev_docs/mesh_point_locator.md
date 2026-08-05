@@ -469,11 +469,40 @@ family behaves a certain way, which is what makes it work uniformly across order
 | straight-sided simplex, any order | Affine | a T6 with mid-edge nodes at the midpoints has its quadratic terms cancel identically |
 | parallelogram / parallelepiped quad or hex, any order | Affine | the bilinear cross term a3 = (X00 - X10 - X01 + X11)/4 vanishes exactly for a parallelogram - *not* only for a rectangle, so sheared structured meshes qualify too |
 | straight-edged 2d quad, non-parallelogram | Bilinear2d | a bilinear map sends the reference square's edges to straight segments, and eliminating one variable leaves a **quadratic** - still a closed form, no iteration |
-| curved anything, distorted 3d hex | General | Newton, seeded from the element's best affine fit |
+| extruded (translated) wedge, parallelogram-based pyramid | Affine | same all-nodes test; their reference domains are in `inside_reference_domain` |
+| curved anything, distorted 3d hex/wedge/pyramid | General | Newton, seeded from the element's best affine fit |
 
 3d is the genuine exception: a trilinear inverse has no closed form and hex faces are ruled surfaces
 rather than planes, so a distorted hex has to iterate. Seeding from the affine fit rather than the
 element centre is what makes that iteration cheap.
+
+### Wedges and pyramids: the old path could not do them at all
+
+They are not merely slower on the old path - `oomph::MeshAsGeomObject` **throws** on them. Its
+`locate_zeta` needs two virtuals that `WedgeElementBase` and `PyramidElementBase` do not implement:
+`nplot_points()` for the multi-start grid (`elements.cc:4795`) and `local_coord_is_valid()` for the
+containment check. Both are pure-virtual-by-exception on `FiniteElement`. So mesh-to-mesh
+interpolation on a wedge or pyramid mesh was impossible, not inaccurate.
+
+The locator does not depend on either. Its containment test comes from the reference domains
+documented on the element classes themselves (`wedges_and_pyramids.hpp`: the wedge is a triangular
+prism; for the pyramid, "s[0] and s[1] run from 0 to 1-s[2]"), and where the geometry is not affine
+it runs its own Newton - the same `polish_local_coordinate` used to fix the accuracy problem above -
+instead of delegating. Measured on `tests/box_mesh_3d.py`, interpolating a linear field, worst error
+over all probes:
+
+| mesh | classification | MeshAsGeomObject | locator |
+| --- | --- | --- | --- |
+| wedge, regular | 54/54 affine | throws | 4.4e-16 |
+| wedge, trilinearly distorted | 54 newton | throws | 4.4e-16 |
+| pyramid, regular | 162/162 affine | throws | 3.3e-16 |
+| pyramid, trilinearly distorted | 162 newton | throws | 6.7e-16 |
+| hex+tet+wedge+pyramid mixed, regular | 138/138 affine | throws | 2.2e-16 |
+| the same, trilinearly distorted | 138 newton | throws | 4.4e-16 |
+
+A regular box mesh makes every wedge an extruded triangle and every pyramid parallelogram-based, so
+all of them take the exact path; the distorted variants fall to the seeded Newton, at ~2 us/point for
+wedges and ~7 us/point for pyramids. Nothing was unlocated in any case.
 
 Self-locating a mesh's own integration points, per point:
 

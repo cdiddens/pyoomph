@@ -32,6 +32,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "elements.hpp"
 #include "exception.hpp"
 #include "mesh.hpp"
+#include "wedges_and_pyramids.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -459,7 +460,7 @@ namespace pyoomph
   // so the result is reproducible AND more accurate than before.
   //
   // Only needed on the Newton path; the affine and bilinear inverses are exact by construction.
-  void MeshPointLocator::polish_local_coordinate(BulkElementBase *e, const double *x, double *s) const
+  double MeshPointLocator::polish_local_coordinate(BulkElementBase *e, const double *x, double *s) const
   {
     const unsigned nnode = e->nnode();
     oomph::Shape psi(nnode);
@@ -472,7 +473,8 @@ namespace pyoomph
     if (scale <= 0.0)
       scale = 1.0;
 
-    for (unsigned iter = 0; iter < 5; iter++)
+    double last = 1.0;
+    for (unsigned iter = 0; iter < 8; iter++)
     {
       for (unsigned d = 0; d < element_dim; d++)
         sv[d] = s[d];
@@ -497,10 +499,10 @@ namespace pyoomph
       for (unsigned d = 0; d < element_dim; d++)
         rnorm = std::max(rnorm, std::abs(res[d]));
       if (rnorm < 1e-15 * scale)
-        return;
+        return rnorm / scale;
 
       if (!small_invert(&J[0], element_dim))
-        return; // degenerate here; leave s as locate_zeta left it
+        return rnorm / scale; // degenerate here; leave s where it was
       for (unsigned d = 0; d < element_dim; d++)
       {
         double ds = 0.0;
@@ -508,7 +510,9 @@ namespace pyoomph
           ds += J[d * element_dim + k] * res[k];
         s[d] += ds;
       }
+      last = rnorm / scale;
     }
+    return last;
   }
 
   bool MeshPointLocator::inside_reference_domain(unsigned slot, BulkElementBase *e, const double *s) const
@@ -531,6 +535,22 @@ namespace pyoomph
         if (s[d] < e->s_min() - tol || s[d] > e->s_max() + tol)
           return false;
       return true;
+    }
+    // Both of these are documented on the element classes in wedges_and_pyramids.hpp: the wedge is
+    // a triangular prism, and the pyramid's cross-section shrinks with s2 ("s[0] and s[1] run from
+    // 0 to 1-s[2]").
+    if (element_ref_domain[slot] == RefDomain::Prism)
+    {
+      if (s[0] < -tol || s[1] < -tol || s[0] + s[1] > 1.0 + tol)
+        return false;
+      return s[2] >= e->s_min() - tol && s[2] <= e->s_max() + tol;
+    }
+    if (element_ref_domain[slot] == RefDomain::Pyramid)
+    {
+      if (s[2] < e->s_min() - tol || s[2] > e->s_max() + tol)
+        return false;
+      const double lim = 1.0 - s[2];
+      return s[0] >= -tol && s[0] <= lim + tol && s[1] >= -tol && s[1] <= lim + tol;
     }
     return false;
   }
@@ -559,17 +579,22 @@ namespace pyoomph
     {
       BulkElementBase *e = elements_by_index[ie];
 
-      // Wedges and pyramids are deliberately left as General: their reference domains are neither
-      // a simplex nor a box, so the containment test below would not apply.
       if (dynamic_cast<oomph::TElementBase *>(e))
         element_ref_domain[ie] = RefDomain::Simplex;
       else if (dynamic_cast<oomph::QElementGeometricBase *>(e))
         element_ref_domain[ie] = RefDomain::Box;
-      else
-        continue;
+      else if (dynamic_cast<oomph::WedgeElementBase *>(e))
+        element_ref_domain[ie] = RefDomain::Prism;
+      else if (dynamic_cast<oomph::PyramidElementBase *>(e))
+        element_ref_domain[ie] = RefDomain::Pyramid;
+      // else: RefDomain::Unknown - no containment test, so no exact path, but the affine fit below
+      // is still built and still improves the Newton starting point.
 
       if (!build_affine_fit_for(e, ie))
-        continue; // no usable fit: Newton from the element centre, as before
+        continue; // no usable fit at all: Newton from the element centre, as before
+
+      if (element_ref_domain[ie] == RefDomain::Unknown)
+        continue; // seeded Newton only
 
       if (is_exactly_affine(e, ie))
       {
@@ -759,6 +784,60 @@ namespace pyoomph
       return false;
     }
 
+    // Seed for whichever Newton runs below: the element's best affine fit, which is a far better
+    // guess than the centre for a distorted element. Falls back to the centroid of the local node
+    // coordinates, which is inside every reference domain here.
+    double seed[3] = {0.0, 0.0, 0.0};
+    if (has_affine_fit[slot])
+    {
+      const double *Dinv = &affine_inverse[(size_t)slot * dd];
+      const double *orig = &affine_origin[(size_t)slot * space_dim];
+      const double *s0 = &affine_s0[(size_t)slot * element_dim];
+      const double *Sdiff = &affine_sdiff[(size_t)slot * dd];
+      double u[3] = {0.0, 0.0, 0.0};
+      for (unsigned d = 0; d < element_dim; d++)
+        for (unsigned k = 0; k < element_dim; k++)
+          u[d] += Dinv[d * element_dim + k] * (x[k] - orig[k]);
+      for (unsigned d = 0; d < element_dim; d++)
+      {
+        double v = s0[d];
+        for (unsigned k = 0; k < element_dim; k++)
+          v += Sdiff[d * element_dim + k] * u[k];
+        seed[d] = v;
+      }
+    }
+    else
+    {
+      oomph::Vector<double> sn(element_dim, 0.0);
+      for (unsigned in = 0; in < e->nnode(); in++)
+      {
+        e->local_coordinate_of_node(in, sn);
+        for (unsigned d = 0; d < element_dim; d++)
+          seed[d] += sn[d] / e->nnode();
+      }
+    }
+
+    // Wedges and pyramids cannot go through oomph's locate_zeta at all: it needs both
+    // nplot_points() and local_coord_is_valid(), and neither is implemented for those elements
+    // (they throw). This is why oomph::MeshAsGeomObject could not interpolate on a wedge or pyramid
+    // mesh - the old path threw rather than returning a wrong answer. Both pieces exist here
+    // already, so those families get their own Newton instead: seed, polish to machine precision,
+    // then test containment against the reference domain documented on the element class.
+    if (element_ref_domain[slot] == RefDomain::Prism || element_ref_domain[slot] == RefDomain::Pyramid)
+    {
+      double sc[3] = {seed[0], seed[1], seed[2]};
+      const double res = polish_local_coordinate(e, x, sc);
+      if (res > 1e-10)
+        return false; // did not converge from this element: it is not the one
+      if (!inside_reference_domain(slot, e, sc))
+        return false;
+      for (unsigned d = 0; d < element_dim; d++)
+        s_out[d] = sc[d];
+      if (offset_out)
+        *offset_out = 0.0;
+      return true;
+    }
+
     oomph::Vector<double> zeta(space_dim);
     for (unsigned d = 0; d < space_dim; d++)
       zeta[d] = x[d];
@@ -776,41 +855,23 @@ namespace pyoomph
     // The starting point is the element's best affine fit rather than its centre. That matters most
     // for the elements that end up here at all - curved ones, and 3d hexes, whose trilinear inverse
     // has no closed form - because those are exactly the ones where the centre is a poor guess.
-    bool seeded = false;
-    if (has_affine_fit[slot])
-    {
-      const double *Dinv = &affine_inverse[(size_t)slot * dd];
-      const double *orig = &affine_origin[(size_t)slot * space_dim];
-      const double *s0 = &affine_s0[(size_t)slot * element_dim];
-      const double *Sdiff = &affine_sdiff[(size_t)slot * dd];
-      double u[3] = {0.0, 0.0, 0.0};
-      for (unsigned d = 0; d < element_dim; d++)
-        for (unsigned k = 0; k < element_dim; k++)
-          u[d] += Dinv[d * element_dim + k] * (x[k] - orig[k]);
-      for (unsigned d = 0; d < element_dim; d++)
-      {
-        double v = s0[d];
-        for (unsigned k = 0; k < element_dim; k++)
-          v += Sdiff[d * element_dim + k] * u[k];
-        // Clamp into the reference element: the fit is only approximate, and Newton started well
-        // outside can wander into a neighbouring element's preimage.
-        s[d] = std::min(std::max(v, e->s_min()), e->s_max());
-      }
-      seeded = true;
-    }
-    if (!seeded)
-    {
-      for (unsigned d = 0; d < element_dim; d++)
-        s[d] = 0.5 * (e->s_min() + e->s_max());
-    }
+    // Clamp into the reference element: the fit is only approximate, and Newton started well
+    // outside can wander into a neighbouring element's preimage.
+    for (unsigned d = 0; d < element_dim; d++)
+      s[d] = std::min(std::max(seed[d], e->s_min()), e->s_max());
     e->locate_zeta(zeta, go, s, true);
 
-    if (!go && allow_multistart)
+    // oomph's multi-start lays out a grid of plot-point initial guesses, each with its own Newton
+    // solve. Two reasons it is not the default here. It is paid per REJECTED candidate, and the
+    // search tries several candidates per query - on a distorted 3d hex mesh that alone was the
+    // difference between 17 us and 10 us per point. And it is not available at all for wedges and
+    // pyramids: it goes through nplot_points() (elements.cc:4795), which those elements do not
+    // implement, so calling it throws. That is also why oomph::MeshAsGeomObject cannot locate in a
+    // wedge or pyramid mesh at all - the old interpolation path simply threw on them.
+    const bool multistart_supported = (element_ref_domain[slot] == RefDomain::Simplex ||
+                                       element_ref_domain[slot] == RefDomain::Box);
+    if (!go && allow_multistart && multistart_supported)
     {
-      // oomph's multi-start: a grid of plot-point initial guesses, each with its own Newton solve.
-      // Reserved for the second pass because it is paid per REJECTED candidate otherwise, and the
-      // search tries several candidates per query - on a distorted 3d hex mesh that alone was the
-      // difference between 17 us and 1 us per point.
       for (unsigned d = 0; d < element_dim; d++)
         s[d] = 0.5 * (e->s_min() + e->s_max());
       e->locate_zeta(zeta, go, s, false);
