@@ -3033,7 +3033,7 @@ namespace pyoomph
   // the value at a nearby existing node. As in the boundary variant, a field_map translates field
   // indices between the two mesh's JIT-compiled code instances (identity if they are the same code),
   // and DG/DL/D0 (discontinuous) fields are not supported (throws if present).
-  void Mesh::nodal_interpolate_from(Mesh *from, int boundary_index)
+  void Mesh::nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate)
   {
     this->interpolated_lagrangian_coordinates_at_remeshing=from->interpolated_lagrangian_coordinates_at_remeshing;
     auto old_setting=BulkElementBase::zeta_coordinate_type;
@@ -3183,10 +3183,24 @@ namespace pyoomph
     // are no longer a copy of x, and the location has to use x explicitly.
     LocatorSetup lsetup;
     lsetup.space = (this->interpolated_lagrangian_coordinates_at_remeshing ? LocatorSpace::Eulerian : LocatorSpace::Lagrangian);
-    if (dynamic_cast<InterfaceMesh *>(this) && boundary_index >= 0)
+    const bool interface_case = (dynamic_cast<InterfaceMesh *>(this) && boundary_index >= 0);
+    // With a boundary coordinate the interface is a 1d chart and the match is an exact inversion of
+    // it. Without one, the match is the closest point on the old interface geometry instead: the
+    // locator sees a codimension-1 source in the position space and switches to projection by
+    // itself. That is what lets a 2d interface in 3d work at all, since no chart exists for it.
+    const bool by_zeta = (interface_case && use_boundary_coordinate);
+    if (by_zeta)
     {
       lsetup.space = LocatorSpace::BoundaryZeta;
       lsetup.boundary_index = boundary_index;
+    }
+    if (interface_case && !by_zeta && !use_point_locator)
+    {
+      // Projection is new capability, not a reimplementation of something MeshAsGeomObject could
+      // do: asking it to locate a 2-component position among 1d face elements walks off the end of
+      // the coordinate vector. So the A/B switch cannot express this path, and reaching here means
+      // a caller selected projection without checking.
+      throw_runtime_error("Interface interpolation by projection requires the point locator; it has no MeshAsGeomObject equivalent. Either enable Mesh.set_use_point_locator(True) or interpolate along the boundary by zeta / nearest nodes instead.");
     }
 
     // Pre-locate every node this routine is about to visit, in one batch. Collected in exactly the
@@ -3216,7 +3230,7 @@ namespace pyoomph
           seen.insert(n);
 
           oomph::Vector<double> xnode = n->position();
-          if (lsetup.space == LocatorSpace::BoundaryZeta)
+          if (by_zeta)
           {
             xnode.resize(deste->dim());
             n->get_coordinates_on_boundary(boundary_index, xnode);
@@ -3286,12 +3300,10 @@ namespace pyoomph
           continue;
 
         oomph::Vector<double> xnode = n->position();
-        if (dynamic_cast<InterfaceMesh *>(this) && boundary_index >= 0)
+        if (by_zeta)
         {
           xnode.resize(deste->dim());
-          //          std::cout << "BOUNDARY INDEX " << boundary_index << "  xnode " << xnode.size() << std::endl;
           n->get_coordinates_on_boundary(boundary_index, xnode);
-          //          std::cout << "  XNODE " << xnode[0] << std::endl;
         }
         oomph::Vector<double> s(xnode.size(), 0.5 * (deste->s_min() + deste->s_max()));
         BulkElementBase *srcelem = NULL;

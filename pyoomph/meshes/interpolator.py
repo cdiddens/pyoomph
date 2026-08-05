@@ -32,6 +32,7 @@ import numpy
 
 from ..generic.problem import *
 from ..meshes.mesh import ODEStorageMesh
+from .. import _pyoomph_core as _pyoomph
 
 
 if TYPE_CHECKING:
@@ -75,6 +76,10 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
         self.new:AnySpatialMesh=new
         self.boundary_max_distances:dict[str,float]={}
         self.try_to_use_zeta_on_boundary:bool=True
+        #: On a boundary with no zeta defined, match interface nodes by projecting them onto the old
+        #: interface geometry instead of blending the two nearest old nodes. Set False to get the old
+        #: behaviour back. See dev_docs/mesh_point_locator.md.
+        self.project_on_boundary_without_zeta:bool=True
         old.prepare_interpolation()
         # Remove the macro elements, since they are really troublesome for the locate_zeta
         for e in old.elements():
@@ -103,6 +108,14 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
                 if not self.new.is_boundary_coordinate_defined(bi_new):
                     raise RuntimeError("Boundary coordinate along "+bn+" is defined on the old, but not the new mesh")
                 intermesh_new.nodal_interpolate_from(intermesh_old,bi_new)
+            elif self.project_on_boundary_without_zeta and _pyoomph.Mesh.get_use_point_locator():
+                # No zeta along this boundary. Rather than the nearest-node blend below - which is
+                # not an interpolation and is quadratic in the mesh size - match each new interface
+                # node to the closest point of the OLD interface geometry and evaluate the old
+                # element's shape functions there. That needs no chart, so unlike zeta it also works
+                # for a 2d interface in 3d. Anything it cannot place falls through to the blend
+                # inside nodal_interpolate_from, which now reports when it does.
+                intermesh_new.nodal_interpolate_from(intermesh_old,bi_new,False)
             else:
                 self.new.nodal_interpolate_along_boundary(self.old, bi_new, bi_old, intermesh_new,intermesh_old,boundary_interpolation_max_dist)
             

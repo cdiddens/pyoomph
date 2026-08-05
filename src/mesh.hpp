@@ -179,7 +179,12 @@ namespace pyoomph
 		virtual void apply_additional_dof_constraints(); // Apply any additional dof constraints that have been registered on this mesh's nodes
 		// Interpolate nodal values of this mesh from the mesh "from". If boundary_index>=0, only nodes on that
 		// boundary are interpolated (used when remeshing only a boundary/interface region).
-		virtual void nodal_interpolate_from(Mesh *from, int boundary_index);
+		// Transfer nodal values from `from`. boundary_index >= 0 restricts to one boundary of an
+		// interface mesh. use_boundary_coordinate selects HOW the matching point is found there: through
+		// the intrinsic boundary coordinate (zeta) when one is defined, or - when it is not - by
+		// projecting each node onto the old interface geometry, which needs no chart and is therefore
+		// the only option for a 2d interface in 3d. See dev_docs/mesh_point_locator.md.
+		virtual void nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate = true);
 		// Interpolate nodal values along a boundary from an old mesh, using the arclength-like boundary coordinate
 		// to find the closest correspondence; boundary_max_dist limits how far a match may be to still be accepted.
 		virtual void nodal_interpolate_along_boundary(Mesh *from, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist);

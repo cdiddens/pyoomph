@@ -637,10 +637,37 @@ Three things had to change for this, all of which were latent bugs rather than n
   acceptable. An on-surface query matched a neighbour whose closest point was half an element away.
   The scan now ranks by offset and keeps the minimum.
 
-**Still to do in this phase:** wire it into the interpolation path, so an interface with no zeta
-defined projects instead of falling into `nodal_interpolate_along_boundary`'s two-nearest blend, and
-so 2d interfaces work end to end rather than only under `locate_points`. Then the acceptance test:
-a 3d surface remesh with an analytic surface field, error converging under refinement.
+**Wired into interpolation.** `nodal_interpolate_from(from, boundary_index, use_boundary_coordinate)`
+now chooses between the two on its last argument: with a boundary coordinate the interface is a 1d
+chart and the match inverts it; without one, the locator sees a codimension-1 source in the position
+space and projects. `InternalInterpolator` takes the projection branch whenever no zeta is defined
+(`project_on_boundary_without_zeta`, on by default).
+
+The improvement over the blend it replaces is not marginal. Transferring an analytic interface field
+across a remesh of a curved 2d interface:
+
+| boundary path | worst \\|transferred - exact\\| | mean |
+| --- | --- | --- |
+| nearest-node blend | 2.100e+00 | 9.630e-01 |
+| projection | 1.464e-11 | 2.094e-12 |
+
+The field ranges over about [0.4, 2.1], so the blend was not merely inaccurate - it was losing the
+interface field almost entirely. A 2d interface in 3d transfers at 2.2e-16 over 49 nodes with nothing
+unlocated.
+
+One consequence of this being new capability rather than a reimplementation: **the A/B switch cannot
+express it.** Asking `MeshAsGeomObject` to locate a 2-component position among 1d face elements walks
+off the end of the coordinate vector and segfaults, so with `use_point_locator(False)` the
+interpolator falls back to the blend, and `nodal_interpolate_from` throws with an explanation if the
+projection path is reached anyway.
+
+Note also that the droplet A/B is a weak test of the boundary path: that remesh reproduces the same
+interface node positions, so the blend and the projection agree trivially. The transfer test above is
+the one that discriminates.
+
+**Still to do in this phase:** the offset guard is a fixed fraction of the element size and has not
+been tuned against a near-touching interface, which is the case it exists for. And the
+bulk-restricted candidate rule of §4.5, needed before the non-manifold skeleton case, is not written.
 
 **Phase 3 - periodic zeta.** §4.3. *Acceptance:* closed-loop remesh with a `sin(2 theta)` surface
 field at interpolation order rather than O(1).
