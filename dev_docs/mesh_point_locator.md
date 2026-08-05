@@ -132,10 +132,24 @@ already-vendored nanoflann (`src/thirdparty/nanoflann.hpp`, wrapped in `src/kdtr
 `LocationSet` - the result of `locate_batch`, and the handle through which `evaluate(EvalRequest)`
 is called. It owns the routing schedule.
 
-`evaluate`/`values_per_point` are **declared but still throw**. Nothing needs them yet: every migrated
-call site resolves a handle to a local element through `resolve_local` and evaluates for itself. Phase
-5 does need them, and so does routing the projection solve's `coords_oldmesh` off its raw element
-pointer (rule 1 below).
+`evaluate`/`values_per_point` are **implemented**, for continuous, DL, D0 and DG fields plus
+position, Lagrangian coordinates and zeta, at any list of time levels. Layout per point is fixed -
+time levels outermost, then those blocks in that order - rather than "whatever the request listed
+first", so a consumer can index the result without re-reading the request it sent. `field_map` maps
+the caller's own continuous field indices onto the source's; a `-1` entry leaves that slot at zero,
+and the block is then sized by the map rather than by the source.
+
+Two details worth knowing. A `zeta` request re-enters `ZetaFlagGuard` with the *locator's* setup, so
+the coordinates come back in the space the points were located in - without that, a search run in
+Eulerian space answers with Lagrangian coordinates. And the DG block reports only `numfields_new`
+per present space: those are the element's own internal Data, laid out before the DL and D0 entries
+by `allocate_discontinous_fields`, whereas anything inherited from the bulk is external data and not
+the source element's to report.
+
+`Mesh::evaluate_at_points` (bound as `Mesh.evaluate_at_points`) is the tree's only consumer so far
+and exists mostly so the path is exercised and testable: it returns `[found, continuous..., DL...,
+D0..., position...]` per point, `[0.0]` for a point outside the mesh. Its real consumers are phase 5
+and routing the projection solve's `coords_oldmesh` off its raw element pointer (rule 1 below).
 
 **Locate and evaluate are split deliberately.** Locating is expensive and happens once; evaluating is
 cheap and repeats. The projection solve evaluates ten times (once per history level) against one set

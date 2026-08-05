@@ -3946,6 +3946,61 @@ namespace pyoomph
     return res;
   }
 
+  // The one consumer of LocationSet::evaluate() in the tree, and the reason it exists as a batched
+  // call rather than a loop over resolve_local: everything a caller wants at a point is requested
+  // up front, so a distributed version costs one collective instead of one per field.
+  std::vector<std::vector<double>> Mesh::evaluate_at_points(const std::vector<std::vector<double>> &coords, bool lagrangian, bool with_position, unsigned time_level)
+  {
+    std::vector<std::vector<double>> result;
+    if (coords.empty() || !this->nelement())
+      return result;
+
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (e && !e->get_eleminfo()->alloced)
+        e->fill_element_info(true);
+    }
+
+    LocatorSetup lsetup;
+    lsetup.space = (lagrangian ? LocatorSpace::Lagrangian : LocatorSpace::Eulerian);
+    MeshPointLocator locator(this, lsetup);
+
+    const unsigned qdim = coords[0].size();
+    std::vector<double> flat;
+    flat.reserve(coords.size() * qdim);
+    for (const auto &c : coords)
+      for (unsigned i = 0; i < qdim; i++)
+        flat.push_back(i < c.size() ? c[i] : 0.0);
+
+    EvalRequest what;
+    what.continuous_fields = true;
+    what.DL_fields = true;
+    what.D0_fields = true;
+    what.position = with_position;
+    what.time_levels.assign(1, time_level);
+
+    LocationSet located = locator.locate_batch(flat, coords.size());
+    const unsigned stride = located.values_per_point(what);
+    std::vector<double> vals = located.evaluate(what);
+
+    for (unsigned i = 0; i < coords.size(); i++)
+    {
+      std::vector<double> row;
+      if (located.get_handles()[i].is_located())
+      {
+        row.push_back(1.0);
+        row.insert(row.end(), vals.begin() + (size_t)i * stride, vals.begin() + (size_t)(i + 1) * stride);
+      }
+      else
+      {
+        row.push_back(0.0);
+      }
+      result.push_back(row);
+    }
+    return result;
+  }
+
   std::vector<std::vector<double>> Mesh::locate_points(const std::vector<std::vector<double>> &coords, bool lagrangian)
   {
     std::vector<std::vector<double>> result;

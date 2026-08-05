@@ -219,9 +219,14 @@ namespace pyoomph
     // Perpendicular offset recorded for one query; 0 for an exact inversion, -1 if unlocated.
     double offset_of(unsigned i) const;
 
-    // Evaluate `what` at every located point. Returns a flat structure-of-arrays buffer with
-    // values_per_point() entries per query, in query order; unlocated points are left at zero.
+    // Evaluate `what` at every located point. Returns a flat buffer with values_per_point()
+    // entries per query, in query order; unlocated points are left at zero.
     // One collective under MPI, regardless of how many fields and time levels are requested.
+    //
+    // Layout per point: the requested time levels outermost, and within one level the blocks in the
+    // order the EvalRequest declares them - continuous, DL, D0, DG, position, lagrangian, zeta.
+    // Fixed rather than "whatever was asked for first", so a consumer can index the result without
+    // consulting the request it sent.
     std::vector<double> evaluate(const EvalRequest &what) const;
 
     // Entries per point that evaluate() will produce for `what`.

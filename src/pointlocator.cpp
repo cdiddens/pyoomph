@@ -1526,14 +1526,181 @@ namespace pyoomph
     return oss.str();
   }
 
-  unsigned LocationSet::values_per_point(const EvalRequest &) const
+  namespace
   {
-    throw_runtime_error("LocationSet::values_per_point is not implemented yet");
+    // Sizes of each block of one time level, in the fixed order evaluate() writes them. Taken from a
+    // representative source element rather than the request, because every count except field_map's
+    // is a property of the source mesh's code instance.
+    struct EvalLayout
+    {
+      unsigned ncont = 0, nDL = 0, nD0 = 0, nDG = 0, npos = 0, nlag = 0, nzeta = 0;
+      unsigned per_level() const { return ncont + nDL + nD0 + nDG + npos + nlag + nzeta; }
+    };
+
+    EvalLayout eval_layout(BulkElementBase *e, const EvalRequest &what)
+    {
+      EvalLayout L;
+      if (!e)
+        return L;
+      const JITFuncSpec_Table_FiniteElement_t *ft = e->get_code_instance()->get_func_table();
+      if (what.continuous_fields)
+      {
+        // With a field_map the caller is asking for ITS OWN field layout, so the count is the map's
+        // length; entries mapping to -1 are simply left at zero.
+        L.ncont = (what.field_map.empty() ? e->ncont_interpolated_values()
+                                          : (unsigned)what.field_map.size());
+      }
+      if (what.DL_fields)
+        L.nDL = ft->info_DL.numfields;
+      if (what.D0_fields)
+        L.nD0 = ft->info_D0.numfields;
+      if (what.DG_fields)
+      {
+        for (unsigned i = 0; i < ft->num_present_dg_spaces; i++)
+          L.nDG += ft->present_dg_spaces[i]->numfields_new;
+      }
+      if (what.position)
+        L.npos = e->nodal_dimension();
+      if (what.lagrangian)
+        L.nlag = e->nlagrangian();
+      if (what.zeta)
+        L.nzeta = e->dim();
+      return L;
+    }
+
+    unsigned n_levels(const EvalRequest &what)
+    {
+      return what.time_levels.empty() ? 1u : (unsigned)what.time_levels.size();
+    }
   }
 
-  std::vector<double> LocationSet::evaluate(const EvalRequest &) const
+  unsigned LocationSet::values_per_point(const EvalRequest &what) const
   {
-    throw_runtime_error("LocationSet::evaluate is not implemented yet");
+    BulkElementBase *rep = NULL;
+    for (BulkElementBase *e : local_elements)
+    {
+      if (e)
+      {
+        rep = e;
+        break;
+      }
+    }
+    if (!rep && locator && locator->get_source_mesh() && locator->get_source_mesh()->nelement())
+      rep = dynamic_cast<BulkElementBase *>(locator->get_source_mesh()->element_pt(0));
+    return n_levels(what) * eval_layout(rep, what).per_level();
+  }
+
+  std::vector<double> LocationSet::evaluate(const EvalRequest &what) const
+  {
+    const unsigned stride = this->values_per_point(what);
+    std::vector<double> out((size_t)npoint * stride, 0.0);
+    if (!stride || !npoint)
+      return out;
+
+    // interpolated_zeta() reports whichever coordinate the two static flags select, so a zeta
+    // request has to be answered under the same setting the points were located in - otherwise the
+    // caller gets Lagrangian coordinates back from a search it ran in Eulerian space.
+    std::unique_ptr<ZetaFlagGuard> zguard;
+    if (what.zeta && locator)
+    {
+      const LocatorSetup &su = locator->get_setup();
+      zguard.reset(new ZetaFlagGuard(su.time_index, su.space == LocatorSpace::Lagrangian));
+    }
+
+    const std::vector<unsigned> level0(1, 0u);
+    const std::vector<unsigned> &levels = (what.time_levels.empty() ? level0 : what.time_levels);
+
+    oomph::Vector<double> vals;
+    std::vector<double> dvals;
+    oomph::Vector<double> s_o;
+    std::vector<double> sloc;
+    for (unsigned i = 0; i < npoint; i++)
+    {
+      BulkElementBase *e = NULL;
+      if (!this->resolve_local(i, e, sloc) || !e)
+        continue; // unlocated, or owned by another rank: left at zero, as documented
+      const EvalLayout L = eval_layout(e, what);
+      s_o.resize(sloc.size());
+      for (unsigned d = 0; d < sloc.size(); d++)
+        s_o[d] = sloc[d];
+
+      double *row = &out[(size_t)i * stride];
+      for (unsigned li = 0; li < levels.size(); li++)
+      {
+        const unsigned t = levels[li];
+        double *blk = row + (size_t)li * L.per_level();
+        if (L.ncont)
+        {
+          e->get_interpolated_values(t, s_o, vals);
+          for (unsigned f = 0; f < L.ncont; f++)
+          {
+            const int src = (what.field_map.empty() ? (int)f : what.field_map[f]);
+            if (src >= 0 && (unsigned)src < vals.size())
+              blk[f] = vals[src];
+          }
+          blk += L.ncont;
+        }
+        if (L.nDL)
+        {
+          e->get_interpolated_fields_DL(s_o, dvals, t);
+          for (unsigned f = 0; f < L.nDL && f < dvals.size(); f++)
+            blk[f] = dvals[f];
+          blk += L.nDL;
+        }
+        if (L.nD0)
+        {
+          e->get_interpolated_fields_D0(s_o, dvals, t);
+          for (unsigned f = 0; f < L.nD0 && f < dvals.size(); f++)
+            blk[f] = dvals[f];
+          blk += L.nD0;
+        }
+        if (L.nDG)
+        {
+          // DG values live in the element's own internal Data, which allocate_discontinous_fields
+          // lays out before the DL and D0 entries. Only the fields the element owns
+          // (numfields_new); anything inherited from the bulk is external data and not the source
+          // element's to report.
+          const JITFuncSpec_Table_FiniteElement_t *ft = e->get_code_instance()->get_func_table();
+          unsigned idata = 0, f = 0;
+          for (unsigned si = 0; si < ft->num_present_dg_spaces; si++)
+          {
+            auto *space_info = ft->present_dg_spaces[si];
+            const unsigned nn = e->get_eleminfo()->nnode_of_space[space_info->space_index];
+            oomph::Shape psi(nn ? nn : 1);
+            if (nn)
+              e->shape_of_space(space_info->space_index, s_o, psi);
+            for (unsigned fi = 0; fi < space_info->numfields_new; fi++, f++, idata++)
+            {
+              double acc = 0.0;
+              for (unsigned l = 0; l < nn; l++)
+                acc += psi[l] * e->internal_data_pt(idata)->value(t, l);
+              blk[f] = acc;
+            }
+          }
+          blk += L.nDG;
+        }
+        if (L.npos)
+        {
+          for (unsigned d = 0; d < L.npos; d++)
+            blk[d] = e->interpolated_x(t, s_o, d);
+          blk += L.npos;
+        }
+        if (L.nlag)
+        {
+          for (unsigned d = 0; d < L.nlag; d++)
+            blk[d] = e->interpolated_xi(s_o, d);
+          blk += L.nlag;
+        }
+        if (L.nzeta)
+        {
+          oomph::Vector<double> z(L.nzeta, 0.0);
+          e->interpolated_zeta(s_o, z);
+          for (unsigned d = 0; d < L.nzeta; d++)
+            blk[d] = z[d];
+        }
+      }
+    }
+    return out;
   }
 
 }

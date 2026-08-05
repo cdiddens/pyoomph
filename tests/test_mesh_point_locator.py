@@ -383,6 +383,87 @@ def test_interface_d0_history_survives_adaptation():
 
 
 # ----------------------------------------------------------------------------------------------
+# 4b. evaluating fields at located points (LocationSet::evaluate, via Mesh.evaluate_at_points)
+# ----------------------------------------------------------------------------------------------
+
+def test_evaluate_at_points_reproduces_the_analytic_solution():
+    """-u'' = 1 with u(0) = u(1) = 0 gives u = x(1-x)/2, which the C2 space represents exactly.
+
+    So this is not an "about right" check: any error is the locator's or the evaluation's, not the
+    discretisation's.
+    """
+    class Prob(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=8))
+            eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "left" + DirichletBC(u=0) @ "right"
+            self.add_equations(eqs @ "domain")
+
+    probes = [[0.5, 0.5], [0.25, 0.75], [0.0, 0.0], [0.9375, 0.1]]
+    with Prob() as p:
+        p.quiet()
+        p.solve()
+        rows = p.get_mesh("domain").evaluate_at_points(probes, False, True, 0)
+
+    assert len(rows) == len(probes)
+    for probe, row in zip(probes, rows):
+        assert row[0] == 1.0, f"{probe} was not located"
+        # 1e-9 rather than machine zero: the quadratic solution lies in the C2 space, so what is
+        # left is the Newton/linear-solver residual of the solve itself, not the evaluation.
+        assert row[1] == pytest.approx(probe[0] * (1 - probe[0]) / 2, abs=1e-9), (probe, row)
+        # position echoes the query back, which is the round trip locate -> interpolated_x
+        assert row[2] == pytest.approx(probe[0], abs=1e-12)
+        assert row[3] == pytest.approx(probe[1], abs=1e-12)
+
+
+def test_evaluate_at_points_reports_a_point_outside_the_mesh():
+    class Prob(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=4))
+            self.add_equations((PoissonEquation(source=1) + DirichletBC(u=0) @ "left") @ "domain")
+
+    with Prob() as p:
+        p.quiet()
+        p.solve()
+        rows = p.get_mesh("domain").evaluate_at_points([[0.5, 0.5], [5.0, 5.0]], False, False, 0)
+
+    assert rows[0][0] == 1.0 and len(rows[0]) == 2
+    # An unlocated point must be visibly unlocated, not a plausible-looking zero field value.
+    assert rows[1] == [0.0]
+
+
+def test_evaluate_at_points_carries_interface_d0_and_dl():
+    """The discontinuous blocks follow the continuous one, in the DL-then-D0 order evaluate() fixes."""
+    class Iface(InterfaceEquations):
+        def define_fields(self):
+            self.define_scalar_field("da", "DL")
+            self.define_scalar_field("db", "D0")
+
+        def define_residuals(self):
+            a, va = var_and_test("da")
+            b, vb = var_and_test("db")
+            self.add_residual(weak(a - var("coordinate_x"), va) + weak(b - 7, vb))
+
+    class Prob(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=4))
+            eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "left"
+            eqs += Iface() @ "top"
+            self.add_equations(eqs @ "domain")
+
+    with Prob() as p:
+        p.quiet()
+        p.solve()
+        rows = p.get_mesh("domain/top").evaluate_at_points([[0.3, 1.0], [0.8, 1.0]], False, False, 0)
+
+    for probe, row in zip([0.3, 0.8], rows):
+        assert row[0] == 1.0, row
+        # [found, u (continuous), da (DL), db (D0)]
+        assert len(row) == 4, row
+        assert row[2] == pytest.approx(probe, abs=1e-9), row
+        assert row[3] == pytest.approx(7.0, abs=1e-12), row
+
+
+# ----------------------------------------------------------------------------------------------
 # 5. transfer across a remesh (phases 2, 3, 4b) - these build meshes with gmsh, so they are slow
 # ----------------------------------------------------------------------------------------------
 

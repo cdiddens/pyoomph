@@ -121,6 +121,11 @@ namespace pyoomph
 		// point: {found, offset, s...}, where offset is the perpendicular distance to the element in
 		// codimension-1 (projection) mode and 0 when the map was inverted exactly.
 		std::vector<std::vector<double>> locate_points(const std::vector<std::vector<double>> &coords, bool lagrangian);
+		// Locate points and evaluate this mesh's fields there, one row per point:
+		// [found, <continuous fields>, <DL fields>, <D0 fields>, <position if requested>], all at
+		// time level time_level. The continuous block is in the mesh's own nodal field index order.
+		// Unlocated points come back as a single 0.0.
+		std::vector<std::vector<double>> evaluate_at_points(const std::vector<std::vector<double>> &coords, bool lagrangian, bool with_position, unsigned time_level);
 		// Print how long the point-location phase of nodal_interpolate_from took, and how the
 		// candidate sets were arrived at. Off by default; interpolation is called often enough that
 		// unconditional timing output would be noise.
