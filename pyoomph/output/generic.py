@@ -138,9 +138,13 @@ class _BaseNumpyOutput(_BaseOutputter):
         assert not isinstance(m,ODEStorageMesh)
         self.mesh=m
 
-    def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=False,tesselate_tri:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True)->"MeshDataCacheEntry":
+    def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=False,tesselate_tri:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,global_mesh:bool=False)->"MeshDataCacheEntry | None":
+        """The mesh data this outputter writes.
+
+        With ``global_mesh`` this is **collective** on a distributed mesh and returns ``None`` off
+        rank 0 - every rank has to reach it, and only rank 0 has anything to write."""
         pr = self.mesh.get_problem()
-        cache = pr.get_cached_mesh_data(mesh, tesselate_tri=tesselate_tri, nondimensional=nondimensional,eigenvector=eigenvector,eigenmode=eigenmode,history_index=history_index,with_halos=with_halos,operator=operator,discontinuous=discontinuous,add_eigen_to_mesh_positions=add_eigen_to_mesh_positions)
+        cache = pr.get_cached_mesh_data(mesh, tesselate_tri=tesselate_tri, nondimensional=nondimensional,eigenvector=eigenvector,eigenmode=eigenmode,history_index=history_index,with_halos=with_halos,operator=operator,discontinuous=discontinuous,add_eigen_to_mesh_positions=add_eigen_to_mesh_positions,global_mesh=global_mesh)
         return cache
 
 
@@ -158,8 +162,9 @@ def _check_output_sorting_arguments(sort_along_axis:"SortAlongAxis | None",start
 
 
 class _TextOutput(_BaseNumpyOutput):
-    def __init__(self,mesh:"AnySpatialMesh",*fields:str,ftrunk:str="txtout",in_subdir:bool=True,file_ext:str | list[str] | None=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True,sort_along_axis:"SortAlongAxis | None"=None,start_near_point:Sequence[ExpressionOrNum] | ExpressionOrNum | None=None):
+    def __init__(self,mesh:"AnySpatialMesh",*fields:str,ftrunk:str="txtout",in_subdir:bool=True,file_ext:str | list[str] | None=None,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True,sort_along_axis:"SortAlongAxis | None"=None,start_near_point:Sequence[ExpressionOrNum] | ExpressionOrNum | None=None,global_mesh:bool=True):
         super().__init__(mesh)
+        self.global_mesh=global_mesh
         self.fname_trunk=ftrunk
         self._orbit_subdir:str | None=None
         self.in_subdir=in_subdir
@@ -247,7 +252,12 @@ class _TextOutput(_BaseNumpyOutput):
         if self.eigenvector is not None:
             if self.eigenvector >= len(self.mesh.get_problem()._last_eigenvectors): #type:ignore
                 return  # No output hrere
-        cache=self.get_cached_mesh_data(self.mesh,nondimensional=self.nondimensional,tesselate_tri=self.tesselate_tri,eigenvector=self.eigenvector,eigenmode=self.eigenvector_mode,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator)
+        # Collective when the mesh is distributed and global_mesh is set, so every rank has to get
+        # here - which is why the early return above only lets a rank out when there is nothing to
+        # merge in the first place.
+        cache=self.get_cached_mesh_data(self.mesh,nondimensional=self.nondimensional,tesselate_tri=self.tesselate_tri,eigenvector=self.eigenvector,eigenmode=self.eigenvector_mode,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator,global_mesh=self.global_mesh)
+        if cache is None:
+            return  # a rank that contributed to the merge; rank 0 writes the file
         if len(self.fields)==0:
             self.fields=cache.get_default_output_fields(rem_lagrangian=self.hide_lagrangian,rem_underscore=self.hide_underscore)
         header:list[str] = []
@@ -1013,11 +1023,12 @@ class TextFileOutput(GenericOutput):
         start_near_point (Optional[Union[Sequence[ExpressionOrNum],ExpressionOrNum]]): Same as sort_along_axis, but ordering by the distance to this point, closest first. May carry units. Default is None.
         discontinuous (bool): Flag indicating whether discontinuous output should be written. In that case, each node can be written multiple times, potential with different values. Default is False.
         add_eigen_to_mesh_positions (bool): When outputting an eigenvector on a moving mesh, do we want to add the original mesh coordinates to the eigensolution or not. Default is True.
+        global_mesh (bool): On a mesh distributed with ``--distribute``, write the whole mesh into one file instead of each rank writing its own partition. Default is True, which is what this output almost always means: the file name carries no rank, so with False the ranks write over each other, and a rank holding no element of the domain has nothing to write at all. Set it to False only if you want this rank's partition, and then give each rank its own file name. Not available together with ``operator``, which has to be applied to the merged data and is not supported there yet.
     """
 
 
 
-    def __init__(self,filetrunk:str | None=None,filename:str | None=None, nondimensional:bool=False,hide_underscore:bool=True,hide_lagrangian:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True,sort_along_axis:"SortAlongAxis | None"=None,start_near_point:Sequence[ExpressionOrNum] | ExpressionOrNum | None=None):
+    def __init__(self,filetrunk:str | None=None,filename:str | None=None, nondimensional:bool=False,hide_underscore:bool=True,hide_lagrangian:bool=True,eigenvector:int | None=None,eigenmode:"MeshDataEigenModes"="abs",reverse_segment_if:Callable[[list[int], NPFloatArray], bool] | None=None,sort_segments_by:Callable[[list[int], NPFloatArray], float] | None=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,operator:"MeshDataCacheOperatorBase | None"=None,tesselate_tri:bool=True,sort_along_axis:"SortAlongAxis | None"=None,start_near_point:Sequence[ExpressionOrNum] | ExpressionOrNum | None=None,global_mesh:bool=True):
         super(TextFileOutput, self).__init__()
         _check_output_sorting_arguments(sort_along_axis,start_near_point,reverse_segment_if,sort_segments_by)
         if filetrunk is not None and filename is not None:
@@ -1039,12 +1050,13 @@ class TextFileOutput(GenericOutput):
         self.tesselate_tri=tesselate_tri
         self.sort_along_axis:"SortAlongAxis | None"=sort_along_axis
         self.start_near_point=start_near_point
+        self.global_mesh=global_mesh
 
     def _construct_outputter_for_eq_tree(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,mpirank:int) -> _TextOutput:
         fn=self._expand_filename(eqtree,self.filename,"",add_problem_outdir=False)
         mesh=eqtree.get_mesh()
         assert not isinstance(mesh,ODEStorageMesh)
-        return _TextOutput(mesh,ftrunk=fn,nondimensional=self.nondimensional,hide_underscore=self.hide_underscore,hide_lagrangian=self.hide_lagrangian,eigenvector=self.eigenvector,eigenmode=self.eigenmode,sort_segments_by=self.sort_segments_by,reverse_segment_if=self.reverse_segment_if,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator,tesselate_tri=self.tesselate_tri,sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point)
+        return _TextOutput(mesh,ftrunk=fn,nondimensional=self.nondimensional,hide_underscore=self.hide_underscore,hide_lagrangian=self.hide_lagrangian,eigenvector=self.eigenvector,eigenmode=self.eigenmode,sort_segments_by=self.sort_segments_by,reverse_segment_if=self.reverse_segment_if,discontinuous=self.discontinuous,add_eigen_to_mesh_positions=self.add_eigen_to_mesh_positions,operator=self.operator,tesselate_tri=self.tesselate_tri,sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point,global_mesh=self.global_mesh)
 
     def _is_ode(self):
         return False
