@@ -152,6 +152,41 @@ namespace pyoomph
 		towrite.print(GiNaC::print_csrc_FEM(os, &csrc_opts));
 	}
 
+	// Emits one residual entry, or "0" when this residual's assembly has been switched off with
+	// set_ignore_residual_assembly() - which the azimuthal and Cartesian normal-mode stability
+	// contributions and the pitchfork mass matrix all do (see Problem's stability setup): they exist
+	// to supply Jacobian and mass-matrix entries for the eigenproblem, never a residual.
+	//
+	// The expression is still printed in the ignored case, into a stream that is thrown away, and
+	// that is the point of this function. Printing is not side-effect free:
+	// GiNaCGlobalParameterWrapper::print (src/expressions.cpp) allocates this code's local parameter
+	// slot for a global parameter on first encounter, and the resulting order of
+	// local_parameter_symbols decides both which dResidual<N>dParameter_<i> routines get written
+	// (write_code) and how functable->global_parameters is laid out. Skipping the print outright
+	// would renumber those, and would drop entirely a parameter that occurs only in a
+	// field-independent term of an ignored residual - such a term survives in no Jacobian derivative
+	// either, so nothing else would ever register it. Printing and discarding costs one traversal
+	// and keeps the generated code identical in every respect except the text removed.
+	//
+	// Previously the printed form was kept, wrapped in a /* IGNORED RESIDUAL ... */ comment. In one
+	// production element that comment payload was 66.5% of a 5.8 MB generated file, handed to the C
+	// compiler on every JIT cache miss for no purpose - and stability analysis, which is what
+	// switches residual assembly off, is exactly the workflow where compile time already hurts.
+	static void print_residual_entry(FiniteElementCode *for_code, const GiNaC::ex &res_part,
+									 std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
+	{
+		if (for_code->is_current_residual_assembly_ignored())
+		{
+			std::ostringstream discarded;
+			print_simplest_form(res_part, discarded, csrc_opts);
+			os << "0 /* IGNORED RESIDUAL */";
+		}
+		else
+		{
+			print_simplest_form(res_part, os, csrc_opts);
+		}
+	}
+
 	//////////////
 
 	// PYOOMPH_TIME_ADD_RESIDUAL=1 prints a per-phase breakdown of add_residual/expand_placeholders
@@ -2830,18 +2865,7 @@ namespace pyoomph
 				if (can_have_hanging)
 				{
 					oss << indent << "    BEGIN_RESIDUAL_CONTINUOUS_SPACE(" << eqn_index << ",";
-					if (for_code->is_current_residual_assembly_ignored())
-					{
-						oss << "0 /* IGNORED RESIDUAL " << std::endl; //<< var_part << std::endl << std::endl ;
-					}
-					//else
-					//{
-						print_simplest_form(res_part, oss, csrc_opts);
-					//}
-					if (for_code->is_current_residual_assembly_ignored())
-					{
-						oss << std::endl << "*/" << std::endl;
-					}
+					print_residual_entry(for_code, res_part, oss, csrc_opts);
 					if (for_code->latex_printer)
 					{
 						std::map<std::string, std::string> latexinfo = {{"typ", "final_residual"}, {"test_name", test_name}};
@@ -2853,18 +2877,7 @@ namespace pyoomph
 				else
 				{
 					oss << indent << "    BEGIN_RESIDUAL(" << eqn_index << ", ";
-					if (for_code->is_current_residual_assembly_ignored())
-					{
-						oss << "0 /* IGNORED RESIDUAL: " << std::endl /*<< var_part << std::endl << std::endl */;
-					}
-					/*else
-					{*/
-						print_simplest_form(res_part, oss, csrc_opts);
-					//}
-					if (for_code->is_current_residual_assembly_ignored())
-					{
-						oss << std::endl << "*/" << std::endl;
-					}
+					print_residual_entry(for_code, res_part, oss, csrc_opts);
 					oss << ")" << std::endl;
 					oss << indent << "      ADD_TO_RESIDUAL()" << std::endl;
 				}

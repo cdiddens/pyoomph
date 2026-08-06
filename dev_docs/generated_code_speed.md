@@ -6,7 +6,9 @@ compiler already does about it. The sibling document `codegen_speed.md` covers t
 
 The short version: pyoomph emits deliberately redundant C and leaves the cleanup to the C compiler,
 and **the C compiler is good enough at it that none of the changes tried here earned their place.**
-Three were implemented and measured; all three were reverted. What survives is the knowledge of which
+Three were implemented and measured; all three were reverted. The one change that did land is not a
+speed change at all - it stops handing the compiler megabytes of commented-out residual it will only
+throw away. What survives is the knowledge of which
 apparent inefficiencies are real (few) and which the optimizer already handles (most), plus one piece
 of advice that beats every code-generation change attempted: use `subexpression()`.
 
@@ -344,7 +346,7 @@ on 350 kB statements — not a general belief that emitted redundancy must cost 
 | `pow(x,2)` → `x*x` in the C printer | 0 | −53% | tried, **reverted** — tcc-only, and tcc is fading |
 | `-fno-math-errno` in the default flags | −86% on transcendental forms, 0 elsewhere | n/a | tried, **reverted** |
 | **`subexpression()` in user code** | **−91% on transcendental forms** | — | **the recommendation**: already available, beats every change tried here |
-| drop the `IGNORED RESIDUAL` comment payload | 0 | 0 | not attempted; compile time only, but that is 66% of one 5.8 MB file |
+| drop the `IGNORED RESIDUAL` comment payload | 0 | 0 | **done** — compile time only, but that was 66% of one 5.8 MB file |
 | remove the dead `d_subexpr_*` stores | ~0 | ~0 | not attempted; clarity, not speed |
 | hoist trial-function pointers | expected ~0 | untested | not attempted; size only |
 | automatic `subexpression()` injection | unknown | unknown | not attempted; narrower than it looks — see below |
@@ -357,15 +359,48 @@ no new GiNaC machinery at all — nothing differentiates a Jacobian expression a
 substitution suffices. That is the half that was built, and it did not pay off; injection is the
 harder half and there is now no evidence it would do better.
 
-## What was changed in the end: nothing
+## What was changed
 
-Every code change explored here was implemented, measured and then reverted. The repository carries
-only this document and two documentation fixes (the `--fast-math` help string in
-`pyoomph/generic/problem.py` and its counterpart in
+One thing, and it is not a speed change at all: the `IGNORED RESIDUAL` comment payload is gone (see
+below). Every change aimed at making the *generated code run faster* was implemented, measured and
+reverted. Beyond that the repository carries this document and two documentation fixes (the
+`--fast-math` help string in `pyoomph/generic/problem.py` and its counterpart in
 `docs/source/tutorial/installation/cmdlineoptions.rst`, both of which now point users at
 `subexpression()` instead).
 
-Reverted, with the reasons above:
+### Dropping the `IGNORED RESIDUAL` comment payload *(kept)*
+
+`set_ignore_residual_assembly()` switches off residual assembly for a contribution that exists only to
+supply Jacobian and mass-matrix entries — the azimuthal and Cartesian normal-mode stability
+contributions and the pitchfork mass matrix all do this. The entry was emitted as `0` followed by the
+whole printed residual wrapped in a `/* IGNORED RESIDUAL ... */` comment. On an archived production
+element that comment was **66.4% of a 5.81 MB file** (5 806 110 → 1 950 436 B over 43 ignored
+residuals), handed to the C compiler on every JIT cache miss for no purpose.
+
+`print_residual_entry` (`src/codegen.cpp`) now prints the expression into a stream that is thrown
+away and emits only `0 /* IGNORED RESIDUAL */`. The print is *kept* deliberately, because it is not
+side-effect free: `GiNaCGlobalParameterWrapper::print` (`src/expressions.cpp`) allocates this code's
+local slot for a global parameter on first encounter, and that order decides both which
+`dResidual<N>dParameter_<i>` routines get written and how `functable->global_parameters` is laid out.
+Skipping the print outright would renumber those, and would drop entirely a parameter occurring only
+in a field-independent term of an ignored residual — such a term survives in no Jacobian derivative
+either, so nothing else would ever register it.
+
+Verified on the Rayleigh-Bénard azimuthal stability tutorial (39 ignored residuals), by generating the
+code with and without the change:
+
+- all eight generated files are **byte-identical after normalising the comment down to the short
+  marker** — so no parameter renumbering, and nothing else moved;
+- the compiled shared library is the same size and its **disassembly differs in exactly two
+  instructions**, both `mov $imm,%edx` carrying a `__LINE__` value for `__assert_fail` (0xa84 → 0xa1e
+  and 0x734 → 0x704), plus the embedded source path. The machine code is otherwise unchanged, which is
+  what one expects from deleting comments;
+- the element shrinks 291 086 → 262 853 B and compiles in 4.83 s instead of 5.09 s. That is a modest
+  case; the 66% file above is the extreme;
+- an actual azimuthal eigensolve under complex PETSc still runs and gives sensible spectra for m=0 and
+  m=1.
+
+### Reverted, with the reasons above:
 
 - **`pow(x,2)` → `x*x` in the printer.** Worked, bit-exact, −53% under tcc, zero under gcc. Cannot
   currently be scoped to tcc; tcc is increasingly irrelevant given the JIT cache.
