@@ -354,6 +354,31 @@ whole new mesh" step can go, remeshing becomes scalable rather than merely corre
 
 ---
 
+## 3c. Validated on a real script
+
+The stages above were all built against the synthetic quarter disc. The first end-to-end check on
+something real is `docs/source/tutorial/multidom/evaporating_water_droplet.py` - two coupled domains
+(droplet and gas) rebuilt by one template, a moving mesh, a contact line (codimension-2), and
+remeshing triggered by `RemeshWhen` rather than by an explicit `force_remesh()`. Run at
+`default_resolution=0.05` to stay under the 40000-dof MPI guideline (14520 equations, 4.5 s serially),
+for the full 100 s, which remeshes once.
+
+The droplet volume, an integral observable over the whole domain, after the remesh:
+
+| | volume at t=100 s |
+| --- | --- |
+| serial | 3.309166529745143e-11 |
+| 2 ranks | 3.3091665297536237e-11 |
+| 3 ranks | 3.309166529546143e-11 |
+| 4 ranks | 3.309166526057907e-11 |
+
+i.e. agreeing to ~1e-9 relative at four ranks and better below that, over a transient that accumulates
+the difference between a partitioned and a whole linear solve. This is also the first exercise of the
+two-domain path: both domains are rebuilt by the same template, so the partial-remesh refusal does not
+fire, and `distribute()` re-partitions them together with their coupled interface.
+
+---
+
 ## 4. Tests
 
 Following the `tests/mpi_*_worker.py` pattern, with a serial in-process run as the reference and
