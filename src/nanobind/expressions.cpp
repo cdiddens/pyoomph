@@ -607,6 +607,9 @@ void PyReg_Expressions(nb::module_ &m)
 		.def("__rpow__", [](const GiNaC::ex &rh, const double &lh)
 			 { return GiNaC::pow(lh, rh); }, nb::is_operator())
 
+		// The @ operator is contract(): dot for vectors, the standard adjacent-index matrix-vector product when one operand
+		// is a matrix, A:B for two matrices. Note grad(u)@u is the advection term u.grad(u), not u@grad(u), since
+		// grad(u)_ij = d u_i/d x_j.
 		.def("__matmul__", [](const GiNaC::ex &lh, const GiNaC::ex &rh)
 			 { return 0 + pyoomph::expressions::contract(lh, rh); }, nb::is_operator())
 		.def("get_type_information", [](const GiNaC::ex &self)
@@ -1155,7 +1158,7 @@ void PyReg_Expressions(nb::module_ &m)
 	m.def(
 		"GiNaC_dot", [](const GiNaC::ex &arg1, const GiNaC::ex &arg2)
 		{ return 0 + pyoomph::expressions::dot(arg1, arg2); },
-		nb::arg("arg1"), nb::arg("arg2"), "Calculates the dot product");
+		nb::arg("arg1"), nb::arg("arg2"), "Calculates the dot product. Between two vectors it is sum_i a_i*b_i. Between a matrix and a vector it is the standard adjacent-index contraction, i.e. dot(A,b)_i=A_ij*b_j and dot(a,B)_i=a_j*B_ji. Two matrices are rejected, since A*B (matproduct) and A:B (double_dot) are both plausible.");
 	m.def(
 		"GiNaC_diff", [](const GiNaC::ex &arg1, const GiNaC::ex &arg2)
 		{ return 0 + pyoomph::expressions::diff(arg1, arg2); },
@@ -1184,7 +1187,7 @@ void PyReg_Expressions(nb::module_ &m)
 	m.def(
 		"GiNaC_contract", [](const GiNaC::ex &arg1, const GiNaC::ex &arg2)
 		{ return 0 + pyoomph::expressions::contract(arg1, arg2); },
-		nb::arg("arg1"), nb::arg("arg2"), "Calculates the dot for vectors and double dot for matrices");
+		nb::arg("arg1"), nb::arg("arg2"), "Generic contraction: the dot product for two vectors, the standard adjacent-index matrix-vector product when one operand is a matrix (identical to dot), the double dot A:B for two matrices, and plain scaling when one operand is a scalar.");
 	m.def(
 		"GiNaC_weak", [](const GiNaC::ex &arg1, const GiNaC::ex &arg2, const GiNaC::ex &flags, const GiNaC::ex &coordsys)
 		{ return 0 + pyoomph::expressions::weak(arg1, arg2, flags, coordsys); },

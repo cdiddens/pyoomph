@@ -1493,9 +1493,29 @@ namespace pyoomph
 
 		////////////////
 
-		// Dot (inner) product of two column vectors (Nx1 matrices). If the two vectors have different lengths, the shorter
-		// one is implicitly zero-padded (but only if the "extra" trailing components of the longer vector are actually
-		// zero -- otherwise this is an error, since silently dropping nonzero components would be wrong).
+		// Standard single-index contraction of a matrix with a column vector, i.e. the adjacent-index one:
+		//   contract_column=true : (M.v)_i = sum_j M_ij v_j   -- contracts M's column index
+		//   contract_column=false: (v.M)_i = sum_j v_j M_ji   -- contracts M's row index
+		// std::min on the summed extent keeps the zero-padding tolerance that the vector/vector branch of dot_eval and
+		// double_dot already have: a tensor assembled with fill_to_max_vector_dim=False is 2x2 in 2d and meets
+		// three-component padded vectors.
+		static ex matrix_vector_contract(const matrix &m, const matrix &v, bool contract_column)
+		{
+			unsigned int free_n = (contract_column ? m.rows() : m.cols());
+			unsigned int sum_n = std::min(contract_column ? m.cols() : m.rows(), v.rows());
+			std::vector<GiNaC::ex> r(free_n, 0);
+			for (unsigned int i = 0; i < free_n; i++)
+				for (unsigned int j = 0; j < sum_n; j++)
+					r[i] += (contract_column ? m(i, j) * v(j, 0) : v(j, 0) * m(j, i));
+			return 0 + GiNaC::matrix(free_n, 1, GiNaC::lst(r.begin(), r.end()));
+		}
+
+		// Dot (inner) product. Between two column vectors (Nx1 matrices) it is the usual sum_i a_i*b_i; if the two vectors
+		// have different lengths, the shorter one is implicitly zero-padded (but only if the "extra" trailing components of
+		// the longer vector are actually zero -- otherwise this is an error, since silently dropping nonzero components
+		// would be wrong). Between a matrix and a vector it is the standard adjacent-index contraction, A.b = A_ij b_j and
+		// a.B = a_j B_ji, agreeing with matproduct(A,b) and matproduct(transpose(B),a) respectively. Two matrices are
+		// rejected: A*B and A:B are both plausible readings, so the caller has to say which.
 		static ex dot_eval(const ex &a, const ex &b)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -1505,7 +1525,9 @@ namespace pyoomph
 						  << std::endl;
 			if (need_to_hold(a) || need_to_hold(b))
 				return dot(a, b).hold();
-			// Also stay held if either operand still contains an unresolved grad(...) call, since evalm() cannot expand a gradient's tensor shape yet
+			// Also stay held if either operand still contains an unresolved grad(...) call, since evalm() cannot expand a
+			// gradient's tensor shape yet. Strictly redundant -- need_to_hold above already lists grad -- but kept because
+			// it states the reason locally.
 			if (a.has(grad(wild(), wild(), wild(), wild(), wild())))
 				return dot(a, b).hold();
 			if (b.has(grad(wild(), wild(), wild(), wild(), wild())))
@@ -1521,13 +1543,18 @@ namespace pyoomph
 				matrix ma = ex_to<matrix>(eva);
 				matrix mb = ex_to<matrix>(evb);
 
+				// Mixed matrix/vector: the standard adjacent-index contraction (see matrix_vector_contract above)
+				if (ma.cols() != 1 && mb.cols() == 1)
+					return matrix_vector_contract(ma, mb, true); // A.b
+				if (ma.cols() == 1 && mb.cols() != 1)
+					return matrix_vector_contract(mb, ma, false); // a.B
 				if (ma.cols() != 1 || mb.cols() != 1)
 				{
 					std::ostringstream oss;
 					oss << std::endl
 						<< " a = " << a << std::endl
 						<< " b = " << b << std::endl;
-					throw_runtime_error("dot is only allowed between vectors, but got: " + oss.str());
+					throw_runtime_error("dot between two matrices is ambiguous. Use matproduct(A,B) for the matrix product A*B, or double_dot(A,B) for the full contraction A:B. Got: " + oss.str());
 				}
 				GiNaC::ex ret;
 				if (ma.rows() != mb.rows())
@@ -1663,10 +1690,17 @@ namespace pyoomph
 
 		////
 
-		// Generic index contraction, implementing the "@"/matmul operator for arbitrary vector/matrix combinations:
-		// vector.vector -> dot product; vector.matrix or matrix.vector -> matrix-vector product (returned as a column
-		// vector); matrix.matrix -> double_dot (full Frobenius contraction); scalar.scalar (or any non-matrix operand)
-		// -> plain multiplication.
+		// Generic index contraction, implementing the "@"/matmul operator for arbitrary vector/matrix combinations. It is a
+		// pure dispatcher: anything involving a column vector goes to dot(), two matrices to double_dot(), and a non-matrix
+		// operand to plain multiplication.
+		//
+		// The mixed matrix/vector case used to be hand-written here and contracted the OUTER index, so contract(A,b) was
+		// transpose(A).b and contract(a,B) was B.a -- the standard dot product with the operands swapped. Combined with
+		// grad() being the Jacobian (grad(u)_ij = d u_i/d x_j) the two reversals cancelled, which is why contract(u,grad(u))
+		// came out as the correct advection term u.grad(u) while contract(grad(u),u) -- the order that reads correctly under
+		// a Jacobian grad -- silently gave grad(|u|^2/2). Both now follow dot(), i.e. the standard adjacent-index
+		// convention, so contract(grad(u),u) is the advection term. Delegating rather than duplicating is deliberate: the
+		// two operators had drifted apart precisely because they were implemented twice.
 		static ex contract_eval(const ex &a, const ex &b)
 		{
 			if (pyoomph::pyoomph_verbose)
@@ -1688,53 +1722,15 @@ namespace pyoomph
 			{
 				matrix ma = ex_to<matrix>(evma);
 				matrix mb = ex_to<matrix>(evmb);
-				// std::cout << "COL ROW INFO" << ma.cols() << " " << mb.cols() << "    " << ma.rows() << "  " << mb.rows() << std::endl;
-				if (ma.cols() == 1 && mb.cols() == 1)
-					return dot(evma, evmb);
-				else if (ma.cols() == 1)
-				{
-					std::vector<GiNaC::ex> v(std::min(ma.rows(), mb.rows()), 0);
-					for (unsigned int i = 0; i < v.size(); i++)
-					{
-						for (unsigned int j = 0; j < mb.rows(); j++)
-							v[i] += ma(j, 0) * mb(i, j);
-					}
-					return 0 + GiNaC::matrix(v.size(), 1, GiNaC::lst(v.begin(), v.end()));
-				}
-				else if (mb.cols() == 1)
-				{
-					//				std::cout << "COL ROW INFO" << ma.cols() << " " << mb.cols() << "    " << ma.rows() << "  " << mb.rows() << std::endl;
-					//				std::cout << "a=" << ma << "  " <<"  b=" << mb   << std::endl;
-					std::vector<GiNaC::ex> v(std::min(ma.rows(), mb.rows()), 0);
-					for (unsigned int i = 0; i < v.size(); i++)
-					{
-						for (unsigned int j = 0; j < ma.rows(); j++)
-						{
-							//		      std::cout << "  CONTRIB " << i << "  " << j << "  is " << mb(j,0) << "  " << ma(j,i) << std::endl;
-							v[i] += mb(j, 0) * ma(j, i);
-						}
-						//  				std::cout << "v[" <<i << "] = " << v[i]   << std::endl;
-					}
-
-					return 0 + GiNaC::matrix(v.size(), 1, GiNaC::lst(v.begin(), v.end()));
-				}
+				if (ma.cols() == 1 || mb.cols() == 1)
+					return dot(evma, evmb); // vector.vector, matrix.vector and vector.matrix
 				else
 					return double_dot(evma, evmb);
 			}
-			if (!is_a<matrix>(evma) && !is_a<matrix>(evmb))
-			{
-				return evma * evmb;
-			}
-			else
-			{
-				return evma * evmb;
-			}
-			std::ostringstream oss;
-			oss << std::endl
-				<< " a = " << evma << std::endl
-				<< " b = " << evmb << std::endl;
-			throw_runtime_error("Cannot contract the following:" + oss.str());
-			return 0;
+			// At least one operand is not a matrix, i.e. a scalar: contracting with a scalar is just scaling, whether the
+			// other operand is a scalar, a vector or a tensor. (This used to be two branches with identical bodies,
+			// followed by an unreachable "Cannot contract the following" throw.)
+			return evma * evmb;
 		}
 
 		REGISTER_FUNCTION(contract, eval_func(contract_eval).set_return_type(GiNaC::return_types::commutative))

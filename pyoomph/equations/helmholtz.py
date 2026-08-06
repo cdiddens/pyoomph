@@ -73,6 +73,9 @@ class HelmholtzEquation(Equations):
             utest = uRtest + I * uItest
         else:
             u,utest=var_and_test(self.name)
+        # contract, not matproduct: coeff defaults to the scalar 1 and matproduct rejects non-matrices. With a tensorial
+        # coeff this is coeff.grad(u), i.e. coeff_ij*d_j u, which is what the standard contraction convention gives; it
+        # used to be transpose(coeff).grad(u), identical for the symmetric coefficient tensors that make sense here.
         eq=weak(contract(self.coeff,grad(u)),contract(self.test_coeff,grad(utest)))-self.k**2*weak(u,utest)
 
         if self.complex:

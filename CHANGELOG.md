@@ -84,6 +84,38 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Changed / Improved
 
+- **Tensor index conventions are now self-consistent -- two of them changed.** `grad` was already the
+  Jacobian, `grad(u)[i,j] = d(u_i)/d(x_j)`, and `matproduct`/`double_dot` were already standard, but
+  `contract` and the divergence of a rank-2 tensor were not, in ways that cancelled for the idiomatic
+  terms and so went unnoticed. Both now follow the standard adjacent-index convention:
+  - **`contract(A,b)` (and `A @ b`) is now `A_ij*b_j`, was `A_ji*b_j`.** Symmetrically,
+    `contract(a,B)` is now `a_j*B_ji`. The two orders have therefore swapped meaning: the advection
+    term `u.grad(u)` is now `contract(grad(u),u)`, and `contract(u,grad(u))` is `grad(|u|^2/2)`. If
+    you have equations written the old way round, swap the arguments -- or better, spell it
+    `matproduct(grad(u),u)`, which never changed. Only the mixed vector/matrix case moved;
+    vector-vector (dot product), matrix-matrix (`A:B`) and anything involving a scalar are untouched,
+    so a `contract(S,S)` stays exactly as it was. `weak()` never went through `contract` and is
+    unaffected.
+  - **`div(T)[i]` of a rank-2 tensor is now `d_j T_ij`, was `d_j T_ji`.** This makes `div` the adjoint
+    of `grad`, so `div(grad(u))` is the vector Laplacian (it used to be `grad(div(u))`), and makes
+    `div(T)` the integration-by-parts partner of `weak(T,grad(v))` with the traction
+    `matproduct(T,n)`. For symmetric tensors -- every usual stress -- nothing changes at all. A flux
+    tensor has to be assembled accordingly: the momentum flux carrying `u` along `rho*q` is
+    `dyadic(u,rho*q)`. The conservative (`GCL=True`) Navier-Stokes momentum flux was updated to
+    match; no other equation in pyoomph took the divergence of a tensor.
+  - `dot()` now also accepts one matrix and one vector, with the same standard convention, where it
+    previously raised "dot is only allowed between vectors". `dot` and `contract` agree in every
+    shape they share; two matrices still raise, since `matproduct` and `double_dot` are both
+    plausible readings. The index order of every operator is now stated in its docstring.
+- Fixed `BaseDifferentialGeometryCoordinateSystem.vector_gradient`, which returned the transpose of
+  what every other coordinate system returns (`d(u_j)/d(x_i)` instead of `d(u_i)/d(x_j)`).
+- Corrected the `upper_convected_derivative` docstring, which stated the stretching terms with the two
+  transposes interchanged. The code was and is right for pyoomph's gradient convention.
+- The spatial-derivative operators (`partial_t` with ALE, `material_derivative`,
+  `directional_derivative`, `convected_derivative`, `upper_convected_derivative`) now all document
+  that they use the *surface* gradient on a domain with a co-dimension, and that `var("u",domain="..")`
+  is how to get the bulk one -- as `grad` and `div` already did. `directional_derivative` and
+  `convected_derivative` had no docstring at all.
 - Extensive internal refactoring of hanging-dof handling (new space-information
   structures, restructured hang buffers, streamlined `fill_hang_info_with_equations`)
   and of DG field handling.

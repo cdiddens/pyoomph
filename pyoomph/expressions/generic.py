@@ -371,10 +371,18 @@ def grad(arg:ExpressionOrNum,lagrangian:bool=False,nondim:bool=False,coordsys:Op
 
 	Returns:
 	Expression: The computed gradient expression.
- 
+
  	Notes:
 		if you calculate grad(u) on a boundary, you will get the surface gradient, even if u is defined in the bulk.
 		To get the bulk gradient at the boundary, use grad(var("u",domain="..")) instead.
+
+		Index order: for a vector field, ``grad(u)[i,j]`` is :math:`\\partial u_i/\\partial x_j`, i.e. the Jacobian, with the
+		component as the row and the derivative direction as the column. Many references (in particular in rheology and
+		tensor analysis) instead write :math:`\\nabla\\otimes\\vec{u}` with the derivative index first, which is the
+		transpose of this. Consequently the advection term :math:`\\vec{u}\\cdot\\nabla\\vec{u}` is
+		``matproduct(grad(u),u)``, equivalently ``dot(grad(u),u)`` or ``grad(u) @ u``, and *not* ``dot(u,grad(u))``, which
+		is :math:`\\nabla(|\\vec{u}|^2/2)`. See also :py:func:`~pyoomph.expressions.div`, which contracts the second index
+		so that ``div(grad(u))`` is the vector Laplacian.
 	"""
 	if isinstance(arg,str):
 		arg=var(arg)
@@ -475,11 +483,13 @@ def timestepper_weight(order:int,index:int,scheme:TimeSteppingScheme="BDF1")->Ex
 
 def contract(a:ExpressionOrNum,b:ExpressionOrNum)->Expression:
 	"""
-	Contract a and b. 
-	If both are scalars, it is just a*b. 
+	Contract a and b, i.e. the standard adjacent-index contraction. This is what the ``@`` operator does.
+
+	If both are scalars, it is just a*b.
 	If both are vectors, it is the dot product.
-	If both are rank-2-tensors/matrices, it is the Frobenius product.
-	If one is a vector and the other a matrix, it is the matrix-vector product.
+	If both are rank-2-tensors/matrices, it is the Frobenius product :math:`\\mathbf{A}:\\mathbf{B}=A_{ij}B_{ij}`.
+	If one is a vector and the other a matrix, it is the matrix-vector product, contracting the index of the matrix that
+	faces the other operand: ``contract(A,b)[i]`` is :math:`A_{ij}b_j` and ``contract(a,B)[i]`` is :math:`a_j B_{ji}`.
 	If one is a scalar, it is just the multiplication by a scalar.
 
 	Args:
@@ -488,6 +498,15 @@ def contract(a:ExpressionOrNum,b:ExpressionOrNum)->Expression:
 
 	Returns:
 		Expression: The symbolic contraction of a and b.
+
+	Notes:
+		The mixed vector/matrix case is *not* symmetric, and with
+		:py:func:`~pyoomph.expressions.generic.grad` storing :math:`\\partial u_i/\\partial x_j` the order matters: the
+		advection term :math:`\\vec{u}\\cdot\\nabla\\vec{u}` is ``contract(grad(u),u)`` (equivalently ``grad(u) @ u`` or
+		``matproduct(grad(u),u)``), whereas ``contract(u,grad(u))`` is :math:`\\nabla(|\\vec{u}|^2/2)`.
+
+		This convention changed: previously the outer index was contracted, so ``contract(A,b)`` was
+		:math:`A_{ji}b_j` and the two orders above were interchanged. See the changelog.
 	"""
 	if not isinstance(a,_pyoomph.Expression):
 		a=_pyoomph.Expression(a)
@@ -532,8 +551,14 @@ def partial_t(f:ExpressionOrNum | str,order:int=1,ALE:Literal["auto"] | bool="au
 
 	Returns:
 		The partial derivative of the function with respect to time.
+
+	Notes:
+		The ALE correction is a :py:func:`~pyoomph.expressions.generic.directional_derivative`, hence a
+		:py:func:`~pyoomph.expressions.generic.grad`, so on a domain with a co-dimension it uses the *surface* gradient:
+		on an interface, ``partial_t(var("u"))`` corrects only with the in-surface part of the mesh motion. Use
+		``partial_t(var("u",domain=".."))`` if the bulk gradient is wanted.
 	"""
-	
+
 	if isinstance(f,str):
 		f=var(f)
 	if order==0:
@@ -588,6 +613,11 @@ def material_derivative(f:ExpressionOrNum | str,velocity:ExpressionOrNum | str,A
 
 	Returns:
 		The material derivative of the expression ``f`` advected by ``velocity``.
+
+	Notes:
+		The advection term is built from :py:func:`~pyoomph.expressions.generic.grad`, so on a domain with a co-dimension
+		it is the *surface* gradient: on an interface, ``material_derivative(var("c"),u)`` advects along the surface only,
+		even if ``c`` is defined in the bulk. Use ``var("c",domain="..")`` to advect with the bulk gradient instead.
 	"""
 	if isinstance(f,str):
 		f=var(f)
@@ -601,6 +631,38 @@ def material_derivative(f:ExpressionOrNum | str,velocity:ExpressionOrNum | str,A
 	return dt_factor * partial_t(f, ALE=ALE, scheme=dt_scheme, nondim=nondim) + advection_factor * adv_term
 
 def convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,alpha:ExpressionOrNum=0,ALE:Literal["auto"] | bool=False,dt_scheme:OptionalTimeSteppingScheme=None,nondim:bool=False,lagrangian:bool=False,dt_factor:ExpressionOrNum=1,advection_factor:ExpressionOrNum=1,coordsys:OptionalCoordinateSystem=None)->Expression:
+	"""
+	Returns the Gordon-Schowalter convected derivative of a rank-2 tensor field :math:`\\mathbf{A}`, i.e. the one-parameter
+	family interpolating between the upper- and the lower-convected derivative:
+
+	.. math:: \\partial_t \\mathbf{A} + \\vec{u}\\cdot\\nabla\\mathbf{A} - \\mathbf{g}_\\alpha\\cdot\\mathbf{A} - \\mathbf{A}\\cdot\\mathbf{g}_\\alpha^\\mathrm{T}
+
+	with :math:`\\mathbf{g}_\\alpha=\\frac{1}{2}[(1+\\alpha)\\nabla\\vec{u}-(1-\\alpha)(\\nabla\\vec{u})^\\mathrm{T}]`.
+	``alpha=1`` reproduces :py:func:`~pyoomph.expressions.generic.upper_convected_derivative`, ``alpha=-1`` gives the
+	lower-convected one, and ``alpha=0`` (the default) the co-rotational Jaumann derivative.
+
+	Args:
+		A: Rank-2 tensor field to be advected.
+		velocity: Advection velocity.
+		alpha: Slip parameter of the family, see above.
+		ALE: Use ALE correction. If set to ``"auto"``, it will only be used if the coordinates are degrees of freedom.
+			Note that this defaults to ``False`` here, unlike in :py:func:`~pyoomph.expressions.generic.material_derivative`
+			and :py:func:`~pyoomph.expressions.generic.upper_convected_derivative`, which default to ``"auto"``.
+		dt_scheme: Used time stepping scheme. If set to None, the default time stepping scheme set at problem level will be used.
+		nondim: Using non-dimensional time. Defaults to False.
+		lagrangian: Using Lagrangian coordinates for the gradient.
+		dt_factor: Factor to weight the :math:`\\partial_t \\mathbf{A}` term.
+		advection_factor: Factor to weight the advection and stretching terms.
+		coordsys: Optional coordinate system to use. Defaults to None, meaning the coordinate system at equation level, parent equation level or problem level.
+
+	Returns:
+		The convected derivative of the tensor field :math:`\\mathbf{A}` advected by the velocity field :math:`\\vec{u}`.
+
+	Notes:
+		Both the advection term and :math:`\\nabla\\vec{u}` are built from :py:func:`~pyoomph.expressions.generic.grad`, so
+		on a domain with a co-dimension they are the *surface* gradient. Use ``var("velocity",domain="..")`` to get the
+		bulk gradient at an interface.
+	"""
 	res=material_derivative(A,velocity,ALE,dt_scheme,nondim,lagrangian,dt_factor,advection_factor,coordsys)
 	gradv=grad(velocity,lagrangian=lagrangian,nondim=nondim) # Due to different conventions, this might be transposed in other references!
 	g_alpha=0.5*((1+alpha)*gradv-(1-alpha)*transpose(gradv))
@@ -609,7 +671,13 @@ def convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,alpha:Expres
 
 def upper_convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,ALE:Literal["auto"] | bool="auto",dt_scheme:OptionalTimeSteppingScheme=None,nondim:bool=False,lagrangian:bool=False,dt_factor:ExpressionOrNum=1,advection_factor:ExpressionOrNum=1,coordsys:OptionalCoordinateSystem=None)->Expression:
 	"""
- 	Returns the upper-convected derivative of a tensor field :math:`\\mathbf{A}`, i.e. :math:`\\partial_t \\mathbf{A} + \\vec{u}\\cdot\\nabla\\mathbf{A}-(\\nabla \\vec{u})^\\mathrm{T}\\cdot \\mathbf{A} - \\mathbf{A}\\cdot\\nabla\\vec{u}`.
+ 	Returns the upper-convected derivative of a tensor field :math:`\\mathbf{A}`, i.e. :math:`\\partial_t \\mathbf{A} + \\vec{u}\\cdot\\nabla\\mathbf{A}-(\\nabla \\vec{u})\\cdot \\mathbf{A} - \\mathbf{A}\\cdot(\\nabla\\vec{u})^\\mathrm{T}`.
+
+	Note where the transpose sits: with pyoomph's convention :math:`(\\nabla\\vec{u})_{ij}=\\partial u_i/\\partial x_j` (see
+	:py:func:`~pyoomph.expressions.generic.grad`) the stretching terms are :math:`-\\mathbf{L}\\mathbf{A}-\\mathbf{A}\\mathbf{L}^\\mathrm{T}`
+	with :math:`\\mathbf{L}=\\nabla\\vec{u}`, which follows from :math:`\\mathbf{C}=\\mathbf{F}\\mathbf{F}^\\mathrm{T}` and
+	:math:`\\dot{\\mathbf{F}}=\\mathbf{L}\\mathbf{F}`. References written with the opposite gradient convention state the
+	same object with the two transposes interchanged.
 
 	Args:
 		A: Rank-2 tensor field to be advected.
@@ -624,6 +692,11 @@ def upper_convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,ALE:Li
 
 	Returns:
 		The upper convected derivative of the tensor field :math:`\\mathbf{A}` advected by the velocity field :math:`\\vec{u}`.
+
+	Notes:
+		Both the advection term and :math:`\\nabla\\vec{u}` are built from :py:func:`~pyoomph.expressions.generic.grad`, so
+		on a domain with a co-dimension they are the *surface* gradient. Use ``var("velocity",domain="..")`` to get the
+		bulk gradient at an interface.
 	"""
 	res=material_derivative(A,velocity,ALE,dt_scheme,nondim,lagrangian,dt_factor,advection_factor,coordsys)
 	gradv=grad(velocity,lagrangian=lagrangian,nondim=nondim) # Due to different conventions, this might be transposed in other references! 
@@ -631,6 +704,27 @@ def upper_convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,ALE:Li
 	return res
 
 def directional_derivative(f:ExpressionOrNum,direction:ExpressionOrNum,nondim:bool=False,lagrangian:bool=False,coordsys:OptionalCoordinateSystem=None):
+	"""
+	Compute the directional derivative :math:`(\\vec{d}\\cdot\\nabla)f` of ``f`` along ``direction``, i.e. the advection
+	operator. ``f`` may be a scalar, a vector or a rank-2 tensor; the rank is detected from the resolved shape and the
+	right operator is used in each case, so for a vector this is :math:`d_j\\,\\partial u_i/\\partial x_j` and for a tensor
+	:math:`d_k\\,\\partial T_{ij}/\\partial x_k`. ``direction`` must be a vector.
+
+	Args:
+		f: Scalar, vectorial or tensorial expression to differentiate.
+		direction: Vector expression giving the direction, e.g. a velocity.
+		nondim: Using non-dimensional coordinates. Defaults to False.
+		lagrangian: Using Lagrangian coordinates for the gradient.
+		coordsys: Optional coordinate system to use. Defaults to None, meaning the coordinate system at equation level, parent equation level or problem level.
+
+	Returns:
+		The directional derivative of ``f`` along ``direction``, of the same rank as ``f``.
+
+	Notes:
+		Built from :py:func:`~pyoomph.expressions.generic.grad`, so on a domain with a co-dimension this is the *surface*
+		gradient: on an interface, ``directional_derivative(var("c"),u)`` only differentiates along the surface, even if
+		``c`` is defined in the bulk. Use ``var("c",domain="..")`` for the bulk gradient.
+	"""
 	if isinstance(f,float) or isinstance(f,int):
 		return Expression(0)
 	flag=(0 if nondim else 1) + (8 if lagrangian else 0) #Code the flag
@@ -993,14 +1087,25 @@ def convert_to_expression(a:ExpressionOrNum | NPAnyArray)->Expression:
 
 def dot(a:ExpressionOrNum | str,b:ExpressionOrNum | str)->Expression:    
 	"""
-	Compute the dot product between two vectors.
+	Compute the dot product, i.e. the standard adjacent-index contraction.
+
+	Between two vectors this is :math:`a_i b_i`. One operand may also be a rank-2 tensor/matrix, in which case the index
+	facing the other operand is contracted: ``dot(A,b)[i]`` is :math:`A_{ij}b_j` (the same as ``matproduct(A,b)``) and
+	``dot(a,B)[i]`` is :math:`a_j B_{ji}` (the same as ``matproduct(transpose(B),a)``). Two matrices are rejected, since
+	both :math:`\\mathbf{A}\\mathbf{B}` and :math:`\\mathbf{A}:\\mathbf{B}` would be plausible readings - use
+	:py:func:`~pyoomph.expressions.generic.matproduct` or :py:func:`~pyoomph.expressions.generic.double_dot` to say which.
 
 	Parameters:
-	a: The first vector. String will be wrapped in a var expression.
-	b: The second vector. String will be wrapped in a var expression.
+	a: The first operand. String will be wrapped in a var expression.
+	b: The second operand. String will be wrapped in a var expression.
 
 	Returns:
-	Expression: The dot product of the two vectors.
+	Expression: The dot product, a scalar for two vectors and a vector for the mixed case.
+
+	Notes:
+		Since :py:func:`~pyoomph.expressions.generic.grad` stores :math:`\\partial u_i/\\partial x_j`, the advection term
+		:math:`\\vec{u}\\cdot\\nabla\\vec{u}` is ``dot(grad(u),u)``, not ``dot(u,grad(u))``, which is
+		:math:`\\nabla(|\\vec{u}|^2/2)`. For a scalar field both orders agree, since ``grad`` of a scalar is a vector.
 	"""
 	if isinstance(a,str):
 		a=var(a)

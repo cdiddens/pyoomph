@@ -40,6 +40,22 @@ if TYPE_CHECKING:
 pi = 2 * _pyoomph.GiNaC_asin(1)
 
 
+def _transpose_resolved_matrix(T:Expression)->Expression:
+    """
+    Element-wise transpose of a matrix that has already been resolved by ``evalm()``.
+
+    The symbolic :py:func:`~pyoomph.expressions.generic.transpose` cannot be used here: ``need_to_hold``
+    in the C++ core lists ``field``, so ``transpose(T)`` of any tensor built from fields stays held and
+    ``evalm()`` does not resolve it, after which indexing ``T[i,j]`` falls back to a held
+    ``double_index`` instead of giving a component.
+
+    The extent is the padded 3x3 that every tensor in pyoomph has: ``matrix()`` fills to 3x3 and
+    ``vector()`` to three components, and the ``tensor_divergence`` implementations below already assume
+    it (their loops are ``range(3)`` and they read ``T[2,2]``).
+    """
+    return matrix([[T[j,i] for j in range(3)] for i in range(3)])
+
+
 class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
     
     expansion_eps=_pyoomph.GiNaC_new_symbol("eps") # One epsilon to rule them all, one epsilon to find them, one epsilon to bring them all and in the darkness bind them
@@ -173,7 +189,18 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
         #		is_vector=(flags//2)	#TODO
 
         if tensorial:
-            return self.tensor_divergence(arg.evalm(),ndim,edim,with_scales,lagrangian)
+            # The user-visible convention is (div T)_i = d_j T_ij, contracting the SECOND index. That is what makes div
+            # the adjoint of grad (grad(u)_ij = d u_i/d x_j), hence div(grad(u)) the vector Laplacian, and it is the
+            # integration-by-parts partner of the weak(T,grad(v)) + matproduct(T,n) traction pair the Navier-Stokes and
+            # viscoelastic equations already use.
+            #
+            # The tensor_divergence implementations below still compute the FIRST-index contraction d_j T_ji, so the
+            # transpose converts between the two. It is exact rather than an approximation - d_j (T^t)_ji IS d_j T_ij for
+            # arbitrary T - which is why the curvilinear connection terms can be reused untouched instead of being
+            # re-derived. That matters most for AxisymmetryBreakingCoordinateSystem.tensor_divergence, which was derived
+            # against div(dyadic(a,b)) identities. For symmetric tensors, i.e. every usual stress, the transpose is a
+            # no-op. TODO: fold the second-index convention into the tensor_divergence implementations and drop this.
+            return self.tensor_divergence(_transpose_resolved_matrix(arg.evalm()),ndim,edim,with_scales,lagrangian)
         elif edim == ndim:
             return self.vector_divergence(arg.evalm(), ndim, edim, with_scales, lagrangian)
         elif ndim == edim + 1:
@@ -366,7 +393,15 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         return matrix(res)
     
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
+        """
+        Divergence of a second order tensor contracting the FIRST index, ``(div T)_i = d_j T_ji``.
+
+        Note this is not the user-visible convention: :py:meth:`div` transposes the tensor before calling this, so
+        ``div(T)`` is ``d_j T_ij``. See the comment there.
+        """
         res:list[Expression] = []
+        # get_coords clamps to the three coordinates, so passing nops() (which is 9 for the padded 3x3 tensor, not the
+        # number of rows) happens to give [x,y,z]. Differentiating with respect to an unused coordinate is zero.
         coords = self.get_coords(arg.nops(), with_scales, lagrangian)
         for i in range(3):
             div_line:Expression = Expression(0)
@@ -533,6 +568,13 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
 
 
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
+        """
+        Divergence of a second order tensor contracting the FIRST index, ``(div T)_i = d_j T_ji``, plus the cylindrical
+        connection terms.
+
+        Note this is not the user-visible convention: :py:meth:`div` transposes the tensor before calling this, so
+        ``div(T)`` is ``d_j T_ij``. See the comment there.
+        """
         T=arg
         coords = self.get_coords(T.nops(), with_scales, lagrangian)
         if self.use_x_as_symmetry_axis:
@@ -1371,6 +1413,11 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
         Divergence of a second order tensor, i.e. ``(div T)_j = d_i T_ij``, contracting the FIRST index
         (the convention of the Cartesian and the plain axisymmetric coordinate system).
 
+        Note this is not the user-visible convention: :py:meth:`BaseCoordinateSystem.div` transposes the tensor before
+        calling this, so ``div(T)`` is ``d_j T_ij``. Nothing below needs to change for that -- ``d_j (T^t)_ji`` IS
+        ``d_j T_ij`` -- but it does mean the identity quoted further down reads ``div(dyadic(a,b)) = div(b)*a + (b.grad)a``
+        from the outside.
+
         The mesh coordinates (x,y) and the angle phi are mapped to the physical cylindrical coordinates by
         ``r = x + eps*x_eigen*exp(I*m*phi)`` and ``z = y + eps*y_eigen*exp(I*m*phi)``, with phi itself
         unperturbed. The orthonormal frame (e_r(phi), e_z, e_phi(phi)) therefore does not move at all, so
@@ -1724,8 +1771,12 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         t=self.get_covariant_basis_vectors(ndim,edim,lagrangian,with_scales)
         eaug=self.get_augmented_edim(ndim,edim)
         s=self.get_all_local_coordinates(ndim,edim,lagrangian,with_scales)
-        # TODO: This is likely not right!
-        return self.substitute_values_for_additional_local_coordinates(Expression(sum([g_contra[a,b]*dyadic(t[a],diff(arg,s[b])) for a in range(eaug) for b in range(eaug)])))
+        # dyadic(d_b arg, t[a]), not dyadic(t[a], d_b arg): the free index of t[a] is the derivative direction and the one
+        # of diff(arg,s[b]) is the component, so the latter has to come first to give grad(u)_ij = d u_i/d x_j as in every
+        # other coordinate system here. Written the other way round this returned the transpose - reducing it to Cartesian
+        # (g^ab = delta_ab, t[a] = e_a) makes that immediate: sum_a e_a[i] * d arg_j/d x_a is d arg_j/d x_i. Reasoned, not
+        # measured: nothing in the repository subclasses this coordinate system, so the path is unexercised.
+        return self.substitute_values_for_additional_local_coordinates(Expression(sum([g_contra[a,b]*dyadic(diff(arg,s[b]),t[a]) for a in range(eaug) for b in range(eaug)])))
     
     def vector_divergence(self, arg: Expression, ndim: int, edim: int, with_scales: bool, lagrangian: bool) -> Expression:
         g_contra=self.get_contravariant_metric_tensor(ndim,edim,lagrangian,with_scales)

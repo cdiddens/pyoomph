@@ -565,6 +565,14 @@ def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:bool | None=None,nondim
 	Notes:
 		if you calculate div(u) on a boundary, you will get the surface divergence, even if u is defined in the bulk.
 		To get the bulk divergence at the boundary, use div(var("u",domain="..")) instead.
+
+		Index order: for a rank-2 tensor, ``div(T)[i]`` is :math:`\\partial_j T_{ij}`, contracting the second index. This
+		makes ``div`` the adjoint of :py:func:`~pyoomph.expressions.generic.grad` (which stores
+		:math:`\\partial u_i/\\partial x_j`), so ``div(grad(u))`` is the vector Laplacian, and it makes ``div(T)`` the
+		integration-by-parts partner of ``weak(T,grad(v))`` together with the traction ``matproduct(T,n)``. For symmetric
+		tensors, i.e. every usual stress tensor, the distinction does not matter. Note that a flux tensor has to be
+		assembled accordingly: the momentum flux carrying :math:`\\vec{u}` along :math:`\\rho\\vec{q}` is
+		``dyadic(u,rho*q)``, so that :math:`F_{ij}=\\rho u_i q_j`.
 	"""
 	
 	if isinstance(arg,float) or isinstance(arg,int):
