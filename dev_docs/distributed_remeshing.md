@@ -20,6 +20,37 @@ The two paths differ enough to be treated separately throughout:
 * **`Remesher2d`** - the geometry is reconstructed automatically from the deformed mesh's boundary
   nodes (`pyoomph/meshes/remesher.py:328`).
 
+## 0. Where this stands
+
+Remeshing a distributed problem works. `mpirun -n N python3 script.py --distribute` remeshes, with no
+opt-in and nothing to configure, for:
+
+* both remeshing paths - recreation (`RemesherViaRecreation`, the default on any `MeshedMeshTemplate`)
+  and the automatic `Remesher2d`;
+* `InternalInterpolator`, the default transfer;
+* codimension-2 interfaces, i.e. contact lines and axis points;
+* boundaries parameterised by `zeta`, by either assigner.
+
+What is still refused, each by name and with what to do instead:
+
+| refused | why | see |
+| --- | --- | --- |
+| `ProjectionInternalInterpolator` | its projection integrates the old field at partition-local locations | stage 5 |
+| remeshing only *some* domains | the untouched ones stay partitioned, and oomph cannot distribute a mesh twice | stage 2 |
+| explicit `num_adapt > 0` | adapting leaves the new mesh non-uniformly refined, which `distribute()` rejects | stage 5 |
+
+The default `num_adapt` (from `max_refinement_level`) is dropped to 0 with a printed note rather than
+refused, since the caller did not ask for it by name. `Problem.experimental_distributed_remeshing`
+bypasses every refusal above, for developing what is left.
+
+Two behaviour changes to know about, both explained where they arose:
+
+* `Remesher2d` reconstructs its geometry in a canonical order now, so a **serial** script will not
+  reproduce its old node numbering (stage 4). The domain, its named boundaries and the mesh quality
+  are unchanged.
+* `define_geometry` is a **collective region** on a distributed mesh - do not branch on the rank
+  inside it (stage 1).
+
 ---
 
 ## 1. What actually happens
@@ -281,16 +312,9 @@ refused, see below.
 ### The refusal, narrowed
 
 With stages 1-3 in place, `force_remesh()` on a distributed problem **works** for
-`RemesherViaRecreation` together with `InternalInterpolator`, and needs no opt-in. What is refused is
-now specific, and each refusal names itself:
-
-| refused | why | lifted by |
-| --- | --- | --- |
-| `ProjectionInternalInterpolator` | its projection integrates the old field at partition-local locations | stage 5 |
-| remeshing only some domains | the untouched domains stay partitioned; oomph cannot distribute a mesh twice | not planned |
-| explicit `num_adapt > 0` | leaves the new mesh non-uniformly refined | stage 5 |
-
-`Problem.experimental_distributed_remeshing` bypasses all of these.
+`RemesherViaRecreation` together with `InternalInterpolator`, and needs no opt-in. What was refused
+from here on is listed in §0; each refusal names itself, and
+`Problem.experimental_distributed_remeshing` bypasses all of them.
 
 ### Stage 3b - codimension-2 interfaces. DONE.
 
@@ -413,17 +437,48 @@ instead of quietly desynchronising the run.
 This was only reachable once `Remesher2d` could run distributed at all: `tests/test_mpi_rank_zero_failures.py`
 covers the agreement, but without `--distribute`.
 
-### Stage 5 - the actual fix, later
+### Stage 5 - the MPI point locator. OPEN, and deliberately so.
 
 Phase 5 of `dev_docs/mesh_point_locator.md`: give `MeshPointLocator` its MPI routing layer. The API
 was designed for it (`LocationHandle::owner`, the reusable `LocationSet` schedule, the batched
-`evaluate`), and §5 there already carries the cost model. Once it exists, stage 2's "replicate the
-whole new mesh" step can go, remeshing becomes scalable rather than merely correct, stage 3's
-`Allreduce` disappears, and the projection interpolator works distributed for free.
+`evaluate`), and §5 there carries the cost model. It would make remeshing *scale* rather than merely
+work, and it is what the two remaining refusals are waiting for.
+
+Scoped but not started, and the scoping is the useful part:
+
+* **The foundation is there.** The locator already keeps a per-element bounding box
+  (`element_bbox_min/max`), so the per-rank boxes the routing needs are a union away.
+* **An `Allgatherv`-only version is not worth building.** Routing every query to every rank leaves
+  each rank searching every query - the same O(N) work stage 3 already does. All of the speed is in
+  the bounding-box routing, so a "correctness first, optimise later" split buys nothing here.
+* **Nothing is observable until the Python side moves too.** The routing layer's first consumer is a
+  transfer from an old distributed mesh to a *new distributed* one, and `force_remesh` currently
+  interpolates while the new mesh is still replicated. Both have to land together.
+* **The new mesh is replicated for a reason that stage 5 does not remove.** Gmsh generates the whole
+  mesh on every rank, exactly as at startup; what stage 5 removes is holding it replicated through
+  the *transfer*, not the generation.
+
+The two refusals it would lift are narrow: `num_adapt > 0` (adapting the new mesh) and
+`ProjectionInternalInterpolator`. `num_adapt` could also be lifted without any of this - interpolate
+replicated as now, distribute, then let the adaption rounds use oomph's own father-to-son
+interpolation instead of re-reading the old mesh - at the cost of some accuracy on the nodes the
+adaption creates. That is a smaller, self-contained piece if the refusal ever becomes a nuisance.
 
 ## 3d. Validated on real scripts
 
-The stages above were all built against the synthetic quarter disc. The first end-to-end check on
+Every tutorial the campaign touches - the ones that remesh, move their mesh, or parameterise a
+boundary by zeta - run under `mpirun -n 2 ... --distribute`:
+
+| tutorial | what it exercises | result |
+| --- | --- | --- |
+| `ale/remeshing.py` | `Remesher2d`, `RemeshWhen`, `RemeshMeshSize` | 3 remeshing events, as serially |
+| `ale/beads_on_string.py` | zeta by arclength and by Eulerian coordinate | 3 events, as serially |
+| `ale/rayleigh_plateau.py` | zeta, and an extremum observable driving the time step | 15 events, ranks in step |
+| `multidom/evaporating_water_droplet.py` | two coupled domains, contact line, recreation | 1 event, volume as serially |
+| `plotting/evaporating_water_droplet.py` | the same, plus plotting | 1 event |
+| `advstab/movmesh/hanging_droplet.py` | remeshing plus bifurcation tracking | remeshes, then stops on `Bifurcation tracking is not supported on a distributed (--distribute) problem yet` - a refusal that predates this campaign and has nothing to do with remeshing |
+
+The detail behind the droplet row - the stages above were all built against the synthetic quarter disc. The first end-to-end check on
 something real is `docs/source/tutorial/multidom/evaporating_water_droplet.py` - two coupled domains
 (droplet and gas) rebuilt by one template, a moving mesh, a contact line (codimension-2), and
 remeshing triggered by `RemeshWhen` rather than by an explicit `force_remesh()`. Run at
@@ -522,5 +577,14 @@ as much). Tests: `tests/test_mpi_observables.py` (10 tests, ~18 s).
 
 * `ParametricGmshMeshRemesher2d` subclasses `Remesher2d` but rebuilds its geometry from problem
   parameters alone, so it needs none of stage 4. Untested distributed.
-* How remeshing interacts with distributed **state files** has not been looked at;
-  `dev_docs/distributed_state_files.md` may already constrain it.
+* **Reading a state back** after a distributed remesh. Writing one works and is covered (stage 2
+  assigns the base element numbers for exactly that), but `dev_docs/distributed_state_files.md` §7
+  says sharded state files cannot be read at all yet, and nothing here has tried a
+  write-then-restart across a remesh.
+* The **3d** remeshers. Everything above is 2d: `Remesher2d` by name, and the boundary curves the
+  recreation path rebuilds are polylines. A 3d surface has no `get_interface_line_segments`
+  equivalent, so stage 1 does not carry over as it stands.
+* `RemeshWhen`'s criterion is judged per rank and made unanimous afterwards
+  (`_agree_on_domains_to_remesh`), so a distributed run remeshes as soon as *any* rank's elements are
+  distorted enough. That is the safe direction, but it means a distributed run can remesh more often
+  than the serial one it is compared against.
