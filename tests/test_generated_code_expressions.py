@@ -128,3 +128,41 @@ def test_a_float_coefficient_does_not_break_an_unrelated_reciprocal(tmp_path):
         assert abs(value - reference) < 1e-12
         for name in ("float_coefficient", "differentiated"):
             assert abs(values[name][position] - value) < 1e-12, name
+
+
+def test_in_place_arithmetic_with_a_plain_number_stays_real(tmp_path):
+    """
+    "expr -= 1" must produce the real numeric -1, not the complex -1.0+0.0i.
+
+    __iadd__ and __isub__ used to be bound only against std::complex<double>, and nanobind converts an
+    int or a float to that without complaint, so the in-place forms quietly produced complex constants.
+    Nothing looked wrong symbolically -- they print as "-1" and compare equal to -1 -- but the C printer
+    emitted std::complex<double>(-1.0,0.0) into a real-valued residual and the compiler rejected the
+    whole element, so the failure surfaced as "command '/usr/bin/cc' failed" far from its cause. *= and
+    /= were unaffected, they always had int/double overloads.
+
+    Met through RadialSymmetricCoordinateSystem, whose gradients and divergence shift the radius with
+    "coords[0] -= self.Rcenter": any non-zero Rcenter given as a plain number made the problem
+    uncompilable, while wrapping it in Expression() worked.
+    """
+    y = var("coordinate_y")
+
+    def in_place_minus():
+        value = 3 * y
+        value -= 1
+        return value
+
+    def in_place_plus():
+        value = 3 * y
+        value += 1
+        return value
+
+    expressions = {"binary_minus": 3 * y - 1, "in_place_minus": in_place_minus(),
+                   "binary_plus": 3 * y + 1, "in_place_plus": in_place_plus()}
+    # Compiling at all is most of the point here; the values then confirm nothing else moved.
+    values = _pinned_values(tmp_path, expressions)
+    for position in values["binary_minus"]:
+        assert abs(values["in_place_minus"][position] - (3 * position - 1)) < 1e-12
+        assert abs(values["in_place_plus"][position] - (3 * position + 1)) < 1e-12
+        assert values["in_place_minus"][position] == values["binary_minus"][position]
+        assert values["in_place_plus"][position] == values["binary_plus"][position]

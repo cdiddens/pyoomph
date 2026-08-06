@@ -444,6 +444,18 @@ void PyReg_Expressions(nb::module_ &m)
 #endif
 		.def(nb::self += nb::self)
 		.def(nb::self -= nb::self)
+		// += and -= against a plain Python number need these, exactly as *= and /= below already had them.
+		// Without them the only __iadd__/__isub__ overloads were the std::complex<double> ones further down,
+		// and nanobind happily converts an int or a float to that, so "expr -= 1" produced the *complex*
+		// numeric -1.0+0.0i. It prints as "-1" and compares equal to -1, so nothing looked wrong until code
+		// generation, where the C printer emitted std::complex<double>(-1.0,0.0) into a real-valued residual
+		// and the compiler rejected it. Met through RadialSymmetricCoordinateSystem, whose divergence and
+		// gradients shift the radius by "coords[0] -= self.Rcenter": a non-zero Rcenter passed as a plain
+		// number made every such problem fail to compile, while Expression(Rcenter) worked.
+		.def(nb::self += int())
+		.def(nb::self += double())
+		.def(nb::self -= int())
+		.def(nb::self -= double())
 		.def(nb::self *= nb::self)
 		.def(nb::self *= int())
 		.def(nb::self *= double())
