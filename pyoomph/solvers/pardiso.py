@@ -264,13 +264,13 @@ _BACKWARD_ERROR_LIMIT = 1e-4
 
 class pardisoSolver(object):
     
-    def __init__(self, matA:Any, mtype:int=11, verbose:bool=False,iparm_override:dict[int,int]={},check_solution:bool=True):
+    def __init__(self, matA:Any, mtype:int=11, verbose:bool=False,iparm_override:dict[int,int]={},repair_bad_solves:bool=False):
             #mode  11 : real, nonsymmetric
             #mode  13 : complex,  nonsymmetric
 
         # Whether solve_checked() verifies its own answer (see there). Off means the residual is never
         # formed and the pivoting escalation never fires, i.e. whatever MKL returns is handed on.
-        self.check_solution = check_solution
+        self.repair_bad_solves = repair_bad_solves
 
         self.mtype = mtype
         if mtype in [1, 3]:
@@ -353,6 +353,12 @@ class pardisoSolver(object):
         self._escalated_iparm = any(self.iparm[k] == v for k, v in _ESCALATED_IPARM.items())
         self._escalation_spent = self._escalated_iparm
         self._pre_escalation_iparm:dict[int,int] | None = None
+
+        # Backward error of the solution solve_checked() last returned, None when it could not be
+        # formed (symmetric mtypes) or no solve has happened yet. Read by PardisoSolver to decide
+        # whether the factorisation is still worth reusing, which is the one thing that happens even
+        # when repair_bad_solves is off.
+        self.last_backward_error:float | None=None
 
         self.last_mem_used_in_kb:int | None=None
 
@@ -481,10 +487,11 @@ class pardisoSolver(object):
         try:
             self.factor()
         except PardisoError:
-            # Leave the handle the way it was found. The caller turns this into a retryable
-            # SolverError, so oomph-lib comes back with a smaller step and factorises this same
-            # object again -- with settings that at least got as far as producing an answer last
-            # time, rather than the ones that just failed to factorise at all.
+            # Leave the handle the way it was found, i.e. with the settings that at least got as far as
+            # producing an answer last time rather than the ones that just failed to factorise at all.
+            # This is for a caller holding a pardisoSolver directly: under PardisoSolver the raise now
+            # goes on to discard this object entirely (_invalidate_factorisation), and the retry builds
+            # a fresh one out of iparm_override.
             for k, v in self._pre_escalation_iparm.items():
                 self.iparm[k] = v
             raise
@@ -515,20 +522,37 @@ class pardisoSolver(object):
                   % (self.iparm[12], self.iparm[9]))
 
     def solve_checked(self, rhs:Any, max_steps:int=20)->Any:
-        if not self.check_solution:
-            # Opted out (PardisoSolver.check_solution): a bare phase-33 solve, i.e. exactly what
-            # Pardiso did before any of this existed. No residual, no escalation, no de-escalation.
+        self.last_backward_error = None
+        if not self.repair_bad_solves:
+            # Repairs opted out of (PardisoSolver.repair_bad_solves): no extra refinement, no escalation
+            # to stronger pivoting, no de-escalation, and no raise -- whatever MKL returns is the answer.
+            # All three are repairs, which is what the flag is named for; the DIAGNOSIS below is not one
+            # and stays. It cannot be replaced by anything downstream either: MKL reports a solution of
+            # order 1e13 on a singular matrix as error 0, so nothing else in the stack can tell that this
+            # solve failed. Recording it lets PardisoSolver throw the factorisation away rather than build
+            # the next step on it (see _invalidate_factorisation) -- opting out of repairs is not opting
+            # in to reusing a factorisation that has demonstrably stopped working.
             #
-            # The extra iterative refinement goes with it, and deliberately so, even though it is a
-            # repair rather than a check: on a singular matrix MKL reports the damage it cannot repair
-            # as error -4 out of phase 33, so refining is itself a way of raising. Left unrefined the
-            # same matrix comes back as error 0 and a solution of order 1e13. That is the price of the
-            # opt-out -- and the reason the refinement was added is still live: without it the ALE box
-            # of tests/test_adaptive_3d_campaign.py stalls at a Newton residual of 1e-8.
+            # Dropping the refinement is deliberate rather than incidental. It is a repair by MKL's own
+            # machinery, and one that raises: on a singular matrix MKL reports the damage refinement
+            # cannot repair as error -4 out of phase 33. The reason it was added is still live, though --
+            # without it the ALE box of tests/test_adaptive_3d_campaign.py stalls at a Newton residual of
+            # 1e-8, so this flag is not free on hard systems.
             #
             # A factorisation that fails outright (phases 12/22, e.g. out of memory) still raises from
             # run_pardiso; there is no solution vector to hand on in that case. See _check_pardiso_error.
-            return self.solve(rhs)
+            x = self.solve(rhs)
+            self.last_backward_error = self._backward_error(x, rhs)
+            if self.last_backward_error is not None and self.last_backward_error > _BACKWARD_ERROR_LIMIT:
+                # Said out loud even though the repairs were opted out of: the alternative is a run that
+                # neither converges nor explains itself, which is exactly the failure this whole path
+                # was written for. It costs one line, and only on a solve that is genuinely wrong.
+                print("PARDISO WARNING: backward error %.3e exceeds the %.0e limit. repair_bad_solves is "
+                      "off, so the solution is used as it stands and only the factorisation is "
+                      "discarded. Set repair_bad_solves=True to have stronger pivoting tried, or switch "
+                      "to a dynamically pivoting solver (umfpack)."
+                      % (self.last_backward_error, _BACKWARD_ERROR_LIMIT))
+            return x
         try:
             x = self._solve_refined(rhs, max_steps)
         except PardisoError as first:
@@ -545,6 +569,7 @@ class pardisoSolver(object):
             raise first
 
         err = self._backward_error(x, rhs)
+        self.last_backward_error = err  # kept in step with whichever x is returned below
         if self.msglvl:
             print("PARDISO: %d perturbed pivot(s), refined the solve in %d step(s), backward error %s"
                   % (self.iparm[13], self.iparm[6], err))
@@ -585,6 +610,7 @@ class pardisoSolver(object):
             print("PARDISO WARNING: backward error %.3e after escalation (was %.3e); the solution is "
                   "not trustworthy. A dynamically pivoting solver (umfpack) may be needed here."
                   % (err2, err))
+        self.last_backward_error = err2
         return x2
 
     # MKL's documented meanings for the `error` output. Every value is a hard failure -- Pardiso has no
@@ -727,15 +753,28 @@ class PardisoSolver(GenericLinearSystemSolver):
         self.try_to_reuse_solver=False
         self.verbose=verbose
         self.iparm_override:dict[int,int]={}
-        # Whether each solve is checked against its own residual, extra iterative refinement given when
-        # MKL reports perturbed pivots, and stronger pivoting tried when the answer still comes back
-        # wrong (all of it in pardisoSolver.solve_checked). False gets MKL's answer unexamined, which
-        # is what Pardiso did before any of this existed: the check costs one sparse matrix-vector
-        # product per solve, and a solve just over the limit costs a refactorisation to find out it was
-        # a false alarm. The price is that a singular Jacobian then reaches Newton as a solution of
-        # order 1e13 rather than as a retryable SolverError, so a run that is not converging is worth
-        # re-examining with this back on. A factorisation that fails outright still raises either way.
-        self.check_solution=True
+        # Whether a solve that comes back wrong is REPAIRED: extra iterative refinement when MKL reports
+        # perturbed pivots, then stronger pivoting and a refactorisation, then a raise if it is still
+        # hopeless (all of it in pardisoSolver.solve_checked).
+        #
+        # Off by default, because every repair is speculative and two of them cost a full
+        # refactorisation apiece -- a solve just over the limit pays for one to discover it was a false
+        # alarm, and the escalated settings then have to be withdrawn again. On the tutorials that led
+        # to this code, the repairs were the exception and the false alarms were not.
+        #
+        # It does NOT switch off the residual check itself, which is one sparse matrix-vector product
+        # and the only way to know a solve failed at all: MKL returns a solution of order 1e13 on a
+        # singular matrix as error 0. Either way, a solve over the limit discards the factorisation
+        # (_invalidate_factorisation), so the next Newton or timestep retry starts from a fresh one
+        # instead of a phase-22 refresh of factors that have stopped working.
+        #
+        # Turn it on for a run that will not converge, or whose PARDISO WARNINGs say the backward error
+        # is over the limit: that is the case the repairs were measured on. The cost of leaving it off
+        # is that a singular Jacobian reaches Newton as that 1e13 solution rather than as a retryable
+        # SolverError, i.e. as an ordinary divergence -- which max_residuals still rejects, so an
+        # adaptive step or an arclength step retries either way, just without a diagnosis. A
+        # factorisation that fails outright raises regardless of this flag.
+        self.repair_bad_solves=False
         # Skip Pardiso's reordering/symbolic phase (11) whenever the Jacobian sparsity pattern is
         # unchanged since the last factorisation, i.e. run phase 22 instead of phase 12. This requires
         # problem.keep_structural_zeros to be on -- otherwise the pattern follows the dof values and
@@ -782,6 +821,31 @@ class PardisoSolver(GenericLinearSystemSolver):
     def get_b(self,n:int,b:NPFloatArray):
         return b
 
+    def _invalidate_factorisation(self)->None:
+        """Throw the current factorisation away, so the next op_flag==1 builds a completely fresh one.
+
+        Called on the two ways a factorisation stops being worth keeping: something raised, or a solve
+        came back with a backward error over the limit. Both reuse tiers key off state that neither of
+        those touches -- the symbolic one off _structure_id (phase 22 on an MKL handle whose last phase
+        errored), the numeric one off _current_pardiso still being there (update_matrix_values keeps the
+        broken factors and op_flag==2 then uses them as a preconditioner). So without this the retry
+        walks straight back into the handle that just failed, and oomph-lib's retry is a SMALLER STEP,
+        i.e. a different Jacobian that deserves its own reordering rather than a refresh of the old one.
+
+        This matters most with repair_bad_solves off. With it on, a bad solve has usually been through
+        _escalate_pivoting, which releases and rebuilds the handle itself; with it off nothing does.
+        """
+        self._structure_id = 0
+        self._pattern_verified = False
+        if self._current_pardiso is not None:
+            try:
+                self._current_pardiso.clear()
+            except Exception:
+                # Best-effort: releasing an MKL handle whose last phase errored may error again, and
+                # dropping the reference is what actually matters here. __del__ retries the release.
+                pass
+            self._current_pardiso = None
+
     def _reuse_symbolic_factorisation(self,A:Any)->bool:
         """Feed a re-assembled Jacobian into the existing factorisation object without redoing the
         symbolic phase. Returns False if that is not possible, in which case the caller must build a
@@ -814,6 +878,13 @@ class PardisoSolver(GenericLinearSystemSolver):
         return True
 
     def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
+        try:
+            return self._solve_serial(op_flag,n,nnz,nrhs,values,rowind,colptr,b,ldb,transpose)
+        except Exception:
+            self._invalidate_factorisation()
+            raise
+
+    def _solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
         #print("CALL WITH OP FLAG ",op_flag,ldb,transpose)
         #print("PARDISO ", op_flag)
         if op_flag == 1:
@@ -834,7 +905,7 @@ class PardisoSolver(GenericLinearSystemSolver):
             if self.try_to_reuse_solver:
                 self._lastA=A
                 if self._current_pardiso is None:    
-                    self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,check_solution=self.check_solution)
+                    self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,repair_bad_solves=self.repair_bad_solves)
                     if self.verbose: print("CREATED NEW PARDISO AND FACTOR")
                     self._current_pardiso.factor()
                     self.n_full_factorisations+=1
@@ -853,7 +924,7 @@ class PardisoSolver(GenericLinearSystemSolver):
                     self.n_numeric_reuses+=1
                 else:
                     self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed                
-                    self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,check_solution=self.check_solution)
+                    self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,repair_bad_solves=self.repair_bad_solves)
                     if self.verbose: print("CREATED NEW PARDISO AND FACTOR")
                     self._current_pardiso.factor()                    
                     self.n_full_factorisations+=1
@@ -861,7 +932,7 @@ class PardisoSolver(GenericLinearSystemSolver):
             else:
                 if self._current_pardiso:
                     self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed                
-                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,check_solution=self.check_solution)
+                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,repair_bad_solves=self.repair_bad_solves)
                 self._current_pardiso.factor()
                 self.n_full_factorisations+=1
                 if self.verbose:
@@ -898,7 +969,7 @@ class PardisoSolver(GenericLinearSystemSolver):
                         if self._current_pardiso:
                             self._current_pardiso.clear()
                         mode=11
-                        self._current_pardiso = pardisoSolver(self._lastA, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,check_solution=self.check_solution)
+                        self._current_pardiso = pardisoSolver(self._lastA, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,repair_bad_solves=self.repair_bad_solves)
                         self._current_pardiso.factor()
                         self.n_full_factorisations+=1
                     sol=self._current_pardiso.solve(bv)
@@ -926,13 +997,30 @@ class PardisoSolver(GenericLinearSystemSolver):
             if self.verbose:
                 print("PARDISO SOLVE IPARM",self._current_pardiso.iparm)
             b[:] = sol[:]
+            # A solve that came back wrong condemns the factorisation it came out of, whether or not
+            # anything was done about it. This is the only consequence a bad solve has when
+            # repair_bad_solves is off -- MKL reports these as error 0, so nothing raises and the retry
+            # would otherwise walk straight back into the same factors via phase 22. Last, because
+            # _invalidate_factorisation drops _current_pardiso, which the lines above still read.
+            bwerr = self._current_pardiso.last_backward_error
+            if bwerr is not None and bwerr > _BACKWARD_ERROR_LIMIT:
+                self._invalidate_factorisation()
         else:
             raise RuntimeError("Cannot handle Pardiso mode " + str(op_flag) + " yet")
             return 666
 
         return 0  # TODO: Return sign of Jacobian
 
-    def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:        
+    def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
+        # Only rank 0 ever holds a factorisation here (gather-to-root), so only rank 0 has anything to
+        # invalidate; on the others this is a no-op and needs no collective agreement.
+        try:
+            return self._solve_distributed(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info)
+        except Exception:
+            self._invalidate_factorisation()
+            raise
+
+    def _solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
         # NOTE: This does not solve the system via MPI Pardiso. Instead it solves it on the root process and scatters the solution. This is not optimal, but MKL Pardiso is not MPI parallel. MKL cluster_sparse_solver is, but this must be accessed via PETSc using mkl_cpardiso
         from mpi4py import MPI
         rank=get_mpi_rank()
@@ -968,7 +1056,7 @@ class PardisoSolver(GenericLinearSystemSolver):
                 if self._current_pardiso:
                     self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed
                 mode = 11
-                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=False,check_solution=self.check_solution)
+                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=False,repair_bad_solves=self.repair_bad_solves)
                 self._current_pardiso.factor()
 
                 

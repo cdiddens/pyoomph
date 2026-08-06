@@ -247,9 +247,10 @@ def test_a_stationary_solve_still_fails(tmp_path):
 def test_a_singular_matrix_really_does_raise():
     """The premise of the above: Pardiso reports, rather than papers over, a singular matrix.
 
-    Only through solve_checked(). Left to itself Pardiso perturbs the tiny pivot and returns error 0
-    with a solution of order 1e13 -- the documented static-pivoting behaviour, and the reason this
-    used to reach the time stepper as an ordinary divergence.
+    Only with repair_bad_solves on, which is NOT the default -- the repairs cost a refactorisation
+    each and are off unless asked for. Left to itself Pardiso perturbs the tiny pivot and returns
+    error 0 with a solution of order 1e13 -- the documented static-pivoting behaviour, and the reason
+    this reaches the time stepper as an ordinary divergence when the repairs are off.
 
     Which MKL error carries the refusal is a version detail and is deliberately not asserted: on MKL
     2025.0 the refined solve still comes back with error 0, the backward error of 1.0 is what
@@ -272,12 +273,20 @@ def test_a_singular_matrix_really_does_raise():
     A = sp.csr_matrix(A)
     rhs = numpy.ones(n)
 
-    unchecked = pardisoSolver(A, mtype=11)
-    unchecked.factor()
-    assert numpy.amax(numpy.abs(unchecked.solve(rhs))) > 1e10, \
+    unrepaired = pardisoSolver(A, mtype=11, repair_bad_solves=False)
+    unrepaired.factor()
+    assert numpy.amax(numpy.abs(unrepaired.solve(rhs))) > 1e10, \
         "MKL no longer returns a huge solution here; the premise of solve_checked has changed"
 
-    checked = pardisoSolver(A, mtype=11)
-    checked.factor()
+    repaired = pardisoSolver(A, mtype=11, repair_bad_solves=True)
+    repaired.factor()
     with pytest.raises(PardisoError, match="singular"):
-        checked.solve_checked(rhs)
+        repaired.solve_checked(rhs)
+
+    # Off, the same solve returns that huge answer instead of raising -- but the backward error is
+    # still measured, which is what lets PardisoSolver discard the factorisation behind it.
+    tolerated = pardisoSolver(A, mtype=11, repair_bad_solves=False)
+    tolerated.factor()
+    assert numpy.amax(numpy.abs(tolerated.solve_checked(rhs))) > 1e10
+    assert tolerated.last_backward_error is not None and tolerated.last_backward_error > 1e-4, \
+        "a solve this wrong was not diagnosed, so the factorisation behind it would be reused"
