@@ -1,8 +1,9 @@
 # Remeshing under `--distribute`
 
-Status: **stages 0 to 3 done.** Remeshing a distributed problem now works for the recreation path
-(`RemesherViaRecreation` + `InternalInterpolator`) and needs no opt-in. Stages 4 and 5 are open, and
-what they cover is refused by name - see "The refusal, narrowed" below for the list. File and line
+Status: **stages 0 to 3b done.** Remeshing a distributed problem now works for the recreation path
+(`RemesherViaRecreation` + `InternalInterpolator`), including codimension-2 interfaces, and needs no
+opt-in. Stages 4 and 5 are open, and what they cover is refused by name - see "The refusal, narrowed"
+below for the list. File and line
 references are to the tree state at the time of writing (branch `develop`, after `7b8770a`).
 
 Remeshing a distributed problem did not work at all when this started, and it did not *say* so: at
@@ -287,17 +288,40 @@ now specific, and each refusal names itself:
 | --- | --- | --- |
 | `Remesher2d` | rebuilds the geometry from this rank's boundary elements, and the partition cut has no boundary name | stage 4 |
 | `ProjectionInternalInterpolator` | its projection integrates the old field at partition-local locations | stage 5 |
-| codimension-2 interfaces | transferred by `nodal_interpolate_along_boundary`, whose nearest-node matching is not pooled | see below |
 | remeshing only some domains | the untouched domains stay partitioned; oomph cannot distribute a mesh twice | not planned |
 | explicit `num_adapt > 0` | leaves the new mesh non-uniformly refined | stage 5 |
 
-The codimension-2 case is the one worth doing next after stage 4: contact lines and axis points are
-ordinary in real scripts, and `nodal_interpolate_along_boundary` is a different mechanism from
-`nodal_interpolate_from` (nearest-node matching along a boundary rather than point location), so the
-pooling does not reach it. Refusing it up front is what keeps such a problem from quietly getting its
-corner values from whichever rank happened to hold them.
-
 `Problem.experimental_distributed_remeshing` bypasses all of these.
+
+### Stage 3b - codimension-2 interfaces. DONE.
+
+Contact lines and axis points are ordinary in real scripts - both droplet tutorials have one - and
+they are transferred by `nodal_interpolate_along_boundary`, a different mechanism that the stage 3
+pooling does not reach: nearest-node matching along the boundary rather than point location.
+
+The difference that matters is that **every rank produces an answer for every node** there. It
+matches against the nearest of *its* old boundary nodes, however far away that is, so this is not
+"who found it" but "who found it closest". One `MPI_Allreduce` with `MPI_MINLOC` over the match
+distances picks the owner - ties broken by the lower rank, which the nodes on a partition boundary
+need - and only that rank's blend is kept, through the same
+`pool_node_values_across_ranks` that stage 3 uses.
+
+Three things fell out of it:
+
+* A rank can hold **no part of the old corner at all**, which is ordinary under distribution and used
+  to be a hard error: with no old nodes to match against, `bestnode` stayed null and the routine
+  threw "Found a node on a boundary that is not a boundary node" - on one rank, while the others
+  waited in the new collective. Such a rank now offers no match and contributes nothing. Serially an
+  empty old boundary is still a real problem and still reports itself.
+* The destination node list for a codimension-2 boundary was collected through a `std::set` of node
+  **pointers**, whose order differs between processes. The pooling addresses nodes by position in
+  that list, so it is now built in element/node order.
+* The "matched implausibly far away" warning only means something after the pooling, and its
+  threshold (two old interface element lengths) is itself per-rank. Both the count and the threshold
+  are now global, and only rank 0 prints them.
+
+Verified against a serial run with equations on `domain/interface/axis`, at 2, 3 and 4 ranks: same
+node count, same field extrema, sums agreeing to ~1e-9.
 
 ### Stage 4 - `Remesher2d` from merged data
 
@@ -344,19 +368,21 @@ sums), at 2, 3 and 4 ranks:
    **done** - at 2, 3 and 4 ranks; the `nproc` multiplier of §1.3 makes it a single decisive
    assertion), plus the two refusals stage 2 has to make;
 4. field values after remeshing equal to serial, with **zero** "could not be located" fallbacks
-   (stage 3, **done** - compared through merged global mesh data at 2, 3 and 4 ranks, including sums
-   weighted by position so that values landing on the wrong nodes cannot cancel out);
+   (stage 3, **done** - compared through merged global mesh data at 2, 3 and 4 ranks, with and without
+   a codimension-2 interface, including sums weighted by position so that values landing on the wrong
+   nodes cannot cancel out);
 5. the `Remesher2d` path, once stage 4 lands;
 6. `mpirun` **without** `--distribute` keeps working unchanged throughout - `needs_merging()` already
    short-circuits that case, but it is the regression that would go unnoticed.
 
-`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 18 tests, ~39 s,
-covering stages 0 to 3: the remaining refusals on **every** rank, the unchanged
+`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 20 tests, ~44 s,
+covering stages 0 to 3b: the remaining refusals on **every** rank, the unchanged
 behaviour of `mpirun` without `--distribute` at 2 and 4 ranks, the collective agreement when one rank
 (0 or 2, since the agreement is symmetric) raises inside `define_geometry`, the merged boundary
 matching a serial reference run at 2, 3 and 4 ranks, `ndof` and `is_mesh_distributed()` matching the
-serial run after the re-partitioning, the transferred field matching it too, and the `Remesher2d`,
-partial-remesh, explicit-`num_adapt` and codimension-2 refusals.
+serial run after the re-partitioning, the transferred field matching it too (with and without a
+codimension-2 interface), and the `Remesher2d`,
+partial-remesh and explicit-`num_adapt` refusals.
 
 Everything except the refusals runs **without** the opt-in, i.e. in the configuration that ships.
 

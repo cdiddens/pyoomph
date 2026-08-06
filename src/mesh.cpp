@@ -2797,6 +2797,48 @@ namespace pyoomph
   //     imesh/oldimesh (the corresponding interface meshes), using inter_field_map.
   void Mesh::nodal_interpolate_along_boundary(Mesh *old, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist)
   {
+    // Asked before anything else, because it is collective: every rank has to reach it, including
+    // the ones whose share of the OLD boundary is empty and which therefore have nothing to match
+    // against. This is the remeshing case - old partitioned, new replicated - where this rank's
+    // nearest old node can be arbitrarily far from the new node while another rank has one right
+    // next to it. See dev_docs/distributed_remeshing.md.
+    const bool shared_across_ranks = this->interpolation_is_shared_across_ranks(old);
+
+    // The destination nodes, collected first because they are all this rank is sure to have. Ordered
+    // by element and node index rather than by pointer, so that entry k is the same node on every
+    // rank - the pooling below addresses them by position in this list, and a std::set of pointers
+    // would order them differently in every process.
+    std::vector<oomph::Node *> newnodes;
+    if (this->nboundary_node(bind)) // Works only if codim 1 wrt. bulk mesh
+    {
+      newnodes.reserve(this->nboundary_node(bind));
+      for (unsigned in = 0; in < this->nboundary_node(bind); in++)
+        newnodes.push_back(this->boundary_node_pt(bind, in));
+    }
+    else // Now this is more complicated: We only have boundary elements defined, codim 2 or higher
+    {
+      std::set<oomph::Node *> seen;
+      for (unsigned ie = 0; ie < this->nboundary_element(bind); ie++)
+      {
+        pyoomph::BulkElementBase *be = dynamic_cast<pyoomph::BulkElementBase *>(this->boundary_element_pt(bind, ie));
+        for (unsigned in = 0; in < be->nnode(); in++)
+        {
+          oomph::Node *n = be->node_pt(in);
+          if (n->is_on_boundary(bind) && seen.insert(n).second)
+            newnodes.push_back(n);
+        }
+      }
+    }
+
+    // How far this rank's chosen match was, per destination node; infinite where it has none. The
+    // rank with the closest match is the one whose values are worth having.
+    std::vector<double> local_dist(newnodes.size(), std::numeric_limits<double>::infinity());
+
+    // A rank holding no part of the old boundary has nothing to match against - and asking its old
+    // mesh for element_pt(0) below would be out of bounds. It still owns a full copy of the
+    // destination, so it takes part in the pooling and contributes nothing.
+    if (old->nelement() && this->nelement())
+    {
     //std::cout << "Nodal interpolation along boundary " << bind << std::endl;
     // Bulk field mapping
     BulkElementBase *my_be0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
@@ -2931,36 +2973,7 @@ namespace pyoomph
       }
     }
 
-    std::vector<oomph::Node *> newnodes, oldnodes;
-    // Fill the node buffers
-    if (this->nboundary_node(bind)) // Works only if codim 1 wrt. bulk mesh
-    {
-      newnodes.reserve(this->nboundary_node(bind));
-      for (unsigned in = 0; in < this->nboundary_node(bind); in++)
-      {
-        newnodes.push_back(this->boundary_node_pt(bind, in));
-      }
-    }
-    else // Now this is more complicated: We only have boundary elements defined, codim 2 or higher
-    {
-      std::set<oomph::Node *> uniquenodes;
-      for (unsigned ie = 0; ie < this->nboundary_element(bind); ie++)
-      {
-        pyoomph::BulkElementBase *be = dynamic_cast<pyoomph::BulkElementBase *>(this->boundary_element_pt(bind, ie));
-        for (unsigned in = 0; in < be->nnode(); in++)
-        {
-          if (be->node_pt(in)->is_on_boundary(bind))
-          {
-            uniquenodes.insert(be->node_pt(in));
-          }
-        }
-      }
-      for (auto *n : uniquenodes)
-      {
-        newnodes.push_back(n);
-      }
-    }
-
+    std::vector<oomph::Node *> oldnodes;
     if (old->nboundary_node(oldbind)) // Works only if codim 1 wrt. bulk mesh
     {
       oldnodes.reserve(old->nboundary_node(oldbind));
@@ -3016,7 +3029,13 @@ namespace pyoomph
     double worst_dist = 0.0;
     std::vector<std::vector<double>> unset_positions;
 
-    for (unsigned in = 0; in < newnodes.size(); in++)
+    // Under distribution a rank can hold no part of the OLD boundary at all - a corner that sits
+    // entirely inside another partition - and that is ordinary rather than an error: it offers no
+    // match, and the pooling afterwards takes the values from a rank that has one. Serially an empty
+    // old boundary is a real problem, so the per-node diagnostics below still get to report it.
+    const bool nothing_to_match = (shared_across_ranks && oldnodes.empty());
+
+    for (unsigned in = 0; in < newnodes.size() && !nothing_to_match; in++)
     {
       oomph::Node *n = newnodes[in];
       oomph::Vector<double> xn = n->position();
@@ -3079,6 +3098,8 @@ namespace pyoomph
         unset_positions.push_back(std::vector<double>(xn.begin(), xn.end()));
         continue;
       }
+      // Recorded before the blend, since it is the match this rank is offering the others.
+      local_dist[in] = sqrt(mindist);
 
       double mindist2 = 1e40;
       oomph::Node *bestnode2 = NULL;
@@ -3168,7 +3189,10 @@ namespace pyoomph
     // far away, rather than letting a wrong value pass as a transferred one.
     const std::string where = (imesh ? imesh->get_full_domain_path()
                                      : this->get_full_domain_path() + "/" + this->get_boundary_name_or_index(bind));
-    if (n_suspicious)
+    // Under distribution these counts describe this rank's share of the old boundary, not the
+    // transfer: a node matched far away here is usually one that another rank has right next to an
+    // old node of its own, and the pooling below is what decides. Reported globally afterwards.
+    if (n_suspicious && !shared_across_ranks)
     {
       std::cout << "WARNING: interpolating '" << where
                 << "' by nearest-node blending matched " << n_suspicious << " of " << newnodes.size()
@@ -3178,13 +3202,120 @@ namespace pyoomph
                 << "coordinate along this boundary avoids the nearest-node path entirely."
                 << std::endl;
     }
-    if (!unset_positions.empty())
+    if (!unset_positions.empty() && !shared_across_ranks)
     {
       std::cout << "WARNING: interpolating '" << where << "': " << unset_positions.size() << " of "
                 << newnodes.size() << " nodes received NO value, because no old node lay within the "
                 << "boundary_max_distance of " << boundary_max_dist << ". They keep whatever they "
                 << "were built with. Nodes at: " << describe_node_positions(unset_positions) << std::endl;
     }
+    } // end of "this rank holds part of the old boundary"
+
+    if (shared_across_ranks)
+      this->pool_boundary_interpolation_across_ranks(newnodes, local_dist, oldimesh,
+                                                     (imesh ? imesh->get_full_domain_path()
+                                                            : this->get_full_domain_path() + "/" + this->get_boundary_name_or_index(bind)));
+  }
+
+  // See declaration in mesh.hpp.
+  void Mesh::pool_boundary_interpolation_across_ranks(const std::vector<oomph::Node *> &newnodes,
+                                                      const std::vector<double> &local_dist,
+                                                      Mesh *oldimesh, const std::string &where)
+  {
+#ifdef OOMPH_HAS_MPI
+    MPI_Comm mc = this->get_problem()->communicator_pt()->mpi_comm();
+    const int my_rank = this->get_problem()->communicator_pt()->my_rank();
+
+    // Unlike the point-located transfer, every rank produces an answer for every node here - the
+    // nearest of ITS old nodes, however far that is. So this is not "who found it" but "who found it
+    // closest", and only that rank's blend may stand. MINLOC also settles a tie deterministically,
+    // by the lower rank, which matters for the nodes on a partition boundary that several ranks hold
+    // at the same distance.
+    std::vector<double> best(newnodes.size(), 0.0);
+    std::vector<int> owner(newnodes.size(), -1);
+    {
+      std::vector<double> mine(newnodes.size());
+      std::vector<int> mine_rank(newnodes.size());
+      for (unsigned k = 0; k < newnodes.size(); k++)
+      {
+        mine[k] = local_dist[k];
+        mine_rank[k] = my_rank;
+      }
+      // MPI_DOUBLE_INT pairs, packed the way MPI_MINLOC wants them.
+      std::vector<std::pair<double, int>> in(newnodes.size()), out(newnodes.size());
+      for (unsigned k = 0; k < newnodes.size(); k++)
+        in[k] = std::make_pair(mine[k], mine_rank[k]);
+      if (!in.empty())
+        MPI_Allreduce(&in[0], &out[0], (int)in.size(), MPI_DOUBLE_INT, MPI_MINLOC, mc);
+      for (unsigned k = 0; k < newnodes.size(); k++)
+      {
+        best[k] = out[k].first;
+        owner[k] = out[k].second;
+      }
+    }
+
+    std::vector<double> weights(newnodes.size(), 0.0);
+    unsigned n_unmatched = 0;
+    for (unsigned k = 0; k < newnodes.size(); k++)
+    {
+      if (!std::isfinite(best[k]))
+      {
+        n_unmatched++; // no rank had a usable old node; the node keeps what it was built with
+        continue;
+      }
+      weights[k] = (owner[k] == my_rank) ? 1.0 : 0.0;
+    }
+    this->pool_node_values_across_ranks(newnodes, weights);
+
+    // Now that the closest match over ALL ranks is known, the "matched implausibly far away" test
+    // finally means something. The threshold is the old interface's element size, which is itself
+    // per-rank, so take the largest anybody saw.
+    double old_elem_size = 0.0;
+    if (oldimesh)
+    {
+      for (unsigned ie = 0; ie < oldimesh->nelement(); ie++)
+      {
+        oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(oldimesh->element_pt(ie));
+        if (!fe || fe->nnode() < 2)
+          continue;
+        double d2 = 0.0;
+        oomph::Node *a = fe->node_pt(0), *b = fe->node_pt(fe->nnode() - 1);
+        for (unsigned di = 0; di < a->ndim(); di++)
+          d2 += (a->x(di) - b->x(di)) * (a->x(di) - b->x(di));
+        old_elem_size = std::max(old_elem_size, sqrt(d2));
+      }
+    }
+    MPI_Allreduce(MPI_IN_PLACE, &old_elem_size, 1, MPI_DOUBLE, MPI_MAX, mc);
+    unsigned n_suspicious = 0;
+    double worst = 0.0;
+    if (old_elem_size > 0.0)
+    {
+      for (unsigned k = 0; k < newnodes.size(); k++)
+      {
+        if (!std::isfinite(best[k]))
+          continue;
+        worst = std::max(worst, best[k]);
+        if (best[k] > 2.0 * old_elem_size)
+          n_suspicious++;
+      }
+    }
+    // Every rank has the same numbers, so only one of them says so.
+    if (my_rank == 0 && (n_suspicious || n_unmatched))
+    {
+      if (n_suspicious)
+        std::cout << "WARNING: interpolating '" << where << "' by nearest-node blending matched "
+                  << n_suspicious << " of " << newnodes.size() << " nodes to an old node further than "
+                  << 2.0 * old_elem_size << " away (two element lengths; worst match " << worst
+                  << "), across all ranks. Those values come from an unrelated part of the boundary."
+                  << std::endl;
+      if (n_unmatched)
+        std::cout << "WARNING: interpolating '" << where << "': " << n_unmatched << " of "
+                  << newnodes.size() << " nodes received NO value on any rank. They keep whatever they "
+                  << "were built with." << std::endl;
+    }
+#else
+    (void)newnodes; (void)local_dist; (void)oldimesh; (void)where;
+#endif
   }
 
   // Transfer nodal field values (and, if requested, Lagrangian coordinates) from mesh `from` to this
@@ -3221,6 +3352,78 @@ namespace pyoomph
   }
 
   // See declaration in mesh.hpp.
+  std::vector<double> Mesh::pool_node_values_across_ranks(const std::vector<oomph::Node *> &nodes,
+                                                          std::vector<double> weights)
+  {
+#ifdef OOMPH_HAS_MPI
+    MPI_Comm mc = this->get_problem()->communicator_pt()->mpi_comm();
+    // Everything a transfer writes on a node, pre-multiplied by whether this rank filled it. Only
+    // what it writes: a value it never touches is whatever the freshly built mesh carries, which is
+    // the same number on every rank, so summing it would be harmless but pointless.
+    std::vector<double> values;
+    for (unsigned k = 0; k < nodes.size(); k++)
+    {
+      oomph::Node *n = nodes[k];
+      const double have = weights[k];
+      for (unsigned t = 0; t < n->time_stepper_pt()->ntstorage(); t++)
+        for (unsigned vi = 0; vi < n->nvalue(); vi++)
+          values.push_back(have * n->value(t, vi));
+      for (unsigned t = 1; t < n->position_time_stepper_pt()->ntstorage(); t++)
+        for (unsigned i = 0; i < n->ndim(); i++)
+          values.push_back(have * n->x(t, i));
+      if (this->interpolated_lagrangian_coordinates_at_remeshing)
+      {
+        pyoomph::Node *pn = dynamic_cast<pyoomph::Node *>(n);
+        for (unsigned i = 0; pn && i < pn->nlagrangian(); i++)
+          values.push_back(have * pn->xi(i));
+      }
+    }
+    if (!values.empty())
+      MPI_Allreduce(MPI_IN_PLACE, &values[0], (int)values.size(), MPI_DOUBLE, MPI_SUM, mc);
+    if (!weights.empty())
+      MPI_Allreduce(MPI_IN_PLACE, &weights[0], (int)weights.size(), MPI_DOUBLE, MPI_SUM, mc);
+
+    unsigned pos = 0;
+    for (unsigned k = 0; k < nodes.size(); k++)
+    {
+      oomph::Node *n = nodes[k];
+      const double w = weights[k];
+      // Nobody had it: leave it exactly as it was, so that whatever the caller does with unplaced
+      // nodes still sees them untouched.
+      auto take = [&]() { return values[pos++]; };
+      for (unsigned t = 0; t < n->time_stepper_pt()->ntstorage(); t++)
+        for (unsigned vi = 0; vi < n->nvalue(); vi++)
+        {
+          double v = take();
+          if (w > 0.0)
+            n->set_value(t, vi, v / w);
+        }
+      for (unsigned t = 1; t < n->position_time_stepper_pt()->ntstorage(); t++)
+        for (unsigned i = 0; i < n->ndim(); i++)
+        {
+          double v = take();
+          if (w > 0.0)
+            n->x(t, i) = v / w;
+        }
+      if (this->interpolated_lagrangian_coordinates_at_remeshing)
+      {
+        pyoomph::Node *pn = dynamic_cast<pyoomph::Node *>(n);
+        for (unsigned i = 0; pn && i < pn->nlagrangian(); i++)
+        {
+          double v = take();
+          if (w > 0.0)
+            pn->xi(i) = v / w;
+        }
+      }
+    }
+    return weights;
+#else
+    (void)nodes;
+    return weights;
+#endif
+  }
+
+  // See declaration in mesh.hpp.
   unsigned Mesh::share_interpolation_across_ranks(Mesh *from, int boundary_index, bool interface_case,
                                                   const std::vector<bool> &completed_elements,
                                                   std::set<oomph::Node *> &completed_nodes,
@@ -3252,36 +3455,14 @@ namespace pyoomph
       }
     }
 
-    // Everything the transfer writes, pre-multiplied by whether this rank has it. Only the entries
-    // it writes: a value it never touches is whatever the freshly built mesh carries, which is the
-    // same number on every rank, so summing it would be harmless but pointless.
-    // Layout per node: values (all time levels), positions at the history levels, Lagrangian
-    // coordinates. Then, per element, its DL and D0 internal data.
-    std::vector<double> values;
     std::vector<double> weights(nodes.size(), 0.0);
-    auto pack_node = [&](oomph::Node *n, double have) {
-      for (unsigned t = 0; t < n->time_stepper_pt()->ntstorage(); t++)
-        for (unsigned vi = 0; vi < n->nvalue(); vi++)
-          values.push_back(have * n->value(t, vi));
-      for (unsigned t = 1; t < n->position_time_stepper_pt()->ntstorage(); t++)
-        for (unsigned i = 0; i < n->ndim(); i++)
-          values.push_back(have * n->x(t, i));
-      if (this->interpolated_lagrangian_coordinates_at_remeshing)
-      {
-        pyoomph::Node *pn = dynamic_cast<pyoomph::Node *>(n);
-        for (unsigned i = 0; pn && i < pn->nlagrangian(); i++)
-          values.push_back(have * pn->xi(i));
-      }
-    };
     for (unsigned k = 0; k < nodes.size(); k++)
-    {
       weights[k] = completed_nodes.count(nodes[k]) ? 1.0 : 0.0;
-      pack_node(nodes[k], weights[k]);
-    }
-    const unsigned n_node_values = values.size();
+    const std::vector<double> node_ranks = this->pool_node_values_across_ranks(nodes, weights);
 
     // The element-centre transfer of the discontinuous fields, which fails and succeeds independently
     // of the nodes around it.
+    std::vector<double> values, elem_weights;
     unsigned ndisc = 0;
     if (this->nelement())
     {
@@ -3291,7 +3472,7 @@ namespace pyoomph
     for (unsigned int ie = 0; ie < this->nelement() && ndisc; ie++)
     {
       double have = (ie < completed_elements.size() && completed_elements[ie]) ? 1.0 : 0.0;
-      weights.push_back(have);
+      elem_weights.push_back(have);
       BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
       for (unsigned d = 0; d < ndisc; d++)
       {
@@ -3301,56 +3482,15 @@ namespace pyoomph
             values.push_back(have * dat->value(t, j));
       }
     }
-
     if (!values.empty())
       MPI_Allreduce(MPI_IN_PLACE, &values[0], (int)values.size(), MPI_DOUBLE, MPI_SUM, mc);
-    if (!weights.empty())
-      MPI_Allreduce(MPI_IN_PLACE, &weights[0], (int)weights.size(), MPI_DOUBLE, MPI_SUM, mc);
+    if (!elem_weights.empty())
+      MPI_Allreduce(MPI_IN_PLACE, &elem_weights[0], (int)elem_weights.size(), MPI_DOUBLE, MPI_SUM, mc);
 
-    unsigned rescued = 0;
     unsigned pos = 0;
-    for (unsigned k = 0; k < nodes.size(); k++)
-    {
-      oomph::Node *n = nodes[k];
-      double w = weights[k];
-      auto take = [&]() { double v = values[pos++]; return w > 0.0 ? v / w : 0.0; };
-      for (unsigned t = 0; t < n->time_stepper_pt()->ntstorage(); t++)
-        for (unsigned vi = 0; vi < n->nvalue(); vi++)
-        {
-          double v = take();
-          if (w > 0.0)
-            n->set_value(t, vi, v);
-        }
-      for (unsigned t = 1; t < n->position_time_stepper_pt()->ntstorage(); t++)
-        for (unsigned i = 0; i < n->ndim(); i++)
-        {
-          double v = take();
-          if (w > 0.0)
-            n->x(t, i) = v;
-        }
-      if (this->interpolated_lagrangian_coordinates_at_remeshing)
-      {
-        pyoomph::Node *pn = dynamic_cast<pyoomph::Node *>(n);
-        for (unsigned i = 0; pn && i < pn->nlagrangian(); i++)
-        {
-          double v = take();
-          if (w > 0.0)
-            pn->xi(i) = v;
-        }
-      }
-      // Placed by somebody, so it must not go to the nearest-node fallback - nor be counted as a
-      // failure by the report at the end, which is about the transfer and not about this partition.
-      if (w > 0.0 && !completed_nodes.count(n))
-      {
-        completed_nodes.insert(n);
-        missing_nodes.erase(n);
-        rescued++;
-      }
-    }
-    pos = n_node_values;
     for (unsigned int ie = 0; ie < this->nelement() && ndisc; ie++)
     {
-      double w = weights[nodes.size() + ie];
+      double w = elem_weights[ie];
       BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
       for (unsigned d = 0; d < ndisc; d++)
       {
@@ -3362,6 +3502,19 @@ namespace pyoomph
             if (w > 0.0)
               dat->set_value(t, j, v / w);
           }
+      }
+    }
+
+    // Placed by somebody, so it must not go to the nearest-node fallback - nor be counted as a
+    // failure by the report at the end, which is about the transfer and not about this partition.
+    unsigned rescued = 0;
+    for (unsigned k = 0; k < nodes.size(); k++)
+    {
+      if (node_ranks[k] > 0.0 && !completed_nodes.count(nodes[k]))
+      {
+        completed_nodes.insert(nodes[k]);
+        missing_nodes.erase(nodes[k]);
+        rescued++;
       }
     }
     return rescued;

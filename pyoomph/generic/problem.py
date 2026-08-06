@@ -6979,14 +6979,6 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     reasons.append(reason)
         if getattr(interpolator,"distributed_limitation",None) is not None:
             reasons.append(interpolator.__name__+": "+interpolator.distributed_limitation)
-        # The nodal transfer is pooled across the ranks, the nearest-node matching along a boundary
-        # that InternalInterpolator uses for codimension-2 interfaces (a contact line, an axis point)
-        # is not - it would silently match against this rank's nodes only.
-        codim2=sorted(imsh.get_full_name()+"/"+bn
-                      for imsh in self._interfacemeshes for bn in imsh._interfacemeshes.keys())
-        if codim2:
-            reasons.append("the codimension-2 interface(s) "+", ".join(codim2)+" are transferred by "
-                           "nearest-node matching along the boundary, which still sees this rank's nodes only")
         if not reasons:
             return
         raise RuntimeError("Remeshing is not supported on a distributed (--distribute) problem in this "

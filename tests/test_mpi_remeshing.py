@@ -292,13 +292,20 @@ def test_adapting_the_remeshed_mesh_is_refused_when_asked_for_explicitly(tmp_pat
 
 
 @pytest.mark.parametrize("nproc", [2, 3, 4])
-def test_the_transferred_field_matches_the_serial_one(tmp_path, nproc):
-    """Stage 3: the old solution reaches the new mesh even where it crossed a rank boundary.
+@pytest.mark.parametrize("codim2", [False, True])
+def test_the_transferred_field_matches_the_serial_one(tmp_path, nproc, codim2):
+    """The old solution reaches the new mesh even where it crossed a rank boundary.
 
     Each rank can only place the new nodes that fall into its own share of the old mesh. What it
     cannot place is not a failure - it is another rank's to place - so the ranks pool what each of
     them found instead of blending the rest from local nodes, which used to produce confident wrong
     values for a third of the mesh with only a warning to show for it.
+
+    ``codim2`` adds equations where the arc meets the axis, i.e. an interface of an interface. Those
+    go through a different mechanism - nearest-node matching along the boundary rather than point
+    location - where every rank produces a match for every node, however far away its own nearest old
+    node is. Pooling there is therefore "whose match is closest" rather than "who found it", and this
+    is the case where a rank holding no part of the old corner at all is ordinary.
 
     Both halves matter: that nothing fell through to the blend at all, and that what arrived is what
     a serial run gets. The comparison is against merged global mesh data, so the numbers describe the
@@ -306,14 +313,15 @@ def test_the_transferred_field_matches_the_serial_one(tmp_path, nproc):
     partitioned matrix here and on a whole one serially, so its result already differs in the last
     few digits before the transfer even starts.
     """
-    reference = _run_serially(tmp_path / "serial", [])
+    extra = ["--codim2"] if codim2 else []
+    reference = _run_serially(tmp_path / "serial", extra)
     assert reference.returncode == 0, \
         "the serial reference run failed:\n%s" % reference.stdout[-2000:]
     serial = _field(reference)
     assert serial is not None and serial["nnode"] > 0, \
         "the serial run did not report the field:\n%s" % reference.stdout[-2000:]
 
-    proc = _run(tmp_path / "mpi", ["--distribute"], nproc=nproc)
+    proc = _run(tmp_path / "mpi", ["--distribute"] + extra, nproc=nproc)
     assert proc.returncode == 0, \
         "the run failed:\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s" % (
             proc.stdout[-2000:], proc.stderr[-2000:])
@@ -328,21 +336,3 @@ def test_the_transferred_field_matches_the_serial_one(tmp_path, nproc):
     for key in ("usum", "usqsum", "umin", "umax", "uxsum", "uysum"):
         assert got[key] == pytest.approx(serial[key], rel=1e-6, abs=1e-9), \
             "%s is %.12g after the distributed remesh, %.12g serially" % (key, got[key], serial[key])
-
-
-def test_codim2_interfaces_are_refused(tmp_path):
-    """The nodal transfer is pooled across the ranks; the boundary matching for corners is not.
-
-    An interface of an interface - a contact line, an axis point - is transferred by
-    nodal_interpolate_along_boundary, which matches against the nearest nodes of the source mesh and
-    would silently find only this rank's. Refused by name until that path is pooled too.
-    """
-    proc = _run(tmp_path, ["--distribute", "--codim2"], nproc=2)
-    assert proc.returncode == 3, \
-        "expected the worker to report the refusal (3), got %d:\n--- stderr tail ---\n%s" % (
-            proc.returncode, proc.stderr[-2000:])
-    reported = _reported(proc)
-    assert len(reported) == 2, "expected both ranks to raise:\n%s" % "\n".join(reported)
-    for line in reported:
-        assert "codimension-2 interface(s) domain/interface/axis" in line, \
-            "the refusal did not name the interface: %s" % line

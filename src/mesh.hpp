@@ -199,6 +199,14 @@ namespace pyoomph
 		// Each rank can then only place the nodes that fall into its own share of the old mesh, so the
 		// transfer is only complete once the ranks have pooled what each of them found.
 		bool interpolation_is_shared_across_ranks(Mesh *from) const;
+		// Pool per-node transferred data across the ranks: everything a mesh-to-mesh transfer writes on a
+		// node (values at every time level, the position history, the Lagrangian coordinates when those
+		// are interpolated). `nodes` must be the same list in the same order on every rank, and `weights`
+		// says which of them this rank filled - each datum comes out as the sum over the ranks that had
+		// it divided by their number. Returns the summed weights, i.e. per node how many ranks had it.
+		// Collective on the Problem's communicator; only call it where every rank arrives.
+		std::vector<double> pool_node_values_across_ranks(const std::vector<oomph::Node *> &nodes,
+														  std::vector<double> weights);
 		// Pool that transfer. Every rank holds the same nodes and elements in the same order here, so the
 		// values of whatever each rank could place are summed across the ranks and divided by how many
 		// placed it. Nodes rescued from another rank are added to completed_nodes and removed from
@@ -212,6 +220,15 @@ namespace pyoomph
 		// Interpolate nodal values along a boundary from an old mesh, using the arclength-like boundary coordinate
 		// to find the closest correspondence; boundary_max_dist limits how far a match may be to still be accepted.
 		virtual void nodal_interpolate_along_boundary(Mesh *from, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist);
+		// Settle the boundary matching above across the ranks. Every rank produces a match for every
+		// destination node here - the nearest of ITS old nodes, however far away - so unlike the
+		// point-located transfer this is not "who found it" but "who found it closest": one MPI_MINLOC
+		// over the match distances picks the owner (ties by the lower rank, which the nodes on a
+		// partition boundary need), and only its blend is kept. Also reports what no rank could match,
+		// which is the only place where that count means anything. See dev_docs/distributed_remeshing.md.
+		void pool_boundary_interpolation_across_ranks(const std::vector<oomph::Node *> &newnodes,
+													  const std::vector<double> &local_dist,
+													  Mesh *oldimesh, const std::string &where);
 		// Bind this mesh to its owning Problem and the JIT-compiled element code instance used to create its elements.
 		virtual void _set_problem(Problem *p, DynamicBulkElementInstance *code);
 		// Evaluate all fields at a list of local coordinates ("zetas") per element; masked_lines flags entries to
