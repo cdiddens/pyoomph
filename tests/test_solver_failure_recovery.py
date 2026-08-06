@@ -290,3 +290,53 @@ def test_a_singular_matrix_really_does_raise():
     assert numpy.amax(numpy.abs(tolerated.solve_checked(rhs))) > 1e10
     assert tolerated.last_backward_error is not None and tolerated.last_backward_error > 1e-4, \
         "a solve this wrong was not diagnosed, so the factorisation behind it would be reused"
+
+
+def test_a_resolve_refactorises_when_the_factorisation_was_discarded():
+    """A discarded factorisation must not make the next resolve impossible.
+
+    _invalidate_factorisation() drops the factors of a solve whose backward error came back over the
+    limit. With repair_bad_solves off - the default - that is the ONLY thing that happens to it:
+    nothing refactorises on the way to the next call. oomph-lib's resolve (op_flag=2) means "same
+    matrix, new right-hand side" and expects the factors to still be there, so it asserted instead,
+    and arclength continuation - which resolves for its extra right-hand sides - walked straight into
+    it. Three tutorials died that way: hopf_switch, droplet_spread_marangoni_and_gravity and
+    rising_bubble.
+
+    Driven through solve_serial directly rather than through a continuation that has to be coaxed
+    into a bad solve first: what is under test is that a resolve without factors rebuilds them, and
+    the invalidation is exactly what the bad solve would have done.
+    """
+    try:
+        from pyoomph.solvers.pardiso import PardisoSolver
+    except Exception as e:  # no MKL runtime on this machine
+        pytest.skip("Pardiso is not available here: %s" % e)
+    import scipy.sparse as sp
+
+    with _Diffusion() as problem:
+        problem.set_linear_solver("pardiso")
+        problem.quiet()
+        problem.initialise()
+        solver = problem.get_la_solver()
+        if not isinstance(solver, PardisoSolver):
+            pytest.skip("the pardiso solver was not selected here")
+
+        n = 5
+        A = sp.csr_matrix(sp.diags([numpy.arange(2.0, n + 2.0)], [0]))
+        rhs = numpy.arange(1.0, n + 1.0)
+        # op_flag=1 is "factorise this matrix"; oomph hands it CSR triples.
+        solver.solve_serial(1, n, A.nnz, 1, A.data.copy(), A.indices.copy(), A.indptr.copy(),
+                            rhs.copy(), n, 0)
+        assert solver._current_pardiso is not None, "the matrix was not factorised at all"
+
+        solver._invalidate_factorisation()
+        assert solver._current_pardiso is None, "the invalidation did not drop the factorisation"
+
+        b = rhs.copy()
+        # The matrix arguments are not read at op_flag=2 - a resolve uses the factors and _lastA -
+        # so what this asserts is precisely that it can still get to a solution without them.
+        solver.solve_serial(2, n, A.nnz, 1, A.data.copy(), A.indices.copy(), A.indptr.copy(),
+                            b, n, 0)
+        expected = rhs / numpy.arange(2.0, n + 2.0)
+        assert numpy.allclose(b, expected), \
+            "the resolve returned %s instead of %s" % (b, expected)

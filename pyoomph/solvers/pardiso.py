@@ -943,7 +943,10 @@ class PardisoSolver(GenericLinearSystemSolver):
                     self._pattern_verified=True
             else:
                 if self._current_pardiso:
-                    self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed                
+                    self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed
+                # Kept even though this branch never reuses anything: it is what a resolve refactorises
+                # from when the factorisation was discarded under it, see op_flag==2 below.
+                self._lastA = A
                 self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,repair_bad_solves=self.repair_bad_solves)
                 self._current_pardiso.factor()
                 self.n_full_factorisations+=1
@@ -951,7 +954,29 @@ class PardisoSolver(GenericLinearSystemSolver):
                     print("PARDISO FACTOR IPARM",self._current_pardiso.iparm)                
         elif op_flag == 2:
             self.setup_solver()
-            assert self._current_pardiso is not None
+            if self._current_pardiso is None:
+                # A resolve is "same matrix, new right-hand side", so it normally has the factors from
+                # the op_flag==1 that preceded it. It can arrive without them: _invalidate_factorisation()
+                # drops a factorisation whose solve came back with too large a backward error, and with
+                # repair_bad_solves off that is the ONLY thing that happens to it - nothing refactorises
+                # on the way here. Arclength continuation resolves for its extra right-hand sides, so it
+                # walked straight into this and asserted; three tutorials died that way
+                # (hopf_switch, droplet_spread_marangoni_and_gravity, rising_bubble).
+                #
+                # _lastA is the matrix that factorisation was built from and is not cleared by the
+                # invalidation, so the honest answer is to build the factors again rather than to
+                # refuse. _structure_id and _pattern_verified were reset with it, so no reuse tier
+                # can smuggle the discarded state back in.
+                if self._lastA is None:
+                    raise RuntimeError("Pardiso was asked to resolve (op_flag=2) before any matrix was "
+                                       "factorised, so there is nothing to solve with.")
+                if self.verbose:
+                    print("PARDISO: refactorising for a resolve, the previous factorisation was discarded")
+                self._current_pardiso = pardisoSolver(self._lastA, mtype=11, verbose=self.verbose,
+                                                      iparm_override=self.iparm_override,
+                                                      repair_bad_solves=self.repair_bad_solves)
+                self._current_pardiso.factor()
+                self.n_full_factorisations+=1
             if self.try_to_reuse_solver:
                 maxiters=30
                 self._current_pardiso.iparm[7]=maxiters
