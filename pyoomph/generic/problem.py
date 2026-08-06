@@ -2537,7 +2537,12 @@ class Problem(_pyoomph.Problem):
         ccompiler_group = self.cmdlineparser.add_mutually_exclusive_group()
         ccompiler_group.add_argument('--tcc', help="use internal TCC compiler", action='store_true')
         ccompiler_group.add_argument('--distutils', help="use system C compiler detected by distutils", action='store_true')
-        self.cmdlineparser.add_argument('--fast-math', help="activate fast math compiler flags (only with distutils, not with tcc)", action='store_true')        
+        # The hint is not a style preference: measured on a transcendental-heavy weak form, wrapping the
+        # expensive terms in subexpression() beats -ffast-math outright (codegen then emits each exp/pow
+        # once, and caches its derivatives, instead of leaving redundant libm calls for the compiler to
+        # eliminate), and once it is used -ffast-math adds under a percent. On polynomial weak forms the
+        # flag is within noise either way, since -O3 -march=native is already the default.
+        self.cmdlineparser.add_argument('--fast-math', help="activate fast math compiler flags (only with distutils, not with tcc). Rarely pays off: consider wrapping expensive terms in subexpression() instead, which is faster and does not change the arithmetic", action='store_true')
         self.cmdlineparser.add_argument('--distribute',help="Distribute mesh in parallel",action='store_true')
         self.cmdlineparser.add_argument('--outdir', help="output directory",type=str)
         self.cmdlineparser.add_argument('--suppress_code_writing',help="do not write FEM codes. Useful for debugging",action='store_true')

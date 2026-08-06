@@ -3,6 +3,10 @@
 Investigation on branch `codegen` into whether pyoomph's symbolic code generation can be made
 faster, and what was changed as a result.
 
+This is about the time spent *producing* the C. For the time spent *running* it - what the emitted
+code costs, what the C compiler does and does not clean up, and where the remaining wins are - see
+`generated_code_speed.md`.
+
 ## The two phases, and which one is expensive
 
 "Code generation" is not one step. A residual passes through:

@@ -62,6 +62,8 @@ And the C compiler backend used to build the just-in-time generated code is like
 ``--fast-math``
       Activate fast-math compiler flags. Only usable together with ``--distutils`` (or the default compiler), not with ``--tcc``.
 
+      It rarely pays off. The default flags are already ``-O3 -march=native``, so for weak forms built from polynomial terms the difference is within measurement noise. The one case where it matters is a weak form containing expensive calls such as ``exp``, ``log`` or non-integer powers, which the code generator would otherwise emit once per occurrence. Wrapping those terms in :py:func:`~pyoomph.expressions.generic.subexpression` addresses that far better: the term is then evaluated once into a temporary and its derivatives are cached as well, which beats ``--fast-math`` outright and, unlike ``--fast-math``, does not change the arithmetic at all. With ``subexpression`` in place, ``--fast-math`` adds less than a percent.
+
 Output and code generation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
