@@ -40,22 +40,6 @@ if TYPE_CHECKING:
 pi = 2 * _pyoomph.GiNaC_asin(1)
 
 
-def _transpose_resolved_matrix(T:Expression)->Expression:
-    """
-    Element-wise transpose of a matrix that has already been resolved by ``evalm()``.
-
-    The symbolic :py:func:`~pyoomph.expressions.generic.transpose` cannot be used here: ``need_to_hold``
-    in the C++ core lists ``field``, so ``transpose(T)`` of any tensor built from fields stays held and
-    ``evalm()`` does not resolve it, after which indexing ``T[i,j]`` falls back to a held
-    ``double_index`` instead of giving a component.
-
-    The extent is the padded 3x3 that every tensor in pyoomph has: ``matrix()`` fills to 3x3 and
-    ``vector()`` to three components, and the ``tensor_divergence`` implementations below already assume
-    it (their loops are ``range(3)`` and they read ``T[2,2]``).
-    """
-    return matrix([[T[j,i] for j in range(3)] for i in range(3)])
-
-
 class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
     
     expansion_eps=_pyoomph.GiNaC_new_symbol("eps") # One epsilon to rule them all, one epsilon to find them, one epsilon to bring them all and in the darkness bind them
@@ -189,18 +173,10 @@ class BaseCoordinateSystem(_pyoomph.CustomCoordinateSystem):
         #		is_vector=(flags//2)	#TODO
 
         if tensorial:
-            # The user-visible convention is (div T)_i = d_j T_ij, contracting the SECOND index. That is what makes div
-            # the adjoint of grad (grad(u)_ij = d u_i/d x_j), hence div(grad(u)) the vector Laplacian, and it is the
-            # integration-by-parts partner of the weak(T,grad(v)) + matproduct(T,n) traction pair the Navier-Stokes and
-            # viscoelastic equations already use.
-            #
-            # The tensor_divergence implementations below still compute the FIRST-index contraction d_j T_ji, so the
-            # transpose converts between the two. It is exact rather than an approximation - d_j (T^t)_ji IS d_j T_ij for
-            # arbitrary T - which is why the curvilinear connection terms can be reused untouched instead of being
-            # re-derived. That matters most for AxisymmetryBreakingCoordinateSystem.tensor_divergence, which was derived
-            # against div(dyadic(a,b)) identities. For symmetric tensors, i.e. every usual stress, the transpose is a
-            # no-op. TODO: fold the second-index convention into the tensor_divergence implementations and drop this.
-            return self.tensor_divergence(_transpose_resolved_matrix(arg.evalm()),ndim,edim,with_scales,lagrangian)
+            # (div T)_i = d_j T_ij, contracting the second index, which is what makes div the adjoint of grad
+            # (grad(u)_ij = d u_i/d x_j), hence div(grad(u)) the vector Laplacian, and the integration-by-parts partner
+            # of the weak(T,grad(v)) + matproduct(T,n) traction pair. Each tensor_divergence implements that directly.
+            return self.tensor_divergence(arg.evalm(),ndim,edim,with_scales,lagrangian)
         elif edim == ndim:
             return self.vector_divergence(arg.evalm(), ndim, edim, with_scales, lagrangian)
         elif ndim == edim + 1:
@@ -393,12 +369,7 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         return matrix(res)
     
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        """
-        Divergence of a second order tensor contracting the FIRST index, ``(div T)_i = d_j T_ji``.
-
-        Note this is not the user-visible convention: :py:meth:`div` transposes the tensor before calling this, so
-        ``div(T)`` is ``d_j T_ij``. See the comment there.
-        """
+        """Divergence of a second order tensor, ``(div T)_i = d_j T_ij``, contracting the second index."""
         res:list[Expression] = []
         # get_coords clamps to the three coordinates, so passing nops() (which is 9 for the padded 3x3 tensor, not the
         # number of rows) happens to give [x,y,z]. Differentiating with respect to an unused coordinate is zero.
@@ -406,8 +377,7 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
         for i in range(3):
             div_line:Expression = Expression(0)
             for j,coord in enumerate(coords):
-                entry=arg[j,i]
-                div_line+=diff(entry, coord)
+                div_line+=diff(arg[i,j], coord)
             res.append(div_line)
         return vector(res)
 
@@ -569,11 +539,26 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
 
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         """
-        Divergence of a second order tensor contracting the FIRST index, ``(div T)_i = d_j T_ji``, plus the cylindrical
-        connection terms.
+        Divergence of a second order tensor, ``(div T)_i = d_j T_ij``, contracting the second index, plus the
+        cylindrical connection terms.
 
-        Note this is not the user-visible convention: :py:meth:`div` transposes the tensor before calling this, so
-        ``div(T)`` is ``d_j T_ij``. See the comment there.
+        In the orthonormal cylindrical frame, with d_phi = 0 for axisymmetry, those are
+
+            (div T)_r   = d_r T_rr + d_z T_rz + (T_rr - T_phiphi)/r
+            (div T)_z   = d_r T_zr + d_z T_zz + T_zr/r
+            (div T)_phi = d_r T_phir + d_z T_phiz + (T_rphi + T_phir)/r
+
+        each checkable against div(dyadic(a,b)) = div(b)*a + (b.grad)a on the basis dyads: e_phi (x) e_r, for
+        instance, gives (b.grad)a = (e_r.grad)e_phi = 0 and div(e_r) = 1/r, hence (div T)_phi = 1/r, which is what
+        the T_phir/r half of the last line produces.
+
+        The azimuthal row cannot be reached from any tensor this coordinate system can build: define_tensor_field
+        puts the azimuthal component on the diagonal only ("_aa" at [2][2]) and vector_gradient hard-zeros the
+        azimuthal off-diagonals, since there is no azimuthal velocity component in plain axisymmetry at all. It is
+        reachable from a hand-assembled tensor, e.g. dyadic(vector(h,0,0),vector(0,0,k)), which is how it is tested.
+        Both the two-dimensional and the radial form of that row used to be wrong: the 2d one had
+        (T_phir - T_rphi)/r, which is zero for the symmetric tensors that matter and has the wrong sign otherwise,
+        and the radial one had (2*T_phir - T_rphi)/r, wrong even when symmetric.
         """
         T=arg
         coords = self.get_coords(T.nops(), with_scales, lagrangian)
@@ -581,9 +566,11 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             if ndim==1:
                 raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
             else:
-                div_x=diff(T[0,0],coords[0])+diff(T[1,0],coords[1])+T[1,0] / coords[1] 
-                div_y=diff(T[0,1],coords[0])+diff(T[1,1],coords[1])+(T[1,1]-T[2,2]) / coords[1]
-                div_theta=diff(T[0,2],coords[0])+diff(T[1,2],coords[1])+(T[1,2] - T[2,1]) / coords[1]
+                # Here x is the symmetry axis, so slot 0 is the axial direction and slot 1 the radial one:
+                # r = coords[1] and z = coords[0], which swaps the roles of the first two rows above.
+                div_x=diff(T[0,0],coords[0])+diff(T[0,1],coords[1])+T[0,1] / coords[1]
+                div_y=diff(T[1,0],coords[0])+diff(T[1,1],coords[1])+(T[1,1]-T[2,2]) / coords[1]
+                div_theta=diff(T[2,0],coords[0])+diff(T[2,1],coords[1])+(T[1,2] + T[2,1]) / coords[1]
             return vector(div_x,div_y,div_theta)
         elif ndim==1:
             # On a radial mesh the components are ordered [r, phi], not [r, z, phi]: define_tensor_field
@@ -593,12 +580,12 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             # from the radial row altogether. Checked against the same expression evaluated on a
             # two-dimensional axisymmetric mesh, where the azimuthal diagonal is T[2,2].
             div_x=diff(T[0,0],coords[0])+(T[0,0] - T[1,1]) / coords[0]
-            div_theta=diff(T[0,1],coords[0])+(2*T[0,1] - T[1,0]) / coords[0]
+            div_theta=diff(T[1,0],coords[0])+(T[0,1] + T[1,0]) / coords[0]
             return vector(div_x,  div_theta,0)
         else:
-            div_x=diff(T[0,0],coords[0])+ diff(T[1,0],coords[1]) + (T[0,0] - T[2,2]) / coords[0]
-            div_y=diff(T[0,1],coords[0])+diff(T[1,1],coords[1])+(T[0,1] / coords[0])
-            div_theta=diff(T[0,2],coords[0])+(T[0,2] - T[2,0]) / coords[0]+diff(T[1,2],coords[1])                                    
+            div_x=diff(T[0,0],coords[0])+ diff(T[0,1],coords[1]) + (T[0,0] - T[2,2]) / coords[0]
+            div_y=diff(T[1,0],coords[0])+diff(T[1,1],coords[1])+(T[1,0] / coords[0])
+            div_theta=diff(T[2,0],coords[0])+diff(T[2,1],coords[1])+(T[0,2] + T[2,0]) / coords[0]
             return vector(div_x, div_y, div_theta)
 
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool,)->Expression:        
@@ -1410,13 +1397,8 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
 
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         """
-        Divergence of a second order tensor, i.e. ``(div T)_j = d_i T_ij``, contracting the FIRST index
-        (the convention of the Cartesian and the plain axisymmetric coordinate system).
-
-        Note this is not the user-visible convention: :py:meth:`BaseCoordinateSystem.div` transposes the tensor before
-        calling this, so ``div(T)`` is ``d_j T_ij``. Nothing below needs to change for that -- ``d_j (T^t)_ji`` IS
-        ``d_j T_ij`` -- but it does mean the identity quoted further down reads ``div(dyadic(a,b)) = div(b)*a + (b.grad)a``
-        from the outside.
+        Divergence of a second order tensor, i.e. ``(div T)_i = d_j T_ij``, contracting the second index, as in the
+        Cartesian and the plain axisymmetric coordinate system.
 
         The mesh coordinates (x,y) and the angle phi are mapped to the physical cylindrical coordinates by
         ``r = x + eps*x_eigen*exp(I*m*phi)`` and ``z = y + eps*y_eigen*exp(I*m*phi)``, with phi itself
@@ -1468,23 +1450,23 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             return q/x - mm*Xp*q/x**2
 
         # The connection terms are those of the cylindrical frame, where e_r and e_phi rotate with phi:
-        # (T_rr-T_phiphi)/r on the radial row, T_rz/r on the axial one, (T_rphi+T_phir)/r on the azimuthal
-        # one. The PLUS on the last is what the identity div(dyadic(a,b)) = div(a)*b + (a.grad)b requires
+        # (T_rr-T_phiphi)/r on the radial row, T_zr/r on the axial one, (T_rphi+T_phir)/r on the azimuthal
+        # one. The PLUS on the last is what the identity div(dyadic(a,b)) = div(b)*a + (b.grad)a requires
         # here, checked against vector_divergence and vector_gradient of this class, which do carry all
-        # three components. AxisymmetricCoordinateSystem.tensor_divergence has a minus in that spot, but
-        # that is not a contradiction: its vector_gradient is swirl-free (the a_phi entries are hard
-        # zeros), so a tensor with T_phir != 0 is outside what that coordinate system describes anyway.
+        # three components. AxisymmetricCoordinateSystem.tensor_divergence agrees term for term now; it
+        # used to have a minus in that spot, which went unnoticed because its own vector_gradient is
+        # swirl-free (the a_phi entries are hard zeros), so nothing it can build reaches that row.
         if ndim == 2:
-            div_r = d_dr(T[0,0]) + d_dz(T[1,0]) + d_dphi_over_r(T[2,0]) + over_r(T[0,0] - T[2,2])
-            div_z = d_dr(T[0,1]) + d_dz(T[1,1]) + d_dphi_over_r(T[2,1]) + over_r(T[0,1])
-            div_phi = d_dr(T[0,2]) + d_dz(T[1,2]) + d_dphi_over_r(T[2,2]) + over_r(T[0,2] + T[2,0])
+            div_r = d_dr(T[0,0]) + d_dz(T[0,1]) + d_dphi_over_r(T[0,2]) + over_r(T[0,0] - T[2,2])
+            div_z = d_dr(T[1,0]) + d_dz(T[1,1]) + d_dphi_over_r(T[1,2]) + over_r(T[1,0])
+            div_phi = d_dr(T[2,0]) + d_dz(T[2,1]) + d_dphi_over_r(T[2,2]) + over_r(T[0,2] + T[2,0])
             return vector(div_r, div_z, div_phi)
         else:
             # On a radial mesh the components are ordered [r, phi] rather than [r, z, phi] -- that is
             # what define_vector_field, scalar_gradient and vector_divergence use for ndim==1 -- so the
             # azimuthal slot is index 1 here and index 2 is unused.
-            div_r = d_dr(T[0,0]) + d_dphi_over_r(T[1,0]) + over_r(T[0,0] - T[1,1])
-            div_phi = d_dr(T[0,1]) + d_dphi_over_r(T[1,1]) + over_r(T[0,1] + T[1,0])
+            div_r = d_dr(T[0,0]) + d_dphi_over_r(T[0,1]) + over_r(T[0,0] - T[1,1])
+            div_phi = d_dr(T[1,0]) + d_dphi_over_r(T[1,1]) + over_r(T[0,1] + T[1,0])
             return vector(div_r, div_phi, 0)
 
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:

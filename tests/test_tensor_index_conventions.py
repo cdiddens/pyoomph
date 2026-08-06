@@ -48,7 +48,7 @@ from pyoomph.expressions.coordsys import AxisymmetricCoordinateSystem
 from pyoomph.equations.ALE import PrescribedMovingMesh
 from pyoomph.equations.generic import AverageConstraint
 from pyoomph.equations.navier_stokes import NavierStokesEquations
-from pyoomph.meshes.simplemeshes import RectangularQuadMesh, CuboidBrickMesh
+from pyoomph.meshes.simplemeshes import RectangularQuadMesh, CuboidBrickMesh, LineMesh
 
 #: A matrix whose every entry identifies its own (row, column), so that a result of [0,10,20] can only
 #: be column 0 and [0,1,2] can only be row 0. Any transposed contraction is immediately visible.
@@ -154,26 +154,29 @@ class _Project(Equations):
 
 
 class _ProjectionProblem(Problem):
-    def __init__(self, expressions, coordsys=None, lower_left=None, box=False):
+    def __init__(self, expressions, coordsys=None, lower_left=None, box=False, line=False):
         super().__init__()
         self.expressions = expressions
         self._coordsys = coordsys
         self._lower_left = lower_left
         self._box = box
+        self._line = line
 
     def define_problem(self):
         if self._coordsys is not None:
             self.set_coordinate_system(self._coordsys)
         if self._box:
             self.add_mesh(CuboidBrickMesh(N=2))
+        elif self._line:
+            self.add_mesh(LineMesh(N=2, minimum=1))
         else:
             self.add_mesh(RectangularQuadMesh(N=2, lower_left=self._lower_left or [0, 0]))
         self.add_equations(_Project(self.expressions) @ "domain")
 
 
-def _projected(tmp_path, expressions, coordsys=None, lower_left=None, box=False):
+def _projected(tmp_path, expressions, coordsys=None, lower_left=None, box=False, line=False):
     """{name: max |value| over the nodes} of each expression, as the generated code evaluates it."""
-    with _ProjectionProblem(expressions, coordsys, lower_left, box) as problem:
+    with _ProjectionProblem(expressions, coordsys, lower_left, box, line) as problem:
         problem.set_output_directory(str(tmp_path))
         problem.initialise()
         problem.solve()
@@ -207,7 +210,7 @@ _A_2D = lambda x, y: vector(x * y + 2 * y * y, 3 * x * x, 0)
 _B_2D = lambda x, y: vector(5 * y, 7 * x * y, 0)
 
 
-@pytest.mark.parametrize("coordsys_name", ["cartesian", "axisymmetric"])
+@pytest.mark.parametrize("coordsys_name", ["cartesian", "axisymmetric", "axisymmetric_flipped"])
 def test_divergence_of_a_dyadic_product(tmp_path, coordsys_name):
     """
     div(dyadic(a,b)) == div(b)*a + (b.grad)a, the product rule for the second-index convention.
@@ -227,15 +230,87 @@ def test_divergence_of_a_dyadic_product(tmp_path, coordsys_name):
     a, b = _A_2D(x, y), _B_2D(x, y)
     if coordsys_name == "cartesian":
         coordsys, lower_left = None, [0, 0]
-    else:
+    elif coordsys_name == "axisymmetric":
         # away from the axis, since the connection terms carry 1/r
         coordsys, lower_left = AxisymmetricCoordinateSystem(), [1, 0]
+    else:
+        # use_x_as_symmetry_axis, i.e. the exported "axisymmetric_flipped": y is the radial direction
+        # here, so it is y that has to stay away from zero. Its rows are a separate branch.
+        coordsys = AxisymmetricCoordinateSystem(use_x_as_symmetry_axis=True)
+        lower_left = [0, 1]
 
     lhs = div(dyadic(a, b))
     rhs = div(b) * a + directional_derivative(a, b)
     expressions = {f"residual_{i}": lhs[i] - rhs[i] for i in range(3)}
     expressions["magnitude"] = lhs[0]
     values = _projected(tmp_path, expressions, coordsys=coordsys, lower_left=lower_left)
+    assert values["magnitude"] > 1.0
+    for i in range(3):
+        assert values[f"residual_{i}"] < 1e-11
+
+
+@pytest.mark.parametrize("case", ["radial_x_azimuthal", "azimuthal_x_radial", "azimuthal_x_azimuthal"])
+def test_axisymmetric_tensor_divergence_with_swirl(tmp_path, case):
+    """
+    The azimuthal row of the axisymmetric tensor divergence, against hand-derived references.
+
+    This row is unreachable from any tensor the axisymmetric system can build from fields:
+    define_tensor_field puts the azimuthal component on the diagonal only and vector_gradient hard-zeros
+    the azimuthal off-diagonals, since plain axisymmetry has no azimuthal velocity component. So the
+    dyadic-identity test above cannot reach it either -- (b.grad)a on the right-hand side would need the
+    swirl terms of vector_gradient that are not there -- and the reference has to come from outside.
+
+    Each case below is div(a (x) b) = div(b)*a + (b.grad)a worked out by hand in the orthonormal
+    cylindrical frame, using d_phi(anything) = 0 and the frame derivatives d_phi(e_r) = e_phi,
+    d_phi(e_phi) = -e_r. Slot order is (r, z, phi), so vector(h,0,0) is radial and vector(0,0,k)
+    azimuthal.
+
+    Both forms of this row were wrong before: the 2d one had (T_phir - T_rphi)/r, which is zero for a
+    symmetric tensor and the wrong sign otherwise, and the radial one had (2*T_phir - T_rphi)/r, which is
+    wrong even for a symmetric tensor. The first case here is what pins the sign -- it has T_rphi != 0
+    and T_phir == 0, so the old expression gave exactly minus the right answer.
+    """
+    r, z = var(["coordinate_x", "coordinate_y"])
+    h, k, f, g = 2 * r + 3 * z, 5 * r * z + 1, r * r + 2 * z, 4 * r + z
+    if case == "radial_x_azimuthal":
+        # div(e_r h (x) e_phi k): div(e_phi k) = 0 and (e_phi k .grad)(e_r h) = h*k/r * e_phi
+        tensor, reference = dyadic(vector(h, 0, 0), vector(0, 0, k)), vector(0, 0, h * k / r)
+    elif case == "azimuthal_x_radial":
+        # div(e_phi f (x) e_r g): div(e_r g) = d_r g + g/r and (e_r g .grad)(e_phi f) = g d_r f * e_phi
+        tensor = dyadic(vector(0, 0, f), vector(g, 0, 0))
+        reference = vector(0, 0, f * (grad(g)[0] + g / r) + g * grad(f)[0])
+    else:
+        # div(e_phi f (x) e_phi k): div(e_phi k) = 0 and (e_phi k .grad)(e_phi f) = -f*k/r * e_r
+        tensor, reference = dyadic(vector(0, 0, f), vector(0, 0, k)), vector(-f * k / r, 0, 0)
+
+    divergence = div(tensor)
+    expressions = {f"residual_{i}": divergence[i] - reference[i] for i in range(3)}
+    expressions["magnitude"] = divergence[0] + divergence[1] + divergence[2]
+    values = _projected(tmp_path, expressions, coordsys=AxisymmetricCoordinateSystem(),
+                        lower_left=[1, 0])
+    assert values["magnitude"] > 1.0
+    for i in range(3):
+        assert values[f"residual_{i}"] < 1e-11
+
+
+def test_axisymmetric_tensor_divergence_with_swirl_on_a_radial_mesh(tmp_path):
+    """
+    The same azimuthal row on a one-dimensional radial mesh, which is a separate branch.
+
+    There the components are ordered (r, phi) rather than (r, z, phi), so the azimuthal slot is index 1
+    and index 2 is unused. Its connection term used to read (2*T_phir - T_rphi)/r, which is wrong for a
+    symmetric tensor too, not only in sign -- and nothing exercised it, so reverting it alone left every
+    other test in this file green.
+    """
+    r = var("coordinate_x")
+    h, k = 2 * r + 1, 3 * r * r
+    # div(e_r h (x) e_phi k), as above: div(e_phi k) = 0 and (e_phi k .grad)(e_r h) = h*k/r * e_phi
+    tensor = dyadic(vector(h, 0, 0), vector(0, k, 0))
+    reference = vector(0, h * k / r, 0)
+    divergence = div(tensor)
+    expressions = {f"residual_{i}": divergence[i] - reference[i] for i in range(3)}
+    expressions["magnitude"] = divergence[1]
+    values = _projected(tmp_path, expressions, coordsys=AxisymmetricCoordinateSystem(), line=True)
     assert values["magnitude"] > 1.0
     for i in range(3):
         assert values[f"residual_{i}"] < 1e-11

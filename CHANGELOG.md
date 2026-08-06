@@ -102,11 +102,20 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
     `matproduct(T,n)`. For symmetric tensors -- every usual stress -- nothing changes at all. A flux
     tensor has to be assembled accordingly: the momentum flux carrying `u` along `rho*q` is
     `dyadic(u,rho*q)`. The conservative (`GCL=True`) Navier-Stokes momentum flux was updated to
-    match; no other equation in pyoomph took the divergence of a tensor.
+    match; no other equation in pyoomph took the divergence of a tensor. Each coordinate system's
+    `tensor_divergence` implements the second-index convention directly.
   - `dot()` now also accepts one matrix and one vector, with the same standard convention, where it
     previously raised "dot is only allowed between vectors". `dot` and `contract` agree in every
     shape they share; two matrices still raise, since `matproduct` and `double_dot` are both
     plausible readings. The index order of every operator is now stated in its docstring.
+- Fixed the azimuthal row of `AxisymmetricCoordinateSystem.tensor_divergence`, whose connection term
+  should be `(T_rphi + T_phir)/r`. On a two-dimensional axisymmetric mesh it read
+  `(T_phir - T_rphi)/r`, which is zero for a symmetric tensor and the wrong sign otherwise; on a
+  one-dimensional radial mesh it read `(2*T_phir - T_rphi)/r`, wrong even for a symmetric tensor. Only
+  reachable from a hand-assembled tensor such as `dyadic(vector(h,0,0),vector(0,0,k))`, since
+  `define_tensor_field` puts the azimuthal component on the diagonal only and `vector_gradient` is
+  swirl-free -- plain axisymmetry has no azimuthal velocity component -- which is why it survived. The
+  azimuthal-symmetry-breaking system, which does carry swirl, already had it right.
 - Fixed `BaseDifferentialGeometryCoordinateSystem.vector_gradient`, which returned the transpose of
   what every other coordinate system returns (`d(u_j)/d(x_i)` instead of `d(u_i)/d(x_j)`).
 - Corrected the `upper_convected_derivative` docstring, which stated the stretching terms with the two
