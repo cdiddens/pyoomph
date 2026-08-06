@@ -31,7 +31,7 @@ import inspect
 import os.path
 import weakref
 
-from ..generic.mpi import mpi_barrier, get_mpi_nproc
+from ..generic.mpi import mpi_barrier, get_mpi_nproc, get_mpi_any, get_mpi_rank, get_mpi_world_comm, mpi_share_root_failure
 
 from ..typings import *
 
@@ -829,6 +829,14 @@ class MeshedMeshTemplate(MeshTemplate):
     If you prefer the mesh generator to reconstruct the geometry automatically from the deformed mesh, overwrite the
     :py:attr:`~pyoomph.meshes.mesh.MeshTemplate.remesher` attribute by e.g. a
     :py:class:`~pyoomph.meshes.remesher.Remesher2d` instead.
+
+    .. note::
+        On a mesh distributed with ``--distribute``, :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.define_geometry` is a
+        **collective** region: :py:meth:`get_boundary_coordinates` gathers the boundary from all ranks, since no rank
+        holds more than its own part of it. Every rank must therefore reach the same calls, with the same arguments and
+        in the same order - do not branch on the MPI rank inside ``define_geometry``, and do not ask for a boundary on
+        some ranks only. A ``define_geometry`` that raises on one rank is caught and turned into an error on all of
+        them; one whose ranks disagree on which collectives to enter can only hang. See dev_docs/distributed_remeshing.md.
     """
 
     def __init__(self):
@@ -881,6 +889,10 @@ class MeshedMeshTemplate(MeshTemplate):
     def get_boundary_coordinates(self, name: str, sort_along_axis: "SortAlongAxis | None" = None, start_near_point: tuple["ExpressionOrNum", "ExpressionOrNum"] | None = None, nondimensional: bool = False) -> list[list[tuple[float, float]]]:
         """Returns a list of boundary segments, which are lists of (x,y) coordinates (dimensional or not can be controlled by the nondimensional argument). The segments are sorted and reversed based on the sort_along_axis or start_near_point arguments. If both are None, the order is arbitrary.
 
+        On a mesh distributed with ``--distribute`` this is a **collective** call that returns the
+        whole boundary on every rank, not just this rank's part of it. Every rank must therefore
+        reach it, with the same arguments and in the same order - see :py:class:`MeshedMeshTemplate`.
+
         Args:
             name: Name of the boundary, e.g. "domain1/boundary1"
             sort_along_axis: Sort the segments along a given axis, e.g. "x+" means sort along x in increasing order, "y-" means sort along y in decreasing order. Defaults to None.
@@ -892,21 +904,100 @@ class MeshedMeshTemplate(MeshTemplate):
         """
         self._assert_within_define_geometry("get_boundary_coordinates()")
         self._has_remeshing_path = True # The geometry obviously depends on the mesh we are replacing
-        if not self.get_problem().is_initialised():
+        problem = self.get_problem()
+        if not problem.is_initialised():
             raise RuntimeError("Cannot get boundary coordinates before the first mesh is generated")
-        data = self.get_problem().get_cached_mesh_data(name, nondimensional=True)
+
+        mesh, merge = self._resolve_mesh_for_boundary_coordinates(name)
+        if not merge:
+            # Serial, or mpirun without --distribute: this rank holds the whole boundary already.
+            segs, pts = self._sorted_boundary_segments(mesh, sort_along_axis, start_near_point)
+            assert segs is not None and pts is not None  # only a global request returns None
+            payload = [[(float(pts[0, i]), float(pts[1, i])) for i in seg] for seg in segs]
+        else:
+            # Each rank sees only its own partition of the boundary, which is not a piece of the
+            # answer - it is a different, truncated geometry, and the segments are cut wherever the
+            # partition happens to run. So merge the mesh data (collective, result on rank 0), sort
+            # there, and hand the polylines to everybody.
+            #
+            # The broadcast has to be here rather than inside the merge: a repeated request is a
+            # cache hit on rank 0, which broadcasts nothing (see meshdatamerge.py §3.4b), and the
+            # other ranks would then wait for a request that never comes.
+            comm = get_mpi_world_comm()
+            assert comm is not None  # needs_merging implies more than one process
+            payload = None
+            error: BaseException | None = None
+            if get_mpi_rank() == 0:
+                # Everything from here to the broadcast happens on rank 0 alone, so it has to end for
+                # all ranks or for none - the sorting rejects a bad sort_along_axis, and the merge
+                # itself checks that the nodes it identified really do coincide.
+                try:
+                    segs, pts = self._sorted_boundary_segments(mesh, sort_along_axis, start_near_point,
+                                                               global_mesh=True)
+                    payload = [[(float(pts[0, i]), float(pts[1, i])) for i in seg] for seg in segs]
+                except BaseException as e:
+                    error = e
+            else:
+                self._sorted_boundary_segments(mesh, sort_along_axis, start_near_point, global_mesh=True)
+            # Only the nondimensional numbers travel, so a dimensional scaling (a GiNaC expression)
+            # never has to survive being pickled - it is applied below, on every rank.
+            payload = comm.bcast(payload, root=0)
+            mpi_share_root_failure(error, context="building the boundary coordinates of '"+name+"' from the merged mesh data")
+            assert payload is not None
+
+        SS = 1 if nondimensional else problem.get_scaling("spatial")
+        return [[(x*SS, y*SS) for x, y in seg] for seg in payload]
+
+    def _resolve_mesh_for_boundary_coordinates(self, name: str):
+        """The mesh named by get_boundary_coordinates, and whether its data has to be merged.
+
+        Both answers are agreed on across the ranks, because both decide whether this rank enters the
+        merge collective that follows, and a rank that decides differently from the others hangs them
+        rather than failing:
+
+        * a name this rank cannot resolve becomes an error on all of them, instead of unwinding one
+          rank alone - the same asymmetry MeshedMeshTemplate._do_define_geometry guards against one
+          level further out;
+        * ``needs_merging`` is asked of every rank rather than trusted locally. It reads
+          ``is_mesh_distributed()`` off *this* mesh, and an interface mesh whose partition happens to
+          hold no element of it is exactly the kind of place where that could come out differently.
+        """
+        problem = self.get_problem()
+        collective = bool(problem.is_distributed()) and get_mpi_nproc() > 1
+        mesh = None
+        error: BaseException | None = None
+        try:
+            mesh = problem.get_mesh(name)
+        except BaseException as e:
+            error = e
+        if not collective:
+            if error is not None:
+                raise error
+            return mesh, False
+        if get_mpi_any(error is not None):
+            if error is not None:
+                raise error
+            raise RuntimeError("get_boundary_coordinates('"+name+"'): another MPI rank could not resolve "
+                               "that mesh. This rank raises here rather than entering the collective merge "
+                               "alone; the real error is reported by the rank that saw it.")
+        # Deferred, like everywhere else that touches the merge: a serial run must not pull in mpi4py
+        # through this path.
+        from .meshdatamerge import needs_merging
+        return mesh, get_mpi_any(needs_merging(mesh))
+
+    def _sorted_boundary_segments(self, mesh, sort_along_axis: "SortAlongAxis | None", start_near_point: tuple["ExpressionOrNum", "ExpressionOrNum"] | None, global_mesh: bool = False):
+        """The boundary's line segments, oriented and ordered, together with the coordinate array.
+
+        With ``global_mesh`` the extraction is collective and only rank 0 gets data back; the other
+        ranks still have to call it, which is why it returns ``(None, None)`` there instead of
+        refusing."""
+        data = self.get_problem().get_cached_mesh_data(mesh, nondimensional=True, global_mesh=global_mesh)
+        if data is None:
+            return None, None
         pts = data.get_coordinates()
         segs, _ = data.get_interface_line_segments()
-
-        # Sort and reverse the segments based on the settings
         segs = sort_line_segments(pts, segs, sort_along_axis=sort_along_axis, start_near_point=start_near_point, spatial_unit=self.get_problem().get_scaling("spatial"), whom="get_boundary_coordinates()")
-
-        res = []
-
-        SS = 1 if nondimensional else self.get_problem().get_scaling("spatial")
-        for seg in segs:
-            res.append([(pts[0, i]*SS, pts[1, i]*SS) for i in seg])
-        return res
+        return segs, pts
 
     def _do_define_geometry(self, problem: "Problem", filename_trunk: str | None = None):
         # RemesherViaRecreation passes a fresh file name trunk for each remeshing round, so that the meshes written by
@@ -914,10 +1005,31 @@ class MeshedMeshTemplate(MeshTemplate):
         if filename_trunk is not None:
             self._fntrunk = filename_trunk
         self._within_define_geometry = True
+        error: BaseException | None = None
         try:
             super()._do_define_geometry(problem)
+        except BaseException as e:
+            error = e
         finally:
             self._within_define_geometry = False
+        # Whatever the backend does with the geometry afterwards is collective (the barriers and the
+        # run_on_rank_zero write in generate_mesh_to_file), so a rank that unwinds from here alone
+        # leaves the others waiting for it forever. Agree on the outcome instead, symmetrically
+        # rather than rooted at rank 0, precisely because the rank that fails need not be rank 0.
+        #
+        # This catches a define_geometry that raises once all ranks are through its own collectives -
+        # a geometry only one rank finds invalid, say. It cannot catch a raise BEFORE one of them:
+        # get_boundary_coordinates() is collective on a distributed mesh, so a rank that never
+        # reaches it hangs the others inside its merge and this point is never reached. That is what
+        # the "do not branch on rank" contract on MeshedMeshTemplate is for; see
+        # dev_docs/distributed_remeshing.md, stage 1.
+        if get_mpi_nproc() > 1:
+            if get_mpi_any(error is not None) and error is None:
+                raise RuntimeError("Another MPI rank failed inside the define_geometry() of "+type(self).__name__ +
+                                   ". This rank succeeded and raises here so that the job ends rather than waiting "
+                                   "for a rank that is gone; the real error is reported by the rank that saw it.")
+        if error is not None:
+            raise error
 
 
 class MeshFromTemplateBase(BaseMesh):
