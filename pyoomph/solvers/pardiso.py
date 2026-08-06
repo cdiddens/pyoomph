@@ -261,6 +261,18 @@ _ESCALATED_IPARM = {12: 2, 9: 8}  # 0-based indices, i.e. IPARM(13) and IPARM(10
 # positive costs a full refactorisation.
 _BACKWARD_ERROR_LIMIT = 1e-4
 
+# What to suggest when a solve comes back wrong: a solver that exchanges a bad pivot instead of
+# perturbing it, which is the property MKL does not have and no amount of iparm tuning gives it.
+#
+# UMFPACK is the one measured above. MUMPS belongs on the list for the same reason: it does threshold
+# partial pivoting inside each frontal matrix and DELAYS a pivot it cannot eliminate to the parent
+# front. That is not a footnote from its manual -- it is visible in this codebase, in PETSCSolver's
+# handling of INFOG(1) = -9 (see solvers/petsc.py): MUMPS' workspace cannot be predicted from the
+# analysis phase precisely because pivoting decides the real fill-in, and there the off-diagonal pivot
+# count INFOG(12) was watched going 288 -> 2638 as a continuation walked away from a stale ordering.
+# A statically pivoting solver would have had nothing to report there.
+_DYNAMIC_PIVOTING_ADVICE = "a dynamically pivoting solver (umfpack, or MUMPS via --petsc_mumps)"
+
 
 class pardisoSolver(object):
     
@@ -550,8 +562,8 @@ class pardisoSolver(object):
                 print("PARDISO WARNING: backward error %.3e exceeds the %.0e limit. repair_bad_solves is "
                       "off, so the solution is used as it stands and only the factorisation is "
                       "discarded. Set repair_bad_solves=True to have stronger pivoting tried, or switch "
-                      "to a dynamically pivoting solver (umfpack)."
-                      % (self.last_backward_error, _BACKWARD_ERROR_LIMIT))
+                      "to %s."
+                      % (self.last_backward_error, _BACKWARD_ERROR_LIMIT, _DYNAMIC_PIVOTING_ADVICE))
             return x
         try:
             x = self._solve_refined(rhs, max_steps)
@@ -600,16 +612,16 @@ class pardisoSolver(object):
                 # without trouble. The number is what tells the two apart.
                 print("PARDISO WARNING: backward error %.3e exceeds the %.0e limit, and stronger "
                       "pivoting made it %.3e, so that was withdrawn and the original solution kept. "
-                      "If the run does not converge, a dynamically pivoting solver (umfpack) is the "
-                      "alternative." % (err, _BACKWARD_ERROR_LIMIT, err2))
+                      "If the run does not converge, %s is the alternative."
+                      % (err, _BACKWARD_ERROR_LIMIT, err2, _DYNAMIC_PIVOTING_ADVICE))
             return x
         if err2 > _BACKWARD_ERROR_LIMIT:
             # Better but still bad. Warn rather than raise: before this check existed such a solve was
             # returned silently, and refusing it outright would turn a badly-converging run into a
             # crashing one on problems that never reported anything wrong.
             print("PARDISO WARNING: backward error %.3e after escalation (was %.3e); the solution is "
-                  "not trustworthy. A dynamically pivoting solver (umfpack) may be needed here."
-                  % (err2, err))
+                  "not trustworthy. Consider %s here."
+                  % (err2, err, _DYNAMIC_PIVOTING_ADVICE))
         self.last_backward_error = err2
         return x2
 
