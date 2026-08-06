@@ -41,7 +41,8 @@
 import pytest
 
 from pyoomph import Problem, Equations, DirichletBC, InitialCondition
-from pyoomph.expressions import (var, var_and_test, weak, matrix, vector, grad, div, dyadic, dot,
+from pyoomph.expressions import (var, var_and_test, weak, matrix, vector, grad, div, dyadic, dot, trace,
+                                 identity_matrix,
                                  contract, double_dot, matproduct, transpose, directional_derivative,
                                  Expression)
 from pyoomph.expressions.coordsys import AxisymmetricCoordinateSystem
@@ -184,6 +185,136 @@ def _projected(tmp_path, expressions, coordsys=None, lower_left=None, box=False,
         indices = mesh.get_nodal_field_indices()
         return {name: max(abs(node.value(indices[name])) for node in mesh.nodes())
                 for name in expressions}
+
+
+# (name, coordinate system, kwargs for _projected, mesh dimension). The radial meshes and the flipped
+# axisymmetric one are placed away from the symmetry axis, since the connection terms carry 1/r.
+_ALL_SYSTEMS = [
+    ("cartesian2d", None, {}, 2),
+    ("cartesian3d", None, {"box": True}, 3),
+    ("axisymmetric", AxisymmetricCoordinateSystem(), {"lower_left": [1, 0]}, 2),
+    ("axisymmetric_flipped", AxisymmetricCoordinateSystem(use_x_as_symmetry_axis=True),
+     {"lower_left": [0, 1]}, 2),
+    ("axisymmetric_radial", AxisymmetricCoordinateSystem(), {"line": True}, 1),
+]
+
+
+def _vector_and_scalar(dimension):
+    """A vector and a scalar field, referring only to coordinates the mesh in question actually has."""
+    x, y, z = var(["coordinate_x", "coordinate_y", "coordinate_z"])
+    if dimension == 1:
+        return vector(2 * x * x + 3 * x, 0, 0), 3 * x * x + 2 * x + 1
+    if dimension == 2:
+        return vector(2 * x * x + 3 * y * x, 4 * y * y + x, 0), 3 * x * x + 2 * y * x + y * y + 1
+    return (vector(2 * x * x + 3 * y * x, 4 * y * y + x * z, 5 * z * z + y),
+            3 * x * x + 2 * y * x + y * y + z * z + 1)
+
+
+@pytest.mark.parametrize("name,coordsys,kwargs,dimension", _ALL_SYSTEMS,
+                         ids=[entry[0] for entry in _ALL_SYSTEMS])
+def test_trace_of_grad_is_the_divergence(tmp_path, name, coordsys, kwargs, dimension):
+    """trace(grad(u)) == div(u) in every coordinate system, connection terms and all."""
+    u, _ = _vector_and_scalar(dimension)
+    expressions = {"residual": trace(grad(u)) - div(u), "magnitude": div(u)}
+    values = _projected(tmp_path, expressions, coordsys=coordsys, **kwargs)
+    assert values["magnitude"] > 1.0
+    assert values["residual"] < 1e-11
+
+
+@pytest.mark.parametrize("name,coordsys,kwargs,dimension", _ALL_SYSTEMS,
+                         ids=[entry[0] for entry in _ALL_SYSTEMS])
+def test_divergence_of_a_scalar_times_identity_is_its_gradient(tmp_path, name, coordsys, kwargs,
+                                                               dimension):
+    """
+    div(f*I) == grad(f), since d_j(f*delta_ij) = d_i f. This is the pressure part of any stress
+    divergence, and a sharp test of the connection terms: in cylindrical coordinates the radial row
+    only comes out right because the (T_rr - T_phiphi)/r hoop term cancels for an isotropic tensor.
+
+    It also pins something duller. The identity tensor is the cheapest expression with a nonzero
+    out-of-plane component, and the Cartesian tensor divergence used to sum over all three coordinates
+    whatever the mesh dimension, so on a two-dimensional mesh this died with "Cannot expand the field
+    'coordinate_z'" -- coordinate_z is not a field of the element, so reaching for a derivative that is
+    merely zero is not free.
+    """
+    _, f = _vector_and_scalar(dimension)
+    tensor_divergence, gradient = div(f * identity_matrix()), grad(f)
+    expressions = {f"residual_{i}": tensor_divergence[i] - gradient[i] for i in range(3)}
+    expressions["magnitude"] = gradient[0]
+    values = _projected(tmp_path, expressions, coordsys=coordsys, **kwargs)
+    assert values["magnitude"] > 1.0
+    for i in range(3):
+        assert values[f"residual_{i}"] < 1e-11
+
+
+@pytest.mark.parametrize("name,coordsys,kwargs,dimension", _ALL_SYSTEMS,
+                         ids=[entry[0] for entry in _ALL_SYSTEMS])
+def test_directional_derivative_of_a_dyadic_product(tmp_path, name, coordsys, kwargs, dimension):
+    """
+    (d.grad)(a (x) b) == ((d.grad)a) (x) b + a (x) ((d.grad)b), the product rule for the advection
+    operator on a tensor.
+
+    This is what material_derivative of a tensor field is built from, and in a curvilinear system it
+    carries connection terms of its own, separate from those of the divergence. As with the divergence,
+    the reference uses only operators trusted independently -- directional_derivative of a vector, which
+    is matproduct(grad(a),b).
+
+    On a radial mesh only the diagonal of a tensor is meaningful anyway (define_tensor_field builds a
+    diagonal there), so the dyads below are chosen in-plane; the off-diagonal entries of the
+    one-dimensional branch of AxisymmetricCoordinateSystem.directional_tensor_derivative drop the radial
+    derivative, but nothing that coordinate system can build reaches them, for the same reason its
+    vector_gradient is swirl-free.
+    """
+    x, y, z = var(["coordinate_x", "coordinate_y", "coordinate_z"])
+    if dimension == 1:
+        a, b, d = vector(2 * x * x + 1, 0, 0), vector(3 * x + 2, 0, 0), vector(5 * x, 0, 0)
+    elif dimension == 2:
+        a, b, d = vector(2 * x * x + y, 3 * y * y, 0), vector(3 * x + 2 * y, y * x, 0), vector(5 * y, 7 * x, 0)
+    else:
+        a = vector(2 * x * x + y, 3 * y * y, z * x)
+        b, d = vector(3 * x + 2 * y, y * x, z), vector(5 * y, 7 * x, 2 * z)
+
+    lhs = directional_derivative(dyadic(a, b), d)
+    rhs = (dyadic(directional_derivative(a, d), b) + dyadic(a, directional_derivative(b, d))).evalm()
+    expressions = {f"residual_{i}{j}": lhs[i, j] - rhs[i, j] for i in range(3) for j in range(3)}
+    expressions["magnitude"] = lhs[0, 0]
+    values = _projected(tmp_path, expressions, coordsys=coordsys, **kwargs)
+    assert values["magnitude"] > 1.0
+    for i in range(3):
+        for j in range(3):
+            assert values[f"residual_{i}{j}"] < 1e-10
+
+
+def test_divergence_of_a_vector_with_an_out_of_plane_component(tmp_path):
+    """
+    div(vector(a,b,c)) on a two-dimensional mesh, where the third slot has no coordinate to pair with.
+
+    The Cartesian vector divergence used to sum over the vector's three padded slots rather than the
+    mesh's coordinates, so a nonzero third component reached for d/dz and died with "Cannot expand the
+    field 'coordinate_z'". The out-of-plane component simply does not contribute in 2d.
+    """
+    x, y = var(["coordinate_x", "coordinate_y"])
+    planar, out_of_plane = vector(3 * x * x, 2 * y * y, 0), vector(3 * x * x, 2 * y * y, 5 * x * y)
+    expressions = {"residual": div(out_of_plane) - div(planar), "magnitude": div(planar)}
+    values = _projected(tmp_path, expressions)
+    assert values["magnitude"] > 1.0
+    assert values["residual"] < 1e-11
+
+
+def test_divergence_of_a_vector_with_swirl_on_a_radial_mesh(tmp_path):
+    """
+    div(vector(u_r,u_phi,0)) on a one-dimensional radial mesh, where slot 1 is the azimuthal component.
+
+    The axisymmetric vector divergence gated its axial term on arg.nops(), which is 3 for every padded
+    vector, so on a radial mesh it reached for d/dy -- a coordinate that mesh does not have. It stayed
+    invisible while the azimuthal slot was zero, since d/dy of zero never needs coordinate_y expanded.
+    The azimuthal component contributes (1/r)*d_phi(u_phi), which axisymmetry makes zero.
+    """
+    x = var("coordinate_x")
+    radial_only, with_swirl = vector(3 * x * x, 0, 0), vector(3 * x * x, 4 * x + 1, 0)
+    expressions = {"residual": div(with_swirl) - div(radial_only), "magnitude": div(radial_only)}
+    values = _projected(tmp_path, expressions, coordsys=AxisymmetricCoordinateSystem(), line=True)
+    assert values["magnitude"] > 1.0
+    assert values["residual"] < 1e-11
 
 
 def test_div_of_grad_is_the_laplacian(tmp_path):

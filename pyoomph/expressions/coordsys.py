@@ -353,11 +353,15 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
 
     def vector_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         res:Expression = Expression(0)
-        coords = self.get_coords(arg.nops(), with_scales, lagrangian)
-        for i in range(arg.nops()):
+        # Sum over the coordinates the mesh actually has, not over the vector's three padded slots. On a
+        # two-dimensional mesh d/dz of an out-of-plane component is zero, but asking for it is not free:
+        # coordinate_z is not a field of the element, so div(vector(a,b,c)) with a nonzero c died with
+        # "Cannot expand the field 'coordinate_z'" rather than dropping the term.
+        coords = self.get_coords(ndim, with_scales, lagrangian)
+        for i in range(min(arg.nops(), len(coords))):
             res += diff(arg[i], coords[i])
         return res
-    
+
     def vector_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:        
         res:list[list[ExpressionOrNum]] = []
         for b in range(arg.nops()):
@@ -371,9 +375,13 @@ class CartesianCoordinateSystem(BaseCoordinateSystem):
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         """Divergence of a second order tensor, ``(div T)_i = d_j T_ij``, contracting the second index."""
         res:list[Expression] = []
-        # get_coords clamps to the three coordinates, so passing nops() (which is 9 for the padded 3x3 tensor, not the
-        # number of rows) happens to give [x,y,z]. Differentiating with respect to an unused coordinate is zero.
-        coords = self.get_coords(arg.nops(), with_scales, lagrangian)
+        # Sum over the coordinates the mesh actually has. This used to pass arg.nops(), which is 9 for the padded 3x3
+        # tensor rather than a dimension, and get_coords clamps that to all three coordinates - so on a two-dimensional
+        # mesh the sum reached for d/dz. That derivative is zero, but asking for it is not free: coordinate_z is not a
+        # field of the element, so div(f*identity_matrix()) - the pressure part of any stress divergence - died with
+        # "Cannot expand the field 'coordinate_z'". The out-of-plane row is still returned, it just has no z-derivative
+        # in it.
+        coords = self.get_coords(ndim, with_scales, lagrangian)
         for i in range(3):
             div_line:Expression = Expression(0)
             for j,coord in enumerate(coords):
@@ -484,14 +492,21 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             raise RuntimeError("Axisymmetric vector fields do not work for dimension " + str(ndim))
 
     def vector_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        res = Expression(0)
-        coords = self.get_coords(arg.nops(), with_scales, lagrangian)
-        nops = arg.nops()
-        if nops >= 1:
-            res += diff(arg[0], coords[0]) + (arg[1] / coords[1] if self.use_x_as_symmetry_axis  else arg[0] / coords[0])
-        if nops >= 2:
-            res += diff(arg[1], coords[1])
-        return res
+        # Gated on ndim, not on arg.nops(). nops() is 3 for every padded vector, so on a one-dimensional radial mesh
+        # the axial term below was added unconditionally - harmless while the azimuthal slot happened to be zero, but
+        # div(vector(u_r,u_phi,0)) then died with "Cannot expand the field 'coordinate_y'", since a radial mesh has no
+        # second coordinate. The azimuthal slot contributes (1/r)*d_phi(u_phi), which axisymmetry makes zero, so it is
+        # correctly absent either way.
+        coords = self.get_coords(ndim, with_scales, lagrangian)
+        if ndim == 1:
+            if self.use_x_as_symmetry_axis:
+                raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
+            # Components are ordered [r, phi] here: (1/r)*d_r(r*u_r)
+            return diff(arg[0], coords[0]) + arg[0] / coords[0]
+        # Components are ordered [r, z, phi] (or [z, r, phi] when x is the symmetry axis), so the radial slot - the one
+        # carrying the 1/r term - is 1 rather than 0 in the flipped case.
+        radial = 1 if self.use_x_as_symmetry_axis else 0
+        return diff(arg[0], coords[0]) + diff(arg[1], coords[1]) + arg[radial] / coords[radial]
     
     def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
         s = scale_factor(name)

@@ -108,6 +108,27 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
     previously raised "dot is only allowed between vectors". `dot` and `contract` agree in every
     shape they share; two matrices still raise, since `matproduct` and `double_dot` are both
     plausible readings. The index order of every operator is now stated in its docstring.
+- **`expr += number` and `expr -= number` no longer produce complex constants.** `__iadd__` and
+  `__isub__` were bound only against `std::complex<double>`, and nanobind converts an int or a float to
+  that without complaint, so the in-place forms quietly yielded e.g. the complex numeric `-1.0+0.0i`.
+  Nothing looked wrong symbolically -- it prints as `-1` and compares equal to `-1` -- but the C printer
+  then emitted `std::complex<double>(-1.0,0.0)` into a real-valued residual and the compiler rejected
+  the element, so the failure surfaced as `command '/usr/bin/cc' failed` far from its cause. `*=` and
+  `/=` were never affected; they always had int/double overloads. In practice this made
+  `RadialSymmetricCoordinateSystem(Rcenter=...)` unusable for any non-zero `Rcenter` given as a plain
+  number, since its gradients and divergence shift the radius with `coords[0] -= self.Rcenter`;
+  wrapping the value in `Expression()` was the accidental workaround.
+- Fixed three divergences that reached for a derivative with respect to a coordinate their mesh does
+  not have. Each died with "Cannot expand the field 'coordinate_z'" (or `_y`) instead of dropping a
+  term that is zero anyway, because the summation range came from the operand's padded slot count
+  rather than from the mesh dimension:
+  - `div(f*identity_matrix())` on a two-dimensional Cartesian mesh -- i.e. the pressure part of any
+    stress divergence written out by hand -- since `CartesianCoordinateSystem.tensor_divergence`
+    summed over all three coordinates whatever the dimension.
+  - `div(vector(a,b,c))` with a nonzero third component on a two-dimensional Cartesian mesh, likewise.
+  - `div(vector(u_r,u_phi,0))` on a one-dimensional radial axisymmetric mesh, where
+    `AxisymmetricCoordinateSystem.vector_divergence` gated its axial term on `nops()`, which is three
+    for every padded vector.
 - Fixed the azimuthal row of `AxisymmetricCoordinateSystem.tensor_divergence`, whose connection term
   should be `(T_rphi + T_phir)/r`. On a two-dimensional axisymmetric mesh it read
   `(T_phir - T_rphi)/r`, which is zero for a symmetric tensor and the wrong sign otherwise; on a
