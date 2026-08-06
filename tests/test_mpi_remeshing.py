@@ -292,8 +292,8 @@ def test_adapting_the_remeshed_mesh_is_refused_when_asked_for_explicitly(tmp_pat
 
 
 @pytest.mark.parametrize("nproc", [2, 3, 4])
-@pytest.mark.parametrize("codim2", [False, True])
-def test_the_transferred_field_matches_the_serial_one(tmp_path, nproc, codim2):
+@pytest.mark.parametrize("variant", ["plain", "codim2", "zeta"])
+def test_the_transferred_field_matches_the_serial_one(tmp_path, nproc, variant):
     """The old solution reaches the new mesh even where it crossed a rank boundary.
 
     Each rank can only place the new nodes that fall into its own share of the old mesh. What it
@@ -301,11 +301,16 @@ def test_the_transferred_field_matches_the_serial_one(tmp_path, nproc, codim2):
     them found instead of blending the rest from local nodes, which used to produce confident wrong
     values for a third of the mesh with only a warning to show for it.
 
-    ``codim2`` adds equations where the arc meets the axis, i.e. an interface of an interface. Those
-    go through a different mechanism - nearest-node matching along the boundary rather than point
-    location - where every rank produces a match for every node, however far away its own nearest old
-    node is. Pooling there is therefore "whose match is closest" rather than "who found it", and this
-    is the case where a rank holding no part of the old corner at all is ordinary.
+The variants are the three transfer mechanisms, which fail in different ways:
+
+    * ``plain`` - point location into the old mesh, pooled by "who found it";
+    * ``codim2`` - equations where the arc meets the axis, i.e. an interface of an interface, matched
+      by nearest node along the boundary. Every rank produces a match for every node there, however
+      far its own nearest old node is, so pooling is "whose match is closest"; and it is the case
+      where a rank holding no part of the old corner at all is ordinary;
+    * ``zeta`` - the interface parameterised by arclength, which is a property of the whole curve and
+      therefore has to be built on the merged interface rather than on this rank's piece of it. It
+      also sends the transfer down the zeta branch of the point location.
 
     Both halves matter: that nothing fell through to the blend at all, and that what arrived is what
     a serial run gets. The comparison is against merged global mesh data, so the numbers describe the
@@ -313,7 +318,7 @@ def test_the_transferred_field_matches_the_serial_one(tmp_path, nproc, codim2):
     partitioned matrix here and on a whole one serially, so its result already differs in the last
     few digits before the transfer even starts.
     """
-    extra = ["--codim2"] if codim2 else []
+    extra = [] if variant == "plain" else ["--" + variant]
     reference = _run_serially(tmp_path / "serial", extra)
     assert reference.returncode == 0, \
         "the serial reference run failed:\n%s" % reference.stdout[-2000:]

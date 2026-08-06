@@ -32,6 +32,7 @@ from ..expressions import ExpressionOrNum
 from .mesh import InterfaceMesh, ODEStorageMesh
 from .meshdatacache import MeshDataCacheEntry, MeshDataCacheKey
 from .ordering import SortAlongAxis, check_sorting_arguments, sort_line_segments
+from ..generic.mpi import get_mpi_any, get_mpi_nproc, get_mpi_rank, get_mpi_world_comm, get_mpi_max, get_mpi_min, get_mpi_sum, mpi_share_root_failure
 import numpy
 from ..typings import *
 
@@ -208,18 +209,24 @@ class AssignZetaCoordinatesBase(InterfaceEquations):
     def assign_zetas(self,mesh:InterfaceMesh)->None:
         raise RuntimeError("This function must be implemented!")
 
-    def _refuse_if_distributed(self)->None:
-        """Zeta assignment walks the *local* mesh only.
+    def _needs_merged_interface(self,mesh:InterfaceMesh)->bool:
+        """Whether zeta has to be built from the globally merged interface rather than the local one.
 
-        Under ``--distribute`` that means the arclength restarts on every rank, the segment
-        orientation heuristics act on partial curves, halo nodes never receive a consistent value,
-        and a zeta owned by another rank is not found at interpolation time at all. None of that
-        announces itself, so refuse rather than produce a plausible wrong answer. See
-        dev_docs/mesh_point_locator.md phase 5.
+        Zeta is a chart over the WHOLE interface, so an assignment that reads only this rank's part
+        of it is not a piece of the answer - the arclength restarts on every rank and the segment
+        orientation heuristics act on a partial curve. An assignment that reads only node positions
+        (see :py:class:`AssignZetaCoordinatesByEulerianCoordinate`) needs none of this.
+
+        Collective, and answered identically on every rank, since it decides whether this rank enters
+        the merge: the gate is Problem-wide, and the local answer is agreed inside it because an
+        interface mesh a rank holds no part of does not carry the distributed flag. Same reasoning as
+        MeshedMeshTemplate._resolve_mesh_for_boundary_coordinates.
         """
         problem=self.get_problem()
-        if problem is not None and problem.is_distributed():
-            raise self.add_exception_info(RuntimeError("Zeta coordinates cannot be assigned on a distributed mesh (mpirun --distribute): the assignment only sees this rank's part of the interface. See dev_docs/mesh_point_locator.md."))
+        if problem is None or not problem.is_distributed() or get_mpi_nproc()<=1:
+            return False
+        from .meshdatamerge import needs_merging
+        return get_mpi_any(needs_merging(mesh))
 
     def after_mapping_on_macro_elements(self):
         self.assign_zetas(self.get_mesh())
@@ -265,15 +272,17 @@ class AssignZetaCoordinatesByEulerianCoordinate(AssignZetaCoordinatesBase):
     def assign_zetas(self,mesh:InterfaceMesh):
         if mesh.get_dimension()!=1:
             raise RuntimeError("Currently only implemented for 1d interfaces meshes")
-        self._refuse_if_distributed()
         bmesh=mesh.get_bulk_mesh()
         if isinstance(bmesh,InterfaceMesh):
             raise RuntimeError("Cannot do it, if the parent mesh is not a bulk mesh")
         bind=bmesh.get_boundary_index(mesh.get_name())
         minzeta=1e40
-        maxzeta=-minzeta        
+        maxzeta=-minzeta
         nodes_set=0
-        for e in mesh.elements():            
+        # Nothing to merge: zeta here IS a nodal coordinate, so a rank assigning it to its own nodes
+        # produces exactly the values it would in a serial run, and the chart is global by
+        # construction. Only the degeneracy test below is about the interface as a whole.
+        for e in mesh.elements():
             for ni in range(e.nnode()):
                 n=e.node_pt(ni)
                 zeta=n.x(self.direction)
@@ -283,6 +292,11 @@ class AssignZetaCoordinatesByEulerianCoordinate(AssignZetaCoordinatesBase):
                 nodes_set+=1
         bmesh.boundary_coordinate_bool(bind)
         mesh.update_zeta_in_buffer()
+        if self._needs_merged_interface(mesh):
+            # A rank whose share of the interface is a short stretch - or none at all - would
+            # otherwise report the whole boundary as degenerate.
+            minzeta,maxzeta=get_mpi_min(minzeta),get_mpi_max(maxzeta)
+            nodes_set=get_mpi_sum(nodes_set)
         if maxzeta-minzeta<1e-10 and nodes_set>1:
             raise self.add_exception_info(RuntimeError("The assigned zeta coordinates are not meaningful. Probably align along another axis"))
         if self.validate_zetas:
@@ -316,7 +330,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
 
         check_sorting_arguments(sort_along_axis,start_near_point,require_one=True,whom="AssignZetaCoordinatesByArclength")
 
-    def _assign_closed_loop(self,mesh:InterfaceMesh,bmesh,bind:int,cache:MeshDataCacheEntry,pts,loop:list[int])->None:
+    def _closed_loop_zetas(self,mesh:InterfaceMesh,pts,loop:list[int])->tuple[float,list[tuple[int,float]]]:
         """Parameterise a closed loop by arclength, and declare the result periodic.
 
         A circle has no single-valued zeta - that is a property of the circle, not of the code - so
@@ -381,32 +395,16 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         s_anchor=cum[seam_k]+seam_u*edge[seam_k]
         period=1.0 if self.normalized else total
 
-        nodemap=mesh.fill_node_index_to_node_map()
-        for k,ptind in enumerate(loop):
-            z=(cum[k]-s_anchor)%total
-            if self.normalized:
-                z/=total
-            nodemap[ptind].set_coordinates_on_boundary(bind,[z])
+        return period,[(ptind,((cum[k]-s_anchor)%total)/(total if self.normalized else 1.0))
+                       for k,ptind in enumerate(loop)]
 
-        bmesh.boundary_coordinate_bool(bind)
-        bmesh.set_boundary_zeta_period(bind,period)
-        mesh.update_zeta_in_buffer()
-        if self.validate_zetas:
-            try:
-                _check_zeta_is_invertible(mesh,bind,"AssignZetaCoordinatesByArclength (closed loop)",period)
-            except RuntimeError as e:
-                raise self.add_exception_info(e)
+    def _compute_zetas(self,mesh:InterfaceMesh,cache:MeshDataCacheEntry,whole_interface:bool)->tuple[float,list[tuple[int,float]]]:
+        """The zeta of every point of ``cache``, and the period (0 for an open boundary).
 
-    def assign_zetas(self,mesh:InterfaceMesh)->None:
-        if mesh.get_dimension()!=1:
-            raise RuntimeError("Currently only implemented for 1d interfaces meshes")
-        self._refuse_if_distributed()
-        bmesh=mesh.get_bulk_mesh()
-        if isinstance(bmesh,InterfaceMesh):
-            raise RuntimeError("Cannot do it, if the parent mesh is not a bulk mesh")
-        bind=bmesh.get_boundary_index(mesh.get_name())
-        cache=MeshDataCacheEntry(mesh,MeshDataCacheKey(nondimensional=True,tesselate_tri=True))
-
+        Touches no node, so that the same computation serves the local mesh and - on rank 0 - the
+        globally merged one, where the point indices do not address this rank's nodes at all.
+        ``whole_interface`` says the cache covers the entire boundary, which is what lets the node
+        count be compared against it."""
         pts=cache.get_coordinates()
         segs,_=cache.get_interface_line_segments()
 
@@ -417,18 +415,17 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
             loop=_walk_closed_loop(cache)
             if loop is None:
                 raise self.add_exception_info(RuntimeError("The interface '"+mesh.get_name()+"' looks like a closed loop but its elements do not form one single cycle, so it cannot be given a periodic zeta."))
-            self._assign_closed_loop(mesh,bmesh,bind,cache,pts,loop)
-            return
-        bmesh.set_boundary_zeta_period(bind,0.0)
+            return self._closed_loop_zetas(mesh,pts,loop)
 
         # Sort and reverse the segments based on the settings
         segs=sort_line_segments(pts,segs,sort_along_axis=self.sort_along_axis,start_near_point=self.start_near_point,spatial_unit=mesh.get_code_gen().get_scaling("spatial"),whom="AssignZetaCoordinatesByArclength")
 
-        nodemap=mesh.fill_node_index_to_node_map()
-        if len(nodemap)!=sum(len(seg) for seg in segs):
-            print("NODEMAP",nodemap)
-            print("SEGS",segs)
-            raise RuntimeError("NODEMAP AND SEGMENT LENGTH MISMATCH")
+        if whole_interface:
+            nodemap=mesh.fill_node_index_to_node_map()
+            if len(nodemap)!=sum(len(seg) for seg in segs):
+                print("NODEMAP",nodemap)
+                print("SEGS",segs)
+                raise RuntimeError("NODEMAP AND SEGMENT LENGTH MISMATCH")
 
 
         alengths_list:list[float]=[]
@@ -477,14 +474,77 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
                 offs=aleng_segs[i][-1]+self.segment_jump_offset
             alengths=numpy.concatenate(aleng_segs)
 
-        for al,pti in zip(alengths,ptinds):
-            n=nodemap[pti]
-            n.set_coordinates_on_boundary(bind,[al])
+        return 0.0,[(pti,float(al)) for al,pti in zip(alengths,ptinds)]
+
+    def _assign_zetas_by_position(self,mesh:InterfaceMesh,bind:int,table:list[tuple[float,float,float]])->None:
+        """Set zeta on this rank's nodes from a (position, zeta) table built on the whole interface.
+
+        The table is addressed by position rather than by index because the merged data numbers the
+        points of the *whole* interface, which says nothing about this rank's node order. Every local
+        node is one of the merged points, so the match is exact up to the last bits; anything further
+        away means the table does not describe this interface and is an error rather than a nearest
+        neighbour worth taking."""
+        from scipy.spatial import cKDTree
+        coords=numpy.array([[t[0],t[1]] for t in table])
+        zetas=numpy.array([t[2] for t in table])
+        nodes=[e.node_pt(ni) for e in mesh.elements() for ni in range(e.nnode())]
+        if not len(coords) or not nodes:
+            return
+        dist,idx=cKDTree(coords).query(numpy.array([[n.x(0),n.x(1)] for n in nodes]))
+        extent=max(float(numpy.amax(numpy.abs(coords))),1.0)
+        if float(numpy.amax(dist))>1e-8*extent:
+            raise self.add_exception_info(RuntimeError("Assigning zeta on '"+mesh.get_name()+"' from the merged interface: a node of this rank is "+str(float(numpy.amax(dist)))+" away from the nearest point of the merged boundary, which should be zero. The merged data does not describe the same interface."))
+        for n,i in zip(nodes,idx):
+            n.set_coordinates_on_boundary(bind,[float(zetas[i])])
+
+    def assign_zetas(self,mesh:InterfaceMesh)->None:
+        if mesh.get_dimension()!=1:
+            raise RuntimeError("Currently only implemented for 1d interfaces meshes")
+        bmesh=mesh.get_bulk_mesh()
+        if isinstance(bmesh,InterfaceMesh):
+            raise RuntimeError("Cannot do it, if the parent mesh is not a bulk mesh")
+        bind=bmesh.get_boundary_index(mesh.get_name())
+
+        if not self._needs_merged_interface(mesh):
+            cache=MeshDataCacheEntry(mesh,MeshDataCacheKey(nondimensional=True,tesselate_tri=True))
+            period,zetas=self._compute_zetas(mesh,cache,whole_interface=True)
+            nodemap=mesh.fill_node_index_to_node_map()
+            for ptind,z in zetas:
+                nodemap[ptind].set_coordinates_on_boundary(bind,[z])
+        else:
+            # Arclength is a property of the whole curve, so it can only be measured on the whole
+            # curve: merge the interface (collective, result on rank 0), parameterise it there, and
+            # hand the (position, zeta) pairs to everybody. Broadcasting the result rather than the
+            # merged entry keeps the payload to the boundary itself.
+            problem=self.get_problem()
+            comm=get_mpi_world_comm()
+            assert comm is not None
+            cache=problem.get_cached_mesh_data(mesh,nondimensional=True,global_mesh=True)
+            payload=None
+            error:BaseException | None=None
+            if get_mpi_rank()==0:
+                try:
+                    assert cache is not None
+                    period,zetas=self._compute_zetas(mesh,cache,whole_interface=False)
+                    pts=cache.get_coordinates()
+                    payload=(period,[(float(pts[0,ptind]),float(pts[1,ptind]),z) for ptind,z in zetas])
+                except BaseException as e:
+                    error=e
+            payload=comm.bcast(payload,root=0)
+            mpi_share_root_failure(error,context="parameterising the merged interface '"+mesh.get_name()+"' by arclength")
+            assert payload is not None
+            period,table=payload
+            self._assign_zetas_by_position(mesh,bind,table)
+
         bmesh.boundary_coordinate_bool(bind)
+        bmesh.set_boundary_zeta_period(bind,period)
         mesh.update_zeta_in_buffer()
         if self.validate_zetas:
+            # Local, and correct to be: the test is that the elements THIS rank holds tile their own
+            # stretch of zeta without overlapping, which is exactly as meaningful on a partition as on
+            # the whole interface (disconnected stretches only ever leave gaps, never overlaps).
             try:
-                _check_zeta_is_invertible(mesh,bind,"AssignZetaCoordinatesByArclength")
+                _check_zeta_is_invertible(mesh,bind,"AssignZetaCoordinatesByArclength"+(" (closed loop)" if period>0 else ""),period)
             except RuntimeError as e:
                 raise self.add_exception_info(e)
 

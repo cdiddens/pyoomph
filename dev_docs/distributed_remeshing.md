@@ -1,8 +1,8 @@
 # Remeshing under `--distribute`
 
-Status: **stages 0 to 3b done.** Remeshing a distributed problem now works for the recreation path
-(`RemesherViaRecreation` + `InternalInterpolator`), including codimension-2 interfaces, and needs no
-opt-in. Stages 4 and 5 are open, and what they cover is refused by name - see "The refusal, narrowed"
+Status: **stages 0 to 3c done.** Remeshing a distributed problem now works for the recreation path
+(`RemesherViaRecreation` + `InternalInterpolator`), including codimension-2 interfaces and zeta
+parameterised boundaries, and needs no opt-in. Stages 4 and 5 are open, and what they cover is refused by name - see "The refusal, narrowed"
 below for the list. File and line
 references are to the tree state at the time of writing (branch `develop`, after `7b8770a`).
 
@@ -323,6 +323,37 @@ Three things fell out of it:
 Verified against a serial run with equations on `domain/interface/axis`, at 2, 3 and 4 ranks: same
 node count, same field extrema, sums agreeing to ~1e-9.
 
+### Stage 3c - zeta coordinates. DONE.
+
+`AssignZetaCoordinatesByArclength` and `AssignZetaCoordinatesByEulerianCoordinate` refused a
+distributed mesh outright (`_refuse_if_distributed`), which blocked the two moving-interface tutorials
+that use them. Zeta is worth having distributed for its own sake: where it is defined, the transfer
+locates through the chart instead of falling back to the nearest-node blend at all.
+
+The two need very different amounts of work, which is the whole point:
+
+* **By Eulerian coordinate** - zeta *is* a nodal coordinate, so a rank assigning it to its own nodes
+  produces exactly the serial values and the chart is global by construction. Nothing had to be
+  merged; only the "is this degenerate" test spans the interface, and it is now an `Allreduce` (a
+  rank whose share is a short stretch, or none, would otherwise call the whole boundary degenerate).
+* **By arclength** - a property of the whole curve, so it has to be measured on the whole curve. The
+  computation is split from the assignment (`_compute_zetas`), run on the merged interface on rank 0,
+  and broadcast as `(position, zeta)` pairs; each rank then assigns to the nodes it holds, matching by
+  position through a k-d tree. Addressed by position and not by index deliberately: the merged data
+  numbers the points of the whole interface, which says nothing about this rank's node order. Every
+  local node *is* one of the merged points, so a match further away than 1e-8 of the mesh extent means
+  the table does not describe this interface, and that is an error rather than a nearest neighbour
+  worth taking.
+
+`_check_zeta_is_invertible` stays local, and correctly so: it tests that the elements this rank holds
+tile their own stretch of zeta without overlapping, which is as meaningful on a partition as on the
+whole interface - disconnected stretches only ever leave gaps, never overlaps.
+
+Verified at 2, 3 and 4 ranks against serial, both through the worker (same field statistics as the
+other transfer paths) and on `docs/source/tutorial/ale/beads_on_string.py`, which runs to completion
+distributed with the same three remeshing events as serially, the ranks in step, and a minimum radius
+tracking the serial one to ~5e-5 over the whole transient.
+
 ### Stage 4 - `Remesher2d` from merged data
 
 `Remesher2d` reasons in `_pyoomph.Node` and `OomphGeneralisedElement` objects and has to reason in
@@ -352,9 +383,7 @@ was designed for it (`LocationHandle::owner`, the reusable `LocationSet` schedul
 whole new mesh" step can go, remeshing becomes scalable rather than merely correct, stage 3's
 `Allreduce` disappears, and the projection interpolator works distributed for free.
 
----
-
-## 3c. Validated on a real script
+## 3d. Validated on real scripts
 
 The stages above were all built against the synthetic quarter disc. The first end-to-end check on
 something real is `docs/source/tutorial/multidom/evaporating_water_droplet.py` - two coupled domains
@@ -393,20 +422,20 @@ sums), at 2, 3 and 4 ranks:
    **done** - at 2, 3 and 4 ranks; the `nproc` multiplier of §1.3 makes it a single decisive
    assertion), plus the two refusals stage 2 has to make;
 4. field values after remeshing equal to serial, with **zero** "could not be located" fallbacks
-   (stage 3, **done** - compared through merged global mesh data at 2, 3 and 4 ranks, with and without
-   a codimension-2 interface, including sums weighted by position so that values landing on the wrong
-   nodes cannot cancel out);
+   (stage 3, **done** - compared through merged global mesh data at 2, 3 and 4 ranks, for each of the
+   three transfer mechanisms (point location, codimension-2 nearest-node, zeta), including sums
+   weighted by position so that values landing on the wrong nodes cannot cancel out);
 5. the `Remesher2d` path, once stage 4 lands;
 6. `mpirun` **without** `--distribute` keeps working unchanged throughout - `needs_merging()` already
    short-circuits that case, but it is the regression that would go unnoticed.
 
-`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 20 tests, ~44 s,
-covering stages 0 to 3b: the remaining refusals on **every** rank, the unchanged
+`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 23 tests, ~49 s,
+covering stages 0 to 3c: the remaining refusals on **every** rank, the unchanged
 behaviour of `mpirun` without `--distribute` at 2 and 4 ranks, the collective agreement when one rank
 (0 or 2, since the agreement is symmetric) raises inside `define_geometry`, the merged boundary
 matching a serial reference run at 2, 3 and 4 ranks, `ndof` and `is_mesh_distributed()` matching the
-serial run after the re-partitioning, the transferred field matching it too (with and without a
-codimension-2 interface), and the `Remesher2d`,
+serial run after the re-partitioning, the transferred field matching it too (plain, codimension-2 and
+zeta), and the `Remesher2d`,
 partial-remesh and explicit-`num_adapt` refusals.
 
 Everything except the refusals runs **without** the opt-in, i.e. in the configuration that ships.
@@ -418,12 +447,23 @@ segfault *after* a correct error message.
 
 ---
 
-## 5. Open questions
+## 5. Found on the way, not part of this campaign
+
+Two things surfaced while running the tutorials distributed. Both are independent of remeshing, and
+both make a distributed run of an otherwise working script produce nonsense output:
+
+* **`ExtremumObservables` is not reduced across the ranks.** Each rank reports the extremum over its
+  own partition. In `docs/source/tutorial/ale/rayleigh_plateau.py` that observable *drives the time
+  step* (`dt = 0.1 * r_min`), so the ranks pick different steps and march to different times - the
+  run does not fail, it silently stops being one simulation.
+* **`Problem.create_text_file_output` has every rank write the same file.** The rows interleave
+  mid-number: `beads_on_string`'s `minimum.txt` comes out as `10.0\t0.8511691410.0\t0.85116914...`.
+  Either rank 0 alone should write it, or the name should carry the rank, the way the mesh output
+  does.
+
+## 6. Open questions
 
 * `ParametricGmshMeshRemesher2d` subclasses `Remesher2d` but rebuilds its geometry from problem
   parameters alone, so it should work with stage 2 only. Worth confirming as the early win.
-* Boundaries carrying a `zeta`: `AssignZetaCoordinatesByArclength._refuse_if_distributed`
-  (`pyoomph/meshes/zeta.py:211`) already refuses distributed meshes, so such an interface still
-  refuses after stage 1. Whether that blocks real scripts is not yet known.
 * How remeshing interacts with distributed **state files** has not been looked at;
   `dev_docs/distributed_state_files.md` may already constrain it.

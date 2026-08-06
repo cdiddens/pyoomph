@@ -38,6 +38,7 @@ from pyoomph import Problem, MeshFileOutput, Equations, ElementSpace, var
 from pyoomph.equations.generic import ProjectExpression
 from pyoomph.meshes.gmsh import GmshTemplate
 from pyoomph.meshes.remesher import Remesher2d
+from pyoomph.meshes.zeta import AssignZetaCoordinatesByArclength
 from pyoomph.generic.mpi import get_mpi_rank
 
 #: Projected onto the mesh before remeshing, so that the transfer to the new mesh has something to
@@ -140,6 +141,8 @@ def main():
                         help="pass num_adapt to force_remesh explicitly")
     parser.add_argument("--codim2", action="store_true",
                         help="put equations where two boundaries meet, i.e. on a codimension-2 interface")
+    parser.add_argument("--zeta", action="store_true",
+                        help="parameterise the interface by arclength, i.e. transfer through a zeta chart")
     args, rest = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + rest
 
@@ -155,6 +158,11 @@ def main():
             p.experimental_distributed_remeshing = args.force
             p += mesh
             interface_eqs = Equations()
+            if args.zeta:
+                # Arclength is a property of the whole curve, so this only works if the ranks
+                # parameterise the merged interface rather than their own piece of it. It also sends
+                # the transfer down the zeta branch of nodal_interpolate_from instead of projection.
+                interface_eqs = interface_eqs + AssignZetaCoordinatesByArclength(sort_along_axis="x+")
             if args.codim2:
                 # Where the arc meets the axis: an interface of the interface, transferred by the
                 # nearest-node matching that is not pooled across the ranks.
