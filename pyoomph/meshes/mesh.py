@@ -28,6 +28,7 @@ from __future__ import annotations
  
 import abc
 import inspect
+import math
 import os.path
 import weakref
 
@@ -1032,6 +1033,87 @@ class MeshedMeshTemplate(MeshTemplate):
             raise error
 
 
+def _evaluate_extremum_impl(mesh:"AnySpatialMesh",name:str | list[str],sign:int,dimensional:bool,as_float:bool,return_x:bool):
+    """Shared body of ``evaluate_maximum``/``evaluate_minimum`` for bulk and interface meshes.
+
+    ``sign`` is +1 for a maximum and -1 for a minimum, matching ``Mesh::evaluate_extremum``.
+
+    On a distributed mesh this is **collective**: an extremum is a property of the whole mesh, while
+    ``Mesh::evaluate_extremum`` samples only the elements this rank holds (its halo copies merely
+    repeat a neighbour's answer). Every rank therefore has to reach it, with the same arguments -
+    ``rayleigh_plateau.py`` derives its *time step* from one of these, so ranks that answered
+    differently did not fail, they quietly stopped being one simulation.
+    """
+    if not isinstance(name,str):
+        if return_x:
+            raise RuntimeError("Please set return_x=False for multiple extremum evaluations (or call them one by one)")
+        return [cast(ExpressionOrNum, _evaluate_extremum_impl(mesh,n,sign,dimensional,as_float,False)) for n in name]
+    flags=0
+    if dimensional:
+        flags|=1
+
+    x:list[float] | None=None
+    if mesh.nelement():
+        val,s,elem=mesh._evaluate_extremum(name,sign,flags)
+        if return_x:
+            x=[float(xc) for xc in elem.get_interpolated_position_at_s(0,s,False)]
+        fval=float(_pyoomph.GiNaC_collect_units(val)[0]) if dimensional else float(val)
+    else:
+        # A rank holding no element of this mesh has nothing to offer - which happens for an
+        # interface mesh whose boundary lies entirely in another partition. -inf loses a maximum
+        # search and +inf loses a minimum one, so it needs no special case in the comparison.
+        fval=-math.inf if sign>0 else math.inf
+
+    if mesh.is_mesh_distributed() and get_mpi_nproc()>1:
+        comm=get_mpi_world_comm()
+        assert comm is not None
+        # One allgather of a float and a handful of coordinates, rather than a reduction followed by
+        # a broadcast: min()/max() over the gathered list settles a tie by the lowest rank, and does
+        # so identically on every rank.
+        gathered=comm.allgather((fval,x))
+        pick=max if sign>0 else min
+        best=pick(range(len(gathered)),key=lambda r:gathered[r][0])
+        fval,x=gathered[best]
+        if fval in (math.inf,-math.inf):
+            raise RuntimeError("evaluate_maximum/evaluate_minimum('"+name+"'): no rank holds any element of '"+
+                               mesh.get_full_name()+"', so there is no extremum to report.")
+
+    # The unit comes from the registered expression rather than from the value just evaluated, so
+    # that a rank holding no element of this mesh - which has no value to read it off - can still
+    # build the dimensional result. Only the number travels between the ranks; a GiNaC expression
+    # could not, and would not have to.
+    unit:ExpressionOrNum=1
+    if dimensional and not as_float:
+        unit=mesh.get_code_gen()._get_extremum_expression_unit_factor(name)
+
+    if return_x and x is not None and dimensional:
+        SS=mesh.get_problem().get_scaling("spatial")
+        assert isinstance(SS, Expression)
+        xdim:list[ExpressionOrNum]=[xc*SS for xc in x]
+    else:
+        xdim=list(x) if x is not None else None  # type:ignore
+
+    if not dimensional:
+        outval:ExpressionOrNum=fval
+    elif as_float:
+        outval=fval
+        if return_x:
+            assert xdim is not None
+            xn:list[ExpressionOrNum]=[]
+            for xc in xdim:
+                assert isinstance(xc, Expression)
+                factor, _, _, _ = _pyoomph.GiNaC_collect_units(xc)
+                xn.append(float(factor))
+            xdim=xn
+    else:
+        outval=fval*unit
+    if return_x:
+        assert xdim is not None
+        return outval,xdim
+    else:
+        return outval
+
+
 class MeshFromTemplateBase(BaseMesh):
     def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: "BulkTemplateMesh | None" = None):
         # Not super().__init__(): self is a MeshFromTemplate1d/2d/3d instance, which (due to the
@@ -1453,43 +1535,9 @@ class MeshFromTemplateBase(BaseMesh):
     def _evaluate_extremum_wrapper(self,name:str | list[str],sign:int,dimensional:bool=True,as_float:bool=False,return_x:bool=True):
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
-        if not isinstance(name,str):
-            if return_x:
-                raise RuntimeError("Please set return_x=False for multiple extremum evaluations (or call them one by one)")
-            return [cast(ExpressionOrNum, self._evaluate_extremum_wrapper(n,sign,dimensional=dimensional,as_float=as_float,return_x=False)) for n in name]
-        flags=0
-        if dimensional:
-            flags|=1
-        val,s,elem=self._evaluate_extremum(name,sign,flags)
-        #print(val,s,elem)
-        x = None
-        if return_x:
-            x=elem.get_interpolated_position_at_s(0,s,False)
-            #print("X",x)
-            if dimensional:
-                SS=self.get_problem().get_scaling("spatial")
-                assert isinstance(SS, Expression)
-                x=[xc*SS for xc in x]
-        if not dimensional:
-            val=float(val)
-        else:
-            if as_float:
-                factor, _, _, _ = _pyoomph.GiNaC_collect_units(val)
-                val = float(factor)
-                if return_x:
-                    assert x is not None
-                    xn=[]
-                    for xc in x:
-                        assert isinstance(xc, Expression)
-                        factor, _, _, _ = _pyoomph.GiNaC_collect_units(xc)
-                        xn.append(float(factor))
-                    x=xn
-        if return_x:
-            assert x is not None
-            return val,x
-        else:
-            return val
-                    
+        return _evaluate_extremum_impl(self,name,sign,dimensional,as_float,return_x)
+
+
     def evaluate_maximum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | Sequence[ExpressionOrNum] | tuple[ExpressionOrNum, Sequence[ExpressionOrNum]]:
         """Evaluate the maximum of a quantity defined by ExtremumObservables on the mesh.
         
@@ -1961,43 +2009,9 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
 
 
     def _evaluate_extremum_wrapper(self,name:str | list[str],sign:int,dimensional:bool=True,as_float:bool=False,return_x:bool=True):
-        if not isinstance(name,str):
-            if return_x:
-                raise RuntimeError("Please set return_x=False for multiple extremum evaluations (or call them one by one)")
-            return [cast(ExpressionOrNum, self._evaluate_extremum_wrapper(n,sign,dimensional=dimensional,as_float=as_float,return_x=False)) for n in name]
-        flags=0
-        if dimensional:
-            flags|=1
-        val,s,elem=self._evaluate_extremum(name,sign,flags)
-        #print(val,s,elem)
-        x = None
-        if return_x:
-            x=elem.get_interpolated_position_at_s(0,s,False)
-            #print("X",x)
-            if dimensional:
-                SS=self.get_problem().get_scaling("spatial")
-                assert isinstance(SS, Expression)
-                x=[xc*SS for xc in x]
-        if not dimensional:
-            val=float(val)
-        else:
-            if as_float:
-                factor, _, _, _ = _pyoomph.GiNaC_collect_units(val)
-                val = float(factor)
-                if return_x:
-                    assert x is not None
-                    xn=[]
-                    for xc in x:
-                        assert isinstance(xc, Expression)
-                        factor, _, _, _ = _pyoomph.GiNaC_collect_units(xc)
-                        xn.append(float(factor))
-                    x=xn
-        if return_x:
-            assert x is not None
-            return val,x
-        else:
-            return val
-                    
+        return _evaluate_extremum_impl(self,name,sign,dimensional,as_float,return_x)
+
+
     def evaluate_maximum(self,name:str | list[str],dimensional:bool=True,as_float:bool=False,return_x:bool=False)->ExpressionOrNum | Sequence[ExpressionOrNum] | tuple[ExpressionOrNum, Sequence[ExpressionOrNum]]:
         """Evaluate the maximum of a quantity defined by ExtremumObservables on the mesh.
         

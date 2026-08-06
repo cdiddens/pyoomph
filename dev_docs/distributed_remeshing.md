@@ -447,19 +447,37 @@ segfault *after* a correct error message.
 
 ---
 
-## 5. Found on the way, not part of this campaign
+## 5. Found on the way. FIXED.
 
-Two things surfaced while running the tutorials distributed. Both are independent of remeshing, and
-both make a distributed run of an otherwise working script produce nonsense output:
+Two things surfaced while running the tutorials distributed. Neither has anything to do with
+remeshing, and both made a distributed run of an otherwise working script produce nonsense:
 
-* **`ExtremumObservables` is not reduced across the ranks.** Each rank reports the extremum over its
-  own partition. In `docs/source/tutorial/ale/rayleigh_plateau.py` that observable *drives the time
-  step* (`dt = 0.1 * r_min`), so the ranks pick different steps and march to different times - the
-  run does not fail, it silently stops being one simulation.
-* **`Problem.create_text_file_output` has every rank write the same file.** The rows interleave
-  mid-number: `beads_on_string`'s `minimum.txt` comes out as `10.0\t0.8511691410.0\t0.85116914...`.
-  Either rank 0 alone should write it, or the name should carry the rank, the way the mesh output
-  does.
+* **`ExtremumObservables` was not reduced across the ranks.** `Mesh::evaluate_extremum` samples the
+  elements this rank holds, so each rank reported the extremum of its own partition. In
+  `docs/source/tutorial/ale/rayleigh_plateau.py` that observable *drives the time step*
+  (`dt = 0.1 * r_min`), so the ranks picked different steps and marched to different times - the run
+  did not fail, it silently stopped being one simulation.
+
+  `evaluate_maximum`/`evaluate_minimum` are now collective: one `allgather` of the local extremum and
+  its position, and `min`/`max` over the gathered list, which settles a tie by the lowest rank and
+  does so identically everywhere. A rank holding no element of the mesh contributes -inf or +inf and
+  needs no special case.
+
+  The one subtlety is the **unit**. The value used to come back from C++ already dimensional, and a
+  rank with no element has nothing to read the unit off - and a GiNaC expression cannot be sent in
+  its place. It now comes from `FiniteElementCode::get_extremum_expression_unit_factor`, i.e. from
+  the registered expression rather than from the evaluated value, so only the number ever travels.
+  Verified equal to the old source exactly, including the decomposition's remainder being 1.
+* **`Problem.create_text_file_output` had every rank write the same file.** The rows interleaved
+  mid-number: `beads_on_string`'s `minimum.txt` came out as `10.0\t0.8511691410.0\t0.85116914...`.
+  Only rank 0 writes now; the other ranks keep a working object whose writes are dropped, so the same
+  script runs serially and distributed without asking about the rank.
+  `only_on_rank_zero=False` restores the old behaviour for genuinely per-rank rows.
+
+With both, `rayleigh_plateau.py` runs distributed at 2 and 4 ranks: the same 226 steps as serially,
+the ranks at identical times, and a trajectory agreeing with the serial one to within that script's
+own run-to-run spread (two identical serial runs already diverge at step 148 near pinch-off, by about
+as much). Tests: `tests/test_mpi_observables.py` (10 tests, ~18 s).
 
 ## 6. Open questions
 

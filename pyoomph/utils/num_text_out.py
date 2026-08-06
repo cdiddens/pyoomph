@@ -33,47 +33,69 @@ from ..typings import *
 
 
 class NumericalTextOutputFile:
-    def __init__(self, filename: str, open_mode: str = "w",header:list[str] | None=None):
-        f = open(filename, open_mode)
-        if f is None:
-            raise RuntimeError("Could not open file "+str(filename))
-        self.file = f
+    """A tab-separated text file of scalar rows, e.g. an observable over time.
+
+    Under ``mpirun`` only rank 0 writes. What goes into such a file are quantities of the whole
+    problem, so every rank producing the same row into the same file gains nothing and loses the
+    file: the writes interleave *mid-number*, turning ``10.0\\t0.851169`` into
+    ``10.0\\t0.8511691410.0\\t0.851169``. The other ranks keep a working object whose writes are
+    dropped, so the same script runs serially and distributed without asking about the rank.
+
+    Pass ``only_on_rank_zero=False`` if the rows really are per-rank - then give each rank its own
+    file name, or they will overwrite each other in exactly the way described above.
+    """
+
+    def __init__(self, filename: str, open_mode: str = "w",header:list[str] | None=None,only_on_rank_zero:bool=True):
+        from ..generic.mpi import get_mpi_nproc, get_mpi_rank
+        self.filename = filename
+        #: Whether this rank is the one that writes. See the class docstring.
+        self.writes_here = (get_mpi_nproc() <= 1) or (not only_on_rank_zero) or (get_mpi_rank() == 0)
+        self.file = None
+        if self.writes_here:
+            f = open(filename, open_mode)
+            if f is None:
+                raise RuntimeError("Could not open file "+str(filename))
+            self.file = f
+        self._closed = False
         if header:
             self.header(*header)
 
-    def add_row(self, *args: float | Any):
-        if self.file is None:
+    def _write(self, line: str) -> None:
+        if not self.writes_here:
+            return
+        if self._closed or self.file is None:
             raise RuntimeError("File was closed before")
+        self.file.write(line)
+        self.file.flush()
+
+    def add_row(self, *args: float | Any):
         def params_to_float(p):
             if isinstance(p,(Expression,_pyoomph.GiNaC_GlobalParam)):
                 return float(p)
             else:
                 return p
-        if len(args)==1 and isinstance(args[0],(list,tuple)):            
+        if len(args)==1 and isinstance(args[0],(list,tuple)):
             strargs = map(str, map(params_to_float,args[0]))
         else:
             strargs = map(str, map(params_to_float,[*args]))
-        line = "\t".join(strargs)+"\n"
-        self.file.write(line)
-        self.file.flush()
+        self._write("\t".join(strargs)+"\n")
 
     def header(self, *args: float | str | Any):
-        if self.file is None:
-            raise RuntimeError("File was closed before")
-        line = "#"+("\t".join(map(str, [*args]))) + "\n"
-        self.file.write(line)
-        self.file.flush()
+        self._write("#"+("\t".join(map(str, [*args]))) + "\n")
 
     def close(self):
-        if self.file is None:
+        if self._closed:
             raise RuntimeError("File was already closed before")
-        self.file.close()
-        self.file = None
+        self._closed = True
+        if self.file is not None:
+            self.file.close()
+            self.file = None
 
     def flush(self) -> None:
-        if self.file is None:
+        if self._closed:
             raise RuntimeError("File was already closed before")
-        self.file.flush()
+        if self.file is not None:
+            self.file.flush()
 
 
 class LoadedTextDataFile:
