@@ -1,9 +1,9 @@
 # Remeshing under `--distribute`
 
-Status: **stages 0 to 3c done.** Remeshing a distributed problem now works for the recreation path
-(`RemesherViaRecreation` + `InternalInterpolator`), including codimension-2 interfaces and zeta
-parameterised boundaries, and needs no opt-in. Stages 4 and 5 are open, and what they cover is refused by name - see "The refusal, narrowed"
-below for the list. File and line
+Status: **stages 0 to 4 done.** Remeshing a distributed problem works for **both** remeshing paths -
+recreation and `Remesher2d` - including codimension-2 interfaces and zeta parameterised boundaries,
+and needs no opt-in. Stage 5 is open; what is still refused is named in "The refusal, narrowed"
+below. File and line
 references are to the tree state at the time of writing (branch `develop`, after `7b8770a`).
 
 Remeshing a distributed problem did not work at all when this started, and it did not *say* so: at
@@ -286,7 +286,6 @@ now specific, and each refusal names itself:
 
 | refused | why | lifted by |
 | --- | --- | --- |
-| `Remesher2d` | rebuilds the geometry from this rank's boundary elements, and the partition cut has no boundary name | stage 4 |
 | `ProjectionInternalInterpolator` | its projection integrates the old field at partition-local locations | stage 5 |
 | remeshing only some domains | the untouched domains stay partitioned; oomph cannot distribute a mesh twice | not planned |
 | explicit `num_adapt > 0` | leaves the new mesh non-uniformly refined | stage 5 |
@@ -354,26 +353,65 @@ other transfer paths) and on `docs/source/tutorial/ale/beads_on_string.py`, whic
 distributed with the same three remeshing events as serially, the ranks in step, and a minimum radius
 tracking the serial one to ~5e-5 over the whole transient.
 
-### Stage 4 - `Remesher2d` from merged data
+### Stage 4 - `Remesher2d` from the merged boundaries. DONE.
 
-`Remesher2d` reasons in `_pyoomph.Node` and `OomphGeneralisedElement` objects and has to reason in
-merged `MeshDataCacheEntry` arrays instead:
+The automatic remesher reconstructs the geometry from the boundaries of the mesh it replaces, walking
+the local `Node` objects. A partition is bounded partly by named boundaries and partly by the
+partition cut, which carries no boundary name at all, so the curves could never close - §1.5.
 
-* **curves** come from the merged `get_interface_line_segments()`, already proven to reproduce the
-  serial segmentation;
-* **`_meshbounds`** becomes the union over ranks, not each rank's locally non-empty boundaries;
-* **point sizes** are the awkward part. `get_size_at_point` reads
-  `get_initial_cartesian_nondim_size()`, `get_current_cartesian_nondim_size()` and
-  `refinement_level()` off the adjacent boundary elements, none of which travel with the merge today;
-  they need a small per-boundary-element array in the payload. Deriving the size from the merged
-  polyline spacing would be simpler but drops the initial/current averaging that encodes how far the
-  mesh has stretched - a behaviour change, so not that;
-* **`_ptsizes`**, filled by `EquationTree._setup_remeshing_size`, is keyed by `Node` and has to be
-  re-keyed by merged point index;
-* `_corner_size_map` comes from the template and is rank-independent - unchanged.
+`Remesher2dBoundaryLineCollection` now works on `RemeshBoundaryPoint`, a point addressed by its
+position rather than a node pointer, and the boundaries are collected in three steps: each rank
+lists its share as a point table and edges, one `allgather` puts the shares together, and the copies
+of a node that several ranks contributed are fused by position (k-d tree, tolerance far below any
+distance between two distinct nodes). Serial takes the same path - the merge is a fixed point for a
+single contribution - so there is one code path rather than two.
 
-Since every rank already loads rank 0's `.msh`, the natural shape is to reconstruct the geometry on
-rank 0 only, from merged data, under stage 0's collective failure guard.
+Three things it turned up:
+
+* **`_ptsizes` was dead.** The plan expected the node-keyed size dictionary to be the hard part.
+  Nothing has ever written to it; `get_size_at_point` was its only reader. Removed. The sizes that do
+  matter are the element sizes, which are now accumulated onto the point while it is collected
+  (`sum sqrt(initial)`, `sum sqrt(current)`, count) and summed across the ranks, so the average is
+  over all the elements around the point rather than over this rank's.
+* **Halo elements had to be excluded.** oomph's boundary lookup keeps them, and letting a halo
+  contribute would give its nodes the same element twice in that average.
+* **The order had to become canonical.** `split_into_curves` starts its walk at the first edge it
+  meets, which fixes the direction of the curve and with it the order the gmsh points are created
+  in - and gmsh meshes a differently numbered geometry differently. Concatenating the ranks'
+  contributions makes that order depend on how many ranks there are, and 3 ranks gave a different
+  mesh from 2 and 4. The edges are therefore sorted by position.
+
+  **This changes serial results.** The reconstructed geometry is the same domain with the same named
+  boundaries, but some lines come out in the opposite direction and the curve loop with the opposite
+  orientation, so gmsh produces a slightly different triangulation than before. Nothing about the
+  mesh is worse - and a remesh regenerates the mesh anyway - but a `Remesher2d` script will not
+  reproduce its old node numbering. The alternative was to keep the element order serially and use
+  the canonical one distributed, i.e. to give up on "distributed reproduces serial", which is the
+  property everything else here has.
+
+Verified against serial at 2, 3 and 4 ranks through the worker (identical node count, field
+statistics agreeing to ~1e-9, and at 3 ranks bit-identical), and on
+`docs/source/tutorial/ale/remeshing.py`, which runs distributed with the same three remeshing events
+as serially.
+
+#### The bug underneath it
+
+The tutorial deadlocked the first time, and not in the remesher: one rank remeshed while the other
+went on to write its output, and the next collective paired the boundary `allgather` with the mesh
+file output's - which surfaced as `TypeError: '>' not supported between instances of 'dict' and 'int'`
+deep inside `meshio.py`.
+
+`Problem._agree_on_domains_to_remesh` matched the requests against `_meshtemplate_list`. A
+`Remesher2d` hands the problem a *new* template (`GmshRemesher2d`, its `get_new_template()`), and
+`RemeshWhen` asks by the template its mesh currently carries, so from the first such remesh onwards
+the request named something that list did not contain. It fell through to the "keep it rather than
+drop it" branch, which preserves exactly the asymmetry the method exists to remove. The candidate
+list now also contains the templates the current meshes carry (`_meshdict` is built in the same order
+on every rank, so it stays rank-independent), and a request that still cannot be matched says so
+instead of quietly desynchronising the run.
+
+This was only reachable once `Remesher2d` could run distributed at all: `tests/test_mpi_rank_zero_failures.py`
+covers the agreement, but without `--distribute`.
 
 ### Stage 5 - the actual fix, later
 
@@ -423,19 +461,20 @@ sums), at 2, 3 and 4 ranks:
    assertion), plus the two refusals stage 2 has to make;
 4. field values after remeshing equal to serial, with **zero** "could not be located" fallbacks
    (stage 3, **done** - compared through merged global mesh data at 2, 3 and 4 ranks, for each of the
-   three transfer mechanisms (point location, codimension-2 nearest-node, zeta), including sums
-   weighted by position so that values landing on the wrong nodes cannot cancel out);
-5. the `Remesher2d` path, once stage 4 lands;
+   three transfer mechanisms (point location, codimension-2 nearest-node, zeta) and for the
+   `Remesher2d` path, including sums weighted by position so that values landing on the wrong nodes
+   cannot cancel out);
+5. the `Remesher2d` path (**done**, as a variant of item 4);
 6. `mpirun` **without** `--distribute` keeps working unchanged throughout - `needs_merging()` already
    short-circuits that case, but it is the regression that would go unnoticed.
 
-`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 23 tests, ~49 s,
-covering stages 0 to 3c: the remaining refusals on **every** rank, the unchanged
+`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 24 tests, ~54 s,
+covering stages 0 to 4: the remaining refusals on **every** rank, the unchanged
 behaviour of `mpirun` without `--distribute` at 2 and 4 ranks, the collective agreement when one rank
 (0 or 2, since the agreement is symmetric) raises inside `define_geometry`, the merged boundary
 matching a serial reference run at 2, 3 and 4 ranks, `ndof` and `is_mesh_distributed()` matching the
-serial run after the re-partitioning, the transferred field matching it too (plain, codimension-2 and
-zeta), and the `Remesher2d`,
+serial run after the re-partitioning, the transferred field matching it too (plain, codimension-2,
+zeta and `Remesher2d`), and the
 partial-remesh and explicit-`num_adapt` refusals.
 
 Everything except the refusals runs **without** the opt-in, i.e. in the configuration that ships.
@@ -482,6 +521,6 @@ as much). Tests: `tests/test_mpi_observables.py` (10 tests, ~18 s).
 ## 6. Open questions
 
 * `ParametricGmshMeshRemesher2d` subclasses `Remesher2d` but rebuilds its geometry from problem
-  parameters alone, so it should work with stage 2 only. Worth confirming as the early win.
+  parameters alone, so it needs none of stage 4. Untested distributed.
 * How remeshing interacts with distributed **state files** has not been looked at;
   `dev_docs/distributed_state_files.md` may already constrain it.

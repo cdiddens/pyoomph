@@ -39,6 +39,7 @@ from .. import _pyoomph_core as _pyoomph
 
 from .gmsh import GmshTemplate, Point, Line,Spline
 from .mesh import MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,MeshTemplate,MeshedMeshTemplate
+from ..generic.mpi import get_mpi_nproc, get_mpi_world_comm
 
 from ..typings import *
 if TYPE_CHECKING:
@@ -153,14 +154,42 @@ class GmshRemesher2d(GmshTemplate):
             self.kernel=self.remesher.template.kernel
         self.remesher._define_geometry() 
 
+class RemeshBoundaryPoint:
+    """A point of a boundary of the mesh being replaced, addressed by its position.
+
+    The remesher used to walk the ``Node`` objects of the local mesh directly. Under ``--distribute``
+    each rank holds only its share of every boundary, so the curves have to be stitched together from
+    all of them - and a node pointer means nothing on another rank, while its position is the same
+    everywhere. The element sizes that set the local resolution are accumulated here as well, since
+    the elements around a point on the partition cut are split over several ranks.
+    """
+    __slots__=("_x","_y","sum_initial","sum_current","count")
+
+    def __init__(self,x:float,y:float):
+        self._x,self._y=x,y
+        self.sum_initial=0.0
+        self.sum_current=0.0
+        self.count=0.0
+
+    def x(self,i:int)->float:
+        return self._x if i==0 else self._y
+
+    def element_size(self)->float:
+        """The resolution the old mesh had here: the mean of the initial and the current element
+        size, averaged over the boundary elements around the point - all of them, not just this
+        rank's."""
+        if self.count<=0:
+            return 1.0
+        return (self.sum_initial/self.count+self.sum_current/self.count)/2
+
+
 class Remesher2dBoundaryLineCollection:
     def __init__(self,boundname:str,remesher:"Remesher2d",point_size_func:Callable[[float, float], float] | None=None):
         super(Remesher2dBoundaryLineCollection, self).__init__()
         self.name=boundname
         self.parts=[]
-        self.oldnodes:dict[tuple[_pyoomph.Node,_pyoomph.Node],list[_pyoomph.Node]]= {} #Dict mapping from a pair of vertex nodes to the non-vertex nodes in between
-        self.curves:list[list[_pyoomph.Node]]=[]
-        self._node_to_bound_elems:dict[_pyoomph.Node,set[_pyoomph.OomphGeneralisedElement]] = {}
+        self.oldnodes:dict[tuple[RemeshBoundaryPoint,RemeshBoundaryPoint],list[RemeshBoundaryPoint]]= {} #Dict mapping from a pair of vertex points to the non-vertex points in between
+        self.curves:list[list[RemeshBoundaryPoint]]=[]
         self.point_size_func=point_size_func
         self.remesher=remesher
 
@@ -223,31 +252,16 @@ class Remesher2dBoundaryLineCollection:
                 currentcurve = []
 
 
-    def get_size_at_point(self,p:_pyoomph.Node) -> float:
+    def get_size_at_point(self,p:RemeshBoundaryPoint) -> float:
         if self.point_size_func is not None:
             if callable(self.point_size_func):
                 return self.point_size_func(p.x(0),p.x(1))
             else:
                 return self.point_size_func
-        elif p in self.remesher._ptsizes.keys():
-            return self.remesher._ptsizes[p]
-        elif p in self._node_to_bound_elems.keys():
-            avg_i=0.0
-            avg_c = 0.0
-            cnt=0
-            for e in self._node_to_bound_elems[p]:
-                lvl=e.refinement_level()
-                scal:int=2**lvl
-                avg_i+=math.sqrt(e.get_initial_cartesian_nondim_size())*scal
-                avg_c+=math.sqrt(e.get_current_cartesian_nondim_size())*scal
-                cnt+=1
-            assert cnt!=0
-            avg_i/=cnt
-            avg_c /= cnt
-            #print("AVG",avg_c,avg_i)
-            return 1*(avg_i+avg_c)/2 #* 2 # Again *2 if refine is used to generate the quads
-            #return math.sqrt(avg_i)
-        return 1.0
+        # The element sizes were accumulated while the points were collected - see
+        # RemeshBoundaryPoint - rather than looked up through a node-to-element map here, because the
+        # elements around a point can live on several ranks.
+        return p.element_size()
 
 
 
@@ -340,9 +354,9 @@ class Remesher2d(RemesherBase):
     Args:
         template: The mesh template to be remeshed.
     """
-    # The boundary curves are collected from the local elements, and the partition cut that bounds
-    # the rest of this rank's piece carries no boundary name at all, so the loop cannot be closed.
-    distributed_limitation="the boundary curves are collected from this rank's elements only, and the partition cut between the ranks carries no boundary name, so the gmsh line loop cannot be closed at all"
+    # Works distributed since stage 4 of dev_docs/distributed_remeshing.md: the boundary curves are
+    # stitched together from every rank's share before the geometry is described.
+    distributed_limitation=None
 
     def __init__(self,template:MeshTemplate):
         super(Remesher2d, self).__init__(template)
@@ -350,7 +364,6 @@ class Remesher2d(RemesherBase):
         self._boundary_nodes:dict[str,Remesher2dBoundaryLineCollection]={}
         self.gmsh=GmshRemesher2d(self)
         self._meshbounds={}
-        self._ptsizes:dict[_pyoomph.Node,float]={}
         self._boundary_point_size_funcs:dict[str,Callable[[float,float],float]]={}
         self.use_corner_sizes=True
         self._corner_size_map=None
@@ -374,7 +387,6 @@ class Remesher2d(RemesherBase):
         # class for why none of it may outlive the remeshing process. All of it is rebuilt from
         # scratch by the next remesh() anyway.
         self._boundary_nodes={}
-        self._ptsizes={}
         self._corner_size_map = None
 
     def get_new_template(self)->MeshTemplate:
@@ -394,30 +406,134 @@ class Remesher2d(RemesherBase):
         #print(mesh.get_boundary_names())
         #print(dir(mesh))
 
-    def _define_boundaries_for_domain(self,n:str):
+    def _collect_local_boundary_edges(self,n:str)->dict[str,tuple[list[list[float]],list[tuple[int,int,list[int]]]]]:
+        """This rank's share of every boundary of domain ``n``, as positions rather than as nodes.
+
+        Per boundary: a point table of ``[x, y, sum sqrt(initial size), sum sqrt(current size),
+        element count]`` and the edges of the boundary as index triples ``(first, last, in between)``.
+        Both are position-based on purpose, since they are merged across the ranks afterwards.
+        """
         mesh=self._old_meshes[n]
-        self._meshbounds[n]=[]
+        distributed=bool(mesh.is_mesh_distributed())
+        local:dict[str,tuple[list[list[float]],list[tuple[int,int,list[int]]]]]={}
         for bn in mesh.get_boundary_names():
             ind=mesh.get_boundary_index(bn)
-            nelem=mesh.nboundary_element(ind)
-            if nelem==0: #TODO: These bounds could still be relevant
+            if mesh.nboundary_element(ind)==0: #TODO: These bounds could still be relevant
                 continue
+            pts:list[list[float]]=[]
+            index_of:dict[_pyoomph.Node,int]={}
+            edges:list[tuple[int,int,list[int]]]=[]
+            for be,dir in mesh.boundary_elements(bn,with_directions=True):
+                # A halo element is a copy of one that another rank owns, and the boundary lookup
+                # keeps it. Letting it contribute would give its nodes the element twice, which is
+                # not what the size average means.
+                if distributed and be.is_halo():
+                    continue
+                scal:int=2**be.refinement_level()
+                size_i=math.sqrt(be.get_initial_cartesian_nondim_size())*scal
+                size_c=math.sqrt(be.get_current_cartesian_nondim_size())*scal
+                idx:list[int]=[]
+                for i in range(be.nnode_1d()):
+                    nd=be.boundary_node_pt(dir,i)
+                    k=index_of.get(nd)
+                    if k is None:
+                        k=len(pts)
+                        index_of[nd]=k
+                        pts.append([nd.x(0),nd.x(1),0.0,0.0,0.0])
+                    pts[k][2]+=size_i
+                    pts[k][3]+=size_c
+                    pts[k][4]+=1.0
+                    idx.append(k)
+                edges.append((idx[0],idx[-1],idx[1:-1]))
+            local[bn]=(pts,edges)
+        return local
 
-            self._meshbounds[n].append(bn)
-            #if n not in self._domain_points.keys():
-            #    self._domain_points[n] = {}
-            #if bn not in self._domain_points[n].keys():
-            #    self._domain_points[n][bn]={}
+    def _merge_boundary_edges(self,local:dict[str,tuple[list[list[float]],list[tuple[int,int,list[int]]]]],order:list[str]):
+        """Stitch every rank's share of the boundaries into the whole ones.
 
-            if not (bn in self._boundary_nodes.keys()):
-                self._boundary_nodes[bn]=Remesher2dBoundaryLineCollection(bn,self,point_size_func=self._boundary_point_size_funcs.get(bn,None))
-                bnd = self._boundary_nodes[bn]
-                for be,dir in mesh.boundary_elements(bn,with_directions=True):
-                    internodes=[be.boundary_node_pt(dir,i) for i in range(be.nnode_1d())]
-                    bnd.oldnodes[(internodes[0],internodes[-1],)]=internodes[1:-1]
-                    for inode in internodes:
-                        bnd._node_to_bound_elems.setdefault(inode, set()).add(be) #type:ignore
-                bnd.split_into_curves()
+        Collective on a distributed mesh, and a no-op otherwise - the merging below is a fixed point
+        for a single contribution, so serial and distributed take the same path.
+
+        Every rank ends up with the same result rather than only rank 0: the geometry is described by
+        every rank (only rank 0's ``.msh`` is kept, but the others have to describe *something* that
+        closes), so what they describe had better be the same thing. `allgather` and a deterministic
+        merge give that without a second broadcast.
+        """
+        contributions=[local]
+        if get_mpi_nproc()>1 and any(m.is_mesh_distributed() for m in self._old_meshes.values()):
+            comm=get_mpi_world_comm()
+            assert comm is not None
+            contributions=comm.allgather(local)
+        merged:dict[str,tuple[list[RemeshBoundaryPoint],list[tuple[int,int,list[int]]]]]={}
+        # In the mesh's own order of boundary names rather than in the order this rank happens to
+        # hold them: it is the same list everywhere, and it is the order a serial run uses, which the
+        # gmsh entity numbering - and through it the mesh gmsh produces - depends on.
+        present={b for c in contributions for b in c.keys()}
+        for bn in [b for b in order if b in present]:
+            allpts:list[list[float]]=[]
+            alledges:list[tuple[int,int,list[int]]]=[]
+            for c in contributions:
+                if bn not in c:
+                    continue
+                pts,edges=c[bn]
+                off=len(allpts)
+                allpts.extend(pts)
+                alledges.extend((a+off,b+off,[i+off for i in inb]) for a,b,inb in edges)
+            merged[bn]=self._fuse_boundary_points(allpts,alledges)
+        return merged
+
+    def _fuse_boundary_points(self,allpts:list[list[float]],alledges:list[tuple[int,int,list[int]]]):
+        """Make one point out of the copies of a node that several ranks contributed.
+
+        By position, not by index: the copies come from different ranks and carry no common
+        numbering. They are the same node, so they coincide to the last bits - the tolerance is only
+        there so that a difference in the last bits does not tear the curve apart at the partition
+        cut, and is far below any distance between two genuinely distinct nodes.
+        """
+        if not allpts:
+            return [],[]
+        from scipy.spatial import cKDTree
+        coords=numpy.array([[p[0],p[1]] for p in allpts])
+        extent=max(float(numpy.amax(numpy.abs(coords))),1.0)
+        tol=1e-10*extent
+        tree=cKDTree(coords)
+        # The lowest index within the tolerance represents the cluster. With copies of one node that
+        # is unambiguous, and it makes the numbering below independent of how many ranks contributed.
+        rep=numpy.arange(len(coords))
+        for i,neighbours in enumerate(tree.query_ball_point(coords,r=tol)):
+            rep[i]=min(neighbours)
+        order={}
+        points:list[RemeshBoundaryPoint]=[]
+        for i,r in enumerate(rep):
+            r=int(r)
+            if r not in order:
+                order[r]=len(points)
+                points.append(RemeshBoundaryPoint(allpts[r][0],allpts[r][1]))
+            p=points[order[r]]
+            p.sum_initial+=allpts[i][2]
+            p.sum_current+=allpts[i][3]
+            p.count+=allpts[i][4]
+        remap=[order[int(r)] for r in rep]
+        edges=[(remap[a],remap[b],[remap[i] for i in inb]) for a,b,inb in alledges]
+        # By position, so that the order does not depend on how many ranks contributed and in which
+        # order they were concatenated. It is not cosmetic: split_into_curves() starts its walk at the
+        # first edge it meets, which fixes the direction of the curve and with it the order the gmsh
+        # points are created in - and gmsh gives a different mesh for a differently numbered geometry.
+        edges.sort(key=lambda e:(points[e[0]].x(0),points[e[0]].x(1),points[e[1]].x(0),points[e[1]].x(1)))
+        return points,edges
+
+    def _define_boundaries_for_domain(self,n:str):
+        merged=self._merge_boundary_edges(self._collect_local_boundary_edges(n),
+                                          self._old_meshes[n].get_boundary_names())
+        self._meshbounds[n]=[bn for bn in merged.keys() if merged[bn][0]]
+        for bn,(points,edges) in merged.items():
+            if not points or bn in self._boundary_nodes.keys():
+                continue
+            bnd=Remesher2dBoundaryLineCollection(bn,self,point_size_func=self._boundary_point_size_funcs.get(bn,None))
+            self._boundary_nodes[bn]=bnd
+            for a,b,inb in edges:
+                bnd.oldnodes[(points[a],points[b],)]=[points[i] for i in inb]
+            bnd.split_into_curves()
 
 
     def _mesh_domain(self,n:str):
@@ -433,6 +549,9 @@ class Remesher2d(RemesherBase):
 
     def _define_geometry(self):
         mesh=self.gmsh
+        # _define_boundaries_for_domain is collective on a distributed mesh, so the ranks have to
+        # enter it for the same domains in the same order. _old_meshes follows Problem._meshdict,
+        # which is built identically everywhere, so its own order already is that order.
         for n in self._old_meshes.keys():
             self._define_boundaries_for_domain(n)
 

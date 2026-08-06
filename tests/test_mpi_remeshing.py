@@ -24,10 +24,10 @@
 # ========================================================================
 
 # Remeshing under --distribute, built stage by stage in dev_docs/distributed_remeshing.md. The
-# recreation path works by now and is exercised here in the configuration it ships in; what is not
-# built yet (Remesher2d, codimension-2 interfaces, the projection interpolator) is refused by name,
-# and the refusals are tested too, because what those paths do instead of failing is produce a
-# plausible wrong answer.
+# Both remeshing paths work by now and are exercised here in the configuration they ship in; what is
+# not built yet (the projection interpolator, remeshing a subset of the domains, adapting the new
+# mesh) is refused by name, and the refusals are tested too, because what those paths would do
+# instead of failing is produce a plausible wrong answer.
 #
 # What the whole thing used to do instead of saying that it could not:
 #
@@ -133,27 +133,6 @@ def _boundaries(proc):
             fields = dict(f.split("=", 1) for f in line.split()[1:])
             out[int(fields["rank"])] = fields
     return out
-
-
-@pytest.mark.parametrize("nproc", [2, 4])
-def test_remesher2d_is_still_refused_on_every_rank(tmp_path, nproc):
-    """The automatic remesher rebuilds the geometry from this rank's boundary elements only.
-
-    A partition is bounded partly by named boundaries and partly by the partition cut, which carries
-    no boundary name at all, so the gmsh line loop cannot be closed. That is stage 4; until then the
-    refusal has to name it, since the two remeshing paths fail for different reasons.
-    """
-    proc = _run(tmp_path, ["--distribute", "--remesher2d"], nproc=nproc)
-    assert proc.returncode != 0, \
-        "the run reported success although Remesher2d cannot work distributed:\n%s" % (
-            "\n".join(_reported(proc)))
-    reported = _reported(proc)
-    assert len(reported) == nproc, \
-        "expected all %d ranks to raise, got:\n%s\n--- stderr tail ---\n%s" % (
-            nproc, "\n".join(reported), proc.stderr[-2000:])
-    for line in reported:
-        assert "not supported on a distributed" in line, "unhelpful failure on a rank: %s" % line
-        assert "Remesher2d:" in line, "the refusal did not name the remesher: %s" % line
 
 
 @pytest.mark.parametrize("nproc", [2, 4])
@@ -292,7 +271,7 @@ def test_adapting_the_remeshed_mesh_is_refused_when_asked_for_explicitly(tmp_pat
 
 
 @pytest.mark.parametrize("nproc", [2, 3, 4])
-@pytest.mark.parametrize("variant", ["plain", "codim2", "zeta"])
+@pytest.mark.parametrize("variant", ["plain", "codim2", "zeta", "remesher2d"])
 def test_the_transferred_field_matches_the_serial_one(tmp_path, nproc, variant):
     """The old solution reaches the new mesh even where it crossed a rank boundary.
 
@@ -310,7 +289,10 @@ The variants are the three transfer mechanisms, which fail in different ways:
       where a rank holding no part of the old corner at all is ordinary;
     * ``zeta`` - the interface parameterised by arclength, which is a property of the whole curve and
       therefore has to be built on the merged interface rather than on this rank's piece of it. It
-      also sends the transfer down the zeta branch of the point location.
+      also sends the transfer down the zeta branch of the point location;
+    * ``remesher2d`` - the automatic remesher, which reconstructs the geometry from the boundaries of
+      the mesh it replaces. Those are stitched together from every rank's share, since a partition is
+      bounded partly by named boundaries and partly by the partition cut.
 
     Both halves matter: that nothing fell through to the blend at all, and that what arrived is what
     a serial run gets. The comparison is against merged global mesh data, so the numbers describe the

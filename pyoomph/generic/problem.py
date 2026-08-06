@@ -2911,15 +2911,32 @@ class Problem(_pyoomph.Problem):
         """
         if get_mpi_nproc()<=1:
             return
-        templates=self._meshtemplate_list
+        # _meshtemplate_list is built by define_problem(), i.e. in the same order on every rank - but
+        # it is not the whole story once a mesh has been remeshed. A Remesher2d hands the problem a
+        # NEW template (GmshRemesher2d, see its get_new_template()), and RemeshWhen asks by the
+        # template its mesh currently carries, so from the first such remesh onwards the request
+        # names something this list does not contain. It then fell through to the "keep it" branch
+        # below, which preserves the very asymmetry this method exists to remove: one rank remeshed,
+        # the other went on, and the next collective paired a boundary merge with a file output.
+        # _meshdict is built in the same order everywhere too, so adding the templates in use keeps
+        # the list rank-independent.
+        templates=list(self._meshtemplate_list)
+        for _mn,_msh in self._meshdict.items():
+            t=getattr(_msh,"_templatemesh",None)
+            if t is not None and t not in templates:
+                templates.append(t)
         if not any(t.remesher is not None for t in templates):
             return  # nothing can ever ask, so do not pay for a collective after every solve
-        # _meshtemplate_list is built by define_problem(), i.e. in the same order on every rank.
         agreed=get_mpi_any_list([t in self._domains_to_remesh for t in templates])
         wanted={t for t,w in zip(templates,agreed) if w}
-        # Anything not registered as a template of this problem cannot be matched up across the
-        # ranks; keep it rather than silently dropping the request.
-        self._domains_to_remesh=wanted | (self._domains_to_remesh-set(templates))
+        # Anything still unknown here cannot be matched up across the ranks; keep it rather than
+        # silently dropping the request, and say so, since it is the asymmetry described above.
+        leftover=self._domains_to_remesh-set(templates)
+        if leftover:
+            print("WARNING: a remesh was requested for "+str(len(leftover))+" mesh template(s) this problem does "
+                  "not know about, so the request cannot be made unanimous across the MPI ranks. If the ranks "
+                  "disagree, the run will desynchronise.")
+        self._domains_to_remesh=wanted | leftover
 
     def remeshing_necessary(self):
         """
