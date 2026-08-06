@@ -1432,10 +1432,13 @@ void PyReg_Mesh(nb::module_ &m)
 			 {
 			 	int my_rank = self->communicator_pt()->my_rank();
       			int n_proc = self->communicator_pt()->nproc();
+				// A mesh with no local element still has to describe its fields, so borrow the
+				// element code instance from a neighbour's haloed element. Silently: this is an
+				// ordinary situation on a distributed mesh (an interface lying entirely in another
+				// partition), it is not quiet()-able, and it printed once per rank per call.
 				for (int nrnk=0;nrnk<n_proc;nrnk++)
 				{
-					std::cout << "INFO MY RANK " << my_rank << " NRNK " << nrnk << " NROOT " << self->nroot_haloed_element(nrnk) << std::endl;
-					if (nrnk!=my_rank) 
+					if (nrnk!=my_rank)
 					{
 						if (self->nroot_haloed_element(nrnk)>0) 
 						{
