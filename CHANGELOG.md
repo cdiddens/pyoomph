@@ -108,6 +108,13 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
     previously raised "dot is only allowed between vectors". `dot` and `contract` agree in every
     shape they share; two matrices still raise, since `matproduct` and `double_dot` are both
     plausible readings. The index order of every operator is now stated in its docstring.
+- Documented, and covered by tests, a limitation of
+  `CartesianCoordinateSystemWithAdditionalNormalMode`: its `tensor_divergence` and
+  `directional_tensor_derivative` are not implemented, so `div` of a rank-2 tensor and the material
+  derivative of a tensor field raise there. Concretely, neither `NavierStokesEquations(GCL=True)` nor
+  the viscoelastic module can be combined with
+  `setup_for_stability_analysis(additional_cartesian_mode=True)`. The azimuthal counterpart,
+  `AxisymmetryBreakingCoordinateSystem`, does implement both.
 - **`expr += number` and `expr -= number` no longer produce complex constants.** `__iadd__` and
   `__isub__` were bound only against `std::complex<double>`, and nanobind converts an int or a float to
   that without complaint, so the in-place forms quietly yielded e.g. the complex numeric `-1.0+0.0i`.

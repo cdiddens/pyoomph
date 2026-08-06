@@ -175,10 +175,20 @@ class _ProjectionProblem(Problem):
         self.add_equations(_Project(self.expressions) @ "domain")
 
 
-def _projected(tmp_path, expressions, coordsys=None, lower_left=None, box=False, line=False):
-    """{name: max |value| over the nodes} of each expression, as the generated code evaluates it."""
+def _projected(tmp_path, expressions, coordsys=None, lower_left=None, box=False, line=False,
+               stability=None):
+    """
+    {name: max |value| over the nodes} of each expression, as the generated code evaluates it.
+
+    ``stability`` is "azimuthal" or "cartesian_mode" to swap in the corresponding normal-mode
+    coordinate system, which has to happen before initialise().
+    """
     with _ProjectionProblem(expressions, coordsys, lower_left, box, line) as problem:
         problem.set_output_directory(str(tmp_path))
+        if stability == "azimuthal":
+            problem.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False)
+        elif stability == "cartesian_mode":
+            problem.setup_for_stability_analysis(additional_cartesian_mode=True, analytic_hessian=False)
         problem.initialise()
         problem.solve()
         mesh = problem.get_mesh("domain")
@@ -514,3 +524,82 @@ def test_gcl_momentum_flux_preserves_a_free_stream(tmp_path):
         error_y = max(abs(node.value(indices["velocity_y"])) for node in mesh.nodes())
     assert error_x < 1e-8
     assert error_y < 1e-8
+
+
+# ----------------------------------------------------------------------------------------------
+# The normal-mode coordinate systems, used for azimuthal and Cartesian-wavenumber stability
+# analysis. These had no coverage of their tensor operations at all, and
+# AxisymmetryBreakingCoordinateSystem.tensor_divergence is the one implementation whose indices the
+# move to the second-index convention rewrote without a test to catch it.
+# ----------------------------------------------------------------------------------------------
+
+def test_azimuthal_stability_coordinate_system_keeps_the_identities(tmp_path):
+    """
+    With azimuthal stability active the coordinate system becomes AxisymmetryBreaking, whose div, grad
+    and tensor_divergence carry the mode number m and the first-order mesh perturbation. All three
+    identities must still hold, and the base state has to reduce to the plain axisymmetric answer.
+
+    What this does and does not cover. The projected values are the *base* residual, i.e. the eps -> 0
+    limit, so this pins the index pattern and the connection terms of the second-index tensor divergence
+    -- which is what the rewrite touched -- and confirms the reduction to AxisymmetricCoordinateSystem.
+    It does not reach the m-dependent or eps-dependent terms: those live in the eigen-residual, which a
+    projection cannot see. The generated code does differ from the plain axisymmetric run (roughly 53 kB
+    against 38 kB), so the mode machinery is genuinely engaged rather than skipped.
+    """
+    r, z = var(["coordinate_x", "coordinate_y"])
+    a = vector(2 * r * r + z * r, 3 * z * z, 0)
+    b = vector(3 * r + 2 * z, z * r, 0)
+    f = 3 * r * r + 2 * z * r + z * z + 1
+
+    expressions = {"trace_grad_minus_div": trace(grad(a)) - div(a)}
+    for i in range(3):
+        expressions[f"identity_{i}"] = div(f * identity_matrix())[i] - grad(f)[i]
+    lhs, rhs = div(dyadic(a, b)), div(b) * a + directional_derivative(a, b)
+    for i in range(3):
+        expressions[f"dyadic_{i}"] = lhs[i] - rhs[i]
+    expressions["magnitude"] = lhs[0]
+
+    baseline = _projected(tmp_path / "plain", expressions, coordsys=AxisymmetricCoordinateSystem(),
+                          lower_left=[1, 0])
+    values = _projected(tmp_path / "azimuthal", expressions,
+                        coordsys=AxisymmetricCoordinateSystem(), lower_left=[1, 0],
+                        stability="azimuthal")
+    assert values["magnitude"] > 1.0
+    for name, value in values.items():
+        if name == "magnitude":
+            # the base state must agree with the plain axisymmetric system, not merely be self-consistent
+            assert abs(value - baseline[name]) < 1e-10
+        else:
+            assert value < 1e-10, name
+
+
+def test_cartesian_normal_mode_coordinate_system_keeps_the_vector_identity(tmp_path):
+    """
+    The same for CartesianCoordinateSystemWithAdditionalNormalMode, restricted to what it implements.
+
+    Its tensor_divergence and directional_tensor_derivative both raise "Implement the ... for this
+    coordinate system", so div of a rank-2 tensor and the material derivative of a tensor field are
+    simply unavailable there. That is not hypothetical: NavierStokesEquations(GCL=True) takes the
+    divergence of a momentum flux tensor, so it cannot be combined with
+    setup_for_stability_analysis(additional_cartesian_mode=True) at all, and neither can the
+    viscoelastic module, which advects a tensor field. Only the vector identity can be checked.
+    """
+    x, y = var(["coordinate_x", "coordinate_y"])
+    a = vector(2 * x * x + y * x, 3 * y * y, 0)
+    expressions = {"trace_grad_minus_div": trace(grad(a)) - div(a), "magnitude": div(a)}
+    values = _projected(tmp_path, expressions, stability="cartesian_mode")
+    assert values["magnitude"] > 1.0
+    assert values["trace_grad_minus_div"] < 1e-10
+
+
+def test_cartesian_normal_mode_tensor_divergence_is_unimplemented(tmp_path):
+    """
+    Pins the gap above as a gap, so that implementing it is noticed rather than silently assumed.
+
+    Should CartesianCoordinateSystemWithAdditionalNormalMode.tensor_divergence ever be written, this
+    test fails and the identities above should be extended to cover it instead.
+    """
+    x, y = var(["coordinate_x", "coordinate_y"])
+    f = 3 * x * x + 2 * y * x + 1
+    with pytest.raises(RuntimeError, match="tensor_divergence"):
+        _projected(tmp_path, {"out": div(f * identity_matrix())[0]}, stability="cartesian_mode")
