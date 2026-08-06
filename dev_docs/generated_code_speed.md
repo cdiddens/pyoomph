@@ -200,12 +200,8 @@ Deleting the 90 provably dead assignments and re-measuring: gcc −0.1%, tcc +0.
 computed once per integration point, against `nnode² = 729` Jacobian entries per point — the ratio is
 what makes them free.
 
-So this is worth fixing for clarity and for what it reveals, not for speed. What it reveals is worth
-acting on: the same escape hatch means that on moving meshes `subexpression()` hoists the *value* but
-inlines the *derivative* at every use site, which is exactly the case where the Jacobian statements
-grow to hundreds of kilobytes. Related, and worth fixing in the same pass: at
-`src/codegen.cpp:9222-9236` an error message is carefully assembled and then not thrown — the
-`throw_runtime_error` is commented out.
+So this is worth fixing for clarity and for what it reveals, not for speed. What it reveals is the
+subject of the next section.
 
 ### Repeated subtrees in the Jacobian entries — this is the real one
 
@@ -338,6 +334,14 @@ If someone does return to this, the entry condition should be evidence that `-O3
 up — e.g. a production element where compile time or `pow@plt` counts show the optimizer bailing out
 on 350 kB statements — not a general belief that emitted redundancy must cost something.
 
+That verdict is about *this* pass: teaching the emitter to factor repeated subtrees the compiler can
+already factor. It says nothing about the three items under *Open leads* below, which are a different
+kind of thing. One is a latent correctness bug. The other two are about the **symbolic derivative
+cache**, which is the one place code generation demonstrably beats the compiler — `subexpression()`
+wins by −91% precisely because it caches derivatives, and a C compiler cannot differentiate anything.
+Where that cache is switched off, on moving meshes and in the Hessian, the win is simply not being
+collected.
+
 ## Ranked conclusions
 
 | item | gcc `-O3` | tccbox | verdict |
@@ -347,13 +351,14 @@ on 350 kB statements — not a general belief that emitted redundancy must cost 
 | `-fno-math-errno` in the default flags | −86% on transcendental forms, 0 elsewhere | n/a | tried, **reverted** |
 | **`subexpression()` in user code** | **−91% on transcendental forms** | — | **the recommendation**: already available, beats every change tried here |
 | drop the `IGNORED RESIDUAL` comment payload | 0 | 0 | **done** — compile time only, but that was 66% of one 5.8 MB file |
-| remove the dead `d_subexpr_*` stores | ~0 | ~0 | not attempted; clarity, not speed |
+| remove the dead `d_subexpr_*` stores | ~0 | ~0 | not attempted; symptom of the moving-mesh escape hatch, see *Open leads* |
 | hoist trial-function pointers | expected ~0 | untested | not attempted; size only |
 | automatic `subexpression()` injection | unknown | unknown | not attempted; narrower than it looks — see below |
+| **the three open leads in the subexpression machinery** | unmeasured | unmeasured | **not attempted; the largest remaining levers — see *Open leads*** |
 
-A note on the last one. Automatic marker injection before differentiation is the obvious idea, and it
+A note on automatic injection. Marker injection before differentiation is the obvious idea, and it
 is the *riskier* half: it changes what gets differentiated symbolically, it is blocked from anything
-containing a test function (`src/codegen.cpp:250-254` throws), and on `coordinates_as_dofs` codes the
+containing a test function (`src/codegen.cpp:288` throws), and on `coordinates_as_dofs` codes the
 escape hatch above means it can make the Jacobian larger, not smaller. Post-differentiation CSE needs
 no new GiNaC machinery at all — nothing differentiates a Jacobian expression again, so a plain symbol
 substitution suffices. That is the half that was built, and it did not pay off; injection is the
@@ -412,6 +417,87 @@ code with and without the change:
   string or every previously cached `.so` is silently reused.
 - **The automatic CSE pass.** −1.9% against an achievable −10.6%; see above for why it is unlikely to
   be the right approach at all.
+
+## Open leads in the subexpression machinery
+
+None of these were attempted. They are recorded because the investigation walked past all three and
+each is a bigger lever than anything measured above — the first is a latent correctness bug, the
+other two are the reason moving-mesh and stability elements generate the largest code in the project.
+
+### A swallowed `throw_runtime_error` that hides a dropped Jacobian term
+
+`GiNaCSubExpression::derivative` (`src/codegen.cpp:9142`) builds its result in two stages. First it
+walks the subexpression's `req_fields` and accumulates the cached chain rule,
+`d_subexpr_N_d_<field> * <derived shape>`, into `res`, setting `found`. Then, on a
+`coordinates_as_dofs` code, if the symbol being differentiated by is a nodal coordinate, it takes the
+escape hatch at `src/codegen.cpp:9180` and computes `deriv = diff(expr, s)` directly.
+
+If that direct derivative is non-zero **and** `found` is already true, the code assembles a detailed
+message — *"subexpression derivative wrto ... is non-zero, but we already have a contribution
+before"*, with the offending derivative printed as "should be 0" — and then does not throw it
+(`src/codegen.cpp:9243`, the `throw_runtime_error` is commented out). It `return deriv`, **discarding
+`res`**. So in the one case the author thought impossible, the cached contributions are silently
+dropped from the Jacobian entry rather than added to it.
+
+Nobody knows whether that branch is reachable; if it is not, the throw costs nothing, and if it is,
+the Jacobian is quietly wrong. Either turn it into a real error or, if the combination is legitimate,
+return `res + deriv` and delete the message. Deciding which is a small piece of work and it is the
+highest-value item in this document.
+
+### Derivatives with respect to the moving-mesh coordinates
+
+The escape hatch exists because a coordinate derivative of a subexpression genuinely cannot be a
+single precomputed scalar: terms like `d(dpsi/dx * u)/dX^l_j` depend on the `l_shape` loop index,
+which the cached `d_subexpr_N_d_<field>` variables do not carry. `SubExpressionsToStructs` therefore
+erases every position shape expansion from the subexpression's required fields up front
+(`src/codegen.cpp:300-322`, the `sub_shapeexps.erase(se)` loops over all bases, time schemes and
+history indices), so no cached coordinate derivative is even emitted.
+
+The consequence is that on a moving mesh `subexpression()` delivers only half of what it delivers
+elsewhere: the value is hoisted, the derivative is re-expanded inline at every use site. That is
+exactly the configuration in which the Jacobian statements reach hundreds of kilobytes — the archived
+3.7 MB hyperelastic element has nine single C statements of ~348 000 characters each, and none of its 153
+cached derivatives is read.
+
+Two directions, in increasing order of ambition:
+
+- **Unwrap instead of half-wrapping.** If a subexpression's only remaining consumers on a moving mesh
+  are coordinate derivatives, wrapping it may be a net loss: the value is hoisted once per integration
+  point, but the derivative is inlined `nnode²` times per point *and* is now the derivative of a tree
+  the user chose to make large. Detecting that case and simply not creating the subexpression would be
+  cheap and might shrink these elements substantially. Worth measuring before building anything: take
+  a moving-mesh element and compare generated size with the `subexpression()` calls removed.
+- **Make the cache index-aware.** A cached derivative that is an array over the shape index rather
+  than a scalar — `d_subexpr_N_d_coordinate_x[l_shape]`, filled once per integration point in its own
+  loop — would restore the chain rule for coordinates and is the version that actually fixes the
+  problem. It is real work: the fill loop, the interaction with `is_derived_other_index`, and the
+  Hessian's second index all have to be thought through.
+
+Note the interaction with the previous item: any change here changes which branch of
+`GiNaCSubExpression::derivative` fires, so the swallowed throw should be resolved *first*, not
+discovered afterwards.
+
+### Subexpressions in the Hessian
+
+They are stripped outright. `write_generic_Hessian` runs `RemoveSubexpressionsByIndentity` over the
+residual (`src/codegen.cpp:4834-4835`) to unwrap every marker back to its raw argument before
+differentiating twice, and `write_code_subexpressions` throws `"Hessian subexpressions!"` if any
+survive into its Hessian path (`src/codegen.cpp:4568`). So on a problem with `generate_hessian` — that
+is, every azimuthal or Cartesian normal-mode stability analysis with an analytic Hessian — the user's
+`subexpression()` calls buy nothing at all in the Hessian, which is routinely the *largest* generated
+function: in one production element `HessianVectorProduct1` is 455 kB against `ResidualAndJacobian1`'s
+386 kB.
+
+The machinery is half-present rather than absent. `__SE_to_struct_hessian` (`src/codegen.cpp:394`)
+exists to re-wrap markers during Hessian generation, `__hessian_subexprs_scanned` tracks what has been
+folded in, and `GiNaCSubExpression::derivative` already has an `__in_hessian` branch
+(`src/codegen.cpp:9155-9163`) that builds a nested subexpression for the inner derivative instead of
+reading the cache. What is missing is the second-derivative cache itself — the `d2_subexpr_N_d_f_d_g`
+equivalent — and the emission of its fill code.
+
+This is the largest of the three and the least explored. It should not be started before the
+coordinate-derivative question above is settled, because on a moving mesh the two share the same
+escape hatch and the same reason for it.
 
 ## Things deliberately left alone
 
