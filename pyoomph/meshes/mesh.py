@@ -1349,12 +1349,13 @@ class MeshFromTemplateBase(BaseMesh):
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
         from .meshstate import save_mesh_state, load_mesh_state
         # The base element numbers have to exist before anything can be addressed by them. On a
-        # distributed mesh they were assigned before the distribution and must not be touched here,
-        # where only the local share is visible. Otherwise assign them now: besides being
-        # idempotent for a mesh that has them, this covers the meshes that did not exist when the
-        # problem was initialised - the ones a remesh built, and the ones the loader itself builds
-        # when the state file carries a different mesh template. Both are built from a template, in
-        # its element order, so writer and reader agree on the numbers.
+        # distributed mesh they were assigned while it was still whole - before the initial
+        # distribution, or in Problem._redistribute_after_remeshing() for a mesh a remesh replaced -
+        # and must not be touched here, where only the local share is visible. Otherwise assign them
+        # now: besides being idempotent for a mesh that has them, this covers the meshes that did not
+        # exist when the problem was initialised - the ones a remesh built, and the ones the loader
+        # itself builds when the state file carries a different mesh template. Both are built from a
+        # template, in its element order, so writer and reader agree on the numbers.
         if not self.is_mesh_distributed():
             self.assign_global_base_element_indices()
         if state.save:

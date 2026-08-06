@@ -23,9 +23,11 @@
 #
 # ========================================================================
 
-# Remeshing under --distribute. See dev_docs/distributed_remeshing.md for the full picture; the
-# short version is that it does not work yet and, before the refusal these tests pin down, it did
-# not say so either:
+# Remeshing under --distribute, which is being built stage by stage - see
+# dev_docs/distributed_remeshing.md. Until it is finished, force_remesh() refuses on a distributed
+# problem and the tests here bypass that with --force.
+#
+# What it used to do instead of saying that it could not:
 #
 # * at two ranks every rank rebuilt the geometry from its own partition of the boundary, and since
 #   only rank 0's .msh file is kept, rank 0's truncated wedge silently became the mesh for all of
@@ -35,9 +37,10 @@
 #   define_geometry() while the others walked into the barriers of generate_mesh_to_file(), and the
 #   job hung. At three ranks that rank is rank 0.
 #
-# So: force_remesh() refuses on a distributed problem, and MeshedMeshTemplate._do_define_geometry()
-# agrees across ranks on whether define_geometry() succeeded. The last test is the one that would
-# hang without the latter, which is why every run here has a timeout that fails rather than waits.
+# So the tests below cover, in order: the refusal (stage 0) and the agreement that replaces the hang,
+# the merged boundary every rank now rebuilds (stage 1), and the re-partitioning of the rebuilt mesh
+# together with the two things it cannot do yet (stage 2). Every run is under a timeout that fails
+# rather than waits, since the regressions being guarded against are deadlocks.
 
 import os
 import shutil
@@ -98,6 +101,17 @@ def _run_serially(tmpdir, extra_args, timeout=300):
 
 def _reported(proc):
     return [l for l in proc.stdout.splitlines() if l.startswith("PYOOMPH_MPI_RESULT ")]
+
+
+def _remesh_fields(proc):
+    """{rank: {"ndof": ..., "distributed": ...}} from the ranks that got through the remesh."""
+    out = {}
+    for line in _reported(proc):
+        if " remeshed " not in line:
+            continue
+        fields = dict(f.split("=", 1) for f in line.split() if "=" in f)
+        out[int(fields["rank"])] = fields
+    return out
 
 
 def _boundaries(proc):
@@ -198,3 +212,68 @@ def test_boundary_coordinates_are_the_whole_boundary_on_every_rank(tmp_path, npr
             "rank %d rebuilt a different boundary than the serial run "
             "(%s points in %s segment(s) vs %s in %s)" % (
                 rank, fields["npts"], fields["nseg"], expected["npts"], expected["nseg"]))
+
+
+@pytest.mark.parametrize("nproc", [2, 3, 4])
+def test_the_remeshed_problem_is_partitioned_again(tmp_path, nproc):
+    """Stage 2: the rebuilt meshes are replicated, so the problem has to be distributed again.
+
+    Without that, every rank holds the whole mesh while oomph-lib still numbers the equations as if
+    it were distributed, and ndof comes out nproc times too large - which is exactly what the
+    comparison against the serial run below catches.
+    """
+    reference = _run_serially(tmp_path / "serial", [])
+    assert reference.returncode == 0, \
+        "the serial reference run failed:\n%s" % reference.stdout[-2000:]
+    serial = _remesh_fields(reference)[0]
+    assert serial["distributed"] == "False", "the serial run reports a distributed mesh"
+
+    proc = _run(tmp_path / "mpi", ["--distribute", "--force"], nproc=nproc)
+    assert proc.returncode == 0, \
+        "the run failed:\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s" % (
+            proc.stdout[-2000:], proc.stderr[-2000:])
+    got = _remesh_fields(proc)
+    assert len(got) == nproc, "not every rank finished the remesh, got ranks %s" % sorted(got)
+    for rank, fields in sorted(got.items()):
+        assert fields["distributed"] == "True", \
+            "rank %d kept a replicated mesh after remeshing" % rank
+        assert fields["ndof"] == serial["ndof"], (
+            "rank %d reports ndof=%s after remeshing, the serial run %s -- a factor of %s would mean "
+            "the replicated mesh was numbered as if it were distributed" % (
+                rank, fields["ndof"], serial["ndof"], nproc))
+
+
+def test_remeshing_only_some_domains_is_refused(tmp_path):
+    """A domain that is not remeshed stays partitioned, and oomph cannot distribute a mesh twice.
+
+    Refused before the first mesh is replaced: raising once force_remesh() is under way leaves the
+    problem half rebuilt, which does not even survive interpreter shutdown (it segfaulted at exit
+    while this was checked at the re-distribution instead). Hence the check on the returncode: 3 is
+    the worker reporting the exception, anything else means it died on the way out.
+    """
+    proc = _run(tmp_path, ["--distribute", "--force", "--second-domain"], nproc=2)
+    assert proc.returncode == 3, \
+        "expected the worker to report the refusal (3), got %d:\n--- stderr tail ---\n%s" % (
+            proc.returncode, proc.stderr[-2000:])
+    reported = _reported(proc)
+    assert len(reported) == 2, "expected both ranks to raise:\n%s" % "\n".join(reported)
+    for line in reported:
+        assert "only some domains" in line and "box" in line, \
+            "the refusal did not name the domain left behind: %s" % line
+
+
+def test_adapting_the_remeshed_mesh_is_refused_when_asked_for_explicitly(tmp_path):
+    """num_adapt>0 would leave the new mesh non-uniformly refined, which distribute() rejects.
+
+    The default (num_adapt=None, i.e. max_refinement_level) is dropped to 0 with a printed note
+    instead; only a value the caller named is refused, since that is a request about the result.
+    """
+    proc = _run(tmp_path, ["--distribute", "--force", "--num-adapt", "3"], nproc=2)
+    assert proc.returncode == 3, \
+        "expected the worker to report the refusal (3), got %d:\n--- stderr tail ---\n%s" % (
+            proc.returncode, proc.stderr[-2000:])
+    reported = _reported(proc)
+    assert len(reported) == 2, "expected both ranks to raise:\n%s" % "\n".join(reported)
+    for line in reported:
+        assert "num_adapt=3" in line and "uniformly refined" in line, \
+            "the refusal did not explain itself: %s" % line

@@ -84,6 +84,21 @@ class Disc(GmshTemplate):
         self.plane_surface("substrate", "axis", "interface", name="domain")
 
 
+class Box(GmshTemplate):
+    """A second domain that never asks whether it is being remeshed.
+
+    force_remesh() therefore skips it (see MeshedMeshTemplate._remeshing_can_change_the_mesh), which
+    is what makes a partial remesh - the case the re-distribution has to refuse, since the mesh it
+    leaves alone is still partitioned from before."""
+
+    def define_geometry(self):
+        self.default_resolution = 0.25
+        corners = [self.point(x, y) for x, y in ((-2, -2), (-1, -2), (-1, -1), (-2, -1))]
+        self.create_lines(corners[0], "bottom", corners[1], "right", corners[2], "top", corners[3],
+                          "left", corners[0])
+        self.plane_surface("bottom", "right", "top", "left", name="box")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--outdir", required=True)
@@ -93,6 +108,10 @@ def main():
                         help="set experimental_distributed_remeshing, i.e. run the unfinished path")
     parser.add_argument("--fail-define-geometry-on-rank", type=int, default=None,
                         help="raise inside define_geometry on this rank only")
+    parser.add_argument("--second-domain", action="store_true",
+                        help="add a domain that is not remeshed, i.e. make it a partial remesh")
+    parser.add_argument("--num-adapt", type=int, default=None,
+                        help="pass num_adapt to force_remesh explicitly")
     args, rest = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + rest
 
@@ -109,8 +128,11 @@ def main():
             p += mesh
             p += (MeshFileOutput() + ElementSpace("C2") + ProjectExpression(u=0)
                   + Equations() @ "interface") @ "domain"
+            if args.second_domain:
+                p += Box()
+                p += (MeshFileOutput() + ElementSpace("C2") + ProjectExpression(u=0)) @ "box"
             p.initialise()
-            p.force_remesh()
+            p.force_remesh(num_adapt=args.num_adapt)
             ndof, distributed = p.ndof(), bool(p.get_mesh("domain").is_mesh_distributed())
         print("PYOOMPH_MPI_RESULT rank=%d remeshed ndof=%d distributed=%s" % (
             get_mpi_rank(), ndof, distributed))

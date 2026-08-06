@@ -6901,6 +6901,55 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.set_custom_assembler(None)
         return
 
+    def _check_distributed_remeshing_scope(self,remeshers:list["RemesherBase"],num_adapt:int | None)->None:
+        """Refuse what the distributed remeshing path cannot do, *before* anything is rebuilt.
+
+        Both limitations below are properties of the request, so they are known here - and they have
+        to be raised here, because force_remesh() has no way back once it has started replacing
+        meshes: the problem is then left half rebuilt, with the new meshes installed and the
+        superseded ones not yet torn down, which does not even survive interpreter shutdown.
+
+        Unanimous by construction: every rank has the same meshes, the same remeshers and the same
+        argument.
+        """
+        if not self.is_distributed() or get_mpi_nproc()<=1:
+            return
+        rebuilt={name for name,m in self._meshdict.items()
+                 if not isinstance(m,ODEStorageMesh) and any(r.template.has_domain(name) for r in remeshers)}
+        untouched=sorted(name for name,m in self._meshdict.items()
+                         if not isinstance(m,ODEStorageMesh) and name not in rebuilt)
+        if untouched:
+            # oomph's Mesh::distribute() partitions a whole mesh; it is not a re-partitioning of one
+            # that is already split. A domain left alone stays partitioned from before, and there is
+            # no way to fit the rebuilt ones into that partition. See _redistribute_after_remeshing.
+            raise RuntimeError("Remeshing only some domains of a distributed (--distribute) problem is not "
+                               "supported: the rebuilt meshes are replicated on every rank and have to be "
+                               "partitioned again, but "+", ".join(untouched)+" would still be partitioned "
+                               "from before, and oomph-lib cannot distribute a mesh twice. Remesh all domains "
+                               "at once, or run without --distribute. See dev_docs/distributed_remeshing.md.")
+        if num_adapt is not None and num_adapt>0:
+            # Never silently dropped: an explicit num_adapt is a request about the resulting mesh.
+            raise RuntimeError("force_remesh(num_adapt="+str(num_adapt)+") is not supported on a distributed "
+                               "(--distribute) problem: adapting the new mesh leaves it non-uniformly refined, "
+                               "and oomph-lib only distributes uniformly refined meshes, so the remeshed problem "
+                               "could not be partitioned again. Pass num_adapt=0, or run without --distribute. "
+                               "See dev_docs/distributed_remeshing.md.")
+
+    def _remesh_adaption_steps(self,num_adapt:int | None)->int:
+        """How many adaption rounds the remesh should run. Zero on a distributed problem.
+
+        Adapting would leave the new mesh non-uniformly refined, which Problem::distribute() refuses,
+        so the re-distribution afterwards would be the thing that fails. An explicit num_adapt>0 has
+        already been refused in _check_distributed_remeshing_scope(); this is the default, derived
+        from max_refinement_level, which the user did not ask for by name."""
+        if num_adapt is None and self.is_distributed() and get_mpi_nproc()>1:
+            # Deliberately not behind is_quiet(): it changes the mesh that comes out.
+            print("NOTE: not adapting the remeshed mesh, since a distributed problem can only be "
+                  "partitioned again while its meshes are uniformly refined "
+                  "(dev_docs/distributed_remeshing.md, stage 2)")
+            return 0
+        return self.max_refinement_level if num_adapt is None else num_adapt
+
     def _refuse_distributed_remeshing(self,remeshers:list["RemesherBase"])->None:
         """Stop a remesh of a distributed problem, unless :py:attr:`experimental_distributed_remeshing` says otherwise.
 
@@ -6931,6 +6980,53 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                            "Run without --distribute, or set Problem.experimental_distributed_remeshing=True to get "
                            "the (wrong) old behaviour back. See dev_docs/distributed_remeshing.md.")
 
+    def _redistribute_after_remeshing(self)->None:
+        """Partition the rebuilt meshes again, since remeshing replaces them whole and replicated.
+
+        A remesh regenerates the mesh from its geometry, which every rank does in full - the same
+        state the problem is in at startup, just before its first :py:meth:`distribute`. Left like
+        that, every rank holds the entire mesh while oomph-lib still has ``Problem_has_been_distributed``
+        set, so the equation numbering counts every locally owned node once per rank and ``ndof``
+        comes out ``nproc`` times too large. So do what startup does, at the point where the meshes
+        are whole and the transfer of the old solution is finished. See
+        dev_docs/distributed_remeshing.md, stage 2.
+
+        Both preconditions oomph-lib puts on distribute() - a whole mesh, uniformly refined - were
+        established before any mesh was touched, by _check_distributed_remeshing_scope() and
+        _remesh_adaption_steps(). They are asserted rather than checked here: there is no way back
+        from this point, so a refusal would leave the problem half rebuilt instead of helping.
+        """
+        if not self.is_distributed() or get_mpi_nproc()<=1:
+            return
+        meshes=[m for m in self._meshdict.values() if not isinstance(m,ODEStorageMesh)]
+        assert not any(m.is_mesh_distributed() for m in meshes), \
+            "a mesh survived the remesh still partitioned, which _check_distributed_remeshing_scope should have refused"
+        assert all(self._is_uniformly_refined(m) for m in meshes), \
+            "the remeshed mesh came out non-uniformly refined, which _remesh_adaption_steps should have prevented"
+
+        # The base element numbers are what state files address elements and nodes by, and they can
+        # only be assigned while the mesh is still whole (Mesh::assign_global_base_element_indices).
+        # Once the meshes below are partitioned, the lazy assignment in BaseMesh._define_state_file
+        # deliberately does not step in any more, so this is the only chance.
+        for m in meshes:
+            m.assign_global_base_element_indices()
+
+        if not self.is_quiet():
+            print("REDISTRIBUTING THE REMESHED PROBLEM")
+        self.actions_before_distribute()
+        self.distribute()
+        self.actions_after_distribute()
+
+    def _is_uniformly_refined(self,mesh:"AnySpatialMesh")->bool:
+        """Whether every element of ``mesh`` sits at the same refinement level.
+
+        Asked of the local mesh, which is the whole mesh here - _redistribute_after_remeshing() only
+        calls it on meshes it has just established are replicated."""
+        if not mesh.refinement_possible():
+            return True
+        levels={e.refinement_level() for e in mesh.elements()}
+        return len(levels)<=1
+
     def force_remesh(self, only_domains:set[MeshTemplate] | None=None, num_adapt:int | None=None,interpolator:type["BaseMeshToMeshInterpolator"] | None=None):
         if interpolator is None:
             interpolator=self.mesh_interpolator
@@ -6954,9 +7050,11 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
         if len(remeshers)==0:
             return
-        # Deliberately after the "is there anything to remesh at all" test, so that a
-        # remesh_if_necessary() which finds nothing to do still returns quietly when distributed.
+        # Both deliberately after the "is there anything to remesh at all" test, so that a
+        # remesh_if_necessary() which finds nothing to do still returns quietly when distributed,
+        # and both before the first mesh is touched - see _check_distributed_remeshing_scope.
         self._refuse_distributed_remeshing(remeshers)
+        self._check_distributed_remeshing_scope(remeshers,num_adapt)
         self.invalidate_cached_mesh_data()
         print("REMESHING")
         
@@ -7053,7 +7151,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             dof_current=self.get_history_dofs(6)
             self._update_dof_vectors_for_continuation(dof_deriv,dof_current)
 
-        num_adapt = self.max_refinement_level if num_adapt is None else num_adapt
+        num_adapt = self._remesh_adaption_steps(num_adapt)
 
 
         for name, newmesh in new_meshes.items():
@@ -7082,6 +7180,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             perform_interpolation()
 
         self.remove_macro_elements()
+
+        # Before actions_after_remeshing(), so that user code sees the mesh in its final state - which
+        # on a distributed problem means partitioned, exactly as it is in every other callback.
+        self._redistribute_after_remeshing()
 
         self.actions_after_remeshing()
         for r in remeshers:

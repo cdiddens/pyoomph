@@ -1,9 +1,9 @@
 # Remeshing under `--distribute`
 
-Status: **stages 0 and 1 done.** Stages 2-5 are open, and the refusal from stage 0 still stands, so
-remeshing a distributed problem is still not something a user can do - stage 1 only makes the
-geometry it would rebuild correct. File and line references are to the tree state at the time of
-writing (branch `develop`, after `7b8770a`).
+Status: **stages 0, 1 and 2 done.** Stages 3-5 are open, and the refusal from stage 0 still stands,
+so remeshing a distributed problem is still not something a user can do: the geometry and the
+partition are right by now, but the *values* on the new mesh are not, which is stage 3. File and line
+references are to the tree state at the time of writing (branch `develop`, after `7b8770a`).
 
 Remeshing a distributed problem does not work today. Until stage 0 it did not *say* so: at two ranks
 it ran to completion and produced a truncated domain, a replicated mesh and an equation count `nproc`
@@ -194,17 +194,46 @@ remesh produces), and the only thing wrong is that it is replicated:
 
 i.e. exactly `nproc` x the true count, confirming §1.3 at three partition counts rather than one.
 
-### Stage 2 - re-distribute after remeshing
+### Stage 2 - re-distribute after remeshing. DONE.
 
-`force_remesh()` gets a distributed mode: build the new mesh replicated on every rank (which is
-exactly what `initialise()` does before its own first `distribute()`), run the interpolation and the
-`num_adapt` loop replicated, then `actions_before_distribute()` / `distribute()` /
-`actions_after_distribute()` at the very end.
+`force_remesh()` builds the new mesh replicated on every rank (which is exactly what `initialise()`
+does before its own first `distribute()`), transfers the old solution, and then runs
+`actions_before_distribute()` / `distribute()` / `actions_after_distribute()` -
+`_redistribute_after_remeshing()`, called after `remove_macro_elements()` and before
+`actions_after_remeshing()`, so that user code sees the mesh in its final, partitioned state.
 
-Doing the adapt loop replicated is redundant work, but it is correct, it matches the existing startup
-flow, and it keeps a re-partition from interleaving with the interpolation rounds. Peak memory is no
-worse than at startup, where the whole mesh exists on every rank anyway. Making it scalable belongs to
-stage 5, not here.
+Measured: `ndof` after the remesh is now 437 at 1, 2, 3 and 4 ranks, where it used to be
+437 x `nproc`, and every rank holds a partition with halos.
+
+Two things had to come with it:
+
+* **The base element numbers.** `Mesh::assign_global_base_element_indices` can only run while the
+  mesh is whole, and `BaseMesh._define_state_file`'s lazy assignment deliberately stands down on a
+  distributed mesh - so without assigning them here, saving a state after a distributed remesh fails
+  with "The mesh has elements without a global base index". Verified by removing the call: it does.
+* **Both preconditions refused up front.** oomph's `distribute()` needs a whole mesh, uniformly
+  refined. Neither can be checked at the point where it is used: `force_remesh()` has no way back
+  once it starts replacing meshes, and raising there leaves the problem half rebuilt - which does not
+  even survive interpreter shutdown (it segfaulted at exit while the partial-remesh check still sat
+  in `_redistribute_after_remeshing`). Both are therefore decided in
+  `_check_distributed_remeshing_scope()`, before the first mesh is touched, and asserted rather than
+  checked at the distribution.
+
+What those two refusals are:
+
+* **Remeshing only some domains.** A domain that is not remeshed stays partitioned from before, and
+  `Mesh::distribute` builds a partition of a whole mesh rather than re-partitioning a split one. The
+  message names the domains left behind.
+* **Adapting the new mesh.** `num_adapt > 0` leaves it non-uniformly refined. Unlike at startup
+  (`_defer_uneven_initial_refinement`) there is nothing to defer, since the refinement comes from the
+  error estimate on the new mesh rather than from a level that was asked for. An **explicit**
+  `num_adapt` is refused; the default (`None`, i.e. `max_refinement_level`) is dropped to 0 by
+  `_remesh_adaption_steps()` with a printed note, since the caller did not ask for it by name. The
+  note is not behind `is_quiet()` - it changes the mesh that comes out.
+
+Running the interpolation replicated is redundant work, but it is correct, it matches the startup
+flow, and peak memory is no worse than at startup, where the whole mesh exists on every rank anyway.
+Making it scalable, and lifting the adaption refusal, belongs to stage 5.
 
 ### Stage 3 - cross-rank value transfer
 
@@ -263,21 +292,26 @@ sums), at 2, 3 and 4 ranks:
    over the polylines, against a serial run of the same worker, at 2, 3 and 4 ranks);
 2. the three-rank case specifically - rank 0 owning no interface element is what used to hang
    (**done**, covered by the same test: at three ranks rank 0 is the rank with no interface element);
-3. `is_mesh_distributed()` true and `ndof` equal to the serial count after the remesh (stage 2). The
-   `nproc` multiplier of §1.3 makes this a single decisive assertion;
+3. `is_mesh_distributed()` true and `ndof` equal to the serial count after the remesh (stage 2,
+   **done** - at 2, 3 and 4 ranks; the `nproc` multiplier of §1.3 makes it a single decisive
+   assertion), plus the two refusals stage 2 has to make;
 4. field values after remeshing equal to serial within round-off, with **zero** "could not be located"
    fallbacks (stage 3);
 5. the `Remesher2d` path, once stage 4 lands;
 6. `mpirun` **without** `--distribute` keeps working unchanged throughout - `needs_merging()` already
    short-circuits that case, but it is the regression that would go unnoticed.
 
-`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 11 tests, ~23 s,
-covering stages 0 and 1: the refusal on **every** rank for both paths at 2 and 4 ranks, the unchanged
+`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 16 tests, ~36 s,
+covering stages 0 to 2: the refusal on **every** rank for both paths at 2 and 4 ranks, the unchanged
 behaviour of `mpirun` without `--distribute` at 2 and 4 ranks, the collective agreement when one rank
-(0 or 2, since the agreement is symmetric) raises inside `define_geometry`, and the merged boundary
-matching a serial reference run at 2, 3 and 4 ranks. Every run is under a timeout that fails rather
-than waits, so a regression in the agreement shows up as a failed test instead of a stuck suite - it
-already caught one, see the note at the end of stage 1.
+(0 or 2, since the agreement is symmetric) raises inside `define_geometry`, the merged boundary
+matching a serial reference run at 2, 3 and 4 ranks, `ndof` and `is_mesh_distributed()` matching the
+serial run after the re-partitioning, and the partial-remesh and explicit-`num_adapt` refusals.
+
+Every run is under a timeout that fails rather than waits, so a regression in the agreement shows up
+as a failed test instead of a stuck suite - it has already caught one (see the end of stage 1). The
+partial-remesh test additionally asserts the exact return code, because the bug it pins down was a
+segfault *after* a correct error message.
 
 ---
 
