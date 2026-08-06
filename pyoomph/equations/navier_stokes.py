@@ -541,7 +541,10 @@ class StokesEquations(Equations):
 ##################################
 
 class NavierStokesEquations(StokesEquations):   
-    """Represents the Navier-Stokes-Equations, defined by the second-order partial differential equations (PDEs):
+    """    
+    .. _NavierStokesEquations:
+    
+    Represents the Navier-Stokes-Equations, defined by the second-order partial differential equations (PDEs):
 
     .. math:: \\partial_t \\rho + \\nabla \\cdot (\\rho \\vec{u}) = 0 \\,
     .. math:: \\rho (\\partial_t \\vec{u} + \\vec{u} \\cdot \\nabla \\vec{u} ) = \\nabla \\cdot [-\\nabla p \\vec{\\vec{I}} + \\mu (\\nabla \\vec{u} + (\\nabla \\vec{u})^\\text{T})] + f \\,

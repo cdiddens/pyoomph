@@ -5,7 +5,7 @@ Viscoelastic flow: the log-conformation approach
 
 A polymer solution does not respond to deformation instantaneously: the dissolved chains stretch, store elastic energy and relax back over a characteristic time :math:`\lambda`. The state of the chains is described by the *conformation tensor* :math:`\mathbf{C}`, a symmetric positive definite tensor that equals the identity when the polymer is unstretched. It is carried by the flow and pulled back towards equilibrium,
 
-.. math::
+.. math:: :label: eqviscoelastic
 
    \stackrel{\triangledown}{\mathbf{C}}\;=\;\partial_t\mathbf{C}+\left(\vec{u}\cdot\nabla\right)\mathbf{C}-\nabla\vec{u}\cdot\mathbf{C}-\mathbf{C}\cdot\left(\nabla\vec{u}\right)^\mathrm{T}\;=\;-\frac{1}{\lambda}g(\mathbf{C})
 
@@ -17,8 +17,6 @@ where the left hand side is the *upper-convected derivative* and the constitutiv
 
 which is added to the momentum equation alongside the usual solvent stress. Note that pyoomph's :py:func:`~pyoomph.expressions.generic.upper_convected_derivative` implements exactly the left hand side above, so the conformation equation can be written down almost verbatim.
 
-Why not solve for :math:`\mathbf{C}` directly
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Solving that equation as it stands works at low elasticity and then fails, usually well before the flow becomes physically interesting. The problem is that :math:`\mathbf{C}` grows *exponentially* in extensional regions, and a polynomial finite element basis approximates an exponential badly. Once the discrete :math:`\mathbf{C}` loses positive definiteness the computation diverges, and no amount of mesh refinement postpones it for long. This is the classical *high Weissenberg number problem*.
 
@@ -39,8 +37,6 @@ where :math:`\boldsymbol{\Omega}` and :math:`\mathbf{B}` are the rotational and 
 
 Besides :py:class:`~pyoomph.equations.viscoelastic.OldroydB`, the models :py:class:`~pyoomph.equations.viscoelastic.Giesekus` :cite:`Giesekus1982`, :py:class:`~pyoomph.equations.viscoelastic.PTT`, :py:class:`~pyoomph.equations.viscoelastic.FENE_CR` and :py:class:`~pyoomph.equations.viscoelastic.FENE_P` are available, and both 2d Cartesian and axisymmetric coordinate systems are supported.
 
-Flow past a confined cylinder
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The standard benchmark for viscoelastic flow solvers is creeping flow past a cylinder placed on the centreline of a channel whose half-height is twice the cylinder radius :cite:`Alves2001,Hulsen2005,Claus2013`. Everything is nondimensionalised with the total viscosity :math:`\eta_0=\eta_\mathrm{s}+\eta_\mathrm{p}`, the cylinder radius and the mean inlet velocity, leaving the solvent fraction :math:`\beta=\eta_\mathrm{s}/\eta_0=0.59` and the Weissenberg number :math:`\mathrm{Wi}=\lambda\langle u\rangle/R`. Only the upper half is solved, with a symmetry condition on the centreline:
 
@@ -57,24 +53,10 @@ The Weissenberg number enters as a :py:meth:`~pyoomph.generic.problem.Problem.de
 
 The conformation tensor needs a symmetry condition of its own. Its shear component is odd under :math:`y\to-y`, so :math:`\Psi_{xy}=0` on the centreline, and imposing that is not optional: the constitutive equation contains no diffusion, so nothing else damps an odd mode in that component.
 
-Finally, the mesh is graded by hand rather than by an error estimator, and stabilised. Both deserve a section of their own.
+We introduce two numbers to steer the local mesh size: a coarse ``far_resolution`` for the channel, and a much finer ``near_resolution`` attached to a single extra point on the top wall directly above the cylinder, from which gmsh grades outwards. This is combined with a O-grid, which resolves the thin polymer stress boundary layer on the cylinder.
 
-Resolution, and why not to leave it to the error estimator
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Another catch is in :math:`eqviscoelastic` itself, since it has no diffusion whatsoever -- its only spatial operator is :math:`\left(\vec{u}\cdot\nabla\right)\boldsymbol{\Psi}` -- and just behind the rear stagnation point the polymer stress grows exponentially. Plain Galerkin answers that with a node-to-node sawtooth running the length of the wake. It barely touches the drag, which is an integral over the cylinder, but it destroys any profile taken through the wake. Passing ``stabilization="SUPG"`` to :py:class:`~pyoomph.equations.viscoelastic.ViscoelasticEquations` removes it; the reference stabilises as well, with a DEVSS-G/DG scheme.
 
-A :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator` is the obvious thing to reach for here, and it is a poor choice. Far up- and downstream the flow is fully developed: :math:`\boldsymbol{\Psi}` no longer varies along the channel, so the advection term vanishes, the constitutive equation degenerates to a pointwise algebraic relation with no spatial derivatives at all, and it is satisfied exactly at every node on any mesh whatsoever. Refining there buys nothing. The Z2 estimator cannot know that -- it sees a nonzero recovered-flux error, because :math:`\log\mathbf{C}` is not a polynomial in :math:`y` -- and spends most of the mesh on it.
-
-Two numbers steer the mesh instead: a coarse ``far_resolution`` for the channel, and a much finer ``near_resolution`` attached to a single extra point on the top wall directly above the cylinder, from which gmsh grades outwards. Together with the O-grid this is both cheaper and more accurate than the adaptive version -- about 82 000 degrees of freedom against 150 000, and a drag error several times smaller.
-
-The O-grid itself is what resolves the thin polymer stress boundary layer on the cylinder, and the estimator would never have refined it anyway: those structured quadrilaterals come out at exactly their nominal transfinite count.
-
-Stabilisation
-~~~~~~~~~~~~~
-
-The constitutive equation has no diffusion whatsoever -- its only spatial operator is :math:`\left(\vec{u}\cdot\nabla\right)\boldsymbol{\Psi}` -- and just behind the rear stagnation point the polymer stress grows exponentially. Plain Galerkin answers that with a node-to-node sawtooth running the length of the wake. It barely touches the drag, which is an integral over the cylinder, but it destroys any profile taken through the wake. Passing ``stabilization="SUPG"`` to :py:class:`~pyoomph.equations.viscoelastic.ViscoelasticEquations` removes it; the reference stabilises as well, with a DEVSS-G/DG scheme.
-
-Comparing against the reference
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :numref:`figpdeviscoelasticstress` reproduces Fig. 6 of :cite:`Claus2013`: the polymer stress :math:`\tau_{xx}` along a path that runs up the centreline, over the cylinder surface and away down the wake, one curve per Weissenberg number. The axes are theirs, so the two can be laid side by side.
 
