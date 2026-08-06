@@ -763,7 +763,9 @@ def test_structure_id_changes_on_remeshing():
     which was never caused by the test or by the structural-sparsity work: a superseded mesh kept its
     _templatemesh reference, closing an uncollectable Problem -> mesh -> template -> remesher -> Problem
     cycle, so any remeshing script leaked its whole Problem. Fixed in _destroy_superseded_mesh() (see
-    generic/problem.py); if leak reports ever reappear here, look there first."""
+    generic/problem.py), and again on the remesher side for the *replacement* mesh, which does keep its
+    template (RemesherBase.problem, see meshes/remesher.py); if leak reports ever reappear here, look
+    there first. test_remeshing_leaks.py guards both."""
     gmsh = pytest.importorskip("gmsh", reason="remeshing needs gmsh")  # noqa: F841
     from pyoomph.equations.ALE import LaplaceSmoothedMesh
     from pyoomph.meshes.remesher import Remesher2d

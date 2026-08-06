@@ -467,11 +467,14 @@ def _destroy_superseded_mesh(m:"AnySpatialMesh") -> None:
     # Dropping _templatemesh is what keeps the whole Problem collectible at all: unlike the
     # replacement mesh (which release() eventually tears down via _teardown_spatial_mesh), a
     # superseded mesh is never seen by release() again, yet stays pinned alive by the
-    # unrevokable nb::keep_alive from the Problem. Its MeshTemplate in turn reaches the Problem
-    # again through the template's remesher (RemesherBase.problem, see meshes/remesher.py),
-    # closing a Problem -> (invisible keep_alive) -> superseded mesh -> _templatemesh ->
-    # MeshTemplate -> remesher -> Problem cycle that gc cannot break, so every remeshing script
-    # leaked its entire Problem - meshes, nodes, elements, equations and all. Only this mesh's
+    # unrevokable nb::keep_alive from the Problem. Its MeshTemplate used to reach the Problem
+    # again through the template's remesher, which stored it in a plain attribute, closing a
+    # Problem -> (invisible keep_alive) -> superseded mesh -> _templatemesh -> MeshTemplate ->
+    # remesher -> Problem cycle that gc cannot break, so every remeshing script leaked its entire
+    # Problem - meshes, nodes, elements, equations and all. That last edge is gone (RemesherBase
+    # .problem is a live, non-owning lookup now - it had to be, since the *replacement* mesh keeps
+    # its template and so hit the same cycle), but dropping _templatemesh here is still what stops
+    # a superseded mesh's template graph from being kept alive for nothing. Only this mesh's
     # reference to the template is dropped; the template itself lives on (it is what the
     # replacement mesh was built from), and it must NOT be _set_problem(None)'d the way
     # _teardown_spatial_mesh() does, since it is still in active use.

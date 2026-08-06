@@ -43,6 +43,7 @@ from .mesh import MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,MeshT
 from ..typings import *
 if TYPE_CHECKING:
     from ..expressions import ExpressionOrNum
+    from ..generic.problem import Problem
 
 class RemesherPointEntry:
     def __init__(self,x:float,y:float,z:float,size:float):
@@ -77,6 +78,22 @@ class RemesherBase:
         self._unique_pts:list[RemesherPointEntry]=[]
         self._old_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d]={}
         #self._domain_points={} # access the points via domain names
+
+    @property
+    def problem(self) -> "Problem":
+        # Resolved live from the template, never stored: a Python-level attribute holding the
+        # Problem here closed a cycle that the garbage collector cannot break, because one of
+        # its edges is a nb::keep_alive record and thus invisible to gc:
+        #   Problem -(keep_alive from add_sub_mesh)-> mesh -> _templatemesh -> MeshTemplate
+        #   -> remesher -> Problem.
+        # Nothing then made the Problem collectible, so its __del__/release() never ran and
+        # every remeshing script leaked its whole Problem (meshes, nodes, elements, equations)
+        # - reported at shutdown as "nanobind: leaked N instances". Problem.force_remesh() only
+        # breaks this for the *superseded* meshes (_destroy_superseded_mesh(), see
+        # generic/problem.py); the replacement mesh must keep its _templatemesh, so the edge has
+        # to be removed on this side. get_problem() is the same non-owning C++-side lookup that
+        # the meshes and code generators use for exactly this reason.
+        return self.template.get_problem()
 
     def add_point_entry(self,x:float,y:float,z:float,size:float) -> RemesherPointEntry:
         for p in self._unique_pts:
@@ -321,7 +338,6 @@ class Remesher2d(RemesherBase):
         super(Remesher2d, self).__init__(template)
         self._old_meshes={}
         self._boundary_nodes:dict[str,Remesher2dBoundaryLineCollection]={}
-        self.problem=None
         self.gmsh=GmshRemesher2d(self)
         self._meshbounds={}
         self._ptsizes:dict[_pyoomph.Node,float]={}
@@ -460,7 +476,6 @@ class Remesher2d(RemesherBase):
 
 
     def remesh(self):
-        self.problem=self.template.get_problem()
         assert self.problem is not None
         self._identify_domains()
         self._boundary_nodes={}
@@ -571,7 +586,6 @@ class ParametricGmshMeshRemesher2d(Remesher2d):
         
     def remesh(self):
         
-        self.problem=self.template.get_problem()
         assert self.problem is not None
         self.gmsh._meshfile=None 
         self.gmsh._loaded_from_mesh_file = None 
