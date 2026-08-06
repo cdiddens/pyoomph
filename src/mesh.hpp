@@ -193,6 +193,22 @@ namespace pyoomph
 		// projecting each node onto the old interface geometry, which needs no chart and is therefore
 		// the only option for a 2d interface in 3d. See dev_docs/mesh_point_locator.md.
 		virtual void nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate = true);
+		// Whether nodal_interpolate_from(from) is a transfer OUT of a distributed mesh INTO a replicated
+		// one, which is what remeshing a distributed problem does: the new mesh is rebuilt in full on
+		// every rank (see Problem._redistribute_after_remeshing), while the old one is still partitioned.
+		// Each rank can then only place the nodes that fall into its own share of the old mesh, so the
+		// transfer is only complete once the ranks have pooled what each of them found.
+		bool interpolation_is_shared_across_ranks(Mesh *from) const;
+		// Pool that transfer. Every rank holds the same nodes and elements in the same order here, so the
+		// values of whatever each rank could place are summed across the ranks and divided by how many
+		// placed it. Nodes rescued from another rank are added to completed_nodes and removed from
+		// missing_nodes, so that the nearest-node fallback - and the count it reports - are left with the
+		// nodes that are genuinely outside the old mesh everywhere. Returns how many were rescued.
+		// See dev_docs/distributed_remeshing.md, stage 3.
+		unsigned share_interpolation_across_ranks(Mesh *from, int boundary_index, bool interface_case,
+												  const std::vector<bool> &completed_elements,
+												  std::set<oomph::Node *> &completed_nodes,
+												  std::set<oomph::Node *> &missing_nodes);
 		// Interpolate nodal values along a boundary from an old mesh, using the arclength-like boundary coordinate
 		// to find the closest correspondence; boundary_max_dist limits how far a match may be to still be accepted.
 		virtual void nodal_interpolate_along_boundary(Mesh *from, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist);

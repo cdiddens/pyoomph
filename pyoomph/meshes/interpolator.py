@@ -40,6 +40,13 @@ if TYPE_CHECKING:
 
 
 class BaseMeshToMeshInterpolator:
+    #: What this interpolator still gets wrong on a distributed (``--distribute``) problem, quoted by
+    #: the refusal in :py:meth:`~pyoomph.generic.problem.Problem.force_remesh`, or ``None`` if it
+    #: works there. The default says no, since transferring between two meshes that are partitioned
+    #: differently is the hard part and every interpolator has to solve it deliberately.
+    #: See dev_docs/distributed_remeshing.md.
+    distributed_limitation:str | None="it transfers only what this rank's part of the old mesh covers"
+
     def __init__(self, old:"AnyMesh", new:"AnyMesh"):
         self.old = old
         self.new = new
@@ -223,6 +230,11 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
 
 
 class InternalInterpolator(BaseMeshToMeshInterpolator):
+    # Works distributed since stage 3 of dev_docs/distributed_remeshing.md: nodal_interpolate_from
+    # pools across the ranks what each of them could place. Its nodal_interpolate_along_boundary
+    # branches do not, which is why force_remesh() refuses a problem with codim-2 interfaces.
+    distributed_limitation=None
+
     def __init__(self, old:"AnySpatialMesh", new:"AnySpatialMesh"):
         super(InternalInterpolator, self).__init__(old, new)
         self.old:AnySpatialMesh=old

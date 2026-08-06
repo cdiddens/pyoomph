@@ -3197,13 +3197,207 @@ namespace pyoomph
   // the value at a nearby existing node. As in the boundary variant, a field_map translates field
   // indices between the two mesh's JIT-compiled code instances (identity if they are the same code),
   // and DG/DL/D0 (discontinuous) fields are not supported (throws if present).
+  // See declaration in mesh.hpp. Collective, and deliberately so.
+  bool Mesh::interpolation_is_shared_across_ranks(Mesh *from) const
+  {
+#ifdef OOMPH_HAS_MPI
+    // The gate has to be something every rank answers the same way, since it decides whether this
+    // rank enters the MPI_Allreduce below: the problem being distributed is a Problem-wide flag, and
+    // so is the process count.
+    Problem *prob = const_cast<Mesh *>(this)->get_problem();
+    if (!prob || !prob->distributed() || !prob->communicator_pt() || prob->communicator_pt()->nproc() <= 1)
+      return false;
+    // The local answer is not: a rank holding no element of the source cannot say whether the source
+    // is partitioned (an interface mesh it has no share of does not carry the flag), and a rank that
+    // decided differently from the others would leave them in the pooling collective. Ask everybody.
+    int local = (from && from->is_mesh_distributed() && !this->is_mesh_distributed()) ? 1 : 0;
+    int any = local;
+    MPI_Allreduce(&local, &any, 1, MPI_INT, MPI_MAX, prob->communicator_pt()->mpi_comm());
+    return any != 0;
+#else
+    (void)from;
+    return false;
+#endif
+  }
+
+  // See declaration in mesh.hpp.
+  unsigned Mesh::share_interpolation_across_ranks(Mesh *from, int boundary_index, bool interface_case,
+                                                  const std::vector<bool> &completed_elements,
+                                                  std::set<oomph::Node *> &completed_nodes,
+                                                  std::set<oomph::Node *> &missing_nodes)
+  {
+#ifdef OOMPH_HAS_MPI
+    // Not re-checked here: interpolation_is_shared_across_ranks() is itself collective, so asking it
+    // a second time from a place only some ranks reach would be the very deadlock it prevents. The
+    // caller has established it. The communicator is the Problem's - the source mesh may be one this
+    // rank holds no element of, and this one was built after the last distribution and has none.
+    MPI_Comm mc = this->get_problem()->communicator_pt()->mpi_comm();
+
+    // The very order the transfer loop visits them in, so that entry k describes the same node on
+    // every rank. That holds because this mesh is replicated: same elements, same order, same nodes.
+    std::vector<oomph::Node *> nodes;
+    {
+      std::set<oomph::Node *> seen;
+      for (unsigned int ie = 0; ie < this->nelement(); ie++)
+      {
+        BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+        for (unsigned int ine = 0; ine < deste->nnode(); ine++)
+        {
+          oomph::Node *n = deste->node_pt(ine);
+          if (!node_is_in_scope(n, boundary_index, interface_case))
+            continue;
+          if (seen.insert(n).second)
+            nodes.push_back(n);
+        }
+      }
+    }
+
+    // Everything the transfer writes, pre-multiplied by whether this rank has it. Only the entries
+    // it writes: a value it never touches is whatever the freshly built mesh carries, which is the
+    // same number on every rank, so summing it would be harmless but pointless.
+    // Layout per node: values (all time levels), positions at the history levels, Lagrangian
+    // coordinates. Then, per element, its DL and D0 internal data.
+    std::vector<double> values;
+    std::vector<double> weights(nodes.size(), 0.0);
+    auto pack_node = [&](oomph::Node *n, double have) {
+      for (unsigned t = 0; t < n->time_stepper_pt()->ntstorage(); t++)
+        for (unsigned vi = 0; vi < n->nvalue(); vi++)
+          values.push_back(have * n->value(t, vi));
+      for (unsigned t = 1; t < n->position_time_stepper_pt()->ntstorage(); t++)
+        for (unsigned i = 0; i < n->ndim(); i++)
+          values.push_back(have * n->x(t, i));
+      if (this->interpolated_lagrangian_coordinates_at_remeshing)
+      {
+        pyoomph::Node *pn = dynamic_cast<pyoomph::Node *>(n);
+        for (unsigned i = 0; pn && i < pn->nlagrangian(); i++)
+          values.push_back(have * pn->xi(i));
+      }
+    };
+    for (unsigned k = 0; k < nodes.size(); k++)
+    {
+      weights[k] = completed_nodes.count(nodes[k]) ? 1.0 : 0.0;
+      pack_node(nodes[k], weights[k]);
+    }
+    const unsigned n_node_values = values.size();
+
+    // The element-centre transfer of the discontinuous fields, which fails and succeeds independently
+    // of the nodes around it.
+    unsigned ndisc = 0;
+    if (this->nelement())
+    {
+      auto *ft = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_func_table();
+      ndisc = ft->info_DL.numfields + ft->info_D0.numfields;
+    }
+    for (unsigned int ie = 0; ie < this->nelement() && ndisc; ie++)
+    {
+      double have = (ie < completed_elements.size() && completed_elements[ie]) ? 1.0 : 0.0;
+      weights.push_back(have);
+      BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      for (unsigned d = 0; d < ndisc; d++)
+      {
+        oomph::Data *dat = deste->internal_data_pt(d);
+        for (unsigned t = 0; t < dat->time_stepper_pt()->ntstorage(); t++)
+          for (unsigned j = 0; j < dat->nvalue(); j++)
+            values.push_back(have * dat->value(t, j));
+      }
+    }
+
+    if (!values.empty())
+      MPI_Allreduce(MPI_IN_PLACE, &values[0], (int)values.size(), MPI_DOUBLE, MPI_SUM, mc);
+    if (!weights.empty())
+      MPI_Allreduce(MPI_IN_PLACE, &weights[0], (int)weights.size(), MPI_DOUBLE, MPI_SUM, mc);
+
+    unsigned rescued = 0;
+    unsigned pos = 0;
+    for (unsigned k = 0; k < nodes.size(); k++)
+    {
+      oomph::Node *n = nodes[k];
+      double w = weights[k];
+      auto take = [&]() { double v = values[pos++]; return w > 0.0 ? v / w : 0.0; };
+      for (unsigned t = 0; t < n->time_stepper_pt()->ntstorage(); t++)
+        for (unsigned vi = 0; vi < n->nvalue(); vi++)
+        {
+          double v = take();
+          if (w > 0.0)
+            n->set_value(t, vi, v);
+        }
+      for (unsigned t = 1; t < n->position_time_stepper_pt()->ntstorage(); t++)
+        for (unsigned i = 0; i < n->ndim(); i++)
+        {
+          double v = take();
+          if (w > 0.0)
+            n->x(t, i) = v;
+        }
+      if (this->interpolated_lagrangian_coordinates_at_remeshing)
+      {
+        pyoomph::Node *pn = dynamic_cast<pyoomph::Node *>(n);
+        for (unsigned i = 0; pn && i < pn->nlagrangian(); i++)
+        {
+          double v = take();
+          if (w > 0.0)
+            pn->xi(i) = v;
+        }
+      }
+      // Placed by somebody, so it must not go to the nearest-node fallback - nor be counted as a
+      // failure by the report at the end, which is about the transfer and not about this partition.
+      if (w > 0.0 && !completed_nodes.count(n))
+      {
+        completed_nodes.insert(n);
+        missing_nodes.erase(n);
+        rescued++;
+      }
+    }
+    pos = n_node_values;
+    for (unsigned int ie = 0; ie < this->nelement() && ndisc; ie++)
+    {
+      double w = weights[nodes.size() + ie];
+      BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      for (unsigned d = 0; d < ndisc; d++)
+      {
+        oomph::Data *dat = deste->internal_data_pt(d);
+        for (unsigned t = 0; t < dat->time_stepper_pt()->ntstorage(); t++)
+          for (unsigned j = 0; j < dat->nvalue(); j++)
+          {
+            double v = values[pos++];
+            if (w > 0.0)
+              dat->set_value(t, j, v / w);
+          }
+      }
+    }
+    return rescued;
+#else
+    (void)from; (void)boundary_index; (void)interface_case; (void)completed_elements;
+    (void)completed_nodes; (void)missing_nodes;
+    return 0;
+#endif
+  }
+
   void Mesh::nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate)
   {
     this->interpolated_lagrangian_coordinates_at_remeshing=from->interpolated_lagrangian_coordinates_at_remeshing;
     auto old_setting=BulkElementBase::zeta_coordinate_type;
     if (this->interpolated_lagrangian_coordinates_at_remeshing) BulkElementBase::zeta_coordinate_type=1;
+    // Asked before any return, because it is collective: every rank has to reach it, including the
+    // ones that have nothing to do here.
+    const bool shared_across_ranks = this->interpolation_is_shared_across_ranks(from);
     if (!this->nelement() || !from->nelement())
+    {
+      // A rank holding no element of the source still owns a full copy of the destination (that is
+      // what makes this case possible at all), so it has to take part in the pooling below and
+      // contribute nothing, or the ranks that do have something will wait for it forever.
+      if (shared_across_ranks && this->nelement())
+      {
+        std::set<oomph::Node *> nothing_completed, nothing_missing;
+        std::vector<bool> no_elements(this->nelement(), false);
+        // The same interface_case the body derives below - it selects which nodes are in scope, so
+        // the two have to agree or the ranks would pack buffers of different lengths.
+        share_interpolation_across_ranks(from, boundary_index,
+                                         (dynamic_cast<InterfaceMesh *>(this) && boundary_index >= 0),
+                                         no_elements, nothing_completed, nothing_missing);
+      }
+      BulkElementBase::zeta_coordinate_type = old_setting;
       return;
+    }
     BulkElementBase *my_be0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     BulkElementBase *from_be0 = dynamic_cast<BulkElementBase *>(from->element_pt(0));
     auto *my_ci = my_be0->get_code_instance();
@@ -3508,6 +3702,13 @@ namespace pyoomph
       }
     }
 
+    // shared_across_ranks, asked once at the top of this function, says that we are transferring out
+    // of a distributed mesh into a replicated one. This rank can then only place what falls into its
+    // own share of the old mesh; everything else is another rank's to place, not a failure, so it
+    // must neither be reported per node here nor blended from local nodes below - the ranks pool
+    // what each of them found first (share_interpolation_across_ranks).
+    std::vector<bool> completed_elements(this->nelement(), false);
+
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
       BulkElementBase *deste = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
@@ -3536,7 +3737,7 @@ namespace pyoomph
         }
         if (!srcelem)
         {
-          if (boundary_index<0) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << xnode[0] << "\t" << xnode[1] << "  " << completed_nodes.size() * 100.0 / this->nnode() << " % done" << std::endl;
+          if (boundary_index<0 && !shared_across_ranks) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << xnode[0] << "\t" << xnode[1] << "  " << completed_nodes.size() * 100.0 / this->nnode() << " % done" << std::endl;
           missing_nodes.insert(n);
           continue;
         }
@@ -3626,9 +3827,10 @@ namespace pyoomph
         }
         if (!srcelem)
         {
-          if (boundary_index<0) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << dmpt[0] << "\t" << dmpt[1] << "  INTERNAL CENTER " << ie * 100.0 / this->nelement() << " % done" << std::endl;
+          if (boundary_index<0 && !shared_across_ranks) std::cerr << "MISSING_BULKONLY_ELEM_AT\t" << dmpt[0] << "\t" << dmpt[1] << "  INTERNAL CENTER " << ie * 100.0 / this->nelement() << " % done" << std::endl;
           continue;
         }
+        completed_elements[ie] = true;
         // Interpolate all D0 fields
         if (my_ft->info_D0.numfields != from_ft->info_D0.numfields)
         {
@@ -3667,6 +3869,18 @@ namespace pyoomph
 
         // throw_runtime_error("TODO: DL data interpolation");
       }
+    }
+
+    // Pool what each rank could place, before anything falls through to the blend below: a node this
+    // rank could not find is usually one that simply lives in another rank's share of the old mesh,
+    // and blending it from local nodes would produce a confident wrong value that the pooling could
+    // no longer tell from a real one.
+    if (shared_across_ranks)
+    {
+      unsigned rescued = share_interpolation_across_ranks(from, boundary_index, interface_case,
+                                                          completed_elements, completed_nodes, missing_nodes);
+      if (rescued && report_interpolation_timing)
+        std::cout << "  [mpi] " << rescued << " node(s) were transferred by another rank" << std::endl;
     }
 
     // Handle the nodes which where not found by nearest nodes.

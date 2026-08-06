@@ -70,12 +70,11 @@ class RemesherLineEntry:
 
 
 class RemesherBase:
-    #: What this remesher gets wrong on a distributed (``--distribute``) problem, quoted by the
-    #: refusal in :py:meth:`~pyoomph.generic.problem.Problem.force_remesh`. It only names what is
-    #: specific to *this* remesher; the parts that are the same for all of them (no
-    #: re-distribution afterwards, no transfer across a rank boundary) are added there. Every
-    #: remesher has one for now - see dev_docs/distributed_remeshing.md.
-    distributed_limitation:str="it rebuilds the mesh from this rank's part of the problem only"
+    #: What this remesher still gets wrong on a distributed (``--distribute``) problem, quoted by the
+    #: refusal in :py:meth:`~pyoomph.generic.problem.Problem.force_remesh`, or ``None`` if it works.
+    #: It only names what is specific to *this* remesher; the limitations that hold for all of them
+    #: are added there. See dev_docs/distributed_remeshing.md.
+    distributed_limitation:str | None="it rebuilds the mesh from this rank's part of the problem only"
 
     def __init__(self,template:"MeshTemplate"):
         self.template=template
@@ -555,11 +554,9 @@ class RemesherViaRecreation(RemesherBase):
     default to any :py:class:`~pyoomph.meshes.mesh.MeshedMeshTemplate`, i.e. also to any
     :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`, so it usually does not have to be created manually.
     """
-    # get_boundary_coordinates() reads the local partition, so every rank describes a different,
-    # truncated geometry - and since only rank 0's .msh file is kept, its truncation becomes the mesh
-    # on all of them. A rank whose partition holds no element of the requested boundary raises
-    # instead. Both in dev_docs/distributed_remeshing.md §1.1/§1.2.
-    distributed_limitation="define_geometry() rebuilds the geometry from get_boundary_coordinates(), which only sees this rank's part of each boundary, so every rank describes a different truncated geometry and the one rank 0 happens to hold becomes the mesh for all of them"
+    # Works distributed since stage 1 of dev_docs/distributed_remeshing.md: get_boundary_coordinates()
+    # merges the boundary across the ranks, so every rank describes the same geometry again.
+    distributed_limitation=None
 
     def __init__(self,template:MeshTemplate):
         super().__init__(template)

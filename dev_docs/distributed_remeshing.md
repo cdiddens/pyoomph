@@ -1,14 +1,15 @@
 # Remeshing under `--distribute`
 
-Status: **stages 0, 1 and 2 done.** Stages 3-5 are open, and the refusal from stage 0 still stands,
-so remeshing a distributed problem is still not something a user can do: the geometry and the
-partition are right by now, but the *values* on the new mesh are not, which is stage 3. File and line
+Status: **stages 0 to 3 done.** Remeshing a distributed problem now works for the recreation path
+(`RemesherViaRecreation` + `InternalInterpolator`) and needs no opt-in. Stages 4 and 5 are open, and
+what they cover is refused by name - see "The refusal, narrowed" below for the list. File and line
 references are to the tree state at the time of writing (branch `develop`, after `7b8770a`).
 
-Remeshing a distributed problem does not work today. Until stage 0 it did not *say* so: at two ranks
-it ran to completion and produced a truncated domain, a replicated mesh and an equation count `nproc`
-times too large, without an error; at three and four ranks it hung. This document records what goes
-wrong, why, and in which order to fix it.
+Remeshing a distributed problem did not work at all when this started, and it did not *say* so: at
+two ranks it ran to completion and produced a truncated domain, a replicated mesh and an equation
+count `nproc` times too large, without an error; at three and four ranks it hung. §1 below is that
+starting state, kept because it is what the tests exist to prevent coming back; §3 is what was done
+about it, stage by stage.
 
 The two paths differ enough to be treated separately throughout:
 
@@ -235,21 +236,68 @@ Running the interpolation replicated is redundant work, but it is correct, it ma
 flow, and peak memory is no worse than at startup, where the whole mesh exists on every rank anyway.
 Making it scalable, and lifting the adaption refusal, belongs to stage 5.
 
-### Stage 3 - cross-rank value transfer
+### Stage 3 - cross-rank value transfer. DONE.
 
 The old mesh is distributed; the new one is replicated and **identically numbered on every rank**,
-which makes the cheap route available: each rank interpolates whatever it can find in its own
-partition (plus halos), and one `Allreduce` over the new mesh's values combines the results.
+which is what makes the cheap route work: each rank transfers whatever it can find in its own share
+of the old mesh, and `Mesh::share_interpolation_across_ranks` then pools the results - one
+`MPI_Allreduce` of the values each rank could fill (pre-multiplied by whether it could) and one of
+how many ranks could, so the value is the sum over the ranks that had it divided by their number.
 
-That needs one thing that does not exist: a per-node *was properly located* mask.
-`Mesh::nodal_interpolate_from` only counts fallbacks today, for the warning at `src/mesh.cpp:3838`. It
-has to expose the mask, and under distribution the nearest-node blend must be **suppressed** rather
-than applied - otherwise a rank contributes a confident wrong value for a node that lives inside
-someone else's partition, and the `Allreduce` cannot tell it from a real one. A node unlocated on
-*every* rank is then a genuine error to report, not something to blend away.
+It runs *before* the nearest-node fallback, not after. A node this rank could not place is usually
+one that simply lives in another rank's partition, and blending it from local nodes first would
+produce a confident wrong value that the pooling could no longer tell from a real one. Nodes rescued
+from another rank are moved out of `missing_nodes`, so the blend - and the count it reports - are
+left with the nodes that are genuinely outside the old mesh everywhere. The two per-node `cerr`
+diagnostics are suppressed on this path for the same reason: they would fire for most of the mesh and
+mean nothing.
 
-This covers `InternalInterpolator`. `ProjectionInternalInterpolator` needs the same treatment or an
-explicit refusal until stage 5.
+What travels is exactly what the transfer writes: nodal values at every time level, the position
+history, the Lagrangian coordinates when they are interpolated, and the DL/D0 internal data of the
+elements (whose element-centre query fails and succeeds independently of the nodes around it).
+
+Two things about the collective were not obvious:
+
+* **The decision to pool has to be collective too.** `nodal_interpolate_from` returns early when
+  either mesh has no elements, and on an interface mesh a rank holding no part of it hits exactly
+  that - so it skipped the `Allreduce` while the others entered it, and the three-rank run hung. The
+  gate is now a Problem-wide flag (`distributed()` and the process count), inside which the local
+  answer is `Allreduce`d, and a rank with an empty source still joins the pooling and contributes
+  nothing.
+* **The buffer layout has to be derived from the destination**, which is the replicated mesh, so
+  every rank packs the same lengths in the same order - including the rank that has nothing to say.
+
+Measured against a serial run of the same problem, on merged global mesh data: identical node count
+and field extrema, and sums agreeing to ~1e-9 relative at 2, 3 and 4 ranks - the residue being the
+projection solve, which runs on a partitioned matrix here and a whole one serially, i.e. it differs
+before the transfer even starts. **Zero** nodes fall through to the blend, where a quarter of them
+used to.
+
+`ProjectionInternalInterpolator` does not do any of this - its right-hand side integrates the old
+field at the new mesh's integration points, which are located the same partition-local way - so it is
+refused, see below.
+
+### The refusal, narrowed
+
+With stages 1-3 in place, `force_remesh()` on a distributed problem **works** for
+`RemesherViaRecreation` together with `InternalInterpolator`, and needs no opt-in. What is refused is
+now specific, and each refusal names itself:
+
+| refused | why | lifted by |
+| --- | --- | --- |
+| `Remesher2d` | rebuilds the geometry from this rank's boundary elements, and the partition cut has no boundary name | stage 4 |
+| `ProjectionInternalInterpolator` | its projection integrates the old field at partition-local locations | stage 5 |
+| codimension-2 interfaces | transferred by `nodal_interpolate_along_boundary`, whose nearest-node matching is not pooled | see below |
+| remeshing only some domains | the untouched domains stay partitioned; oomph cannot distribute a mesh twice | not planned |
+| explicit `num_adapt > 0` | leaves the new mesh non-uniformly refined | stage 5 |
+
+The codimension-2 case is the one worth doing next after stage 4: contact lines and axis points are
+ordinary in real scripts, and `nodal_interpolate_along_boundary` is a different mechanism from
+`nodal_interpolate_from` (nearest-node matching along a boundary rather than point location), so the
+pooling does not reach it. Refusing it up front is what keeps such a problem from quietly getting its
+corner values from whichever rank happened to hold them.
+
+`Problem.experimental_distributed_remeshing` bypasses all of these.
 
 ### Stage 4 - `Remesher2d` from merged data
 
@@ -295,18 +343,22 @@ sums), at 2, 3 and 4 ranks:
 3. `is_mesh_distributed()` true and `ndof` equal to the serial count after the remesh (stage 2,
    **done** - at 2, 3 and 4 ranks; the `nproc` multiplier of §1.3 makes it a single decisive
    assertion), plus the two refusals stage 2 has to make;
-4. field values after remeshing equal to serial within round-off, with **zero** "could not be located"
-   fallbacks (stage 3);
+4. field values after remeshing equal to serial, with **zero** "could not be located" fallbacks
+   (stage 3, **done** - compared through merged global mesh data at 2, 3 and 4 ranks, including sums
+   weighted by position so that values landing on the wrong nodes cannot cancel out);
 5. the `Remesher2d` path, once stage 4 lands;
 6. `mpirun` **without** `--distribute` keeps working unchanged throughout - `needs_merging()` already
    short-circuits that case, but it is the regression that would go unnoticed.
 
-`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 16 tests, ~36 s,
-covering stages 0 to 2: the refusal on **every** rank for both paths at 2 and 4 ranks, the unchanged
+`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 18 tests, ~39 s,
+covering stages 0 to 3: the remaining refusals on **every** rank, the unchanged
 behaviour of `mpirun` without `--distribute` at 2 and 4 ranks, the collective agreement when one rank
 (0 or 2, since the agreement is symmetric) raises inside `define_geometry`, the merged boundary
 matching a serial reference run at 2, 3 and 4 ranks, `ndof` and `is_mesh_distributed()` matching the
-serial run after the re-partitioning, and the partial-remesh and explicit-`num_adapt` refusals.
+serial run after the re-partitioning, the transferred field matching it too, and the `Remesher2d`,
+partial-remesh, explicit-`num_adapt` and codimension-2 refusals.
+
+Everything except the refusals runs **without** the opt-in, i.e. in the configuration that ships.
 
 Every run is under a timeout that fails rather than waits, so a regression in the agreement shows up
 as a failed test instead of a stuck suite - it has already caught one (see the end of stage 1). The

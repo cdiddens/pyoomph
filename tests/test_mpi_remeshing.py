@@ -23,11 +23,13 @@
 #
 # ========================================================================
 
-# Remeshing under --distribute, which is being built stage by stage - see
-# dev_docs/distributed_remeshing.md. Until it is finished, force_remesh() refuses on a distributed
-# problem and the tests here bypass that with --force.
+# Remeshing under --distribute, built stage by stage in dev_docs/distributed_remeshing.md. The
+# recreation path works by now and is exercised here in the configuration it ships in; what is not
+# built yet (Remesher2d, codimension-2 interfaces, the projection interpolator) is refused by name,
+# and the refusals are tested too, because what those paths do instead of failing is produce a
+# plausible wrong answer.
 #
-# What it used to do instead of saying that it could not:
+# What the whole thing used to do instead of saying that it could not:
 #
 # * at two ranks every rank rebuilt the geometry from its own partition of the boundary, and since
 #   only rank 0's .msh file is kept, rank 0's truncated wedge silently became the mesh for all of
@@ -37,10 +39,11 @@
 #   define_geometry() while the others walked into the barriers of generate_mesh_to_file(), and the
 #   job hung. At three ranks that rank is rank 0.
 #
-# So the tests below cover, in order: the refusal (stage 0) and the agreement that replaces the hang,
-# the merged boundary every rank now rebuilds (stage 1), and the re-partitioning of the rebuilt mesh
-# together with the two things it cannot do yet (stage 2). Every run is under a timeout that fails
-# rather than waits, since the regressions being guarded against are deadlocks.
+# So the tests below cover, in order: the refusals that remain and the cross-rank agreement that
+# replaced the hang (stage 0), the merged boundary every rank now rebuilds (stage 1), the
+# re-partitioning of the rebuilt mesh and the two things it cannot do (stage 2), and the transferred
+# field itself (stage 3). Every run is under a timeout that fails rather than waits, since the
+# regressions being guarded against are deadlocks.
 
 import os
 import shutil
@@ -114,6 +117,14 @@ def _remesh_fields(proc):
     return out
 
 
+def _field(proc):
+    """The summary of the transferred field, from whichever process reported it (rank 0)."""
+    for line in proc.stdout.splitlines():
+        if line.startswith("PYOOMPH_MPI_FIELD "):
+            return {k: float(v) for k, v in (f.split("=", 1) for f in line.split()[1:])}
+    return None
+
+
 def _boundaries(proc):
     """What each rank got out of get_boundary_coordinates(), as {rank: line}."""
     out = {}
@@ -125,12 +136,16 @@ def _boundaries(proc):
 
 
 @pytest.mark.parametrize("nproc", [2, 4])
-@pytest.mark.parametrize("remesher", ["recreation", "remesher2d"])
-def test_distributed_remeshing_is_refused_on_every_rank(tmp_path, nproc, remesher):
-    args = ["--distribute"] + (["--remesher2d"] if remesher == "remesher2d" else [])
-    proc = _run(tmp_path, args, nproc=nproc)
+def test_remesher2d_is_still_refused_on_every_rank(tmp_path, nproc):
+    """The automatic remesher rebuilds the geometry from this rank's boundary elements only.
+
+    A partition is bounded partly by named boundaries and partly by the partition cut, which carries
+    no boundary name at all, so the gmsh line loop cannot be closed. That is stage 4; until then the
+    refusal has to name it, since the two remeshing paths fail for different reasons.
+    """
+    proc = _run(tmp_path, ["--distribute", "--remesher2d"], nproc=nproc)
     assert proc.returncode != 0, \
-        "the run reported success although remeshing distributed does not work:\n%s" % (
+        "the run reported success although Remesher2d cannot work distributed:\n%s" % (
             "\n".join(_reported(proc)))
     reported = _reported(proc)
     assert len(reported) == nproc, \
@@ -138,10 +153,7 @@ def test_distributed_remeshing_is_refused_on_every_rank(tmp_path, nproc, remeshe
             nproc, "\n".join(reported), proc.stderr[-2000:])
     for line in reported:
         assert "not supported on a distributed" in line, "unhelpful failure on a rank: %s" % line
-        # The message has to name the path that is broken, since the two fail for different reasons
-        # and are fixed separately.
-        expected = "Remesher2d:" if remesher == "remesher2d" else "RemesherViaRecreation:"
-        assert expected in line, "the refusal did not name the remesher: %s" % line
+        assert "Remesher2d:" in line, "the refusal did not name the remesher: %s" % line
 
 
 @pytest.mark.parametrize("nproc", [2, 4])
@@ -172,7 +184,7 @@ def test_failing_define_geometry_ends_the_job_instead_of_hanging(tmp_path, faili
 
     The worker raises *after* get_boundary_coordinates() on purpose; see its `fail_on_rank`.
     """
-    proc = _run(tmp_path, ["--distribute", "--force", "--fail-define-geometry-on-rank",
+    proc = _run(tmp_path, ["--distribute", "--fail-define-geometry-on-rank",
                            str(failing_rank)], nproc=3)
     assert proc.returncode != 0, "the run reported success although one rank could not remesh"
     reported = _reported(proc)
@@ -200,7 +212,7 @@ def test_boundary_coordinates_are_the_whole_boundary_on_every_rank(tmp_path, npr
     assert len(ref) == 1, "the serial run did not report its boundary:\n%s" % reference.stdout[-2000:]
     expected = ref[0]
 
-    proc = _run(tmp_path / "mpi", ["--distribute", "--force"], nproc=nproc)
+    proc = _run(tmp_path / "mpi", ["--distribute"], nproc=nproc)
     assert proc.returncode == 0, \
         "the run failed:\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s" % (
             proc.stdout[-2000:], proc.stderr[-2000:])
@@ -228,7 +240,7 @@ def test_the_remeshed_problem_is_partitioned_again(tmp_path, nproc):
     serial = _remesh_fields(reference)[0]
     assert serial["distributed"] == "False", "the serial run reports a distributed mesh"
 
-    proc = _run(tmp_path / "mpi", ["--distribute", "--force"], nproc=nproc)
+    proc = _run(tmp_path / "mpi", ["--distribute"], nproc=nproc)
     assert proc.returncode == 0, \
         "the run failed:\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s" % (
             proc.stdout[-2000:], proc.stderr[-2000:])
@@ -251,7 +263,7 @@ def test_remeshing_only_some_domains_is_refused(tmp_path):
     while this was checked at the re-distribution instead). Hence the check on the returncode: 3 is
     the worker reporting the exception, anything else means it died on the way out.
     """
-    proc = _run(tmp_path, ["--distribute", "--force", "--second-domain"], nproc=2)
+    proc = _run(tmp_path, ["--distribute", "--second-domain"], nproc=2)
     assert proc.returncode == 3, \
         "expected the worker to report the refusal (3), got %d:\n--- stderr tail ---\n%s" % (
             proc.returncode, proc.stderr[-2000:])
@@ -268,7 +280,7 @@ def test_adapting_the_remeshed_mesh_is_refused_when_asked_for_explicitly(tmp_pat
     The default (num_adapt=None, i.e. max_refinement_level) is dropped to 0 with a printed note
     instead; only a value the caller named is refused, since that is a request about the result.
     """
-    proc = _run(tmp_path, ["--distribute", "--force", "--num-adapt", "3"], nproc=2)
+    proc = _run(tmp_path, ["--distribute", "--num-adapt", "3"], nproc=2)
     assert proc.returncode == 3, \
         "expected the worker to report the refusal (3), got %d:\n--- stderr tail ---\n%s" % (
             proc.returncode, proc.stderr[-2000:])
@@ -277,3 +289,60 @@ def test_adapting_the_remeshed_mesh_is_refused_when_asked_for_explicitly(tmp_pat
     for line in reported:
         assert "num_adapt=3" in line and "uniformly refined" in line, \
             "the refusal did not explain itself: %s" % line
+
+
+@pytest.mark.parametrize("nproc", [2, 3, 4])
+def test_the_transferred_field_matches_the_serial_one(tmp_path, nproc):
+    """Stage 3: the old solution reaches the new mesh even where it crossed a rank boundary.
+
+    Each rank can only place the new nodes that fall into its own share of the old mesh. What it
+    cannot place is not a failure - it is another rank's to place - so the ranks pool what each of
+    them found instead of blending the rest from local nodes, which used to produce confident wrong
+    values for a third of the mesh with only a warning to show for it.
+
+    Both halves matter: that nothing fell through to the blend at all, and that what arrived is what
+    a serial run gets. The comparison is against merged global mesh data, so the numbers describe the
+    whole mesh in both runs. The tolerance covers the projection solve, which is a linear solve on a
+    partitioned matrix here and on a whole one serially, so its result already differs in the last
+    few digits before the transfer even starts.
+    """
+    reference = _run_serially(tmp_path / "serial", [])
+    assert reference.returncode == 0, \
+        "the serial reference run failed:\n%s" % reference.stdout[-2000:]
+    serial = _field(reference)
+    assert serial is not None and serial["nnode"] > 0, \
+        "the serial run did not report the field:\n%s" % reference.stdout[-2000:]
+
+    proc = _run(tmp_path / "mpi", ["--distribute"], nproc=nproc)
+    assert proc.returncode == 0, \
+        "the run failed:\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s" % (
+            proc.stdout[-2000:], proc.stderr[-2000:])
+    assert "could not be located" not in proc.stdout, (
+        "a node fell through to the nearest-node blend, i.e. the ranks did not pool the transfer:\n%s"
+        % "\n".join(l for l in proc.stdout.splitlines() if "could not be located" in l))
+
+    got = _field(proc)
+    assert got is not None, "no rank reported the field:\n%s" % proc.stdout[-2000:]
+    assert got["nnode"] == serial["nnode"], \
+        "the merged mesh has %g nodes, the serial one %g" % (got["nnode"], serial["nnode"])
+    for key in ("usum", "usqsum", "umin", "umax", "uxsum", "uysum"):
+        assert got[key] == pytest.approx(serial[key], rel=1e-6, abs=1e-9), \
+            "%s is %.12g after the distributed remesh, %.12g serially" % (key, got[key], serial[key])
+
+
+def test_codim2_interfaces_are_refused(tmp_path):
+    """The nodal transfer is pooled across the ranks; the boundary matching for corners is not.
+
+    An interface of an interface - a contact line, an axis point - is transferred by
+    nodal_interpolate_along_boundary, which matches against the nearest nodes of the source mesh and
+    would silently find only this rank's. Refused by name until that path is pooled too.
+    """
+    proc = _run(tmp_path, ["--distribute", "--codim2"], nproc=2)
+    assert proc.returncode == 3, \
+        "expected the worker to report the refusal (3), got %d:\n--- stderr tail ---\n%s" % (
+            proc.returncode, proc.stderr[-2000:])
+    reported = _reported(proc)
+    assert len(reported) == 2, "expected both ranks to raise:\n%s" % "\n".join(reported)
+    for line in reported:
+        assert "codimension-2 interface(s) domain/interface/axis" in line, \
+            "the refusal did not name the interface: %s" % line

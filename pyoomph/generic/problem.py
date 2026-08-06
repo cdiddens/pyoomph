@@ -587,10 +587,12 @@ class Problem(_pyoomph.Problem):
         #: interface coordinates and their values, and the question becomes arithmetic on two files.
         self._debug_remeshing:bool=False
 
-        #: Let :py:meth:`force_remesh` run on a distributed (``--distribute``) problem, which it
-        #: otherwise refuses to do. It does not work yet - see dev_docs/distributed_remeshing.md for
-        #: what exactly goes wrong - so this exists to develop that support and to get the old,
-        #: silently wrong behaviour back if some run depended on it.
+        #: Let :py:meth:`force_remesh` run on a distributed (``--distribute``) problem even in a
+        #: configuration it refuses. Remeshing distributed works for the combination
+        #: dev_docs/distributed_remeshing.md has built (recreation from merged boundary data,
+        #: transfer pooled across the ranks); the parts that are not there yet are refused by name,
+        #: because what they do instead is produce a plausible wrong answer rather than fail. This
+        #: bypasses those refusals - to develop the remaining stages, or to accept the result.
         self.experimental_distributed_remeshing:bool=False
 
         self._call_output_after_adapt:bool=False
@@ -6950,35 +6952,47 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             return 0
         return self.max_refinement_level if num_adapt is None else num_adapt
 
-    def _refuse_distributed_remeshing(self,remeshers:list["RemesherBase"])->None:
-        """Stop a remesh of a distributed problem, unless :py:attr:`experimental_distributed_remeshing` says otherwise.
+    def _refuse_distributed_remeshing(self,remeshers:list["RemesherBase"],interpolator:type["BaseMeshToMeshInterpolator"])->None:
+        """Stop a remesh of a distributed problem whose ingredients do not all support one.
 
-        Remeshing under ``--distribute`` is being built (dev_docs/distributed_remeshing.md); until it
-        is, it does not merely fail, it succeeds wrongly. Every remesher rebuilds the mesh from the
-        local partition, and on top of that the new mesh is never re-distributed while oomph-lib still
-        counts equations as if it were - so ndof comes out nproc times too large and the transfer of
-        the old solution falls back to a nearest-node blend over local nodes. At three or more ranks
-        it used to hang instead, which stage 0's guard in MeshedMeshTemplate._do_define_geometry
-        turns into an error.
+        Remeshing under ``--distribute`` works for the combination the campaign in
+        dev_docs/distributed_remeshing.md has built: a remesher that rebuilds the geometry from
+        globally merged boundary data, and an interpolator that pools across the ranks what each of
+        them could place. Anything else does not merely fail, it succeeds wrongly - it rebuilds the
+        mesh from one rank's partition, or fills a third of the new mesh with a nearest-node blend
+        over local nodes - so it is refused by name rather than left to produce a plausible answer.
 
-        Collective by construction rather than by communication: is_distributed() and the set of
-        remeshers are the same on every rank, so either all of them raise or none does.
+        :py:attr:`experimental_distributed_remeshing` bypasses this, which is how the remaining
+        stages get developed.
+
+        Collective by construction rather than by communication: is_distributed(), the set of
+        remeshers, the interpolator and the mesh structure are the same on every rank, so either all
+        of them raise or none does.
         """
         if not self.is_distributed() or self.experimental_distributed_remeshing:
             return
         reasons:list[str]=[]
         for r in remeshers:
-            reason=type(r).__name__+": "+r.distributed_limitation
-            if reason not in reasons:
-                reasons.append(reason)
-        raise RuntimeError("Remeshing is not supported on a distributed (--distribute) problem yet.\n"+
-                           "\n".join("  "+r for r in reasons)+"\n"+
-                           "  The remeshed mesh is also not re-distributed afterwards, so every rank would end up "
-                           "holding the whole mesh while the problem still numbers the equations as if it were "
-                           "distributed (ndof comes out nproc times too large), and transferring the old solution "
-                           "cannot cross a rank boundary.\n"
-                           "Run without --distribute, or set Problem.experimental_distributed_remeshing=True to get "
-                           "the (wrong) old behaviour back. See dev_docs/distributed_remeshing.md.")
+            if r.distributed_limitation is not None:
+                reason=type(r).__name__+": "+r.distributed_limitation
+                if reason not in reasons:
+                    reasons.append(reason)
+        if getattr(interpolator,"distributed_limitation",None) is not None:
+            reasons.append(interpolator.__name__+": "+interpolator.distributed_limitation)
+        # The nodal transfer is pooled across the ranks, the nearest-node matching along a boundary
+        # that InternalInterpolator uses for codimension-2 interfaces (a contact line, an axis point)
+        # is not - it would silently match against this rank's nodes only.
+        codim2=sorted(imsh.get_full_name()+"/"+bn
+                      for imsh in self._interfacemeshes for bn in imsh._interfacemeshes.keys())
+        if codim2:
+            reasons.append("the codimension-2 interface(s) "+", ".join(codim2)+" are transferred by "
+                           "nearest-node matching along the boundary, which still sees this rank's nodes only")
+        if not reasons:
+            return
+        raise RuntimeError("Remeshing is not supported on a distributed (--distribute) problem in this "
+                           "configuration:\n"+"\n".join("  "+r for r in reasons)+"\n"+
+                           "Run without --distribute, or set Problem.experimental_distributed_remeshing=True to "
+                           "run it anyway and get whatever it produces. See dev_docs/distributed_remeshing.md.")
 
     def _redistribute_after_remeshing(self)->None:
         """Partition the rebuilt meshes again, since remeshing replaces them whole and replicated.
@@ -7053,7 +7067,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # Both deliberately after the "is there anything to remesh at all" test, so that a
         # remesh_if_necessary() which finds nothing to do still returns quietly when distributed,
         # and both before the first mesh is touched - see _check_distributed_remeshing_scope.
-        self._refuse_distributed_remeshing(remeshers)
+        self._refuse_distributed_remeshing(remeshers,interpolator)
         self._check_distributed_remeshing_scope(remeshers,num_adapt)
         self.invalidate_cached_mesh_data()
         print("REMESHING")

@@ -32,11 +32,18 @@ import hashlib
 import sys
 import traceback
 
-from pyoomph import Problem, MeshFileOutput, Equations, ElementSpace
+import numpy
+
+from pyoomph import Problem, MeshFileOutput, Equations, ElementSpace, var
 from pyoomph.equations.generic import ProjectExpression
 from pyoomph.meshes.gmsh import GmshTemplate
 from pyoomph.meshes.remesher import Remesher2d
 from pyoomph.generic.mpi import get_mpi_rank
+
+#: Projected onto the mesh before remeshing, so that the transfer to the new mesh has something to
+#: carry. Varies in both directions and is not a polynomial the C2 space reproduces exactly, so a
+#: value that travelled the wrong way cannot coincide with the right one.
+TRANSFERRED_FIELD = 1 + var("coordinate_x") ** 2 - 2 * var("coordinate_y") ** 3
 
 
 def _digest(segments):
@@ -50,6 +57,25 @@ def _digest(segments):
         for x, y in seg:
             h.update(("%.12f,%.12f;" % (float(x), float(y))).encode())
     return h.hexdigest()[:16]
+
+
+def _field_summary(problem, name):
+    """What the transferred field looks like on the WHOLE new mesh, or None off rank 0.
+
+    Read through the globally merged mesh data, so that the numbers describe the same thing serially
+    and distributed - a per-rank summary would only describe that rank's partition. Collective, so
+    every rank has to get here. Statistics rather than a digest, because the transfer is arithmetic
+    and the last bits are allowed to differ."""
+    data = problem.get_cached_mesh_data(name, global_mesh=True)
+    if data is None:
+        return None
+    u = numpy.asarray(data.get_data("u"))
+    coords = data.get_coordinates()
+    # Weighted by position as well: a value that landed on the wrong node leaves the plain sums
+    # almost untouched if it merely swapped with another, but not these.
+    return {"nnode": len(u), "usum": float(numpy.sum(u)), "usqsum": float(numpy.sum(u * u)),
+            "umin": float(numpy.amin(u)), "umax": float(numpy.amax(u)),
+            "uxsum": float(numpy.sum(u * coords[0])), "uysum": float(numpy.sum(u * coords[1]))}
 
 
 class Disc(GmshTemplate):
@@ -112,6 +138,8 @@ def main():
                         help="add a domain that is not remeshed, i.e. make it a partial remesh")
     parser.add_argument("--num-adapt", type=int, default=None,
                         help="pass num_adapt to force_remesh explicitly")
+    parser.add_argument("--codim2", action="store_true",
+                        help="put equations where two boundaries meet, i.e. on a codimension-2 interface")
     args, rest = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + rest
 
@@ -126,16 +154,27 @@ def main():
             p.quiet()
             p.experimental_distributed_remeshing = args.force
             p += mesh
-            p += (MeshFileOutput() + ElementSpace("C2") + ProjectExpression(u=0)
-                  + Equations() @ "interface") @ "domain"
+            interface_eqs = Equations()
+            if args.codim2:
+                # Where the arc meets the axis: an interface of the interface, transferred by the
+                # nearest-node matching that is not pooled across the ranks.
+                interface_eqs = interface_eqs + Equations() @ "axis"
+            p += (MeshFileOutput() + ElementSpace("C2") + ProjectExpression(u=TRANSFERRED_FIELD)
+                  + interface_eqs @ "interface") @ "domain"
             if args.second_domain:
                 p += Box()
                 p += (MeshFileOutput() + ElementSpace("C2") + ProjectExpression(u=0)) @ "box"
             p.initialise()
+            # Solve the projection, so that u carries the field before the remesh and nothing
+            # re-imposes it afterwards: what ends up on the new mesh is what the transfer put there.
+            p.solve()
             p.force_remesh(num_adapt=args.num_adapt)
             ndof, distributed = p.ndof(), bool(p.get_mesh("domain").is_mesh_distributed())
+            transferred = _field_summary(p, "domain")
         print("PYOOMPH_MPI_RESULT rank=%d remeshed ndof=%d distributed=%s" % (
             get_mpi_rank(), ndof, distributed))
+        if transferred is not None:
+            print("PYOOMPH_MPI_FIELD " + " ".join("%s=%.12g" % kv for kv in sorted(transferred.items())))
     except BaseException as e:  # noqa: BLE001
         # Flattened: the refusal message is multi-line, and only the first line would carry the
         # prefix the test greps for.
