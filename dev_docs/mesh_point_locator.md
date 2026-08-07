@@ -651,18 +651,15 @@ by ~1e-8.
 * A distorted 3d hex is two orders of magnitude slower than every other case. If that ever matters,
   the lever is a better seed still, not a closed form - there is none.
 
-**Tracers are explicitly out of scope.** `MeshKDTree` (`mesh.cpp`) stays where it is for now,
-with the static-flag reset of §3.1 still in it, and `tracers.cpp` keeps using it. Porting tracers onto
-the locator is a **separate campaign for later**, not a loose end of this one.
-
-That includes the consequence: **if refactoring here breaks the tracers, that is accepted.** Do not
-hold back a change to the locator, to `MeshKDTree`, or to the zeta statics in order to keep
-`tracers.cpp` working, and do not bolt compatibility shims onto the locator for its benefit. The
-tracer campaign will pick up whatever state it finds and fix it there. What *is* worth doing is
-leaving a note in this file when a change is known to have broken them, so that campaign starts from
-a list rather than from a bisect.
-
-Known to be affected so far: nothing yet - `MeshKDTree` is still untouched.
+**Tracers were out of scope here, and have since had their own campaign.** See
+`dev_docs/tracers.md`. It ported them onto this class and **deleted `MeshKDTree`** along with
+`Mesh::get_lagrangian_kdtree` / `invalidate_lagrangian_kdtree`, which had no other user; the
+staleness signal is now `Mesh::bump_topology_generation()`, a counter rather than the address of a
+cached object that the invalidation deleted. It also added two things to the locator itself, both
+small: `LocatorSetup::skip_halo_elements` (so a located point has exactly one owner under MPI) and
+`neighbour_elements()` (the element-to-element walk a particle leaving its element needs). The
+reference-domain containment predicates moved out to `src/refdomain.{hpp,cpp}` so the tracers and
+the locator share one copy.
 * `add_interpolated_nodes_at` has no in-tree caller and `prepare_zeta_interpolation`'s only caller is
   the unfinished projection interpolator (§7), so neither is covered by the test suite. Both were
   checked directly instead: the former against the other backend point by point, including a point
@@ -926,8 +923,8 @@ the default path. It now builds the locator on demand.
 
 **Deliberately kept:**
 
-* `MeshKDTree` (`mesh.cpp`) - the tracer campaign's business, not this one; it is its only remaining
-  user;
+* nothing on the tracers' account any more - `MeshKDTree` was their only remaining user and the
+  tracer campaign deleted it (see `dev_docs/tracers.md`);
 * the two-nearest blend in `nodal_interpolate_from`'s `missing_nodes` pass and in
   `nodal_interpolate_along_boundary` - already demoted from silent default to reported last resort,
   and reachable now only when a point genuinely lies outside the old mesh. §16 is a case where it is
