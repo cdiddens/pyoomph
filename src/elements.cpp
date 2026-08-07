@@ -9055,6 +9055,16 @@ namespace pyoomph
 	// straight/bowed shape of the physical edge is irrelevant because reference edges are always straight.
 	void BulkElementBase::tess_register_hanging_node(const oomph::Vector<double> &s_coarse, oomph::Node *n, const std::vector<std::pair<unsigned, unsigned>> &edge_corner_pairs, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
+		// Same unsupported case as inform_coarser_neighbors_for_tesselated_numpy()/tess_inform_coarser_tri()
+		// (see their comments): an InterfaceElementBase is never registered for tesselated-numpy export, so
+		// this->_numpy_index is not a valid index into add_nodes here. Reaching this point for an interface
+		// element (e.g. a corner element sitting on an interface-of-an-interface, such as a free surface's
+		// intersection with an axis of symmetry) indexed add_nodes out of bounds instead of raising - silent
+		// heap corruption that surfaced much later as an unrelated-looking std::bad_alloc whose own exception
+		// unwinding then segfaulted. Raise here, consistently with the sibling guards, until tesselating
+		// interface meshes is actually supported.
+		if (dynamic_cast<InterfaceElementBase *>(this))
+			throw_runtime_error("Cannot yet tesselate interface meshes [will fail in connecting hanging nodes and have to go via the parent mesh]");
 		for (unsigned ni = 0; ni < this->nnode(); ni++)
 		{
 			if (this->node_pt(ni) == n)
