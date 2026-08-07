@@ -4876,78 +4876,100 @@ namespace pyoomph
 		return functable->EvalExtremumExpression(&eleminfo, this->shape_info, index);
 	}	
 
-	// Evaluates a user-defined tracer-advection velocity (given in physical/Eulerian coordinates
-	// by the JIT code) and converts it into a local-coordinate velocity svelo by inverting the
-	// Jacobian dx/ds, so that a tracer particle can be advected in local coordinate space (used
-	// e.g. to track material points through mesh motion without leaving the element frame).
-	bool BulkElementBase::eval_tracer_advection_in_s_space(unsigned index, double time_frac, const oomph::Vector<double> &s, oomph::Vector<double> &svelo)
+	// Deliberately NOT built on fill_shape_info_at_s: this is called several times per Runge-Kutta
+	// stage and needs only the local shape derivatives and the nodal position history, none of the
+	// metric tensors, field interpolations and Jacobian bookkeeping that the shape buffer fill does.
+	// It also has to work unchanged on an interface element, where el_dim < nodal_dim.
+	void BulkElementBase::tracer_geometry_at_s(const oomph::Vector<double> &s, unsigned nlevel, const double *w, const double *dwdtau,
+											   oomph::Vector<double> *x, oomph::DenseMatrix<double> *J,
+											   oomph::Vector<double> *dXdtau) const
+	{
+		const unsigned el_dim = this->dim();
+		const unsigned n_dim = this->nodal_dimension();
+		const unsigned n_node = this->nnode();
+
+		oomph::Shape psi(n_node);
+		oomph::DShape dpsids(n_node, std::max((unsigned)1, el_dim));
+		this->dshape_local(s, psi, dpsids);
+
+		if (x)
+			x->assign(n_dim, 0.0);
+		if (J)
+		{
+			J->resize(el_dim, n_dim);
+			J->initialise(0.0);
+		}
+		if (dXdtau)
+			dXdtau->assign(n_dim, 0.0);
+
+		for (unsigned l = 0; l < n_node; l++)
+		{
+			for (unsigned i = 0; i < n_dim; i++)
+			{
+				double xl = 0.0, xdotl = 0.0;
+				for (unsigned k = 0; k < nlevel; k++)
+				{
+					const double pos = this->nodal_position(k, l, i);
+					xl += w[k] * pos;
+					if (dXdtau)
+						xdotl += dwdtau[k] * pos;
+				}
+				if (x)
+					(*x)[i] += psi(l) * xl;
+				if (dXdtau)
+					(*dXdtau)[i] += psi(l) * xdotl;
+				if (J)
+					for (unsigned a = 0; a < el_dim; a++)
+						(*J)(a, i) += dpsids(l, a) * xl;
+			}
+		}
+	}
+
+	// Per-element part of a tracer evaluation: timestepper weights, time levels and element sizes,
+	// none of which depend on where in the element the particle sits. Split out from
+	// eval_tracer_advection_at_s because that runs several times per Runge-Kutta sub-step while a
+	// particle stays in the same element, and prepare_shape_buffer_for_integration sweeps the
+	// element's integration points. The old code called neither, so any partial_t() inside an
+	// advection expression read whatever timestepper weights the last assembly had left behind.
+	void BulkElementBase::tracer_prepare_element()
+	{
+		this->interpolate_hang_values();
+		this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_TracerAdvection, 0);
+	}
+
+	// Evaluates a user-defined tracer-advection velocity field, in physical/Eulerian components, at
+	// an arbitrary local coordinate. Must be preceded by tracer_prepare_element() for this element.
+	//
+	// The history-geometry slots are filled first where the generated code asks for them, so that a
+	// gradient inside a past-level advection expression is taken on the configuration that level
+	// belongs to rather than on the current one.
+	//
+	// xvelo is sized 3: a coordinate system may produce more velocity components than the mesh has
+	// dimensions (an out-of-plane swirl on an axisymmetric mesh). Those extra components cannot move
+	// a particle that lives in the mesh; it is the caller's job to notice and complain rather than to
+	// drop them silently.
+	void BulkElementBase::eval_tracer_advection_at_s(unsigned index, const oomph::Vector<double> &s, oomph::Vector<double> &xvelo)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		if (index >= functable->numtracer_advections)
 			throw_runtime_error("Cannot evaluate tracer advection at too large index " + std::to_string(index));
-		this->interpolate_hang_values();
+		const JITFuncSpec_RequiredShapes_FiniteElement_t &required = functable->shapes_required_TracerAdvection;
 
+		for (unsigned k = 1; k <= 2; k++)
+		{
+			if (k == 1 ? required.history_geometry1 : required.history_geometry2)
+			{
+				double JLagr_hist;
+				this->fill_shape_info_at_s(s, 0, required, JLagr_hist, 0, NULL, k);
+			}
+		}
 		double JLagr;
-		oomph::DenseMatrix<double> *dxds_ptr = new oomph::DenseMatrix<double>(s.size(), s.size(), 0.0);
-		this->fill_shape_info_at_s(s, 0, codeinst->get_func_table()->shapes_required_TracerAdvection, JLagr, 0, dxds_ptr);
-		oomph::DenseMatrix<double> &dxds = *dxds_ptr;
-		set_remaining_shapes_appropriately(shape_info, codeinst->get_func_table()->shapes_required_TracerAdvection);
+		this->fill_shape_info_at_s(s, 0, required, JLagr, 0);
+		set_remaining_shapes_appropriately(shape_info, required);
 
-		oomph::Vector<double> xvelo(s.size(), 0.0);
-      _currently_assembled_element = this;
-		functable->EvalTracerAdvection(&eleminfo, this->shape_info, index, time_frac, &(xvelo[0]));
-
-		// Now calculate the dxds-Inverse
-		if (dxds.nrow() == 1 && dxds.ncol() == 1)
-		{
-			svelo.resize(1, 0.0);
-			svelo[0] = 1 / dxds(0, 0) * xvelo[0];
-		}
-		else if (dxds.nrow() == 2 && dxds.ncol() == 2)
-		{
-			double det_a = dxds(0, 0) * dxds(1, 1) - dxds(0, 1) * dxds(1, 0);
-			oomph::DenseMatrix<double> dsdx2d(2, 2, 0.0);
-			dsdx2d(0, 0) = dxds(1, 1) / det_a;
-			dsdx2d(0, 1) = -dxds(0, 1) / det_a;
-			dsdx2d(1, 0) = -dxds(1, 0) / det_a;
-			dsdx2d(1, 1) = dxds(0, 0) / det_a;
-			svelo.resize(2, 0.0);
-			svelo[0] = 0.0;
-			svelo[1] = 0.0;
-			for (unsigned int i = 0; i < 2; i++)
-				for (unsigned int j = 0; j < 2; j++)
-					svelo[j] += dsdx2d(i, j) * xvelo[i];
-		}
-		else if (dxds.nrow() == 3 && dxds.ncol() == 3)
-		{
-			double det_a = dxds(0, 0) * dxds(1, 1) * dxds(2, 2) + dxds(0, 1) * dxds(1, 2) * dxds(2, 0) + dxds(0, 2) * dxds(1, 0) * dxds(2, 1) - dxds(0, 0) * dxds(1, 2) * dxds(2, 1) - dxds(0, 1) * dxds(1, 0) * dxds(2, 2) - dxds(0, 2) * dxds(1, 1) * dxds(2, 0);
-
-			oomph::DenseMatrix<double> dsdx(3, 3, 0.0);
-			dsdx(0, 0) = (dxds(1, 1) * dxds(2, 2) - dxds(1, 2) * dxds(2, 1)) / det_a;
-			dsdx(0, 1) = -(dxds(0, 1) * dxds(2, 2) - dxds(0, 2) * dxds(2, 1)) / det_a;
-			dsdx(0, 2) = (dxds(0, 1) * dxds(1, 2) - dxds(0, 2) * dxds(1, 1)) / det_a;
-			dsdx(1, 0) = -(dxds(1, 0) * dxds(2, 2) - dxds(1, 2) * dxds(2, 0)) / det_a;
-			dsdx(1, 1) = (dxds(0, 0) * dxds(2, 2) - dxds(0, 2) * dxds(2, 0)) / det_a;
-			dsdx(1, 2) = -(dxds(0, 0) * dxds(1, 2) - dxds(0, 2) * dxds(1, 0)) / det_a;
-			dsdx(2, 0) = (dxds(1, 0) * dxds(2, 1) - dxds(1, 1) * dxds(2, 0)) / det_a;
-			dsdx(2, 1) = -(dxds(0, 0) * dxds(2, 1) - dxds(0, 1) * dxds(2, 0)) / det_a;
-			dsdx(2, 2) = (dxds(0, 0) * dxds(1, 1) - dxds(0, 1) * dxds(1, 0)) / det_a;
-			svelo.resize(3, 0.0);
-			svelo[0] = 0.0;
-			svelo[1] = 0.0;
-			svelo[2] = 0.0;
-			for (unsigned int i = 0; i < 3; i++)
-				for (unsigned int j = 0; j < 3; j++)
-					svelo[j] += dsdx(i, j) * xvelo[i];
-		}
-		else
-		{
-			throw_runtime_error("Cannot do this here");
-		}
-
-		delete dxds_ptr;
-
-		return true;
+		xvelo.assign(3, 0.0);
+		_currently_assembled_element = this;
+		functable->EvalTracerAdvection(&eleminfo, this->shape_info, index, &(xvelo[0]));
 	}
 
 	// Multi-assembly: performs several residual/Jacobian/mass-matrix/Hessian-vector-product/
@@ -8653,31 +8675,6 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
-	// Given a point s and a direction ds inside the element, finds how far (in units of ds) one
-	// can move before leaving the local-coordinate range [-1,1], along with the outward normal
-	// snormal of the exited face and its distance sdistance from the origin. Used by line-search/
-	// tracing algorithms (e.g. Newton's method for locate_zeta, or particle tracing) that must
-	// stay within the valid local coordinate domain of the element.
-	double BulkElementLine1dC1::factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
-	{
-		if (abs(ds[0]) < 1e-20)
-			return 1e20;
-		if (ds[0] > 0)
-		{
-			snormal.resize(1);
-			snormal[0] = 1;
-			sdistance = this->s_max();
-			return (this->s_max() - s[0]) / ds[0];
-		}
-		else
-		{
-			snormal.resize(1);
-			snormal[0] = -1;
-			sdistance = -this->s_min();
-			return (this->s_min() - s[0]) / ds[0];
-		}
-	}
-
 	void BulkElementLine1dC1::shape_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		psi[0] = 1.0;
@@ -8815,27 +8812,6 @@ namespace pyoomph
 		sfather[0] = s_lo[0] + (s_hi[0] - s_lo[0]) * s_fraction[0];
 	}
 	
-	// Same as BulkElementLine1dC1's version above, for the [-1,1]-parametrized quadratic line.
-	double BulkElementLine1dC2::factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
-	{
-		if (abs(ds[0]) < 1e-20)
-			return 1e20;
-		if (ds[0] > 0)
-		{
-			snormal.resize(1);
-			snormal[0] = 1;
-			sdistance = this->s_max();
-			return (this->s_max() - s[0]) / ds[0];
-		}
-		else
-		{
-			snormal.resize(1);
-			snormal[0] = -1;
-			sdistance = -this->s_min();
-			return (this->s_min() - s[0]) / ds[0];
-		}
-	}
-
 	void BulkElementLine1dC2::shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const
 	{
 		oomph::OneDimLagrange::shape<2>(s[0], &(psi[0]));
@@ -9512,54 +9488,6 @@ namespace pyoomph
 		}
 	}
 
-	// Shared implementation of factor_when_local_coordinate_becomes_invalid() for all 2-d
-	// quadrilateral elements (parametrized on [-1,1]^2): finds which of the two local-coordinate
-	// directions is exited first when moving from s along ds, and returns the corresponding
-	// step factor and exit-face normal/distance.
-	double QUAD2d_factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
-	{
-		double f0, f1;
-		double dsn = ds[0] * ds[0] + ds[1] * ds[1];
-		dsn = sqrt(dsn);
-		snormal.resize(2);
-		if (dsn < 1e-20)
-			return 1e20;
-		dsn = 1 / dsn;
-
-		if (abs(ds[0] * dsn) < 1e-16)
-			f0 = 1e20;
-		else if (ds[0] > 0)
-			f0 = (1 - s[0]) / ds[0];
-		else
-			f0 = (-1 - s[0]) / ds[0];
-
-		if (abs(ds[1] * dsn) < 1e-16)
-			f1 = 1e20;
-		else if (ds[1] > 0)
-			f1 = (1 - s[1]) / ds[1];
-		else
-			f1 = (-1 - s[1]) / ds[1];
-
-		sdistance = 1.0;
-		if (f0 < f1)
-		{
-			snormal[1] = 0;
-			snormal[0] = (ds[0] > 0 ? 1 : -1);
-		}
-		else
-		{
-			snormal[0] = 0;
-			snormal[1] = (ds[1] > 0 ? 1 : -1);
-		}
-
-		return std::min(f0, f1);
-	}
-
-	double BulkElementQuad2dC1::factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
-	{
-		return QUAD2d_factor_when_local_coordinate_becomes_invalid(s, ds, snormal, sdistance);
-	}
-
 	// Same idea as BulkElementLine1dC1::get_nodal_s_in_father() above, but for quadtree
 	// refinement: maps node l's local coordinate to the father's local coordinate based on which
 	// quadrant (SW/SE/NE/NW) this son occupies.
@@ -9637,11 +9565,6 @@ namespace pyoomph
 		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		allocate_discontinous_fields();
-	}
-
-	double BulkElementQuad2dC2::factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
-	{
-		return QUAD2d_factor_when_local_coordinate_becomes_invalid(s, ds, snormal, sdistance);
 	}
 
 	void BulkElementQuad2dC2::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
@@ -10214,110 +10137,6 @@ namespace pyoomph
 		allocate_discontinous_fields();
 	}
 
-	// Shared implementation of factor_when_local_coordinate_becomes_invalid() for all 2-d
-	// triangular elements: the reference triangle has local coordinates s0,s1 in [0,1] with
-	// s0+s1<=1, so there are three possible exit edges (s0=0, s1=0, s0+s1=1); works out, from the
-	// signs/magnitudes of ds, which edge is hit first and returns the corresponding step factor
-	// and outward normal/distance.
-	double TRI2d_factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
-	{
-		snormal.resize(2);
-		if (abs(ds[0]) < 1e-20 && abs(ds[1]) < 1e-20)
-			return 1e20;
-
-		if (ds[0] < 0 && ds[1] < 0) // Can only hit s0 or s1 axis
-		{
-			if (-s[0] / ds[0] < -s[1] / ds[1])
-			{
-				snormal[0] = -1;
-				snormal[1] = 0;
-				sdistance = 0;
-				return -s[0] / ds[0];
-			}
-			else
-			{
-				snormal[0] = 0;
-				snormal[1] = -1;
-				sdistance = 0;
-				return -s[1] / ds[1];
-			}
-		}
-		else if (ds[0] > 0 && ds[1] > 0) // Can only hit s2 axis
-		{
-			sdistance = snormal[0] = snormal[1] = 1 / sqrt(2.0);
-			return (1.0 - (s[0] + s[1])) / (ds[0] + ds[1]);
-		}
-		else if (ds[0] > 0)
-		{
-			if (abs(ds[1]) < 1e-20)
-			{
-				sdistance = snormal[0] = snormal[1] = 1 / sqrt(2.0);
-				return (1.0 - (s[0] + s[1])) / (ds[0] + ds[1]);
-			}
-			else if (ds[1] <= -ds[0])
-			{
-				snormal[0] = 0;
-				snormal[1] = -1;
-				sdistance = 0;
-				return -s[1] / ds[1];
-			}
-			else
-			{
-				double l1 = (1.0 - (s[0] + s[1])) / (ds[0] + ds[1]);
-				double l2 = -s[1] / ds[1];
-				if (l1 < l2)
-				{
-					sdistance = snormal[0] = snormal[1] = 1 / sqrt(2.0);
-					return l1;
-				}
-				else
-				{
-					snormal[0] = 0;
-					snormal[1] = -1;
-					sdistance = 0;
-					return l2;
-				}
-			}
-		}
-		else
-		{
-			if (abs(ds[0]) < 1e-20)
-			{
-				sdistance = snormal[0] = snormal[1] = 1 / sqrt(2.0);
-				return (1.0 - (s[0] + s[1])) / (ds[0] + ds[1]);
-			}
-			else if (ds[0] <= -ds[1])
-			{
-				snormal[0] = -1;
-				snormal[1] = 0;
-				sdistance = 0;
-				return -s[0] / ds[0];
-			}
-			else
-			{
-				double l1 = (1.0 - (s[0] + s[1])) / (ds[0] + ds[1]);
-				double l2 = (0 - s[0]) / ds[0];
-				if (l1 < l2)
-				{
-					sdistance = snormal[0] = snormal[1] = 1 / sqrt(2.0);
-					return l1;
-				}
-				else
-				{
-					snormal[0] = -1;
-					snormal[1] = 0;
-					sdistance = 0;
-					return l2;
-				}
-			}
-		}
-	}
-
-	double BulkElementTri2dC1::factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
-	{
-		return TRI2d_factor_when_local_coordinate_becomes_invalid(s, ds, snormal, sdistance);
-	}
-
 	oomph::Node *BulkElementTri2dC1::boundary_node_pt(const int &face_index, const unsigned int i)
 	{
 		return this->node_pt(this->get_bulk_node_number(face_index, i));
@@ -10449,11 +10268,6 @@ namespace pyoomph
       return res;
     }
 
-
-	double BulkElementTri2dC2::factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance)
-	{
-		return TRI2d_factor_when_local_coordinate_becomes_invalid(s, ds, snormal, sdistance);
-	}
 
 	void BulkElementTri2dC2::get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support)
 	{

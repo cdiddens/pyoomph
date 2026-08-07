@@ -1110,6 +1110,9 @@ namespace pyoomph
       // moving mesh. Everywhere else the history slots are never filled and the symbols must fall
       // back to the current geometry.
       bool history_geometry_is_relevant() const;
+      // Overrides the above for the duration of one emission pass. Only write_code_tracer_advection
+      // sets it, and only through an RAII guard - see the rationale there.
+      bool force_history_geometry = false;
       virtual std::string get_elem_info_str(const FiniteElementSpace *sp);
       virtual std::string get_nodal_data_string(const FiniteElementSpace *sp);
       virtual void finalise(); // Locks in the residual definitions and prepares the code for write_code() (space/field discovery, index assignment, etc.)

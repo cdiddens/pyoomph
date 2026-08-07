@@ -1321,8 +1321,10 @@ void PyReg_Mesh(nb::module_ &m)
 			 { return m->nrefined(); }), "Returns the number of elements that were refined during the last adaptation step")
 		.def("nunrefined",mesh_method([](pyoomph::Mesh *m)
 			 { return m->nunrefined(); }), "Returns the number of elements that were unrefined during the last adaptation step")
-		.def("invalidate_lagrangian_kdtree",mesh_method([](pyoomph::Mesh *m)
-			 { m->invalidate_lagrangian_kdtree(); }), "Invalidates the cached kd-tree used for Lagrangian-coordinate spatial searches, forcing it to be rebuilt on next use")
+		.def("bump_topology_generation",mesh_method([](pyoomph::Mesh *m)
+			 { m->bump_topology_generation(); }), "Announces that this mesh's elements or their coordinates have changed, so that anything caching them (tracer particles, point locators) rebuilds before its next use")
+		.def("get_topology_generation",mesh_method([](pyoomph::Mesh *m)
+			 { return m->get_topology_generation(); }), "The counter incremented by bump_topology_generation(); compare against a stored value to detect that cached element information has gone stale")
 		.def_prop_rw(
 			"min_permitted_error",mesh_method([](pyoomph::Mesh *m)
 			{ return m->min_permitted_error(); }),mesh_method([](pyoomph::Mesh *m, double e)
@@ -1901,36 +1903,101 @@ void PyReg_Mesh(nb::module_ &m)
 		  nb::arg("connections"), nb::arg("when") = "", nb::arg("mode") = 1,
 		  "Counts boundary facets of a coupled interface that have no counterpart on the opposite side; mode 0 silent, 1 report, 2 throw. Collective: every process must call it");
 
+	// Reshape a flat vector into an (n, ncol) numpy array owned by Python.
+	auto tracer_matrix = [](const std::vector<double> &v, size_t ncol) -> nb::ndarray<nb::numpy, double>
+	{
+		double *dest = new double[v.size() ? v.size() : 1];
+		for (size_t i = 0; i < v.size(); i++)
+			dest[i] = v[i];
+		nb::capsule owner(dest, [](void *p) noexcept { delete[] (double *)p; });
+		if (!ncol)
+			return nb::ndarray<nb::numpy, double>(dest, {(size_t)0}, owner);
+		return nb::ndarray<nb::numpy, double>(dest, {v.size() / ncol, ncol}, owner);
+	};
+
 	nb::class_<pyoomph::TracerCollection>(m, "TracerCollection")
 		.def(nb::init<std::string>())
 		.def("_set_mesh", [](pyoomph::TracerCollection *self, MeshHandleBase *mesh_h)
-			 { self->set_mesh(mesh_h->mesh()); })
-		.def("_advect_all", &pyoomph::TracerCollection::advect_all)
-		.def("_prepare_advection", &pyoomph::TracerCollection::prepare_advection)
-		.def("_locate_elements", &pyoomph::TracerCollection::locate_elements)
+			 { self->set_mesh(mesh_h->mesh()); },
+			 "Attaches this collection to a mesh. The mesh may be a bulk domain (codimension 0) or an interface of one (codimension 1); on an interface the tracers are advected tangentially and co-move with it normally")
+		.def("_set_num_payloads", &pyoomph::TracerCollection::set_num_payloads,
+			 "Declares how many path-integrated scalars each particle carries; must match what the generated code registered")
+		.def("_advect_all", &pyoomph::TracerCollection::advect_all,
+			 "Advects every particle through one accepted timestep, using adaptive Runge-Kutta sub-steps over the time-interpolated mesh configuration")
+		.def("_relocate_all", &pyoomph::TracerCollection::relocate_all, nb::arg("time_level") = 0,
+			 "Re-derives every particle's element and local coordinate from its stored position, in the mesh configuration at the given nodal time-history level. Needed after adaptation or remeshing; particles that no longer lie in the mesh are dropped")
 		.def("_save_state", [](pyoomph::TracerCollection *t)
-			 {std::vector<double> pos; std::vector<int> tags; t->_save_state(pos,tags); return std::make_tuple(vector_to_ndarray(pos),vector_to_ndarray(tags)); })
-		.def("_load_state", [](pyoomph::TracerCollection *t, std::vector<double> pos, std::vector<int> tags)
-			 { t->_load_state(pos, tags); })
-		.def("_set_transfer_interface", &pyoomph::TracerCollection::set_transfer_interface)
+			 {std::vector<double> pos; std::vector<long long> ids; t->_save_state(pos,ids); return std::make_tuple(vector_to_ndarray(pos),vector_to_ndarray(ids)); },
+			 "Serialises positions/payloads and (id, tag) pairs of all particles, for checkpointing")
+		.def("_load_state", [](pyoomph::TracerCollection *t, std::vector<double> pos, std::vector<long long> ids)
+			 { t->_load_state(pos, ids); },
+			 "Replaces all particles by those of a previously saved state, restoring their identities")
+		.def("_set_transfer_interface", &pyoomph::TracerCollection::set_transfer_interface,
+			 "Registers that particles crossing the given mesh boundary are handed over to another collection instead of being dropped")
 		.def(
-			"add_tracer", [](pyoomph::TracerCollection *coll, const std::vector<double> &pos, int tag = 0)
-			{ coll->add_tracer(pos, tag); },
-			nb::arg("position"), nb::arg("tag") = 0)
-		.def("get_positions", [](pyoomph::TracerCollection *coll) -> nb::ndarray<nb::numpy, double>
-			 {
-    unsigned nd=coll->get_coordinate_dimension();
-    if (!nd)
-    {
-        double *empty = new double[0];
-        nb::capsule owner(empty, [](void *p) noexcept { delete[] (double *) p; });
-        return nb::ndarray<nb::numpy, double>(empty, {(size_t)0}, owner);
-    }
-    std::vector<double> pos=coll->get_positions();
-    double *dest = new double[pos.size()];
-	 for (unsigned int i=0;i<pos.size();i++) dest[i]=pos[i];
-	 nb::capsule owner(dest, [](void *p) noexcept { delete[] (double *) p; });
-	 return nb::ndarray<nb::numpy, double>(dest, {(size_t)(pos.size()/nd),(size_t)nd}, owner); });
+			"add_tracer", [](pyoomph::TracerCollection *coll, const std::vector<double> &pos, int tag,
+							 const std::vector<double> &payload)
+			{ return (long long)coll->add_tracer(pos, tag, payload); },
+			nb::arg("position"), nb::arg("tag") = 0, nb::arg("payload") = std::vector<double>(),
+			"Adds one particle at a physical position and returns its globally unique id, or 0 if the position does not lie in the mesh")
+		.def(
+			"add_tracers_collective", [](pyoomph::TracerCollection *coll, const std::vector<double> &pos,
+										 const std::vector<int> &tags, const std::vector<double> &payload)
+			{ return coll->add_tracers_collective(pos, tags, payload); },
+			nb::arg("positions"), nb::arg("tags") = std::vector<int>(), nb::arg("payload") = std::vector<double>(),
+			"COLLECTIVE. Adds one particle per candidate position, given as a flat array. Every process must pass the same candidates; each ends up on exactly one process and gets an identity derived from its index, so the particle set does not depend on how the mesh is partitioned. Returns how many candidates lay outside the mesh everywhere")
+		.def("remove_tracer", [](pyoomph::TracerCollection *coll, long long id)
+			 { return coll->remove_tracer((pyoomph::TracerId)id); }, nb::arg("id"),
+			 "Removes the particle with this id; returns whether one was found")
+		.def("nglobal", [](pyoomph::TracerCollection *coll) { return coll->nglobal(); },
+			 "COLLECTIVE. Number of particles over all processes")
+		.def("gather_positions", [tracer_matrix](pyoomph::TracerCollection *coll)
+			 { return tracer_matrix(coll->gather_positions(), coll->get_coordinate_dimension()); },
+			 "COLLECTIVE. Positions of every process's particles, sorted by identity, so the result is the same on every process and independent of the partitioning")
+		.def("gather_payloads", [tracer_matrix](pyoomph::TracerCollection *coll)
+			 { return tracer_matrix(coll->gather_payloads(), coll->get_num_payloads()); },
+			 "COLLECTIVE. Path-integrated scalars of every process's particles, in the same order as gather_positions()")
+		.def("gather_ids", [](pyoomph::TracerCollection *coll)
+			 { return vector_to_ndarray(coll->gather_ids()); },
+			 "COLLECTIVE. Identities of every process's particles, ascending")
+		.def("gather_tags", [](pyoomph::TracerCollection *coll)
+			 { return vector_to_ndarray(coll->gather_tags()); },
+			 "COLLECTIVE. Tags of every process's particles, in the same order as gather_positions()")
+		.def("clear", &pyoomph::TracerCollection::clear, "Removes all particles")
+		.def("nlocal", &pyoomph::TracerCollection::nlocal, "Number of particles held by this process")
+		.def("get_codimension", &pyoomph::TracerCollection::get_codimension,
+			 "0 for tracers in a bulk domain, 1 for tracers confined to an interface")
+		.def("get_coordinate_dimension", &pyoomph::TracerCollection::get_coordinate_dimension,
+			 "Number of spatial components of a particle position, i.e. the nodal dimension of the mesh. On an interface this is one more than the element dimension")
+		.def("step_statistics", &pyoomph::TracerCollection::step_statistics,
+			 "One-line summary of the last advection: particle count, sub-steps taken and rejected, element changes, particles lost")
+		.def_rw("rtol", &pyoomph::TracerCollection::rtol,
+				"Relative tolerance of the adaptive sub-step controller, in units of the particle position")
+		.def_rw("atol", &pyoomph::TracerCollection::atol, "Absolute tolerance of the adaptive sub-step controller")
+		.def_rw("history_window", &pyoomph::TracerCollection::history_window,
+				"Length of the rolling position history kept for trails, in nondimensional time; 0 disables it")
+		.def_rw("history_capacity", &pyoomph::TracerCollection::history_capacity,
+				"Maximum number of history samples per particle; the window is additionally limited by this")
+		.def_rw("time_interpolation_order", &pyoomph::TracerCollection::time_interpolation_order,
+				"Order of the in-step Lagrange interpolation of the nodal positions: 1 uses two history levels, 2 uses three, -1 takes the best the stored history allows")
+		.def_rw("fixed_substeps", &pyoomph::TracerCollection::fixed_substeps,
+				"If positive, uses this many uniform sub-steps per timestep instead of the error controller. Only useful for order-of-convergence tests")
+		.def("get_positions", [tracer_matrix](pyoomph::TracerCollection *coll)
+			 { return tracer_matrix(coll->get_positions(), coll->get_coordinate_dimension()); },
+			 "Current physical positions, one row per particle")
+		.def("get_payloads", [tracer_matrix](pyoomph::TracerCollection *coll)
+			 { return tracer_matrix(coll->get_payloads(), coll->get_num_payloads()); },
+			 "Path-integrated scalars, one row per particle")
+		.def("get_ids", [](pyoomph::TracerCollection *coll)
+			 { return vector_to_ndarray(coll->get_ids()); },
+			 "Globally unique, never-recycled identity of each particle, in the same order as get_positions()")
+		.def("get_tags", [](pyoomph::TracerCollection *coll)
+			 { return vector_to_ndarray(coll->get_tags()); },
+			 "User tag of each particle, in the same order as get_positions()")
+		.def("get_history", [tracer_matrix](pyoomph::TracerCollection *coll, long long id)
+			 { return tracer_matrix(coll->get_history_of((pyoomph::TracerId)id), 1 + coll->get_coordinate_dimension()); },
+			 nb::arg("id"),
+			 "Rolling position history of one particle as rows of (time, position...), oldest first. Empty unless history_window was set");
 	 
 	 
 	 delete py_decl_OomphData;

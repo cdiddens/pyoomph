@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,644 +13,1524 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
-
 #include "tracers.hpp"
-#include "exception.hpp"
+
 #include "elements.hpp"
-#include <iostream>
+#include "exception.hpp"
+#include "pointlocator.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <sstream>
 
 namespace pyoomph
 {
 
-	// Resize the global-position vector to the mesh's coordinate dimension d (called once
-	// the particle is added to a TracerCollection whose mesh dimension is known).
-	void TracerParticle::set_coordinate_dimension(unsigned d)
-	{
-		pos.resize(d, 0.0);
-	}
+  namespace
+  {
+    // Dense solve for n <= 3 by Gaussian elimination with partial pivoting. Everything here is
+    // 1x1, 2x2 or 3x3, so this is both the fastest and the least error-prone option; the previous
+    // code carried three hand-expanded adjugate formulas, one per dimension, and simply threw for
+    // anything that was not square.
+    bool solve_small(double *A, unsigned n, double *b, double *xout)
+    {
+      unsigned piv[3] = {0, 1, 2};
+      for (unsigned c = 0; c < n; c++)
+      {
+        unsigned best = c;
+        double bestv = std::abs(A[piv[c] * n + c]);
+        for (unsigned r = c + 1; r < n; r++)
+        {
+          const double v = std::abs(A[piv[r] * n + c]);
+          if (v > bestv)
+          {
+            bestv = v;
+            best = r;
+          }
+        }
+        if (bestv < 1e-300)
+          return false;
+        std::swap(piv[c], piv[best]);
+        for (unsigned r = c + 1; r < n; r++)
+        {
+          const double f = A[piv[r] * n + c] / A[piv[c] * n + c];
+          if (f == 0.0)
+            continue;
+          for (unsigned k = c; k < n; k++)
+            A[piv[r] * n + k] -= f * A[piv[c] * n + k];
+          b[piv[r]] -= f * b[piv[c]];
+        }
+      }
+      for (int c = (int)n - 1; c >= 0; c--)
+      {
+        double sum = b[piv[c]];
+        for (unsigned k = c + 1; k < n; k++)
+          sum -= A[piv[c] * n + k] * xout[k];
+        xout[c] = sum / A[piv[c] * n + c];
+      }
+      return true;
+    }
 
-	// Advect this particle through the remainder (1-timefrac) of a timestep of length dt,
-	// by taking adaptive RK2 sub-steps in local ("s") coordinates. Sub-step size is chosen so
-	// that (a) the particle moves at most `desired_smag_scale` in s-space per sub-step, and
-	// (b) sub-steps never overshoot the boundary of the current element (as determined by
-	// factor_when_local_coordinate_becomes_invalid). If a sub-step would leave the element,
-	// the particle is either handed to another TracerCollection (if it crosses a boundary
-	// registered as a transfer interface), or re-located into the new element via
-	// TracerCollection::get_new_element. If it cannot be re-located, advection is aborted
-	// early (timefrac left short of 1) and the caller is expected to remove the particle.
-	void TracerParticle::advect(double dt)
-	{
-		if (this->timefrac > 1 - 1e-15)
-			return;
-		if (!elem)
-		{
-			// throw_runtime_error("Not without any element");
-			return;
-		}
+    // Bogacki-Shampine 3(2), FSAL. Third order with an embedded second-order estimate, three new
+    // derivative evaluations per accepted step.
+    //
+    // Not a 5(4) method on purpose: the advection field is only C0 across element faces, so a
+    // higher-order method cannot realise its order on any sub-step that straddles one, while
+    // costing six stages times up to three history levels of generated-code calls each.
+    const double BS_A21 = 0.5;
+    const double BS_A32 = 0.75;
+    const double BS_B1 = 2.0 / 9.0, BS_B2 = 1.0 / 3.0, BS_B3 = 4.0 / 9.0;
+    const double BS_E1 = 7.0 / 24.0, BS_E2 = 0.25, BS_E3 = 1.0 / 3.0, BS_E4 = 0.125;
+  }
 
-		// double dt_full=dt*(1-this->timefrac);
-		// double dt_step=dt_full;
+  // ------------------------------------------------------------------------------------------
+  // TracerTimeConfig
+  // ------------------------------------------------------------------------------------------
 
-		double desired_smag_scale = 0.1; //~10 steps per element
+  TracerTimeConfig TracerTimeConfig::from_mesh(Mesh *m, int requested_order, unsigned nlevel_available)
+  {
+    TracerTimeConfig cfg;
 
-		oomph::Vector<double> svelo(s.size());
-		unsigned tracer_index = in_collection->get_tracer_code_index();
-		double over_leave_factor = 0.001;
+    const oomph::TimeStepper *ts = nullptr;
+    if (m->nnode())
+      ts = m->node_pt(0)->time_stepper_pt();
+    else if (m->nelement())
+    {
+      auto *be = dynamic_cast<BulkElementBase *>(m->element_pt(0));
+      if (be)
+      {
+        if (be->nnode())
+          ts = be->node_pt(0)->time_stepper_pt();
+        else if (be->ninternal_data())
+          ts = be->internal_data_pt(0)->time_stepper_pt();
+        else if (be->nexternal_data())
+          ts = be->external_data_pt(0)->time_stepper_pt();
+      }
+    }
+    if (!ts)
+      return cfg; // nothing to advect over
 
-		// On the range [0:1] (where 1 means the desired dt)
-		double min_dt = 1e-5;
-		double max_dt = 5e-2;
+    const double t0 = ts->time_pt()->time(0);
+    const double t1 = ts->time_pt()->time(1);
+    cfg.t_current = t0;
+    cfg.dt = t0 - t1;
+    if (cfg.dt <= 0.0)
+      return cfg;
 
+    unsigned want = 2;
+    if (requested_order >= 0)
+      want = std::min<unsigned>((unsigned)requested_order + 1, 3);
+    else
+      want = 3;
+    want = std::min(want, nlevel_available);
+    // Time::ndt() is the number of stored timestep SIZES, while time(t) walks back over them, so
+    // level t is available for t <= ndt(). Capping at ndt() itself silently forced linear
+    // interpolation on every problem.
+    want = std::min<unsigned>(want, ts->time_pt()->ndt() + 1);
 
-		double s_plane_distance;
-		oomph::Vector<double> s_normal(s.size());
+    cfg.tau_of_level[0] = 1.0;
+    cfg.tau_of_level[1] = 0.0;
+    if (want >= 3)
+    {
+      const double dtprev = t1 - ts->time_pt()->time(2);
+      // An impulsive start leaves t(1) == t(2); the quadratic basis is then singular and the
+      // "third level" carries no information anyway.
+      if (dtprev <= 1e-12 * cfg.dt)
+        want = 2;
+      else
+        cfg.tau_of_level[2] = -dtprev / cfg.dt;
+    }
+    cfg.nlevel = want;
+    cfg.set_tau(0.0);
+    return cfg;
+  }
 
-		while (this->timefrac < 1 - 1e-16)
-		{
+  void TracerTimeConfig::set_tau(double tau)
+  {
+    for (unsigned k = 0; k < 3; k++)
+    {
+      w[k] = 0.0;
+      dwdtau[k] = 0.0;
+    }
+    if (nlevel <= 1)
+    {
+      w[0] = 1.0;
+      return;
+    }
+    // Lagrange basis and its derivative, written out rather than differentiated numerically so
+    // that dX/dtau is the exact derivative of the interpolant J is taken from. Those two being
+    // the same interpolant is what makes a Lagrangian mesh give an identically zero derivative.
+    for (unsigned k = 0; k < nlevel; k++)
+    {
+      double num = 1.0, den = 1.0, deriv = 0.0;
+      for (unsigned m = 0; m < nlevel; m++)
+      {
+        if (m == k)
+          continue;
+        num *= (tau - tau_of_level[m]);
+        den *= (tau_of_level[k] - tau_of_level[m]);
+      }
+      for (unsigned m = 0; m < nlevel; m++)
+      {
+        if (m == k)
+          continue;
+        double term = 1.0;
+        for (unsigned j = 0; j < nlevel; j++)
+        {
+          if (j == k || j == m)
+            continue;
+          term *= (tau - tau_of_level[j]);
+        }
+        deriv += term;
+      }
+      w[k] = num / den;
+      dwdtau[k] = deriv / den;
+    }
+  }
 
-			double this_dt = 1 - this->timefrac;
-			// if (collection_index==0) std::cout << "ADV " << this->timefrac << "  " <<this_dt << std::endl;
-			if (this_dt > max_dt)
-				this_dt = max_dt;
-			elem->eval_tracer_advection_in_s_space(tracer_index, this->timefrac, s, svelo);
-			double svmag = 0.0;
-			for (unsigned int i = 0; i < svelo.size(); i++)
-				svmag += svelo[i] * svelo[i];
-			svmag = sqrt(svmag) * this_dt * dt;
-			// if (collection_index==0) std::cout << "   SVMAG " << svmag << "  " << desired_smag_scale   << std::endl;
-			if (svmag > desired_smag_scale)
-			{
-				this_dt *= desired_smag_scale / (svmag * dt);
-			}
-			double factor_to_leave = elem->factor_when_local_coordinate_becomes_invalid(s, svelo, s_normal, s_plane_distance);
-			// Check if we would leave
-			// if (collection_index==0) std::cout << "   FACT T LEAVE  " << factor_to_leave<< "  " <<  this_dt << "   " << dt   << std::endl;
-			// if (collection_index==0) std::cout << "   SVELO " << svelo[0]<< "  " <<  svelo[1]   << std::endl;
-			if (factor_to_leave < this_dt)
-			{
-				if (factor_to_leave < over_leave_factor)
-					factor_to_leave = over_leave_factor;
-				// Perform only until then
-				this_dt = factor_to_leave * (1 + over_leave_factor);
-			}
-			if (this_dt < min_dt)
-			{
-				this_dt = min_dt;
-			}
+  // ------------------------------------------------------------------------------------------
+  // TracerCollection: setup and storage
+  // ------------------------------------------------------------------------------------------
 
-			if (this->timefrac + this_dt > 1)
-				this_dt = 1 - this->timefrac;
+  TracerCollection::~TracerCollection()
+  {
+    clear();
+    drop_locators();
+  }
 
-			oomph::Vector<double> sold = s;
-			if (false)
-			{
-				for (unsigned int i = 0; i < s.size(); i++)
-				{
-					s[i] += svelo[i] * this_dt * dt;
-				}
-			}
-			else
-			{
-				// Make an RK2 step
-				oomph::Vector<double> s1(s.size());
-				oomph::Vector<double> svelo1(s.size());
-				oomph::Vector<double> s2(s.size());
-				oomph::Vector<double> svelo2(s.size());
-				for (unsigned int i = 0; i < s.size(); i++)
-				{
-					s1[i] = s[i] + 0.5 * this_dt * dt * svelo[i];
-				}
-				elem->eval_tracer_advection_in_s_space(tracer_index, this->timefrac + this_dt * 0.5, s1, svelo1);
-				for (unsigned int i = 0; i < s.size(); i++)
-				{
-					s2[i] = s[i] + this_dt * dt * (2 * svelo1[i] - svelo[i]);
-				}
-				elem->eval_tracer_advection_in_s_space(tracer_index, this->timefrac + this_dt, s2, svelo2);
-				for (unsigned int i = 0; i < s.size(); i++)
-				{
-					s[i] += this_dt * dt * (svelo[i] / 6 + svelo1[i] * 4 / 6 + svelo2[i] / 6);
-				}
-			}
+  void TracerCollection::drop_locators()
+  {
+    for (unsigned k = 0; k < 2; k++)
+    {
+      delete locator[k];
+      locator[k] = nullptr;
+    }
+    has_locator_generation = false;
+  }
 
-			if (!elem->local_coord_is_valid(s))
-			{
-				// The RK2 step left the element. Determine whether we exited through a mesh
-				// boundary by intersecting the boundary sets of all nodes that lie on the
-				// plane (s_normal, s_plane_distance) we crossed; a mesh boundary shared by
-				// all such nodes is a boundary we plausibly left through.
-				std::set<unsigned> allbounds;
-				for (unsigned int in = 0; in < this->elem->nnode(); in++)
-				{
-					std::set<unsigned> *nodebounds;
-					elem->node_pt(in)->get_boundaries_pt(nodebounds);
-					if (nodebounds)
-					{
-						for (auto b : (*nodebounds))
-							allbounds.insert(b);
-					}
-				}
-				// Now go over all nodes and find the boundary where all are located on if they lie on the passing s plane
-				for (unsigned int in = 0; in < this->elem->nnode(); in++)
-				{
-					oomph::Vector<double> snode(s.size());
-					elem->local_coordinate_of_node(in, snode);
-					double dist = -s_plane_distance;
-					for (unsigned int is = 0; is < s.size(); is++)
-						dist += s_normal[is] * snode[is];
-					if (abs(dist) < 1e-7)
-					{
-						std::set<unsigned> *nodebounds;
-						elem->node_pt(in)->get_boundaries_pt(nodebounds);
-						if (!nodebounds)
-						{
-							allbounds.clear();
-							break;
-						}
-						else
-						{
-							std::set<unsigned> nbounds, intersect;
-							nbounds = *nodebounds;
-							std::set_intersection(nbounds.begin(), nbounds.end(), allbounds.begin(), allbounds.end(), std::inserter(intersect, intersect.begin()));
-							allbounds.swap(intersect);
-							if (allbounds.empty())
-								break;
-						}
-					}
-				}
+  bool TracerCollection::generation_changed() const
+  {
+    return !has_locator_generation || mesh->get_topology_generation() != locator_generation;
+  }
 
-				if (!allbounds.empty())
-				{
-					// If any of the boundaries we crossed is a registered transfer interface,
-					// hand the particle over to the paired collection and let it continue
-					// advecting there for the rest of the timestep.
-					for (auto bind : allbounds)
-					{
-						if (this->in_collection->transfer_interfaces.count(bind))
-						{
-							this->timefrac += this_dt;
-							auto *newcoll = this->in_collection->transfer_interfaces[bind].other_collection;
+  MeshPointLocator *TracerCollection::get_locator(unsigned time_level)
+  {
+    if (!mesh)
+      throw_runtime_error("Tracer collection has no mesh");
+    if (generation_changed())
+    {
+      drop_locators();
+      locator_generation = mesh->get_topology_generation();
+      has_locator_generation = true;
+    }
+    if (time_level > 1)
+      throw_runtime_error("Tracers only locate in time levels 0 and 1");
+    if (!locator[time_level])
+    {
+      LocatorSetup ls;
+      ls.space = LocatorSpace::Eulerian;
+      ls.time_index = time_level;
+      locator[time_level] = new MeshPointLocator(mesh, ls);
+    }
+    return locator[time_level];
+  }
 
-							if (newcoll->mesh->get_lagrangian_kdtree() != newcoll->last_lagrangian_kdtree)
-							{
-								newcoll->locate_elements();
-							}
+  void TracerCollection::set_mesh(Mesh *m)
+  {
+    mesh = m;
+    drop_locators();
+    nodal_dim = m->get_nodal_dimension();
+    const int ed = m->get_element_dimension();
+    if (ed < 0)
+      throw_runtime_error("Cannot attach tracers to a mesh with a negative element dimension");
+    elem_dim = (unsigned)ed;
+    if (nodal_dim < elem_dim || nodal_dim - elem_dim > 1)
+    {
+      throw_runtime_error("Tracers can only live on a bulk domain (codimension 0) or on an interface "
+                          "of it (codimension 1), but this mesh has element dimension " +
+                          std::to_string(elem_dim) + " in " + std::to_string(nodal_dim) + " dimensions");
+    }
+    for (auto *p : tracers)
+    {
+      p->elem = nullptr;
+      p->x.resize(nodal_dim, 0.0);
+      p->s.assign(elem_dim, 0.0);
+    }
+    resolve_code_indices();
+  }
 
-							this->in_collection->remove_tracer(this);
-							newcoll->add_tracer(this);
-							newcoll->get_new_element(this);
+  void TracerCollection::set_num_payloads(unsigned n)
+  {
+    n_payload = n;
+    for (auto *p : tracers)
+      p->payload.resize(n, 0.0);
+    resolve_code_indices();
+  }
 
-							this->advect(dt);
-							if (this->elem)
-								this->update_position_from_s();
+  // Each tracer name registers one generated-code entry per nodal time-history level, under the
+  // name with an "@k" suffix for k > 0, and likewise one per payload. A level that was not
+  // registered caps the time-interpolation order rather than being an error: a code generated
+  // before a payload was added, or with only two levels, is still usable.
+  void TracerCollection::resolve_code_indices()
+  {
+    code_index[0] = code_index[1] = code_index[2] = -1;
+    payload_code_index.assign(3 * n_payload, -1);
+    if (!mesh || !mesh->nelement())
+      return;
+    auto *be = dynamic_cast<BulkElementBase *>(mesh->element_pt(0));
+    if (!be)
+      return;
+    auto *ft = be->get_code_instance()->get_func_table();
+    for (unsigned ind = 0; ind < ft->numtracer_advections; ind++)
+    {
+      const std::string nm(ft->tracer_advection_names[ind]);
+      for (unsigned k = 0; k < 3; k++)
+      {
+        const std::string want = (k == 0 ? tracer_name : tracer_name + "@" + std::to_string(k));
+        if (nm == want)
+          code_index[k] = (int)ind;
+        for (unsigned pi = 0; pi < n_payload; pi++)
+        {
+          const std::string wantp = want + "/payload" + std::to_string(pi);
+          if (nm == wantp)
+            payload_code_index[k * n_payload + pi] = (int)ind;
+        }
+      }
+    }
+  }
 
-							return;
-						}
-					}
+  void TracerCollection::clear()
+  {
+    for (auto *p : tracers)
+      delete p;
+    tracers.clear();
+  }
 
-					// Mode: Stay inside, tangential motion at interface:
-					//   find projected s
-					oomph::Vector<double> sstep(s.size());
-					// double sdot = 0.0;
-					oomph::Vector<double> sproj(s.size());
-					for (unsigned int is = 0; is < s.size(); is++)
-						sstep[is] = s[is] - sold[is];
+  // Builds a particle at `pos` and places it. Returns null (having deleted it) if the point does not
+  // lie in a non-halo element of this process's part of the mesh.
+  TracerParticle *TracerCollection::make_and_place(const std::vector<double> &pos, int tag,
+                                                  const std::vector<double> &payload_init)
+  {
+    TracerParticle *p = new TracerParticle();
+    p->x.assign(nodal_dim, 0.0);
+    for (unsigned i = 0; i < std::min<unsigned>(nodal_dim, (unsigned)pos.size()); i++)
+      p->x[i] = pos[i];
+    p->s.assign(elem_dim, 0.0);
+    p->payload.assign(n_payload, 0.0);
+    for (unsigned i = 0; i < std::min<unsigned>(n_payload, (unsigned)payload_init.size()); i++)
+      p->payload[i] = payload_init[i];
+    p->tag = tag;
 
-					/*  //std::cout << "PARTICLE " << this<< " IS LEAVING THROUGH BOUNDARY " ; for (auto b : allbounds) std::cout << b << "  " ; std::cout << " WITH SNORMAL "<< s_normal[0] << "  " << s_normal[1] << "  AND  SSTEP " << sstep[0] << "  " << sstep[1];  std::cout << std::endl;
+    if (!place_globally(p, 0) || (p->elem && p->elem->is_halo()))
+    {
+      // A halo element is somebody else's; letting both keep the particle would advect it twice and
+      // report it twice.
+      delete p;
+      return nullptr;
+    }
+    // The projection may have moved an interface particle onto the surface; make that the position
+    // rather than keeping the requested point, so that the normal offset starts at zero.
+    if (get_codimension() == 1 && p->elem)
+    {
+      oomph::Vector<double> s(p->s.size());
+      for (unsigned a = 0; a < p->s.size(); a++)
+        s[a] = p->s[a];
+      oomph::Vector<double> xs;
+      TracerTimeConfig frozen;
+      p->elem->tracer_geometry_at_s(s, 1, frozen.w, frozen.dwdtau, &xs, nullptr, nullptr);
+      for (unsigned i = 0; i < nodal_dim; i++)
+        p->x[i] = xs[i];
+    }
+    return p;
+  }
 
-						for (unsigned int is=0;is<s.size();is++) sdot+=sstep[is]*s_normal[is];
+  TracerId TracerCollection::add_tracer(const std::vector<double> &pos, int tag,
+                                        const std::vector<double> &payload_init)
+  {
+    if (!mesh)
+      throw_runtime_error("Cannot add tracers before a mesh was set");
+    TracerParticle *p = make_and_place(pos, tag, payload_init);
+    if (!p)
+      return 0;
+    // Rank-tagged so that particles created independently on different processes cannot collide.
+    p->id = (((TracerId)mpi_rank() + 1) << 48) | next_id;
+    next_id++;
+    tracers.push_back(p);
+    return p->id;
+  }
 
-						for (unsigned int is=0;is<s.size();is++)
-						{
-             s[is]=sold[is]+(sstep[is]-s_normal[is]*sdot);
-						}
-             */
+  unsigned TracerCollection::add_tracers_collective(const std::vector<double> &pos,
+                                                    const std::vector<int> &tags,
+                                                    const std::vector<double> &payload_init,
+                                                    const std::vector<long long> &ids)
+  {
+    if (!mesh)
+      throw_runtime_error("Cannot add tracers before a mesh was set");
+    if (!nodal_dim)
+      return 0;
+    const unsigned n = (unsigned)(pos.size() / nodal_dim);
 
-					/*
-					double dn=-s_plane_distance;
-					for (unsigned int is=0;is<s.size();is++)
-					{
-           dn+=s_normal[is]*sold[is];
-					}
-					for (unsigned int is=0;is<s.size();is++)
-					{
-           s[is]=sold[is]-s_normal[is]*dn;
-					}
-					if (elem->local_coord_is_valid(s))
-					{
-           this->timefrac+=this_dt;
-           continue;
-					}
-					else
-					{
-           in_collection->get_new_element(this);
-           if (!this->elem) {
-						this->timefrac+=this_dt;
-						std::cout << "   BUT LEFT " << std::endl;
-						return;
-           }
-					}*/
-				}
+    // Every process tries every candidate; a candidate is claimed by the lowest-numbered process
+    // that holds it in a non-halo element. The tie only arises for a point exactly on a shared
+    // face, which the locator's inside tolerance accepts on both sides.
+    const int nproc = mpi_nproc(), rank = mpi_rank();
+    std::vector<int> claimant(n, nproc);
+    std::vector<TracerParticle *> mine(n, nullptr);
+    std::vector<double> one(nodal_dim, 0.0), pay(n_payload, 0.0);
+    for (unsigned i = 0; i < n; i++)
+    {
+      for (unsigned d = 0; d < nodal_dim; d++)
+        one[d] = pos[(size_t)i * nodal_dim + d];
+      for (unsigned d = 0; d < n_payload && (size_t)i * n_payload + d < payload_init.size(); d++)
+        pay[d] = payload_init[(size_t)i * n_payload + d];
+      TracerParticle *p = make_and_place(one, i < tags.size() ? tags[i] : 0, pay);
+      if (p)
+      {
+        claimant[i] = rank;
+        mine[i] = p;
+      }
+    }
 
-				in_collection->get_new_element(this);
-				if (!this->elem)
-				{
-					this->timefrac += this_dt;
-					// TODO: See if it can be transferred or projected at a boundary
-					return;
-				}
-			}
+#ifdef OOMPH_HAS_MPI
+    if (is_distributed() && n)
+    {
+      std::vector<int> reduced(n, nproc);
+      MPI_Allreduce(claimant.data(), reduced.data(), (int)n, MPI_INT, MPI_MIN,
+                    mesh->communicator_pt()->mpi_comm());
+      claimant.swap(reduced);
+    }
+#endif
 
-			this->timefrac += this_dt;
-		}
-	}
+    unsigned nowhere = 0;
+    for (unsigned i = 0; i < n; i++)
+    {
+      if (claimant[i] >= nproc)
+      {
+        nowhere++;
+        delete mine[i];
+        continue;
+      }
+      if (claimant[i] != rank)
+      {
+        delete mine[i]; // another process claimed it
+        continue;
+      }
+      // The identity is the candidate's index in the list, which every process agrees on, so the
+      // particle set and its ids are the same however the mesh happens to be partitioned.
+      mine[i]->id = (i < ids.size()) ? (TracerId)ids[i] : (next_id + i);
+      tracers.push_back(mine[i]);
+      next_id = std::max(next_id, mine[i]->id + 1);
+    }
+    if (ids.empty())
+      next_id += n;
+    return nowhere;
+  }
 
-	// Recompute the global position pos from the current element and local coordinate s.
-	void TracerParticle::update_position_from_s()
-	{
-		if (elem)
-		{
-			elem->interpolated_x(s, pos);
-		}
-	}
+  bool TracerCollection::remove_tracer(TracerId id)
+  {
+    for (unsigned i = 0; i < tracers.size(); i++)
+    {
+      if (tracers[i]->id == id)
+      {
+        delete tracers[i];
+        tracers.erase(tracers.begin() + i);
+        return true;
+      }
+    }
+    return false;
+  }
 
-	// Re-locate particle p after it has left its previous element (oldelem). We first
-	// convert its local coordinate to Lagrangian (undeformed reference) coordinates xi via
-	// the old element, then use the mesh's Lagrangian k-d tree to find the element/local
-	// coordinate at that Lagrangian position. Using Lagrangian coordinates (rather than
-	// current/Eulerian ones) makes this robust for moving/deforming meshes, since the
-	// Lagrangian k-d tree is only rebuilt when the mesh's connectivity/topology changes.
-	void TracerCollection::get_new_element(TracerParticle *p)
-	{
-		oomph::Vector<double> xi;
-		xi.resize(p->s.size());
-		BulkElementBase *oldelem = p->elem;
-		for (unsigned int i = 0; i < p->s.size(); i++)
-		{
-			xi[i] = oldelem->interpolated_xi(p->s, i);
-		}
-		// oldelem->interpolated_xi(p->s,xi); // WHY EVER...
+  std::vector<double> TracerCollection::get_positions()
+  {
+    std::vector<double> ret;
+    ret.reserve(tracers.size() * nodal_dim);
+    for (auto *p : tracers)
+      for (unsigned i = 0; i < nodal_dim; i++)
+        ret.push_back(p->x[i]);
+    return ret;
+  }
 
-		/*    p->update_position_from_s();
-				std::cout << "TRACER PARTICLE AT " << p->pos[0] << "  " << p->pos[1] << std::endl;
-				std::cout << "  XI " << xi[0] << "  " << xi[1] << std::endl;
-				std::cout << "  S " << p->s[0] << "  " << p->s[1] << std::endl;
-				std::cout << "  NODE CORNERS" << std::endl;
-				for (unsigned ni=0;ni<oldelem->nnode();ni++)
-				{
-						std::cout << "  " <<ni << "  " << dynamic_cast<Node*>(oldelem->node_pt(ni))->xi(0) << "  " << dynamic_cast<Node*>(oldelem->node_pt(ni))->xi(1)  << std::endl;
-				}
-			*/
+  std::vector<long long> TracerCollection::get_ids() const
+  {
+    std::vector<long long> ret;
+    ret.reserve(tracers.size());
+    for (auto *p : tracers)
+      ret.push_back((long long)p->id);
+    return ret;
+  }
 
-		p->elem = last_lagrangian_kdtree->find_element(xi, p->s);
-	}
+  std::vector<int> TracerCollection::get_tags() const
+  {
+    std::vector<int> ret;
+    ret.reserve(tracers.size());
+    for (auto *p : tracers)
+      ret.push_back(p->tag);
+    return ret;
+  }
 
-	// Return an index into `tracers` for a new particle: reuse a recycled slot from
-	// free_indices if one exists, otherwise grow the vector by one (NULL placeholder).
-	unsigned TracerCollection::get_free_index()
-	{
-		if (free_indices.empty())
-		{
-			unsigned ret = tracers.size();
-			tracers.push_back(NULL);
-			return ret;
-		}
-		else
-		{
-			unsigned ret = free_indices.top();
-			free_indices.pop();
-			return ret;
-		}
-	}
+  std::vector<double> TracerCollection::get_payloads() const
+  {
+    std::vector<double> ret;
+    ret.reserve(tracers.size() * n_payload);
+    for (auto *p : tracers)
+      for (unsigned i = 0; i < n_payload; i++)
+        ret.push_back(p->payload[i]);
+    return ret;
+  }
 
-	// Remove all tracers from this collection. If kill_contents is true, also delete the
-	// TracerParticle objects themselves (they must still belong to this collection - a
-	// particle owned by a different collection indicates a bookkeeping bug and throws).
-	void TracerCollection::clear(bool kill_contents)
-	{
-		if (kill_contents)
-		{
-			for (unsigned int i = 0; i < tracers.size(); i++)
-			{
-				if (tracers[i])
-				{
-					// TODO: Throw if in other collection
-					if (tracers[i]->in_collection == this)
-						delete tracers[i];
-					else
-					{
-						throw_runtime_error("Tracer in wrong collection...");
-					}
-				}
-			}
-		}
-		tracers.clear();
-		free_indices = {};
-	}
+  std::vector<double> TracerCollection::get_history_of(TracerId id) const
+  {
+    const unsigned stride = 1 + nodal_dim;
+    for (auto *p : tracers)
+    {
+      if (p->id != id)
+        continue;
+      std::vector<double> ret;
+      ret.reserve(p->hist_n * stride);
+      // Unwrap the ring into chronological order.
+      const unsigned cap = p->hist_n ? (unsigned)(p->hist.size() / stride) : 0;
+      for (unsigned k = 0; k < p->hist_n; k++)
+      {
+        const unsigned slot = (p->hist_head + cap - p->hist_n + k) % cap;
+        for (unsigned j = 0; j < stride; j++)
+          ret.push_back(p->hist[slot * stride + j]);
+      }
+      return ret;
+    }
+    return std::vector<double>();
+  }
 
-	// Insert an already-constructed particle p into this collection, assigning it a slot
-	// and adjusting its coordinate-dimension to match this collection's mesh. Throws if p
-	// is already registered in any collection (including this one).
-	unsigned TracerCollection::add_tracer(TracerParticle *p)
-	{
-		unsigned ret = this->get_free_index();
-		tracers[ret] = p;
-		if (p->in_collection)
-		{
-			if (p->in_collection == this)
-			{
-				throw_runtime_error("Tracer already added to this collection");
-			}
-			else
-			{
-				throw_runtime_error("Tracer already part of another collection");
-			}
-		}
-		p->in_collection = this;
-		p->collection_index = ret;
-		p->set_coordinate_dimension(this->get_coordinate_dimension());
-		return ret;
-	}
+  void TracerCollection::set_transfer_interface(unsigned boundary_index, TracerCollection *opp)
+  {
+    transfer_interfaces[boundary_index] = TracerTransferInterfaceInfo();
+    transfer_interfaces[boundary_index].other_collection = opp;
+  }
 
-	// Remove particle p (which must belong to this collection) by its collection_index.
-	void TracerCollection::remove_tracer(TracerParticle *p)
-	{
-		if (!p->in_collection)
-		{
-			throw_runtime_error("Cannot remove tracer which is in no collection");
-		}
-		else if (p->in_collection != this)
-		{
-			throw_runtime_error("Cannot remove tracer since it is in another collection");
-		}
-		this->remove_tracer(p->collection_index);
-	}
+  // ------------------------------------------------------------------------------------------
+  // MPI
+  // ------------------------------------------------------------------------------------------
 
-	// Remove and return the particle at slot `index` (NULL if the slot was already free),
-	// freeing the slot for reuse and clearing the particle's back-reference to this collection.
-	// Note: the particle itself is NOT deleted - ownership is handed back to the caller.
-	TracerParticle *TracerCollection::remove_tracer(unsigned index)
-	{
-		if (index >= tracers.size())
-		{
-			throw_runtime_error("Tracer index out of bounds");
-		}
-		if (!tracers[index])
-			return NULL;
-		TracerParticle *ret = tracers[index];
-		free_indices.push(index);
-		tracers[index] = NULL;
-		if (ret->in_collection == this)
-		{
-			ret->in_collection = NULL;
-		}
-		return ret;
-	}
+  int TracerCollection::mpi_nproc() const
+  {
+#ifdef OOMPH_HAS_MPI
+    if (mesh && mesh->communicator_pt())
+      return mesh->communicator_pt()->nproc();
+#endif
+    return 1;
+  }
 
-	// Return the indices in `tracers` that currently hold a live particle (i.e. skip free slots).
-	std::vector<unsigned> TracerCollection::get_allocated_indices()
-	{
-		std::vector<unsigned> res;
-		res.reserve(tracers.size());
-		for (unsigned int i = 0; i < tracers.size(); i++)
-			if (tracers[i])
-				res.push_back(i);
-		return res;
-	}
+  int TracerCollection::mpi_rank() const
+  {
+#ifdef OOMPH_HAS_MPI
+    if (mesh && mesh->communicator_pt())
+      return mesh->communicator_pt()->my_rank();
+#endif
+    return 0;
+  }
 
-	// Return the flattened (cd doubles per particle) global positions of all allocated
-	// tracers, refreshing each from its local coordinate first if it still has an element.
-	std::vector<double> TracerCollection::get_positions()
-	{
-		unsigned cd = this->get_coordinate_dimension();
-		std::vector<unsigned> inds = get_allocated_indices();
-		std::vector<double> ret;
-		ret.reserve(inds.size() * cd);
-		for (const auto &i : inds)
-		{
-			if (tracers[i]->elem)
-				tracers[i]->update_position_from_s();
-			for (unsigned int j = 0; j < cd; j++)
-				ret.push_back(tracers[i]->pos[j]);
-		}
-		return ret;
-	}
+  bool TracerCollection::is_distributed() const
+  {
+#ifdef OOMPH_HAS_MPI
+    return mesh && mesh->is_mesh_distributed() && mpi_nproc() > 1;
+#else
+    return false;
+#endif
+  }
 
-	// Return the user-defined tags of all allocated tracers, in the same order as get_positions().
-	std::vector<int> TracerCollection::get_tags()
-	{
-		std::vector<unsigned> inds = get_allocated_indices();
-		std::vector<int> ret;
-		ret.reserve(inds.size());
-		for (const auto &i : inds)
-			ret.push_back(tracers[i]->tag);
-		return ret;
-	}
+  // Everything a particle needs to continue on another process, as one fixed-length record of
+  // doubles: position, local coordinate, payloads, sub-step state and the whole position history.
+  // Fixed length so the exchange is a single Alltoallv with a stride both sides agree on without
+  // negotiating it.
+  unsigned TracerCollection::record_stride() const
+  {
+    return nodal_dim + n_payload + 3 + 1 + history_capacity * (1 + nodal_dim);
+  }
 
-	// Attach this collection to mesh m. Tracers require the mesh to have zero co-dimension
-	// (element dimension == nodal/space dimension, i.e. bulk elements, not e.g. surface
-	// elements embedded in a higher-dimensional space) since tracer advection is only
-	// defined in the element's own local coordinate space. Also looks up this tracer's
-	// index (tracer_code_index) in the generated element code's advection-field table by
-	// matching tracer_name, so later calls can pass it straight to the generated code.
-	void TracerCollection::set_mesh(pyoomph::Mesh *m)
-	{
-		mesh = m;
-		nodal_dim = m->get_nodal_dimension();
-		int ed = m->get_element_dimension();
-		if (ed < 0)
-			throw_runtime_error("Cannot set tracer mesh with a negative element dimension");
-		elem_dim = ed;
-		if (nodal_dim != elem_dim)
-			throw_runtime_error("Tracers can only be added to domains with zero co-dimension");
+  void TracerCollection::pack(const TracerParticle *p, double *out) const
+  {
+    unsigned k = 0;
+    for (unsigned i = 0; i < nodal_dim; i++)
+      out[k++] = p->x[i];
+    for (unsigned i = 0; i < n_payload; i++)
+      out[k++] = p->payload[i];
+    out[k++] = p->timefrac;
+    out[k++] = p->next_h;
+    out[k++] = p->completed_step_time;
+    const unsigned cap = history_capacity;
+    out[k++] = (double)p->hist_n;
+    for (unsigned j = 0; j < p->hist_n; j++)
+    {
+      const unsigned stride = 1 + nodal_dim;
+      const unsigned slot = (p->hist_head + cap - p->hist_n + j) % cap;
+      for (unsigned c = 0; c < stride; c++)
+        out[k++] = p->hist.empty() ? 0.0 : p->hist[slot * stride + c];
+    }
+    while (k < record_stride())
+      out[k++] = 0.0;
+  }
 
-		if (m->nelement())
-		{
-			BulkElementBase *be = dynamic_cast<BulkElementBase *>(m->element_pt(0));
-			DynamicBulkElementInstance *ci = be->get_code_instance();
-			auto *ft = ci->get_func_table();
-			for (unsigned int ind = 0; ind < ft->numtracer_advections; ind++)
-			{
-				if (std::string(ft->tracer_advection_names[ind]) == this->tracer_name)
-				{
-					tracer_code_index = ind;
-					break;
-				}
-			}
-		}
+  TracerParticle *TracerCollection::unpack(const double *in, TracerId id, int tag)
+  {
+    TracerParticle *p = new TracerParticle();
+    unsigned k = 0;
+    p->x.assign(nodal_dim, 0.0);
+    for (unsigned i = 0; i < nodal_dim; i++)
+      p->x[i] = in[k++];
+    p->payload.assign(n_payload, 0.0);
+    for (unsigned i = 0; i < n_payload; i++)
+      p->payload[i] = in[k++];
+    p->timefrac = in[k++];
+    p->next_h = in[k++];
+    p->completed_step_time = in[k++];
+    p->s.assign(elem_dim, 0.0);
+    p->id = id;
+    p->tag = tag;
+    const unsigned nh = (unsigned)(in[k++] + 0.5);
+    const unsigned stride = 1 + nodal_dim;
+    if (nh)
+    {
+      p->hist.assign((size_t)history_capacity * stride, 0.0);
+      for (unsigned j = 0; j < nh && j < history_capacity; j++)
+        for (unsigned c = 0; c < stride; c++)
+          p->hist[j * stride + c] = in[k + j * stride + c];
+      p->hist_n = std::min(nh, history_capacity);
+      p->hist_head = p->hist_n % history_capacity;
+    }
+    return p;
+  }
 
-		// std::cout << " TRACER SET MESH " << nodal_dim << "  " << elem_dim << std::endl;
-	}
+  unsigned TracerCollection::exchange_migrants()
+  {
+#ifdef OOMPH_HAS_MPI
+    if (!is_distributed())
+      return 0;
+    const int nproc = mpi_nproc();
+    MPI_Comm comm = mesh->communicator_pt()->mpi_comm();
+    const unsigned stride = record_stride();
 
-	// Fetch the mesh's time at history index `index` (0 = current time, 1 = previous
-	// timestep, etc.), by asking any available data object (node, internal or external
-	// data of the first element) for its time stepper. Returns 0.0 if the mesh has no data
-	// to query a time stepper from.
-	double TracerCollection::get_time(unsigned index)
-	{
-		oomph::TimeStepper *ts = NULL;
-		if (mesh->nnode())
-			ts = mesh->node_pt(0)->time_stepper_pt();
-		else if (mesh->nelement())
-		{
-			auto *elpt = mesh->element_pt(0);
-			auto *bebase = dynamic_cast<pyoomph::BulkElementBase *>(elpt);
-			if (bebase)
-			{
-				if (bebase->nnode())
-					ts = bebase->node_pt(0)->time_stepper_pt();
-				else if (bebase->ninternal_data())
-					ts = bebase->internal_data_pt(0)->time_stepper_pt();
-				else if (bebase->nexternal_data())
-					ts = bebase->external_data_pt(0)->time_stepper_pt();
-			}
-		}
-		if (ts)
-		{
-			return ts->time_pt()->time(index);
-		}
-		return 0.0;
-	}
+    // Partition the local particles into keepers and migrants, by whether the element they ended in
+    // is a halo of somebody else's.
+    std::vector<std::vector<double>> send_d((size_t)nproc);
+    std::vector<std::vector<long long>> send_i((size_t)nproc);
+    std::vector<TracerParticle *> keep;
+    keep.reserve(tracers.size());
+    unsigned nsent = 0;
+    for (auto *p : tracers)
+    {
+      int dest = -1;
+      if (p->elem && p->elem->is_halo())
+        dest = p->elem->non_halo_proc_ID();
+      if (dest < 0 || dest >= nproc || dest == mpi_rank())
+      {
+        keep.push_back(p);
+        continue;
+      }
+      const size_t base = send_d[dest].size();
+      send_d[dest].resize(base + stride, 0.0);
+      pack(p, send_d[dest].data() + base);
+      send_i[dest].push_back((long long)p->id);
+      send_i[dest].push_back((long long)p->tag);
+      delete p;
+      nsent++;
+    }
+    tracers.swap(keep);
 
-	// Convenience overload: construct a new TracerParticle at global position `pos` with
-	// user tag `tag`, add it to this collection, and return it. The particle's element/local
-	// coordinate is not resolved here; call locate_elements() to do that.
-	TracerParticle *TracerCollection::add_tracer(std::vector<double> pos, int tag)
-	{
-		TracerParticle *tp = new TracerParticle();
-		tp->pos.resize(pos.size());
-		for (unsigned int i = 0; i < pos.size(); i++)
-			tp->pos[i] = pos[i];
-		tp->tag = tag;
-		tp->timefrac = 0.0;
-		this->add_tracer(tp);
-		return tp;
-	}
+    std::vector<int> scount(nproc), rcount(nproc), sdispl(nproc, 0), rdispl(nproc, 0);
+    for (int r = 0; r < nproc; r++)
+      scount[r] = (int)(send_d[r].size() / stride);
+    MPI_Alltoall(scount.data(), 1, MPI_INT, rcount.data(), 1, MPI_INT, comm);
 
-	// (Re-)build a temporary k-d tree over the current mesh and use it to find, for every
-	// tracer, which element contains its global position `pos` and the corresponding local
-	// coordinate `s`. Tracers that fall outside the mesh entirely are dropped. Also updates
-	// last_lagrangian_kdtree to the mesh's current Lagrangian k-d tree, so callers can tell
-	// (by comparing pointers) whether a re-location is needed after mesh adaptation, and
-	// refreshes tracer_code_index (mesh's element code instance may have changed).
-	void TracerCollection::locate_elements()
-	{
-		if (!mesh)
-			throw_runtime_error("Can only locate elements of the tracers when a mesh was set");
-		pyoomph::MeshKDTree kdtree(mesh, false, 0);
-		for (unsigned int i = 0; i < tracers.size(); i++)
-			if (tracers[i])
-			{
-				tracers[i]->elem = kdtree.find_element(tracers[i]->pos, tracers[i]->s);
-				if (!tracers[i]->elem)
-					this->remove_tracer(i);
-			}
-		last_lagrangian_kdtree = mesh->get_lagrangian_kdtree();
+    std::vector<double> sbuf, rbuf;
+    std::vector<long long> sids, rids;
+    std::vector<int> sd(nproc), rd(nproc), sdi(nproc), rdi(nproc), scd(nproc), rcd(nproc), sci(nproc), rci(nproc);
+    int so = 0, ro = 0, soi = 0, roi = 0;
+    for (int r = 0; r < nproc; r++)
+    {
+      scd[r] = scount[r] * (int)stride;
+      rcd[r] = rcount[r] * (int)stride;
+      sci[r] = scount[r] * 2;
+      rci[r] = rcount[r] * 2;
+      sd[r] = so;
+      rd[r] = ro;
+      sdi[r] = soi;
+      rdi[r] = roi;
+      so += scd[r];
+      ro += rcd[r];
+      soi += sci[r];
+      roi += rci[r];
+      sbuf.insert(sbuf.end(), send_d[r].begin(), send_d[r].end());
+      sids.insert(sids.end(), send_i[r].begin(), send_i[r].end());
+    }
+    rbuf.assign((size_t)std::max(ro, 1), 0.0);
+    rids.assign((size_t)std::max(roi, 1), 0);
+    MPI_Alltoallv(sbuf.empty() ? nullptr : sbuf.data(), scd.data(), sd.data(), MPI_DOUBLE,
+                  rbuf.data(), rcd.data(), rd.data(), MPI_DOUBLE, comm);
+    MPI_Alltoallv(sids.empty() ? nullptr : sids.data(), sci.data(), sdi.data(), MPI_LONG_LONG,
+                  rids.data(), rci.data(), rdi.data(), MPI_LONG_LONG, comm);
 
-		if (mesh->nelement())
-		{
-			BulkElementBase *be = dynamic_cast<BulkElementBase *>(mesh->element_pt(0));
-			DynamicBulkElementInstance *ci = be->get_code_instance();
-			auto *ft = ci->get_func_table();
-			for (unsigned int ind = 0; ind < ft->numtracer_advections; ind++)
-			{
-				if (std::string(ft->tracer_advection_names[ind]) == this->tracer_name)
-				{
-					tracer_code_index = ind;
-					break;
-				}
-			}
-		}
-	}
+    const unsigned nrecv = (unsigned)(ro / (int)stride);
+    for (unsigned i = 0; i < nrecv; i++)
+    {
+      TracerParticle *p = unpack(&rbuf[(size_t)i * stride], (TracerId)rids[2 * i], (int)rids[2 * i + 1]);
+      // The sender's position is at the end of its sub-stepping, so the level-0 configuration is
+      // the right one to place it in.
+      if (place_globally(p, 0))
+        tracers.push_back(p);
+      else
+      {
+        stat_lost++;
+        delete p;
+      }
+    }
 
-	// Called once at the start of a timestep: re-locate elements if the mesh changed since
-	// the last advection, and reset every tracer's timefrac to 0 (start of the new step).
-	void TracerCollection::prepare_advection()
-	{
-		if (mesh->get_lagrangian_kdtree() != last_lagrangian_kdtree)
-		{
-			locate_elements();
-		}
-		for (unsigned int i = 0; i < tracers.size(); i++)
-			if (tracers[i])
-			{
-				tracers[i]->timefrac = 0.0; // Particles are at the old step
-			}
-	}
+    unsigned total = 0;
+    unsigned mine = nsent;
+    MPI_Allreduce(&mine, &total, 1, MPI_UNSIGNED, MPI_SUM, comm);
+    return total;
+#else
+    return 0;
+#endif
+  }
 
-	// Advect every tracer in this collection through the current timestep (dt = current
-	// time minus previous time), then drop any tracer that ended up without a containing
-	// element (i.e. left the mesh without being caught by a transfer interface).
-	void TracerCollection::advect_all()
-	{
-		if (mesh->get_lagrangian_kdtree() != last_lagrangian_kdtree)
-		{
-			locate_elements();
-		}
-		double dt = this->get_time() - this->get_time(1);
-		for (unsigned int i = 0; i < tracers.size(); i++)
-			if (tracers[i])
-			{
-				tracers[i]->advect(dt);
-				if (tracers[i])
-				{
-					if (tracers[i]->elem)
-						tracers[i]->update_position_from_s();
-				}
-			}
-		for (unsigned int i = 0; i < tracers.size(); i++)
-			if (tracers[i])
-			{
-				if (!tracers[i]->elem)
-					this->remove_tracer(i);
-			}
-	}
+  unsigned long TracerCollection::nglobal() const
+  {
+    unsigned long mine = (unsigned long)tracers.size();
+#ifdef OOMPH_HAS_MPI
+    if (is_distributed())
+    {
+      unsigned long total = 0;
+      MPI_Allreduce(&mine, &total, 1, MPI_UNSIGNED_LONG, MPI_SUM, mesh->communicator_pt()->mpi_comm());
+      return total;
+    }
+#endif
+    return mine;
+  }
 
-	// Serialize all currently allocated tracers' positions and tags into flat output arrays
-	// (posarr holds cd doubles per tracer), e.g. for checkpointing/restarting a simulation.
-	void TracerCollection::_save_state(std::vector<double> &posarr, std::vector<int> &tagarr)
-	{
-		std::vector<unsigned> inds = get_allocated_indices();
-		unsigned cd = this->get_coordinate_dimension();
-		posarr.resize(cd * inds.size(), 0.0);
+  // Gathers are written once, over a per-particle block of doubles, and the four public views just
+  // pick columns out of it. Sorting by the (never recycled, partition-independent) id is what makes
+  // the result the same on every process and independent of how the mesh was split.
+  namespace
+  {
+    struct GatheredRow
+    {
+      long long id;
+      std::vector<double> vals;
+      bool operator<(const GatheredRow &o) const { return id < o.id; }
+    };
+  }
 
-		tagarr.resize(inds.size(), 0);
-		unsigned arrind = 0;
-		for (auto ind : inds)
-		{
-			tagarr[arrind] = tracers[ind]->tag;
-			for (unsigned d = 0; d < cd; d++)
-				posarr[cd * arrind + d] = tracers[ind]->pos[d];
-			arrind++;
-		}
-	}
-	// Discard all current tracers and re-populate this collection from a previously saved
-	// (posarr, tagarr) pair (see _save_state). Elements are not located here.
-	void TracerCollection::_load_state(std::vector<double> &posarr, std::vector<int> &tagarr)
-	{
-		clear(true);
-		unsigned cd = this->get_coordinate_dimension();
-		std::vector<double> pos(cd, 0.0);
-		for (unsigned int i = 0; i < tagarr.size(); i++)
-		{
-			for (unsigned d = 0; d < cd; d++)
-				pos[d] = posarr[i * cd + d];
-			add_tracer(pos, tagarr[i]);
-		}
-	}
+  std::vector<double> TracerCollection::gather_positions() const
+  {
+    std::vector<double> local;
+    local.reserve(tracers.size() * nodal_dim);
+    for (auto *p : tracers)
+      for (unsigned i = 0; i < nodal_dim; i++)
+        local.push_back(p->x[i]);
+    return gather_rows(local, nodal_dim);
+  }
 
-	// Register that tracers leaving this collection's mesh through boundary `boundary_index`
-	// should be transferred into collection `opp` rather than simply dropped (see
-	// TracerParticle::advect's boundary-crossing handling).
-	void TracerCollection::set_transfer_interface(unsigned boundary_index, TracerCollection *opp)
-	{
-		transfer_interfaces[boundary_index] = TracerTransferInterfaceInfo();
-		transfer_interfaces[boundary_index].other_collection = opp;
-	}
+  std::vector<double> TracerCollection::gather_payloads() const
+  {
+    std::vector<double> local;
+    local.reserve(tracers.size() * n_payload);
+    for (auto *p : tracers)
+      for (unsigned i = 0; i < n_payload; i++)
+        local.push_back(p->payload[i]);
+    return gather_rows(local, n_payload);
+  }
+
+  std::vector<long long> TracerCollection::gather_ids() const
+  {
+    std::vector<double> none;
+    std::vector<long long> ids;
+    gather_rows(none, 0, &ids);
+    return ids;
+  }
+
+  std::vector<int> TracerCollection::gather_tags() const
+  {
+    std::vector<double> local;
+    local.reserve(tracers.size());
+    for (auto *p : tracers)
+      local.push_back((double)p->tag);
+    std::vector<double> all = gather_rows(local, 1);
+    std::vector<int> ret;
+    ret.reserve(all.size());
+    for (double v : all)
+      ret.push_back((int)(v < 0 ? v - 0.5 : v + 0.5));
+    return ret;
+  }
+
+  std::vector<double> TracerCollection::gather_rows(const std::vector<double> &local, unsigned ncol,
+                                                    std::vector<long long> *ids_out) const
+  {
+    std::vector<long long> local_ids;
+    local_ids.reserve(tracers.size());
+    for (auto *p : tracers)
+      local_ids.push_back((long long)p->id);
+
+    std::vector<long long> all_ids = local_ids;
+    std::vector<double> all = local;
+
+#ifdef OOMPH_HAS_MPI
+    if (is_distributed())
+    {
+      MPI_Comm comm = mesh->communicator_pt()->mpi_comm();
+      const int nproc = mpi_nproc();
+      int mine = (int)local_ids.size();
+      std::vector<int> counts(nproc, 0);
+      MPI_Allgather(&mine, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+      std::vector<int> displ(nproc, 0), dcounts(nproc, 0), ddispl(nproc, 0);
+      int tot = 0, dtot = 0;
+      for (int r = 0; r < nproc; r++)
+      {
+        displ[r] = tot;
+        tot += counts[r];
+        dcounts[r] = counts[r] * (int)ncol;
+        ddispl[r] = dtot;
+        dtot += dcounts[r];
+      }
+      all_ids.assign((size_t)std::max(tot, 1), 0);
+      all.assign((size_t)std::max(dtot, 1), 0.0);
+      MPI_Allgatherv(local_ids.empty() ? nullptr : local_ids.data(), mine, MPI_LONG_LONG,
+                     all_ids.data(), counts.data(), displ.data(), MPI_LONG_LONG, comm);
+      if (ncol)
+        MPI_Allgatherv(local.empty() ? nullptr : local.data(), mine * (int)ncol, MPI_DOUBLE,
+                       all.data(), dcounts.data(), ddispl.data(), MPI_DOUBLE, comm);
+      all_ids.resize((size_t)tot);
+      all.resize((size_t)dtot);
+    }
+#endif
+
+    std::vector<unsigned> order(all_ids.size());
+    for (unsigned i = 0; i < order.size(); i++)
+      order[i] = i;
+    std::sort(order.begin(), order.end(),
+              [&](unsigned a, unsigned b) { return all_ids[a] < all_ids[b]; });
+
+    if (ids_out)
+    {
+      ids_out->clear();
+      ids_out->reserve(order.size());
+      for (unsigned i : order)
+        ids_out->push_back(all_ids[i]);
+    }
+    std::vector<double> ret;
+    ret.reserve(order.size() * ncol);
+    for (unsigned i : order)
+      for (unsigned c = 0; c < ncol; c++)
+        ret.push_back(all[(size_t)i * ncol + c]);
+    return ret;
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // Locating
+  // ------------------------------------------------------------------------------------------
+
+  bool TracerCollection::place_globally(TracerParticle *p, unsigned time_level)
+  {
+    MeshPointLocator *loc = get_locator(time_level);
+    std::vector<double> flat(p->x.begin(), p->x.begin() + nodal_dim);
+    LocationSet ls = loc->locate_batch(flat, 1);
+    BulkElementBase *e = nullptr;
+    std::vector<double> s;
+    if (!ls.resolve_local(0, e, s) || !e)
+    {
+      p->elem = nullptr;
+      return false;
+    }
+    p->elem = e;
+    p->s.assign(s.begin(), s.begin() + elem_dim);
+    p->refdomain = reference_domain_kind(e);
+    e->tracer_prepare_element();
+    stat_global_locates++;
+    return true;
+  }
+
+  // Newton (codimension 0) or Gauss-Newton on the normal equations (codimension 1) for
+  // X(s, tau) = target, restarted in a neighbouring element whenever the iterate leaves the
+  // reference domain.
+  //
+  // The walk rather than a search is deliberate. Within a sub-step the configuration is the
+  // time-interpolated one, which no locator is built for; a particle that has moved further than
+  // one element in one sub-step is telling the controller the sub-step was too long, and shrinking
+  // it is both cheaper and more accurate than locating it globally in the wrong configuration.
+  bool TracerCollection::place_at(TracerParticle *p, const TracerTimeConfig &cfg, const double *target,
+                                  double *x_on_elem)
+  {
+    if (!p->elem)
+      return false;
+
+    const unsigned nd = nodal_dim, ed = elem_dim;
+    const bool square = (nd == ed);
+
+    // Newton (square) / Gauss-Newton on the normal equations (codimension 1) in one element.
+    // Returns true when the iteration converged AND landed inside the reference domain.
+    auto try_element = [&](BulkElementBase *e, const std::vector<double> &seed,
+                           std::vector<double> &sout) -> bool {
+        oomph::Vector<double> sv(seed.size());
+      for (unsigned a = 0; a < seed.size(); a++)
+        sv[a] = seed[a];
+      oomph::Vector<double> xs;
+      oomph::DenseMatrix<double> J;
+      bool converged = false;
+      for (unsigned it = 0; it < 25; it++)
+      {
+        e->tracer_geometry_at_s(sv, cfg.nlevel, cfg.w, cfg.dwdtau, &xs, &J, nullptr);
+        double r[3] = {0.0, 0.0, 0.0};
+        for (unsigned i = 0; i < nd; i++)
+          r[i] = target[i] - xs[i];
+
+        double A[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0}, b[3] = {0, 0, 0}, ds[3] = {0, 0, 0};
+        if (square)
+        {
+          // X(s + ds)_i ~ X(s)_i + sum_a J(a,i) ds_a, so the system matrix is J transposed.
+          for (unsigned i = 0; i < nd; i++)
+          {
+            for (unsigned a = 0; a < ed; a++)
+              A[i * ed + a] = J(a, i);
+            b[i] = r[i];
+          }
+        }
+        else
+        {
+          // Least squares: (J J^T) ds = J r. The tangential correction is solved for and the
+          // normal part of r is deliberately left in the residual - that is the offset from the
+          // surface, which is exactly what must not be corrected away.
+          for (unsigned a = 0; a < ed; a++)
+          {
+            for (unsigned c = 0; c < ed; c++)
+            {
+              double v = 0.0;
+              for (unsigned i = 0; i < nd; i++)
+                v += J(a, i) * J(c, i);
+              A[a * ed + c] = v;
+            }
+            double v = 0.0;
+            for (unsigned i = 0; i < nd; i++)
+              v += J(a, i) * r[i];
+            b[a] = v;
+          }
+        }
+        if (!solve_small(A, ed, b, ds))
+          return false;
+
+        double dsnorm = 0.0;
+        for (unsigned a = 0; a < ed; a++)
+        {
+          sv[a] += ds[a];
+          dsnorm += ds[a] * ds[a];
+        }
+        if (std::sqrt(dsnorm) < 1e-14)
+        {
+          converged = true;
+          break;
+        }
+        // A wild iterate means this element is not the one; do not spend 25 iterations proving it.
+        for (unsigned a = 0; a < ed; a++)
+          if (std::abs(sv[a]) > 20.0)
+            return false;
+      }
+      if (!converged)
+        return false;
+      sout.assign(sv.begin(), sv.begin() + ed);
+      return inside_reference_domain(reference_domain_kind(e), e, ed, sout.data(), 1e-8);
+    };
+
+    auto accept = [&](BulkElementBase *e, const std::vector<double> &sfound) {
+      if (e != p->elem)
+      {
+        p->elem = e;
+        p->refdomain = reference_domain_kind(e);
+        e->tracer_prepare_element();
+        stat_walks++;
+      }
+      p->s = sfound;
+      if (x_on_elem)
+      {
+        oomph::Vector<double> svf(sfound.size());
+        for (unsigned a = 0; a < sfound.size(); a++)
+          svf[a] = sfound[a];
+        oomph::Vector<double> xf;
+        e->tracer_geometry_at_s(svf, cfg.nlevel, cfg.w, cfg.dwdtau, &xf, nullptr, nullptr);
+        for (unsigned i = 0; i < nd; i++)
+          x_on_elem[i] = xf[i];
+      }
+    };
+
+    std::vector<double> sfound;
+    if (try_element(p->elem, p->s, sfound))
+    {
+      accept(p->elem, sfound);
+      return true;
+    }
+
+    // Left the element: it must be one of the neighbours, otherwise the sub-step was too long.
+    std::vector<BulkElementBase *> candidates;
+    get_locator(0)->neighbour_elements(p->elem, candidates);
+    BulkElementBase *from = p->elem;
+    for (auto *cand : candidates)
+    {
+      if (cand == from)
+        continue;
+      // Seed at the centre of the candidate's reference domain: two or three Newton steps from
+      // there suffice for any element reachable within one sub-step.
+      std::vector<double> seed(ed, 0.0);
+      switch (reference_domain_kind(cand))
+      {
+      case RefDomain::Simplex:
+        for (unsigned a = 0; a < ed; a++)
+          seed[a] = 1.0 / (ed + 1.0);
+        break;
+      case RefDomain::Prism:
+        seed[0] = seed[1] = 1.0 / 3.0;
+        seed[2] = 0.5 * (cand->s_min() + cand->s_max());
+        break;
+      case RefDomain::Pyramid:
+        seed[2] = 0.5 * (cand->s_min() + cand->s_max());
+        seed[0] = seed[1] = 0.5 * (1.0 - seed[2]);
+        break;
+      default:
+        for (unsigned a = 0; a < ed; a++)
+          seed[a] = 0.5 * (cand->s_min() + cand->s_max());
+        break;
+      }
+      if (try_element(cand, seed, sfound))
+      {
+        accept(cand, sfound);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // Advection
+  // ------------------------------------------------------------------------------------------
+
+  bool TracerCollection::eval_derivative(TracerParticle *p, TracerTimeConfig &cfg, double tau,
+                                         const double *y, double *dydtau, double *dpdtau)
+  {
+    cfg.set_tau(tau);
+    if (!place_at(p, cfg, y, nullptr))
+      return false;
+
+    const unsigned nd = nodal_dim, ed = elem_dim;
+    oomph::Vector<double> sv(p->s.size());
+    for (unsigned a = 0; a < p->s.size(); a++)
+      sv[a] = p->s[a];
+
+    // The advection field, blended over the history levels with the same weights the configuration
+    // uses. Blending the field and the geometry with one set of weights is what makes a mesh moving
+    // exactly with the flow produce an identically zero derivative.
+    double v[3] = {0.0, 0.0, 0.0};
+    oomph::Vector<double> xvelo;
+    for (unsigned k = 0; k < cfg.nlevel; k++)
+    {
+      if (code_index[k] < 0)
+        throw_runtime_error("Tracer '" + tracer_name + "' has no generated code for history level " +
+                            std::to_string(k));
+      if (cfg.w[k] == 0.0)
+        continue;
+      p->elem->eval_tracer_advection_at_s((unsigned)code_index[k], sv, xvelo);
+      for (unsigned i = 0; i < 3; i++)
+      {
+        if (i < nd)
+          v[i] += cfg.w[k] * xvelo[i];
+        else if (std::abs(xvelo[i]) > 1e-12)
+        {
+          throw_runtime_error("The advection field of tracer '" + tracer_name + "' has a non-zero "
+                              "component " + std::to_string(i) + ", which is out of the plane of a " +
+                              std::to_string(nd) + "-dimensional mesh. A tracer lives in the mesh and "
+                              "cannot follow it.");
+        }
+      }
+    }
+
+    if (nd == ed)
+    {
+      // Bulk: J J^+ = I, the mesh velocity cancels analytically and never has to be computed.
+      for (unsigned i = 0; i < nd; i++)
+        dydtau[i] = cfg.dt * v[i];
+    }
+    else
+    {
+      // Interface: tangential part of v plus normal part of the interface's own motion.
+      oomph::DenseMatrix<double> J;
+      oomph::Vector<double> dXdtau;
+      p->elem->tracer_geometry_at_s(sv, cfg.nlevel, cfg.w, cfg.dwdtau, nullptr, &J, &dXdtau);
+
+      // P = J^T (J J^T)^-1 J is the projector onto the tangent space. Applied to the combination
+      // dt*v - dXdtau it gives the tangential advection; the rest is the surface's own motion.
+      double d[3];
+      for (unsigned i = 0; i < nd; i++)
+        d[i] = cfg.dt * v[i] - dXdtau[i];
+
+      double A[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0}, b[3] = {0, 0, 0}, c[3] = {0, 0, 0};
+      for (unsigned a = 0; a < ed; a++)
+      {
+        for (unsigned q = 0; q < ed; q++)
+        {
+          double vv = 0.0;
+          for (unsigned i = 0; i < nd; i++)
+            vv += J(a, i) * J(q, i);
+          A[a * ed + q] = vv;
+        }
+        double vv = 0.0;
+        for (unsigned i = 0; i < nd; i++)
+          vv += J(a, i) * d[i];
+        b[a] = vv;
+      }
+      if (!solve_small(A, ed, b, c))
+        return false;
+      for (unsigned i = 0; i < nd; i++)
+      {
+        double t = 0.0;
+        for (unsigned a = 0; a < ed; a++)
+          t += c[a] * J(a, i);
+        dydtau[i] = t + dXdtau[i];
+      }
+    }
+
+    for (unsigned pi = 0; pi < n_payload; pi++)
+    {
+      double acc = 0.0;
+      for (unsigned k = 0; k < cfg.nlevel; k++)
+      {
+        const int ci = payload_code_index[k * n_payload + pi];
+        if (ci < 0 || cfg.w[k] == 0.0)
+          continue;
+        p->elem->eval_tracer_advection_at_s((unsigned)ci, sv, xvelo);
+        acc += cfg.w[k] * xvelo[0];
+      }
+      dpdtau[pi] = cfg.dt * acc;
+    }
+    return true;
+  }
+
+  // Offer a particle to every collection registered as a transfer target.
+  //
+  // The old implementation worked out which mesh boundary the particle had crossed by intersecting
+  // the boundary sets of the element's nodes. That is unnecessary: a particle that has left this
+  // mesh either lies in a registered neighbour or it does not, and simply asking each of them is
+  // both shorter and correct for a particle that leaves through a corner where two boundaries meet.
+  TracerCollection *TracerCollection::try_transfer(TracerParticle *p, unsigned depth)
+  {
+    for (auto &kv : transfer_interfaces)
+    {
+      TracerCollection *other = kv.second.other_collection;
+      if (!other || other == this)
+        continue;
+      if (other->adopt(p, depth + 1))
+        return other;
+    }
+    return nullptr;
+  }
+
+  bool TracerCollection::adopt(TracerParticle *p, unsigned depth)
+  {
+    // Bounded because a particle sitting exactly on a shared interface could otherwise be passed
+    // back and forth between two domains without its timefrac advancing.
+    if (depth > 8 || !mesh)
+      return false;
+    resolve_code_indices();
+    unsigned nlevel_available = 0;
+    while (nlevel_available < 3 && code_index[nlevel_available] >= 0)
+      nlevel_available++;
+    if (!nlevel_available)
+      return false;
+    p->elem = nullptr;
+    p->s.assign(elem_dim, 0.0);
+    p->payload.resize(n_payload, 0.0);
+    if (!place_globally(p, 0))
+      return false;
+    if (p->elem->is_halo())
+      return false; // let the owning process take it, on the next migration round
+
+    TracerTimeConfig cfg = TracerTimeConfig::from_mesh(mesh, time_interpolation_order, nlevel_available);
+    if (cfg.dt <= 0.0 || advect_one(p, cfg, depth))
+    {
+      if (!transferred_away)
+        tracers.push_back(p);
+      return true;
+    }
+    // It left this domain too, and try_transfer inside advect_one already had its chance.
+    return false;
+  }
+
+  bool TracerCollection::advect_one(TracerParticle *p, TracerTimeConfig &cfg, unsigned depth)
+  {
+    const unsigned nd = nodal_dim;
+    const bool interface = (get_codimension() == 1);
+
+    double y[3] = {0.0, 0.0, 0.0};
+    for (unsigned i = 0; i < nd; i++)
+      y[i] = p->x[i];
+    std::vector<double> pay(p->payload);
+
+    double tau = p->timefrac;
+    double h = (fixed_substeps > 0) ? (1.0 / fixed_substeps) : p->next_h;
+    h = std::min(h, 1.0 - tau);
+
+    double k1[3], k2[3], k3[3], k4[3];
+    std::vector<double> pk1(n_payload), pk2(n_payload), pk3(n_payload), pk4(n_payload);
+    double ytmp[3];
+    std::vector<double> ptmp(n_payload);
+
+    bool have_k1 = false;
+    unsigned long guard = 0;
+    transferred_away = false;
+
+    while (tau < 1.0 - 1e-15)
+    {
+      if (++guard > max_substeps)
+        throw_runtime_error("Tracer '" + tracer_name + "' did not finish its timestep within " +
+                            std::to_string(max_substeps) + " sub-steps");
+      if (h < 1e-12)
+      {
+        // The sub-step collapsed, so the particle really is leaving this mesh rather than merely
+        // having overshot. Store where it got to before offering it to a neighbouring domain.
+        for (unsigned i = 0; i < nd; i++)
+          p->x[i] = y[i];
+        p->payload = pay;
+        p->timefrac = tau;
+        if (!transfer_interfaces.empty() && try_transfer(p, depth))
+        {
+          transferred_away = true;
+          return true; // the receiving collection owns it now
+        }
+        return false;
+      }
+      if (tau + h > 1.0)
+        h = 1.0 - tau;
+
+      if (!have_k1)
+      {
+        if (!eval_derivative(p, cfg, tau, y, k1, pk1.data()))
+          return false;
+        have_k1 = true;
+      }
+
+      for (unsigned i = 0; i < nd; i++)
+        ytmp[i] = y[i] + h * BS_A21 * k1[i];
+      for (unsigned i = 0; i < n_payload; i++)
+        ptmp[i] = pay[i] + h * BS_A21 * pk1[i];
+      if (!eval_derivative(p, cfg, tau + BS_A21 * h, ytmp, k2, pk2.data()))
+      {
+        h *= 0.5;
+        stat_rejected++;
+        continue;
+      }
+
+      for (unsigned i = 0; i < nd; i++)
+        ytmp[i] = y[i] + h * BS_A32 * k2[i];
+      if (!eval_derivative(p, cfg, tau + BS_A32 * h, ytmp, k3, pk3.data()))
+      {
+        h *= 0.5;
+        stat_rejected++;
+        continue;
+      }
+
+      double ynew[3] = {0.0, 0.0, 0.0};
+      for (unsigned i = 0; i < nd; i++)
+        ynew[i] = y[i] + h * (BS_B1 * k1[i] + BS_B2 * k2[i] + BS_B3 * k3[i]);
+      std::vector<double> pnew(n_payload);
+      for (unsigned i = 0; i < n_payload; i++)
+        pnew[i] = pay[i] + h * (BS_B1 * pk1[i] + BS_B2 * pk2[i] + BS_B3 * pk3[i]);
+
+      // FSAL: the derivative at the end of this step is also the first stage of the next one.
+      if (!eval_derivative(p, cfg, tau + h, ynew, k4, pk4.data()))
+      {
+        h *= 0.5;
+        stat_rejected++;
+        continue;
+      }
+
+      double err = 0.0, scale = 0.0;
+      if (fixed_substeps <= 0)
+      {
+        for (unsigned i = 0; i < nd; i++)
+        {
+          const double e = h * ((BS_B1 - BS_E1) * k1[i] + (BS_B2 - BS_E2) * k2[i] +
+                                (BS_B3 - BS_E3) * k3[i] - BS_E4 * k4[i]);
+          const double sc = atol + rtol * std::max(std::abs(y[i]), std::abs(ynew[i]));
+          err += (e / sc) * (e / sc);
+          scale += 1.0;
+        }
+        err = std::sqrt(err / std::max(1.0, scale));
+      }
+
+      if (fixed_substeps <= 0 && err > 1.0)
+      {
+        h *= std::max(0.2, 0.9 * std::pow(err, -1.0 / 3.0));
+        stat_rejected++;
+        continue;
+      }
+
+      // Accepted.
+      for (unsigned i = 0; i < nd; i++)
+        y[i] = ynew[i];
+      pay = pnew;
+      tau += h;
+      stat_substeps++;
+
+      if (interface)
+      {
+        // Re-anchor onto the interface. The unprojected iterate is already O(h^4) off the surface,
+        // so this costs no order, and it is what keeps the normal offset at machine zero over
+        // thousands of steps instead of letting it random-walk.
+        cfg.set_tau(tau);
+        double yproj[3];
+        if (place_at(p, cfg, y, yproj))
+          for (unsigned i = 0; i < nd; i++)
+            y[i] = yproj[i];
+      }
+
+      for (unsigned i = 0; i < nd; i++)
+        k1[i] = k4[i];
+      pk1 = pk4;
+      have_k1 = !interface; // the re-anchor moved y, so the stored derivative no longer belongs to it
+
+      if (fixed_substeps <= 0)
+      {
+        const double fac = (err > 0.0) ? std::min(5.0, 0.9 * std::pow(err, -1.0 / 3.0)) : 5.0;
+        h *= fac;
+      }
+      p->timefrac = tau;
+    }
+
+    for (unsigned i = 0; i < nd; i++)
+      p->x[i] = y[i];
+    p->payload = pay;
+    // Left at 1, not reset to 0: between MPI migration rounds this is what says the particle has
+    // finished its step, and advect_all clears it once before the rounds begin.
+    p->timefrac = 1.0;
+    p->completed_step_time = cfg.t_current;
+    p->next_h = std::min(1.0, std::max(1e-6, h));
+    return true;
+  }
+
+  void TracerCollection::advect_all()
+  {
+    if (!mesh)
+      throw_runtime_error("Cannot advect tracers before a mesh was set");
+    stat_substeps = stat_rejected = stat_walks = stat_global_locates = 0;
+    stat_lost = 0;
+    stat_migrated = 0;
+    stat_transferred = 0;
+
+    unsigned nlevel_available = 0;
+    while (nlevel_available < 3 && code_index[nlevel_available] >= 0)
+      nlevel_available++;
+    if (nlevel_available == 0)
+    {
+      resolve_code_indices();
+      while (nlevel_available < 3 && code_index[nlevel_available] >= 0)
+        nlevel_available++;
+      if (nlevel_available == 0)
+        throw_runtime_error("No generated code found for tracer '" + tracer_name + "'");
+    }
+
+    TracerTimeConfig cfg = TracerTimeConfig::from_mesh(mesh, time_interpolation_order, nlevel_available);
+    if (cfg.dt <= 0.0)
+      return; // stationary: nothing to advect over
+
+    // At tau = 0 the particles sit in the configuration of history level 1 - their positions are
+    // from the end of the previous step, which is what level 1 now holds.
+    if (generation_changed())
+      relocate_all(1);
+
+    for (auto *p : tracers)
+      if (p->completed_step_time < cfg.t_current)
+        p->timefrac = 0.0;
+
+    // Advect, then hand over anything that ended in somebody else's halo and let its new owner
+    // finish it. Rounds rather than a single pass because a receiving process may itself find the
+    // particle in a halo of a third one; in practice one round settles it, since the halo layer is
+    // one element deep and the exchange happens at the end of the step.
+    //
+    // Collective from here on: every process must run the same number of rounds, including
+    // processes holding no particles at all - hence the Allreduce inside exchange_migrants(),
+    // which is what makes the loop condition agree everywhere.
+    for (unsigned round = 0; round < max_migration_rounds; round++)
+    {
+      std::vector<TracerParticle *> survivors;
+      survivors.reserve(tracers.size());
+      for (auto *p : tracers)
+      {
+        bool ok = (p->elem != nullptr);
+        transferred_away = false;
+        if (ok && p->completed_step_time >= cfg.t_current)
+        {
+          // Handed to this collection by another domain part-way through this very step, and
+          // already finished there. Advecting it again would double its displacement.
+          survivors.push_back(p);
+          continue;
+        }
+        if (ok && p->timefrac < 1.0 - 1e-15)
+          ok = advect_one(p, cfg);
+        if (!ok)
+        {
+          stat_lost++;
+          delete p;
+          continue;
+        }
+        if (transferred_away)
+        {
+          stat_transferred++;
+          continue; // another domain's collection owns it now
+        }
+        survivors.push_back(p);
+      }
+      tracers.swap(survivors);
+
+      if (!is_distributed())
+        break;
+      stat_migrated += exchange_migrants();
+      unsigned unfinished = 0;
+      for (auto *p : tracers)
+        if (p->timefrac < 1.0 - 1e-15)
+          unfinished++;
+#ifdef OOMPH_HAS_MPI
+      unsigned total = 0;
+      MPI_Allreduce(&unfinished, &total, 1, MPI_UNSIGNED, MPI_SUM,
+                    mesh->communicator_pt()->mpi_comm());
+      unfinished = total;
+#endif
+      if (!unfinished)
+        break;
+      if (round + 1 == max_migration_rounds)
+      {
+        // Never spin silently: an unfinished particle here means it is bouncing between processes,
+        // which is a defect rather than something to wait out.
+        throw_runtime_error("Tracers '" + tracer_name + "': " + std::to_string(unfinished) +
+                            " particle(s) did not finish their timestep within " +
+                            std::to_string(max_migration_rounds) + " migration rounds");
+      }
+    }
+
+    // Positions are now those of history level 0, so a locator built for level 1 is stale even
+    // though the topology has not changed.
+    if (history_window > 0.0)
+    {
+      const double tnow = mesh->nnode() ? mesh->node_pt(0)->time_stepper_pt()->time_pt()->time(0) : 0.0;
+      const unsigned stride = 1 + nodal_dim;
+      for (auto *p : tracers)
+      {
+        if (p->hist.size() != (size_t)history_capacity * stride)
+          p->hist.assign((size_t)history_capacity * stride, 0.0);
+        p->hist[p->hist_head * stride] = tnow;
+        for (unsigned i = 0; i < nodal_dim; i++)
+          p->hist[p->hist_head * stride + 1 + i] = p->x[i];
+        p->hist_head = (p->hist_head + 1) % history_capacity;
+        if (p->hist_n < history_capacity)
+          p->hist_n++;
+        // Drop samples that have fallen out of [t - history_window, t].
+        while (p->hist_n > 1)
+        {
+          const unsigned oldest = (p->hist_head + history_capacity - p->hist_n) % history_capacity;
+          if (tnow - p->hist[oldest * stride] <= history_window)
+            break;
+          p->hist_n--;
+        }
+      }
+    }
+  }
+
+  void TracerCollection::relocate_all(unsigned time_level)
+  {
+    if (!mesh)
+      throw_runtime_error("Cannot locate tracers before a mesh was set");
+    std::vector<TracerParticle *> survivors;
+    survivors.reserve(tracers.size());
+    for (auto *p : tracers)
+    {
+      p->elem = nullptr;
+      if (place_globally(p, time_level))
+        survivors.push_back(p);
+      else
+      {
+        stat_lost++;
+        delete p;
+      }
+    }
+    tracers.swap(survivors);
+  }
+
+  std::string TracerCollection::step_statistics() const
+  {
+    std::ostringstream oss;
+    oss << tracers.size() << " tracers, " << stat_substeps << " sub-steps";
+    if (stat_rejected)
+      oss << ", " << stat_rejected << " rejected";
+    if (stat_walks)
+      oss << ", " << stat_walks << " element changes";
+    if (stat_global_locates)
+      oss << ", " << stat_global_locates << " global locates";
+    if (stat_migrated)
+      oss << ", " << stat_migrated << " migrated";
+    if (stat_transferred)
+      oss << ", " << stat_transferred << " handed to another domain";
+    if (stat_lost)
+      oss << ", " << stat_lost << " LOST";
+    return oss.str();
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // State files
+  // ------------------------------------------------------------------------------------------
+
+  // COLLECTIVE. Writes the whole particle set, id-sorted, so the file says nothing about how the
+  // mesh was partitioned and can be read back at any process count.
+  void TracerCollection::_save_state(std::vector<double> &posarr, std::vector<long long> &tagarr)
+  {
+    const std::vector<double> allpos = gather_positions();
+    const std::vector<double> allpay = gather_payloads();
+    const std::vector<long long> allids = gather_ids();
+    const std::vector<int> alltags = gather_tags();
+    const unsigned n = (unsigned)allids.size();
+    const unsigned stride = nodal_dim + n_payload;
+    posarr.assign((size_t)n * stride, 0.0);
+    tagarr.assign((size_t)n * 2, 0);
+    for (unsigned i = 0; i < n; i++)
+    {
+      tagarr[2 * i] = allids[i];
+      tagarr[2 * i + 1] = alltags[i];
+      for (unsigned d = 0; d < nodal_dim; d++)
+        posarr[(size_t)i * stride + d] = allpos[(size_t)i * nodal_dim + d];
+      for (unsigned d = 0; d < n_payload; d++)
+        posarr[(size_t)i * stride + nodal_dim + d] = allpay[(size_t)i * n_payload + d];
+    }
+  }
+
+  // COLLECTIVE. The file holds the whole particle set, so every process reads all of it and keeps
+  // the ones it owns - which is also what makes a file written at one process count readable at
+  // another.
+  void TracerCollection::_load_state(const std::vector<double> &posarr, const std::vector<long long> &tagarr)
+  {
+    clear();
+    next_id = 1;
+    const unsigned stride = nodal_dim + n_payload;
+    const unsigned n = (unsigned)(tagarr.size() / 2);
+    std::vector<double> pos((size_t)n * nodal_dim, 0.0), pay((size_t)n * n_payload, 0.0);
+    std::vector<int> tags(n, 0);
+    std::vector<long long> ids(n, 0);
+    for (unsigned i = 0; i < n; i++)
+    {
+      for (unsigned d = 0; d < nodal_dim; d++)
+        pos[(size_t)i * nodal_dim + d] = posarr[(size_t)i * stride + d];
+      for (unsigned d = 0; d < n_payload; d++)
+        pay[(size_t)i * n_payload + d] = posarr[(size_t)i * stride + nodal_dim + d];
+      ids[i] = tagarr[2 * i];
+      tags[i] = (int)tagarr[2 * i + 1];
+    }
+    add_tracers_collective(pos, tags, pay, ids);
+  }
 
 }

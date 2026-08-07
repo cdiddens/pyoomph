@@ -3822,58 +3822,87 @@ namespace pyoomph
 		{
 			if (GiNaC::is_a<GiNaC::matrix>(expa))
 			{
-				GiNaC::ex component;
 				GiNaC::matrix expam = GiNaC::ex_to<GiNaC::matrix>(expa);
-				std::vector<GiNaC::ex> newvect;
-				for (unsigned int cd = 0; cd < expa.nops(); cd++)
-				{
+				const unsigned ncomp = (unsigned)expa.nops();
 
-					GiNaC::ex factor, unit, rest;
-					if (!expressions::collect_base_units(expa[cd], factor, unit, rest))
+				// Split every component into (numeric factor, unit, rest) first, then decide which
+				// one supplies the reference unit the others are converted to.
+				std::vector<GiNaC::ex> facs(ncomp), units(ncomp), rests(ncomp);
+				for (unsigned int cd = 0; cd < ncomp; cd++)
+				{
+					if (!expressions::collect_base_units(expa[cd], facs[cd], units[cd], rests[cd]))
 					{
 						std::ostringstream oss;
 						oss << std::endl
 							<< "INPUT FORM:" << what << std::endl;
 						oss << "EXPANDED FORM, component " << cd << ":" << expa[cd] << std::endl;
 						oss << "CANNOT SEPARATE UNITS AND REST" << std::endl;
-						oss << "NUMERICAL FACTOR: " << factor << std::endl;
-						oss << "COLLECTED UNITS: " << unit << std::endl;
-						oss << "REMAINING PART: " << rest << std::endl;
+						oss << "NUMERICAL FACTOR: " << facs[cd] << std::endl;
+						oss << "COLLECTED UNITS: " << units[cd] << std::endl;
+						oss << "REMAINING PART: " << rests[cd] << std::endl;
 						throw_runtime_error("Found a inseparable units in the added expression:" + oss.str());
 					}
-					else
+				}
+
+				// An identically zero component carries no unit, and its factor comes back as 0.
+				// Taking component 0 as the reference unconditionally therefore divided every other
+				// component by zero as soon as the first one happened to vanish - vector(0, 1) was
+				// not expressible at all, in any expression that reaches here.
+				int ref = -1;
+				for (unsigned int cd = 0; cd < ncomp; cd++)
+				{
+					if (!GiNaC::is_zero(rests[cd]) && !GiNaC::is_zero((facs[cd] * units[cd]).evalf()))
 					{
-						if (cd == 0)
-						{
-							for (auto &bu : base_units)
-							{
-								sublist.append(bu.second == 1);
-							}
-							component = rest;
-							(*collected_units_and_factor) = factor * unit;
-						}
-						else
-						{
-							GiNaC::ex conversion = (factor * unit / (*collected_units_and_factor)).expand().evalm().normal();
-							GiNaC::ex rest2;
-
-							if (!expressions::collect_base_units(conversion, factor, unit, rest2))
-							{
-								std::ostringstream oss;
-								oss << std::endl
-									<< "INPUT FORM:" << what << std::endl;
-								oss << "EXPANDED FORM, component " << cd << ":" << expa[cd] << std::endl;
-								oss << "CANNOT SEPARATE UNITS AND REST, when comparing to base unit of first vector component, namely " << (*collected_units_and_factor) << std::endl;
-								oss << "NUMERICAL FACTOR: " << factor << std::endl;
-								oss << "COLLECTED UNITS: " << unit << std::endl;
-								oss << "REMAINING PART: " << rest2 << std::endl;
-								throw_runtime_error("Found a inseparable units in the added expression:" + oss.str());
-							}
-
-							component = rest * conversion;
-						}
+						ref = (int)cd;
+						break;
 					}
-					newvect.push_back(component);
+				}
+
+				for (auto &bu : base_units)
+				{
+					sublist.append(bu.second == 1);
+				}
+
+				std::vector<GiNaC::ex> newvect;
+				if (ref < 0)
+				{
+					// Every component vanishes: there is nothing to nondimensionalize.
+					(*collected_units_and_factor) = 1;
+					for (unsigned int cd = 0; cd < ncomp; cd++)
+						newvect.push_back(0);
+				}
+				else
+				{
+					(*collected_units_and_factor) = facs[ref] * units[ref];
+					for (unsigned int cd = 0; cd < ncomp; cd++)
+					{
+						if (GiNaC::is_zero(rests[cd]))
+						{
+							newvect.push_back(0);
+							continue;
+						}
+						if ((int)cd == ref)
+						{
+							newvect.push_back(rests[cd]);
+							continue;
+						}
+						GiNaC::ex conversion = (facs[cd] * units[cd] / (*collected_units_and_factor)).expand().evalm().normal();
+						GiNaC::ex factor2, unit2, rest2;
+						if (!expressions::collect_base_units(conversion, factor2, unit2, rest2))
+						{
+							std::ostringstream oss;
+							oss << std::endl
+								<< "INPUT FORM:" << what << std::endl;
+							oss << "EXPANDED FORM, component " << cd << ":" << expa[cd] << std::endl;
+							oss << "CANNOT SEPARATE UNITS AND REST, when comparing to the base unit of vector component "
+								<< ref << ", namely " << (*collected_units_and_factor) << std::endl;
+							oss << "NUMERICAL FACTOR: " << factor2 << std::endl;
+							oss << "COLLECTED UNITS: " << unit2 << std::endl;
+							oss << "REMAINING PART: " << rest2 << std::endl;
+							throw_runtime_error("Found a inseparable units in the added expression:" + oss.str());
+						}
+						newvect.push_back(rests[cd] * conversion);
+					}
 				}
 				expa = 0 + GiNaC::matrix(expam.cols(), expam.rows(), GiNaC::lst(newvect.begin(), newvect.end()));
 			}
@@ -5470,14 +5499,33 @@ namespace pyoomph
 		os << "}" << std::endl;
 	}
 
-	// Emits the EvalTracerAdvection function that evaluates the registered tracer-advection velocity
-	// field(s) (used to advect passive tracer particles through the flow field) at the first
-	// integration point, blended over a time fraction `timefrac_tracer` for sub-stepping between two
-	// stored time levels. Structurally similar to write_code_integral_or_local_expressions but
-	// specialized for the tracer velocity's vector output (`result_velo`) and time-fraction blending.
+	// Emits the EvalTracerAdvection function that evaluates one registered tracer-advection velocity
+	// field (used to advect passive tracer particles through the flow field) at the local coordinate
+	// the shape buffer was filled at. Structurally similar to
+	// write_code_integral_or_local_expressions but specialized for the vector output.
+	//
+	// There is no time blending here. Each tracer name registers one entry per nodal time-history
+	// level (see TracerParticles in pyoomph/equations/tracers.py), and the caller blends them with
+	// weights it derives from t(0),t(1),t(2) at run time. Those weights cannot be baked in: for BDF2
+	// with a changing dt they depend on the actual time levels, which are unknown here. The old code
+	// passed a `timefrac_tracer` scalar and blended two levels linearly inside the generated code,
+	// which could only ever be first order in a varying-dt run.
 	void FiniteElementCode::write_code_tracer_advection(std::ostream &os)
 	{
-		os << "static void EvalTracerAdvection(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo, unsigned index, double timefrac_tracer, double * result_velo)" << std::endl;
+		// Past-level geometry must be materialised even on a code without position dofs: a mesh moved
+		// by macro elements or by direct node manipulation still has a nodal position history, and a
+		// gradient inside a past-level advection expression has to be taken on the matching
+		// configuration. history_geometry_is_relevant() gates that on coordinates_as_dofs, which is
+		// the right default for residuals (it avoids duplicating interpolations that cannot differ)
+		// but silently wrong here.
+		struct ForceHistoryGeometry
+		{
+			FiniteElementCode *c;
+			ForceHistoryGeometry(FiniteElementCode *code) : c(code) { c->force_history_geometry = true; }
+			~ForceHistoryGeometry() { c->force_history_geometry = false; }
+		} force_hist(this);
+
+		os << "static void EvalTracerAdvection(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo, unsigned index, double * result_velo)" << std::endl;
 		os << "{" << std::endl;
 		GiNaC::ex gathered;
 		unsigned cnt = 0;
@@ -5536,7 +5584,9 @@ namespace pyoomph
 		GiNaC::print_FEM_options csrc_opts;
 		csrc_opts.for_code = this;
 
-		os << "    const double dx = shapeinfo->int_pt_weight[0];" << std::endl; // TODO: Lagrangian part
+		// No `dx` here on purpose. The shape buffer is filled at an arbitrary local coordinate, not at
+		// an integration point, so shapeinfo->int_pt_weight[0] holds whatever the last assembly left
+		// in it. Emitting it as `dx` made a stale value silently available to any expression.
 		os << "    switch (index)" << std::endl;
 		os << "    {" << std::endl;
 		unsigned index = 0;
@@ -6366,6 +6416,8 @@ namespace pyoomph
 	// Interfaces inherit the answer from their bulk, whose nodes they share.
 	bool FiniteElementCode::history_geometry_is_relevant() const
 	{
+		if (this->force_history_geometry)
+			return true; // see write_code_tracer_advection
 		if (this->coordinates_as_dofs)
 			return true;
 		for (const FiniteElementCode *c = this->bulk_code; c; c = c->bulk_code)
@@ -7599,17 +7651,12 @@ namespace pyoomph
 	
 
 	// Resolves a named runtime "flag" symbol (eval_flag(...) placeholder) to its GiNaC expression:
-	// "moving_mesh" becomes the constant 0/1 depending on coordinates_as_dofs, "timefrac_tracer"
-	// becomes the special time-fraction symbol used for tracer-advection sub-stepping.
+	// "moving_mesh" becomes the constant 0/1 depending on coordinates_as_dofs.
 	GiNaC::ex FiniteElementCode::eval_flag(std::string flagname)
 	{
 		if (flagname == "moving_mesh")
 		{
 			return (coordinates_as_dofs ? 1 : 0);
-		}
-		if (flagname == "timefrac_tracer")
-		{
-			return pyoomph::expressions::timefrac_tracer;
 		}
 		else
 			throw_runtime_error("Unknown flag name: " + flagname);
@@ -7744,6 +7791,28 @@ namespace pyoomph
 	// velocity) - any other combination of units is a user error and raises a descriptive exception.
 	void FiniteElementCode::set_tracer_advection_velocity(std::string name, GiNaC::ex expr)
 	{
+		// An identically zero field has no unit to infer, and asking for one divides by it. Store it
+		// as-is instead of failing: "advect by nothing while the mesh moves" is the sharpest test
+		// there is of the ALE handling, so it must be expressible.
+		{
+			GiNaC::ex probe = (0 + expr).evalm();
+			bool all_zero = true;
+			if (GiNaC::is_a<GiNaC::matrix>(probe))
+			{
+				for (size_t i = 0; i < probe.nops() && all_zero; i++)
+					if (!GiNaC::is_zero(probe.op(i)))
+						all_zero = false;
+			}
+			else
+				all_zero = GiNaC::is_zero(probe);
+			if (all_zero)
+			{
+				this->tracer_advection_terms[name] = probe;
+				this->tracer_advection_units[name] = 1;
+				return;
+			}
+		}
+
 		RemoveSubexpressionsByIndentity sub_to_id(this);
 		this->tracer_advection_units[name] = 1;
 		this->tracer_advection_terms[name] = sub_to_id(expand_all_and_ensure_nondimensional(expr, "TracerVelocity", &(this->tracer_advection_units[name])));

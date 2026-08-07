@@ -645,6 +645,17 @@ class BaseEquations(_pyoomph.Equations):
     def after_newton_solve(self):
         pass
 
+    def after_transient_solve(self):
+        """Called once per **accepted** timestep, at the end of :py:meth:`~pyoomph.generic.problem.Problem.solve`
+        with a time step.
+
+        Unlike :py:meth:`after_newton_solve`, this does not fire for stationary solves, for
+        arclength continuation steps, for the Newton solves a temporal-adaptivity retry discards,
+        or for the intermediate solves of spatial adaptation. Anything that must advance exactly
+        once per step in time - tracer particle advection, say - belongs here.
+        """
+        pass
+
     # Returns true if the Newton step is okay. If we cannot take the Newton step for whatever reason, we can return False to reject the step
     def before_newton_convergence_check(self,eqtree:"EquationTree")->bool:
         return True
@@ -1698,6 +1709,15 @@ class EquationTree:
             self._equations._set_current_codegen(oldcg)
         for _,c in self._children.items():
             c._after_newton_solve()
+
+    def _after_transient_solve(self):
+        if self._equations is not None:
+            oldcg = self._equations._get_current_codegen()
+            self._equations._set_current_codegen(self._codegen)
+            self._equations.after_transient_solve()
+            self._equations._set_current_codegen(oldcg)
+        for _,c in self._children.items():
+            c._after_transient_solve()
 
     def _before_newton_convergence_check(self)->bool:
         res=True
@@ -2774,6 +2794,14 @@ class CombinedEquations(Equations):
         for e in self._subelements:
             if isinstance(e, BaseEquations): #type:ignore
                 e.after_newton_solve()
+        self._rstr_final_elem(bck)
+
+    def after_transient_solve(self):
+        bck = self._bckup_final_elem()
+        self._setup_combined_element()
+        for e in self._subelements:
+            if isinstance(e, BaseEquations): #type:ignore
+                e.after_transient_solve()
         self._rstr_final_elem(bck)
 
     def before_newton_convergence_check(self,eqtree:"EquationTree")->bool:

@@ -168,10 +168,15 @@ class GenericProblemHooks:
 
     def actions_after_newton_solve(self):
         pass
-    
+
+    def actions_after_transient_solve(self):
+        """Called once per accepted timestep, not once per Newton solve. See
+        :py:meth:`Problem.actions_after_transient_solve`."""
+        pass
+
     def actions_before_newton_solve(self):
         pass
-    
+
     def actions_after_newton_step(self):
         pass
     
@@ -2874,6 +2879,20 @@ class Problem(_pyoomph.Problem):
         if len(last_res)==0 or last_res[-1]>self.newton_solver_tolerance:
             return True
         return False
+
+    def actions_after_transient_solve(self):
+        """Dispatched once per **accepted** timestep, at the end of :py:meth:`solve` with a
+        ``timestep``, after any spatial adaptation and after temporal adaptivity has settled on a
+        step it accepts.
+
+        This is where anything that must advance exactly once per step in time belongs.
+        :py:meth:`actions_after_newton_solve` cannot serve that purpose: it also fires for
+        stationary solves, for each arclength continuation step, for every discarded temporal
+        retry, and once per adaptation level.
+        """
+        self._equation_system._after_transient_solve()
+        for hook in self._hooks:
+            hook.actions_after_transient_solve()
 
     def actions_after_newton_solve(self):
         if self.last_newton_step_failed():
@@ -6410,6 +6429,7 @@ class Problem(_pyoomph.Problem):
                     desired_dt=self.adaptive_unsteady_newton_solve(timestep,temporal_error,shift_values)
                 self._first_step=False
                 self._suggested_next_dt=desired_dt
+                self.actions_after_transient_solve()
                 self._override_for_this_solve(**oldsettings)
                 self.timestepper.increment_num_unsteady_steps_done()
                 return desired_dt*TSCALE
@@ -6427,6 +6447,7 @@ class Problem(_pyoomph.Problem):
                         lambda adapt_level,shift: self.doubly_adaptive_unsteady_newton_solve(timestep,temporal_error,adapt_level,int(suppress_resolve_after_adapt),self._first_step,shift))
                 self._first_step=False
                 self._suggested_next_dt=desired_dt
+                self.actions_after_transient_solve()
                 self._override_for_this_solve(**oldsettings)
                 self.timestepper.increment_num_unsteady_steps_done()
                 return desired_dt*TSCALE

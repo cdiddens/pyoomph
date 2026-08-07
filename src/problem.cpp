@@ -1099,7 +1099,7 @@ namespace pyoomph
 		{
 			if (dynamic_cast<Mesh *>(this->mesh_pt(nmi)))
 			{
-				dynamic_cast<Mesh *>(this->mesh_pt(nmi))->invalidate_lagrangian_kdtree();
+				dynamic_cast<Mesh *>(this->mesh_pt(nmi))->bump_topology_generation();
 			}
 		}
 		ensure_dummy_values_to_be_dummy();

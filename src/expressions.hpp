@@ -458,7 +458,6 @@ namespace pyoomph
     extern GiNaC::potential_real_symbol t, _dt_BDF1, _dt_BDF2, _dt_Newmark2;
     extern GiNaC::potential_real_symbol __partial_t_mass_matrix; // This symbol is used to identify partial_t terms to put in the mass matrix
     extern GiNaC::potential_real_symbol dt;
-    extern GiNaC::potential_real_symbol timefrac_tracer; // Fractional-in-time weight used when interpolating quantities at tracer particle positions between timesteps
     extern GiNaC::idx l_shape; // Symbolic loop index over shape functions/nodes (corresponds to the "l_shape" loop variable in generated C code)
     extern GiNaC::idx l_test;  // Symbolic loop index over test functions (corresponds to the "l_test" loop variable in generated C code)
     extern GiNaC::potential_real_symbol *proj_on_test_function; // If set, restricts weak-form assembly to a single, given test function (projection) instead of looping over all of them

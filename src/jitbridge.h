@@ -284,7 +284,10 @@ typedef void (*JITFuncSpec_GetZ2Fluxes_FiniteElement)(const JITElementInfo_t *, 
 typedef double (*JITFuncSpec_InitialCondition_FiniteElement)(const JITElementInfo_t *, int, double *, double *, double *,double, int, double);
 typedef double (*JITFuncSpec_DirichletCondition_FiniteElement)(const JITElementInfo_t *, int, double *, double *, double *,double, double);
 typedef double (*JITFuncSpec_EvalIntegralExpr_FiniteElement)(const JITElementInfo_t *, const JITShapeInfo_t *, unsigned);
-typedef void (*JITFuncSpec_EvalTracerAdvection_FiniteElement)(const JITElementInfo_t *, const JITShapeInfo_t *, unsigned, double, double *);
+/* Tracer advection: (eleminfo, shapeinfo, index, result). One registered entry per tracer name AND
+   per nodal time-history level - the caller blends the levels itself, since the blending weights
+   follow from t(0),t(1),t(2), which are not known when this code is generated. */
+typedef void (*JITFuncSpec_EvalTracerAdvection_FiniteElement)(const JITElementInfo_t *, const JITShapeInfo_t *, unsigned, double *);
 
 typedef double (*JITFuncSpec_GeometricJacobian)(const JITElementInfo_t *, const double *);
 

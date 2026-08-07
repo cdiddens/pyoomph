@@ -771,10 +771,34 @@ namespace pyoomph
     // additional sample points (not part of the original mesh) for post-processing/projection.
     pyoomph::Node * create_interpolated_node(const oomph::Vector<double> & s,bool as_boundary_node);
 
-    // Evaluates a user-defined "tracer" advection velocity field at local coordinate s and time
-    // fraction time_frac (for particle tracing / streamline integration); returns false if
-    // evaluation is not possible (e.g. s outside the element).
-    bool eval_tracer_advection_in_s_space(unsigned index, double time_frac, const oomph::Vector<double> &s, oomph::Vector<double> &svelo);
+    // --- Tracer particle advection (see tracers.hpp) ---------------------------------------------
+
+    // Geometry of the time-interpolated mesh configuration at local coordinate s.
+    //
+    // The configuration within a timestep is defined as X(s,tau) = sum_k w_k X^k(s), a Lagrange
+    // interpolation in time of the NODAL POSITIONS between the stored history levels k. Because the
+    // shape functions do not depend on tau, both the Jacobian and the configuration velocity are
+    // then exact rather than approximated: J(tau) = sum_k w_k J^k and dX/dtau = sum_k w'_k X^k.
+    // That exactness is what makes a tracer sitting in a moving mesh with zero advection velocity
+    // stay put; the old code took J at history level 0 for the whole step irrespective of tau.
+    //
+    //   w / dwdtau : nlevel Lagrange weights and their derivatives w.r.t. tau (tau in [0,1], where
+    //                tau = 1 is history level 0). Any of the three outputs may be null.
+    //   J          : J(a,i) = dX_i/ds_a, so el_dim rows by nodal_dim columns - NOT square on an
+    //                interface element, where the caller wants the pseudo-inverse.
+    //   dXdtau     : per unit tau, not per unit time.
+    void tracer_geometry_at_s(const oomph::Vector<double> &s, unsigned nlevel, const double *w, const double *dwdtau,
+                              oomph::Vector<double> *x, oomph::DenseMatrix<double> *J,
+                              oomph::Vector<double> *dXdtau) const;
+
+    // Per-element preparation (timestepper weights, time levels, element sizes), valid for as long
+    // as a particle stays in this element. Must precede eval_tracer_advection_at_s.
+    void tracer_prepare_element();
+
+    // Evaluates registered tracer-advection field `index` at local coordinate s, in physical
+    // (Eulerian) components. One index per tracer name per history level; the caller blends them
+    // with the same weights it passed to tracer_geometry_at_s. xvelo is sized 3 - see the .cpp.
+    void eval_tracer_advection_at_s(unsigned index, const oomph::Vector<double> &s, oomph::Vector<double> &xvelo);
 
     //  void assign_local_eqn_numbers(const bool &store_local_dof_pt);
     // Assigns local equation numbers to the "additional" degrees of freedom introduced beyond
@@ -1011,7 +1035,6 @@ namespace pyoomph
     // the boundary of) the valid domain, along with the corresponding boundary normal snormal and
     // remaining "overshoot" distance sdistance. Used e.g. when integrating particle/tracer paths
     // that cross element boundaries. Must be implemented per concrete geometric element type.
-    virtual double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &, const oomph::Vector<double> &, oomph::Vector<double> &, double &) { throw_runtime_error("Implement for the specific element"); }
 
     // Sets the integration (quadrature) order/scheme to use for this element; each concrete element
     // type maps "order" to the appropriate IntegrationSchemeStorage lookup for its shape.
@@ -1247,7 +1270,6 @@ namespace pyoomph
       return 2;
     }
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
-    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 1, order)); }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
   };
@@ -1307,7 +1329,6 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 1, order)); }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
   };
@@ -1498,7 +1519,6 @@ namespace pyoomph
       return res;
     }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
-    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 2, order)); }
   };
 
@@ -1581,7 +1601,6 @@ namespace pyoomph
       return res;
     }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
-    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 2, order)); }
   };
 
@@ -1643,7 +1662,6 @@ namespace pyoomph
       BulkElementBase::__CurrentCodeInstance = NULL;
       return res;
     }
-    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order)); }
     oomph::Vector<double> get_midpoint_s() override { return oomph::Vector<double>(this->dim(), 1.0 / 3.0); }
   };
@@ -1753,7 +1771,6 @@ namespace pyoomph
     unsigned ninterpolating_node(const int &value_id) override;
     void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override;
     BulkElementBase *create_son_instance() const override;
-    double factor_when_local_coordinate_becomes_invalid(const oomph::Vector<double> &s, const oomph::Vector<double> &ds, oomph::Vector<double> &snormal, double &sdistance) override;
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order)); }
     oomph::Vector<double> get_midpoint_s() override { return oomph::Vector<double>(this->dim(), 1.0 / 3.0); }
   };

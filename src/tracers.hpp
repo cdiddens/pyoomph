@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,105 +13,304 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
 ================================================================================*/
 
-
-// Lagrangian tracer particles that are advected through a (possibly moving/deforming)
-// mesh by evaluating an element-provided advection velocity field in local ("s") coordinates.
-// A TracerParticle lives inside exactly one TracerCollection at a time and tracks its
-// element, local coordinate and global position; TracerCollection owns the particles,
-// (re-)locates them in the mesh via a k-d tree, and drives the per-timestep advection.
+// Passive tracer particles advected through a (possibly moving and deforming) mesh.
+//
+// ---------------------------------------------------------------------------------------------
+// The formulation, because it is not the obvious one and the difference is the whole point
+// ---------------------------------------------------------------------------------------------
+//
+// A particle sits at x_p(t) = X(s(t), t), where X is the mesh map and J = dX/ds. In general
+//
+//     ds/dt = J^+ (v - dX/dt|_s)                                     (J^+ = pseudo-inverse)
+//
+// and two cases fall out of that, which is why one piece of code covers both:
+//
+//  * BULK (codimension 0). J is square, so J J^+ = I and the whole thing collapses to
+//    dx_p/dt = v. The mesh velocity cancels ANALYTICALLY. So this class integrates the physical
+//    position and uses the local coordinate s purely as a chart for evaluating the field. Nothing
+//    ever computes a mesh velocity, and a particle in a moving mesh with v = 0 does not move
+//    because every stage derivative is identically zero - not because two terms cancel to within
+//    rounding. The old implementation integrated s instead and subtracted a mesh_velocity() term
+//    that was neither blended over the sub-step nor even emitted unless the mesh had position
+//    dofs, so a mesh moved by macro elements dragged its tracers along with it.
+//
+//  * INTERFACE (codimension 1). J is (d-1) x d, P = J^+ J is the orthogonal projector onto the
+//    tangent space, and
+//
+//        dx_p/dt = P v + (I - P) dX/dt|_s
+//
+//    i.e. the tangential part of the advection field plus the normal part of the interface's own
+//    motion. That is exactly "advected tangentially, co-moving normally", with no explicit
+//    normal/tangent algebra anywhere. After each sub-step the position is re-anchored onto the
+//    interface by the same least-squares inversion, which pins the normal offset at machine zero.
+//
+// The configuration WITHIN a timestep is a Lagrange interpolation in time of the nodal positions
+// between the stored history levels (see TracerTimeConfig). Since the shape functions do not
+// depend on time, J and dX/dt of that interpolant are exact rather than approximated. The solver
+// never defines intermediate configurations, so this is the best available statement of where the
+// mesh was in the middle of a step - and it caps the achievable accuracy at the interpolation
+// order regardless of how tight the integrator tolerance is set.
+//
+// ---------------------------------------------------------------------------------------------
+// Bookkeeping
+// ---------------------------------------------------------------------------------------------
+//
+// The PHYSICAL POSITION is the authoritative state. `elem` and `s` are derived, and are dropped
+// whenever the mesh announces a new topology generation. Every particle carries a globally unique,
+// never-recycled TracerId, which is what makes state files partition-independent and gathers
+// deterministic under MPI.
 
 #pragma once
+#include <map>
+#include <string>
 #include <vector>
-#include <stack>
+
 #include "mesh.hpp"
+#include "refdomain.hpp"
+
 namespace pyoomph
 {
-
+  class BulkElementBase;
+  class MeshPointLocator;
   class TracerCollection;
 
+  typedef unsigned long long TracerId;
 
-
-  // A single Lagrangian tracer particle. Position is tracked both as global coordinates
-  // (pos) and as local/element coordinates (s) within the current element (elem); the two
-  // are kept in sync by update_position_from_s(). Particles are owned/indexed by exactly
-  // one TracerCollection (in_collection, collection_index) at a time.
-  class TracerParticle
+  // Lagrange interpolation in time of the nodal positions, over one timestep.
+  //
+  // tau runs over [0,1] within the step: tau = 0 is history level 1 (where the particles were at
+  // the end of the previous step) and tau = 1 is history level 0 (the configuration the Newton
+  // solve just produced). Level 2, when usable, sits at tau = -dtprev/dt.
+  class TracerTimeConfig
   {
-  protected:
-    friend class TracerCollection;
-    oomph::Vector<double> pos, s;
-    BulkElementBase *elem;
-    bool active;
-    TracerCollection *in_collection;
-    unsigned collection_index;
-    int tag;
-    double timefrac; // Fraction in [0,1] of the current timestep already advected (0=start of step, 1=done)
-    virtual void set_coordinate_dimension(unsigned d);
-    virtual void advect(double dt); // Advect this particle through the full timestep dt, starting from timefrac
-    virtual void update_position_from_s();
-
   public:
-    TracerParticle() : pos(), s(), elem(NULL), active(true), in_collection(NULL), collection_index(0), tag(0), timefrac(0) {}
-    virtual ~TracerParticle() {}
+    unsigned nlevel = 1;
+    double dt = 0.0;                        // t(0) - t(1), the step being advected over
+    double t_current = 0.0;                 // t(0), used to stamp which step a particle has finished
+    double tau_of_level[3] = {1.0, 0.0, 0.0};
+    double w[3] = {1.0, 0.0, 0.0};          // Lagrange weights at the current tau
+    double dwdtau[3] = {0.0, 0.0, 0.0};     // and their derivatives w.r.t. tau
+
+    // requested_order < 0 means "the best the stored history supports". The order is demoted
+    // silently when it has to be: on the first step t(1) == t(2) and the quadratic basis is
+    // singular, and a code that only registered two history levels cannot supply a third.
+    static TracerTimeConfig from_mesh(Mesh *m, int requested_order, unsigned nlevel_available);
+    void set_tau(double tau);
   };
 
-  class TracerCollection;
+  // One particle. Not a POD and not what crosses an MPI boundary - TracerCollection packs and
+  // unpacks these into a flat, per-collection-uniform stride for that.
+  class TracerParticle
+  {
+    friend class TracerCollection;
 
-  // Bookkeeping for a tracer transfer interface: when a particle leaves through a mesh
-  // boundary that is registered as a transfer interface, it is handed over to the
-  // TracerCollection stored here (see TracerCollection::set_transfer_interface).
+  protected:
+    TracerId id = 0;
+    int tag = 0;
+    std::vector<double> x;       // authoritative physical position, nodal_dim entries
+    std::vector<double> s;       // local coordinate in `elem`; meaningless when elem is NULL
+    std::vector<double> payload; // path-integrated user scalars
+
+    BulkElementBase *elem = nullptr; // derived, never serialised, dropped on a generation bump
+    RefDomain refdomain = RefDomain::Unknown;
+
+    double timefrac = 0.0;   // fraction of the current step already advected; only ever non-zero
+                             // between MPI migration rounds
+    double next_h = 0.25;    // sub-step size the controller ended the last step on
+    // Time level 0 of the step this particle last completed. A particle handed over from another
+    // domain mid-step has already finished the current step by the time the receiving domain's own
+    // hook runs, and without this it would be advected a second time.
+    double completed_step_time = -1e300;
+
+    // Rolling position history for trails, as (t, x[0..d-1]) samples, oldest first once unwrapped.
+    // Stored as a ring so that pruning is O(1) and the buffer never grows without bound.
+    std::vector<double> hist;
+    unsigned hist_n = 0, hist_head = 0;
+
+  public:
+    virtual ~TracerParticle() {}
+    TracerId get_id() const { return id; }
+    int get_tag() const { return tag; }
+    const std::vector<double> &get_position() const { return x; }
+  };
+
+  // Where particles crossing a given mesh boundary should be handed over to.
   class TracerTransferInterfaceInfo
   {
   public:
-    TracerCollection *other_collection;
+    TracerCollection *other_collection = nullptr;
   };
 
-  // Owns a set of TracerParticle objects that live on a single Mesh, and drives their
-  // advection. Uses a k-d tree (last_lagrangian_kdtree) to (re-)locate particles' elements
-  // whenever the mesh's Lagrangian k-d tree has changed (e.g. after mesh adaptation).
-  // Free slots left behind by removed tracers are recycled via free_indices so that
-  // tracer indices stay stable for as long as possible (important for save/load state).
   class TracerCollection
   {
   protected:
-    friend class TracerParticle;
-    pyoomph::Mesh *mesh;
-    std::string tracer_name; // Name of the tracer advection field to look up in the generated code's function table
-    pyoomph::MeshKDTree *last_lagrangian_kdtree; // k-d tree used the last time elements were located; compared against mesh's current one to detect staleness
-    unsigned nodal_dim, elem_dim;
-    unsigned tracer_code_index; // Index of this tracer's advection field within the element code's function table
-    std::vector<TracerParticle *> tracers; // Indexed storage; NULL entries are free slots (see free_indices)
-    std::map<unsigned, TracerTransferInterfaceInfo> transfer_interfaces; // Maps mesh boundary index -> collection to transfer particles into when they cross it
-    std::stack<unsigned> free_indices; // Recycled indices into `tracers` left by removed particles
-    virtual unsigned get_free_index();
-    virtual std::vector<unsigned> get_allocated_indices();
-    virtual double get_time(unsigned index = 0);
+    Mesh *mesh = nullptr;
+    std::string tracer_name;
+
+    unsigned nodal_dim = 0, elem_dim = 0; // codimension = nodal_dim - elem_dim, must be 0 or 1
+    unsigned n_payload = 0;
+
+    // One generated-code entry per history level, -1 where the level was not registered.
+    int code_index[3] = {-1, -1, -1};
+    // n_payload entries per level, flattened as [level*n_payload + p].
+    std::vector<int> payload_code_index;
+
+    std::vector<TracerParticle *> tracers; // owned; dense, no free-slot recycling
+    std::map<unsigned, TracerTransferInterfaceInfo> transfer_interfaces;
+
+    TracerId next_id = 1;
+
+    // Set by advect_one when the particle it was given was handed to another domain's collection,
+    // which then owns it. The caller must not keep it.
+    bool transferred_away = false;
+
+    // Point locators over this mesh, one per time level, rebuilt when the mesh's topology
+    // generation changes. Cached because building one walks every element.
+    //
+    // These INCLUDE halo elements. A particle is deliberately allowed to advect through the halo
+    // layer, whose nodal positions and dof values are synchronised copies of the owner's, so that
+    // it reaches the end of the step before ownership is reconsidered. Migrating mid-step would
+    // otherwise need the receiving rank to place the particle in the time-interpolated
+    // configuration, which no locator is built for. Ownership is then decided by is_halo() on the
+    // element the particle ended in, at tau = 1, where the level-0 locator is exactly valid.
+    MeshPointLocator *locator[2] = {nullptr, nullptr};
+    unsigned long locator_generation = 0;
+    bool has_locator_generation = false;
+
+    int mpi_nproc() const;
+    int mpi_rank() const;
+    bool is_distributed() const;
+    // Hand every particle whose element is a halo to the rank that owns that element, and take in
+    // the ones sent here. Returns the number of particles that moved, summed over all ranks.
+    unsigned exchange_migrants();
+    // Flatten / rebuild one particle for the wire and for state files.
+    unsigned record_stride() const;
+    void pack(const TracerParticle *p, double *out) const;
+    TracerParticle *unpack(const double *in, TracerId id, int tag);
+
+    // Per-step counters, reported by step_statistics().
+    unsigned long stat_substeps = 0, stat_rejected = 0, stat_walks = 0, stat_global_locates = 0;
+    unsigned stat_lost = 0, stat_migrated = 0, stat_transferred = 0;
+
+    MeshPointLocator *get_locator(unsigned time_level);
+    void drop_locators();
+    // True when the mesh has announced a new generation since the locators were built.
+    bool generation_changed() const;
+
+    void resolve_code_indices();
+
+    // Invert (bulk) or least-squares project (interface) X(s, tau) = target, starting from p->s in
+    // p->elem, walking to a neighbouring element if it leaves the reference domain. Returns false
+    // if the point could not be placed in any element reachable by the walk - which the caller is
+    // expected to treat as "the sub-step was too big", not as "the particle is gone".
+    bool place_at(TracerParticle *p, const TracerTimeConfig &cfg, const double *target, double *x_on_elem);
+    // Same, but starting from scratch through the global locator. Only valid at tau = 1, where the
+    // locator's time level matches the configuration.
+    bool place_globally(TracerParticle *p, unsigned time_level);
+
+    // dy/dtau at (tau, y) for one particle, leaving p->elem/p->s at the located position.
+    // Returns false if y could not be placed.
+    bool eval_derivative(TracerParticle *p, TracerTimeConfig &cfg, double tau, const double *y,
+                         double *dydtau, double *dpdtau);
+
+    // Advect one particle from its current timefrac to 1. Returns false if it left the mesh.
+    // `depth` bounds the chain of domain-to-domain handovers within one timestep.
+    bool advect_one(TracerParticle *p, TracerTimeConfig &cfg, unsigned depth = 0);
+
+    // Take over a particle that has just left another domain through a shared interface, place it
+    // here and finish its timestep. Returns false (having NOT taken ownership) if the position does
+    // not lie in this mesh.
+    bool adopt(TracerParticle *p, unsigned depth);
+    // Offer a particle that cannot continue here to the collections registered on the boundaries it
+    // may have crossed. Returns the collection that took it, or null.
+    TracerCollection *try_transfer(TracerParticle *p, unsigned depth);
+
+    TracerParticle *make_and_place(const std::vector<double> &pos, int tag,
+                                   const std::vector<double> &payload_init);
+
+    // Gather `local` (ncol doubles per local particle) from every process and return it sorted by
+    // particle id, so the answer is the same everywhere and independent of the partitioning. Also
+    // returns the sorted ids if asked.
+    std::vector<double> gather_rows(const std::vector<double> &local, unsigned ncol,
+                                    std::vector<long long> *ids_out = nullptr) const;
 
   public:
-    TracerCollection(std::string name) : mesh(NULL), tracer_name(name), last_lagrangian_kdtree(NULL), nodal_dim(0), elem_dim(0), tracer_code_index(0) {}
-    virtual unsigned get_tracer_code_index() { return tracer_code_index; }
-    virtual void set_mesh(pyoomph::Mesh *m);
-    virtual void clear(bool kill_contents);
-    unsigned add_tracer(TracerParticle *p);
-    TracerParticle *add_tracer(std::vector<double> pos, int tag);
-    virtual void remove_tracer(TracerParticle *p);
-    virtual TracerParticle *remove_tracer(unsigned index);
-    virtual std::vector<double> get_positions();
-    virtual std::vector<int> get_tags();
-    unsigned get_coordinate_dimension() { return nodal_dim; }
-    virtual void advect_all(); // Advect all tracers by the current timestep, re-locating elements first if the mesh has changed
-    virtual void prepare_advection(); // Reset all tracers' timefrac to 0 before a new timestep starts
-    virtual void locate_elements(); // Rebuild a fresh k-d tree and find the containing element/local coordinate for every tracer
-    virtual void get_new_element(TracerParticle *p); // Find the element containing p after it left its previous element, using Lagrangian (undeformed) coordinates
-    virtual void _save_state(std::vector<double> &posarr, std::vector<int> &tagarr); // Serialize positions/tags of all currently allocated tracers (e.g. for checkpointing)
-    virtual void _load_state(std::vector<double> &posarr, std::vector<int> &tagarr); // Restore tracers from a previously saved (posarr, tagarr) pair, replacing current contents
-    virtual void set_transfer_interface(unsigned boundary_index, TracerCollection *opp); // Register that particles crossing mesh boundary `boundary_index` should be handed over to collection `opp`
+    // Tunables. Deliberately public: they are plain knobs with no invariants between them.
+    double rtol = 1e-8;
+    double atol = 1e-10;
+    double history_window = 0.0;      // 0 disables the position history entirely
+    unsigned history_capacity = 64;
+    int time_interpolation_order = -1; // -1 = as good as the stored history allows
+    int fixed_substeps = 0;            // > 0 forces uniform sub-steps, for order-of-convergence tests
+    unsigned long max_substeps = 1000000;
+    unsigned max_migration_rounds = 64;
+
+    TracerCollection(const std::string &name) : tracer_name(name) {}
+    virtual ~TracerCollection();
+
+    virtual void set_mesh(Mesh *m);
+    Mesh *get_mesh() const { return mesh; }
+    unsigned get_coordinate_dimension() const { return nodal_dim; }
+    unsigned get_codimension() const { return nodal_dim - elem_dim; }
+    void set_num_payloads(unsigned n);
+    unsigned get_num_payloads() const { return n_payload; }
+
+    virtual void clear();
+    // Adds one particle on THIS process only. Returns 0 and adds nothing if the point does not lie
+    // in a non-halo element of this process's part of the mesh - which under MPI is the normal
+    // outcome on all but one rank, so a caller that wants one particle per point must use
+    // add_tracers_collective instead.
+    TracerId add_tracer(const std::vector<double> &pos, int tag, const std::vector<double> &payload_init);
+
+    // COLLECTIVE. Every process must pass the same candidate list. Each candidate ends up on
+    // exactly one process - the lowest-numbered one that holds it in a non-halo element - and gets
+    // an identity derived from its index in the list, so the resulting set of particles and their
+    // ids do not depend on how the mesh is partitioned.
+    //
+    // Returns how many candidates lay outside the mesh on every process.
+    // `ids`, when non-empty, supplies the identity of each candidate instead of deriving it from
+    // the index. That is what restoring a state file needs: the identities are part of the file.
+    unsigned add_tracers_collective(const std::vector<double> &pos, const std::vector<int> &tags,
+                                    const std::vector<double> &payload_init,
+                                    const std::vector<long long> &ids = std::vector<long long>());
+
+    bool remove_tracer(TracerId id);
+    unsigned nlocal() const { return (unsigned)tracers.size(); }
+    // COLLECTIVE. Number of particles over all processes.
+    unsigned long nglobal() const;
+
+    // Local views, in the order the particles are stored (which is creation order until removals).
+    std::vector<double> get_positions();
+    std::vector<long long> get_ids() const;
+    std::vector<int> get_tags() const;
+    std::vector<double> get_payloads() const;
+    std::vector<double> get_history_of(TracerId id) const;
+
+    // COLLECTIVE. All processes' particles, id-sorted, identical on every process. This is the view
+    // that does not depend on the partitioning, and the one state files and plots should use.
+    std::vector<double> gather_positions() const;
+    std::vector<long long> gather_ids() const;
+    std::vector<int> gather_tags() const;
+    std::vector<double> gather_payloads() const;
+
+    // Re-derive every particle's element and local coordinate from its stored position, in the
+    // configuration at `time_level`. Drops particles that no longer lie in the mesh.
+    virtual void relocate_all(unsigned time_level);
+    // Advect every particle through one accepted timestep.
+    virtual void advect_all();
+
+    std::string step_statistics() const;
+
+    virtual void _save_state(std::vector<double> &posarr, std::vector<long long> &tagarr);
+    virtual void _load_state(const std::vector<double> &posarr, const std::vector<long long> &tagarr);
+
+    virtual void set_transfer_interface(unsigned boundary_index, TracerCollection *opp);
   };
 
 }

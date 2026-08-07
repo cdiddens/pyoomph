@@ -38,7 +38,6 @@ namespace pyoomph
 	class Problem;
 	class BulkElementBase;
 	class DynamicBulkElementInstance;
-	class MeshKDTree;
 
 	class Mesh;
 
@@ -81,7 +80,7 @@ namespace pyoomph
 		std::map<std::string, unsigned> interface_dof_ids; // Names of interface-only degrees of freedom mapped to their global index
 		std::vector<bool> dirichlet_active; // Whether each Dirichlet condition (by index) is currently active
 		std::map<pyoomph::Node *, pyoomph::Node *> copied_masters; // Maps a copied node to its master node (see resolve_copy_master)
-		MeshKDTree *lagrangian_kdtree; // Lazily-built KD-tree over Lagrangian node coordinates, used for spatial lookups
+		unsigned long topology_generation = 0; // Bumped whenever cached element pointers/coordinates go stale, see bump_topology_generation()
 		DynamicBulkElementInstance *codeinst = NULL; // JIT-compiled element code instance backing the elements of this mesh
 
 	public:
@@ -312,7 +311,7 @@ namespace pyoomph
 		//	NodalIteratorAccess  boundary_nodes(const  std::string & bn );  //Iterate over a boundary
 		//	NodalIteratorAccess  boundary_nodes(const std::vector<std::string> & bn );  //Iterate over boundaries
 		Problem *get_problem() { return problem; }
-		Mesh() : problem(NULL),  lagrangian_kdtree(NULL) {}
+		Mesh() : problem(NULL) {}
 		// Look up the oomph-lib boundary index for a named boundary; throws with a helpful message (listing
 		// all available boundary names) if n is not found.
 		unsigned get_boundary_index(const std::string &n)
@@ -394,10 +393,17 @@ namespace pyoomph
 		std::vector<RefinementDirective> refinement_directives;
 		virtual unsigned get_nodal_dimension();
 		virtual int get_element_dimension();
-		// Discard the cached lagrangian_kdtree (e.g. because nodes moved); it will be rebuilt lazily on next use.
-		virtual void invalidate_lagrangian_kdtree();
-		// Lazily build (if necessary) and return the KD-tree over Lagrangian node coordinates.
-		virtual MeshKDTree *get_lagrangian_kdtree();
+		// Announce that anything caching this mesh's elements or their coordinates must rebuild:
+		// adaptation, remeshing, interface-element regeneration, a reset of the Lagrangian
+		// coordinates. Consumers compare get_topology_generation() against the value they last
+		// built at.
+		//
+		// A counter rather than a cached-object pointer on purpose. The tracers used to detect
+		// staleness by comparing against the address of a cached kd-tree that the invalidation
+		// deleted - so the allocator handing the same address back a moment later made the change
+		// invisible, and the stored pointer was dangling either way.
+		virtual void bump_topology_generation();
+		unsigned long get_topology_generation() const { return topology_generation; }
 		virtual std::map<std::string, std::string> get_field_information(); // first: names, second: list of spaces (C2,C1,DL,D0), but also (../C2 etc for elements defined on bulk domains)
 		~Mesh() override;
 		virtual void check_integrity();
@@ -911,34 +917,6 @@ namespace pyoomph
 			}
 			this->Node_pt = new_node_pt;
 		}		
-	};
-
-	// Spatial index over a mesh's nodes, used for nearest-node and containing-element lookups
-	// (e.g. interpolation between meshes, connecting periodic/interface meshes). Can be built over
-	// either Eulerian or Lagrangian coordinates, at a given history/time index.
-	class MeshKDTree
-	{
-	protected:
-		bool lagrangian; // Whether the tree indexes Lagrangian (true) or Eulerian (false) coordinates
-		unsigned tindex; // Time-history index of the coordinates used to build the tree
-		std::vector<pyoomph::Node *> nodes_by_index; // Node pointers, indexed the same way as the underlying KDTree
-		std::map<pyoomph::Node *, std::set<pyoomph::BulkElementBase *>> nodes_to_elem; // Elements adjacent to each node, used to search from a node to a containing element
-		KDTree *tree;
-		// Return the index (into nodes_by_index/tree) of the node nearest to coord; optionally returns the distance.
-		unsigned find_index(const std::vector<double> &coord, double *distreturn = NULL);
-		double max_search_radius;
-
-	public:
-		MeshKDTree(pyoomph::Mesh *mesh, bool use_lagrangian, unsigned time_index);
-		virtual ~MeshKDTree()
-		{
-			if (tree)
-				delete tree;
-		}
-		pyoomph::Node *find_node(const oomph::Vector<double> &coord, double *distreturn = NULL);
-		// Locate the element containing the point zeta (in the same coordinate system the tree was built with),
-		// starting the search from the nearest node; sreturn receives the local coordinates within that element.
-		pyoomph::BulkElementBase *find_element(oomph::Vector<double> zeta, oomph::Vector<double> &sreturn);
 	};
 
 }

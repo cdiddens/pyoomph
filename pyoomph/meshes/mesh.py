@@ -1507,12 +1507,10 @@ class MeshFromTemplateBase(BaseMesh):
     def _define_tracer_state_file(self, state: "DumpFile"):
         assert isinstance(
             self, (MeshFromTemplate1d, MeshFromTemplate2d, MeshFromTemplate3d))
-        if len(self._tracers) and self.is_mesh_distributed() and get_mpi_nproc()>1:
-            # Tracer particles are spread over the processes in no particular order, so they would have
-            # to be given an identity (or be sorted) before they can be gathered into one file. Nothing
-            # needs them under MPI yet, so this refuses rather than writing a file that silently holds
-            # only rank 0's particles.
-            raise RuntimeError("Tracers are not supported in state files of distributed problems yet")
+        # No MPI refusal here any more: TracerCollection._save_state gathers every process's
+        # particles and sorts them by their persistent identity, and _load_state hands the whole set
+        # to every process, each of which keeps the ones it owns. So the file says nothing about the
+        # partitioning and can be written at one process count and read at another.
         numtracercols = len(self._tracers)
         state.int_data(lambda: numtracercols,
                        lambda n: state.assert_equal(n, numtracercols))

@@ -2264,6 +2264,16 @@ class MatplotLibTracers(MatplotLibPart):
     invisible=False
 
 
+    #: Draw each particle's recent path as a fading trail. Needs the tracers to have been created
+    #: with a ``history_time``, otherwise there is nothing stored to draw.
+    trail:bool=False
+    #: Line width of the trail.
+    trail_width:float=0.8
+    #: Opacity of the oldest trail segment; the newest is always drawn at full opacity.
+    trail_min_alpha:float=0.05
+    #: Colour particles by their integer tag, using this colormap. ``None`` uses ``color``.
+    tag_colormap:str | None=None
+
     def __init__(self,plotter:"MatplotlibPlotter"):
         super(MatplotLibTracers, self).__init__(plotter)
         self.tracer_name:str | None = None
@@ -2274,24 +2284,58 @@ class MatplotLibTracers(MatplotLibPart):
         self.tracer_name=name
         self.mesh=mesh
         self.transform=transform
-        
+
     def pre_process(self):
         super(MatplotLibTracers, self).pre_process()
 
+    def _to_plot_coords(self,pos:"numpy.ndarray",scale:float)->"numpy.ndarray":
+        pos=pos*scale
+        if self.transform is not None:
+            pos, _ = self.transform.apply(numpy.transpose(pos), None) #type:ignore
+            pos=numpy.transpose(pos) #type:ignore
+        return pos #type:ignore
 
+    def _colors_by_tag(self,col:Any)->Any:
+        if self.tag_colormap is None:
+            return self.color
+        tags=numpy.asarray(col.get_tags(),dtype=float)
+        if tags.size==0:
+            return self.color
+        lo,hi=float(tags.min()),float(tags.max())
+        norm=(tags-lo)/(hi-lo) if hi>lo else numpy.zeros_like(tags)
+        return plt.get_cmap(self.tag_colormap)(norm) #type:ignore
+
+    def _add_trails(self,col:Any,scale:float):
+        from matplotlib.collections import LineCollection
+        segments:list[Any]=[]
+        alphas:list[float]=[]
+        for tid in col.get_ids():
+            hist=col.get_history(int(tid))
+            if hist is None or len(hist)<2:
+                continue
+            pts=self._to_plot_coords(numpy.asarray(hist[:,1:],dtype=float),scale)
+            if pts.shape[1]!=2:
+                return  # a trail is only meaningful in the plane we are drawing
+            n=len(pts)-1
+            for k in range(n):
+                segments.append([pts[k],pts[k+1]])
+                # Fade with age, so the head of the trail reads as "now" without a legend.
+                alphas.append(self.trail_min_alpha+(1.0-self.trail_min_alpha)*((k+1)/n))
+        if not segments:
+            return
+        lc=LineCollection(segments,linewidths=self.trail_width,zorder=self.zindex-1) #type:ignore
+        base=self.color if self.color is not None else "k"
+        rgba=numpy.array([plt.matplotlib.colors.to_rgba(base,alpha=a) for a in alphas]) #type:ignore
+        lc.set_color(rgba) #type:ignore
+        plt.gca().add_collection(lc) #type:ignore
 
     def add_to_plot(self):
         assert self.tracer_name is not None
         assert self.mesh is not None
         col=self.mesh.get_tracers(self.tracer_name)
         assert col is not None
-        pos=col.get_positions()
         ss = self.mesh.get_output_scale("spatial")
-        pos*=ss
-        if self.transform is not None:
-            pos, _ = self.transform.apply(numpy.transpose(pos), None) #type:ignore
-            pos=numpy.transpose(pos) #type:ignore
-
+        pos=self._to_plot_coords(col.get_positions(),ss)
 
         if len(pos)==0: #type:ignore
             return
@@ -2300,9 +2344,13 @@ class MatplotLibTracers(MatplotLibPart):
         if pos.shape[0]==0:
             return
         if pos.shape[1]!=2:
-            raise RuntimeError("Can only plot tracers on 2d meshes")
-        if not self.invisible:
-            plt.gca().scatter(pos[:,0],pos[:,1],marker=self.marker,s=self.size,c=self.color, edgecolor=self.edgecolor,zorder=self.zindex) #type:ignore
+            raise RuntimeError("Can only plot tracers of two-dimensional position, but got "+
+                               str(pos.shape[1])+" components. Use get_positions() and plot them yourself")
+        if self.invisible:
+            return
+        if self.trail:
+            self._add_trails(col,ss)
+        plt.gca().scatter(pos[:,0],pos[:,1],marker=self.marker,s=self.size,c=self._colors_by_tag(col), edgecolor=self.edgecolor,zorder=self.zindex) #type:ignore
 
 
 
@@ -2800,11 +2848,18 @@ class MatplotlibPlotter(BasePlotter):
             cached=self._get_mesh_data(msh,problem_name=problem_name,ignore_eigenfactors=True)
             
             
+            # A tracer collection is not a nodal field and cannot be contoured. It is recognised as a
+            # plottable name further down, but the mode inference below would still have made it a
+            # tricontourf and then failed asking for a colorbar - so tracers were only plottable by
+            # passing mode="tracers" by hand.
+            if mode is None and field is not None and msh.get_tracers(field,error_on_missing=False) is not None:
+                mode="tracers"
+
             if mode is None:
                 if field is None:
                     if dim==2:
                         mode="outlines"
-                    else:                        
+                    else:
                         mode="interfaceline"
                 elif dim==2:
                     mode="tricontourf"

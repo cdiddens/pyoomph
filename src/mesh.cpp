@@ -411,28 +411,13 @@ namespace pyoomph
 #endif
   }
 
-  // Lazily construct (at Lagrangian coordinates, history index 0) and cache the KD-tree used for
-  // nearest-node/element lookups; reused across calls until invalidate_lagrangian_kdtree() is called.
-  MeshKDTree *Mesh::get_lagrangian_kdtree()
+  void Mesh::bump_topology_generation()
   {
-    if (!lagrangian_kdtree)
-    {
-      lagrangian_kdtree = new MeshKDTree(this, true, 0);
-    }
-    return lagrangian_kdtree;
+    topology_generation++;
   }
 
-  void Mesh::invalidate_lagrangian_kdtree()
-  {
-    if (lagrangian_kdtree)
-      delete lagrangian_kdtree;
-    lagrangian_kdtree = NULL;
-  }
   Mesh::~Mesh()
   {
-    if (lagrangian_kdtree)
-      delete lagrangian_kdtree;
-    lagrangian_kdtree = NULL;
   }
 
   // Sanity-check the tree forest's neighbour information (if this is a tree-based refineable mesh);
@@ -6085,7 +6070,7 @@ namespace pyoomph
       }
     }
     opposite_interior_facets.clear();
-    this->invalidate_lagrangian_kdtree();
+    this->bump_topology_generation();
   }
 
   // Both the locator and shape_at_s_DL read their buffer sizes out of eleminfo, so an element whose
@@ -6644,7 +6629,7 @@ namespace pyoomph
 
     bulkmesh->generate_interface_elements(interfacename, this, code);
     // this->nullify_selected_bulk_dofs();
-    this->invalidate_lagrangian_kdtree();
+    this->bump_topology_generation();
     // Only now do the elements to restore into exist.
     this->restore_discontinuous_data();
   }
@@ -7726,170 +7711,5 @@ namespace pyoomph
       }
   }
 
-  ////////////////
-
-  // Builds a KD-tree over all distinct nodes of `mesh`, indexed by their zeta
-  // coordinate (Lagrangian if use_lagrangian, else Eulerian) at the given history
-  // time index. zeta_time_history/zeta_coordinate_type are temporary global hooks
-  // read by BulkElementBase::zeta_nodal while building the tree, reset to their
-  // default (0) afterwards. Also records, per node, the set of elements touching it
-  // (nodes_to_elem, used later by find_element) and estimates a generous
-  // max_search_radius (10x the largest nearest-neighbour distance seen) used as the
-  // starting radius for the expanding-radius search in find_element.
-  MeshKDTree::MeshKDTree(pyoomph::Mesh *mesh, bool use_lagrangian, unsigned time_index) : lagrangian(use_lagrangian), tindex(time_index), tree(NULL)
-  {
-    std::map<pyoomph::Node *, unsigned> nodeinds;
-    BulkElementBase::zeta_time_history = time_index;
-    BulkElementBase::zeta_coordinate_type = (use_lagrangian ? 0 : 1);
-    max_search_radius = 0.0;
-    unsigned int dim = 0;
-    std::vector<double> coords;
-    for (unsigned int ie = 0; ie < mesh->nelement(); ie++)
-    {
-      auto *elpt = dynamic_cast<BulkElementBase *>(mesh->element_pt(ie));
-      for (unsigned int in = 0; in < elpt->nnode(); in++)
-      {
-        pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(elpt->node_pt(in));
-        unsigned int index;
-        if (nodeinds.count(n))
-        {
-          index = nodeinds[n];
-        }
-        else
-        {
-          index = nodes_by_index.size();
-          nodeinds[n] = index;
-          nodes_by_index.push_back(n);
-          if (!dim)
-            dim = (use_lagrangian ? n->nlagrangian() : n->ndim());
-          for (unsigned int d = 0; d < dim; d++)
-            coords.push_back(elpt->zeta_nodal(in, 0, d));
-        }
-        if (!nodes_to_elem.count(n))
-          nodes_to_elem[n] = std::set<pyoomph::BulkElementBase *>();
-        nodes_to_elem[n].insert(elpt);
-
-        for (unsigned int jn = in + 1; jn < elpt->nnode(); jn++)
-        {
-          double nndist = 0.0;
-          for (unsigned int d = 0; d < dim; d++)
-          {
-            double zdist = elpt->zeta_nodal(in, 0, d) - elpt->zeta_nodal(jn, 0, d);
-            nndist += zdist * zdist;
-          }
-          if (nndist > max_search_radius)
-            max_search_radius = nndist;
-        }
-      }
-    }
-    max_search_radius = sqrt(max_search_radius) * 10;
-    BulkElementBase::zeta_time_history = 0;
-    BulkElementBase::zeta_coordinate_type = 0;
-    tree = new KDTree(coords, dim);
-  }
-
-  // Returns the mesh node nearest to `coord` (in the tree's coordinate space); the
-  // squared/actual distance can optionally be returned via distreturn.
-  pyoomph::Node *MeshKDTree::find_node(const oomph::Vector<double> &coord, double *distreturn)
-  {
-    int index = -1;
-    if (coord.size() == 1)
-      index = tree->nearest_point(coord[0], 0.0, 0.0, distreturn);
-    else if (coord.size() == 2)
-      index = tree->nearest_point(coord[0], coord[1], 0.0, distreturn);
-    else if (coord.size() == 3)
-      index = tree->nearest_point(coord[0], coord[1], coord[2], distreturn);
-
-    if (index < 0)
-      return NULL;
-
-    return nodes_by_index[index];
-  }
-
-  // Locates the element containing the point `zeta` (in the tree's coordinate
-  // space) and the corresponding local coordinates, returned in sreturn. Strategy:
-  // first try all elements attached to the nearest node (cheap, succeeds in the
-  // common case); if that fails, fall back to an expanding-radius search over
-  // increasingly distant nodes (see below) until an element containing zeta is found
-  // or the search radius exceeds max_search_radius.
-  pyoomph::BulkElementBase *MeshKDTree::find_element(oomph::Vector<double> zeta, oomph::Vector<double> &sreturn)
-  {
-    // std::cout << "ENTERINF FIND ELEMENT " << std::endl;
-    BulkElementBase::zeta_time_history = tindex;
-    BulkElementBase::zeta_coordinate_type = (lagrangian ? 0 : 1);
-
-    std::set<BulkElementBase *> processed_elems;
-    std::set<pyoomph::Node *> processed_nodes;
-
-    sreturn.resize(zeta.size(), 0.0);
-
-    // First, process the nearest node and all attached elements
-    pyoomph::Node *n = this->find_node(zeta);
-    if (!n)
-    {
-      BulkElementBase::zeta_time_history = 0;
-      BulkElementBase::zeta_coordinate_type = 0;
-      return NULL;
-    }
-
-    oomph::GeomObject *ret = NULL;
-    for (auto &e : nodes_to_elem[n])
-    {
-      //  std::cout << " TRY TO FIND ZETA " << zeta[0] << "  " << zeta[1] << " BASED ON NODE POS " << n->x(0) << "  " <<  n->x(1) << std::endl;
-      oomph::Vector<double> zeta_in = zeta; // Why ever... But without I had issues
-                                            //  std::cout << " BEF ZETA " << zeta[0] << "  " << zeta[1] << "  IN "  << zeta_in[0] << "  " << zeta_in[1] << std::endl;
-      e->locate_zeta(zeta_in, ret, sreturn);
-      //  std::cout << " AFTER ZETA " << zeta[0] << "  " << zeta[1] << "   IN "  << zeta_in[0] << "  " << zeta_in[1] << "  " << ret << std::endl;
-      if (ret)
-      {
-        BulkElementBase::zeta_time_history = 0;
-        BulkElementBase::zeta_coordinate_type = 0;
-        return e;
-      }
-      processed_elems.insert(e);
-    }
-    processed_nodes.insert(n);
-
-    // Then, go by increasing radius
-    double rad = max_search_radius;
-    double x = zeta[0], y = 0.0, z = 0.0;
-    if (zeta.size() >= 2)
-    {
-      y = zeta[1];
-      if (zeta.size() >= 3)
-      {
-        z = zeta[2];
-      }
-    }
-    std::vector<std::pair<uint32_t, double>> search_res = tree->radius_search(rad, x, y, z);
-
-    for (auto &sr : search_res)
-    {
-      //     std::cout << "ITERATING OVER SERACH RES " << sr.first << "  " << sr.second << std::endl;
-      pyoomph::Node *n = nodes_by_index[sr.first];
-      //     std::cout << " TRY TO FIND ZETA " << zeta[0] << "  " << zeta[1] << " BASED ON NODE POS " << n->x(0) << "  " <<  n->x(1) << std::endl;
-      if (processed_nodes.count(n))
-        continue;
-      for (auto &e : nodes_to_elem[n])
-      {
-        if (processed_elems.count(e))
-          continue;
-        oomph::Vector<double> zeta_in = zeta; // Why ever... But without I had issues
-        e->locate_zeta(zeta_in, ret, sreturn);
-        if (ret)
-        {
-          BulkElementBase::zeta_time_history = 0;
-          BulkElementBase::zeta_coordinate_type = 0;
-          return e;
-        }
-        processed_elems.insert(e);
-      }
-      processed_nodes.insert(n);
-    }
-
-    BulkElementBase::zeta_time_history = 0;
-    BulkElementBase::zeta_coordinate_type = 0;
-    return NULL;
-  }
 
 }

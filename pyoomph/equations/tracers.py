@@ -3,169 +3,466 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
- 
- 
+
+"""Passive tracer particles.
+
+Tracers are advected by a prescribed vector field - usually the flow velocity - without feeding
+back into it. Add :py:class:`TracerParticles` to a bulk domain and its particles move with the
+field; add it to an interface and they are confined to that interface, advected by the *tangential*
+part of the field and co-moving with the interface in the normal direction.
+
+See ``dev_docs/tracers.md`` for the formulation and for what limits the accuracy.
+"""
+
 from .. import _pyoomph_core as _pyoomph
 
-from ..expressions import eval_flag,evaluate_in_past,scale_factor,mesh_velocity
-from ..expressions.generic import Expression,ExpressionOrNum
-from ..generic.codegen import Equations,var,InterfaceEquations
+from ..expressions import evaluate_in_past, scale_factor
+from ..expressions.generic import Expression, ExpressionOrNum
+from ..generic.codegen import Equations, var, InterfaceEquations
 
 from ..meshes.mesh import assert_spatial_mesh
+from ..generic.mpi import get_mpi_nproc, get_mpi_min, get_mpi_max
 
 from ..typings import *
 
 import numpy
 
 if TYPE_CHECKING:
-    from ..meshes.mesh import AnyMesh,AnySpatialMesh
+    from ..meshes.mesh import AnyMesh, AnySpatialMesh
     from ..generic.codegen import EquationTree
 
+
+# Number of nodal time-history levels the generated code is asked for. Two would only ever give a
+# linear-in-time mesh configuration; the third makes the quadratic (BDF2-matched) one available, and
+# is dropped at run time when the stored history cannot support it (an impulsive start, a first step).
+_NUM_HISTORY_LEVELS = 3
+
+
+###################################################################################################
+# Seeding
+###################################################################################################
+
+class TracerSeed:
+    """Base class of the strategies that decide where a :py:class:`TracerParticles` starts its
+    particles. Every strategy checks that a candidate actually lies inside the mesh and reports how
+    many did not, rather than silently creating particles in a hole of the domain."""
+
+    def __init__(self, tag: int = 0):
+        self.tag = tag
+
+    def generate(self, mesh: "AnySpatialMesh", dim: int) -> numpy.ndarray:
+        """Return an (N, dim) array of candidate positions, in nondimensional coordinates."""
+        raise NotImplementedError
+
+    #: Whether every process proposes the same candidates. When it does, seeding goes through
+    #: ``add_tracers_collective``, which gives one particle per candidate with a
+    #: partition-independent identity. A strategy that walks the local elements cannot promise this
+    #: and sets it False, seeding each process's own share instead.
+    global_candidates: bool = True
+
+    def bounding_box(self, mesh: "AnySpatialMesh", dim: int) -> tuple[list[float], list[float]]:
+        """Nondimensional bounding box of the mesh's nodes.
+
+        Reduced over the processes, so that a distributed mesh gives the same box - and hence the
+        same candidate lattice - everywhere, rather than one box per partition."""
+        mins = [1e60] * dim
+        maxs = [-1e60] * dim
+        for n in mesh.nodes():
+            for i in range(dim):
+                x = n.x(i)
+                mins[i] = min(mins[i], x)
+                maxs[i] = max(maxs[i], x)
+        if get_mpi_nproc() > 1:
+            mins = [float(get_mpi_min(v)) for v in mins]
+            maxs = [float(get_mpi_max(v)) for v in maxs]
+        return mins, maxs
+
+
+class PointSeed(TracerSeed):
+    """Explicit positions, as an (N, dim) array or a list of points."""
+
+    def __init__(self, positions: Any, tag: int = 0):
+        super().__init__(tag)
+        self.positions = positions
+
+    def generate(self, mesh: "AnySpatialMesh", dim: int) -> numpy.ndarray:
+        arr = numpy.atleast_2d(numpy.asarray(self.positions, dtype=float))
+        if arr.shape[1] != dim:
+            raise ValueError("PointSeed got " + str(arr.shape[1]) + "-dimensional positions for a " +
+                             str(dim) + "-dimensional mesh")
+        return arr
+
+
+class GridSeed(TracerSeed):
+    """An axis-aligned lattice with the given spacing over the mesh's bounding box.
+
+    Works in 1, 2 and 3 dimensions. Candidates outside the mesh - in a hole, or outside a non-convex
+    outline - are dropped and counted, which is why this is safe on a domain the bounding box does
+    not describe.
+
+    Args:
+        spacing: distance between neighbouring candidates, dimensional if the problem is.
+        bbox: ``(mins, maxs)`` to override the mesh bounding box.
+        inset: how far to stay away from the bounding box faces, as a multiple of ``spacing``.
+    """
+
+    def __init__(self, spacing: ExpressionOrNum, bbox: tuple[Sequence[float], Sequence[float]] | None = None,
+                 inset: float = 0.5, tag: int = 0):
+        super().__init__(tag)
+        self.spacing = spacing
+        self.bbox = bbox
+        self.inset = inset
+
+    def generate(self, mesh: "AnySpatialMesh", dim: int) -> numpy.ndarray:
+        d = float(self.spacing / mesh.get_problem().get_scaling("spatial"))
+        if d <= 0:
+            raise ValueError("GridSeed needs a positive spacing")
+        if self.bbox is not None:
+            mins, maxs = list(self.bbox[0]), list(self.bbox[1])
+        else:
+            mins, maxs = self.bounding_box(mesh, dim)
+        axes: list[numpy.ndarray] = []
+        for i in range(dim):
+            lo = mins[i] + self.inset * d
+            hi = maxs[i] - self.inset * d
+            if hi < lo:
+                lo = hi = 0.5 * (mins[i] + maxs[i])
+            n = max(1, int(round((hi - lo) / d)) + 1)
+            axes.append(numpy.linspace(lo, hi, n, endpoint=True))
+        grids = numpy.meshgrid(*axes, indexing="ij")
+        return numpy.stack([g.ravel() for g in grids], axis=-1)
+
+
+class RandomSeed(TracerSeed):
+    """``n`` candidates drawn uniformly from the mesh's bounding box.
+
+    Deterministic given ``rng_seed``, and - importantly under MPI - independent of how the mesh is
+    partitioned: the candidates are drawn from the *globally* reduced bounding box, so every process
+    proposes the same points and simply keeps the ones it owns.
+    """
+
+    def __init__(self, n: int, rng_seed: int = 0, tag: int = 0):
+        super().__init__(tag)
+        self.n = n
+        self.rng_seed = rng_seed
+
+    def generate(self, mesh: "AnySpatialMesh", dim: int) -> numpy.ndarray:
+        mins, maxs = self.bounding_box(mesh, dim)
+        rng = numpy.random.default_rng(self.rng_seed)
+        out = rng.random((self.n, dim))
+        for i in range(dim):
+            out[:, i] = mins[i] + out[:, i] * (maxs[i] - mins[i])
+        return out
+
+
+class ElementSeed(TracerSeed):
+    """One candidate at the centroid of each element (or ``per_element`` random points in it).
+
+    Containment is free here, and the density follows the mesh rather than a bounding box, which is
+    what you usually want on a graded or non-convex mesh.
+    """
+
+    #: Each process walks its own elements, so the candidates differ per process by construction.
+    global_candidates = False
+
+    def __init__(self, per_element: int = 1, rng_seed: int = 0, tag: int = 0):
+        super().__init__(tag)
+        self.per_element = per_element
+        self.rng_seed = rng_seed
+
+    def generate(self, mesh: "AnySpatialMesh", dim: int) -> numpy.ndarray:
+        rng = numpy.random.default_rng(self.rng_seed)
+        pts: list[list[float]] = []
+        for ie in range(mesh.nelement()):
+            e = mesh.element_pt(ie)
+            nn = e.nnode()
+            if nn == 0:
+                continue
+            if e.is_halo():
+                continue  # somebody else's element; seeding it here would duplicate the particle
+            corners = numpy.array([[e.node_pt(i).x(j) for j in range(dim)] for i in range(nn)])
+            centroid = corners.mean(axis=0)
+            pts.append(list(centroid))
+            for _ in range(self.per_element - 1):
+                # Convex combination of the nodes: always inside for a convex element, and close
+                # enough to inside for a curved one that the containment check settles it.
+                wts = rng.random(nn)
+                wts /= wts.sum()
+                pts.append(list(wts @ corners))
+        if not pts:
+            return numpy.zeros((0, dim))
+        return numpy.array(pts)
+
+
+class CallableSeed(TracerSeed):
+    """Positions from a user function ``fn(mesh) -> (N, dim) array``.
+
+    Args:
+        global_candidates: whether ``fn`` returns the same points on every process. Leave it True
+            for a function of nothing but the global geometry; set it False if it inspects the
+            process's own elements.
+    """
+
+    def __init__(self, fn: Callable[["AnySpatialMesh"], Any], tag: int = 0,
+                 global_candidates: bool = True):
+        super().__init__(tag)
+        self.fn = fn
+        self.global_candidates = global_candidates
+
+    def generate(self, mesh: "AnySpatialMesh", dim: int) -> numpy.ndarray:
+        return numpy.atleast_2d(numpy.asarray(self.fn(mesh), dtype=float))
+
+
+###################################################################################################
+# The equations
+###################################################################################################
+
 class TracerParticles(Equations):
-    """
-        This class defines the equations for tracer particles that are advected by a velocity field. The goal is to track the movement of particles in a fluid flow.
-        These particles do not affect the flow field and are only used for visualization purposes.
+    """Passive tracer particles advected by ``advection``.
 
-        Args:
-            distance (ExpressionOrNum): The distance between the tracer particles. If None, the particles are placed on a grid with this spacing.
-            advection (Expression): The advection velocity field that advects the tracer particles. Default is var("velocity").
-            tracer_name (str): The name of the tracer particles. Default is "tracers".
+    Where the equation is added decides what the particles do - there is no separate class and no
+    flag for it:
+
+      * on a **bulk** domain they follow the advection field itself. On a moving mesh the ALE term
+        cancels analytically, so a particle in a mesh that moves under a zero advection field does
+        not move at all;
+      * on an **interface** (codimension 1) they are confined to it, advected by the *tangential*
+        part of the field and co-moving with the interface in the normal direction.
+
+    .. code-block:: python
+
+        eqs  = NavierStokesEquations(...) + TracerParticles(seed=GridSeed(0.05))
+        eqs += TracerParticles(seed=ElementSeed(), tracer_name="surf") @ "top"
+
+    Args:
+        advection: the velocity field the particles follow. Defaults to ``var("velocity")``.
+        tracer_name: name of this collection on the mesh, for :py:meth:`~pyoomph.meshes.mesh.BaseMesh.get_tracers`.
+        seed: where the particles start; see :py:class:`TracerSeed` and its subclasses. ``None``
+            creates the collection but no particles, to be filled from Python.
+        rtol, atol: tolerances of the adaptive sub-step controller, in units of the particle position.
+        time_interpolation_order: order of the in-step interpolation of the mesh configuration.
+            ``"auto"`` uses the best the stored nodal position history allows. This, not ``rtol``,
+            is what caps the accuracy on a moving mesh.
+        history_time: length of the rolling position history kept for trail plots. ``None`` keeps none.
+        history_capacity: maximum number of history samples per particle.
+        payloads: scalars integrated along each particle's path, as ``{name: source expression}``.
+            Each source must be **dimensionless**, and is integrated over nondimensional time, so
+            ``{"residence": 1}`` accumulates the time a particle has spent in the domain in units of
+            the temporal scale. Multiply a dimensional rate by the appropriate scale yourself.
+        statistics: print a one-line summary of each advection.
     """
-    def __init__(self,distance:ExpressionOrNum,advection:Expression=var("velocity"),tracer_name:str="tracers"):
+
+    def __init__(self, advection: Expression = var("velocity"), *,
+                 tracer_name: str = "tracers",
+                 seed: TracerSeed | None = None,
+                 rtol: float = 1e-8, atol: float = 1e-10,
+                 time_interpolation_order: int | Literal["auto"] = "auto",
+                 history_time: ExpressionOrNum | None = None,
+                 history_capacity: int = 64,
+                 payloads: dict[str, ExpressionOrNum] | None = None,
+                 statistics: bool = False):
         super(TracerParticles, self).__init__()
-        self.advection_expression=advection
-        self.tracer_name=tracer_name
-        self._mesh:"AnySpatialMesh | None"=None
-        self.distance=distance
+        if "@" in tracer_name or "/" in tracer_name:
+            # Both are used to derive the names of the per-history-level and per-payload entries in
+            # the generated code's function table.
+            raise ValueError("A tracer name must not contain '@' or '/', but got " + repr(tracer_name))
+        self.advection_expression = advection
+        self.tracer_name = tracer_name
+        self.seed = seed
+        self.rtol = rtol
+        self.atol = atol
+        self.time_interpolation_order = time_interpolation_order
+        self.history_time = history_time
+        self.history_capacity = history_capacity
+        self.payloads = dict(payloads) if payloads else {}
+        self.statistics = statistics
+        self._mesh: "AnySpatialMesh | None" = None
+        self._last_advected_time: float | None = None
 
-
-    def _update_mesh(self,mesh:"AnySpatialMesh"):
-        if mesh!=self._mesh:
-            if self.tracer_name in mesh._tracers.keys(): #type:ignore
-                raise RuntimeError("Tracers with the name " + str(self.tracer_name) + " already added by other TracerParticles")
-        self._mesh = mesh
-        self._mesh._tracers[self.tracer_name] = _pyoomph.TracerCollection(self.tracer_name) #type:ignore
-        self._mesh._tracers[self.tracer_name]._set_mesh(self._mesh) #type:ignore
+    # ----------------------------------------------------------------------------- collection
 
     def get_collection(self) -> _pyoomph.TracerCollection | None:
-        if (self._mesh is None) or (self.tracer_name not in self._mesh._tracers.keys()): #type:ignore
+        """The C++ collection holding this equation's particles, or ``None`` before setup."""
+        if (self._mesh is None) or (self.tracer_name not in self._mesh._tracers.keys()):  # type:ignore
             return None
-        return self._mesh._tracers[self.tracer_name] #type:ignore
+        return self._mesh._tracers[self.tracer_name]  # type:ignore
 
-    def before_assigning_equations_preorder(self, mesh:"AnyMesh"):
+    def _bind_mesh(self, mesh: "AnySpatialMesh"):
+        """Attach to `mesh`, creating the collection only if this mesh does not have one yet.
+
+        Creating it unconditionally - which is what this used to do - threw away every particle and
+        every registered transfer interface on each call, and this is called more than once."""
+        existing = mesh._tracers.get(self.tracer_name)  # type:ignore
+        if existing is not None and self._mesh is not None and mesh is not self._mesh:
+            raise RuntimeError("Tracers named " + repr(self.tracer_name) +
+                               " already exist on domain " + mesh.get_full_name())
+        self._mesh = mesh
+        if existing is None:
+            coll = _pyoomph.TracerCollection(self.tracer_name)
+            mesh._tracers[self.tracer_name] = coll  # type:ignore
+        else:
+            coll = existing
+        coll._set_mesh(mesh)  # type:ignore
+        coll._set_num_payloads(len(self.payloads))
+        coll.rtol = self.rtol
+        coll.atol = self.atol
+        coll.history_capacity = self.history_capacity
+        coll.time_interpolation_order = (-1 if self.time_interpolation_order == "auto"
+                                         else int(self.time_interpolation_order))
+        if self.history_time is not None:
+            coll.history_window = float(self.history_time / mesh.get_problem().get_scaling("temporal"))
+        return coll
+
+    def before_assigning_equations_preorder(self, mesh: "AnyMesh"):
         if self._mesh is None:
-            self._update_mesh(assert_spatial_mesh(mesh))
+            self._bind_mesh(assert_spatial_mesh(mesh))
 
-    def _init_output(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,rank:int):
-        mesh=assert_spatial_mesh(eqtree._mesh)        
-        self._update_mesh(mesh)
-        assert self._mesh is not None
-        # Create a grid of tracers in the distance
+    # ----------------------------------------------------------------------------- lifecycle
+
+    def _init_output(self, eqtree: "EquationTree", continue_info: dict[str, Any] | None, rank: int):
+        mesh = assert_spatial_mesh(eqtree._mesh)
+        coll = self._bind_mesh(mesh)
+        if continue_info is not None:
+            return  # particles come from the state file, not from the seed
+        if self.seed is not None and coll.nlocal() == 0:
+            self._seed_particles(mesh, coll)
+        coll._relocate_all(0)
+
+    def _seed_particles(self, mesh: "AnySpatialMesh", coll: _pyoomph.TracerCollection):
+        assert self.seed is not None
+        dim = coll.get_coordinate_dimension()
+        candidates = numpy.ascontiguousarray(self.seed.generate(mesh, dim), dtype=float)
+        npay = len(self.payloads)
+        n = len(candidates)
+        if self.seed.global_candidates:
+            # Collective: every process proposes the same candidates and exactly one keeps each, so
+            # the particle set and its identities do not depend on the partitioning.
+            outside = coll.add_tracers_collective(candidates.ravel().tolist(),
+                                                  [self.seed.tag] * n, [0.0] * (n * npay))
+        else:
+            outside = 0
+            for row in candidates:
+                if coll.add_tracer([float(v) for v in row], self.seed.tag, [0.0] * npay) == 0:
+                    outside += 1
+        problem = mesh.get_problem()
+        if outside and not problem.is_quiet():
+            print("Tracers '" + self.tracer_name + "' on '" + mesh.get_full_name() + "': seeded " +
+                  str(coll.nglobal()) + " particles, " + str(outside) + " of " + str(n) +
+                  " candidates were outside the domain")
+
+    def after_transient_solve(self):
         coll = self.get_collection()
-        assert coll is not None
-        if self.distance is not None:
-            dnd=self.distance/self._mesh.get_problem().get_scaling("spatial")
-            dnd=float(dnd)
-            d=self._mesh.get_dimension()
-            mins=[1e60]*d
-            maxs = [-1e60] * d
-            for n in self._mesh.nodes():
-                for i in range(d):
-                    x=n.x(i)
-                    mins[i]=min(mins[i],x)
-                    maxs[i] = max(maxs[i], x)
-            # move d/2 from the boundaries
-            for i in range(d):
-                mins[i]+=dnd/2
-                maxs[i] -= dnd / 2
-            npts=[max(1,round((maxs[i]-mins[i])/dnd)+1) for i in range(d)]
-            if d==2:
-                xs =numpy.linspace(mins[0],maxs[0],npts[0],endpoint=True) #type:ignore
-                ys = numpy.linspace(mins[1], maxs[1], npts[1], endpoint=True) #type:ignore
-                for y in ys: #type:ignore
-                    for x in xs: #type:ignore
-                        coll.add_tracer([x,y])
-            else:
-                raise RuntimeError("Implement here tracer grid generation for other dimensions")
-        coll._locate_elements()
-
-
-    def before_newton_solve(self):
-        coll=self.get_collection()
-        assert coll is not None
-        coll._prepare_advection()
-
-    def after_newton_solve(self):
+        if coll is None:
+            return
         assert self._mesh is not None
-        print("Advecting tracers '"+str(self.tracer_name)+"' on domain '"+self._mesh.get_full_name()+"'")
-        coll=self.get_collection()
-        assert coll is not None        
+        problem = self._mesh.get_problem()
+        # Even though this hook only fires for accepted timesteps, guard against advecting twice at
+        # the same time: an adaptation recovery may re-solve, and a caller may drive solve() itself.
+        now = float(problem.get_current_time(as_float=True, dimensional=False))
+        if self._last_advected_time is not None and now <= self._last_advected_time:
+            return
+        self._last_advected_time = now
         coll._advect_all()
+        if self.statistics and not problem.is_quiet():
+            print("Tracers '" + self.tracer_name + "' on '" + self._mesh.get_full_name() + "': " +
+                  coll.step_statistics())
 
-    def after_remeshing(self,eqtree:"EquationTree"):
-        coll=self.get_collection()
-        assert coll is not None           
-        coll._locate_elements()
+    def after_remeshing(self, eqtree: "EquationTree"):
+        coll = self.get_collection()
+        if coll is not None:
+            coll._relocate_all(0)
+
+    # ----------------------------------------------------------------------------- code generation
 
     def define_additional_functions(self):
         master = self._get_combined_element()
-        cg=master._assert_codegen()
-        adv=self.advection_expression
+        cg = master._assert_codegen()
+        scale = scale_factor("temporal") / scale_factor("spatial")
 
-        TF=eval_flag("timefrac_tracer")
-        adv_blend=adv*TF+evaluate_in_past(adv)*(1-TF)        
-        # TODO: ALE term in past?
-        ALE_term = eval_flag("moving_mesh") * mesh_velocity()
-        ALE_corrected=scale_factor("temporal")/scale_factor("spatial")*(adv_blend-ALE_term)
-        cg._register_tracer_advection(self.tracer_name, ALE_corrected)
+        # One entry per nodal time-history level. The C++ side blends them with the same Lagrange
+        # weights it uses for the mesh configuration, which is what makes the two consistent; it
+        # cannot be done here because the weights follow from t(0), t(1) and t(2), which are not
+        # known at compile time and change with the step size.
+        #
+        # apply_on_others=True so that gradients and normals inside a past-level expression are
+        # taken on the configuration that level belongs to, rather than on the current one.
+        for k in range(_NUM_HISTORY_LEVELS):
+            name = self.tracer_name if k == 0 else self.tracer_name + "@" + str(k)
+            adv = self.advection_expression if k == 0 else evaluate_in_past(self.advection_expression, k, apply_on_others=True)
+            cg._register_tracer_advection(name, scale * adv)
+            for pi, (_, src) in enumerate(self.payloads.items()):
+                psrc = src if k == 0 else evaluate_in_past(src, k, apply_on_others=True)
+                # A payload source is a scalar, but the tracer machinery carries vectors; wrap it in
+                # a one-component vector so the same registration path serves both.
+                cg._register_tracer_advection(name + "/payload" + str(pi), _as_vector(psrc))
 
-    #def before_finalization(self,codegen):
-        #self._update_mesh(codegen._mesh)
+    def get_payload_names(self) -> list[str]:
+        return list(self.payloads.keys())
+
+
+def _as_vector(scalar: ExpressionOrNum) -> Expression:
+    from ..expressions.generic import vector
+    return vector([scalar])
 
 
 class TracerTransferAtInterface(InterfaceEquations):
+    """Hands particles over between the tracer collections of two domains sharing this interface.
+
+    Without this, a particle reaching the edge of its domain is dropped. Both sides must carry a
+    :py:class:`TracerParticles` (they need not use the same advection field).
+
+    Args:
+        vice_versa: also register the transfer in the opposite direction.
+    """
     required_parent_type = TracerParticles
     required_opposite_parent_type = TracerParticles
 
-    def __init__(self,vice_versa:bool=True):
+    def __init__(self, vice_versa: bool = True):
         super(TracerTransferAtInterface, self).__init__()
-        self.vice_versa=vice_versa
+        self.vice_versa = vice_versa
 
-    def before_assigning_equations_preorder(self, mesh:"AnyMesh"):
-        mytr=self.get_parent_equations()
-        othertr=self.get_opposite_parent_equations()
-        assert isinstance(mytr,TracerParticles) and isinstance(othertr,TracerParticles)
-        pmesh=mytr._mesh 
-        mycol=mytr.get_collection()
-        othcol=othertr.get_collection()
+    def _wire(self):
+        mytr = self.get_parent_equations()
+        othertr = self.get_opposite_parent_equations()
+        assert isinstance(mytr, TracerParticles) and isinstance(othertr, TracerParticles)
+        pmesh = mytr._mesh
+        mycol = mytr.get_collection()
+        othcol = othertr.get_collection()
         if pmesh and mycol and othcol:
-            bind=pmesh.get_boundary_index(self.get_mesh().get_name())
-            mycol._set_transfer_interface(bind,othcol)
+            bind = pmesh.get_boundary_index(self.get_mesh().get_name())
+            mycol._set_transfer_interface(bind, othcol)
             if self.vice_versa:
-                opmesh=othertr._mesh 
+                opmesh = othertr._mesh
                 if opmesh:
-                    obind=opmesh.get_boundary_index(self.get_mesh().get_name())
-                    othcol._set_transfer_interface(obind,mycol)
+                    obind = opmesh.get_boundary_index(self.get_mesh().get_name())
+                    othcol._set_transfer_interface(obind, mycol)
 
+    def before_assigning_equations_preorder(self, mesh: "AnyMesh"):
+        self._wire()
+
+    def _init_output(self, eqtree: "EquationTree", continue_info: dict[str, Any] | None, rank: int):
+        # Re-register here too: the parents bind their collections in their own _init_output, which
+        # may run after before_assigning_equations_preorder did.
+        self._wire()

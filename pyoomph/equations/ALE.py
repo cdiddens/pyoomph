@@ -66,7 +66,7 @@ class BaseMovingMeshEquations(Equations):
 
     def after_mapping_on_macro_elements(self):
         self.get_mesh().set_lagrangian_nodal_coordinates()
-        self.get_mesh().invalidate_lagrangian_kdtree()
+        self.get_mesh().bump_topology_generation()
 
     def with_average_position_constraint(self, problem:"Problem", *, act_on:str="mesh",ode_domain_name:str="globals",lagrange_prefix:str="lagr_intconstr_mesh_", set_zero_on_normal_mode_eigensolve:bool=True, **avg_pos:ExpressionOrNum)->Equations:
 
@@ -306,7 +306,7 @@ class SetLagrangianToEulerianAfterSolve(Equations):
         super(SetLagrangianToEulerianAfterSolve, self).after_newton_solve()
         if self.active:
             self.get_mesh().set_lagrangian_nodal_coordinates()
-            self.get_mesh().invalidate_lagrangian_kdtree()
+            self.get_mesh().bump_topology_generation()
 
 
 class ConnectMeshAtInterface(InterfaceEquations):
