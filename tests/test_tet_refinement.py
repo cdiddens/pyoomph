@@ -117,9 +117,18 @@ class _TetPoisson(Problem):
         self += eqs @ "domain"
 
 
-def test_uniform_tet_refinement_conforming():
+@pytest.mark.parametrize("space", ["C1", "C1TB", "C2", "C2TB"])
+def test_uniform_tet_refinement_conforming(space):
     # A tet refines 1->8; the mesh must stay conforming (manifold) and element count x8 per level.
-    with _TetPoisson(N=1) as problem:
+    #
+    # Every enrichment of the tet is swept here because refining a C1TB one used to SEGFAULT, and did
+    # so on the very first refinement of any tet mesh: BulkElementTetra3dC1TB::local_coordinate_of_node
+    # wrote s[0..2] without resizing s, and FiniteElement::get_node_at_local_coordinate hands it a
+    # default-constructed (empty) Vector to size itself. Every other shape in the codebase -- the 2d
+    # C1TB triangle, the wedges, the pyramids, oomph's own TBubbleEnrichedElementShape -- resizes
+    # first; this one had been missed, so no test ever refined a C1TB tet. Note that a regression here
+    # takes the interpreter down rather than failing this assertion.
+    with _TetPoisson(N=1, space=space) as problem:
         problem.max_refinement_level = 3
         problem.initialise()
         m = problem.get_mesh("domain")
@@ -149,7 +158,7 @@ def test_single_level_tet_hanging_residual_oracle(space, boundary, lo, hi):
         assert _max_abs_residual(problem) < 1e-9
 
 
-@pytest.mark.parametrize("space", ["C1", "C2"])
+@pytest.mark.parametrize("space", ["C1", "C1TB", "C2", "C2TB"])
 def test_abrupt_multilevel_tet_hanging_residual_oracle(space):
     # A deliberately non-2:1 abrupt >1-level jump (level 1 domain, level 3 near one boundary). The
     # 2:1 balancing pass + hang-chain flattening must still drive the linear residual to machine

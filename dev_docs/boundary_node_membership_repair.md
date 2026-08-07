@@ -291,7 +291,8 @@ The companion test on realistic meshes now asserts set *equality* in both direct
 
 **Every element family, every space, both directions.** `tests/test_boundary_element_identification.py`
 sweeps hex/tet/wedge/pyramid and the `all_four` mixed layout over C1, C2, C1TB and C2TB at 0-2
-refinements, asserting `check_boundary_node_membership() == (0, 0)` *and* the same comparison made
+refinements (C1TB/C2TB for the simplices only -- a wedge or pyramid throws rather than producing an
+element), asserting `check_boundary_node_membership() == (0, 0)` *and* the same comparison made
 against the INTERFACE MESHES instead of the tags. The second one is the load-bearing check: an
 interface mesh is assembled by `build_face_element()`, which is the routine that knows about the
 oddities, so it is an oracle independent of the tables in §2 -- a self-consistent check against the
@@ -346,14 +347,21 @@ with `--full`. MPI with `--full`, all passing: `test_mpi_boundary_membership`, `
 `test_mpi_undistributable`, `test_mpi_global_meshdata`, `test_mpi_structural_assembly`,
 `test_mpi_observables`, `test_mpi_tracers`, `test_mpi_rank_zero_failures`, `test_mpi_newton_abort`.
 
-Two failures found on the way are **pre-existing and unrelated**, both confirmed by rebuilding the tree
-without this work and reproducing them identically:
+Two failures found on the way were **pre-existing and unrelated**, both confirmed by rebuilding the
+tree without this work and reproducing them identically:
 
-* refining a **C1TB tet** segfaults (`MixedBoxMesh3D(kind="tet")` with `space="C1TB"`, at the first
-  `refine_uniformly`). C2TB is fine. That combination is therefore left out of the family sweep rather
-  than xfailed, since a segfault takes the interpreter down.
+* refining a **C1TB tet** segfaulted, on the first `refine_uniformly` of any tet mesh.
+  `BulkElementTetra3dC1TB::local_coordinate_of_node` wrote `s[0..2]` without resizing `s`, and
+  `FiniteElement::get_node_at_local_coordinate` (`elements.cc:3890`) hands it a default-constructed,
+  i.e. empty, `Vector` to size itself -- so it was an out-of-bounds write on an empty `std::vector`.
+  Every other shape resizes first (the 2d C1TB triangle, both wedges, both pyramids, and oomph's own
+  `TBubbleEnrichedElementShape`, which is why C2TB was fine), so this one shape had simply been
+  missed, and nothing had ever refined a C1TB tet. **Fixed**, and
+  `test_uniform_tet_refinement_conforming` now sweeps all four tet spaces so that no enrichment goes
+  unrefined again.
 * `test_adaptive_3d_campaign.py::test_ale_moving_mesh[levels0-hex_pyr]` stalls at
   `max|residual| = 8.583e-09` against a 1e-11 tolerance, deterministically, on an unrefined mesh.
+  Still open, and unrelated to any of this.
 
 
 ## 7. Risks

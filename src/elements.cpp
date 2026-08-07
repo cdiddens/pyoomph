@@ -11347,6 +11347,12 @@ namespace pyoomph
 	// Local coordinates of the 4 linear (corner) nodes plus the interior bubble node (index 4, at the centroid).
 	void BulkElementTetra3dC1TB::local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const
 	{
+		// The resize is part of the contract, not a precaution: FiniteElement::get_node_at_local_coordinate
+		// passes a DEFAULT-CONSTRUCTED (i.e. empty) Vector and relies on this function to size it, so
+		// writing s[0..2] without it is an out-of-bounds write on an empty std::vector. That is what made
+		// every refinement of a C1TB tet segfault -- oomph's own TBubbleEnrichedElementShape<3,3> and
+		// pyoomph's 2d BulkElementTri2dC1TB both resize first, which is why only this one shape crashed.
+		s.resize(3);
 		if (j==0)
 		{
 			s[0]=1.0; s[1]=0.0; s[2]=0.0;
@@ -11367,7 +11373,7 @@ namespace pyoomph
 		{
 			s[0]=0.25; s[1]=0.25; s[2]=0.25;
 		}
-		
+		else throw_runtime_error("Invalid node index " + std::to_string(j) + " for a C1TB tetrahedron (it has 5 nodes)");
 	}
 
 

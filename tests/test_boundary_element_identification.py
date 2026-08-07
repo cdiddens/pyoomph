@@ -269,11 +269,9 @@ def _membership_vs_interface_meshes(problem, walls):
     return spurious, unmarked
 
 
-# C1TB/C2TB exist for simplices only ("cannot be generalized to the space C2TB" for wedges/pyramids),
-# and refining a C1TB tet segfaults -- a pre-existing defect, unrelated to boundary membership and
-# reproduced on the tree before this landed, so that one combination is left out rather than xfailed.
-_FAMILY_CASES = ([("hex", s) for s in ("C1", "C2", "C1TB", "C2TB")] +
-                 [("tet", s) for s in ("C1", "C2", "C2TB")] +
+# C1TB/C2TB exist for simplices only -- a wedge or pyramid throws "cannot be generalized to the
+# space C2TB" rather than producing an element.
+_FAMILY_CASES = ([(k, s) for k in ("hex", "tet") for s in ("C1", "C1TB", "C2", "C2TB")] +
                  [(k, s) for k in ("wedge", "pyr", "all_four") for s in ("C1", "C2")])
 
 
