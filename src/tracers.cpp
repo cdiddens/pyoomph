@@ -849,6 +849,25 @@ namespace pyoomph
     p->s.assign(s.begin(), s.begin() + elem_dim);
     p->refdomain = reference_domain_kind(e);
     e->tracer_prepare_element();
+
+    // On an interface, snap the stored position onto the located point. The locate was a
+    // closest-point projection, so the two differ by however far the particle was off the surface -
+    // which is zero during a run, but not after a remesh, where the new interface discretises the
+    // same boundary slightly differently. Without this a particle would sit fractionally off the
+    // surface until the next sub-step re-anchored it, and anything reading positions in between
+    // would see the invariant broken.
+    if (nodal_dim != elem_dim)
+    {
+      oomph::Vector<double> sv(p->s.size());
+      for (unsigned a = 0; a < p->s.size(); a++)
+        sv[a] = p->s[a];
+      oomph::Vector<double> xs;
+      TracerTimeConfig frozen;
+      e->tracer_geometry_at_s(sv, 1, frozen.w, frozen.dwdtau, &xs, nullptr, nullptr);
+      for (unsigned i = 0; i < nodal_dim; i++)
+        p->x[i] = xs[i];
+    }
+
     stat_global_locates++;
     return true;
   }

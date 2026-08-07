@@ -1747,6 +1747,15 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         self.max_permitted_error = parent.max_permitted_error
         if previous_mesh is not None:
             self._setup_information_from_old_mesh(previous_mesh)
+            # Carry the tracer collections over to the replacement mesh. Remeshing does this for the
+            # bulk meshes explicitly (Problem.remesh_handler_during_solve), but an interface mesh is
+            # rebuilt as a new object rather than replaced in _meshdict, so without this the
+            # collections - and every particle in them - simply disappeared. The dict is shared
+            # rather than copied, for the same reason the bulk path shares it: the TracerParticles
+            # equation may still be holding the old mesh, and both then see the same collections.
+            # Re-pointing each collection at this mesh has to wait until it has elements, which is
+            # what TracerParticles.after_remeshing does.
+            self._tracers = previous_mesh._tracers
 
         for n, eqtree in self._eqtree.get_children().items():
             pinter = None

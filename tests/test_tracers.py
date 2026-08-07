@@ -862,3 +862,132 @@ def test_tracers_survive_adaptation_of_a_curved_boundary():
     # Rigid rotation preserves the radius exactly; the boundary moving underneath must not drag them.
     r1 = numpy.hypot(*tr.get_positions().T)
     assert numpy.max(numpy.abs(numpy.sort(r1) - numpy.sort(r0))) < 1e-9
+
+
+# ----------------------------------------------------------------------------------------------
+# Remeshing
+# ----------------------------------------------------------------------------------------------
+#
+# Different from adaptation: remeshing builds an entirely NEW mesh object, sharing no element and no
+# node with the old one, and discretising the domain differently. Nothing about the particles'
+# element pointers survives, so the collections have to be carried across to the replacement mesh
+# and every particle re-located from its stored physical position.
+
+class _RemeshBlob(GmshTemplate):
+    """Quarter disc with a curved boundary, rebuilt through a spline over the previous nodes."""
+
+    def define_geometry(self):
+        self.default_resolution = 0.12
+        p00 = self.point(0, 0)
+        if not self.is_remeshing():
+            p10, p01 = self.point(1, 0), self.point(0, 1)
+            self.circle_arc(p10, p01, center=p00, name="interface")
+        else:
+            coords = self.get_boundary_coordinates("domain/interface", sort_along_axis="x+")
+            pts = [self.point(x, y) for x, y in coords[0]]
+            self.spline(pts, name="interface")
+            p10, p01 = pts[-1], pts[0]
+        self.create_lines(p10, "substrate", p00, "axis", p01)
+        self.plane_surface("substrate", "axis", "interface", name="domain")
+
+
+_REMESH_BULK = [[0.3, 0.2], [0.5, 0.35], [0.2, 0.5]]
+_REMESH_SURF = [[math.cos(a), math.sin(a)] for a in (0.4, 0.9, 1.3)]
+
+
+class _RemeshProblem(Problem):
+    def define_problem(self):
+        from pyoomph.meshes.remesher import Remesher2d
+        m = _RemeshBlob()
+        m.remesher = Remesher2d(m)
+        self.add_mesh(m)
+        eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "interface"
+        eqs += TracerParticles(vector(0, 0), seed=TracerSeedPoints(_REMESH_BULK),
+                               tracer_name="bulk", rtol=1e-11, atol=1e-13)
+        eqs += TracerParticles(vector(0, 0), seed=TracerSeedPoints(_REMESH_SURF),
+                               tracer_name="surf", rtol=1e-11, atol=1e-13) @ "interface"
+        self += eqs @ "domain"
+
+
+def _remesh_problem(tag):
+    p = _RemeshProblem()
+    p.set_output_directory("_tracer_" + tag)
+    p.quiet()
+    p.initialise()
+    return p
+
+
+def test_bulk_tracers_survive_a_remeshing_event():
+    p = _remesh_problem("remesh_bulk")
+    tr = p.get_mesh("domain").get_tracers("bulk")
+    before = tr.get_positions().copy()
+    assert len(before) == len(_REMESH_BULK)
+    p.force_remesh()
+    tr = p.get_mesh("domain").get_tracers("bulk")
+    assert tr.nlocal() == len(_REMESH_BULK), "particles were lost in the remesh"
+    # The domain is unchanged, only its discretisation, so the particles must not move at all.
+    assert numpy.max(numpy.abs(tr.get_positions() - before)) < 1e-13
+
+
+def test_interface_tracers_survive_a_remeshing_event():
+    """An interface mesh is rebuilt as a new object rather than replaced in the problem's mesh dict,
+    so without carrying the collections across the replacement the particles - and the collection
+    itself - simply vanished."""
+    p = _remesh_problem("remesh_surf")
+    tr = p.get_mesh("domain/interface").get_tracers("surf")
+    before = tr.get_positions().copy()
+    ids_before = list(tr.get_ids())
+    p.force_remesh()
+    tr = p.get_mesh("domain/interface").get_tracers("surf", error_on_missing=False)
+    assert tr is not None, "the tracer collection did not survive the remesh at all"
+    assert tr.nlocal() == len(_REMESH_SURF), "particles were lost in the remesh"
+    assert list(tr.get_ids()) == ids_before, "identities were not preserved"
+    # The rebuilt boundary is a spline through the old nodes, so it is the same curve to within the
+    # spline's own error; the particles are re-projected onto it and must not have travelled along it.
+    assert numpy.max(numpy.abs(tr.get_positions() - before)) < 1e-3
+
+
+def test_interface_tracers_stay_on_the_interface_after_a_remeshing_event():
+    """The invariant that matters for an interface particle is not where it is along the surface but
+    that it is ON it, and that has to hold immediately after the remesh, not only once the next
+    sub-step has re-anchored it."""
+    p = _remesh_problem("remesh_surf_offset")
+    p.force_remesh()
+    imesh = p.get_mesh("domain/interface")
+    tr = imesh.get_tracers("surf")
+    located = numpy.array(imesh.locate_points(tr.get_positions(), lagrangian=False), dtype=float)
+    assert numpy.all(located[:, 0] > 0.5), "a tracer is not in the rebuilt interface mesh at all"
+    assert numpy.max(numpy.abs(located[:, 1])) < 1e-12, \
+        "normal offset after the remesh: %g" % numpy.max(numpy.abs(located[:, 1]))
+
+
+def test_tracers_keep_advecting_correctly_after_a_remeshing_event():
+    """A remesh in the middle of a run must not disturb the trajectory."""
+    class P(Problem):
+        def define_problem(self):
+            from pyoomph.meshes.remesher import Remesher2d
+            m = _RemeshBlob()
+            m.remesher = Remesher2d(m)
+            self.add_mesh(m)
+            eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "interface"
+            # Rigid rotation: the radius is preserved exactly, so any disturbance from the remesh
+            # shows up immediately and cannot be absorbed into the answer.
+            eqs += TracerParticles(vector(-var("coordinate_y"), var("coordinate_x")),
+                                   seed=TracerSeedPoints([[0.55, 0.15], [0.35, 0.4], [0.2, 0.2]]),
+                                   rtol=1e-11, atol=1e-13)
+            self += eqs @ "domain"
+
+    p = P()
+    p.set_output_directory("_tracer_remesh_advect")
+    p.quiet()
+    p.initialise()
+    tr = p.get_mesh("domain").get_tracers()
+    r0 = numpy.hypot(*tr.get_positions().T)
+    for i in range(6):
+        p.solve(timestep=0.02)
+        if i == 2:
+            p.force_remesh()
+            tr = p.get_mesh("domain").get_tracers()
+    assert tr.nlocal() == 3, "particles were lost across the remesh"
+    r1 = numpy.hypot(*tr.get_positions().T)
+    assert numpy.max(numpy.abs(r1 - r0)) < 1e-8, "the remesh disturbed the trajectory"

@@ -205,6 +205,38 @@ tests (an interface mesh, which is torn down and rebuilt entirely, and a curved 
 refinement genuinely moves the domain by snapping new nodes onto the arc) are behavioural guards
 against particle loss and pass either way.
 
+## 5b. Remeshing
+
+Different from adaptation in kind, not degree: remeshing builds an entirely new mesh object that
+shares no element and no node with the old one and discretises the domain differently. Nothing about
+a particle's element pointer survives, so the collections are carried over to the replacement and
+every particle is re-located from its stored physical position.
+
+Bulk collections were already carried over (`Problem.remesh_handler_during_solve` re-points them at
+the new mesh). **Interface collections were not**, and the effect was total: an interface mesh is
+rebuilt as a new object rather than swapped into the problem's mesh dict, so the collection and
+every particle in it simply disappeared. They now travel along the `previous_mesh` chain in
+`InterfaceMesh.__init__`, which covers arbitrarily nested interfaces for free.
+
+Two smaller things fell out of that:
+
+* `TracerParticles._mesh` was left pointing at the mesh that had been thrown away. It happened to
+  work, because the bulk carry-over shares the `_tracers` dict by reference rather than copying it,
+  so the stale mesh still resolved to the right collection. `after_remeshing` now re-binds to the
+  equation tree's current mesh, at a point where it has its elements.
+* The duplicate-name guard in `_bind_mesh` compared mesh objects, which is exactly wrong here: a
+  remesh legitimately presents a different object for the same domain. It compares domain names now.
+
+`place_globally` also snaps an interface particle onto the located point. During a run that is a
+no-op, since the sub-step re-anchor already keeps the offset at zero, but after a remesh the new
+interface discretises the same boundary slightly differently and the particle would otherwise sit
+fractionally off it until the next sub-step. Anything reading positions in between would see the
+invariant broken.
+
+`test_interface_tracers_survive_a_remeshing_event` and
+`..._stay_on_the_interface_after_a_remeshing_event` both fail without the carry-over; the bulk one
+passes either way and is there as a guard.
+
 ## 6. Where the accuracy stops
 
 Worth stating, because the tolerance knob does not reach it.

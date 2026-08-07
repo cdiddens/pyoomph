@@ -315,7 +315,12 @@ class TracerParticles(Equations):
         Creating it unconditionally - which is what this used to do - threw away every particle and
         every registered transfer interface on each call, and this is called more than once."""
         existing = mesh._tracers.get(self.tracer_name)  # type:ignore
-        if existing is not None and self._mesh is not None and mesh is not self._mesh:
+        # Keyed on the DOMAIN NAME rather than on object identity: remeshing hands us a different
+        # mesh object for the same domain, carrying the same collections over, and that is exactly
+        # the case this guard must not fire on. What it is for is two TracerParticles claiming one
+        # name on two genuinely different domains.
+        if (existing is not None and self._mesh is not None
+                and mesh.get_full_name() != self._mesh.get_full_name()):
             raise RuntimeError("Tracers named " + repr(self.tracer_name) +
                                " already exist on domain " + mesh.get_full_name())
         self._mesh = mesh
@@ -390,6 +395,14 @@ class TracerParticles(Equations):
                   coll.step_statistics())
 
     def after_remeshing(self, eqtree: "EquationTree"):
+        # Remeshing replaces the mesh object, so self._mesh is stale by now and the collection still
+        # points at the mesh that was thrown away. Re-bind to whatever the equation tree is holding -
+        # by this point it has its elements, which _set_mesh needs - and then re-locate every
+        # particle from its stored position, since the new mesh discretises the domain differently
+        # and shares no elements with the old one.
+        mesh = eqtree._mesh
+        if mesh is not None:
+            self._bind_mesh(assert_spatial_mesh(mesh))
         coll = self.get_collection()
         if coll is not None:
             coll._relocate_all(0)
