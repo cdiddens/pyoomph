@@ -705,6 +705,17 @@ def _compact_field_indices(field_inds:dict[str,int])->None:
         field_inds[name]=newindex
 
 
+def _vector_components_present(vfield:str,field_inds:dict[str,int])->list[str]:
+    """The x/y/z components of a vector field that survive an extrusion.
+
+    Both extrusions fold the in-plane component ("_phi" azimuthally, "_normal" for the Cartesian
+    mode) into the Cartesian ones and may add a "_z". The list stored in vector_fields has to be
+    rebuilt from what is left afterwards: it used to keep naming the folded-away component and to
+    miss the added one, so entry.vector_fields disagreed with entry.nodal_field_inds.
+    """
+    return [vfield+c for c in ("_x","_y","_z") if vfield+c in field_inds]
+
+
 # Keyed by a template name; the mapping from element type (plus, on the rotation axis, which of its
 # nodes lie on the axis) to a name is done in _extrusion_template_groups.
 _EXTRUSION_TEMPLATES:dict[str,_ExtrusionTemplate]={
@@ -1255,6 +1266,7 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                         field_operators[vfield+"_y"]= [lambda vy: numpy.tile(vy,n_segments+1), vfield+"_normal"] #type:ignore
                 if vfield+"_normal" in new_nodal_field_inds:
                     del new_nodal_field_inds[vfield+"_normal"]
+                vector_fields[vfield]=_vector_components_present(vfield,new_nodal_field_inds)
 
         _compact_field_indices(new_nodal_field_inds)
         for name,index in sorted(new_nodal_field_inds.items(),key=lambda item: item[1]): #type:ignore
@@ -1544,6 +1556,7 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                 else:
                     field_operators[vfield + "_x"] = [lambda vx: numpy.outer(numpy.cos(phis), vx).flatten(),vfield + "_x"] #type:ignore
                     field_operators[vfield + "_y"] = [lambda vx: numpy.outer(numpy.sin(phis), vx).flatten(),vfield + "_x"] #type:ignore
+                vector_fields[vfield]=_vector_components_present(vfield,new_nodal_field_inds)
 
         if "coordinate_y" in base.nodal_field_inds:
             new_nodal_field_inds["coordinate_z"]=max(new_nodal_field_inds.values())+1
