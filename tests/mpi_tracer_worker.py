@@ -43,7 +43,7 @@ import numpy
 from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.poisson import PoissonEquation
-from pyoomph.equations.tracers import TracerParticles, PointSeed, GridSeed
+from pyoomph.equations.tracers import TracerParticles, TracerSeedPoints, TracerSeedGrid
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
 
@@ -69,7 +69,7 @@ class TracerProblem(Problem):
         self.add_mesh(RectangularQuadMesh(size=[LX, LY], lower_left=[0, -1], N=[NX, NY]))
         eqs = PoissonEquation(source=0) + DirichletBC(u=0) @ "left" + DirichletBC(u=1) @ "right"
         eqs += TracerParticles(vector(1 - var("coordinate_y") ** 2, 0),
-                               seed=PointSeed(_seed_positions(self.corner_only)),
+                               seed=TracerSeedPoints(_seed_positions(self.corner_only)),
                                payloads={"residence": 1} if self.use_payloads else None,
                                rtol=1e-11, atol=1e-13)
         self += eqs @ "domain"

@@ -29,7 +29,7 @@ from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.navier_stokes import NavierStokesEquations, NoSlipBC
 from pyoomph.equations.ALE import LaplaceSmoothedMesh
-from pyoomph.equations.tracers import TracerParticles, GridSeed
+from pyoomph.equations.tracers import TracerParticles, TracerSeedGrid
 from pyoomph.output.plotting import MatplotlibPlotter
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 
@@ -84,7 +84,7 @@ class WavyChannel(Problem):
         # each particle a scalar integrated along its own path - here simply the time it has spent
         # in the domain, which the outlet then removes along with the particle.
         eqs += TracerParticles(var("velocity"),
-                               seed=GridSeed(0.15),
+                               seed=TracerSeedGrid(0.15),
                                history_time=0.4,
                                payloads={"residence": 1},
                                statistics=True)

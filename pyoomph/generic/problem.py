@@ -4359,6 +4359,18 @@ class Problem(_pyoomph.Problem):
         return _pyoomph._check_interface_conformity(conns,when,2 if throw_on_mismatch else 1) #type:ignore
 
     def actions_after_adapt(self):
+        # Announce that every cached element pointer is now stale. Refinement replaces a leaf element
+        # by its sons and unrefinement DELETES them, so anything holding an element pointer across an
+        # adaptation - tracer particles, point locators - is pointing into freed memory.
+        #
+        # This has to be done here rather than in pyoomph::Problem::actions_after_adapt, which also
+        # does it: this override shadows the C++ one completely (it does not call super), so the C++
+        # body never runs for a Python-defined Problem, which is every Problem.
+        for _m in self._meshdict.values():
+            _m.bump_topology_generation()
+        for _m in self._interfacemeshes:
+            _m.bump_topology_generation()
+
         # BEFORE the interface meshes are rebuilt below, and before _connect_opposite_elements pairs
         # them up: the two sides of a coupled interface may have been refined differently (the meshes
         # are adapted individually), and this is the one point where that can still be repaired.

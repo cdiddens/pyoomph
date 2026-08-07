@@ -18,16 +18,16 @@ Adding tracers to a domain is one line:
 
 .. code:: python
 
-   eqs += TracerParticles(var("velocity"), seed=GridSeed(0.15))
+   eqs += TracerParticles(var("velocity"), seed=TracerSeedGrid(0.15))
 
 The first argument is the field that advects them - it defaults to ``var("velocity")`` - and
-``seed`` says where they start. :py:class:`~pyoomph.equations.tracers.GridSeed` lays a lattice over
+``seed`` says where they start. :py:class:`~pyoomph.equations.tracers.TracerSeedGrid` lays a lattice over
 the domain's bounding box and drops the candidates that fall outside the mesh, so it is safe on a
 domain with a hole in it. The alternatives are
-:py:class:`~pyoomph.equations.tracers.PointSeed` (explicit positions),
-:py:class:`~pyoomph.equations.tracers.ElementSeed` (one per element, which follows a graded mesh
-rather than a box), :py:class:`~pyoomph.equations.tracers.RandomSeed` and
-:py:class:`~pyoomph.equations.tracers.CallableSeed`. All of them work in one, two and three
+:py:class:`~pyoomph.equations.tracers.TracerSeedPoints` (explicit positions),
+:py:class:`~pyoomph.equations.tracers.TracerSeedElement` (one per element, which follows a graded mesh
+rather than a box), :py:class:`~pyoomph.equations.tracers.TracerSeedRandom` and
+:py:class:`~pyoomph.equations.tracers.TracerSeedCallable`. All of them work in one, two and three
 dimensions.
 
 Let us put them in a channel whose top wall oscillates, so that the mesh is in constant motion:

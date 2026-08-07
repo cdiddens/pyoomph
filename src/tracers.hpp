@@ -195,7 +195,8 @@ namespace pyoomph
     TracerParticle *unpack(const double *in, TracerId id, int tag);
 
     // Per-step counters, reported by step_statistics().
-    unsigned long stat_substeps = 0, stat_rejected = 0, stat_walks = 0, stat_global_locates = 0;
+    unsigned long stat_substeps = 0, stat_rejected = 0, stat_walks = 0;
+    unsigned stat_global_locates = 0;
     unsigned stat_lost = 0, stat_migrated = 0, stat_transferred = 0;
 
     MeshPointLocator *get_locator(unsigned time_level);
@@ -306,6 +307,13 @@ namespace pyoomph
     virtual void advect_all();
 
     std::string step_statistics() const;
+    // How many particles had to be located from scratch during the last advection, i.e. how many
+    // were holding an element pointer that the mesh had invalidated. Zero on a step where nothing
+    // adapted or remeshed; equal to the particle count on a step where something did. Exposed
+    // because "did the collection notice the adaptation" is otherwise invisible: a stale pointer
+    // into a refined element's still-alive parent keeps producing plausible answers, and one into
+    // an unrefined element's deleted son is undefined behaviour that may not crash.
+    unsigned get_relocations_last_step() const { return stat_global_locates; }
 
     virtual void _save_state(std::vector<double> &posarr, std::vector<long long> &tagarr);
     virtual void _load_state(const std::vector<double> &posarr, const std::vector<long long> &tagarr);

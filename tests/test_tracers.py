@@ -31,8 +31,8 @@ import pytest
 from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.poisson import PoissonEquation
-from pyoomph.equations.tracers import (TracerParticles, PointSeed, GridSeed, ElementSeed,
-                                       RandomSeed, CallableSeed)
+from pyoomph.equations.tracers import (TracerParticles, TracerSeedPoints, TracerSeedGrid, TracerSeedElement,
+                                       TracerSeedRandom, TracerSeedCallable)
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh, CuboidBrickMesh, LineMesh
 
 
@@ -68,7 +68,7 @@ class _TracerProblem(Problem):
     def define_problem(self):
         self.add_mesh(RectangularQuadMesh(size=[4, 2], lower_left=[0, -1], N=list(self.N)))
         eqs = PoissonEquation(source=0) + DirichletBC(u=0) @ "left" + DirichletBC(u=1) @ "right"
-        tp = TracerParticles(self.advection, seed=PointSeed(self.seeds),
+        tp = TracerParticles(self.advection, seed=TracerSeedPoints(self.seeds),
                              rtol=self._rtol, atol=self._atol,
                              payloads=self._payloads,
                              time_interpolation_order=self._tio,
@@ -423,7 +423,7 @@ class _HoledProblem(Problem):
 
 
 def test_grid_seed_rejects_points_outside_the_mesh():
-    p = _HoledProblem(GridSeed(0.2, bbox=([0.0, 0.0], [1.0, 3.0]), inset=0.0))
+    p = _HoledProblem(TracerSeedGrid(0.2, bbox=([0.0, 0.0], [1.0, 3.0]), inset=0.0))
     p.set_output_directory("_tracer_seed_holed")
     p.quiet()
     p.initialise()
@@ -445,9 +445,9 @@ class _Seed3dProblem(Problem):
                  + TracerParticles(vector(0, 0, 0), seed=self.seed)) @ "domain"
 
 
-@pytest.mark.parametrize("seed,name", [(GridSeed(0.3), "grid"),
-                                       (ElementSeed(), "element"),
-                                       (RandomSeed(50, rng_seed=3), "random")])
+@pytest.mark.parametrize("seed,name", [(TracerSeedGrid(0.3), "grid"),
+                                       (TracerSeedElement(), "element"),
+                                       (TracerSeedRandom(50, rng_seed=3), "random")])
 def test_seeding_works_in_3d(seed, name):
     """The old implementation raised outright for anything but 2d, both in the seeding and in the
     element-exit test."""
@@ -469,7 +469,7 @@ def test_tracers_work_in_3d():
             self.add_mesh(CuboidBrickMesh(size=[1, 1, 1], N=4))
             adv = vector(1, 0.5, 0.25)
             self += (PoissonEquation(source=0) + DirichletBC(u=0) @ "left"
-                     + TracerParticles(adv, seed=PointSeed([[0.1, 0.2, 0.3]]),
+                     + TracerParticles(adv, seed=TracerSeedPoints([[0.1, 0.2, 0.3]]),
                                        rtol=1e-11, atol=1e-13)) @ "domain"
     p = P()
     p.set_output_directory("_tracer_3d")
@@ -673,7 +673,7 @@ def _two_domain_counts(with_transfer):
             self.add_mesh(_StackedMesh())
             adv = vector(0, 1)
             lower = PoissonEquation(source=0) + DirichletBC(u=0) @ "bottom"
-            lower += TracerParticles(adv, seed=PointSeed(seeds), rtol=1e-11, atol=1e-13)
+            lower += TracerParticles(adv, seed=TracerSeedPoints(seeds), rtol=1e-11, atol=1e-13)
             upper = PoissonEquation(source=0) + DirichletBC(u=0) @ "top"
             upper += TracerParticles(adv, seed=None, rtol=1e-11, atol=1e-13)
             if with_transfer:
@@ -714,3 +714,151 @@ def test_without_a_transfer_interface_the_particles_are_dropped():
     _start, _elapsed, tr_lo, tr_up = _two_domain_counts(with_transfer=False)
     assert tr_lo.nlocal() == 0
     assert tr_up.nlocal() == 0
+
+
+# ----------------------------------------------------------------------------------------------
+# Spatial adaptation
+# ----------------------------------------------------------------------------------------------
+#
+# Refinement replaces a leaf element by its sons; unrefinement DELETES them. A particle holding an
+# element pointer across either is holding a pointer the mesh has invalidated, and the failure is
+# not one that shows up in the numbers: oomph keeps a refined element's parent alive, so a stale
+# pointer into one keeps producing plausible values, while a pointer into a deleted son is
+# undefined behaviour that need not crash. So these tests assert the MECHANISM (the collection
+# noticed and re-located) as well as the answer.
+
+class _AdaptiveTracerProblem(Problem):
+    """A blob that travels to the right, so the refinement pattern keeps moving under the particles
+    and elements are created and destroyed on essentially every step."""
+
+    def __init__(self, seeds, advection, on_interface=None, max_level=4):
+        super().__init__()
+        self.seeds = seeds
+        self.advection = advection
+        self.on_interface = on_interface
+        self.max_level = max_level
+
+    def define_problem(self):
+        self.add_mesh(RectangularQuadMesh(size=[4, 1], N=[16, 4]))
+        eqs = _MovingBlob() + DirichletBC(u=0) @ "left" + DirichletBC(u=0) @ "right"
+        eqs += SpatialErrorEstimator(u=1)
+        tp = TracerParticles(self.advection, seed=TracerSeedPoints(self.seeds),
+                             rtol=1e-11, atol=1e-13)
+        eqs += (tp @ self.on_interface) if self.on_interface else tp
+        self += eqs @ "domain"
+
+    def tracers(self):
+        return self.get_mesh("domain/" + self.on_interface if self.on_interface
+                             else "domain").get_tracers()
+
+
+class _MovingBlob(Equations):
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+
+    def define_residuals(self):
+        u, v = var_and_test("u")
+        x, y = var("coordinate_x"), var("coordinate_y")
+        xc = 0.3 + 0.8 * var("time")
+        source = 50 * exp(-200 * ((x - xc) ** 2 + (y - 0.5) ** 2))
+        self.add_residual(weak(grad(u), grad(v)) - weak(source, v))
+
+
+_ADAPT_FIELD = vector(4 * var("coordinate_y") * (1 - var("coordinate_y")), 0)
+
+
+def test_tracers_survive_refinement_and_unrefinement():
+    p = _AdaptiveTracerProblem([[0.3, 0.25], [0.3, 0.5], [0.3, 0.75]], _ADAPT_FIELD)
+    p.set_output_directory("_tracer_adapt")
+    p.quiet()
+    p.max_refinement_level = 4
+    p.initialise()
+    m = p.get_mesh("domain")
+    tr = p.tracers()
+    start = tr.get_positions().copy()
+    t0 = float(p.get_current_time(as_float=True, dimensional=False))
+
+    refined, unrefined, relocations = False, False, 0
+    counts = [m.nelement()]
+    for _ in range(12):
+        p.solve(timestep=0.05, spatial_adapt=1)
+        counts.append(m.nelement())
+        if counts[-1] > counts[-2]:
+            refined = True
+        if counts[-1] < counts[-2]:
+            unrefined = True
+        # Every particle must have been re-located on a step where the mesh changed, and none on a
+        # step where it did not: this is the assertion that fails if the adaptation is not announced.
+        if counts[-1] != counts[-2]:
+            assert tr.get_relocations_last_step() == tr.nlocal(), \
+                "the mesh adapted but %d of %d particles kept their old element" % (
+                    tr.nlocal() - tr.get_relocations_last_step(), tr.nlocal())
+            relocations += 1
+    elapsed = float(p.get_current_time(as_float=True, dimensional=False)) - t0
+
+    assert refined and unrefined, "elements were only %s (counts %s)" % (
+        "created" if refined else "destroyed", counts)
+    assert relocations >= 5, "only %d adapting steps, too few to mean much" % relocations
+    assert tr.nlocal() == len(start), "particles were lost across the adaptation"
+    end = tr.get_positions()
+    expected_x = start[:, 0] + 4 * start[:, 1] * (1 - start[:, 1]) * elapsed
+    assert numpy.max(numpy.abs(end[:, 0] - expected_x)) < 1e-11
+    assert numpy.max(numpy.abs(end[:, 1] - start[:, 1])) < 1e-13
+
+
+def test_interface_tracers_survive_adaptation():
+    """The interface mesh is torn down and rebuilt on every adaptation, so its elements are new
+    objects rather than merely re-parented ones."""
+    p = _AdaptiveTracerProblem([[0.4, 1.0], [1.1, 1.0]], vector(1, 0), on_interface="top")
+    p.set_output_directory("_tracer_adapt_interface")
+    p.quiet()
+    p.max_refinement_level = 4
+    p.initialise()
+    tr = p.tracers()
+    start = tr.get_positions().copy()
+    t0 = float(p.get_current_time(as_float=True, dimensional=False))
+    for _ in range(10):
+        p.solve(timestep=0.05, spatial_adapt=1)
+    elapsed = float(p.get_current_time(as_float=True, dimensional=False)) - t0
+    assert tr.nlocal() == len(start)
+    end = tr.get_positions()
+    assert numpy.max(numpy.abs(end[:, 0] - (start[:, 0] + elapsed))) < 1e-10
+    assert numpy.max(numpy.abs(end[:, 1] - start[:, 1])) < 1e-12
+
+
+def test_tracers_survive_adaptation_of_a_curved_boundary():
+    """Refining a curved boundary MOVES it: the new nodes are snapped onto the true arc, so the
+    domain a particle sits in is not the domain it was located in. A particle near the boundary can
+    genuinely end up outside, which is the one case where relocation has to do more than bookkeeping.
+    """
+    from pyoomph.meshes.simplemeshes import CircularMesh
+
+    class P(Problem):
+        def define_problem(self):
+            self.add_mesh(CircularMesh(radius=1, segments=["NE", "NW", "SW", "SE"]))
+            eqs = PoissonEquation(source=1) + DirichletBC(u=0) @ "circumference"
+            eqs += SpatialErrorEstimator(u=1)
+            # Seeded close to the arc, where refinement moves the boundary the most.
+            seeds = [[0.94 * math.cos(a), 0.94 * math.sin(a)] for a in
+                     numpy.linspace(0, 2 * math.pi, 12, endpoint=False)]
+            # Slow rotation, so they stay in the annulus the refinement keeps changing.
+            eqs += TracerParticles(vector(-var("coordinate_y"), var("coordinate_x")),
+                                   seed=TracerSeedPoints(seeds), rtol=1e-11, atol=1e-13)
+            self += eqs @ "domain"
+
+    p = P()
+    p.set_output_directory("_tracer_adapt_curved")
+    p.quiet()
+    p.max_refinement_level = 4
+    p.initialise()
+    tr = p.get_mesh("domain").get_tracers()
+    n0 = tr.nlocal()
+    assert n0 == 12
+    r0 = numpy.hypot(*tr.get_positions().T)
+    for _ in range(8):
+        p.solve(timestep=0.05, spatial_adapt=1)
+    assert tr.nlocal() == n0, "%d of %d particles were lost at the curved boundary" % (
+        n0 - tr.nlocal(), n0)
+    # Rigid rotation preserves the radius exactly; the boundary moving underneath must not drag them.
+    r1 = numpy.hypot(*tr.get_positions().T)
+    assert numpy.max(numpy.abs(numpy.sort(r1) - numpy.sort(r0))) < 1e-9

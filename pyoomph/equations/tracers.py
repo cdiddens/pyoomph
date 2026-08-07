@@ -100,7 +100,7 @@ class TracerSeed:
         return mins, maxs
 
 
-class PointSeed(TracerSeed):
+class TracerSeedPoints(TracerSeed):
     """Explicit positions, as an (N, dim) array or a list of points."""
 
     def __init__(self, positions: Any, tag: int = 0):
@@ -110,12 +110,12 @@ class PointSeed(TracerSeed):
     def generate(self, mesh: "AnySpatialMesh", dim: int) -> numpy.ndarray:
         arr = numpy.atleast_2d(numpy.asarray(self.positions, dtype=float))
         if arr.shape[1] != dim:
-            raise ValueError("PointSeed got " + str(arr.shape[1]) + "-dimensional positions for a " +
+            raise ValueError("TracerSeedPoints got " + str(arr.shape[1]) + "-dimensional positions for a " +
                              str(dim) + "-dimensional mesh")
         return arr
 
 
-class GridSeed(TracerSeed):
+class TracerSeedGrid(TracerSeed):
     """An axis-aligned lattice with the given spacing over the mesh's bounding box.
 
     Works in 1, 2 and 3 dimensions. Candidates outside the mesh - in a hole, or outside a non-convex
@@ -138,7 +138,7 @@ class GridSeed(TracerSeed):
     def generate(self, mesh: "AnySpatialMesh", dim: int) -> numpy.ndarray:
         d = float(self.spacing / mesh.get_problem().get_scaling("spatial"))
         if d <= 0:
-            raise ValueError("GridSeed needs a positive spacing")
+            raise ValueError("TracerSeedGrid needs a positive spacing")
         if self.bbox is not None:
             mins, maxs = list(self.bbox[0]), list(self.bbox[1])
         else:
@@ -155,7 +155,7 @@ class GridSeed(TracerSeed):
         return numpy.stack([g.ravel() for g in grids], axis=-1)
 
 
-class RandomSeed(TracerSeed):
+class TracerSeedRandom(TracerSeed):
     """``n`` candidates drawn uniformly from the mesh's bounding box.
 
     Deterministic given ``rng_seed``, and - importantly under MPI - independent of how the mesh is
@@ -177,7 +177,7 @@ class RandomSeed(TracerSeed):
         return out
 
 
-class ElementSeed(TracerSeed):
+class TracerSeedElement(TracerSeed):
     """One candidate at the centroid of each element (or ``per_element`` random points in it).
 
     Containment is free here, and the density follows the mesh rather than a bounding box, which is
@@ -216,7 +216,7 @@ class ElementSeed(TracerSeed):
         return numpy.array(pts)
 
 
-class CallableSeed(TracerSeed):
+class TracerSeedCallable(TracerSeed):
     """Positions from a user function ``fn(mesh) -> (N, dim) array``.
 
     Args:
@@ -253,8 +253,8 @@ class TracerParticles(Equations):
 
     .. code-block:: python
 
-        eqs  = NavierStokesEquations(...) + TracerParticles(seed=GridSeed(0.05))
-        eqs += TracerParticles(seed=ElementSeed(), tracer_name="surf") @ "top"
+        eqs  = NavierStokesEquations(...) + TracerParticles(seed=TracerSeedGrid(0.05))
+        eqs += TracerParticles(seed=TracerSeedElement(), tracer_name="surf") @ "top"
 
     Args:
         advection: the velocity field the particles follow. Defaults to ``var("velocity")``.

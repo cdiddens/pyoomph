@@ -173,6 +173,38 @@ here because a tracer test is what exposed them:
   interpolation on every problem - caught only because the order test then showed bit-identical
   results for both orders.
 
+## 5a. Spatial adaptation, and a bug it uncovered
+
+Refinement replaces a leaf element by its sons; unrefinement **deletes** them. Anything holding an
+element pointer across either is holding a pointer the mesh has invalidated, so tracers have to be
+told. They are: `Problem.actions_after_adapt` bumps every mesh's topology generation, and the
+collection re-locates every particle from its stored physical position before the next advection.
+
+That bump had to be added to the **Python** `actions_after_adapt`, and this is worth knowing beyond
+the tracers: `pyoomph::Problem::actions_after_adapt` in `src/problem.cpp` is **dead code for every
+Python-defined problem**, which is every problem. The Python override replaces it wholesale and does
+not call `super()`, so the C++ body - generation bump, `ensure_dummy_values_to_be_dummy()`,
+`setup_pinning()` - never runs. (`setup_pinning()` happens to be repeated in the Python version;
+`ensure_dummy_values_to_be_dummy()` is not, and has therefore never run after an adapt. That is
+pre-existing and untouched here, but somebody should look at it.)
+
+The failure this caused is a good example of why the test asserts a mechanism rather than a number.
+Without the bump the tracers kept dereferencing invalidated elements for twelve adaptations and
+still produced the analytic answer to 2e-16, because:
+
+* oomph keeps a **refined** element's parent object alive, with its nodes and their current values,
+  so evaluating in a stale parent gives a coarser interpolation of the same solution - plausible,
+  and for a field that depends only on geometry, identical;
+* a pointer into an **unrefined** element's deleted son is undefined behaviour that need not crash,
+  and did not.
+
+So `test_tracers_survive_refinement_and_unrefinement` asserts that on every step where the element
+count changed, *every* particle was re-located - `get_relocations_last_step() == nlocal()`. That
+assertion fails without the fix; the value assertions beside it do not. The other two adaptation
+tests (an interface mesh, which is torn down and rebuilt entirely, and a curved boundary, where
+refinement genuinely moves the domain by snapping new nodes onto the arc) are behavioural guards
+against particle loss and pass either way.
+
 ## 6. Where the accuracy stops
 
 Worth stating, because the tolerance knob does not reach it.

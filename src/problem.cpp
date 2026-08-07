@@ -1091,8 +1091,13 @@ namespace pyoomph
 	  return res;
 	}
 
-	// After mesh adaptation: invalidates any cached Lagrangian KD-trees (node positions may have changed),
-	// re-establishes the dummy-value pinning invariant, and re-runs problem-specific pinning setup.
+	// After mesh adaptation: announces that cached element pointers are stale (refinement replaces a
+	// leaf by its sons, unrefinement deletes them), re-establishes the dummy-value pinning invariant,
+	// and re-runs problem-specific pinning setup.
+	//
+	// Note that pyoomph's Python Problem overrides this WITHOUT calling back into it, so for anything
+	// driven from Python - which is everything - this body does not run. The generation bump is
+	// therefore repeated at the top of that override; if you add something here, add it there too.
 	void Problem::actions_after_adapt()
 	{
 		for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)

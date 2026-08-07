@@ -1969,6 +1969,8 @@ void PyReg_Mesh(nb::module_ &m)
 			 "0 for tracers in a bulk domain, 1 for tracers confined to an interface")
 		.def("get_coordinate_dimension", &pyoomph::TracerCollection::get_coordinate_dimension,
 			 "Number of spatial components of a particle position, i.e. the nodal dimension of the mesh. On an interface this is one more than the element dimension")
+		.def("get_relocations_last_step", &pyoomph::TracerCollection::get_relocations_last_step,
+			 "How many particles had to be located from scratch during the last advection, i.e. were holding an element pointer the mesh had invalidated by adapting or remeshing. Zero on a step where the mesh did not change")
 		.def("step_statistics", &pyoomph::TracerCollection::step_statistics,
 			 "One-line summary of the last advection: particle count, sub-steps taken and rejected, element changes, particles lost")
 		.def_rw("rtol", &pyoomph::TracerCollection::rtol,
