@@ -279,6 +279,19 @@ class TracerParticles(Equations):
             ``{"residence": 1}`` accumulates the time a particle has spent in the domain in units of
             the temporal scale. Multiply a dimensional rate by the appropriate scale yourself.
         statistics: print a one-line summary of each advection.
+        fixed_substeps: if positive, take this many uniform sub-steps per timestep instead of
+            letting the error controller choose. Only useful for order-of-convergence tests.
+        max_substeps: hard upper bound on the sub-steps one particle may take within one timestep.
+            Exceeding it raises - it is a backstop against a runaway, not a budget to be spent.
+        max_migration_rounds: hard upper bound on the rounds of MPI migration and periodic
+            re-injection per timestep. Exceeding it raises, since a particle still unfinished by
+            then is bouncing between processes.
+        max_periodic_wraps: how many times one particle may be re-injected at a periodic image
+            within a single timestep.
+
+    Every one of these is also a plain attribute of the underlying collection, so it can be changed
+    at any time through :py:meth:`get_collection` - the constructor arguments only set the value the
+    collection is (re-)bound with.
     """
 
     def __init__(self, advection: Expression = var("velocity"), *,
@@ -289,7 +302,11 @@ class TracerParticles(Equations):
                  history_time: ExpressionOrNum | None = None,
                  history_capacity: int = 64,
                  payloads: dict[str, ExpressionOrNum] | None = None,
-                 statistics: bool = False):
+                 statistics: bool = False,
+                 fixed_substeps: int = 0,
+                 max_substeps: int = 1000000,
+                 max_migration_rounds: int = 64,
+                 max_periodic_wraps: int = 8):
         super(TracerParticles, self).__init__()
         if "@" in tracer_name or "/" in tracer_name:
             # Both are used to derive the names of the per-history-level and per-payload entries in
@@ -305,6 +322,10 @@ class TracerParticles(Equations):
         self.history_capacity = history_capacity
         self.payloads = dict(payloads) if payloads else {}
         self.statistics = statistics
+        self.fixed_substeps = fixed_substeps
+        self.max_substeps = max_substeps
+        self.max_migration_rounds = max_migration_rounds
+        self.max_periodic_wraps = max_periodic_wraps
         self._mesh: "AnySpatialMesh | None" = None
         self._last_advected_time: float | None = None
 
@@ -343,6 +364,10 @@ class TracerParticles(Equations):
         coll.history_capacity = self.history_capacity
         coll.time_interpolation_order = (-1 if self.time_interpolation_order == "auto"
                                          else int(self.time_interpolation_order))
+        coll.fixed_substeps = self.fixed_substeps
+        coll.max_substeps = self.max_substeps
+        coll.max_migration_rounds = self.max_migration_rounds
+        coll.max_periodic_wraps = self.max_periodic_wraps
         if self.history_time is not None:
             coll.history_window = float(self.history_time / mesh.get_problem().get_scaling("temporal"))
         return coll

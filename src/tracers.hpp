@@ -218,7 +218,7 @@ namespace pyoomph
     unsigned long stat_substeps = 0, stat_rejected = 0, stat_walks = 0;
     unsigned stat_global_locates = 0;
     unsigned stat_lost = 0, stat_migrated = 0, stat_transferred = 0;
-    unsigned stat_wrapped = 0, stat_reinjected = 0;
+    unsigned stat_wrapped = 0, stat_reinjected = 0, stat_pinned = 0;
 
     // A locator whose GEOMETRY is valid for the mesh's current configuration at `time_level`.
     MeshPointLocator *get_locator(unsigned time_level);
@@ -273,6 +273,11 @@ namespace pyoomph
     // the owner of the HALO element it ended in, and the far end of a periodic domain is not a halo
     // of the near end - it is usually not in the sending process's mesh at all.
     unsigned exchange_reinjections();
+
+    // Pin a codimension-1 particle to the end of its interface for the rest of the step, having
+    // run out of local coordinate there. Returns false for a bulk collection, which has no such
+    // thing as an end to be pinned to.
+    bool pin_to_interface_end(TracerParticle *p, TracerTimeConfig &cfg);
 
     // Take over a particle that has just left another domain through a shared interface, place it
     // here and finish its timestep. Returns false (having NOT taken ownership) if the position does
@@ -380,6 +385,9 @@ namespace pyoomph
     // that the collective round did the work - the positions cannot show it.
     unsigned get_wraps_last_step() const { return stat_wrapped; }
     unsigned get_reinjections_last_step() const { return stat_reinjected; }
+    // How many particles the last advection pinned to the end of their interface because they had
+    // run out of local coordinate there and no neighbouring domain took them.
+    unsigned get_pins_last_step() const { return stat_pinned; }
 
     // `with_history` also serialises the rolling position history the trail plots read; it costs
     // the samples themselves in the file and makes `tagarr` three entries per particle instead of

@@ -445,6 +445,83 @@ def test_interface_normal_offset_stays_at_machine_zero_on_a_deforming_interface(
     assert worst < 1e-12, "normal offset from the interface grew to %g" % worst
 
 
+@pytest.mark.parametrize("at_end,speed", [(False, 1e-2), (True, 1.0), (True, 1e-6)],
+                         ids=["mid_curve", "at_the_end_fast", "at_the_end_slow"])
+def test_an_interface_tracer_at_the_end_of_the_curve_is_pinned_there(at_end, speed):
+    """A confined particle cannot leave its interface, only reach the end of it - so it has to be
+    pinned there, not dropped and not spun on forever.
+
+    The geometry is the apex of an evaporating droplet in miniature: a curved interface whose
+    highest point is also the end of the curve, descending, with a particle sitting exactly on that
+    end and a tangential advection pushing it off. The two speeds are the two ways the sub-step
+    controller finds out that the particle is stuck, and they need different halves of the fix:
+
+      * fast - the overshoot past the end does not shrink with the sub-step, so h collapses through
+        1e-12 in about forty halvings and the "the particle is leaving" branch is reached as it
+        always was. Only the pinning is new here.
+      * slow - the overshoot IS proportional to the sub-step, so the halved step is accepted, the
+        controller grows h straight back because the error estimate is tiny, and tau crawls forward
+        at rounding scale. Without the progress watchdog this runs a million sub-steps and then
+        raises; it was found at the apex of a real evaporating droplet.
+
+    Either way the particle stays. Dropping it - which is what a bulk particle leaving its domain
+    gets - would delete a particle that never left anything. The `mid_curve` case passes whatever
+    happens at the ends and is here to show that an ordinary interface particle is untouched.
+    """
+    def descending_dome(x, y, t):
+        # A curved top whose apex sits on x = 0, which is also the end of the interface.
+        return (x, y - (0.5 * (y + 1.0)) * (0.3 * t) * math.cos(0.35 * x))
+
+    seeds = [[0.0 if at_end else 1.2, 1.0]]
+    p = _TracerProblem(vector(-speed, 0), seeds, motion=descending_dome, on_interface="top",
+                       N=(16, 4))
+    tag = "surf_end_%s_%g" % ("on" if at_end else "off", speed)
+    tr, _start, end, _T = _run(p, tag, endtime=0.2, dt=0.05)
+
+    assert len(end) == 1, "the particle was dropped instead of being kept on the interface"
+    if at_end:
+        assert tr.get_pins_last_step() >= 1, \
+            "nothing was pinned, so this no longer exercises the end of the curve"
+        # Pinned means pinned AT the end, not slid back along the interface.
+        assert abs(end[0][0]) < 1e-9, "the pinned particle left the end (x = %g)" % end[0][0]
+    else:
+        assert tr.get_pins_last_step() == 0, "an ordinary interface particle must not be pinned"
+
+    # And it is still ON the interface either way, which is the invariant the whole formulation
+    # exists for. Measured through the point locator's projection offset, independently of the
+    # tracer code, exactly as the deforming-interface test above does.
+    located = numpy.array(p.get_mesh("domain/top").locate_points(end, lagrangian=False), dtype=float)
+    assert located[0][0] > 0.5, "the particle is not on the interface mesh at all"
+    assert abs(located[0][1]) < 1e-9, "normal offset from the interface is %g" % located[0][1]
+
+
+def test_every_sub_step_setting_is_reachable_from_python():
+    """A runaway that can only be diagnosed by editing C++ is not diagnosable, so every tunable of
+    the collection is settable from the equation and stays writable on the collection afterwards."""
+    class P(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(size=[4, 2], lower_left=[0, -1], N=[8, 4]))
+            eqs = PoissonEquation(source=0) + DirichletBC(u=0) @ "left"
+            eqs += TracerParticles(POISEUILLE, seed=TracerSeedPoints(SEEDS),
+                                   rtol=1e-7, atol=1e-9, history_capacity=17,
+                                   time_interpolation_order=1, fixed_substeps=3,
+                                   max_substeps=4321, max_migration_rounds=5,
+                                   max_periodic_wraps=2)
+            self += eqs @ "domain"
+
+    p = P()
+    p.set_output_directory("_tracer_settings")
+    p.quiet()
+    p.initialise()
+    tr = p.get_mesh("domain").get_tracers()
+    assert (tr.rtol, tr.atol, tr.history_capacity) == (1e-7, 1e-9, 17)
+    assert tr.time_interpolation_order == 1
+    assert (tr.fixed_substeps, tr.max_substeps) == (3, 4321)
+    assert (tr.max_migration_rounds, tr.max_periodic_wraps) == (5, 2)
+    tr.max_substeps = 10
+    assert tr.max_substeps == 10
+
+
 # ----------------------------------------------------------------------------------------------
 # G - seeding
 # ----------------------------------------------------------------------------------------------

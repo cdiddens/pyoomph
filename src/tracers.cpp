@@ -84,6 +84,14 @@ namespace pyoomph
     // Not a 5(4) method on purpose: the advection field is only C0 across element faces, so a
     // higher-order method cannot realise its order on any sub-step that straddles one, while
     // costing six stages times up to three history levels of generated-code calls each.
+    // Progress watchdog of advect_one: every PROGRESS_CHECK_INTERVAL sub-steps the particle has to
+    // have covered at least PROGRESS_PER_CHECK of the timestep. The two are two orders of magnitude
+    // apart from both the pathology they catch (about 2e-7 per hundred sub-steps, measured) and the
+    // hardest legitimate trajectory the sub-step budget allows (1e-4 per hundred), so neither the
+    // element size nor the velocity enters the choice.
+    const unsigned long PROGRESS_CHECK_INTERVAL = 100;
+    const double PROGRESS_PER_CHECK = 1e-6;
+
     const double BS_A21 = 0.5;
     const double BS_A32 = 0.75;
     const double BS_B1 = 2.0 / 9.0, BS_B2 = 1.0 / 3.0, BS_B3 = 4.0 / 9.0;
@@ -1392,6 +1400,36 @@ namespace pyoomph
     return 0;
   }
 
+  // A confined particle cannot leave its interface, it can only reach the end of it - so when it
+  // has run out of local coordinate there and no neighbouring domain wants it, it is pinned to that
+  // end rather than dropped. The closest point of a curve to a target beyond its end IS that end,
+  // so the clamp is the projection the interface formulation asks for, not a fudge. Dropping it
+  // instead - which is what a bulk particle leaving its domain gets - would delete a particle that
+  // never left anything, and at a symmetry axis, where what pushes it off the end is rounding
+  // noise, that is simply wrong.
+  //
+  // The position is taken at tau = 1, not at the tau where the particle got stuck: a pinned
+  // particle IS the end of the interface for the rest of the step and has to co-move with it.
+  // Freezing it where it stalled would make it lag a receding interface by part of a step's motion
+  // every step, and it would walk off the surface over time.
+  bool TracerCollection::pin_to_interface_end(TracerParticle *p, TracerTimeConfig &cfg)
+  {
+    if (!p->elem || get_codimension() != 1)
+      return false;
+    clamp_to_reference_domain(p->refdomain, p->elem, elem_dim, p->s.data());
+    cfg.set_tau(1.0);
+    oomph::Vector<double> sv(p->s.size());
+    for (unsigned a = 0; a < p->s.size(); a++)
+      sv[a] = p->s[a];
+    oomph::Vector<double> xs;
+    p->elem->tracer_geometry_at_s(sv, cfg.nlevel, cfg.w, cfg.dwdtau, &xs, nullptr, nullptr);
+    for (unsigned i = 0; i < nodal_dim; i++)
+      p->x[i] = xs[i];
+    p->timefrac = 1.0;
+    p->completed_step_time = cfg.t_current;
+    return true;
+  }
+
   bool TracerCollection::adopt(TracerParticle *p, unsigned depth)
   {
     // Bounded because a particle sitting exactly on a shared interface could otherwise be passed
@@ -1444,6 +1482,9 @@ namespace pyoomph
 
     bool have_k1 = false;
     unsigned long guard = 0;
+    // Progress watchdog, see the stall test below.
+    unsigned long next_progress_check = PROGRESS_CHECK_INTERVAL;
+    double tau_at_last_check = tau;
     transferred_away = false;
 
     while (tau < 1.0 - 1e-15)
@@ -1451,7 +1492,29 @@ namespace pyoomph
       if (++guard > max_substeps)
         throw_runtime_error("Tracer '" + tracer_name + "' did not finish its timestep within " +
                             std::to_string(max_substeps) + " sub-steps");
-      if (h < 1e-12)
+
+      // A particle pressed against the end of its element with nowhere left to walk to makes the
+      // controller oscillate rather than collapse: every sub-step large enough to move it is
+      // rejected for want of a place to put it, the halved one is accepted, and the controller
+      // grows h straight back because the error estimate is tiny. tau then creeps forward at
+      // rounding scale - a million sub-steps covering 2e-3 of one timestep was measured at the
+      // apex of an evaporating droplet, where the drift pushing the particle off the end of the
+      // free surface is itself rounding noise - and the sub-step guard above was the only thing
+      // that ended it, as a hard error after a minute of work.
+      //
+      // h alone cannot detect that: it never gets small, it oscillates. So measure the pathology
+      // itself - ground covered per sub-step - which needs no assumption about element sizes or
+      // velocities. A particle that legitimately needs the full max_substeps budget still covers
+      // a hundred times more than this per check.
+      bool stalled = false;
+      if (guard >= next_progress_check)
+      {
+        stalled = (tau - tau_at_last_check < PROGRESS_PER_CHECK);
+        tau_at_last_check = tau;
+        next_progress_check = guard + PROGRESS_CHECK_INTERVAL;
+      }
+
+      if (h < 1e-12 || stalled)
       {
         // The sub-step collapsed, so the particle really is leaving this mesh rather than merely
         // having overshot. Store where it got to before offering it to a neighbouring domain.
@@ -1463,6 +1526,11 @@ namespace pyoomph
         {
           transferred_away = true;
           return true; // the receiving collection owns it now
+        }
+        if (interface && pin_to_interface_end(p, cfg))
+        {
+          stat_pinned++;
+          return true;
         }
         return false;
       }
@@ -1583,7 +1651,7 @@ namespace pyoomph
     stat_lost = 0;
     stat_migrated = 0;
     stat_transferred = 0;
-    stat_wrapped = stat_reinjected = 0;
+    stat_wrapped = stat_reinjected = stat_pinned = 0;
     // The solve that produced this step moved the nodes, so any locator built during the previous
     // one describes a configuration that no longer exists.
     mark_geometry_stale();
@@ -1781,6 +1849,8 @@ namespace pyoomph
       oss << ", " << stat_wrapped << " wrapped periodically";
     if (stat_reinjected)
       oss << ", " << stat_reinjected << " reinjected from another process";
+    if (stat_pinned)
+      oss << ", " << stat_pinned << " pinned at an interface end";
     if (stat_lost)
       oss << ", " << stat_lost << " LOST";
     return oss.str();

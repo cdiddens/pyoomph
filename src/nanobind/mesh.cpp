@@ -1938,6 +1938,8 @@ void PyReg_Mesh(nb::module_ &m)
 			 "Registers that particles crossing the given mesh boundary are handed over to another collection instead of being dropped")
 		.def("get_wraps_last_step", &pyoomph::TracerCollection::get_wraps_last_step,
 			 "How many particles the last advection re-injected at a periodic image lying in this process's own part of the mesh")
+		.def("get_pins_last_step", &pyoomph::TracerCollection::get_pins_last_step,
+			 "How many particles the last advection pinned to the end of their interface, having run out of local coordinate there with no neighbouring domain to hand them to")
 		.def("get_reinjections_last_step", &pyoomph::TracerCollection::get_reinjections_last_step,
 			 "How many particles the last advection took over from another process's periodic wrap, because the image was not in that process's mesh. Disjoint from get_wraps_last_step(), and zero in a serial run")
 		.def("_add_periodic_wrap", &pyoomph::TracerCollection::add_periodic_wrap, nb::arg("shift"),
@@ -1997,6 +1999,12 @@ void PyReg_Mesh(nb::module_ &m)
 				"Order of the in-step Lagrange interpolation of the nodal positions: 1 uses two history levels, 2 uses three, -1 takes the best the stored history allows")
 		.def_rw("fixed_substeps", &pyoomph::TracerCollection::fixed_substeps,
 				"If positive, uses this many uniform sub-steps per timestep instead of the error controller. Only useful for order-of-convergence tests")
+		.def_rw("max_substeps", &pyoomph::TracerCollection::max_substeps,
+				"Hard upper bound on the sub-steps one particle may take within one timestep. Exceeding it throws: it is a backstop against a runaway, not a budget to be spent")
+		.def_rw("max_migration_rounds", &pyoomph::TracerCollection::max_migration_rounds,
+				"Hard upper bound on the rounds of MPI migration and periodic re-injection per timestep. Exceeding it throws, since a particle still unfinished by then is bouncing between processes")
+		.def_rw("max_periodic_wraps", &pyoomph::TracerCollection::max_periodic_wraps,
+				"How many times one particle may be re-injected at a periodic image within a single timestep")
 		.def("get_positions", [tracer_matrix](pyoomph::TracerCollection *coll)
 			 { return tracer_matrix(coll->get_positions(), coll->get_coordinate_dimension()); },
 			 "Current physical positions, one row per particle")

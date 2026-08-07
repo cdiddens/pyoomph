@@ -3,7 +3,7 @@
 Status: **done and in use.** `TracerParticles` (`pyoomph/equations/tracers.py`) advects passive
 particles through a bulk domain or confined to an interface, on static and moving meshes, in 1/2/3
 dimensions, with path-integrated payloads, a rolling position history for trails, handover between
-domains, periodic re-injection, and `--distribute`. Covered by `tests/test_tracers.py` (47 cases) and
+domains, periodic re-injection, and `--distribute`. Covered by `tests/test_tracers.py` (51 cases) and
 `tests/test_mpi_tracers.py` (13 cases, `--full`).
 
 This replaces the original implementation wholesale. That one was dead code - no test, no example,
@@ -313,6 +313,46 @@ of its timestep from there. Three things about the shape of it:
 The trail is dropped on a wrap. A trail is a path through the plotted coordinates and a wrapped path
 is not continuous there, so keeping the samples from before the jump would draw one line straight
 back across the whole domain on the next output.
+
+## 5e. The end of an interface curve
+
+A bulk particle that leaves its domain is gone. A **confined** particle cannot leave its interface at
+all - it can only reach the end of it - so it is pinned there instead, and only after the registered
+transfer interfaces have declined it. The clamp is the projection the interface formulation already
+asks for: the closest point of a curve to a target beyond its end IS that end. Dropping it would
+delete a particle that never left anything, and at a symmetry axis, where what pushes it off the end
+is rounding noise, that is simply wrong. The pinned position is taken at `tau = 1`, not where the
+particle stalled: a pinned particle *is* the end of the interface for the rest of the step and has to
+co-move with it, and freezing it mid-step would make it lag a receding interface a little more every
+step until it walked off the surface.
+
+Getting *to* that branch was the harder half. It was reached only when `h` collapsed below `1e-12`,
+and at the apex of an evaporating droplet `h` never collapses - it oscillates:
+
+* every sub-step large enough to move the particle is rejected, because past the end of the curve
+  there is no element to walk into;
+* the halved one is accepted;
+* the controller grows `h` straight back, because the embedded error estimate of an almost-stationary
+  particle is tiny.
+
+`tau` then crawls forward at rounding scale - a million sub-steps covering `2e-3` of one timestep,
+measured - and `max_substeps` was the only thing that ended it, as a hard error after a minute of
+work. `h` cannot detect this, since it never gets small. So `advect_one` measures the pathology
+itself: every 100 sub-steps the particle must have covered at least `1e-6` of the timestep. That is
+two orders of magnitude away from both the livelock (`2e-7` per hundred) and the hardest legitimate
+trajectory the sub-step budget allows (`1e-4` per hundred), so neither the element size nor the
+velocity enters the choice.
+
+The two halves are independent, and `test_an_interface_tracer_at_the_end_of_the_curve_is_pinned_there`
+is parametrised to need both: with a *fast* tangential push the overshoot does not shrink with the
+sub-step, `h` collapses as it always did, and only the pinning is new; with a *slow* one the overshoot
+is proportional to the sub-step and only the watchdog ends it. Building with either half alone fails
+one of the two cases.
+
+What it looks like in practice, on the evaporating droplet of the plotting tutorial: the particle
+seeded on the zenith stays on the axis and rides the surface down, and surface parcels swept to the
+pinned contact line accumulate there rather than disappearing one by one - which is the transport
+behind the coffee ring, and is now visible instead of being silently deleted.
 
 ## 6. Where the accuracy stops
 
