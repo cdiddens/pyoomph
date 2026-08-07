@@ -108,13 +108,20 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
     previously raised "dot is only allowed between vectors". `dot` and `contract` agree in every
     shape they share; two matrices still raise, since `matproduct` and `double_dot` are both
     plausible readings. The index order of every operator is now stated in its docstring.
-- Documented, and covered by tests, a limitation of
-  `CartesianCoordinateSystemWithAdditionalNormalMode`: its `tensor_divergence` and
-  `directional_tensor_derivative` are not implemented, so `div` of a rank-2 tensor and the material
-  derivative of a tensor field raise there. Concretely, neither `NavierStokesEquations(GCL=True)` nor
-  the viscoelastic module can be combined with
-  `setup_for_stability_analysis(additional_cartesian_mode=True)`. The azimuthal counterpart,
-  `AxisymmetryBreakingCoordinateSystem`, does implement both.
+- **The normal-mode coordinate systems can now take the divergence and the directional derivative of a
+  rank-2 tensor.** `CartesianCoordinateSystemWithAdditionalNormalMode.tensor_divergence` and
+  `.directional_tensor_derivative` used to raise, and so did
+  `AxisymmetryBreakingCoordinateSystem.directional_tensor_derivative`. All three are implemented, for
+  `ndim == edim`; the surface and point cases still raise, now with a message that says so. The
+  practical consequence is that `NavierStokesEquations(GCL=True)` and the viscoelastic module can be
+  combined with `setup_for_stability_analysis(additional_cartesian_mode=True)` and
+  `azimuthal_stability=True`, which was previously refused outright. Expanding by `exp(I*k*z)` rather
+  than `exp(I*m*phi)` needs no connection terms at all -- a Cartesian frame does not rotate and there
+  is no `1/r` -- so the whole content is three first-order derivative operators, which are the same
+  ones the class's existing `scalar_gradient`, `vector_gradient` and `vector_divergence` already spell
+  out. `docs/source/tutorial/advstab/cartesiannormal/rivulet.py` runs with `GCL=True` and reproduces
+  its eigenvalue curve; `rising_bubble.py` does too, with the two formulations converging together
+  under refinement as their `int rho*u_i*div(u)*v_i` difference requires.
 - **`expr += number` and `expr -= number` no longer produce complex constants.** `__iadd__` and
   `__isub__` were bound only against `std::complex<double>`, and nanobind converts an int or a float to
   that without complaint, so the in-place forms quietly yielded e.g. the complex numeric `-1.0+0.0i`.
@@ -144,6 +151,15 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   `define_tensor_field` puts the azimuthal component on the diagonal only and `vector_gradient` is
   swirl-free -- plain axisymmetry has no azimuthal velocity component -- which is why it survived. The
   azimuthal-symmetry-breaking system, which does carry swirl, already had it right.
+- Fixed the azimuthal frame rotation of `AxisymmetricCoordinateSystem.directional_tensor_derivative`,
+  which was wrong in all three of its branches -- each in a different single slot, because each spelled
+  the rotation out separately. `C_rz` read `+T_phiz` instead of `-T_phiz` in the `(r,z,phi)` layout;
+  the `use_x_as_symmetry_axis` layout read the transposed `T_rz` for `C_zphi`; and the radial-mesh
+  branch had no azimuthal term on the diagonals at all, and dropped the radial derivative on the
+  off-diagonals. All four call sites now share one derivation. As with the `tensor_divergence` fix
+  above, every wrong entry multiplies an azimuthal off-diagonal, which plain axisymmetry cannot build,
+  so nothing reachable was affected and the tests use hand-assembled basis dyads. A cheap check that
+  catches all three: the rotation must satisfy `C(T^transpose) == C(T)^transpose`.
 - Fixed `BaseDifferentialGeometryCoordinateSystem.vector_gradient`, which returned the transpose of
   what every other coordinate system returns (`d(u_j)/d(x_i)` instead of `d(u_i)/d(x_j)`).
 - Corrected the `upper_convected_derivative` docstring, which stated the stretching terms with the two

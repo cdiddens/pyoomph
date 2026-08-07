@@ -4,10 +4,12 @@ Written 2026-08-07 on branch `develop`, after the run of commits that moved `con
 divergence of a rank-2 tensor onto the standard adjacent-index convention (`8c6fbfb`, `89e6108`,
 `aa8ec89`, `a493590`, `926fe0c`).
 
-That work is finished and tested. This document is for what it *did not* close: five gaps in
-`pyoomph/expressions/coordsys.py` that are either unimplemented, unreachable-and-therefore-unverified,
-or verified only in part. None of them blocks anything the tutorials or the test suite do, which is
-exactly why they need writing down — each survived for years behind a structural zero.
+**Updated 2026-08-07, later the same day**: §2 and §5 are closed, and §3 is closed by a new kind of
+test (§6.5). The two normal-mode coordinate systems now implement all four operators on a bulk mesh,
+so `NavierStokesEquations(GCL=True)` works with both `azimuthal_stability=True` and
+`additional_cartesian_mode=True`, and so does viscoelastic normal-mode stability analysis. Three more
+wrong entries turned up in `AxisymmetricCoordinateSystem.directional_tensor_derivative` while deriving
+the azimuthal one; they are fixed, and §5 records what they were.
 
 §6 is the part worth reading even if none of the gaps matter to you: it records how these operators
 can be tested at all, which is less obvious than it looks and cost most of the effort.
@@ -21,88 +23,113 @@ Per coordinate system, for the four operators that take spatial derivatives:
 | system | `scalar_gradient` | `vector_gradient` / `vector_divergence` | `tensor_divergence` | `directional_tensor_derivative` |
 |---|---|---|---|---|
 | `CartesianCoordinateSystem` | ok | ok | ok | ok |
-| `AxisymmetricCoordinateSystem` | ok | ok, **swirl-free** (§4) | ok | ok on the diagonal (§5) |
-| `AxisymmetryBreakingCoordinateSystem` | ok | ok | ok, base mode verified only (§3) | raises |
-| `CartesianCoordinateSystemWithAdditionalNormalMode` | ok, one `XXX` (§2.3) | ok | **raises** (§2) | **raises** (§2) |
+| `AxisymmetricCoordinateSystem` | ok | ok, **swirl-free** (§4) | ok | ok (§5) |
+| `AxisymmetryBreakingCoordinateSystem` | ok | ok | ok, bulk only | ok, bulk only |
+| `CartesianCoordinateSystemWithAdditionalNormalMode` | ok | ok | ok, bulk only | ok, bulk only |
 | `RadialSymmetricCoordinateSystem` | ok | ok | **raises** (§7) | raises |
 | `BaseDifferentialGeometryCoordinateSystem` | `TODO` (§8) | `vector_gradient` fixed but unexercised (§8) | inherits, raises | inherits, raises |
 
-"ok" means the three identities of §6.1 hold to machine zero, and there is a test.
+"ok" means the three identities of §6.1 hold to machine zero, and there is a test. "bulk only" means
+`ndim == edim`; the surface and point cases raise, deliberately, for the reason in §2.3.
 
 ---
 
-## 2. `CartesianCoordinateSystemWithAdditionalNormalMode` has no tensor operations
+## 2. The Cartesian normal-mode tensor operations (closed)
 
-[coordsys.py:893](pyoomph/expressions/coordsys.py#L893) and
-[:896](pyoomph/expressions/coordsys.py#L896) both raise `Implement the ... for this coordinate
-system`.
+[coordsys.py](pyoomph/expressions/coordsys.py) — `CartesianCoordinateSystemWithAdditionalNormalMode`
+now implements `tensor_divergence` and `directional_tensor_derivative` for `ndim == edim`.
 
-### 2.1 What it blocks
+### 2.1 What it blocked
 
-Not hypothetical. Both were run and both fail:
-
-- `NavierStokesEquations(GCL=True)` takes the divergence of a momentum flux tensor
-  ([navier_stokes.py:640](pyoomph/equations/navier_stokes.py#L640)), so the conservative ALE
-  formulation cannot be combined with
+- `NavierStokesEquations(GCL=True)` takes the divergence of a momentum flux tensor, so the
+  conservative ALE formulation could not be combined with
   `setup_for_stability_analysis(additional_cartesian_mode=True)` at all.
 - The viscoelastic module advects a tensor field through `material_derivative`, which routes to
-  `directional_tensor_derivative`, so viscoelastic Cartesian-wavenumber stability analysis is out too.
+  `directional_tensor_derivative`, so viscoelastic Cartesian-wavenumber stability analysis was out too.
 
-The azimuthal counterpart implements both, so neither restriction applies to
-`azimuthal_stability=True`. `tests/test_tensor_index_conventions.py` asserts the gap *is* a gap, so
-filling it will fail a test rather than pass silently.
+Both work now. `docs/source/tutorial/advstab/cartesiannormal/rivulet.py` runs with `GCL=True` and
+reproduces its eigenvalue curve to all fourteen printed digits — see §6.3 for why that agreement is
+much weaker evidence than it looks.
 
-### 2.2 Why it was not filled
+### 2.2 The derivation: `exp(i*k*z)` against `exp(i*m*phi)`
 
-It looks like it should be mechanical — Cartesian has no connection terms, so a tensor divergence
-ought to be "replace `d_z` with `I*k`" applied row by row. It is not, because the class also carries
-first-order mesh-perturbation corrections, and those are where the difficulty is. Compare
-`vector_divergence` ([:768](pyoomph/expressions/coordsys.py#L768)): the `edim==2` branch is one line
-of `mm*(...)` corrections, but the `edim==1` branch is a `mmterm` of some thirty products built from
-`diff(X01, s1)`, `diff(Xk1, s1)` and the local coordinate `s1`.
+The whole difference is that a Cartesian frame does not rotate. The azimuthal system carries four
+first-order operators because `e_r` and `e_phi` turn with `phi` and because of the `1/r` factor; here
+there is **no connection term anywhere and no `over_r`**, and the entire content of the coordinate
+system is three operators. With `x_phys = x + eps*Xk*exp(I*k*z)`, `y_phys = y + eps*Yk*exp(I*k*z)` and
+the additional direction `z` itself unperturbed, inverting to first order in `eps` gives, for any
+scalar `q`,
 
-### 2.3 Two things to resolve before generalising it
+    d/dx|_(y,z) q  =  q_x - (Xk_x*q_x + Yk_x*q_y)
+    d/dy|_(x,z) q  =  q_y - (Xk_y*q_x + Yk_y*q_y)
+    d/dz|_(x,y) q  =  q_z - I*k*(Xk*q_x + Yk*q_y)
 
-Both are pre-existing and neither was touched:
+The `I*k` on the last is the counterpart of the `I*m` in the azimuthal `d_dphi_over_r`; the
+`-Xp*q_phi/x**2` term beside it there comes from the `1/r` and has no analogue. The tensor operations
+are then those three applied entry by entry, with nothing else added.
 
-- **`diff(0, s1)` inside that `mmterm`** ([:801](pyoomph/expressions/coordsys.py#L801)) — the
-  derivative of a literal zero, so those four products vanish identically. That is the signature of a
-  symbolic derivation in which some quantity was substituted as `0` and the result pasted in without
-  cleaning. Harmless arithmetically; the worry is what the `0` was *meant* to be. Until that is known,
-  the expression cannot be trusted as the template for a rank-2 version.
-- **`# XXX Not according to Duarte`** on the `ndim==1` branch of `scalar_gradient`
-  ([:757](pyoomph/expressions/coordsys.py#L757)) — a disagreement someone already flagged and left.
+Two things about the mechanics that are easy to get wrong. The `z`-derivative must be written
+`diff(q, xadd)` and not `I*k*q`: `exp(I*k*z)` is a `FakeExponentialMode`, which prints as `1` in the
+generated code but differentiates by the chain rule, so the `I*k` appears by itself on exactly those
+terms that carry the mode. The explicit `I*k` inside the correction is right for the opposite reason —
+that term always multiplies `Xk` or `Yk`, which carry the mode by construction. And test functions
+carry `exp(-I*k*z)`, the complex conjugate, so the field-times-test pairing is `z`-independent and the
+residual is a genuine two-dimensional integral; that is handled once in
+`get_mode_expansion_of_var_or_test` and the operators need to know nothing about it.
 
-Deriving a tensor divergence on top of terms with that provenance is not defensible. Either sort out
-the `mmterm` first, or — the cheaper option — leave the operations unimplemented and improve the error
-message to name the blocked combinations (`GCL=True`, viscoelastic) instead of the bare "Implement the
-tensor_divergence for this coordinate system", which gives a user no idea why their problem is refused.
+### 2.3 Why the earlier objections to filling this did not hold
+
+This section used to argue the generalisation was not defensible, on two grounds. Both were wrong, and
+the reason is worth keeping because it is the kind of mistake that is easy to repeat.
+
+The three operators above are **not a new derivation**. They are, term for term, what the class
+already computed in `scalar_gradient` (both branches), `vector_gradient` (both branches, all nine
+entries in 2d) and the `ndim == edim` branches of `vector_divergence`. That was checked entry by entry
+before a line was written, and it is what makes the new operators checkable against the old ones.
+
+- The `mmterm` with its `diff(0, s1)` products is in the `ndim==2, edim==1` **surface** branch, which
+  a bulk-only tensor divergence never reaches — the azimuthal `tensor_divergence` refuses `ndim!=edim`
+  for the same reason. Treating it as the template for the bulk case was a category error.
+- `# XXX Not according to Duarte` on the `ndim==1` branch of `scalar_gradient` *is* `d_dz` for
+  `ndim==1`, and the identical expression appears at three other sites in the same class. It is
+  internally consistent; whatever the disagreement was, any error in it is already carried by every
+  `grad` and `div` that every existing Cartesian-wavenumber tutorial relies on, so it neither blocks
+  nor is aggravated by the tensor operations.
+
+Still open, and still only about the branches the tensor operations refuse: what the `diff(0, s1)`
+factors were meant to be, and the `edim==0` branches of `vector_divergence`, which do **not** follow
+the operator form either — one of them reads `+ mm*(I*Xk*k*diff(arg[0], xadd))` where `d_dz(arg[1])`
+would give `- mm*I*k*Xk*diff(arg[1], x)`, i.e. a different index and the opposite sign. Both already
+carry `# TODO: Test this`.
 
 ---
 
-## 3. The azimuthal tensor divergence is verified only in its base mode
+## 3. The azimuthal tensor divergence (closed by §6.5)
 
-`AxisymmetryBreakingCoordinateSystem.tensor_divergence`
-([coordsys.py:1413](pyoomph/expressions/coordsys.py#L1413)) is implemented, and `89e6108` rewrote its
-index pattern for the second-index convention.
+`AxisymmetryBreakingCoordinateSystem.tensor_divergence` was implemented but verified only in its base
+mode: the older test projects a steady solution, i.e. the `eps -> 0` limit, in which the
+`d_dphi_over_r` contributions and every `mm*` moving-mesh correction are structurally zero.
 
-What the test in `tests/test_tensor_index_conventions.py` establishes: with
-`setup_for_stability_analysis(azimuthal_stability=True)` the three identities of §6.1 hold, and the
-projected values agree with the plain axisymmetric system. That comparison is the load-bearing part —
-it pins the index pattern and the connection terms, which is what the rewrite changed. The mode
-machinery is genuinely engaged and not skipped: the generated code is about 53 kB against 38 kB for
-the plain axisymmetric run.
+That half is now measured, by the eigen-mode projection of §6.5, which reads the first-order value of
+an expression straight out of an eigenvector. Both normal-mode systems are covered.
 
-What it does not establish: projected values are the **base residual**, the `eps -> 0` limit. The
-`d_dphi_over_r` contributions and every `mm*` moving-mesh correction live in the eigen-residual, and a
-projection cannot see them. So the mode-dependent half of that method remains unverified. It was
-unverified before the rewrite too, and the rewrite was a term-by-term transposition checked against
-the canonical cylindrical formulas — but that is reasoning, not measurement.
+Independently, the conservative ALE momentum flux gives an end-to-end cross-check that needs no new
+machinery at all, because `GCL=True` and `GCL=False` are two different discretisations of the same
+continuous equations that differ only by the discretely-nonzero `int rho*u_i*div(u)*v_i`. Run on
+`docs/source/tutorial/advstab/azimuthal/rising_bubble.py` at `m=1`, on meshes made identical between
+the two arms by dumping the base state and reloading it:
 
-To close it, something has to compare an actual eigen-residual against an independent reference. The
-obvious candidate is a manufactured azimuthal mode with a known analytic answer, run through
-`get_last_eigenvalues`/`get_last_eigenvectors`; none of the existing azimuthal tutorials help, because
-none takes the divergence of a tensor.
+| refinement | ndof | \|dLambda\| at Bo=3 | \|dLambda\| at Bo=4 |
+|---|---|---|---|
+| level 3 | 14204 | 1.9e-2 | 3.4e-2 |
+| level 4 | 23375 | 9.2e-4 | 2.1e-3 |
+| level 5 | 29780 | 2.8e-4 | 3.0e-4 |
+
+At level 5 the two formulations differ by less than either differs from its own level-4 value
+(1.3e-5 against 2.4e-3 in the real part at Bo=4), which is what a discretisation-error difference
+converging away looks like and not what a wrong connection term looks like — those move an eigenvalue
+by O(1). Do pin the mesh before believing any of this: run without it, the two arms adapt to different
+meshes (23652 against 23489 dofs) and the comparison measures the mesh.
 
 ---
 
@@ -133,21 +160,35 @@ extending this one.
 
 ---
 
-## 5. The 1d axisymmetric directional tensor derivative drops off-diagonal terms
+## 5. `AxisymmetricCoordinateSystem.directional_tensor_derivative` had a wrong entry in every branch
 
-The `ndim==1` branch of `AxisymmetricCoordinateSystem.directional_tensor_derivative`
-([coordsys.py:606](pyoomph/expressions/coordsys.py#L606)) writes only four entries and omits, on the
-off-diagonals, the radial-derivative term `d_0 * d_r T_01` that the `ndim==2` branch below it includes
-for every `i,j`. It also omits the azimuthal connection on the diagonals.
+All three branches spelled out the azimuthal frame rotation separately, and all three got it wrong,
+each in a different single slot. Found while deriving the azimuthal counterpart, which needs the same
+group; now all four call sites go through one `azimuthal_frame_rotation_of_tensor`.
 
-Every omitted term is multiplied by an off-diagonal entry, and §4 explains why those are structurally
-zero on a radial mesh, so nothing reachable is affected — the product-rule identity of §6.1 passes
-there.
+With `d_phi(e_r) = e_phi`, `d_phi(e_phi) = -e_r`, `d_phi(e_z) = 0`, expanding `d_phi(T_ij e_i e_j)`
+puts the rotation on each index in turn, i.e. `C = R.T + T.R^T` for the generator `R[azi][rad] = 1`,
+`R[rad][azi] = -1`:
 
-It is left alone because it cannot be arbitrated locally: the reference for the identity is built from
-`directional_derivative` of a *vector*, i.e. `matproduct(grad(a), b)`, and that system's
-`vector_gradient` is itself swirl-free. Both sides of the check would be incomplete in the same way.
-Fixing it means hand-deriving the terms as §6.2 did for the divergence.
+| branch | slots | was | should be |
+|---|---|---|---|
+| `ndim==2` | (r,z,phi) | `C_rz = +T_phiz` | `C_rz = -T_phiz` |
+| `ndim==2`, `use_x_as_symmetry_axis` | (z,r,phi) | `C_zphi = T_rz` | `C_zphi = T_zr` |
+| `ndim==1` | (r,phi) | no azimuthal term on the diagonals at all, and no radial derivative on the off-diagonals | `C_rr = -T_rphi-T_phir`, `C_phiphi = T_rphi+T_phir` |
+
+Every one of them multiplies an azimuthal off-diagonal, and §4 explains why plain axisymmetry can
+build no tensor that has one — which is exactly how all three survived, the same way the two errors in
+`tensor_divergence` did. The tests use hand-assembled basis dyads, per §6.2.
+
+The cheap check that catches all three at once, and that is worth applying to anything of this shape:
+the rotation must satisfy `C(T^transpose) == C(T)^transpose`. None of the three did. It costs five
+lines of sympy and needs no finite elements.
+
+This section previously argued the `ndim==1` branch could not be arbitrated locally, because the
+reference for the product-rule identity is built from `directional_derivative` of a *vector*, which in
+this coordinate system is itself swirl-free, so both sides of the check would be incomplete in the
+same way. That is true of the identity, and the answer is simply not to use the identity: the
+orthonormal-frame derivation of §6.2 is the reference, and it settles all three branches at once.
 
 ---
 
@@ -178,7 +219,7 @@ written into the test beside each case. Note that only `e_r (x) e_phi` discrimin
 `T_rphi != 0` and `T_phir == 0`, so the old expression returned exactly minus the right answer, while
 `e_phi (x) e_r` gives the same result either way and would have looked like coverage.
 
-### 6.3 Three traps
+### 6.3 Traps
 
 - **Symbolic comparison does not work for anything involving `grad`.** A gradient of a field stays a
   held `Diff(..., nondimfield(...))` until the code generator resolves it, so `(lhs-rhs).is_zero()` is
@@ -193,12 +234,83 @@ written into the test beside each case. Note that only `e_r (x) e_phi` discrimin
   `LaplaceSmoothedMesh` the difference is a pure gradient, the pressure field absorbs it, and the test
   passes whichever ordering is used. `PrescribedMovingMesh` with a deliberately non-harmonic velocity
   is what makes it discriminate.
+- **A normal-mode test that projects nodal values sees the base residual only.** This is the big one,
+  and it is why §2 and §3 stood unverified for so long while looking tested. `_projected` in
+  `tests/test_tensor_index_conventions.py` solves a steady problem and reads the nodes, i.e. the
+  `eps -> 0` limit, in which every `mm*` mesh-perturbation term and every `I*k`/`I*m` term is
+  multiplied by zero. Such a test pins the index pattern and the connection terms and *nothing else*.
+  §6.5 is the way round it.
+- **A normal-mode moving-mesh test needs mesh dofs that are free *and* excited.** Every `mm*` term is
+  multiplied by the mesh perturbation, so if the eigenvector leaves the mesh alone they all vanish and
+  the test passes having checked nothing. `PrescribedMovingMesh` pins the position dofs outright. A
+  smoothed mesh does not have that problem but has the opposite one: its position equations carry no
+  time derivative, so the eigensolver refuses the problem with an empty mass matrix, and adding
+  `partial_t` of a mesh coordinate does not fix it. What works is slaving the mesh to a field that does
+  have a time derivative — `_MeshSlavedToADiffusingField` in the test file is four lines and both mesh
+  components come out excited by the same eigenvector. Assert on the mesh perturbation itself, so that
+  a run where it collapsed fails rather than passes.
+- **`rivulet.py` with `GCL=True` is the worked example of a check that proves only that the code
+  compiles.** Its base state is a *static* rivulet: `u` and the mesh velocity are identically zero, so
+  `div(rho*dyadic(u,u-w))` is quadratic in the perturbation and contributes an identically zero block
+  to the base residual *and* to the eigenproblem. The eigenvalues match to fourteen digits and not one
+  `mm*` term has been evaluated. Contrast `rising_bubble.py` in §3, whose base flow is non-zero.
+- **At k=0 the in-plane mesh corrections drop out.** Measured: removing the `mm*` corrections of `d_dx`
+  and `d_dy` entirely leaves a `k=0` normal-mode eigensolve bit-identical. So the otherwise attractive
+  "compare the normal-mode system at k=0 against plain Cartesian" reduction — which is exact, see
+  §6.6 — cannot validate those terms, only the index pattern and the derivative structure. A test at
+  `k != 0` is needed as well. Why the two separate has not been established, only observed.
 
 ### 6.4 Reverting is the only proof a test bites
 
 Every fix in these commits was checked by putting the old expression back and confirming a named test
 fails. Worth keeping up: several of the bugs here are in code paths whose operands are structurally
 zero, where a test can look thorough and assert nothing.
+
+It is worth scripting rather than doing by hand — patch, run, restore, per regression — because the
+interesting output is *which* tests fail, not merely that some do. That is what showed the three tests
+here have genuinely different reach: the `I*k` sign is caught only by §6.5, a transposed tensor index
+by all three, and the `d_dx` mesh coefficient by §6.5 alone and not by §6.6 (see the last trap in
+§6.3, which is exactly how that was found).
+
+### 6.5 Reading a first-order value straight out of an eigenvector
+
+The way past the first normal-mode trap in §6.3, and the thing that closes §3.
+
+A projection residual `weak(unknown - expr, test)` has no mass-matrix row, so its row of
+`J v = lambda M v` reads `d(unknown) - d(expr) = 0`. The eigenvector entry for that field therefore
+**is** the first-order-in-eps value of `expr` at the requested wavenumber — every `mm*` and every
+`I*k`/`I*m` term included. Solve the eigenproblem, push the eigenvector back in with
+`set_current_dofs`, and read the nodes exactly as a steady projection would.
+
+Points that matter in practice:
+
+- Read the real and the imaginary part separately. The entry is a complex number and the eigensolver
+  is free to return the whole vector times any phase, which can leave either part at zero.
+- Only compare *identically zero* expressions against zero. Anything the C2 space cannot represent
+  exactly leaves a non-zero base residual, and the first-order change of the integration measure then
+  feeds into the entry as well. Identity residuals are exactly zero and therefore clean; raw operator
+  values are only good for magnitude checks, or for comparing two runs against each other as in §6.6.
+- The problem needs no flow and no physics — `var("coordinate_x")` already expands to
+  `x + eps*Xk*exp(I*k*z)` once coordinates are dofs. A 3x3 mesh and a diffusing field are enough.
+
+### 6.6 The k=0 reduction, for a reference outside the coordinate system
+
+Every identity in §6.1 compares the tensor operations against `grad` and `div` of the *same* class, so
+a defect shared by both sides cancels. The one available independent reference is the ordinary
+eigensolve: mesh sensitivity there comes from the C++ shape-derivative machinery, whereas for the
+normal-mode contributions that machinery is switched off — `problem.py` calls
+`set_ignore_dpsi_coord_diffs_in_jacobian` for them — and replaced by the `mm*` terms plus the
+first-order measure in `integral_dx`. Two independent implementations of the same derivative.
+
+At `k=0` the additional direction decouples and the in-plane spectra coincide: measured agreement is
+1e-12 on the eigenvalues and 1e-13 relative on the projected operator values of §6.5. `k` is an
+ordinary global parameter, so `k=0` is a plain numerical evaluation and nothing degenerates.
+
+Compare raw operator values, not identity residuals, or the independence is thrown away. Phase-fix
+each eigenvector by dividing through its own entry at the node where some reference field is largest,
+and use only the leading eigenvalues — higher relaxation modes come in near-degenerate pairs where the
+basis within the pair is undetermined and a componentwise comparison means nothing. And see the last
+trap in §6.3 for what this does *not* reach.
 
 ---
 

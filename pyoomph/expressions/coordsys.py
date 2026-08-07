@@ -603,37 +603,71 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             div_theta=diff(T[2,0],coords[0])+diff(T[2,1],coords[1])+(T[0,2] + T[2,0]) / coords[0]
             return vector(div_x, div_y, div_theta)
 
-    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool,)->Expression:        
+    @staticmethod
+    def azimuthal_frame_rotation_of_tensor(T:Expression,rad:int,azi:int)->list[list[ExpressionOrNum]]:
+        """
+        The part of ``d/dphi`` of a second order tensor that comes from the frame turning, not from the
+        components changing, i.e. ``C`` in ``(d_phi T)_ij = d_phi(T_ij) + C_ij``.
+
+        With ``d_phi(e_r) = e_phi``, ``d_phi(e_phi) = -e_r`` and ``d_phi(e_z) = 0``, expanding
+        ``d_phi(T_ij e_i e_j)`` puts the rotation on each index in turn, which in matrix form is
+        ``C = R.T + T.R^T`` for the generator ``R[azi][rad] = 1``, ``R[rad][azi] = -1``:
+
+            row rule:     C_[rad][j] -= T_[azi][j]      C_[azi][j] += T_[rad][j]
+            column rule:  C_[i][rad] -= T_[i][azi]      C_[i][azi] += T_[i][rad]
+
+        ``rad`` and ``azi`` are the slots of the radial and azimuthal directions, which differ between
+        the layouts this class supports: (r,z,phi) normally, (z,r,phi) with use_x_as_symmetry_axis, and
+        (r,phi) on a radial mesh.
+
+        Written out in one place because all four branches of directional_tensor_derivative below need
+        it and each used to spell it out separately. Three of those spellings were wrong, each in a
+        single off-diagonal slot: ``+T_zphi`` instead of ``-T_zphi`` in the (r,z,phi) layout, the
+        transposed ``T_zr`` instead of ``T_rz`` in the use_x_as_symmetry_axis one, and the whole
+        diagonal contribution missing on a radial mesh. All three are unreachable from any tensor plain
+        axisymmetry can build -- define_tensor_field and vector_gradient leave every azimuthal
+        off-diagonal a hard zero, so T_rphi = T_phir = T_zphi = T_phiz = 0 always -- which is the same
+        way the analogous errors in tensor_divergence survived. The cheap check that catches all of
+        them: C must satisfy C(T^transpose) == C(T)^transpose, which none of the three did.
+
+        Note that the corresponding group in tensor_divergence looks different -- (T_rr-T_phiphi)/r,
+        T_zr/r, (T_rphi+T_phir)/r -- because there the second index is contracted away, which folds the
+        two rotations together; here both survive.
+        """
+        C:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+        for j in range(3):
+            C[rad][j] -= T[azi,j]
+            C[azi][j] += T[rad,j]
+        for i in range(3):
+            C[i][rad] -= T[i,azi]
+            C[i][azi] += T[i,rad]
+        return C
+
+    def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool,)->Expression:
+        res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
         if ndim==1:
             if self.use_x_as_symmetry_axis:
                 raise RuntimeError("Cannot have use_x_as_symmetry_axis in an axisymmetric coordinate system in 1d")
-            res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+            # A radial mesh orders the components [r, phi], so slot 1 is azimuthal and slot 2 unused.
             coords = self.get_coords(1, with_scales, lagrangian)
-            res[0][0]=diff(T[0,0],coords[0])*direct[0]
-            res[0][1]=1/coords[0]*(T[0,0]-T[1,1])*direct[1]
-            res[1][0]=res[0][1]
-            res[1][1]=diff(T[1,1],coords[0])*direct[0]
-
+            r=coords[0]
+            C=self.azimuthal_frame_rotation_of_tensor(T,0,1)
+            for i in range(2):
+                for j in range(2):
+                    res[i][j]=direct[0]*diff(T[i,j],r)+direct[1]/r*C[i][j]
             return matrix(res)
         elif ndim==2:
+            coords = self.get_coords(T.nops(), with_scales, lagrangian)
             if self.use_x_as_symmetry_axis:
-                #raise RuntimeError("TODO")
-                res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
-                coords = self.get_coords(T.nops(), with_scales, lagrangian)
-                #diff_tensor_theta=[[-T[2,0]-T[0,2], T[2,1], T[0,0]-T[2,2]], [-T[1,2], 0, T[1,0]], [T[0,0]-T[2,2], T[0,1], T[0,2]+T[2,0]]]
-                diff_tensor_theta=[[0, -T[0,2], T[1,0]], [-T[2,0], -T[2,1]-T[1,2], T[1,1]-T[2,2]], [T[1,0], T[1,1]-T[2,2], T[1,2]+T[2,1]]]
-                for i in range(3):
-                    for j in range(3):
-                        res[i][j]=direct[0]*diff(T[i,j],coords[0])+direct[1]*diff(T[i,j],coords[1])+direct[2]/coords[1]*diff_tensor_theta[i][j]
-                return matrix(res)
+                # x is the symmetry axis here, so the slots are (z,r,phi) and r is coords[1]
+                rad,r=1,coords[1]
             else:
-                res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
-                coords = self.get_coords(T.nops(), with_scales, lagrangian)
-                diff_tensor_theta=[[-T[2,0]-T[0,2], T[2,1], T[0,0]-T[2,2]], [-T[1,2], 0, T[1,0]], [T[0,0]-T[2,2], T[0,1], T[0,2]+T[2,0]]]
-                for i in range(3):
-                    for j in range(3):
-                        res[i][j]=direct[0]*diff(T[i,j],coords[0])+direct[1]*diff(T[i,j],coords[1])+direct[2]/coords[0]*diff_tensor_theta[i][j]
-                return matrix(res)
+                rad,r=0,coords[0]
+            C=self.azimuthal_frame_rotation_of_tensor(T,rad,2)
+            for i in range(3):
+                for j in range(3):
+                    res[i][j]=direct[0]*diff(T[i,j],coords[0])+direct[1]*diff(T[i,j],coords[1])+direct[2]/r*C[i][j]
+            return matrix(res)
         else:
             raise RuntimeError("Not possible")
 
@@ -890,13 +924,122 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
         
         return matrix(res)
 
+    def _first_order_derivative_operators(self,ndim:int,with_scales:bool,lagrangian:bool)->list[Callable[[Expression],Expression]]:
+        """
+        The first-order derivative operators of this coordinate system, expressed in mesh coordinates.
+
+        Fields are expanded as ``U = U_base + eps*U_k*exp(I*k*z)`` and the mesh accordingly as
+        ``x_phys = x + eps*Xk*exp(I*k*z)``, ``y_phys = y + eps*Yk*exp(I*k*z)``, with the additional
+        direction z itself unperturbed (``with_normal_component_in_mesh_coordinates`` is False, so
+        expand_coordinate_or_mesh_vector zeroes the third mesh component). Unlike the cylindrical frame
+        of AxisymmetryBreakingCoordinateSystem, the Cartesian frame does not rotate with anything, so
+        there is not a single connection term and no 1/r factor: the entire content of this coordinate
+        system is what the derivative operators mean once written in the mesh coordinates. Inverting the
+        mapping to first order in eps gives, for any scalar q,
+
+            d/dx|_(y,z) q  =  q_x - (Xk_x*q_x + Yk_x*q_y)
+            d/dy|_(x,z) q  =  q_y - (Xk_y*q_x + Yk_y*q_y)
+            d/dz|_(x,y) q  =  q_z - I*k*(Xk*q_x + Yk*q_y)
+
+        The I*k in the last one is the counterpart of the I*m in the azimuthal d_dphi_over_r; the
+        -Xp*q_phi/x**2 term that sits beside it there comes from the 1/r factor and has no analogue.
+        Note that the z-derivative must be written diff(q,xadd) rather than I*k*q: exp(I*k*z) is a
+        FakeExponentialMode that prints as 1 but differentiates by the chain rule, so the I*k appears by
+        itself on exactly those terms that carry the mode. The explicit I*k in the correction is right
+        because that term always multiplies Xk or Yk, which carry the mode by construction.
+
+        These three reproduce, term for term, scalar_gradient (the ndim==2 branch above and the ndim==1
+        one), vector_gradient (both branches, all nine entries in 2d) and the ndim==edim branches of
+        vector_divergence. That is what makes the tensor operations below checkable against them - and
+        it is why those three are deliberately left written out rather than rerouted through here: the
+        identities div(a (x) b) = div(b)*a + (b.grad)a and trace(grad(u)) = div(u) that test the tensor
+        code would degrade from "two implementations agree" to "the assembly loop contracts the right
+        index" if both sides came out of the same closures.
+
+        Returns ndim+1 operators in the component order define_vector_field uses: [d_dx, d_dy, d_dz] for
+        ndim==2 and [d_dx, d_dz] for ndim==1, where the additional direction takes slot 1.
+        """
+        dcoords=self.map_to_zero_epsilon(self.get_coords(3, with_scales, lagrangian))
+        pcoords=self.map_to_first_order_epsilon(self.get_coords(3, with_scales, lagrangian,mesh_coords=True))
+        xadd=self.get_additional_coordinate(with_scales)
+        k=self.get_wavenumber_k(dimensional=with_scales)
+        I=self.imaginary_i
+        mm=_pyoomph.GiNaC_EvalFlag("moving_mesh")
+        x,Xk=dcoords[0],pcoords[0]
+        if ndim==2:
+            y,Yk=dcoords[1],pcoords[1]
+        else:
+            # A one-dimensional mesh has no second in-plane direction, so nothing is perturbed along y
+            y,Yk=None,None
+
+        def d_dx(q:Expression)->Expression:  # d/dx at fixed y and z
+            corr=diff(Xk, x)*diff(q, x) + (diff(Yk, x)*diff(q, y) if y is not None else 0)
+            return diff(q, x) - mm*corr
+
+        def d_dy(q:Expression)->Expression:  # d/dy at fixed x and z
+            return diff(q, y) - mm*(diff(Xk, y)*diff(q, x) + diff(Yk, y)*diff(q, y))
+
+        def d_dz(q:Expression)->Expression:  # d/dz at fixed x and y, i.e. along the additional direction
+            conv=Xk*diff(q, x) + (Yk*diff(q, y) if y is not None else 0)
+            return diff(q, xadd) - mm*I*k*conv
+
+        return [d_dx,d_dy,d_dz] if ndim==2 else [d_dx,d_dz]
+
     def tensor_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
-        raise RuntimeError("Implement the tensor_divergence for this coordinate system. Occured upon taking the div of " + str(arg))
+        """
+        Divergence of a second order tensor, i.e. ``(div T)_i = d_j T_ij``, contracting the second index,
+        as in the Cartesian and the axisymmetry-breaking coordinate system.
+
+        There is nothing to it beyond applying the three operators of _first_order_derivative_operators
+        row by row: a Cartesian frame does not rotate, so no connection term and no 1/r factor appears,
+        and the whole mesh-perturbation content sits inside the operators. Mind the component order for
+        ndim==1, which is [x, x_add] rather than [x, y] - the additional direction occupies slot 1 there,
+        as in define_vector_field, scalar_gradient and vector_divergence - so index 2 is unused.
+
+        Bulk only. The edim!=ndim branches of vector_divergence above are of an entirely different shape
+        (the ndim==2/edim==1 one is a thirty-product expression in local_coordinate_1, and the edim==0
+        ones do not follow the operator form at all and carry a TODO), so the surface and point cases are
+        refused rather than guessed at, exactly as the azimuthal counterpart does.
+        """
+        if lagrangian:
+            return super().tensor_divergence(arg, ndim, edim, with_scales, lagrangian)
+        if ndim!=edim or ndim not in (1,2):
+            raise RuntimeError("Tensor divergence in the Cartesian normal mode coordinate system is only implemented on a bulk mesh, not for ndim="+str(ndim)+", edim="+str(edim))
+        T=arg
+        ops=self._first_order_derivative_operators(ndim, with_scales, lagrangian)
+        res:list[ExpressionOrNum]=[]
+        for i in range(ndim+1):
+            div_line:ExpressionOrNum=0
+            for j,d_dj in enumerate(ops):
+                div_line+=d_dj(T[i,j])
+            res.append(div_line)
+        while len(res)<3:
+            res.append(0)
+        return vector(res)
 
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
-        raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
+        """
+        ``((d.grad)T)_ij = d_c * d_c(T_ij)``, i.e. the same three operators contracted with the direction.
 
-    def expand_coordinate_or_mesh_vector(self,cg:"FiniteElementCodeGenerator", name:str,dimensional:bool,no_jacobian:bool,no_hessian:bool):        
+        Identical in structure to CartesianCoordinateSystem.directional_tensor_derivative, except that
+        the sum reaches the additional direction and each operator carries the mesh perturbation. There
+        are no frame-rotation terms, again because the Cartesian basis vectors are constant. ``direct``
+        is given in the same component order as any other vector of this system, so its slot ndim is the
+        additional direction. Bulk only, for the reason given in tensor_divergence.
+        """
+        if lagrangian:
+            return super().directional_tensor_derivative(T,direct,lagrangian,dimensional,ndim,edim,with_scales)
+        if ndim!=edim or ndim not in (1,2):
+            raise RuntimeError("Directional tensor derivative in the Cartesian normal mode coordinate system is only implemented on a bulk mesh, not for ndim="+str(ndim)+", edim="+str(edim))
+        ops=self._first_order_derivative_operators(ndim, with_scales, lagrangian)
+        res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+        for i in range(ndim+1):
+            for j in range(ndim+1):
+                for c,d_dc in enumerate(ops):
+                    res[i][j]+=d_dc(T[i,j])*direct[c]
+        return matrix(res)
+
+    def expand_coordinate_or_mesh_vector(self,cg:"FiniteElementCodeGenerator", name:str,dimensional:bool,no_jacobian:bool,no_hessian:bool):
         if not cg._coordinates_as_dofs:
             dim=cg.get_nodal_dimension()
             if dim==0:
@@ -1434,9 +1577,41 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
         """
         if lagrangian:
             return super().tensor_divergence(arg, ndim, edim, with_scales, lagrangian)
-        if ndim != edim or ndim not in (1, 2):
-            raise RuntimeError("Tensor divergence in the axisymmetry-breaking coordinate system is only implemented on a bulk mesh, not for ndim=" + str(ndim) + ", edim=" + str(edim))
         T = arg
+        d_dr, d_dz, d_dphi_over_r, over_r = self._first_order_derivative_operators(ndim, edim, with_scales, lagrangian, "Tensor divergence")
+        # The connection terms are those of the cylindrical frame, where e_r and e_phi rotate with phi:
+        # (T_rr-T_phiphi)/r on the radial row, T_zr/r on the axial one, (T_rphi+T_phir)/r on the azimuthal
+        # one. The PLUS on the last is what the identity div(dyadic(a,b)) = div(b)*a + (b.grad)a requires
+        # here, checked against vector_divergence and vector_gradient of this class, which do carry all
+        # three components. AxisymmetricCoordinateSystem.tensor_divergence agrees term for term now; it
+        # used to have a minus in that spot, which went unnoticed because its own vector_gradient is
+        # swirl-free (the a_phi entries are hard zeros), so nothing it can build reaches that row.
+        if ndim == 2:
+            div_r = d_dr(T[0,0]) + d_dz(T[0,1]) + d_dphi_over_r(T[0,2]) + over_r(T[0,0] - T[2,2])
+            div_z = d_dr(T[1,0]) + d_dz(T[1,1]) + d_dphi_over_r(T[1,2]) + over_r(T[1,0])
+            div_phi = d_dr(T[2,0]) + d_dz(T[2,1]) + d_dphi_over_r(T[2,2]) + over_r(T[0,2] + T[2,0])
+            return vector(div_r, div_z, div_phi)
+        else:
+            # On a radial mesh the components are ordered [r, phi] rather than [r, z, phi] -- that is
+            # what define_vector_field, scalar_gradient and vector_divergence use for ndim==1 -- so the
+            # azimuthal slot is index 1 here and index 2 is unused.
+            div_r = d_dr(T[0,0]) + d_dphi_over_r(T[0,1]) + over_r(T[0,0] - T[1,1])
+            div_phi = d_dr(T[1,0]) + d_dphi_over_r(T[1,1]) + over_r(T[0,1] + T[1,0])
+            return vector(div_r, div_phi, 0)
+
+    def _first_order_derivative_operators(self, ndim:int, edim:int, with_scales:bool, lagrangian:bool, what:str):
+        """
+        The four first-order operators of the docstring of tensor_divergence, as callables.
+
+        Kept in one place because tensor_divergence and directional_tensor_derivative need exactly the
+        same four, and because a discrepancy between them would be invisible in every identity that
+        tests one against the other. ``what`` only names the caller in the bulk-only error message.
+
+        On a one-dimensional radial mesh there is no axial direction at all, so nothing is perturbed
+        along y and d_dz is returned as a plain zero: the remaining three reduce to the plane-polar ones.
+        """
+        if ndim != edim or ndim not in (1, 2):
+            raise RuntimeError(what + " in the axisymmetry-breaking coordinate system is only implemented on a bulk mesh, not for ndim=" + str(ndim) + ", edim=" + str(edim))
         coords = self.get_coords(3, with_scales, lagrangian)
         x = self.map_to_zero_epsilon(coords[0])
         Xp = self.map_to_first_order_epsilon(coords[0])
@@ -1464,28 +1639,44 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
         def over_r(q:Expression)->Expression:  # q/r
             return q/x - mm*Xp*q/x**2
 
-        # The connection terms are those of the cylindrical frame, where e_r and e_phi rotate with phi:
-        # (T_rr-T_phiphi)/r on the radial row, T_zr/r on the axial one, (T_rphi+T_phir)/r on the azimuthal
-        # one. The PLUS on the last is what the identity div(dyadic(a,b)) = div(b)*a + (b.grad)a requires
-        # here, checked against vector_divergence and vector_gradient of this class, which do carry all
-        # three components. AxisymmetricCoordinateSystem.tensor_divergence agrees term for term now; it
-        # used to have a minus in that spot, which went unnoticed because its own vector_gradient is
-        # swirl-free (the a_phi entries are hard zeros), so nothing it can build reaches that row.
-        if ndim == 2:
-            div_r = d_dr(T[0,0]) + d_dz(T[0,1]) + d_dphi_over_r(T[0,2]) + over_r(T[0,0] - T[2,2])
-            div_z = d_dr(T[1,0]) + d_dz(T[1,1]) + d_dphi_over_r(T[1,2]) + over_r(T[1,0])
-            div_phi = d_dr(T[2,0]) + d_dz(T[2,1]) + d_dphi_over_r(T[2,2]) + over_r(T[0,2] + T[2,0])
-            return vector(div_r, div_z, div_phi)
-        else:
-            # On a radial mesh the components are ordered [r, phi] rather than [r, z, phi] -- that is
-            # what define_vector_field, scalar_gradient and vector_divergence use for ndim==1 -- so the
-            # azimuthal slot is index 1 here and index 2 is unused.
-            div_r = d_dr(T[0,0]) + d_dphi_over_r(T[0,1]) + over_r(T[0,0] - T[1,1])
-            div_phi = d_dr(T[1,0]) + d_dphi_over_r(T[1,1]) + over_r(T[0,1] + T[1,0])
-            return vector(div_r, div_phi, 0)
+        if ndim == 1:
+            d_dz = lambda q : Expression(0)
+        return d_dr, d_dz, d_dphi_over_r, over_r
 
     def directional_tensor_derivative(self,T:Expression,direct:Expression,lagrangian:bool,dimensional:bool,ndim:int,edim:int,with_scales:bool)->Expression:
-        raise RuntimeError("Implement the directional tensor derivative for this coordinate system")
+        """
+        ``((d.grad)T)_ij``, the directional derivative of a second order tensor along ``direct``.
+
+        Same four operators as tensor_divergence, but contracted with the direction rather than with the
+        second index, so a different group of connection terms survives. Only the azimuthal part of the
+        direction sees the frame turning:
+
+            (d.grad)T = d_r*d_dr(T) + d_z*d_dz(T) + d_phi*( d_dphi_over_r(T) + (1/r)*C(T) )
+
+        with C the frame rotation of AxisymmetricCoordinateSystem.azimuthal_frame_rotation_of_tensor,
+        which is where that group is derived. Contrast tensor_divergence, where contracting the second
+        index folds both index rotations into the single hoop group (T_rr-T_phiphi)/r, T_zr/r,
+        (T_rphi+T_phir)/r.
+
+        The reference for this is the product rule (d.grad)(a (x) b) = ((d.grad)a) (x) b + a (x) (d.grad)b,
+        whose right-hand side is built from matproduct(grad(.),d), i.e. from this class's vector_gradient,
+        which carries all three components. That is what makes it testable here and not in plain
+        axisymmetry, whose own vector_gradient is swirl-free (see dev_docs/coordinate_system_tensor_ops.md).
+        """
+        if lagrangian:
+            return super().directional_tensor_derivative(T,direct,lagrangian,dimensional,ndim,edim,with_scales)
+        d_dr, d_dz, d_dphi_over_r, over_r = self._first_order_derivative_operators(ndim, edim, with_scales, lagrangian, "Directional tensor derivative")
+        # (r,z,phi) on a 2d mesh, (r,phi) on a radial one -- the same slot layout tensor_divergence uses
+        azi = 2 if ndim == 2 else 1
+        C = self.azimuthal_frame_rotation_of_tensor(T, 0, azi)
+        res:list[list[ExpressionOrNum]] = [[0]*3 for _x in range(3)]
+        for i in range(azi+1):
+            for j in range(azi+1):
+                entry = direct[0]*d_dr(T[i,j]) + direct[azi]*(d_dphi_over_r(T[i,j]) + over_r(C[i][j]))
+                if ndim == 2:
+                    entry += direct[1]*d_dz(T[i,j])
+                res[i][j] = entry
+        return matrix(res)
 
 
 
