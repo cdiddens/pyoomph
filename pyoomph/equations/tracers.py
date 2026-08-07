@@ -480,6 +480,83 @@ def _as_vector(scalar: ExpressionOrNum) -> Expression:
     return vector([scalar])
 
 
+class TracerTransferToInterface(InterfaceEquations):
+    """Puts particles leaving the bulk through this interface onto the interface's own tracers.
+
+    Where a bulk particle reaching the edge of its domain is otherwise dropped, this hands it to the
+    collection living on the interface, where it continues as a confined particle: advected by the
+    tangential part of the field and co-moving with the interface in the normal direction.
+
+    The case it exists for is a free surface losing mass. The liquid recedes past the particle
+    rather than the particle swimming out, so a parcel that reaches the surface belongs on it - and
+    dropping it there both loses the particle and hides the accumulation, which on an evaporating
+    droplet with a pinned contact line is the transport behind the coffee ring.
+
+    .. code-block:: python
+
+        d_eqs += TracerParticles(var("velocity"), seed=TracerSeedGrid(0.04*milli*meter))
+        d_eqs += (TracerParticles(var("velocity"), tracer_name="surface", seed=...)
+                  + TracerTransferToInterface()) @ "droplet_gas"
+
+    The bulk domain and this interface must each carry a :py:class:`TracerParticles`. Nothing goes
+    the other way: an interface particle cannot leave its interface, it can only reach the end of
+    it, and it is pinned there.
+
+    Args:
+        interface_tracer_name: which collection on this interface receives them. Only needed when
+            the interface carries more than one, where there is nothing to guess from.
+    """
+    required_parent_type = TracerParticles
+
+    def __init__(self, interface_tracer_name: str | None = None):
+        super(TracerTransferToInterface, self).__init__()
+        self.interface_tracer_name = interface_tracer_name
+
+    def _interface_equations(self) -> TracerParticles:
+        """The TracerParticles living on this interface - the receiving side."""
+        eqs = self.get_current_code_generator().get_equations()
+        found = eqs.get_equation_of_type(TracerParticles, always_as_list=True)
+        found = [e for e in found if isinstance(e, TracerParticles)]
+        if self.interface_tracer_name is not None:
+            found = [e for e in found if e.tracer_name == self.interface_tracer_name]
+            if not found:
+                raise RuntimeError("TracerTransferToInterface was asked for tracers named " +
+                                   repr(self.interface_tracer_name) + " on " +
+                                   self.get_mesh().get_full_name() + ", but there are none")
+        if not found:
+            raise RuntimeError("TracerTransferToInterface needs a TracerParticles on the interface "
+                               + self.get_mesh().get_full_name() + " to hand the particles to")
+        if len(found) > 1:
+            raise RuntimeError("The interface " + self.get_mesh().get_full_name() + " carries " +
+                               str(len(found)) + " tracer collections (" +
+                               ", ".join(repr(e.tracer_name) for e in found) +
+                               "), so TracerTransferToInterface needs interface_tracer_name to say "
+                               "which one receives the particles")
+        return found[0]
+
+    def _wire(self):
+        bulk = self.get_parent_equations()
+        assert isinstance(bulk, TracerParticles)
+        surf = self._interface_equations()
+        bulkmesh = bulk._mesh
+        bulkcol = bulk.get_collection()
+        surfcol = surf.get_collection()
+        if bulkmesh and bulkcol and surfcol:
+            # Keyed on the BULK mesh's boundary index, exactly like a domain-to-domain transfer:
+            # what the collection registers is "particles that leave me through this boundary go
+            # there", and the boundary is the same object either way.
+            bind = bulkmesh.get_boundary_index(self.get_mesh().get_name())
+            bulkcol._set_transfer_interface(bind, surfcol)
+
+    def before_assigning_equations_preorder(self, mesh: "AnyMesh"):
+        self._wire()
+
+    def _init_output(self, eqtree: "EquationTree", continue_info: dict[str, Any] | None, rank: int):
+        # Re-register here too: both collections are bound in their own _init_output, which may run
+        # after before_assigning_equations_preorder did.
+        self._wire()
+
+
 class TracerTransferAtInterface(InterfaceEquations):
     """Hands particles over between the tracer collections of two domains sharing this interface.
 

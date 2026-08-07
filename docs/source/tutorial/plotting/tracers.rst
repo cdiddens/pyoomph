@@ -36,6 +36,12 @@ Two of the keyword arguments deserve a word.
 ``history_time`` keeps a rolling window of each particle's recent positions, i.e. the last
 :math:`0.4` time units here. That is what a trail is drawn from.
 
+``payloads`` gives each particle scalars that are integrated along its own path, by the same
+sub-steps that move it. ``{"residence": 1}`` is therefore just a simple example, it accumulates the time the particle has spent
+in the domain; a strain rate would accumulate strain, and a concentration would accumulate exposure.
+The sources must be dimensionless, and are integrated over nondimensional time. Read them back with
+:py:meth:`~pyoomph.meshes.mesh.BaseMesh.get_tracers` and ``get_payloads()``.
+
 In the plotter, a tracer collection is addressed by its name just like a field:
 
 .. literalinclude:: tracers.py
@@ -48,12 +54,6 @@ the resolution. Note that ``image_size`` alone fixes the pixel count while ``dpi
 inches those pixels are, so halving *both* keeps the figure the same size in inches: the labels,
 the markers and the colorbar keep their proportion instead of growing to twice their share of a
 half-size canvas.
-
-``payloads`` gives each particle scalars that are integrated along its own path, by the same
-sub-steps that move it. ``{"residence": 1}`` is therefore just a simple example, it accumulates the time the particle has spent
-in the domain; a strain rate would accumulate strain, and a concentration would accumulate exposure.
-The sources must be dimensionless, and are integrated over nondimensional time. Read them back with
-:py:meth:`~pyoomph.meshes.mesh.BaseMesh.get_tracers` and ``get_payloads()``.
 
 The last line of the equation system is what keeps the picture worth looking at. A particle that
 reaches the outlet has left the mesh and is simply dropped, so the channel would empty out from the
@@ -101,9 +101,18 @@ Some further remarks
 
 * Particles that leave the domain are removed, unless you say where they should go instead: to a
   neighbouring domain sharing an interface, with a
-  :py:class:`~pyoomph.equations.tracers.TracerTransferAtInterface` (both sides must carry tracers),
+  :py:class:`~pyoomph.equations.tracers.TracerTransferAtInterface` (both sides must carry tracers);
+  onto the domain's own interface, with a
+  :py:class:`~pyoomph.equations.tracers.TracerTransferToInterface`, which is what a free surface
+  losing mass wants - the surface recedes past the particle rather than the particle swimming out;
   or back in at the far end, with a
   :py:class:`~pyoomph.equations.tracers.TracerPeriodicBoundaryCondition` as above.
+* A trail outlives the particle that drew it. One that leaves is gone from the simulation
+  immediately - it stops being advected and drops out of ``get_positions()`` - but its trail stays
+  in the picture and fades out over ``history_time`` instead of blinking out with the marker.
+* A particle confined to an interface cannot leave it, only reach the end of it, and it stays
+  there. On a free surface with a pinned contact line the particles therefore accumulate at the
+  rim, which is the transport behind the coffee-ring effect rather than an artefact.
 * Advection happens once per accepted timestep. Stationary solves, continuation steps and the
   intermediate solves of spatial adaptation do not move the particles.
 * The accuracy is bounded by the mesh: within a timestep the solver only knows where the nodes were

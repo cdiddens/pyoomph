@@ -341,6 +341,57 @@ namespace pyoomph
     for (auto *p : pending_reinject)
       delete p;
     pending_reinject.clear();
+    for (auto *p : dead)
+      delete p;
+    dead.clear();
+  }
+
+  void TracerCollection::retire(TracerParticle *p)
+  {
+    // Without a window there is nothing to fade, so this is exactly the delete it always was.
+    if (history_window <= 0.0 || !p->hist_n)
+    {
+      delete p;
+      return;
+    }
+    p->elem = nullptr; // it is in no element any more, and nothing may try to use one
+    dead.push_back(p);
+  }
+
+  void TracerCollection::prune_dead(double tnow)
+  {
+    if (dead.empty())
+      return;
+    const unsigned stride = 1 + nodal_dim;
+    std::vector<TracerParticle *> keep;
+    keep.reserve(dead.size());
+    for (auto *p : dead)
+    {
+      // Unlike a living particle, which always keeps its newest sample because that sample IS its
+      // current position, a dead one is pruned all the way down and then forgotten.
+      while (p->hist_n > 0)
+      {
+        const unsigned cap = (unsigned)(p->hist.size() / stride);
+        const unsigned oldest = (p->hist_head + cap - p->hist_n) % cap;
+        if (tnow - p->hist[(size_t)oldest * stride] <= history_window)
+          break;
+        p->hist_n--;
+      }
+      if (p->hist_n)
+        keep.push_back(p);
+      else
+        delete p;
+    }
+    dead.swap(keep);
+  }
+
+  std::vector<long long> TracerCollection::get_dead_ids() const
+  {
+    std::vector<long long> ret;
+    ret.reserve(dead.size());
+    for (auto *p : dead)
+      ret.push_back((long long)p->id);
+    return ret;
   }
 
   // Builds a particle at `pos` and places it. Returns null (having deleted it) if the point does not
@@ -561,6 +612,10 @@ namespace pyoomph
     for (auto *p : tracers)
       if (p->id == id)
         return history_of(p);
+    // Dead too: a fading trail is asked for by exactly this call.
+    for (auto *p : dead)
+      if (p->id == id)
+        return history_of(p);
     return std::vector<double>();
   }
 
@@ -770,7 +825,7 @@ namespace pyoomph
       else
       {
         stat_lost++;
-        delete p;
+        retire(p);
       }
     }
 
@@ -1343,9 +1398,6 @@ namespace pyoomph
         sids[2 * i] = (long long)pending_reinject[i]->id;
         sids[2 * i + 1] = (long long)pending_reinject[i]->tag;
       }
-      for (auto *p : pending_reinject)
-        delete p; // everybody, this process included, rebuilds them from the wire below
-      pending_reinject.clear();
 
       std::vector<double> rbuf((size_t)std::max(dtot, 1), 0.0);
       std::vector<long long> rids((size_t)std::max(itot, 1), 0);
@@ -1382,11 +1434,24 @@ namespace pyoomph
           continue;
         }
         delete cand[i];
-        // Counted once, on the process that would otherwise report nothing at all about it.
-        if (reduced[i] >= nproc && rank == 0)
-          stat_lost++;
       }
       stat_reinjected += taken;
+
+      // Only now can the originals go: whether one is gone for good, and so has a trail to leave
+      // behind on the process that parked it, is not known until the claim has been reduced. Mine
+      // are the block at displ[rank].
+      for (int i = 0; i < mine; i++)
+      {
+        TracerParticle *p = pending_reinject[i];
+        if (reduced[displ[rank] + i] >= nproc)
+        {
+          stat_lost++;
+          retire(p); // no process holds its periodic image; it is out of the domain for good
+        }
+        else
+          delete p; // rebuilt from the wire by whichever process claimed it
+      }
+      pending_reinject.clear();
       return (unsigned)total;
     }
 #endif
@@ -1394,7 +1459,7 @@ namespace pyoomph
     for (auto *p : pending_reinject)
     {
       stat_lost++;
-      delete p;
+      retire(p);
     }
     pending_reinject.clear();
     return 0;
@@ -1729,7 +1794,7 @@ namespace pyoomph
         if (!ok)
         {
           stat_lost++;
-          delete p;
+          retire(p);
           continue;
         }
         if (transferred_away)
@@ -1774,9 +1839,12 @@ namespace pyoomph
 
     // Positions are now those of history level 0, so a locator built for level 1 is stale even
     // though the topology has not changed.
+    const double tnow = mesh->nnode() ? mesh->node_pt(0)->time_stepper_pt()->time_pt()->time(0) : 0.0;
+    // Outside the history_window guard on purpose: a window that has just been switched off still
+    // has to let the trails it created finish fading rather than stranding them forever.
+    prune_dead(tnow);
     if (history_window > 0.0)
     {
-      const double tnow = mesh->nnode() ? mesh->node_pt(0)->time_stepper_pt()->time_pt()->time(0) : 0.0;
       const unsigned stride = 1 + nodal_dim;
       for (auto *p : tracers)
       {
@@ -1825,7 +1893,7 @@ namespace pyoomph
       else
       {
         stat_lost++;
-        delete p;
+        retire(p);
       }
     }
     tracers.swap(survivors);
@@ -1851,6 +1919,8 @@ namespace pyoomph
       oss << ", " << stat_reinjected << " reinjected from another process";
     if (stat_pinned)
       oss << ", " << stat_pinned << " pinned at an interface end";
+    if (!dead.empty())
+      oss << ", " << dead.size() << " trails fading";
     if (stat_lost)
       oss << ", " << stat_lost << " LOST";
     return oss.str();

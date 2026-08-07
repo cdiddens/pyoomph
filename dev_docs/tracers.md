@@ -3,7 +3,7 @@
 Status: **done and in use.** `TracerParticles` (`pyoomph/equations/tracers.py`) advects passive
 particles through a bulk domain or confined to an interface, on static and moving meshes, in 1/2/3
 dimensions, with path-integrated payloads, a rolling position history for trails, handover between
-domains, periodic re-injection, and `--distribute`. Covered by `tests/test_tracers.py` (51 cases) and
+domains, periodic re-injection, and `--distribute`. Covered by `tests/test_tracers.py` (55 cases) and
 `tests/test_mpi_tracers.py` (13 cases, `--full`).
 
 This replaces the original implementation wholesale. That one was dead code - no test, no example,
@@ -353,6 +353,44 @@ What it looks like in practice, on the evaporating droplet of the plotting tutor
 seeded on the zenith stays on the axis and rides the surface down, and surface parcels swept to the
 pinned contact line accumulate there rather than disappearing one by one - which is the transport
 behind the coffee ring, and is now visible instead of being silently deleted.
+
+## 5f. Leaving the domain: onto the interface, or as a fading trail
+
+Two things a particle can do instead of simply disappearing.
+
+**`TracerTransferToInterface`** is `TracerTransferAtInterface` pointed at the domain's own interface
+rather than at a neighbour across it. It needs no new machinery - `set_transfer_interface` already
+takes any collection, `adopt` already places by closest-point projection for codimension 1, and the
+parent-before-child order of `_after_transient_solve` means the bulk advects, hands over, and the
+interface's own pass then skips the arrival on `completed_step_time`. Only the wiring is new: the
+receiving collection is looked up among the equations of the interface itself, by name when the
+interface carries more than one.
+
+The case it exists for is a free surface losing mass, where the surface recedes *past* a stationary
+parcel rather than the parcel swimming out - so the parcel belongs on the surface, and dropping it
+loses both the particle and the accumulation. On the tutorial droplet all nineteen bulk particles
+that reach the free surface are now handed over and none is lost, and they pile up at the pinned
+contact line, which is the transport behind the coffee ring.
+
+Nothing goes the other way, and that is not an omission: an interface particle cannot leave its
+interface, it can only reach the end of it, where §5e pins it.
+
+**A trail outlives its particle.** A particle that leaves is taken out of the simulation but kept in
+a separate `dead` list until its trail has aged out of the history window - not advected, not
+gathered, not written to a state file, not counted by `nlocal()`, and not drawn as a marker, but
+`get_history()` still answers for it and the plotter draws it. Without this a trail blinked out
+together with its particle, which on a channel that loses particles at the outlet reads as a glitch.
+
+Kept in a separate list rather than flagged inside `tracers` on purpose: every accessor, every
+gather, every state file and every loop over the collection keeps meaning "the living particles"
+and none of them has to remember to skip anything. Without a history window `retire()` is exactly
+the `delete` it replaced, so a collection that asked for no trails behaves as it always did.
+
+Two limitations, both deliberate. Dead particles are **local**: one is in nobody's mesh, so no
+process can be said to own it, and the plot that draws its trail is per-process anyway. And they are
+**not in state files**: they are outside the mesh, so the claim protocol that makes a tracer state
+file partition-independent has nothing to place them with. A restart therefore starts with no
+fading trails, which resolves itself within one history window.
 
 ## 6. Where the accuracy stops
 

@@ -2309,7 +2309,11 @@ class MatplotLibTracers(MatplotLibPart):
         from matplotlib.collections import LineCollection
         segments:list[Any]=[]
         alphas:list[float]=[]
-        for tid in col.get_ids():
+        # Dead particles as well: one that has left the domain keeps its trail until the trail has
+        # aged out of the history window, so that it fades away instead of blinking out along with
+        # its marker. It is only the marker that is gone - see add_to_plot below, which draws the
+        # markers from get_positions() and so only ever draws the living.
+        for tid in list(col.get_ids())+list(col.get_dead_ids()):
             hist=col.get_history(int(tid))
             if hist is None or len(hist)<2:
                 continue
@@ -2334,7 +2338,14 @@ class MatplotLibTracers(MatplotLibPart):
         assert self.mesh is not None
         col=self.mesh.get_tracers(self.tracer_name)
         assert col is not None
+        if self.invisible:
+            return
         ss = self.mesh.get_output_scale("spatial")
+        # Trails first, and before the "is there anything to draw" test below: a collection whose
+        # last particle has just left the domain still has trails to finish fading out, and that is
+        # exactly the moment they matter.
+        if self.trail:
+            self._add_trails(col,ss)
         pos=self._to_plot_coords(col.get_positions(),ss)
 
         if len(pos)==0: #type:ignore
@@ -2346,10 +2357,6 @@ class MatplotLibTracers(MatplotLibPart):
         if pos.shape[1]!=2:
             raise RuntimeError("Can only plot tracers of two-dimensional position, but got "+
                                str(pos.shape[1])+" components. Use get_positions() and plot them yourself")
-        if self.invisible:
-            return
-        if self.trail:
-            self._add_trails(col,ss)
         plt.gca().scatter(pos[:,0],pos[:,1],marker=self.marker,s=self.size,c=self._colors_by_tag(col), edgecolor=self.edgecolor,zorder=self.zindex) #type:ignore
 
 

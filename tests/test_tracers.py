@@ -873,6 +873,116 @@ def test_without_a_transfer_interface_the_particles_are_dropped():
 
 
 # ----------------------------------------------------------------------------------------------
+# L1 - bulk to its own interface, the evaporating-surface case
+# ----------------------------------------------------------------------------------------------
+
+_SWALLOW_SEEDS = [[1.0, 0.5], [2.0, 0.6], [3.0, 0.7]]
+
+
+def _swallowed_by_the_surface(with_transfer):
+    """A boundary that recedes over stationary particles - a free surface losing mass, in miniature.
+
+    The advection field is zero, so the particles do not swim out; the surface comes to them. That
+    is the whole point of the transfer: a parcel the surface has caught up with belongs ON it.
+    """
+    from pyoomph.equations.tracers import TracerTransferToInterface
+
+    def descending_top(x, y, t):
+        return (x, y - 0.6 * t * (0.5 * (y + 1.0)))
+
+    class P(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(size=[4, 2], lower_left=[0, -1], N=[8, 4]))
+            self._X0 = None
+            eqs = PoissonEquation(source=0) + DirichletBC(u=0) @ "left"
+            eqs += TracerParticles(vector(0, 0), seed=TracerSeedPoints(_SWALLOW_SEEDS),
+                                   rtol=1e-11, atol=1e-13)
+            surf = TracerParticles(vector(0, 0), tracer_name="surface", seed=None,
+                                   rtol=1e-11, atol=1e-13)
+            if with_transfer:
+                surf = surf + TracerTransferToInterface()
+            eqs += surf @ "top"
+            self += eqs @ "domain"
+
+        def actions_before_newton_solve(self):
+            super().actions_before_newton_solve()
+            m = self.get_mesh("domain")
+            if self._X0 is None:
+                self._X0 = numpy.array([[n.x(0), n.x(1)] for n in m.nodes()])
+            t = float(self.get_current_time(as_float=True, dimensional=False))
+            for n, X in zip(m.nodes(), self._X0):
+                x, y = descending_top(X[0], X[1], t)
+                n.set_x(0, x)
+                n.set_x(1, y)
+
+    p = P()
+    p.set_output_directory("_tracer_swallow_" + ("on" if with_transfer else "off"))
+    p.quiet()
+    p.initialise()
+    bulk = p.get_mesh("domain").get_tracers()
+    surf = p.get_mesh("domain/top").get_tracers("surface")
+    ids = list(bulk.get_ids())
+    p.run(1.0, timestep=0.05, outstep=False, startstep=0.05)
+    return bulk, surf, ids
+
+
+def test_particles_the_surface_catches_up_with_are_transferred_onto_it():
+    """They keep their identity, which is what says they were handed over rather than re-seeded."""
+    bulk, surf, ids = _swallowed_by_the_surface(with_transfer=True)
+    assert bulk.nlocal() == 0, "the receding surface should have caught up with all of them"
+    assert sorted(surf.get_ids()) == sorted(ids), "the particles did not arrive with their identity"
+    # And they are on the interface, not merely somewhere near it.
+    pos = surf.get_positions()
+    assert pos.shape == (len(ids), 2)
+    assert numpy.max(numpy.abs(pos[:, 1] - numpy.max(pos[:, 1]))) < 1e-9, \
+        "the transferred particles are not on the (flat) interface"
+
+
+def test_without_the_transfer_the_swallowed_particles_are_dropped():
+    """The counterpart, so the test above cannot pass by accident."""
+    bulk, surf, _ids = _swallowed_by_the_surface(with_transfer=False)
+    assert bulk.nlocal() == 0
+    assert surf.nlocal() == 0
+
+
+# ----------------------------------------------------------------------------------------------
+# L2 - a trail outliving its particle
+# ----------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("history_time", [0.5, None], ids=["with_history", "without_history"])
+def test_a_trail_outlives_the_particle_that_drew_it(history_time):
+    """A particle that leaves the domain is gone from the simulation, but its trail is not gone from
+    the picture: it fades out over the history window instead of blinking out with the marker. With
+    no window there is no trail, so the particle is deleted outright as it always was."""
+    p = _TracerProblem(POISEUILLE, [[3.9, 0.0]], history_time=history_time)
+    p.set_output_directory("_tracer_afterlife_%s" % history_time)
+    p.quiet()
+    p.initialise()
+    tr = p.tracers()
+    tid = int(tr.get_ids()[0])
+
+    # v = 1 on the axis, so it is out through x = 4 well within this.
+    p.run(0.3, timestep=0.05, outstep=False, startstep=0.05)
+    assert tr.nlocal() == 0, "the particle should have left the domain by now"
+    assert list(tr.get_ids()) == [], "a dead particle must not appear among the living"
+    if history_time is None:
+        assert tr.nlocal_dead() == 0, "without a window there is no trail to keep it around for"
+        assert tr.get_history(tid).size == 0
+        return
+
+    assert tr.nlocal_dead() == 1, "the trail was thrown away with the particle"
+    assert [int(i) for i in tr.get_dead_ids()] == [tid]
+    hist = tr.get_history(tid)
+    assert hist.shape[0] >= 2, "the trail of a dead particle has to still be readable"
+    assert hist.shape[1] == 3
+
+    # ... and it really does go away once it has aged out of the window, rather than accumulating.
+    p.run(p.get_current_time() + 1.5 * history_time, timestep=0.05, outstep=False, startstep=0.05)
+    assert tr.nlocal_dead() == 0, "the faded trail was never forgotten"
+    assert tr.get_history(tid).size == 0
+
+
+# ----------------------------------------------------------------------------------------------
 # L - periodic re-injection
 # ----------------------------------------------------------------------------------------------
 

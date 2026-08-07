@@ -1964,6 +1964,11 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("remove_tracer", [](pyoomph::TracerCollection *coll, long long id)
 			 { return coll->remove_tracer((pyoomph::TracerId)id); }, nb::arg("id"),
 			 "Removes the particle with this id; returns whether one was found")
+		.def("nlocal_dead", &pyoomph::TracerCollection::nlocal_dead,
+			 "Number of particles that have left this process's mesh but whose trail is still fading. They are not part of the simulation any more - not advected, not gathered, not written to a state file - and are forgotten once their trail has aged out of the history window")
+		.def("get_dead_ids", [](pyoomph::TracerCollection *coll)
+			 { return coll->get_dead_ids(); },
+			 "Identities of the particles whose trail is still fading. Local, never gathered: a dead particle is in nobody's mesh, so no process can be said to own it. get_history() still answers for them, which is what a trail plot needs")
 		.def("nglobal", [](pyoomph::TracerCollection *coll) { return coll->nglobal(); },
 			 "COLLECTIVE. Number of particles over all processes")
 		.def("gather_positions", [tracer_matrix](pyoomph::TracerCollection *coll)

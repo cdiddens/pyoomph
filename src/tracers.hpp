@@ -177,6 +177,14 @@ namespace pyoomph
     // pass and the collective reinjection round of advect_all, which owns them until then.
     std::vector<TracerParticle *> pending_reinject;
 
+    // Particles that have left the mesh but still have a trail to finish fading. They are NOT part
+    // of the simulation any more - never advected, never gathered, never written to a state file,
+    // not counted by nlocal() - they exist so that a trail does not vanish the instant its particle
+    // does, which is what made a plot flicker. Kept separate from `tracers` rather than flagged
+    // inside it precisely so that every accessor keeps meaning "the living particles" and no loop
+    // over the collection has to remember to skip them.
+    std::vector<TracerParticle *> dead;
+
     TracerId next_id = 1;
 
     // Set by advect_one when the particle it was given was handed to another domain's collection,
@@ -290,6 +298,13 @@ namespace pyoomph
     TracerParticle *make_and_place(const std::vector<double> &pos, int tag,
                                    const std::vector<double> &payload_init);
 
+    // Take `p` out of the simulation. It is kept as a fading trail when there is a trail to fade
+    // and deleted outright otherwise, so a collection without a history window behaves exactly as
+    // it did. Either way the caller must not touch `p` again.
+    void retire(TracerParticle *p);
+    // Age every fading trail by the history window and forget the ones that have nothing left.
+    void prune_dead(double tnow);
+
     // The two directions of the rolling history ring: unwrap it into chronological (t, x...)
     // samples, and rebuild it from such samples, keeping the newest ones that fit the capacity.
     std::vector<double> history_of(const TracerParticle *p) const;
@@ -347,6 +362,11 @@ namespace pyoomph
 
     bool remove_tracer(TracerId id);
     unsigned nlocal() const { return (unsigned)tracers.size(); }
+    // Particles that have left but whose trail is still fading. Local, never gathered: a dead
+    // particle is not in anybody's mesh, so there is no process that could be said to own it, and
+    // the plot that draws its trail is per-process anyway.
+    unsigned nlocal_dead() const { return (unsigned)dead.size(); }
+    std::vector<long long> get_dead_ids() const;
     // COLLECTIVE. Number of particles over all processes.
     unsigned long nglobal() const;
 
