@@ -3728,15 +3728,56 @@ class Problem(_pyoomph.Problem):
         self.invalidate_cached_mesh_data()
 
 
+    def _global_mesh_nelement(self)->int:
+        """The element count Problem::distribute() will partition, i.e. that of the global mesh.
+
+        The global mesh itself has no Python handle (``mesh_pt()`` returns None for it), so count the
+        submeshes that were added to it in :py:meth:`rebuild_global_mesh_from_list`: the bulk and ODE
+        meshes plus every interface mesh.
+        """
+        n=0
+        for m in self._meshdict.values():
+            n+=m.nelement()
+        for im in self._interfacemeshes:
+            n+=im.nelement()
+        return n
+
     def distribute(self):
         """Distribute the problem's meshes over the MPI processes.
 
         Only checks the prerequisites here - the distribution itself is done by oomph-lib. The check
         must happen on all ranks (see :py:func:`~pyoomph.generic.mpi.ensure_pymetis_available`).
+
+        Leaves the problem undistributed (with a note) when there are fewer elements than processes,
+        which is always the case for a pure ODE problem.
         """
         # On a single process oomph-lib ignores the request entirely and never calls METIS, so do
         # not make PyMetis a requirement for running the same script without mpirun.
         if get_mpi_nproc()>1:
+            # oomph's Problem::distribute() throws when there are fewer elements than processes -
+            # a pure ODE problem has a single element and hence always does. That is a request that
+            # cannot be honoured, not an error: running the same problem replicated on every rank
+            # gives the right answer (it is what mpirun without --distribute does), so do that
+            # instead of aborting the job. Collective by construction: the meshes are still whole
+            # here, so every rank counts the same elements and takes the same branch.
+            #
+            # The count is taken AFTER the initial uniform refinement in initialise() but before the
+            # error-driven initial adaption, which is the only meaningful moment: the adaption leaves
+            # the mesh non-uniformly refined, which Problem::distribute() refuses outright, so a mesh
+            # that is too coarse now cannot be distributed later by growing.
+            nelem=self._global_mesh_nelement()
+            if nelem<get_mpi_nproc():
+                if get_mpi_rank()==0:
+                    msg=("NOTE: not distributing the problem: it has "+str(nelem)+" element(s) for "+
+                         str(get_mpi_nproc())+" processes, and oomph-lib can only partition a mesh with "
+                         "at least one element per process. The problem is solved replicated on every "
+                         "process instead - which is correct, but of course pointless in parallel.")
+                    if any(isinstance(m,MeshFromTemplateBase) for m in self._meshdict.values()):
+                        msg+=(" Adaption cannot repair this, since only a uniformly refined mesh can be "
+                              "distributed at all: to actually run in parallel, start from a finer mesh "
+                              "or add RefineToLevel(n), which refines before the distribution.")
+                    print(msg)
+                return
             ensure_pymetis_available()
         super().distribute()
 
