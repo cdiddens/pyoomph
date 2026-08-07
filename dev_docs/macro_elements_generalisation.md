@@ -1181,7 +1181,7 @@ problem is unaffected.
 What it does affect is anything that iterates nodes *by boundary index* — user post-processing,
 boundary-coordinate assignment, and tests like the ones in this file. **Characterised properly in
 §23**, which supersedes the "needs a degenerate geometry" reading here: the trigger is narrower than
-it looks and the worst case is larger.
+it looks and the worst case is larger. Since repaired; §23.2 says where.
 
 ### 15.3 ~~The edge→entity registry of §3.2.2 is not needed yet~~ — wrong, see §17.2
 
@@ -1716,10 +1716,13 @@ suite contains. The risk is concentrated exactly where this branch already found
 (§19), and the payoff is not measurable on realistic input. It is a good change to make deliberately,
 with its own validation pass; it is a bad change to slip in here.
 
-That validation pass has since been worked out and written up in
-`dev_docs/boundary_node_membership_repair.md` — still unimplemented, but with the staging, the two MPI
-ordering constraints that dictate where the hooks go, and the one accessor gap
-(`BulkElementTetra3dC2TB`'s face bubble) that could make the repair strip a genuine membership.
+**That validation pass has since been done, and the defect is repaired** — see
+`dev_docs/boundary_node_membership_repair.md`. Nodal boundary membership is now reconciled against the
+same per-face tags after every adapt, on by default, with a cross-rank push so the ranks cannot
+diverge. The strict xfail below is a passing test now. Two things that document did not see coming and
+which are the reason to read it before touching any of this: a **hanging** node is on the boundary
+without being a node of any tagged face (§3.1 there), and stripping such a node is irreversible rather
+than merely wrong.
 
 ### 18.4 "Snap only where pinned" is the wrong criterion — two objections that settle it
 

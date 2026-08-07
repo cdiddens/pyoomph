@@ -640,6 +640,15 @@ def _worker_main(argv):
             on_facets = set(key(nd) for nd in problem.get_mesh("domain/" + boundary).nodes())
             print("MARKED", len(marked))
             print("SPURIOUS", len(marked - on_facets))
+            # The other direction. The interface mesh is built through build_face_element(), which is
+            # the routine that knows about oddities like the C2TB tet's face bubble, so this is an
+            # INDEPENDENT oracle for the face-node enumeration the repair relies on -- a self-consistent
+            # check against the same tables could not catch a wrong one.
+            print("UNMARKED", len(on_facets - marked))
+            # And the mesh's own view of the same question, straight off the face tags.
+            sp, mi = mesh.check_boundary_node_membership()
+            print("SELFSPURIOUS", sp)
+            print("SELFMISSING", mi)
         return
     elif kind == "coupled":
         curved = argv[2] == "1"
@@ -1165,39 +1174,45 @@ def test_curved_shared_interface_agrees_from_both_sides(curved, tmp_path):
 
 
 # --------------------------------------------------------------------------------------------
-# Boundary-node membership (dev_docs 15.2) -- pre-existing, not part of this work
+# Boundary-node membership (dev_docs 15.2, characterised in 23, repaired per
+# dev_docs/boundary_node_membership_repair.md)
 # --------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("which", ["tri", "tetball", "gmshball"])
 @pytest.mark.parametrize("nref", [1, 2])
 def test_boundary_node_membership_matches_the_facets(which, nref, tmp_path):
-    # A node is on a boundary iff it belongs to one of that boundary's facets. oomph approximates this
-    # when refining, by giving a new mid-edge node the boundaries SHARED BY BOTH its end nodes
-    # (refineable_telements.cpp:458-467) -- and two nodes can share a boundary label without the edge
-    # between them lying on that boundary.
+    # A node is on a boundary iff it belongs to one of that boundary's facets. The refinement rules
+    # approximate this, by giving a new node the boundaries SHARED BY ALL its generating nodes
+    # (refineable_telements.cpp:458-467 for 2d tris, and the tet/wedge/pyramid/brick equivalents) --
+    # and two nodes can share a boundary label without the edge between them lying on that boundary.
     #
-    # On every mesh anyone would actually write, the approximation is exact, because an element meets a
-    # given boundary in a single face and so no interior edge has both ends on it. This pins that:
-    # measured 0 spurious nodes across these meshes at every level, up to 64512 elements.
+    # On every mesh anyone would actually write, the approximation is exact anyway, because an element
+    # meets a given boundary in a single face and so no interior edge has both ends on it. That is why
+    # the repair is a no-op here, and this pins BOTH halves of that: no spurious marks, and -- the more
+    # important direction now that memberships are actively removed -- nothing missing either.
     out = _worker_lines(tmp_path, "overmark", which, nref)
     assert int(out["MARKED"]) > 0
     assert int(out["SPURIOUS"]) == 0
+    assert int(out["UNMARKED"]) == 0, "the repair dropped a node the interface mesh does own"
+    assert (int(out["SELFSPURIOUS"]), int(out["SELFMISSING"])) == (0, 0)
 
 
-@pytest.mark.parametrize("which,nref,expected", [("halftet", 1, 1), ("halftet", 3, 84), ("singletet", 3, 35)])
-@pytest.mark.xfail(strict=True,
-                   reason="dev_docs/macro_elements_generalisation.md 23: pre-existing over-marking. A "
-                          "node inherits the boundaries shared by its parents, so an element with two "
-                          "or more faces on the SAME boundary mislabels the interior edges joining "
-                          "them. Not repaired -- see 23.2 for why, and for what repairing it costs.")
-def test_boundary_node_membership_is_wrong_when_a_boundary_wraps_an_element(which, nref, expected, tmp_path):
+@pytest.mark.parametrize("which,nref,was", [("halftet", 1, 1), ("halftet", 3, 84), ("singletet", 3, 35)])
+def test_boundary_node_membership_is_repaired_when_a_boundary_wraps_an_element(which, nref, was, tmp_path):
     # The configuration the approximation breaks on: a tetrahedron with several of its faces on one
     # boundary. Its other faces then have all their vertices on that boundary, so every edge of them is
-    # mislabelled, and the error compounds with refinement -- measured 51% of marked nodes at three
-    # refinements for the two-face case. Kept as a strict xfail so that fixing it is noticed here.
+    # mislabelled, and the error compounds with refinement -- 51% of the marked nodes at three
+    # refinements for the two-face case.
+    #
+    # `was` is what these cases measured before the post-adapt repair landed, when this was a strict
+    # xfail; it is quoted in the failure message because "84 spurious" is a much better description of a
+    # regression here than "not 0". The counts after the repair are 165-84=81 and 165-35=130 marked.
     out = _worker_lines(tmp_path, "overmark", which, nref)
-    assert int(out["SPURIOUS"]) == 0, "%s at nref=%d: %s spurious (was %d)" % (
-        which, nref, out["SPURIOUS"], expected)
+    assert int(out["MARKED"]) > 0
+    assert int(out["SPURIOUS"]) == 0, "%s at nref=%d: %s spurious (was %d before the repair)" % (
+        which, nref, out["SPURIOUS"], was)
+    assert int(out["UNMARKED"]) == 0, "the repair overshot and dropped a genuine membership"
+    assert (int(out["SELFSPURIOUS"]), int(out["SELFMISSING"])) == (0, 0)
 
 
 # --------------------------------------------------------------------------------------------

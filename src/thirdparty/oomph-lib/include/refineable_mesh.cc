@@ -1304,6 +1304,13 @@ namespace oomph
         this->setup_boundary_element_info();
       }
 
+      //FOR PYOOMPH: correct the nodal boundary membership of the nodes this adapt has just created.
+      // Deliberately OUTSIDE the block above -- it works off the per-face boundary tags, not off
+      // Boundary_element_pt -- and deliberately here rather than at the end of adapt_mesh(): the
+      // repositioning of hanging boundary nodes onto their macro element further down reads boundary
+      // membership, and would otherwise snap a spuriously marked node onto a boundary it is not on.
+      this->reconcile_boundary_node_membership_locally();
+
       if (Global_timings::Doc_comprehensive_timings)
       {
         t_end = TimingHelpers::timer();
@@ -1780,6 +1787,12 @@ namespace oomph
       } // End of documentation
     } // End if (this->nelement()>0)
 
+    //FOR PYOOMPH: push the boundary memberships just removed above onto the other ranks' halo copies.
+    // This communicates, so it has to be here and not inside the block that just ended: a rank can
+    // legitimately hold no elements of a given submesh, and a collective in there would deadlock it.
+    // It also has to be before classify_halo_and_haloed_nodes() has rebuilt anything, since it is
+    // driven by the halo/haloed ELEMENT lists -- the node lists are still stale at this point.
+    this->reconcile_boundary_node_membership_across_processes();
 
 #ifdef OOMPH_HAS_MPI
 

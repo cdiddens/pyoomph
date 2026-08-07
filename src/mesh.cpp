@@ -7498,6 +7498,267 @@ namespace pyoomph
       }
     }
     face_boundary_tags_valid = !facets.empty();
+    // The template's own intermediate-node rule intersects the parents' boundary sets
+    // (MeshTemplate::add_intermediate_node_unique), which over-marks in exactly the same way
+    // refinement does, so the unrefined mesh can already be wrong. Nothing has been distributed at
+    // this point, so the local pass is all that is needed here.
+    repair_boundary_node_membership_from_face_tags();
+    Pending_boundary_membership_removals.clear();
+  }
+
+  // Collects, from the per-face boundary tags, the set of nodes that genuinely lie on each boundary,
+  // plus the set of nodes for which THIS rank's answer is complete.
+  //
+  // `truth[b]` is the union of the nodes of every face tagged with boundary b. Halo elements are
+  // included: they are evidence like any other element.
+  //
+  // `decidable` is the nodes of the non-halo elements. If a node lies in at least one non-halo element
+  // on a rank, then every element incident to it is present on that rank -- Mesh::distribute() keeps a
+  // foreign element as a root halo iff it shares a node with an element of my domain, and the halo
+  // pruning keeps it on the same criterion. So for those nodes truth[] is complete and a missing entry
+  // really means "not on this boundary". For the rest (nodes reached only through a halo element) this
+  // rank cannot tell, and the owner's decision is pushed to it afterwards; see
+  // reconcile_boundary_node_membership_across_processes().
+  void TemplatedMeshBase::collect_face_tag_node_sets(std::vector<std::set<oomph::Node *>> &truth, std::set<oomph::Node *> &decidable) const
+  {
+    const unsigned nbound = this->nboundary();
+    truth.clear();
+    truth.resize(nbound);
+    decidable.clear();
+    for (unsigned int ie = 0; ie < this->nelement(); ie++)
+    {
+      pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
+      if (!el) continue;
+      if (!el->is_halo())
+      {
+        for (unsigned int in = 0; in < el->nnode(); in++) decidable.insert(el->node_pt(in));
+      }
+      for (const auto &entry : el->get_all_face_boundaries())
+      {
+        std::vector<oomph::Node *> face_nodes;
+        bool have_nodes = false;
+        for (unsigned boundary_id : entry.second)
+        {
+          if (boundary_id >= nbound) continue; // boundary was removed since the tags were seeded
+          if (!have_nodes)
+          {
+            face_nodes = el->get_all_nodes_of_face(entry.first);
+            have_nodes = true;
+          }
+          truth[boundary_id].insert(face_nodes.begin(), face_nodes.end());
+        }
+      }
+    }
+  }
+
+  // Whether a node's membership of boundary b may be removed. The truth set is a union of NODE LISTS
+  // of tagged faces, and that is not the same as "lies on the boundary": a HANGING node sits inside a
+  // coarser element's facet without being one of its nodes, so it belongs to no tagged face while
+  // being every bit as much on the boundary. Removing its membership is not a harmless mislabel --
+  // when that coarser element is refined later, its new node is created as a plain Node rather than a
+  // BoundaryNode (the class is chosen from the generating nodes' memberships and can never be changed
+  // afterwards), and the interface mesh then dies with "is not a boundary node".
+  //
+  // Found the hard way on a non-uniformly adapted tet cube, where four such nodes lost their marks one
+  // adapt before the elements around them were refined; see dev_docs/boundary_node_membership_repair.md.
+  // Skipping hanging nodes is deliberately conservative: a genuinely spurious mark on a hanging node
+  // survives, which is exactly the behaviour there was before any of this, and it stops being hanging
+  // (and gets cleaned up) as soon as the neighbourhood conforms.
+  static bool may_drop_boundary_membership(oomph::Node *n)
+  {
+    return !n->is_obsolete() && !n->is_hanging();
+  }
+
+  // Counts, without changing anything, the (node, boundary) pairs where nodal boundary membership and
+  // the face tags disagree: `spurious` are marked but on no tagged face (what the repair removes),
+  // `missing` are on a tagged face but not marked. `missing` must always be zero -- the inheritance
+  // rules only ever intersect, so they cannot lose a membership, and a node that arrived as a plain
+  // Node can never become a boundary node anyway. A nonzero value therefore means the seeding or one
+  // of the nnode_on_face_by_index()/node_index_on_face() tables is wrong, and is a reason to stop
+  // rather than to patch: it is the one way this machinery could strip a genuine membership.
+  std::pair<unsigned, unsigned> TemplatedMeshBase::check_boundary_node_membership_against_face_tags() const
+  {
+    if (!face_boundary_tags_valid || !this->nboundary()) return std::make_pair(0u, 0u);
+    std::vector<std::set<oomph::Node *>> truth;
+    std::set<oomph::Node *> decidable;
+    collect_face_tag_node_sets(truth, decidable);
+    unsigned spurious = 0, missing = 0;
+    for (unsigned b = 0; b < this->nboundary(); b++)
+    {
+      for (unsigned i = 0; i < Boundary_node_pt[b].size(); i++)
+      {
+        oomph::Node *n = Boundary_node_pt[b][i];
+        // Reports what the repair would act on, hanging nodes included in the exemption -- otherwise a
+        // mesh the repair has deliberately left alone would look broken.
+        if (may_drop_boundary_membership(n) && decidable.count(n) && !truth[b].count(n)) spurious++;
+      }
+      for (oomph::Node *n : truth[b])
+      {
+        if (!n->is_obsolete() && !n->is_on_boundary(b)) missing++;
+      }
+    }
+    return std::make_pair(spurious, missing);
+  }
+
+  // Drops every nodal boundary membership that is not backed by a tagged face, and records what was
+  // dropped in Pending_boundary_membership_removals so the distributed push can replay it.
+  //
+  // Why this is needed at all: a new node inherits the boundaries shared by ALL its generating nodes
+  // (RefineableTElement<2>::get_boundaries and the tet/wedge/pyramid/brick equivalents; oomph's own
+  // RefineableQElement does the same). Two nodes can share a boundary label without the edge between
+  // them lying on that boundary, so an element with two or more faces on the SAME boundary mislabels
+  // the interior edges joining them, and each mislabelled edge seeds more at the next refinement.
+  // The face tags do not have that weakness, so they are used to correct the node labels afterwards.
+  // See dev_docs/boundary_node_membership_repair.md.
+  unsigned TemplatedMeshBase::repair_boundary_node_membership_from_face_tags()
+  {
+    Pending_boundary_membership_removals.clear();
+    if (!repair_boundary_node_membership || !face_boundary_tags_valid || !this->nboundary()) return 0;
+    std::vector<std::set<oomph::Node *>> truth;
+    std::set<oomph::Node *> decidable;
+    collect_face_tag_node_sets(truth, decidable);
+
+    for (unsigned b = 0; b < this->nboundary(); b++)
+    {
+      oomph::Vector<oomph::Node *> keep;
+      keep.reserve(Boundary_node_pt[b].size());
+      for (unsigned i = 0; i < Boundary_node_pt[b].size(); i++)
+      {
+        oomph::Node *n = Boundary_node_pt[b][i];
+        // Obsolete nodes are left alone: prune_dead_nodes() deletes one exactly when it is on no
+        // boundary any more, so un-marking here would change what it frees. Hanging nodes are left
+        // alone for the reason given at may_drop_boundary_membership().
+        if (!may_drop_boundary_membership(n) || !decidable.count(n) || truth[b].count(n))
+        {
+          keep.push_back(n);
+          continue;
+        }
+        Pending_boundary_membership_removals.push_back(std::make_pair(n, b));
+      }
+      Boundary_node_pt[b] = keep;
+    }
+    detach_pending_boundary_memberships();
+    return Pending_boundary_membership_removals.size();
+  }
+
+  // Detaches the recorded (node, boundary) pairs from the nodes themselves. The is_on_boundary() guard
+  // is not optional: PARANOID is off in the default build, so BoundaryNodeBase::remove_from_boundary()
+  // skips its own check and dereferences a Boundaries_pt that may already be null.
+  void TemplatedMeshBase::detach_pending_boundary_memberships()
+  {
+    for (const auto &entry : Pending_boundary_membership_removals)
+    {
+      if (entry.first->is_on_boundary(entry.second)) entry.first->remove_from_boundary(entry.second);
+    }
+  }
+
+  // Replays the local repair's removals onto the ranks that hold halo copies of the affected elements.
+  //
+  // Needed because the local pass deliberately leaves undecided every node this rank reaches only
+  // through a halo element: the element carrying the tagged face may sit on another rank, so removing
+  // it here on the strength of an incomplete truth set could drop a genuine membership. The owner of
+  // such an element is by construction decidable for its nodes, so it decides and tells everyone
+  // holding a copy. One hop suffices: any node this rank holds lives in some element of this rank,
+  // which is either non-halo (decided locally, and correctly) or a halo copy of an element whose owner
+  // is included in the exchange below.
+  //
+  // Nothing else in oomph or pyoomph exchanges boundary membership -- the halo consistency check only
+  // compares geometry, level, flags and error -- so without this the ranks would silently disagree,
+  // and InterfaceMesh::setup_boundary_information() would then build different numbers of
+  // boundary-of-boundary corner elements on the halo and haloed copies of the same element.
+  void TemplatedMeshBase::reconcile_boundary_node_membership_across_processes()
+  {
+#ifdef OOMPH_HAS_MPI
+    if (this->is_mesh_distributed() && this->communicator_pt() && this->communicator_pt()->nproc() > 1)
+    {
+      oomph::OomphCommunicator *comm_pt = this->communicator_pt();
+      MPI_Comm mc = comm_pt->mpi_comm();
+      const int n_proc = comm_pt->nproc();
+      const int my_rank = comm_pt->my_rank();
+
+      std::map<oomph::Node *, std::set<unsigned>> removed_here;
+      for (const auto &entry : Pending_boundary_membership_removals) removed_here[entry.first].insert(entry.second);
+
+      // (index into the element list, local node index, boundary). Both sides walk their lists in the
+      // same order, exactly as oomph's own halo exchanges do.
+      std::vector<unsigned> received;
+      std::vector<std::pair<oomph::Node *, unsigned>> to_remove;
+
+      for (int d = 0; d < n_proc; d++)
+      {
+        if (d != my_rank) // Tell d what I decided about the elements of mine it holds as halos
+        {
+          oomph::Vector<oomph::GeneralisedElement *> haloed_el(this->haloed_element_pt(d));
+          std::vector<unsigned> buf;
+          if (!removed_here.empty())
+          {
+            for (unsigned e = 0; e < haloed_el.size(); e++)
+            {
+              oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(haloed_el[e]);
+              if (!fe) continue;
+              for (unsigned n = 0; n < fe->nnode(); n++)
+              {
+                auto found = removed_here.find(fe->node_pt(n));
+                if (found == removed_here.end()) continue;
+                for (unsigned b : found->second)
+                {
+                  buf.push_back(e);
+                  buf.push_back(n);
+                  buf.push_back(b);
+                }
+              }
+            }
+          }
+          unsigned n_send = buf.size();
+          MPI_Send(&n_send, 1, MPI_UNSIGNED, d, 93, mc);
+          if (n_send) MPI_Send(&buf[0], (int)n_send, MPI_UNSIGNED, d, 94, mc);
+        }
+        else // Collect everyone else's decisions about the elements I hold as halos
+        {
+          for (int dd = 0; dd < n_proc; dd++)
+          {
+            if (dd == d) continue;
+            unsigned n_recv = 0;
+            MPI_Status status;
+            MPI_Recv(&n_recv, 1, MPI_UNSIGNED, dd, 93, mc, &status);
+            received.resize(n_recv);
+            if (n_recv) MPI_Recv(&received[0], (int)n_recv, MPI_UNSIGNED, dd, 94, mc, &status);
+            if (!n_recv) continue;
+            oomph::Vector<oomph::GeneralisedElement *> halo_el(this->halo_element_pt(dd));
+            for (unsigned k = 0; k + 2 < n_recv; k += 3)
+            {
+              if (received[k] >= halo_el.size()) continue; // lists diverged; the halo check reports that
+              oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(halo_el[received[k]]);
+              if (!fe || received[k + 1] >= fe->nnode()) continue;
+              oomph::Node *nod_pt = fe->node_pt(received[k + 1]);
+              if (received[k + 2] < this->nboundary() && nod_pt->is_on_boundary(received[k + 2]))
+                to_remove.push_back(std::make_pair(nod_pt, received[k + 2]));
+            }
+          }
+        }
+      }
+
+      if (!to_remove.empty())
+      {
+        std::set<std::pair<oomph::Node *, unsigned>> drop(to_remove.begin(), to_remove.end());
+        std::set<unsigned> touched;
+        for (const auto &entry : drop) touched.insert(entry.second);
+        for (unsigned b : touched)
+        {
+          oomph::Vector<oomph::Node *> keep;
+          keep.reserve(Boundary_node_pt[b].size());
+          for (unsigned i = 0; i < Boundary_node_pt[b].size(); i++)
+          {
+            if (!drop.count(std::make_pair(Boundary_node_pt[b][i], b))) keep.push_back(Boundary_node_pt[b][i]);
+          }
+          Boundary_node_pt[b] = keep;
+        }
+        Pending_boundary_membership_removals.assign(drop.begin(), drop.end());
+        detach_pending_boundary_memberships();
+      }
+    }
+#endif
+    Pending_boundary_membership_removals.clear();
   }
 
   // Drops every face tag and marks them invalid, so setup_boundary_element_info() falls back to the

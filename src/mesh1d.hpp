@@ -183,6 +183,14 @@ namespace pyoomph
 
     void setup_boundary_element_info(std::ostream &outfile) override;
     void setup_boundary_element_info() override;
+
+    // Deliberate no-ops. In 1d the boundary elements are reconstructed FROM nodal boundary membership
+    // (setup_boundary_element_info below never looks at the face tags), so the nodes are the authority
+    // here and correcting them against the tags would be circular. It would also be pointless: a face
+    // of a line element is a single vertex, so the "boundaries shared by both end nodes" rule that
+    // over-marks in 2d and 3d has nothing to over-mark.
+    void reconcile_boundary_node_membership_locally() override {}
+    void reconcile_boundary_node_membership_across_processes() override {}
 	 void fill_internal_facet_buffers(std::vector<BulkElementBase*> & internal_elements, std::vector<int> & internal_face_dir,std::vector<BulkElementBase*> & opposite_elements,std::vector<int> & opposite_face_dir,std::vector<int> & opposite_already_at_index) override;
   };
 

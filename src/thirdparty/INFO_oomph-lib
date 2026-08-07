@@ -461,3 +461,24 @@ finder -- needed for non-uniform wedge/pyramid hanging, see mixed_adaptive_meshe
 into the trap the moment it starts populating those neighbour pointers. Pure-brick forests are
 unaffected (the cast always succeeds).
 Upstream equivalent: none, this is a pyoomph fix (upstream oomph-lib has no mixed 3d forests).
+
+mesh.h + refineable_mesh.cc (Changed on 7th August 2026):
+Two no-op virtuals on Mesh -- reconcile_boundary_node_membership_locally() and
+reconcile_boundary_node_membership_across_processes() -- and their two call sites in
+TreeBasedRefineableMeshBase::adapt_mesh. pyoomph's TemplatedMeshBase overrides them to correct nodal
+boundary membership against its own per-face boundary tags: oomph gives a new node the boundaries
+shared by ALL its generating nodes (RefineableQElement<2>/<3>::get_boundaries and pyoomph's tri/tet/
+wedge/pyramid equivalents), and two nodes can share a boundary label without the edge between them
+lying on that boundary, so an element with two or more faces on the SAME boundary mislabels the
+interior edges joining them, compounding at every refinement (84 of 165 marked nodes spurious at three
+refinements for a tet with two faces on one boundary).
+Both call sites are load-bearing rather than convenient. The local one sits just after the
+setup_boundary_element_info() block but OUTSIDE it, because the repair reads the face tags rather than
+Boundary_element_pt, and it must precede the repositioning of hanging boundary nodes onto their macro
+element further down, which reads boundary membership. The collective one sits just after the closing
+brace of "if (this->nelement()>0)" and before classify_halo_and_haloed_nodes(): everything inside that
+block is skipped on a rank holding no elements of a submesh, so a collective in there deadlocks, and
+the halo/haloed NODE lists are not rebuilt until afterwards, so only the ELEMENT lists can drive it.
+Only the h-adaptive adapt_mesh is hooked; p_adapt_mesh is not, as pyoomph has no p-refinable elements.
+See dev_docs/boundary_node_membership_repair.md.
+Upstream equivalent: none, this is a pyoomph fix.

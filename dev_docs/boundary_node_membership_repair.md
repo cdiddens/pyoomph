@@ -1,13 +1,19 @@
 # Repairing over-marked boundary-node membership after an adapt
 
-Status: **not implemented — this is the worked-out plan.** It is the "own validation pass" that
+Status: **implemented and on by default.** This was the "own validation pass" that
 `macro_elements_generalisation.md` §23.2 asked for when it deliberately left the defect alone. File and
 line references are to the tree state at the time of writing (branch `develop`, after `8da42d7`).
 
 The defect itself is characterised and measured in `macro_elements_generalisation.md` §23; that section
-is the reference for *how big it is*, this one for *what to do about it*. Two decisions are already
-settled and are recorded as decisions, not options: the MPI half is done properly with a cross-rank
-push (§4), and the repair is on by default with the flag as an escape hatch (§5).
+is the reference for *how big it is*, this one for what was done about it. Two decisions were settled
+up front: the MPI half is done properly with a cross-rank push (§4), and the repair is on by default
+with the flag as an escape hatch (§5).
+
+One thing the plan did not anticipate, and it is the part worth reading if you touch this again:
+**a hanging node is on the boundary without being a node of any tagged face** (§3.1). Stripping those
+is not a harmless mislabel — it makes a later refinement create a plain `Node` where a `BoundaryNode`
+was needed, which cannot be undone. That was caught by `test_tet_refinement.py`, not by anything
+written for this work.
 
 ## 1. The defect, and why the truth is already available
 
@@ -153,8 +159,35 @@ bool repair_boundary_node_membership = true;
    possibly-null `Boundaries_pt` — a segfault, not an exception.
 6. Record each dropped `(node, boundary)` in `Pending_boundary_membership_removals` for §4.
 
-Also call the repair at the end of `seed_face_boundaries_from_facets()` (`src/mesh.cpp:7501`), so the
-template-level over-marking of §1 is fixed once on the unrefined, pre-distribution mesh.
+Also call the repair at the end of `seed_face_boundaries_from_facets()`, so the template-level
+over-marking of §1 is fixed once on the unrefined, pre-distribution mesh.
+
+### 3.1 Hanging nodes must be exempt — the defect this work nearly shipped
+
+`truth[b]` is a union of the **node lists** of tagged faces, and that is not the same set as "the nodes
+lying on boundary b". A **hanging** node sits inside a coarser element's facet without being one of its
+nodes, so it belongs to no tagged face while being every bit as much on the boundary. In 3d it does not
+even need the coarse element to be its neighbour: an edge of a boundary facet is shared by several
+elements, only some of which have a face on that boundary, and if the one that refines the edge is an
+interior element then the new midpoint lies on the boundary and appears in nobody's tagged face list.
+
+Removing such a membership is not a mislabel that the next adapt puts right. It is irreversible, and it
+fails somewhere else entirely: when the coarse element is eventually refined, its new node's class is
+chosen from its generating nodes' memberships (`BoundaryNode` vs plain `Node`, and a plain `Node` can
+never become a boundary node afterwards), so the node is born plain and the interface mesh dies with
+"Node ... is not a boundary node" from `Mesh::generate_interface_elements`.
+
+Measured on `test_tet_refinement.py::test_tet_node_sharing_ignores_node_positions`, a non-uniformly
+adapted `TetCubeMesh(N=3)` that also unrefines: four nodes — all four `is_hanging()` and correctly
+marked one step earlier — lost their memberships at one adapt, and the interface rebuild threw at the
+next. So `repair_boundary_node_membership_from_face_tags()` skips any node with `is_hanging()`
+(`may_drop_boundary_membership()` in `src/mesh.cpp`), and `check_boundary_node_membership()` exempts
+them too, so that a mesh the repair has deliberately left alone does not read as broken.
+
+That is deliberately conservative in one direction: a genuinely spurious mark on a hanging node
+survives, which is exactly the behaviour there was before any of this — and it is cleaned up by the
+next adapt at which the node stops hanging. The configurations the repair exists for (§6) refine
+uniformly and have no hanging nodes at all, so nothing is lost there.
 
 **Remove only; never add.** The inheritance rule is an intersection, so the marked set is always a
 superset of the truth and under-marking cannot arise from refinement. Adding is also structurally
@@ -246,56 +279,96 @@ circular disc and an unstructured gmsh tetrahedral ball, each at one, two and th
 nothing — it is a no-op that can be demonstrated rather than argued. Behind an opt-in flag nobody would
 enable it and the strict xfail could not be flipped, which is the point of doing this at all.
 
-## 6. Verification
+## 6. Verification, as run
 
-**Flip the xfail.** `tests/test_curved_boundaries.py:1187-1200`: drop the
-`@pytest.mark.xfail(strict=True, ...)`, keep the
-`[("halftet",1,1), ("halftet",3,84), ("singletet",3,35)]` parametrisation with `expected` reworded as
-the pre-repair baseline the assertion message quotes, and rename to
-`test_boundary_node_membership_is_repaired_when_a_boundary_wraps_an_element`. Strengthen
-`test_boundary_node_membership_matches_the_facets` (`:1180`) to assert set *equality*
-(`marked == on_facets`) rather than `spurious == 0` — that is what catches an incomplete face-node
-enumeration. At that point §23.2 of `macro_elements_generalisation.md` stops being a "not repaired" note
-and becomes a pointer to what was done.
+**The three cases that used to be a strict xfail now pass.** `tests/test_curved_boundaries.py`'s
+`test_boundary_node_membership_is_repaired_when_a_boundary_wraps_an_element` keeps the
+`[("halftet",1,1), ("halftet",3,84), ("singletet",3,35)]` parametrisation, with the old count quoted in
+the failure message -- "84 spurious" describes a regression here far better than "not 0". The marked
+counts after the repair are exactly the old ones minus the spurious ones: 165-84 = 81 and 165-35 = 130.
+The companion test on realistic meshes now asserts set *equality* in both directions rather than
+"no spurious", which is what catches an incomplete face-node enumeration.
 
-**New tests.**
+**Every element family, every space, both directions.** `tests/test_boundary_element_identification.py`
+sweeps hex/tet/wedge/pyramid and the `all_four` mixed layout over C1, C2, C1TB and C2TB at 0-2
+refinements, asserting `check_boundary_node_membership() == (0, 0)` *and* the same comparison made
+against the INTERFACE MESHES instead of the tags. The second one is the load-bearing check: an
+interface mesh is assembled by `build_face_element()`, which is the routine that knows about the
+oddities, so it is an oracle independent of the tables in §2 -- a self-consistent check against the
+same tables could not catch a wrong one. A wider sweep run while developing covered 103 (family, space,
+level) combinations, all `(0, 0)`.
 
-1. `tests/test_boundary_element_identification.py`: `check_boundary_node_membership() == (0, 0)` across
-   quad, tri C1/C2/C2TB, brick C1/C2, tet C1/C1TB/C2/C2TB, wedge and pyramid meshes at 0-3 refinements.
-   The `missing` half is the guard on the §2 tables; the C2TB tet case is the specific regression for
-   `Central_node_on_face`.
-2. Enumeration against an independent oracle: for every boundary, the union of `get_all_nodes_of_face`
-   over tagged faces must equal the interface mesh's node set. The `overmark` worker at
-   `tests/test_curved_boundaries.py:605-643` already computes one direction by position; add
-   `on_facets - marked`. The interface mesh is built through `build_face_element`, which is exactly the
-   routine that knows about the C2TB bubble, so this catches a wrong table where a self-consistent
-   check would not.
-3. `tests/mpi_boundary_membership_worker.py`, on the pattern of `tests/mpi_curved_worker.py`: build the
-   halftet/singletet problem, distribute over 2-4 ranks, refine 2-3 times, gather
-   `rounded position -> set of boundary indices` from every rank, and assert both that no mark is
-   spurious and that all ranks agree for every shared position. Include a case where one rank holds no
-   elements of a submesh, to drive the `nelement()==0` path through the collective. This is the only
-   test of §4.2.
+That the C2TB tet is really covered was checked rather than assumed: its interface element has **7**
+nodes, and an unrefined tet slab has 11 bulk nodes marked on a wall against 9 for C2 -- the two extra
+face bubbles. Had `nnode_on_face_by_index()` returned 6, those would have shown up as `missing`.
 
-**Suites to run** (ask before launching the long ones, per `CLAUDE.md`):
-`test_boundary_element_identification.py`, `test_facet_adjacency.py`, `test_curved_boundaries.py`,
-`test_segment_ordering.py`, `test_mesh_point_locator.py`, `test_mixed_3d.py`,
-`test_adaptive_3d_campaign.py` (the broad wedge/pyramid/brick face-node coverage),
-`test_adaptive_interface_coupling.py` and the periodic-BC tests; then with `--full`:
-`test_mpi_adaptivity.py`, `test_mpi_adaptivity_3d.py`, `test_mpi_curved_boundaries.py`,
-`test_mpi_remeshing.py`, `test_mpi_state_files.py`. Build with `./build_for_develop.sh`, never bare
-ninja; MPI runs capped at 4 ranks.
+**MPI.** `tests/test_mpi_boundary_membership.py` at 2 and 4 ranks, on the slab of `tests/slab_mesh.py`
+(§6.1). It refines once **after** distributing, which matters: the initial refinement happens before
+distribution, where every element is local and the push has nothing to do. Per rank it asserts
+`check_boundary_node_membership() == (0, 0)`; globally it compares the union over ranks of the marked
+positions against the union of the interface meshes' positions (neither is conclusive on one rank,
+since a halo-only node can sit on a facet owned elsewhere); and separately it asserts that no two ranks
+disagree about a node they both hold.
+
+**The MPI test was verified to have teeth.** With the cross-rank push commented out and everything else
+unchanged, it fails as intended -- "tet/side: 3 nodes marked on no facet anywhere" at 2 ranks, 14 at 4,
+and the agreement check reporting `node at 0.9375,0.0625,0.25 is on ['wall'] on rank 0 but on
+['side', 'wall'] on rank 1`. That divergence is invisible to every other check in the codebase, which
+is the whole reason §4.2 exists. On the 4-rank hex slab, 55 of the 180 nodes a rank holds are
+undecidable there, so the push is not a theoretical concern.
+
+### 6.1 `tests/slab_mesh.py`
+
+The single tetrahedron of `test_curved_boundaries.py` is the defect in its smallest form and cannot be
+distributed. `SlabTemplate` is the same configuration made big enough: an N x N x 1 slab of bricks or
+tets whose top and bottom faces share the boundary name "wall", so every element has two faces on
+"wall", all eight of its nodes are on "wall", and its four vertical edges have both ends on "wall"
+without lying on it. Serial, with the repair switched off:
+
+```
+                nref=1        nref=2
+brick slab     21 spurious   135 spurious
+tet slab       31 spurious   303 spurious
+```
+
+and zero with it on, in both directions. The brick numbers matter on their own: those come from oomph's
+own `RefineableQElement<3>::get_boundaries`, so this is not only a pyoomph-simplex problem.
+
+### 6.2 Suites run
+
+Serial, all passing: `test_boundary_element_identification`, `test_facet_adjacency`,
+`test_curved_boundaries`, `test_segment_ordering`, `test_mesh_point_locator`, `test_mixed_3d`,
+`test_adaptive_interface_coupling`, `test_tet_refinement`, `test_wedge_refinement`,
+`test_pyramid_refinement`, `test_triangle_refinement` (452 passed), and the 2d/3d adaptive campaigns
+with `--full`. MPI with `--full`, all passing: `test_mpi_boundary_membership`, `test_mpi_adaptivity`,
+`test_mpi_adaptivity_3d`, `test_mpi_curved_boundaries`, `test_mpi_remeshing`, `test_mpi_state_files`,
+`test_mpi_interface_coupling`, `test_mpi_error_estimator`, `test_mpi_adaptive_recovery`,
+`test_mpi_undistributable`, `test_mpi_global_meshdata`, `test_mpi_structural_assembly`,
+`test_mpi_observables`, `test_mpi_tracers`, `test_mpi_rank_zero_failures`, `test_mpi_newton_abort`.
+
+Two failures found on the way are **pre-existing and unrelated**, both confirmed by rebuilding the tree
+without this work and reproducing them identically:
+
+* refining a **C1TB tet** segfaults (`MixedBoxMesh3D(kind="tet")` with `space="C1TB"`, at the first
+  `refine_uniformly`). C2TB is fine. That combination is therefore left out of the family sweep rather
+  than xfailed, since a segfault takes the interpreter down.
+* `test_adaptive_3d_campaign.py::test_ale_moving_mesh[levels0-hex_pyr]` stalls at
+  `max|residual| = 8.583e-09` against a 1e-11 tolerance, deterministically, on an unrefined mesh.
+
 
 ## 7. Risks
 
-1. **Incomplete face-node enumeration strips a genuine membership.** The dominant risk, concentrated on
+The first two were the ones that mattered: risk 2 is what actually happened, in the form of §3.1.
+
+1. **Incomplete face-node enumeration strips a genuine membership.** Concentrated on
    `BulkElementTetra3dC2TB` (bubble outside `Node_on_face`), `WedgeElementC2` (9-node quad facets) and
    `PyramidElementC2`. Mitigated by shipping the `missing` counter as an assertion rather than a silent
-   loss, and by verification test 2.
-2. **Irreversibility.** Once a parent's spurious membership is gone, its sons are built as plain
-   `Node`s and can never become boundary nodes again (§3). That is the intended fix, but it means a
-   wrong removal surfaces later as an `add_boundary_node` throw rather than as a mislabel — loud, but
-   far from the cause.
+   loss, and by checking against the interface meshes rather than against the same tables (§6).
+2. **Irreversibility.** Once a node's membership is gone, a son built from it is a plain `Node` and can
+   never become a boundary node again. A wrong removal therefore surfaces much later, and far from its
+   cause, as "is not a boundary node" out of `generate_interface_elements`. §3.1 is one instance of this
+   that was found and fixed; anything else of that shape will look the same, so the first thing to
+   suspect on such a throw is a node that is on the boundary without being on a tagged face.
 3. **Boundary coordinates.** `remove_from_boundary` deletes the node's zeta for that boundary
    (`nodes.cc:3080-3086`) but never frees `Boundary_coordinates_pt` when the map empties, unlike its
    handling of `Boundaries_pt` at `:3088-3092`. So `boundary_coordinates_have_been_set_up()`

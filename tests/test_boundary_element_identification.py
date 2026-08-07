@@ -212,3 +212,98 @@ def test_named_boundaries_are_unaffected_by_the_tag_route():
             for side in ("left", "right", "top", "bottom"):
                 b = m.get_boundary_index(side)
                 assert m.nboundary_element(b) == per_side, (split, side, m.nboundary_element(b))
+
+
+# ------------------------------------------------------------------------------------------------
+# Nodal boundary membership, reconciled against the same face tags
+# (dev_docs/boundary_node_membership_repair.md)
+# ------------------------------------------------------------------------------------------------
+#
+# The tags also correct the NODE labels after every adapt, because the refinement rules give a new
+# node the boundaries shared by all its generating nodes -- a superset of the truth, by exactly the
+# same "interior face whose vertices all sit on one boundary" mechanism as above.
+#
+# Removing a membership is irreversible (the son of an unmarked node is built as a plain Node, which
+# can never become a boundary node again), so the direction that matters here is the one that would
+# be silent: a face whose node set the repair does not know about in full. That is not hypothetical --
+# nnode_on_face()/get_bulk_node_number() are missing or wrong for half the element families, and the
+# 15-node enriched tet keeps its face bubble outside Node_on_face entirely.
+
+from box_mesh_3d import MixedBoxMesh3D
+
+_BOX_WALLS = ["left", "right", "front", "back", "bottom", "top"]
+
+
+class _Box(Problem):
+    def __init__(self, kind, space, N=2):
+        super().__init__()
+        self._kind, self._space, self._N = kind, space, N
+
+    def define_problem(self):
+        self += MixedBoxMesh3D(kind=self._kind, N=self._N)
+        eqs = PoissonEquation(source=1, space=self._space)
+        eqs += DirichletBC(u=0) @ _BOX_WALLS   # so every wall gets an interface mesh to compare against
+        self += eqs @ "domain"
+
+
+def _membership_vs_interface_meshes(problem, walls):
+    """(spurious, unmarked) counted against the INTERFACE meshes rather than against the face tags.
+
+    An interface mesh is assembled by build_face_element(), which is the routine that knows about the
+    per-family face-node oddities, so its node set is an oracle independent of the tables the repair
+    itself uses. Positions are the key: the two meshes hand out distinct wrappers for the same node.
+    """
+    mesh = problem.get_mesh("domain")
+
+    def key(nd):
+        return tuple(round(nd.x(i), 11) for i in range(nd.ndim()))
+
+    spurious = unmarked = 0
+    for wall in walls:
+        b = mesh.get_boundary_index(wall)
+        marked = set(key(nd) for nd in mesh.nodes() if nd.is_on_boundary(b))
+        on_facets = set(key(nd) for nd in problem.get_mesh("domain/" + wall).nodes())
+        assert on_facets, wall
+        spurious += len(marked - on_facets)
+        unmarked += len(on_facets - marked)
+    return spurious, unmarked
+
+
+# C1TB/C2TB exist for simplices only ("cannot be generalized to the space C2TB" for wedges/pyramids),
+# and refining a C1TB tet segfaults -- a pre-existing defect, unrelated to boundary membership and
+# reproduced on the tree before this landed, so that one combination is left out rather than xfailed.
+_FAMILY_CASES = ([("hex", s) for s in ("C1", "C2", "C1TB", "C2TB")] +
+                 [("tet", s) for s in ("C1", "C2", "C2TB")] +
+                 [(k, s) for k in ("wedge", "pyr", "all_four") for s in ("C1", "C2")])
+
+
+@pytest.mark.parametrize("kind,space", _FAMILY_CASES)
+@pytest.mark.parametrize("nref", [0, 1, 2])
+def test_boundary_node_membership_is_exact_for_every_element_family(kind, space, nref, tmp_path):
+    with _Box(kind, space) as pr:
+        pr.set_output_directory(str(tmp_path))
+        pr.max_refinement_level = nref + 1
+        pr.initialise()
+        for _ in range(nref):
+            pr.refine_uniformly()
+        m = pr.get_mesh("domain")
+        # The mesh's own view: (marked but on no tagged face, on a tagged face but not marked).
+        assert m.check_boundary_node_membership() == (0, 0)
+        # ... and the same question asked of the interface meshes instead of the tags.
+        assert _membership_vs_interface_meshes(pr, _BOX_WALLS) == (0, 0)
+
+
+def test_the_repair_can_be_switched_off():
+    # The flag is an escape hatch, not an opt-in. It has to actually reach the adapt, so this checks
+    # both directions on the one mesh where it makes a difference at all is unavailable here -- on a box
+    # every element meets a wall in a single face -- and therefore only that the property round-trips
+    # and leaves an already-consistent mesh alone.
+    with _Box("all_four", "C1") as pr:
+        pr.max_refinement_level = 2
+        pr.initialise()
+        m = pr.get_mesh("domain")
+        assert m.repair_boundary_node_membership is True
+        m.repair_boundary_node_membership = False
+        assert m.repair_boundary_node_membership is False
+        pr.refine_uniformly()
+        assert m.check_boundary_node_membership() == (0, 0)

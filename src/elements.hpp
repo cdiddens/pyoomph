@@ -451,6 +451,21 @@ namespace pyoomph
     virtual const std::vector<int> & get_possible_face_indices() const=0;
     virtual  std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const=0;
 
+    // ALL nodes of a local face -- vertices AND face-interior ones (C2 mid-side/face-centre nodes,
+    // the C2TB tet's face bubble): exactly the set build_face_element() wires into the face element,
+    // and therefore exactly the nodes an interface mesh on that face owns.
+    // get_vertex_nodes_of_face() above is deliberately vertices-only (it keys the facet map) and must
+    // NOT be used to decide nodal boundary membership -- dropping a genuine mid-side node's
+    // membership in repair_boundary_node_membership_from_face_tags() would be a correctness bug.
+    std::vector<oomph::Node *> get_all_nodes_of_face(const int & face_index) const;
+    // oomph's nnode_on_face() is face-index independent, which no wedge or pyramid can answer (their
+    // facets are a mix of triangles and quads, hence the throws in wedges_and_pyramids.hpp), and
+    // TElement<1,*>/TElement<3,*> never implement it at all. Same story for get_bulk_node_number: it
+    // is missing on TElement<1,*>, and on the C2TB tet the face bubble lives OUTSIDE Node_on_face and
+    // is wired in by hand (BulkElementTetra3dC2TB::Central_node_on_face). Hence these two hooks.
+    virtual unsigned nnode_on_face_by_index(const int & face_index) const { return this->nnode_on_face(); }
+    virtual unsigned node_index_on_face(const int & face_index, const unsigned & i) const { return this->get_bulk_node_number(face_index, i); }
+
     // --- Per-face boundary tags -------------------------------------------------------------
     // Which mesh boundaries each of this element's local faces lies on. This is the single source
     // of truth for TemplatedMeshBase::setup_boundary_element_info_from_face_tags(), replacing the
@@ -1352,7 +1367,11 @@ namespace pyoomph
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 2; }
-    BulkTElementLine1dC1();    
+    // A face of a 1d simplex is a single point. oomph::TElement<1,*> implements neither
+    // nnode_on_face() nor get_bulk_node_number(), so both hooks have to be supplied here.
+    unsigned nnode_on_face_by_index(const int & ) const override { return 1; }
+    unsigned node_index_on_face(const int & face_index, const unsigned & ) const override { return (face_index == -1 ? 0 : 1); }
+    BulkTElementLine1dC1();
     unsigned get_meshio_type_index() const override { return 1; }
     void check_integrity(double &max_error) override { max_error = 0; } // TODO throw_runtime_error("IMPLEMENT");
 
@@ -1414,8 +1433,11 @@ namespace pyoomph
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 2; }
+    // As for the C1 line, but the far vertex is node 2 (node 1 is the mid-side node).
+    unsigned nnode_on_face_by_index(const int & ) const override { return 1; }
+    unsigned node_index_on_face(const int & face_index, const unsigned & ) const override { return (face_index == -1 ? 0 : 2); }
     unsigned get_meshio_type_index() const override { return 2; }
-    BulkTElementLine1dC2();    
+    BulkTElementLine1dC2();
     void check_integrity(double &max_error) override { max_error = 0; } // TODO
 
     
@@ -1973,7 +1995,9 @@ namespace pyoomph
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 6; }
-    BulkElementTetra3dC1();    
+    // oomph::TElement<3,*> supplies get_bulk_node_number() (via Node_on_face) but not nnode_on_face().
+    unsigned nnode_on_face_by_index(const int & ) const override { return 3; }
+    BulkElementTetra3dC1();
     unsigned get_meshio_type_index() const override { return 4; }
 
     void check_integrity(double &max_error) override { max_error = 0; } // TODO
@@ -2089,6 +2113,8 @@ namespace pyoomph
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 6; }
+    // 3 vertices + 3 mid-edge nodes per face; Node_on_face is [4][6] here.
+    unsigned nnode_on_face_by_index(const int & ) const override { return 6; }
     BulkElementTetra3dC2(bool has_bubble = false);
     unsigned get_meshio_type_index() const override { return 10; }
     
@@ -2154,7 +2180,6 @@ namespace pyoomph
   {
   private:
     static oomph::TBubbleEnrichedGauss<3, 3> Default_enriched_integration_scheme;
-    //  static const unsigned Central_node_on_face[3];
     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
     static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
@@ -2165,7 +2190,16 @@ namespace pyoomph
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
-    BulkElementTetra3dC2TB();    
+    // The 15-node enriched tet adds one bubble node per face (10..13) plus one cell-interior bubble
+    // (14). The face bubbles live OUTSIDE oomph::TElement<3,3>::Node_on_face, which is only [4][6],
+    // so build_face_element() has to wire them in by hand -- and so does node_index_on_face() below.
+    // Getting this wrong would make the boundary-membership repair strip a genuine membership, since
+    // these nodes are created with boundary_possible=true (meshtemplate.cpp).
+    static const std::vector<unsigned> Central_node_on_face;
+    unsigned nnode_on_face_by_index(const int & ) const override { return 7; }
+    unsigned node_index_on_face(const int & face_index, const unsigned & i) const override
+      { return (i < 6 ? BulkElementTetra3dC2::node_index_on_face(face_index, i) : Central_node_on_face[face_index]); }
+    BulkElementTetra3dC2TB();
     unsigned get_meshio_type_index() const override { return 100; } // Just some otherwise unused value here
     
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
@@ -2216,6 +2250,12 @@ namespace pyoomph
       const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementWedge3dC1();
+      // oomph::WedgeElementC1 already declares nnode_on_face_by_index() with this exact signature, and
+      // so does BulkElementBase -- two independent bases, hence two vtable slots. Without this single
+      // derived declaration (which legally overrides both) a call through a BulkElementBase* would
+      // reach BulkElementBase's default, i.e. the throwing nnode_on_face(). Same below for the other
+      // three wedge/pyramid classes.
+      unsigned nnode_on_face_by_index(const int & face_index) const override { return oomph::WedgeElementC1::nnode_on_face_by_index(face_index); }
       int nedges() const override { throw_runtime_error("Not implemented"); }
       unsigned get_meshio_type_index() const override { return 13; }      
       void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override {oomph::WedgeElementC1::shape(s, psi); }
@@ -2280,6 +2320,7 @@ namespace pyoomph
       const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementPyramid3dC1();
+      unsigned nnode_on_face_by_index(const int & face_index) const override { return oomph::PyramidElementC1::nnode_on_face_by_index(face_index); }
       int nedges() const override { throw_runtime_error("Not implemented"); } // No need tom implement this now
       unsigned get_meshio_type_index() const override { return 15; }      
       void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override {oomph::PyramidElementC1::shape(s, psi); }
@@ -2349,9 +2390,10 @@ namespace pyoomph
       oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
       const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-      BulkElementWedge3dC2();      
+      BulkElementWedge3dC2();
+      unsigned nnode_on_face_by_index(const int & face_index) const override { return oomph::WedgeElementC2::nnode_on_face_by_index(face_index); }
       int nedges() const override { throw_runtime_error("Not implemented"); }
-      unsigned get_meshio_type_index() const override { return 26; }      
+      unsigned get_meshio_type_index() const override { return 26; }
       void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override {oomph::WedgeElementC2::shape(s, psi); }
       void shape_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi) const override { oomph::WedgeElementShapeC1::shape(s, psi); }
       void shape_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }      
@@ -2475,7 +2517,8 @@ namespace pyoomph
       oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
       const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
-      BulkElementPyramid3dC2();      
+      BulkElementPyramid3dC2();
+      unsigned nnode_on_face_by_index(const int & face_index) const override { return oomph::PyramidElementC2::nnode_on_face_by_index(face_index); }
       int nedges() const override { throw_runtime_error("Not implemented"); }
       unsigned get_meshio_type_index() const override { return 27; }      
       void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override {oomph::PyramidElementC2::shape(s, psi); }

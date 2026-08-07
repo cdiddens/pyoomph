@@ -717,6 +717,29 @@ namespace pyoomph
 		// by something that cannot supply facet information.
 		void invalidate_face_boundary_tags();
 
+		// --- Nodal boundary membership, reconciled against the same face tags ---
+		// The refinement rules give a new node the boundaries shared by all its generating nodes, which
+		// is a superset of the truth whenever an element has two or more faces on one and the same
+		// boundary. The tags do not have that weakness, so they are used to correct the node labels
+		// after every adapt. See dev_docs/boundary_node_membership_repair.md.
+		void collect_face_tag_node_sets(std::vector<std::set<oomph::Node *>> &truth, std::set<oomph::Node *> &decidable) const;
+		// Diagnostic: (spurious, missing) without changing anything. `missing` must be zero.
+		std::pair<unsigned, unsigned> check_boundary_node_membership_against_face_tags() const;
+		// Removes the spurious memberships; returns how many. Fills Pending_boundary_membership_removals.
+		unsigned repair_boundary_node_membership_from_face_tags();
+		void detach_pending_boundary_memberships();
+		// What the last local repair removed, replayed onto the other ranks' halo copies by
+		// reconcile_boundary_node_membership_across_processes().
+		std::vector<std::pair<oomph::Node *, unsigned>> Pending_boundary_membership_removals;
+		// Escape hatch, not an opt-in: on every mesh where an element meets a boundary in a single face
+		// the repair provably removes nothing, so it is on by default.
+		bool repair_boundary_node_membership = true;
+
+		// Hooks called by oomph's adapt_mesh(); see the //FOR PYOOMPH comment on oomph::Mesh for why
+		// there are two of them and why their placement is load-bearing.
+		void reconcile_boundary_node_membership_locally() override { repair_boundary_node_membership_from_face_tags(); }
+		void reconcile_boundary_node_membership_across_processes() override;
+
 		//	void set_spatial_error_estimator_pt(oomph::Z2ErrorEstimator * errest) {this->spatial_error_estimator_pt()=errest;}
 		TemplatedMeshBase() : pyoomph::Mesh() {}
 		//	Problem * get_problem() {return problem;}

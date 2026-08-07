@@ -11660,7 +11660,6 @@ namespace pyoomph
 		// 1 : s_1 fixed
 		// 2 : s_2 fixed
 		// 3 : sloping face
-		std::vector<int> Central_node_on_face{13, 12, 10, 11};
 		unsigned bulk_number = Central_node_on_face[face_index];
 		face_element_pt->node_pt(6) = node_pt(bulk_number);
 		face_element_pt->bulk_node_number(6) = bulk_number;
@@ -14309,6 +14308,9 @@ namespace pyoomph
 	oomph::TBubbleEnrichedGauss<2, 3> BulkElementTri2dC1TB::Default_enriched_integration_scheme;
 	oomph::TBubbleEnrichedGauss<2, 3> BulkElementTri2dC2TB::Default_enriched_integration_scheme;
 	oomph::TBubbleEnrichedGauss<3, 3> BulkElementTetra3dC2TB::Default_enriched_integration_scheme;
+	// Local index of the face bubble node of each face: face 0 is s_0 fixed, 1 is s_1, 2 is s_2 and 3
+	// is the sloping face. Read by both build_face_element() and node_index_on_face().
+	const std::vector<unsigned> BulkElementTetra3dC2TB::Central_node_on_face{13, 12, 10, 11};
 
 	bool InterfaceElementBase::interpolate_new_interface_dofs=true;
 
@@ -14841,9 +14843,21 @@ namespace pyoomph
 	  else throw_runtime_error("Invalid face index for line element");
 	}
 
+	// Every node of a local face, in the face element's own ordering. The per-family tables live in the
+	// nnode_on_face_by_index()/node_index_on_face() overrides (see elements.hpp); this is just the loop.
+	std::vector<oomph::Node *> BulkElementBase::get_all_nodes_of_face(const int &face_index) const
+	{
+		const unsigned n = this->nnode_on_face_by_index(face_index);
+		std::vector<oomph::Node *> res;
+		res.reserve(n);
+		for (unsigned i = 0; i < n; i++) res.push_back(const_cast<BulkElementBase *>(this)->node_pt(this->node_index_on_face(face_index, i)));
+		return res;
+	}
+
 	// Developer-only utility (unused by the running code, invoked manually while adding a new element type):
 	// prints, to stdout, ready-to-paste C++ source for the "if (face==...) return {...};" body of a new
 	// get_vertex_nodes_of_face() override, by inspecting which of the element's face-local nodes are vertex nodes.
+	// The per-family node counts it hard-codes below are the same ones nnode_on_face_by_index() now carries.
 	void help_me_with_the_facets(const BulkElementBase *elem,int face_index)
 	{
 
