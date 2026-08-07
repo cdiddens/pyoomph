@@ -304,8 +304,9 @@ bookkeeping at all — the father still holds the tags it was given when it was 
 the tri routine, and the `is_adaptation_enabled() && refinement_possible()` gate.
 Those legacy routines remain only as the fallback for meshes that never receive
 tags — no facet information in the template, or an element set built outside the
-template/refinement path (PFEM's `define_new_mesh`; the
-`flush_element_storage` binding calls `invalidate_face_boundary_tags()`).
+template/refinement path (the `flush_element_storage` binding calls
+`invalidate_face_boundary_tags()`; the PFEM prototype that motivated this case has
+since been removed).
 `setup_interior_boundary_elements` returns early when tags are valid: an interior
 boundary is nothing special, both incident elements are tagged from the template
 facets and already registered, so the old scan would double-add them. The Python

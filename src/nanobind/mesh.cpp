@@ -1190,9 +1190,9 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("add_interpolated_nodes_at",mesh_method(&pyoomph::Mesh::add_interpolated_nodes_at),nb::rv_policy::reference, "Creates and adds new nodes interpolated at the given positions, used e.g. when refining or remeshing")
 		.def("add_boundary_node",mesh_method([](pyoomph::Mesh *self,unsigned bind,pyoomph::Node *n) {self->add_boundary_node(bind,n);}), nb::arg("boundary_index"), nb::arg("node"), "Adds the given node to the given mesh boundary")
 		.def("flush_element_storage",mesh_method([](pyoomph::Mesh *self){
-			// The replacement elements (e.g. PFEM's define_new_mesh) cannot inherit the per-face
-			// boundary tags of the discarded ones, so drop them and let setup_boundary_element_info
-			// fall back to the legacy node-membership reconstruction for this mesh.
+			// The replacement elements cannot inherit the per-face boundary tags of the discarded
+			// ones, so drop them and let setup_boundary_element_info fall back to the legacy
+			// node-membership reconstruction for this mesh.
 			if (auto *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self)) tm->invalidate_face_boundary_tags();
 			self->flush_element_storage();}), "Clears this mesh's list of elements without deleting them (ownership is assumed to be transferred elsewhere)")
 		.def("_set_zeta_projection_enabled",mesh_method([](pyoomph::Mesh *self, bool yesno){self->set_zeta_projection_enabled(yesno);}), nb::arg("yesno"), "Switch the zeta-projection residual on or off for every element of this mesh. Must stay on for the whole projection solve, since a Newton solve assembles more than once.")

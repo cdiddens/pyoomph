@@ -704,11 +704,11 @@ namespace pyoomph
 
 		// True once seed_face_boundaries_from_facets() has run on a mesh whose template actually
 		// carried facet information. Meshes that build their elements outside the template +
-		// refinement path (e.g. PFEM's define_new_mesh) leave this false and keep using the legacy
-		// node-membership reconstruction.
+		// refinement path (e.g. by calling add_tri_C1 and friends directly) leave this false and keep
+		// using the legacy node-membership reconstruction.
 		bool face_boundary_tags_valid = false;
 		// Drops all face tags and the validity flag; used when the element set is replaced wholesale
-		// by something that cannot supply facet information (PFEM).
+		// by something that cannot supply facet information.
 		void invalidate_face_boundary_tags();
 
 		//	void set_spatial_error_estimator_pt(oomph::Z2ErrorEstimator * errest) {this->spatial_error_estimator_pt()=errest;}

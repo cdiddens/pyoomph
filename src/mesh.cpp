@@ -7517,7 +7517,7 @@ namespace pyoomph
 
   // Drops every face tag and marks them invalid, so setup_boundary_element_info() falls back to the
   // legacy node-membership reconstruction. For meshes whose element set is replaced by something
-  // that carries no facet information (PFEM's define_new_mesh).
+  // that carries no facet information.
   void TemplatedMeshBase::invalidate_face_boundary_tags()
   {
     for (unsigned int ie = 0; ie < this->nelement(); ie++)

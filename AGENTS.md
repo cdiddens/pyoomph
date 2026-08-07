@@ -356,7 +356,7 @@ if __name__ == "__main__":
   UNIFAC activity coefficients.
 - [`AGENTS_ADVANCED.md`](AGENTS_ADVANCED.md) — bifurcation/stability analysis, custom
   C code (`CustomMultiReturnExpression`), Discontinuous Galerkin methods, and
-  ALE/remeshing/PFEM internals.
+  ALE/remeshing internals.
 
 ## Where to look for more (in this repo)
 

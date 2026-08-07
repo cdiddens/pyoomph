@@ -382,7 +382,7 @@ namespace pyoomph
   // Normally this is the single, shape-neutral identification from the per-element face boundary
   // tags (TemplatedMeshBase::setup_boundary_element_info_from_face_tags), which is exact on
   // arbitrarily refined meshes. Only meshes that never received tags -- no facet information in the
-  // template, or an element set built outside the template/refinement path (PFEM) -- fall back to
+  // template, or an element set built outside the template/refinement path -- fall back to
   // the legacy per-shape reconstruction from nodal boundary membership below, followed by a cleanup
   // pass that drops any recorded boundary element/face whose face nodes are not actually flagged as
   // lying on that boundary.
