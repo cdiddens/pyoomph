@@ -1716,6 +1716,11 @@ suite contains. The risk is concentrated exactly where this branch already found
 (§19), and the payoff is not measurable on realistic input. It is a good change to make deliberately,
 with its own validation pass; it is a bad change to slip in here.
 
+That validation pass has since been worked out and written up in
+`dev_docs/boundary_node_membership_repair.md` — still unimplemented, but with the staging, the two MPI
+ordering constraints that dictate where the hooks go, and the one accessor gap
+(`BulkElementTetra3dC2TB`'s face bubble) that could make the repair strip a genuine membership.
+
 ### 18.4 "Snap only where pinned" is the wrong criterion — two objections that settle it
 
 Raised after §18 was written, and both are fatal to the option §18.2 recommended.
