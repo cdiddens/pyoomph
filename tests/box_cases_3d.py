@@ -123,11 +123,18 @@ class BoxProblem3D(Problem):
             self += RefineToLevel(hi) @ "domain/top"
 
 
-def solve_case(kind, eq, levels, N=2, outdir=None):
+def solve_case(kind, eq, levels, N=2, outdir=None, linear_solver=None):
+    # linear_solver overrides the default backend for this one case. Meant for the rare matrix where
+    # the default is accurate enough to be a perfectly good answer but not accurate enough to certify
+    # a Jacobian against a machine-zero tolerance -- see _EXACT_SOLVER_CASES in
+    # test_adaptive_3d_campaign.py, which is the only caller that passes it. Left None everywhere else,
+    # deliberately: which solver a case uses is part of what these runs measure.
     import numpy as np
     with BoxProblem3D(kind=kind, eq=eq, levels=tuple(levels), N=N) as p:
         if outdir is not None:
             p.set_output_directory(outdir)
+        if linear_solver is not None:
+            p.set_linear_solver(linear_solver)
         p.max_refinement_level = max(max(levels), 1) + 1
         p.solve()
         m = p.get_mesh("domain")

@@ -359,9 +359,13 @@ tree without this work and reproducing them identically:
   missed, and nothing had ever refined a C1TB tet. **Fixed**, and
   `test_uniform_tet_refinement_conforming` now sweeps all four tet spaces so that no enrichment goes
   unrefined again.
-* `test_adaptive_3d_campaign.py::test_ale_moving_mesh[levels0-hex_pyr]` stalls at
-  `max|residual| = 8.583e-09` against a 1e-11 tolerance, deterministically, on an unrefined mesh.
-  Still open, and unrelated to any of this.
+* `test_adaptive_3d_campaign.py::test_ale_moving_mesh[levels0-hex_pyr]` stalled at
+  `max|residual| = 8.583e-09` against a 1e-11 tolerance, deterministically, on an unrefined mesh. Not
+  a Jacobian problem: the same assembled system solved with SuperLU or UMFPACK gives 5.6e-15. It is
+  MKL Pardiso being imprecise on that one matrix, far below the backward error its own escalation
+  triggers on. **Fixed** by naming that single case in the campaign's `_EXACT_SOLVER_CASES`; see
+  `dev_docs/pardiso_static_pivoting.md` §8 for the measurements and for why it is one case rather than
+  a blanket policy.
 
 
 ## 7. Risks

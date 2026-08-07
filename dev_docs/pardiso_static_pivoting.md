@@ -214,3 +214,46 @@ permanence that was wrong.
 - Not re-run here: the heated-cylinder budget sweep of §4 (its 250 000-dof cases are over this
   machine's 200 000-dof working limit) and `test_adaptive_3d_campaign --full`. The escalation itself
   is unchanged for the case where it *helps*, which is the case those measured.
+
+---
+
+## 8. A third failure mode, far below the escalation threshold, and not worth escalating
+
+Written 2026-08-07. Found while running `test_adaptive_3d_campaign --full` — the run §7 explicitly
+did not do — where `test_ale_moving_mesh[levels0-hex_pyr]` failed at
+`max|residual| = 8.583e-09` against the ALE tolerance of 1e-11.
+
+It looks like §1 and it is not. Nothing here is near-singular: the escalation of §4 triggers on a
+backward error of 1e-4, healthy solves peak at 1e-6, and this solve is orders of magnitude cleaner
+than either — Pardiso considers it, correctly, a good solve. Nor is it a bad Jacobian: the same
+assembled system handed to SuperLU or UMFPACK gives `5.6e-15` from the identical starting residual of
+`1.185e-01`. The answer is right; only the solve was imprecise.
+
+Measured over all 33 ALE cases of the sweep (11 layouts x 3 refinement states), worst `max|residual|`:
+
+```
+Pardiso   4.4e-16 .. 1.1e-14      except 3d-ale-hex_pyr-00 at 8.6e-09
+SuperLU   5.3e-15 .. 1.2e-13
+```
+
+Two things follow, and the second is the reason this is a section rather than a one-line fix:
+
+* it is **one** case out of 33, not a property of ALE or of pyramids — `3d-ale-hex_pyr-11` and
+  `-12`, the same layout refined, are at 7.9e-16 and 1.1e-15;
+* Pardiso is normally **one to two orders better than SuperLU**. Switching the sweep to an "exact"
+  solver to be safe would make 32 cases worse in order to fix one, and would have moved several from
+  1e-16 to 1e-13.
+
+So `test_adaptive_3d_campaign.py` names the single case in `_EXACT_SOLVER_CASES` and passes
+`linear_solver="superlu"` for it through `box_cases_3d.solve_case`. That is a statement about what the
+test is for — it certifies the discretisation and the analytic Jacobian by driving a linear problem to
+machine zero in one Newton step, which needs the linear solve to be exact to roundoff — and not a
+claim that Pardiso is wrong here. 8.6e-9 is a perfectly good answer for a solver to return; it is
+simply not machine zero, and this test measures machine zero.
+
+Deliberately NOT done: lowering `_BACKWARD_ERROR_LIMIT` so the §4 escalation catches this. §7 is the
+argument against — the escalation is expensive, its knobs can themselves cause a Newton stall where
+they are not needed, and the trigger would have to drop by four orders to reach a solve that nothing
+is actually wrong with. The other option, relaxing the ALE tolerance from 1e-11 to 1e-8, was
+considered and rejected for the same reason the tolerance is 1e-11 in the first place: it is the
+tightness that makes the case a Jacobian oracle at all.

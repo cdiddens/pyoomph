@@ -60,9 +60,27 @@ _RES_TOL_DEFAULT = 1e-9
 # cases is 4.5e-13 (wedge ALE), so 1e-10 keeps headroom while staying far below an inconsistent Jacobian.
 _NEWTON_REDUCTION = 1e-10
 
+# Cases solved with an explicitly chosen backend rather than the default (MKL Pardiso here).
+#
+# What these tests certify is the DISCRETISATION and the analytic Jacobian, by driving a linear problem
+# to machine zero in one Newton step. That only works while the linear solve is exact to roundoff, and
+# on exactly one case of the sweep Pardiso is not: 3d-ale-hex_pyr-00 lands at 8.6e-9. It is not a
+# near-singular matrix (dev_docs/pardiso_static_pivoting.md is about backward errors of 1e-4 and worse,
+# which is nowhere near this) and it is not a bad Jacobian -- the same assembled system solved with
+# SuperLU or UMFPACK gives 5.6e-15, i.e. the answer is right and only the solve was imprecise.
+#
+# Measured across all 33 ALE cases, worst max|residual|:
+#     Pardiso   1e-16 .. 1e-14      except 3d-ale-hex_pyr-00 at 8.6e-9
+#     SuperLU   5e-15 .. 1.2e-13
+# So Pardiso is normally one to two orders BETTER, and switching the whole sweep to SuperLU would make
+# 32 cases worse to accommodate one. Hence a single named case, not a blanket policy.
+_EXACT_SOLVER_CASES = {"3d-ale-hex_pyr-00": "superlu"}
+
+
 def _solve(kind, eq, levels, tmp_path):
     cid = box_cases_3d.case_id(kind, eq, levels)
-    return box_cases_3d.solve_case(kind, eq, levels, outdir=str(tmp_path / cid))
+    return box_cases_3d.solve_case(kind, eq, levels, outdir=str(tmp_path / cid),
+                                   linear_solver=_EXACT_SOLVER_CASES.get(cid))
 
 
 def _assert_linear_solve(res, eq, cid):
