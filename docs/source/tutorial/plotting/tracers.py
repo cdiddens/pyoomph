@@ -29,7 +29,8 @@ from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.navier_stokes import NavierStokesEquations, NoSlipBC
 from pyoomph.equations.ALE import LaplaceSmoothedMesh
-from pyoomph.equations.tracers import TracerParticles, TracerSeedGrid
+from pyoomph.equations.tracers import (TracerParticles, TracerSeedGrid,
+                                       TracerPeriodicBoundaryCondition)
 from pyoomph.output.plotting import MatplotlibPlotter
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 
@@ -37,7 +38,7 @@ from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 class TracerPlotter(MatplotlibPlotter):
     def define_plot(self):
         self.background_color = "darkgrey"
-        self.set_view(0,0, 4, 1.35)
+        self.set_view(0, 0, 4, 1.35)
         cb = self.add_colorbar("velocity", position="bottom right")
         self.add_plot("domain/velocity", colorbar=cb)
         # The tracer collection is addressed by its name, exactly like a field. The trail is drawn
@@ -57,11 +58,12 @@ class WavyChannel(Problem):
 
     def __init__(self):
         super().__init__()
+        self.length = 4
         self.amplitude = 0.2
         self.omega = 2 * pi
 
     def define_problem(self):
-        self.add_mesh(RectangularQuadMesh(size=[4, 1], N=[40, 10]))
+        self.add_mesh(RectangularQuadMesh(size=[self.length, 1], N=[40, 10]))
 
         eqs = MeshFileOutput()
         eqs += NavierStokesEquations(dynamic_viscosity=1, mass_density=1)
@@ -82,15 +84,29 @@ class WavyChannel(Problem):
 
         # Tracers. `history_time` is what makes the trails in the plot possible; `payloads` gives
         # each particle a scalar integrated along its own path - here simply the time it has spent
-        # in the domain, which the outlet then removes along with the particle.
+        # in the domain.
         eqs += TracerParticles(var("velocity"),
                                seed=TracerSeedGrid(0.15),
                                history_time=0.4,
                                payloads={"residence": 1},
                                statistics=True)
+        # Without this, a particle reaching the outlet is simply dropped and the channel empties
+        # out. Instead, put it back in at the inlet with the same identity and the same accumulated
+        # residence time: it is the flow that is not periodic here, not the particles.
+        eqs += TracerPeriodicBoundaryCondition(vector(-self.length, 0)) @ "right"
 
         self += eqs @ "domain"
-        self += TracerPlotter(self)
+
+        # The same plot twice: as a vector graphic for print, and as a raster one at half the
+        # resolution for the web. `image_size` alone sets the pixel count, while `dpi` sets how many
+        # inches those pixels are - so halving both keeps the figure the same size in inches, and
+        # the labels, markers and colorbar stay in the same proportion instead of growing to twice
+        # their share of a half-size canvas.
+        self += TracerPlotter(self, fileext="pdf")
+        small = TracerPlotter(self, fileext="png")
+        small.image_size = [640, 360]
+        small.dpi = 50
+        self += small
 
 
 if __name__ == "__main__":

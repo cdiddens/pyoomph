@@ -32,6 +32,7 @@ from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.equations.tracers import (TracerParticles, TracerSeedPoints, TracerSeedGrid, TracerSeedElement,
+                                       TracerPeriodicBoundaryCondition,
                                        TracerSeedRandom, TracerSeedCallable)
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh, CuboidBrickMesh, LineMesh
 
@@ -792,6 +793,89 @@ def test_without_a_transfer_interface_the_particles_are_dropped():
     _start, _elapsed, tr_lo, tr_up = _two_domain_counts(with_transfer=False)
     assert tr_lo.nlocal() == 0
     assert tr_up.nlocal() == 0
+
+
+# ----------------------------------------------------------------------------------------------
+# L - periodic re-injection
+# ----------------------------------------------------------------------------------------------
+
+_PERIODIC_L = 4.0
+_PERIODIC_SEEDS = [[0.5, 0.2], [1.3, -0.6], [2.1, 0.4], [3.6, 0.8]]
+
+
+def _periodic_run(tag, with_wrap, endtime=6.0, dt=0.05, both_directions=True):
+    """Uniform advection down a channel of length 4, so the analytic answer is (x0 + T) mod 4."""
+    class P(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(size=[_PERIODIC_L, 2], lower_left=[0, -1], N=[16, 8]))
+            eqs = PoissonEquation(source=0) + DirichletBC(u=0) @ "left"
+            eqs += TracerParticles(vector(1, 0), seed=TracerSeedPoints(_PERIODIC_SEEDS),
+                                   history_time=0.5, payloads={"residence": 1},
+                                   rtol=1e-11, atol=1e-13)
+            if with_wrap:
+                eqs += TracerPeriodicBoundaryCondition(vector(-_PERIODIC_L, 0),
+                                                       both_directions=both_directions) @ "right"
+            self += eqs @ "domain"
+
+    p = P()
+    p.set_output_directory("_tracer_periodic_" + tag)
+    p.quiet()
+    p.initialise()
+    tr = p.get_mesh("domain").get_tracers()
+    ids = list(tr.get_ids())
+    t0 = float(p.get_current_time(as_float=True, dimensional=False))
+    p.run(endtime, timestep=dt, outstep=False, startstep=dt)
+    elapsed = float(p.get_current_time(as_float=True, dimensional=False)) - t0
+    return tr, ids, elapsed
+
+
+def test_periodic_boundary_reinjects_particles_at_the_other_end():
+    """A wrapped particle finishes the rest of its timestep from the image rather than stopping at
+    the boundary, so the answer stays exact across the jump - which is the whole reason the wrap is
+    applied inside the advection rather than as a position fix-up afterwards."""
+    tr, ids, elapsed = _periodic_run("wrap", with_wrap=True)
+    assert list(tr.get_ids()) == ids, "the wrap must preserve identity, not re-seed particles"
+    end = tr.get_positions()
+    expect = numpy.array([[(s[0] + elapsed) % _PERIODIC_L, s[1]] for s in _PERIODIC_SEEDS])
+    assert numpy.max(numpy.abs(end - expect)) < 1e-11
+    # The payload is path-integrated and knows nothing about the jump: every particle has been in
+    # the domain for the whole run.
+    assert numpy.max(numpy.abs(tr.get_payloads()[:, 0] - elapsed)) < 1e-10
+
+
+def test_without_a_periodic_boundary_the_particles_leave():
+    """The counterpart, so the test above cannot pass by accident on a run where nothing wrapped."""
+    tr, _ids, _elapsed = _periodic_run("nowrap", with_wrap=False)
+    assert tr.nlocal() == 0
+
+
+def test_a_periodic_wrap_restarts_the_trail_rather_than_drawing_it_across_the_domain():
+    """A trail is a path through the plotted coordinates and a wrapped path is not continuous
+    there, so the history starts again at the image instead of keeping the samples from the far
+    end - which would draw one line straight back across the whole domain."""
+    tr, ids, _elapsed = _periodic_run("trail", with_wrap=True, endtime=3.9)
+    longest = 0.0
+    for i in ids:
+        h = tr.get_history(int(i))
+        if len(h) > 1:
+            longest = max(longest, float(numpy.max(numpy.abs(numpy.diff(h[:, 1])))))
+    assert longest < 0.5 * _PERIODIC_L, "a trail segment spans the domain (%g)" % longest
+    assert min(len(tr.get_history(int(i))) for i in ids) < max(len(tr.get_history(int(i))) for i in ids), \
+        "no trail was ever restarted, so this check is vacuous"
+
+
+@pytest.mark.parametrize("both_directions,expected",
+                        [(True, [(-_PERIODIC_L, 0.0), (_PERIODIC_L, 0.0)]),
+                         (False, [(-_PERIODIC_L, 0.0)])],
+                        ids=["both", "one_way"])
+def test_the_registered_shifts_are_the_declared_ones_without_duplicates(both_directions, expected):
+    """`both_directions` adds the opposite shift, and a shift already registered is dropped - so
+    attaching the condition to both ends of a periodic pair, which is the natural thing to write,
+    costs nothing."""
+    tr, _ids, _elapsed = _periodic_run("shifts_" + ("both" if both_directions else "one"),
+                                       with_wrap=True, endtime=0.1,
+                                       both_directions=both_directions)
+    assert sorted(tuple(w) for w in tr.get_periodic_wraps()) == expected
 
 
 # ----------------------------------------------------------------------------------------------

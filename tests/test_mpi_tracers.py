@@ -167,6 +167,33 @@ def test_a_process_with_no_particles_does_not_hang(nproc, tmp_path):
     assert per_rank[0]["analytic_error"] < _ATOL
 
 
+@pytest.mark.parametrize("nproc", [1, 2, 4])
+def test_periodic_reinjection_crosses_processes(nproc, tmp_path):
+    """The case the halo exchange cannot do. A particle leaving through the outlet has to reappear
+    at the inlet, which under a partitioning that knows nothing about the periodicity belongs to
+    an entirely different process - not a halo of the one it left from, so exchange_migrants()
+    would never route it there. It goes through the collective reinjection round instead, and the
+    answer has to be the same as the serial one, to round-off."""
+    per_rank = _run(nproc, tmp_path, "periodic")
+    _assert_all_ranks_agree(per_rank)
+    first = per_rank[0]
+    assert sum(r["nwrapped"] + r["nreinjected"] for r in per_rank) >= 1, \
+        "no particle ever reached the outlet, so nothing was re-injected and this is vacuous"
+    assert first["nglobal"] == first["nstart"] == 5, \
+        "%d of %d particles survived the wrap" % (first["nglobal"], first["nstart"])
+    assert first["analytic_error"] < _ATOL, "analytic error %g" % first["analytic_error"]
+    assert sum(r["nlocal"] for r in per_rank) == first["nglobal"]
+    reinjected = sum(r["nreinjected"] for r in per_rank)
+    if nproc == 1:
+        assert reinjected == 0, "a serial run has nothing to re-inject across processes"
+        assert first["nwrapped"] >= 1
+    else:
+        # The whole point of the collective round. If this ever fires, the partitioning happened to
+        # put both ends of the domain on one process and the test is only checking the local path.
+        assert reinjected >= 1, \
+            "no particle was re-injected across processes, so the collective round was not exercised"
+
+
 @pytest.mark.parametrize("write_nproc,read_nproc", [(3, 1), (1, 4), (2, 4)])
 def test_state_file_is_partition_independent(write_nproc, read_nproc, tmp_path):
     """The file holds the whole particle set sorted by identity, so it says nothing about how the

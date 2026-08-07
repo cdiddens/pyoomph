@@ -164,6 +164,19 @@ namespace pyoomph
     std::vector<TracerParticle *> tracers; // owned; dense, no free-slot recycling
     std::map<unsigned, TracerTransferInterfaceInfo> transfer_interfaces;
 
+    // Periodic images: a particle that has run out of the mesh is offered its position plus each of
+    // these shifts, and is taken back in at the first one that lands inside.
+    //
+    // Not keyed on the boundary it left through, on purpose. A shifted position that lands inside
+    // the mesh IS the periodic image - a domain in which two different shifts both land inside
+    // would have to be larger than its own period. So there is nothing to detect, which also makes
+    // a particle leaving through a corner where two periodic directions meet fall out for free.
+    std::vector<std::vector<double>> periodic_wraps;
+
+    // Particles whose periodic image lies on nobody-knows-which process. Held between the local
+    // pass and the collective reinjection round of advect_all, which owns them until then.
+    std::vector<TracerParticle *> pending_reinject;
+
     TracerId next_id = 1;
 
     // Set by advect_one when the particle it was given was handed to another domain's collection,
@@ -205,6 +218,7 @@ namespace pyoomph
     unsigned long stat_substeps = 0, stat_rejected = 0, stat_walks = 0;
     unsigned stat_global_locates = 0;
     unsigned stat_lost = 0, stat_migrated = 0, stat_transferred = 0;
+    unsigned stat_wrapped = 0, stat_reinjected = 0;
 
     // A locator whose GEOMETRY is valid for the mesh's current configuration at `time_level`.
     MeshPointLocator *get_locator(unsigned time_level);
@@ -238,6 +252,28 @@ namespace pyoomph
     // `depth` bounds the chain of domain-to-domain handovers within one timestep.
     bool advect_one(TracerParticle *p, TracerTimeConfig &cfg, unsigned depth = 0);
 
+    // Try every registered periodic shift and place `p` at the first image that lands in a non-halo
+    // element of this process's part of the mesh. Leaves p->x untouched and returns false if none
+    // does. Drops the position history on success: a trail is a path through the plotted
+    // coordinates, and a wrapped one is not continuous there, so keeping the samples from before
+    // the jump would draw a line straight back across the domain.
+    bool place_periodic_image(TracerParticle *p);
+
+    enum class WrapResult
+    {
+      NotPlaced,             // no shift put it anywhere, and nothing else will take it
+      PlacedHere,            // it is back in this process's mesh, ready to finish its step
+      ParkedForReinjection   // pending_reinject owns it now; the caller must forget it
+    };
+    // place_periodic_image, plus the decision of what to do when no image was local.
+    WrapResult wrap_position(TracerParticle *p);
+
+    // COLLECTIVE. Offer every process's parked particles to all of them, so that the one holding
+    // the periodic image takes it. The migration exchange cannot do this: it routes a particle to
+    // the owner of the HALO element it ended in, and the far end of a periodic domain is not a halo
+    // of the near end - it is usually not in the sending process's mesh at all.
+    unsigned exchange_reinjections();
+
     // Take over a particle that has just left another domain through a shared interface, place it
     // here and finish its timestep. Returns false (having NOT taken ownership) if the position does
     // not lie in this mesh.
@@ -270,6 +306,10 @@ namespace pyoomph
     int fixed_substeps = 0;            // > 0 forces uniform sub-steps, for order-of-convergence tests
     unsigned long max_substeps = 1000000;
     unsigned max_migration_rounds = 64;
+    // How many times one particle may be wrapped within a single timestep. More than one only
+    // happens if it crosses the whole periodic length in a step, which is a bound on the timestep
+    // rather than something to accommodate; this is here so that a degenerate wrap cannot spin.
+    unsigned max_periodic_wraps = 8;
 
     TracerCollection(const std::string &name) : tracer_name(name) {}
     virtual ~TracerCollection();
@@ -333,6 +373,13 @@ namespace pyoomph
     // into a refined element's still-alive parent keeps producing plausible answers, and one into
     // an unrefined element's deleted son is undefined behaviour that may not crash.
     unsigned get_relocations_last_step() const { return stat_global_locates; }
+    // The two halves of periodic re-injection during the last advection: particles whose image was
+    // in this process's own mesh, and particles taken over from another process because the image
+    // was not. Disjoint, so the number of wraps over the whole collection is the sum of both over
+    // all processes. The second is zero serially, and a non-zero value is the only visible proof
+    // that the collective round did the work - the positions cannot show it.
+    unsigned get_wraps_last_step() const { return stat_wrapped; }
+    unsigned get_reinjections_last_step() const { return stat_reinjected; }
 
     // `with_history` also serialises the rolling position history the trail plots read; it costs
     // the samples themselves in the file and makes `tagarr` three entries per particle instead of
@@ -343,6 +390,14 @@ namespace pyoomph
                              bool with_history = true);
 
     virtual void set_transfer_interface(unsigned boundary_index, TracerCollection *opp);
+
+    // Declare that a particle leaving the mesh is the same particle re-entering it at its position
+    // plus `shift` - i.e. that the domain is periodic by that vector. Registering the same shift
+    // twice is a no-op, so attaching the boundary condition to both ends of a periodic pair, which
+    // is the natural thing to write, costs nothing.
+    virtual void add_periodic_wrap(const std::vector<double> &shift);
+    virtual void clear_periodic_wraps();
+    const std::vector<std::vector<double>> &get_periodic_wraps() const { return periodic_wraps; }
   };
 
 }

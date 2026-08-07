@@ -18,7 +18,6 @@ We will develop this method in the following and address the necessary correctio
    ale/freesurf.rst         
    ale/gmshfields.rst
    ale/beadsonstring.rst
-   ale/tracers.rst
    ale/spread.rst
    ale/solid.rst      
 

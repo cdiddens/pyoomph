@@ -1936,6 +1936,17 @@ void PyReg_Mesh(nb::module_ &m)
 			 "Replaces all particles by those of a previously saved state, restoring their identities and, if it is in the data, their position history. with_history must match what _save_state was called with")
 		.def("_set_transfer_interface", &pyoomph::TracerCollection::set_transfer_interface,
 			 "Registers that particles crossing the given mesh boundary are handed over to another collection instead of being dropped")
+		.def("get_wraps_last_step", &pyoomph::TracerCollection::get_wraps_last_step,
+			 "How many particles the last advection re-injected at a periodic image lying in this process's own part of the mesh")
+		.def("get_reinjections_last_step", &pyoomph::TracerCollection::get_reinjections_last_step,
+			 "How many particles the last advection took over from another process's periodic wrap, because the image was not in that process's mesh. Disjoint from get_wraps_last_step(), and zero in a serial run")
+		.def("_add_periodic_wrap", &pyoomph::TracerCollection::add_periodic_wrap, nb::arg("shift"),
+			 "Declares the domain periodic by the given shift vector: a particle leaving the mesh is re-injected at its position plus the shift, if that lands inside, and finishes the rest of its timestep there. Registering the same shift twice is a no-op")
+		.def("_clear_periodic_wraps", &pyoomph::TracerCollection::clear_periodic_wraps,
+			 "Removes all periodic wraps registered with _add_periodic_wrap")
+		.def("get_periodic_wraps", [](pyoomph::TracerCollection *coll)
+			 { return coll->get_periodic_wraps(); },
+			 "The shift vectors registered as periodic images of this domain")
 		.def(
 			"add_tracer", [](pyoomph::TracerCollection *coll, const std::vector<double> &pos, int tag,
 							 const std::vector<double> &payload)

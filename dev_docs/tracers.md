@@ -3,8 +3,8 @@
 Status: **done and in use.** `TracerParticles` (`pyoomph/equations/tracers.py`) advects passive
 particles through a bulk domain or confined to an interface, on static and moving meshes, in 1/2/3
 dimensions, with path-integrated payloads, a rolling position history for trails, handover between
-domains, and `--distribute`. Covered by `tests/test_tracers.py` (31 cases) and
-`tests/test_mpi_tracers.py` (10 cases, `--full`).
+domains, periodic re-injection, and `--distribute`. Covered by `tests/test_tracers.py` (47 cases) and
+`tests/test_mpi_tracers.py` (13 cases, `--full`).
 
 This replaces the original implementation wholesale. That one was dead code - no test, no example,
 no prose documentation, and the only `.rst` was an empty autodoc stub - and it was wrong in ways
@@ -280,6 +280,39 @@ and a state file may put the clock *back* - a rollback, a restart from an earlie
 then refused to advect until the run had caught up with the time it last saw, leaving the particles
 frozen in place while the flow moved on. `after_remeshing`, which a state load goes through, now sets
 the guard to the restored time.
+
+## 5d. Periodic re-injection
+
+`TracerPeriodicBoundaryCondition` is the counterpart of `TracerTransferAtInterface` for a domain
+that is periodic in itself: a particle that has run out of the mesh is offered its position plus
+each registered shift, and is taken back in at the first image that lands inside, finishing the rest
+of its timestep from there. Three things about the shape of it:
+
+* **The shifts are registered on the collection, not on a boundary.** A shifted position that lands
+  inside the mesh *is* the periodic image - a domain in which two different shifts both land inside
+  would have to be larger than its own period - so there is nothing to detect. Which end of a pair
+  the equation is attached to therefore does not matter, attaching it to both is a no-op the second
+  time, and a particle leaving through a corner where two periodic directions meet falls out for
+  free. Same argument as the one that removed the boundary-set intersection from `try_transfer`.
+* **The wrap happens inside the advection, after the transfer interfaces have had their chance.**
+  So a neighbouring domain still wins over a wrap, and the particle finishes its step from the image
+  rather than stopping at the boundary - a wrap costs no accuracy. The re-placement is at the level-0
+  configuration while the particle is at `timefrac < 1`, which is the same approximation `adopt()`
+  already makes for a cross-domain handover: the walk in `place_at` corrects the element.
+* **MPI needs a collective round of its own.** `exchange_migrants()` routes a particle to the owner
+  of the HALO element it ended in, and the far end of a periodic domain is not a halo of the near
+  end - under a partitioning that knows nothing about the periodicity it is usually not in the
+  sending process's mesh at all. So a particle whose image is not local is parked, and
+  `exchange_reinjections()` offers every process's parked particles to all of them with the same
+  claim protocol as seeding (lowest-numbered process holding it wins), inside the existing migration
+  round loop so the re-injected particle gets another round to finish its step in.
+  `test_periodic_reinjection_crosses_processes` asserts `get_reinjections_last_step() >= 1` rather
+  than only the positions: with both ends of the domain on one process the local path would answer
+  identically and the test would be checking nothing.
+
+The trail is dropped on a wrap. A trail is a path through the plotted coordinates and a wrapped path
+is not continuous there, so keeping the samples from before the jump would draw one line straight
+back across the whole domain on the next output.
 
 ## 6. Where the accuracy stops
 

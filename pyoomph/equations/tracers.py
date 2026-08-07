@@ -51,6 +51,13 @@ import numpy
 
 if TYPE_CHECKING:
     from ..meshes.mesh import AnyMesh, AnySpatialMesh
+    # AnySpatialMesh and AnyMesh are string TypeAliases, so resolving an annotation that uses one
+    # means evaluating the union THEY name in THIS module's namespace. sphinx_autodoc_typehints
+    # executes this block for exactly that purpose, and without the concrete classes here it warns
+    # "Cannot resolve forward reference ... name 'InterfaceMesh' is not defined" on every documented
+    # signature that takes a mesh.
+    from ..meshes.mesh import (InterfaceMesh, MeshFromTemplate1d, MeshFromTemplate2d,
+                               MeshFromTemplate3d, ODEStorageMesh)
     from ..generic.codegen import EquationTree
 
 
@@ -486,4 +493,73 @@ class TracerTransferAtInterface(InterfaceEquations):
     def _init_output(self, eqtree: "EquationTree", continue_info: dict[str, Any] | None, rank: int):
         # Re-register here too: the parents bind their collections in their own _init_output, which
         # may run after before_assigning_equations_preorder did.
+        self._wire()
+
+
+class TracerPeriodicBoundaryCondition(InterfaceEquations):
+    """Re-injects particles leaving through this interface at the periodic image of their position.
+
+    The counterpart of :py:class:`TracerTransferAtInterface` for a domain that is periodic in
+    itself: instead of handing the particle to a neighbouring domain, the collection takes it back
+    at ``position + shift``, and it finishes the rest of its timestep from there - so a wrap costs
+    nothing in accuracy and the particle keeps its identity and its payloads.
+
+    .. code-block:: python
+
+        # a channel of length L, periodic along x
+        eqs += TracerPeriodicBoundaryCondition(vector(-L, 0)) @ "right"
+
+    The shift is registered on the collection rather than on the boundary, and a particle that has
+    left the mesh is offered every registered shift until one lands inside. So it does not matter
+    which end of a periodic pair you attach this to, attaching it to both is harmless (the duplicate
+    shift is dropped), and a particle leaving through a corner where two periodic directions meet is
+    handled without any special case.
+
+    Works under MPI: the periodic image of a point at one end of the domain is usually held by an
+    entirely different process, which no halo exchange can reach, so a particle whose image is not
+    local is offered to every process collectively and the one holding it takes it over.
+
+    Args:
+        shift: what to add to a particle's position to get its periodic image, as a vector
+            expression or a sequence of numbers. Dimensional if the problem is.
+        both_directions: also register ``-shift``, so that the pairing works whichever way a
+            particle happens to leave. Turn it off only for a genuinely one-way injection.
+    """
+    required_parent_type = TracerParticles
+
+    def __init__(self, shift: Expression | Sequence[ExpressionOrNum], both_directions: bool = True):
+        super(TracerPeriodicBoundaryCondition, self).__init__()
+        self.shift = shift
+        self.both_directions = both_directions
+
+    def _nondim_shift(self, mesh: "AnySpatialMesh", dim: int) -> list[float]:
+        scal = mesh.get_problem().get_scaling("spatial")
+        if isinstance(self.shift, Expression):
+            comps = [self.shift[i] for i in range(dim)]
+        else:
+            comps = list(self.shift)
+        if len(comps) != dim:
+            raise ValueError("The periodic shift of the tracers must have " + str(dim) +
+                             " components on this mesh, but got " + str(len(comps)))
+        return [float(c / scal) for c in comps]
+
+    def _wire(self):
+        mytr = self.get_parent_equations()
+        assert isinstance(mytr, TracerParticles)
+        coll = mytr.get_collection()
+        if coll is None or mytr._mesh is None:
+            return
+        shift = self._nondim_shift(mytr._mesh, coll.get_coordinate_dimension())
+        coll._add_periodic_wrap(shift)  # type:ignore
+        if self.both_directions:
+            # 0.0 - v, not -v: the latter turns a zero component into -0.0, which then reads back
+            # out of get_periodic_wraps() looking like something deliberate.
+            coll._add_periodic_wrap([0.0 - v for v in shift])  # type:ignore
+
+    def before_assigning_equations_preorder(self, mesh: "AnyMesh"):
+        self._wire()
+
+    def _init_output(self, eqtree: "EquationTree", continue_info: dict[str, Any] | None, rank: int):
+        # As above: the parent binds its collection in its own _init_output, which may run after
+        # before_assigning_equations_preorder did.
         self._wire()

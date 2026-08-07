@@ -43,7 +43,8 @@ import numpy
 from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.poisson import PoissonEquation
-from pyoomph.equations.tracers import TracerParticles, TracerSeedPoints, TracerSeedGrid
+from pyoomph.equations.tracers import (TracerParticles, TracerSeedPoints, TracerSeedGrid,
+                                       TracerPeriodicBoundaryCondition)
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
 
@@ -60,10 +61,11 @@ def _seed_positions(corner_only):
 
 
 class TracerProblem(Problem):
-    def __init__(self, corner_only=False, payloads=True):
+    def __init__(self, corner_only=False, payloads=True, periodic=False):
         super().__init__()
         self.corner_only = corner_only
         self.use_payloads = payloads
+        self.periodic = periodic
 
     def define_problem(self):
         self.add_mesh(RectangularQuadMesh(size=[LX, LY], lower_left=[0, -1], N=[NX, NY]))
@@ -73,6 +75,11 @@ class TracerProblem(Problem):
                                payloads={"residence": 1} if self.use_payloads else None,
                                history_time=0.5,
                                rtol=1e-11, atol=1e-13)
+        if self.periodic:
+            # The hard case for a distributed run: the periodic image of a point at the outlet is
+            # at the inlet, which is nowhere near the process the particle leaves from - not even a
+            # halo of it, so no migration exchange can reach it.
+            eqs += TracerPeriodicBoundaryCondition(vector(-LX, 0)) @ "right"
         self += eqs @ "domain"
 
     def tracers(self):
@@ -80,7 +87,10 @@ class TracerProblem(Problem):
 
 
 def run_case(mode, outdir, statefile=None, nsteps=55, dt=0.05):
-    p = TracerProblem(corner_only=(mode == "corner"))
+    if mode == "periodic":
+        # Long enough that the fastest particles wrap, and then some.
+        nsteps = max(nsteps, 140)
+    p = TracerProblem(corner_only=(mode == "corner"), periodic=(mode == "periodic"))
     p.set_output_directory(outdir)
     p.quiet()
     if get_mpi_nproc() > 1:
@@ -118,9 +128,15 @@ def run_case(mode, outdir, statefile=None, nsteps=55, dt=0.05):
     # cross a partition boundary, without which the analytic assertion below would pass for a
     # completely serial implementation that simply never migrated anything.
     nlocal_seen = {int(tr.nlocal())}
+    # The two disjoint halves of a periodic wrap: the image was in this process's own mesh, or it
+    # was not and another process took the particle over. The second is what says the collective
+    # reinjection round was actually needed, which the positions alone cannot distinguish.
+    nwrapped, nreinjected = 0, 0
     for _ in range(nsteps):
         p.solve(timestep=dt)
         nlocal_seen.add(int(tr.nlocal()))
+        nwrapped += int(tr.get_wraps_last_step())
+        nreinjected += int(tr.get_reinjections_last_step())
     elapsed = float(p.get_current_time(as_float=True, dimensional=False)) - t0
 
     if mode == "save":
@@ -136,8 +152,11 @@ def run_case(mode, outdir, statefile=None, nsteps=55, dt=0.05):
     err = 0.0
     if len(end) == len(start) and len(end):
         expect_x = start[:, 0] + (1.0 - start[:, 1] ** 2) * elapsed
+        if mode == "periodic":
+            expect_x = numpy.mod(expect_x, LX)
         err = float(max(numpy.max(numpy.abs(end[:, 0] - expect_x)),
                         numpy.max(numpy.abs(end[:, 1] - start[:, 1]))))
+
 
     return {
         "rank": get_mpi_rank(),
@@ -152,12 +171,14 @@ def run_case(mode, outdir, statefile=None, nsteps=55, dt=0.05):
         "elapsed": elapsed,
         "analytic_error": err,
         "history_at_state": hist_at_state,
+        "nwrapped": nwrapped,
+        "nreinjected": nreinjected,
     }
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["run", "corner", "save", "load"])
+    ap.add_argument("mode", choices=["run", "corner", "save", "load", "periodic"])
     ap.add_argument("--outdir", default="mpi_tracer_out")
     ap.add_argument("--statefile", default=None)
     ap.add_argument("--nsteps", type=int, default=55)

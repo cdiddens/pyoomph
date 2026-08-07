@@ -330,6 +330,9 @@ namespace pyoomph
     for (auto *p : tracers)
       delete p;
     tracers.clear();
+    for (auto *p : pending_reinject)
+      delete p;
+    pending_reinject.clear();
   }
 
   // Builds a particle at `pos` and places it. Returns null (having deleted it) if the point does not
@@ -557,6 +560,33 @@ namespace pyoomph
   {
     transfer_interfaces[boundary_index] = TracerTransferInterfaceInfo();
     transfer_interfaces[boundary_index].other_collection = opp;
+  }
+
+  void TracerCollection::add_periodic_wrap(const std::vector<double> &shift)
+  {
+    bool nonzero = false;
+    for (double v : shift)
+      if (v != 0.0)
+        nonzero = true;
+    if (!nonzero)
+      throw_runtime_error("A periodic wrap of tracers '" + tracer_name +
+                          "' must have a non-zero shift; a zero one would put the particle back "
+                          "exactly where it just left the mesh");
+    for (const auto &have : periodic_wraps)
+    {
+      bool same = have.size() == shift.size();
+      for (unsigned i = 0; same && i < shift.size(); i++)
+        if (have[i] != shift[i])
+          same = false;
+      if (same)
+        return; // registering both ends of a periodic pair must not double up
+    }
+    periodic_wraps.push_back(shift);
+  }
+
+  void TracerCollection::clear_periodic_wraps()
+  {
+    periodic_wraps.clear();
   }
 
   // ------------------------------------------------------------------------------------------
@@ -1225,6 +1255,143 @@ namespace pyoomph
     return nullptr;
   }
 
+  bool TracerCollection::place_periodic_image(TracerParticle *p)
+  {
+    const std::vector<double> before = p->x;
+    for (const auto &shift : periodic_wraps)
+    {
+      for (unsigned i = 0; i < nodal_dim; i++)
+        p->x[i] = before[i] + (i < shift.size() ? shift[i] : 0.0);
+      p->elem = nullptr;
+      if (place_globally(p, 0) && !p->elem->is_halo())
+      {
+        // The trail is a path through the plotted coordinates, and a wrapped path is not continuous
+        // there: keeping the samples from before the jump would draw a line straight back across
+        // the whole domain on the next output.
+        p->hist_n = 0;
+        p->hist_head = 0;
+        return true;
+      }
+    }
+    p->x = before;
+    p->elem = nullptr;
+    return false;
+  }
+
+  TracerCollection::WrapResult TracerCollection::wrap_position(TracerParticle *p)
+  {
+    if (periodic_wraps.empty())
+      return WrapResult::NotPlaced;
+    if (place_periodic_image(p))
+      return WrapResult::PlacedHere;
+    if (!is_distributed())
+      return WrapResult::NotPlaced;
+    // The periodic image of a point at one end of the domain is at the other end, which under a
+    // partitioning that knows nothing about the periodicity is somebody else's part of the mesh
+    // entirely - not a halo of this one, so exchange_migrants() cannot reach it either. Park the
+    // particle at the position it LEFT from, unshifted, and let the collective round apply the
+    // shifts on whichever process turns out to hold the image.
+    pending_reinject.push_back(p);
+    return WrapResult::ParkedForReinjection;
+  }
+
+  unsigned TracerCollection::exchange_reinjections()
+  {
+#ifdef OOMPH_HAS_MPI
+    if (is_distributed())
+    {
+      MPI_Comm comm = mesh->communicator_pt()->mpi_comm();
+      const int nproc = mpi_nproc(), rank = mpi_rank();
+      const unsigned stride = record_stride();
+
+      int mine = (int)pending_reinject.size();
+      std::vector<int> counts(nproc, 0);
+      MPI_Allgather(&mine, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+      int total = 0;
+      std::vector<int> displ(nproc, 0), dcount(nproc, 0), ddispl(nproc, 0), icount(nproc, 0), idispl(nproc, 0);
+      for (int r = 0; r < nproc; r++)
+      {
+        displ[r] = total;
+        total += counts[r];
+      }
+      if (!total)
+        return 0;
+      int dtot = 0, itot = 0;
+      for (int r = 0; r < nproc; r++)
+      {
+        dcount[r] = counts[r] * (int)stride;
+        ddispl[r] = dtot;
+        dtot += dcount[r];
+        icount[r] = counts[r] * 2;
+        idispl[r] = itot;
+        itot += icount[r];
+      }
+
+      std::vector<double> sbuf((size_t)std::max<int>(mine * (int)stride, 1), 0.0);
+      std::vector<long long> sids((size_t)std::max(2 * mine, 1), 0);
+      for (int i = 0; i < mine; i++)
+      {
+        pack(pending_reinject[i], sbuf.data() + (size_t)i * stride);
+        sids[2 * i] = (long long)pending_reinject[i]->id;
+        sids[2 * i + 1] = (long long)pending_reinject[i]->tag;
+      }
+      for (auto *p : pending_reinject)
+        delete p; // everybody, this process included, rebuilds them from the wire below
+      pending_reinject.clear();
+
+      std::vector<double> rbuf((size_t)std::max(dtot, 1), 0.0);
+      std::vector<long long> rids((size_t)std::max(itot, 1), 0);
+      MPI_Allgatherv(sbuf.data(), mine * (int)stride, MPI_DOUBLE,
+                     rbuf.data(), dcount.data(), ddispl.data(), MPI_DOUBLE, comm);
+      MPI_Allgatherv(sids.data(), 2 * mine, MPI_LONG_LONG,
+                     rids.data(), icount.data(), idispl.data(), MPI_LONG_LONG, comm);
+
+      // The same claim protocol as seeding: every process tries every record and the lowest-numbered
+      // one holding the image keeps it, so the outcome does not depend on the partitioning.
+      std::vector<int> claimant((size_t)total, nproc);
+      std::vector<TracerParticle *> cand((size_t)total, nullptr);
+      for (int i = 0; i < total; i++)
+      {
+        TracerParticle *p = unpack(&rbuf[(size_t)i * stride], (TracerId)rids[2 * i], (int)rids[2 * i + 1]);
+        if (place_periodic_image(p))
+        {
+          claimant[i] = rank;
+          cand[i] = p;
+        }
+        else
+          delete p;
+      }
+      std::vector<int> reduced((size_t)total, nproc);
+      MPI_Allreduce(claimant.data(), reduced.data(), total, MPI_INT, MPI_MIN, comm);
+
+      unsigned taken = 0;
+      for (int i = 0; i < total; i++)
+      {
+        if (reduced[i] == rank && cand[i])
+        {
+          tracers.push_back(cand[i]);
+          taken++;
+          continue;
+        }
+        delete cand[i];
+        // Counted once, on the process that would otherwise report nothing at all about it.
+        if (reduced[i] >= nproc && rank == 0)
+          stat_lost++;
+      }
+      stat_reinjected += taken;
+      return (unsigned)total;
+    }
+#endif
+    // Not distributed: wrap_position never parks anything, so this only ever drains a leftover.
+    for (auto *p : pending_reinject)
+    {
+      stat_lost++;
+      delete p;
+    }
+    pending_reinject.clear();
+    return 0;
+  }
+
   bool TracerCollection::adopt(TracerParticle *p, unsigned depth)
   {
     // Bounded because a particle sitting exactly on a shared interface could otherwise be passed
@@ -1416,6 +1583,7 @@ namespace pyoomph
     stat_lost = 0;
     stat_migrated = 0;
     stat_transferred = 0;
+    stat_wrapped = stat_reinjected = 0;
     // The solve that produced this step moved the nodes, so any locator built during the previous
     // one describes a configuration that no longer exists.
     mark_geometry_stale();
@@ -1470,6 +1638,26 @@ namespace pyoomph
         }
         if (ok && p->timefrac < 1.0 - 1e-15)
           ok = advect_one(p, cfg);
+        // A particle that has run out of the mesh is offered the periodic images before it is given
+        // up on - after the transfer interfaces have had their chance inside advect_one, so a
+        // neighbouring domain still wins over a wrap. It then finishes the rest of its step from
+        // the image, which is what keeps the wrap from costing the step's accuracy.
+        bool parked = false;
+        for (unsigned wraps = 0; !ok && !transferred_away && wraps < max_periodic_wraps; wraps++)
+        {
+          const WrapResult w = wrap_position(p);
+          if (w == WrapResult::ParkedForReinjection)
+          {
+            parked = true;
+            break;
+          }
+          if (w != WrapResult::PlacedHere)
+            break;
+          stat_wrapped++;
+          ok = advect_one(p, cfg);
+        }
+        if (parked)
+          continue; // pending_reinject owns it now
         if (!ok)
         {
           stat_lost++;
@@ -1486,8 +1674,14 @@ namespace pyoomph
       tracers.swap(survivors);
 
       if (!is_distributed())
+      {
+        exchange_reinjections(); // a no-op serially, beyond draining a leftover
         break;
+      }
       stat_migrated += exchange_migrants();
+      // Collective, and before the unfinished count below, because a reinjected particle re-enters
+      // with its step only part-way done and the loop has to run another round for it.
+      exchange_reinjections();
       unsigned unfinished = 0;
       for (auto *p : tracers)
         if (p->timefrac < 1.0 - 1e-15)
@@ -1583,6 +1777,10 @@ namespace pyoomph
       oss << ", " << stat_migrated << " migrated";
     if (stat_transferred)
       oss << ", " << stat_transferred << " handed to another domain";
+    if (stat_wrapped)
+      oss << ", " << stat_wrapped << " wrapped periodically";
+    if (stat_reinjected)
+      oss << ", " << stat_reinjected << " reinjected from another process";
     if (stat_lost)
       oss << ", " << stat_lost << " LOST";
     return oss.str();
