@@ -649,6 +649,241 @@ class MeshDataCacheStorage:
 
 
 
+# --------------------------------------------------------------------------------------------
+# Shared machinery of the two extrusion operators (Cartesian and rotational).
+#
+# Both used to walk every element in Python and, for each one, loop over every segment appending
+# lists - and then grow the D0/DL/angle accumulators with numpy.concatenate ONCE PER ELEMENT, which
+# is quadratic. On a 4000-element quad9 mesh with 64 segments that accumulation alone dominated
+# everything else by an order of magnitude. The connectivity each branch produced is a fixed
+# pattern, so it is expressed as a template table here and evaluated for all elements of a kind at
+# once.
+# --------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _ExtrusionSubElement:
+    """One output element produced from one source element at one segment offset.
+
+    Each column is ``(local_node, offset_factor, offset_delta)`` and resolves to
+
+        elem_indices[src, local_node] + (offset_factor*offs + offset_delta) * stride
+
+    (taken modulo the total node count when the extrusion wraps). ``offset_factor==0`` pins the
+    column to the base layer; that is how the rotational extrusion collapses the nodes sitting on
+    the symmetry axis, which are shared by every segment.
+    """
+    elem_type:int
+    nodes:tuple[tuple[int,int,int],...]
+
+
+@dataclass(frozen=True)
+class _ExtrusionTemplate:
+    """How one kind of source element is extruded. ``step`` is the stride through the segment
+    offsets: ``None`` means "the operator's phi_increm", 0 means "produce one element for the whole
+    extrusion" (used for elements degenerating onto the rotation axis)."""
+    step:int | None
+    subs:tuple[_ExtrusionSubElement,...]
+
+    @property
+    def nnode(self)->int:
+        return len(self.subs[0].nodes)
+
+
+def _sub(elem_type:int,*nodes:tuple[int,int,int])->_ExtrusionSubElement:
+    return _ExtrusionSubElement(elem_type,tuple(nodes))
+
+
+def _compact_field_indices(field_inds:dict[str,int])->None:
+    """Renumbers the indices to 0..n-1, keeping the relative order.
+
+    Not cosmetic: the extruded nodal_values array is built by walking the names in index order, so a
+    gap left by a removed field would shift every later name off its own column. The extrusions used
+    to call this after every single removal, which made it quadratic in the number of fields for no
+    gain - the relabeling is order-preserving, so one call before the array is built is equivalent.
+    """
+    for newindex,(name,_) in enumerate(sorted(field_inds.items(),key=lambda item:item[1])):
+        field_inds[name]=newindex
+
+
+# Keyed by a template name; the mapping from element type (plus, on the rotation axis, which of its
+# nodes lie on the axis) to a name is done in _extrusion_template_groups.
+_EXTRUSION_TEMPLATES:dict[str,_ExtrusionTemplate]={
+    # Point -> line along the extrusion direction
+    "point1":_ExtrusionTemplate(None,(_sub(1,(0,1,0),(0,1,1)),)),
+    "point2":_ExtrusionTemplate(None,(_sub(2,(0,1,0),(0,1,1),(0,1,2)),)),
+    # A point sitting on the rotation axis traces out nothing at all, so it stays a single vertex
+    "point_axis":_ExtrusionTemplate(0,(_sub(0,(0,0,0)),)),
+
+    # LineC1 -> two triangles, or one if an end sits on the rotation axis
+    "line2":_ExtrusionTemplate(1,(_sub(3,(0,1,0),(1,1,0),(1,1,1)),
+                                  _sub(3,(0,1,0),(1,1,1),(0,1,1)))),
+    "line2_ax0":_ExtrusionTemplate(1,(_sub(3,(0,0,0),(1,1,0),(1,1,1)),)),
+    "line2_ax1":_ExtrusionTemplate(1,(_sub(3,(1,0,0),(0,1,0),(0,1,1)),)),
+
+    # LineC2 -> eight triangles (the quadratic edge is tesselated), or four at the axis
+    "line3":_ExtrusionTemplate(2,(_sub(3,(0,1,0),(1,1,0),(1,1,1)),
+                                  _sub(3,(0,1,1),(0,1,0),(1,1,1)),
+                                  _sub(3,(0,1,2),(0,1,1),(1,1,1)),
+                                  _sub(3,(0,1,2),(1,1,1),(1,1,2)),
+                                  _sub(3,(1,1,1),(1,1,0),(2,1,0)),
+                                  _sub(3,(1,1,1),(2,1,0),(2,1,1)),
+                                  _sub(3,(1,1,1),(2,1,1),(2,1,2)),
+                                  _sub(3,(1,1,1),(2,1,2),(1,1,2)))),
+    "line3_ax0":_ExtrusionTemplate(2,(_sub(3,(0,0,0),(1,1,0),(1,1,2)),
+                                      _sub(3,(2,1,1),(1,1,0),(2,1,0)),
+                                      _sub(3,(2,1,2),(1,1,2),(2,1,1)),
+                                      _sub(3,(2,1,1),(1,1,2),(1,1,0)))),
+    "line3_ax2":_ExtrusionTemplate(2,(_sub(3,(2,0,0),(1,1,2),(1,1,0)),
+                                      _sub(3,(0,1,1),(1,1,0),(0,1,0)),
+                                      _sub(3,(0,1,2),(1,1,2),(0,1,1)),
+                                      _sub(3,(0,1,1),(1,1,2),(1,1,0)))),
+
+    # Quad4 -> Hex8, Quad9 -> Hex27
+    "quad4":_ExtrusionTemplate(None,(_sub(11,(2,1,0),(3,1,0),(0,1,0),(1,1,0),
+                                             (2,1,1),(3,1,1),(0,1,1),(1,1,1)),)),
+    "quad9":_ExtrusionTemplate(None,(_sub(14,*[(n,1,i) for i in range(3)
+                                                       for n in (6,7,8,3,4,5,0,1,2)]),)),
+
+    # Tri3 -> Wedge6, Tri6/Tri7 -> Wedge15 (the seventh, central node of a Tri7 is dropped)
+    "tri3":_ExtrusionTemplate(None,(_sub(7,(0,1,1),(1,1,1),(2,1,1),(0,1,0),(1,1,0),(2,1,0)),)),
+    "tri6":_ExtrusionTemplate(None,(_sub(77,(0,1,0),(1,1,0),(2,1,0),(0,1,2),(1,1,2),(2,1,2),
+                                            (3,1,0),(4,1,0),(5,1,0),(3,1,2),(4,1,2),(5,1,2),
+                                            (0,1,1),(1,1,1),(2,1,1)),)),
+}
+
+# Nodes actually read per source element type. elem_indices is zero-padded to the widest element in
+# the mesh, so the axis test below must not look at the padding - column 0 of the padding would
+# alias node 0, which is on the axis surprisingly often.
+_EXTRUSION_NNODE:dict[int,int]={0:1, 1:2, 2:3, 3:3, 66:3, 6:4, 8:9, 9:6, 99:7}
+
+
+def _extrusion_template_groups(elem_types:NPIntArray,elem_indices:NPIntArray,*,phi_increm:int,axis_nodes:"NPBoolArray | None",allow_line_c1:bool,collapse_axis_points:bool)->list[tuple[str,NPIntArray]]:
+    """Splits the elements into groups that share one template, as (template name, row indices)."""
+    groups:list[tuple[str,NPIntArray]]=[]
+    for et in numpy.unique(elem_types):
+        et=int(et)
+        rows=numpy.flatnonzero(elem_types==et)
+        if et==1 and not allow_line_c1:
+            raise RuntimeError("Cartesian extrusion does not work with LineC1 elements")
+        if et in {0,1,2} and axis_nodes is not None:
+            nnode=_EXTRUSION_NNODE[et]
+            on_axis=axis_nodes[elem_indices[rows][:,:nnode]]
+            if et==0:
+                if collapse_axis_points:
+                    parts=[("point_axis",on_axis[:,0]),
+                           ("point2" if phi_increm==2 else "point1",~on_axis[:,0])]
+                else:
+                    parts=[("point2" if phi_increm==2 else "point1",numpy.ones(len(rows),dtype=bool))]
+            else:
+                # The order matters: an element with BOTH ends on the axis takes the ax0 template,
+                # matching the if/elif cascade this replaced. So does an element with only its mid
+                # node on the axis, which falls into the "other end" template.
+                name="line2" if et==1 else "line3"
+                far=1 if et==1 else 2
+                any_axis=on_axis.any(axis=1)
+                parts=[(name+"_ax0",on_axis[:,0]),
+                       (name+"_ax"+str(far),any_axis & ~on_axis[:,0]),
+                       (name,~any_axis)]
+            for name,mask in parts:
+                if mask.any():
+                    groups.append((name,rows[mask]))
+            continue
+        if et==0:
+            groups.append(("point2" if phi_increm==2 else "point1",rows))
+        elif et==1:
+            groups.append(("line2",rows))
+        elif et==2:
+            groups.append(("line3",rows))
+        elif et==8:
+            groups.append(("quad9",rows))
+        elif et==6:
+            groups.append(("quad4",rows))
+        elif et in {3,66}:
+            groups.append(("tri3",rows))
+        elif et in {9,99}:
+            groups.append(("tri6",rows))
+        else:
+            raise RuntimeError("Implement element type "+str(et))
+    return groups
+
+
+def _extrude_element_connectivity(elem_types:NPIntArray,elem_indices:NPIntArray,*,stride:int,upper_limit:int,phi_increm:int,phi_row_for_step:Callable[[int],NPFloatArray],modulus:int | None,axis_nodes:"NPBoolArray | None"=None,allow_line_c1:bool=True,collapse_axis_points:bool=False)->tuple[NPIntArray,NPIntArray,NPFloatArray,NPIntArray]:
+    """Extrudes a 0d/1d/2d connectivity into one dimension higher.
+
+    Returns ``(new_elem_types, new_elem_indices, elemental_angles, counts)``, where ``counts[i]`` is
+    how many output elements source element ``i`` produced. The rows are laid out exactly as the
+    element-by-element loop this replaced produced them - source-major, then segment offset, then
+    sub-element - because the output writers pair these rows with D0/DL by position
+    (see :py:func:`pyoomph.output.meshio._convert_mesh_to_meshio`).
+
+    ``phi_row_for_step`` is the only thing the two extrusion operators differ in: it maps a segment
+    step to the angle (or axial position) assigned to each ring of created elements.
+    """
+    nelem=len(elem_types)
+    if nelem==0:
+        # numpy.array([]) would be float64 here, and the callers assign this straight onto the cache
+        # entry where an integer connectivity is expected.
+        return numpy.zeros((0,),dtype=int),numpy.zeros((0,0),dtype=int),numpy.zeros((0,)),numpy.zeros((0,),dtype=int)
+
+    groups=_extrusion_template_groups(elem_types,elem_indices,phi_increm=phi_increm,axis_nodes=axis_nodes,allow_line_c1=allow_line_c1,collapse_axis_points=collapse_axis_points)
+
+    phi_row_cache:dict[int,NPFloatArray]={}
+    def phi_row(step:int)->NPFloatArray:
+        if step not in phi_row_cache:
+            phi_row_cache[step]=phi_row_for_step(step)
+        return phi_row_cache[step]
+
+    # First pass: sizes only, so the output arrays can be allocated once and every group can be
+    # written straight into its final rows.
+    counts=numpy.zeros((nelem,),dtype=int)
+    resolved:list[tuple[_ExtrusionTemplate,NPIntArray,NPIntArray,NPFloatArray]]=[]
+    maxl=0
+    for name,rows in groups:
+        tmpl=_EXTRUSION_TEMPLATES[name]
+        step=phi_increm if tmpl.step is None else tmpl.step
+        if step==0:
+            offs=numpy.zeros((1,),dtype=int)
+            row=numpy.array([phi_row(phi_increm)[0]])
+        else:
+            offs=numpy.arange(0,upper_limit,step)
+            row=phi_row(step)
+            if len(row)!=len(offs):
+                raise RuntimeError("Inconsistent extrusion of '"+name+"' elements: "+str(len(offs))+" segment offsets but "+str(len(row))+" angles. upper_limit="+str(upper_limit)+" is not a multiple of the step "+str(step)+".")
+        k=len(tmpl.subs)
+        counts[rows]=len(offs)*k
+        maxl=max(maxl,tmpl.nnode)
+        resolved.append((tmpl,rows,offs,row))
+
+    starts=numpy.concatenate(([0],numpy.cumsum(counts)))[:-1]
+    total=int(counts.sum())
+    new_elem_types=numpy.zeros((total,),dtype=int)
+    new_elem_indices=numpy.zeros((total,maxl),dtype=int)
+    elemental_phis=numpy.zeros((total,))
+
+    for tmpl,rows,offs,row in resolved:
+        k=len(tmpl.subs)
+        nn=tmpl.nnode
+        M=len(offs)
+        loc=numpy.array([[c[0] for c in s.nodes] for s in tmpl.subs],dtype=int)       # (k,nn)
+        fac=numpy.array([[c[1] for c in s.nodes] for s in tmpl.subs],dtype=int)
+        dlt=numpy.array([[c[2] for c in s.nodes] for s in tmpl.subs],dtype=int)
+        shift=(offs[:,None,None]*fac[None]+dlt[None])*stride                          # (M,k,nn)
+        dest=(starts[rows][:,None]+numpy.arange(M*k)[None,:]).ravel()
+        sub_types=numpy.array([s.elem_type for s in tmpl.subs],dtype=int)
+        new_elem_types[dest]=numpy.tile(sub_types,len(rows)*M)
+        elemental_phis[dest]=numpy.tile(numpy.repeat(row,k),len(rows))
+        # Chunked so the (Nt,M,k,nn) temporary stays bounded on large meshes
+        chunk=max(1,(1<<23)//max(M*k*nn,1))
+        for lo in range(0,len(rows),chunk):
+            rw=rows[lo:lo+chunk]
+            idx=elem_indices[rw][:,loc][:,None]+shift[None]                            # (Nt,M,k,nn)
+            if modulus is not None:
+                idx=idx%modulus
+            new_elem_indices[dest[lo*M*k:(lo+len(rw))*M*k],:nn]=idx.reshape(-1,nn)
+
+    return new_elem_types,new_elem_indices,elemental_phis,counts
+
+
 class MeshDataCacheOperatorBase:
     def __init__(self):
         super(MeshDataCacheOperatorBase, self).__init__()
@@ -749,71 +984,63 @@ class MeshDataCombineWithEigenfunction(MeshDataCacheOperatorBase):
 
 
             def process(eigendata:MeshDataCacheEntry,prefix:str) -> str:
-                new_nodal_values=base.nodal_values.copy()
+                # Everything here appends the eigenfunction's fields behind the base fields. It used
+                # to do so one column at a time with numpy.c_ / numpy.concatenate, i.e. reallocating
+                # and copying the whole block once per field - O(nfields^2 * nnodes). Selecting all
+                # the columns first and stacking once is the same result for one allocation.
                 new_nodal_field_inds=base.nodal_field_inds.copy()
                 if len(self.eigenindex)>1:
                     prefix+=str(eigenindex)+"_"
-                for fn,index in eigendata.nodal_field_inds.items():
-                    if fn in hidden_fields:
-                        #print("SKIPPING ",fn,hidden_fields)
-                        continue
-                    new_nodal_field_inds[prefix+fn] = max(new_nodal_field_inds.values()) + 1
-                    new_nodal_values=numpy.c_[new_nodal_values,eigendata.nodal_values[:,index]]
+                sel=[index for fn,index in eigendata.nodal_field_inds.items() if fn not in hidden_fields]
+                nxt=max(new_nodal_field_inds.values())+1
+                for j,fn in enumerate(fn for fn in eigendata.nodal_field_inds if fn not in hidden_fields):
+                    # A prefixed name colliding with an existing one overwrites its index but still
+                    # adds a column, which is why the counter runs over all selected fields
+                    new_nodal_field_inds[prefix+fn]=nxt+j
+                new_nodal_values=numpy.hstack((base.nodal_values,eigendata.nodal_values[:,sel])) if sel else base.nodal_values.copy()
 
-              
                 new_elem_field_inds={}
                 rev_field_inds={i:n for n,i in base.elemental_field_inds.items()}
                 rev_field_inds_eig={i:n for n,i in eigendata.elemental_field_inds.items()}
                 cnt=0
 
-                num_DL=base.DL_data.shape[1]        
-                if not base.discontinuous:
-                    new_DL_data=numpy.zeros((base.DL_data.shape[0],0,base.DL_data.shape[2]))                
-                    for iDL in range(num_DL):
-                        new_elem_field_inds[rev_field_inds[iDL]]=cnt
-                        new_DL_data=numpy.concatenate((new_DL_data[:,:,:],base.DL_data[:,iDL:iDL+1,:]),axis=1)
-                        cnt+=1
-                    for iDL in range(eigendata.DL_data.shape[1]):
-                        if rev_field_inds_eig[iDL] in hidden_fields:
-                            continue
-                        new_elem_field_inds[prefix+rev_field_inds[iDL]]=cnt
-                        new_DL_data=numpy.concatenate((new_DL_data[:,:,:],eigendata.DL_data[:,iDL:iDL+1,:]),axis=1)
-                        cnt+=1
-                else:
-                    new_DL_data=numpy.zeros((base.DL_data.shape[0],0))  
-                    for iDL in range(num_DL):
-                        new_elem_field_inds[rev_field_inds[iDL]]=cnt
-                        new_DL_data=numpy.concatenate((new_DL_data[:,:],base.DL_data[:,iDL:iDL+1]),axis=1)
-                        cnt+=1
-                    for iDL in range(eigendata.DL_data.shape[1]):
-                        if rev_field_inds_eig[iDL] in hidden_fields:
-                            continue
-                        new_elem_field_inds[prefix+rev_field_inds[iDL]]=cnt
-                        new_DL_data=numpy.concatenate((new_DL_data[:,:],eigendata.DL_data[:,iDL:iDL+1]),axis=1)
-                        cnt+=1              
+                num_DL=base.DL_data.shape[1]
+                for iDL in range(num_DL):
+                    new_elem_field_inds[rev_field_inds[iDL]]=cnt
+                    cnt+=1
+                sel_DL=[]
+                for iDL in range(eigendata.DL_data.shape[1]):
+                    if rev_field_inds_eig[iDL] in hidden_fields:
+                        continue
+                    # rev_field_inds_eig, not rev_field_inds: the name has to come from the
+                    # eigendata whose column is being appended. It used to read the base's map,
+                    # which happens to agree only because both entries come from the same mesh and
+                    # therefore share their DL ordering.
+                    new_elem_field_inds[prefix+rev_field_inds_eig[iDL]]=cnt
+                    sel_DL.append(iDL)
+                    cnt+=1
+                # concatenate on axis 1 covers both layouts: DL_data is (nelem,nfields,nvalues) for
+                # continuous data and (nelem,nfields) for discontinuous
+                new_DL_data=numpy.concatenate((base.DL_data,eigendata.DL_data[:,sel_DL]),axis=1) if sel_DL else base.DL_data.copy()
 
-                new_D0_data=numpy.zeros((base.D0_data.shape[0],0))
                 for iD0 in range(base.D0_data.shape[1]):
-                    new_elem_field_inds[rev_field_inds[iD0+base.DL_data.shape[1]]]=cnt
-                    new_D0_data=numpy.concatenate((new_D0_data[:,:],base.D0_data[:,iD0:iD0+1]),axis=1)
-                    cnt+=1                    
+                    new_elem_field_inds[rev_field_inds[iD0+num_DL]]=cnt
+                    cnt+=1
+                sel_D0=[]
                 for iD0 in range(eigendata.D0_data.shape[1]):
                     if rev_field_inds_eig[iD0+eigendata.DL_data.shape[1]] in hidden_fields:
                         continue
                     new_elem_field_inds[prefix+rev_field_inds_eig[iD0+eigendata.DL_data.shape[1]]]=cnt
-                    new_D0_data=numpy.concatenate((new_D0_data[:,:],eigendata.D0_data[:,iD0:iD0+1]),axis=1)
+                    sel_D0.append(iD0)
                     cnt+=1
-                
+                new_D0_data=numpy.concatenate((base.D0_data,eigendata.D0_data[:,sel_D0]),axis=1) if sel_D0 else base.D0_data.copy()
+
                 for vector_name,compo_names in eigendata.vector_fields.items():
-                    if len(self.eigenindex) == 1:
-                        base.vector_fields[prefix+vector_name]=[prefix+compo_name for compo_name in compo_names]
-                    else:
-                        base.vector_fields[prefix+vector_name]=[prefix+compo_name for compo_name in compo_names]
-                        #base.vector_fields[prefix +str(eigenindex)+"_"+ vector_name] = [prefix +str(eigenindex)+"_"+ compo_name for compo_name in compo_names]
+                    base.vector_fields[prefix+vector_name]=[prefix+compo_name for compo_name in compo_names]
                 base.nodal_values = new_nodal_values
                 base.nodal_field_inds = new_nodal_field_inds
                 base.elemental_field_inds=new_elem_field_inds
-               
+
                 base.D0_data=new_D0_data
                 base.DL_data=new_DL_data
                 return prefix
@@ -835,7 +1062,8 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
     Args:
         n_segments: Number of segments in the z-direction.
         default_length: Default length of the extrusion (when no wave number is available).
-        phase: Phase of the extrusion to start with.
+        phase: Axial offset the eigenmode expansion starts at. Until this was fixed it shifted only
+            the elemental (D0/DL) fields, not the nodal ones.
         apply_k_mode_expansion: If True, the extrusion will consider the exp(i*k*z) factor of the eigenfunction.
         use_k_for_length: If True, the length of the extrusion will be determined by the wave number (if available, otherwise default_length).
         numperiods: Number of periods to extrude (in terms of either default_length or 2*pi/k).
@@ -884,10 +1112,6 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
         new_nodal_field_inds=base.nodal_field_inds.copy()
         field_operators={}
 
-        new_D0_data=[]
-        new_DL_data=[]
-        
-        
         vector_fields=base.vector_fields.copy()
 #        vector_fields["coordinate"]=["coordinate_x","coordinate_y"]
         rev_vector_fields={}
@@ -939,16 +1163,15 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                         fnRes=prefixRes+fn[len(prefixRe):]
                         del new_nodal_field_inds[fnRe]
                         del new_nodal_field_inds[fnIm]
-                        newindex = 0
-                        for name, index in sorted(new_nodal_field_inds.items(), key=lambda item: item[1]): #type:ignore
-                            new_nodal_field_inds[name] = newindex
-                            newindex += 1
                         new_nodal_field_inds[fnRes]=max(new_nodal_field_inds.values()) + 1
                         k=base.mesh.get_problem().get_last_eigenmodes_k()[eigenindex] #type:ignore
-                        phis=numpy.linspace(0,2*numpy.pi*self.numperiods/k,n_segments+1,endpoint=True)
+                        phis=numpy.linspace(0,2*numpy.pi*self.numperiods/k,n_segments+1,endpoint=True)+self.phase
                         
                         
-                        field_operators[fnRes] = [lambda RealPart,ImagPart : numpy.outer(numpy.cos(k*phis), RealPart).flatten() + numpy.outer(numpy.sin(k*phis), ImagPart).flatten(), fnRe,fnIm] #type:ignore
+                        # k/phis (m/phis) are bound as defaults: these closures are only called much later, after
+                        # every loop has finished, so with more than one entry in _additional_eigendata
+                        # they all used to be evaluated with the LAST eigenindex's wavenumber.
+                        field_operators[fnRes] = [lambda RealPart,ImagPart,k=k,phis=phis : numpy.outer(numpy.cos(k*phis), RealPart).flatten() + numpy.outer(numpy.sin(k*phis), ImagPart).flatten(), fnRe,fnIm] #type:ignore
 
                         if fnRe in rev_vector_fields:
                             ReVector=rev_vector_fields[fnRe] #type:ignore
@@ -983,15 +1206,15 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                         if r_index is not None and phi_index is not None:
                             #print("RINDEX",r_index,phi_index)
                             #print("K",eigenindex,k)
-                            phis=numpy.linspace(0,2*numpy.pi*self.numperiods/k,n_segments+1,endpoint=True)
-                            def get_x_component(ReR,ImR,ReP,ImP): #type:ignore
+                            phis=numpy.linspace(0,2*numpy.pi*self.numperiods/k,n_segments+1,endpoint=True)+self.phase
+                            def get_x_component(ReR,ImR,ReP,ImP,k=k,phis=phis): #type:ignore
                                 #print("XCOMPONENT",vecname, len(ReR),len(ImR),len(ReP),len(ImP))
                                 
                                 return numpy.outer(numpy.cos(k * phis),ReR).flatten()-numpy.outer(numpy.sin(k * phis),ImR).flatten()
                                 #Vr_cos_phi=numpy.outer(numpy.cos(k * phis)*numpy.cos(phis),ReR).flatten()+numpy.outer(numpy.sin(k * phis)*numpy.cos(phis),ImR).flatten() #type:ignore
                                 #Vphi_sin_phi=numpy.outer(numpy.cos(k * phis)*numpy.sin(phis),ReP).flatten()+numpy.outer(numpy.sin(k * phis)*numpy.sin(phis),ImP).flatten() #type:ignore
                                 #return Vr_cos_phi+0*Vphi_sin_phi #type:ignore
-                            def get_y_component(ReR,ImR,ReP,ImP): #type:ignore
+                            def get_y_component(ReR,ImR,ReP,ImP,k=k,phis=phis): #type:ignore
                                 #print("YCOMPONENT",vecname,len(ReR),len(ImR),len(ReP),len(ImP))             
                                 #print("MAGS YCOMPONENT",vecname,numpy.amax(numpy.absolute(ReR)),numpy.amax(numpy.absolute(ImR)),numpy.amax(numpy.absolute(ReP)),numpy.amax(numpy.absolute(ImP)))
                                 return numpy.outer(numpy.cos(k * phis),ReP).flatten()-numpy.outer(numpy.sin(k * phis),ImP).flatten()
@@ -1011,38 +1234,29 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                             #    field_operators[vecname+"_z"]= [lambda ReVy,ImVy: numpy.outer(numpy.cos(m * phis), ReVy).flatten()+numpy.outer(numpy.sin(m * phis), ImVy).flatten(),prefixRe + veccompos[0][len(prefixRes):-len("_x")] + "_y",prefixIm + veccompos[0][len(prefixRes):-len("_x")] + "_y"] #type:ignore
                             vector_fields[vecname]=[vecname+component for component in ["_x","_y","_z"][0:len(composRes)]]
                             #print(new_nodal_field_inds,vector_fields)
-                    else:
-                        field_operators[vecname+"_y"]=[lambda a:numpy.tile(a,n_segments+1),vecname+"_normal"] 
-                        #print("SKIPPING VECTOR",vecname)
-                        pass
+                    # There used to be an else branch here setting field_operators[vecname+"_y"]
+                    # from vecname+"_normal". It was dead: it fires only for the non-eigen vector
+                    # fields, which the loop below overwrites in every case where the entry would
+                    # ever be read.
 
+        for vfield,components in vector_fields.items(): #type:ignore
+            if vfield in completed_eigen_vector_fields:
+                continue
+            if vfield+"_x" in new_nodal_field_inds:
+                if vfield+"_y" in new_nodal_field_inds:
+                    field_operators[vfield+"_y"]= [lambda vy: numpy.tile(vy,n_segments+1), vfield+"_y"] #type:ignore
+                    if vfield+"_normal" in new_nodal_field_inds:
+                        new_nodal_field_inds[vfield+"_z"] = max(new_nodal_field_inds.values()) + 1
+                        field_operators[vfield+"_z"]= [lambda vy: numpy.tile(vy,n_segments+1), vfield+"_normal"] #type:ignore
+                else:
+                    field_operators[vfield+"_x"]= [lambda vy: numpy.tile(vy,n_segments+1), vfield+"_x"] #type:ignore
+                    if vfield+"_normal" in new_nodal_field_inds:
+                        new_nodal_field_inds[vfield + "_y"] = max(new_nodal_field_inds.values()) + 1
+                        field_operators[vfield+"_y"]= [lambda vy: numpy.tile(vy,n_segments+1), vfield+"_normal"] #type:ignore
+                if vfield+"_normal" in new_nodal_field_inds:
+                    del new_nodal_field_inds[vfield+"_normal"]
 
-        if True:
-            for vfield,components in vector_fields.items(): #type:ignore
-                if vfield in completed_eigen_vector_fields:
-                    continue
-                if vfield+"_x" in new_nodal_field_inds:
-                    if vfield+"_y" in new_nodal_field_inds:
-                        field_operators[vfield+"_y"]= [lambda vy: numpy.tile(vy,n_segments+1), vfield+"_y"] #type:ignore
-                        if vfield+"_normal" in new_nodal_field_inds:                                                
-                            new_nodal_field_inds[vfield+"_z"] = max(new_nodal_field_inds.values()) + 1
-                            field_operators[vfield+"_z"]= [lambda vy: numpy.tile(vy,n_segments+1), vfield+"_normal"] #type:ignore
-                    else:
-                        field_operators[vfield+"_x"]= [lambda vy: numpy.tile(vy,n_segments+1), vfield+"_x"] #type:ignore
-                        if vfield+"_normal" in new_nodal_field_inds:                                                
-                            new_nodal_field_inds[vfield + "_y"] = max(new_nodal_field_inds.values()) + 1
-                            field_operators[vfield+"_y"]= [lambda vy: numpy.tile(vy,n_segments+1), vfield+"_normal"] #type:ignore
-                    if vfield+"_normal" in new_nodal_field_inds:                                                
-                            del new_nodal_field_inds[vfield+"_normal"]
-                            newindex=0
-                            for name, index in sorted(new_nodal_field_inds.items(), key=lambda item: item[1]): #type:ignore
-                                new_nodal_field_inds[name]=newindex
-                                newindex+=1
-
-
-        
-                
-
+        _compact_field_indices(new_nodal_field_inds)
         for name,index in sorted(new_nodal_field_inds.items(),key=lambda item: item[1]): #type:ignore
             if name in field_operators.keys():
                 op=field_operators[name] #type:ignore
@@ -1061,7 +1275,9 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                 new_nodal_values.append(newdata) #type:ignore
 
         base.nodal_field_inds=new_nodal_field_inds
-        base.nodal_values=numpy.transpose(numpy.array(new_nodal_values)) #type:ignore        
+        # column_stack, not transpose(array(...)): the latter leaves a Fortran-ordered view, so
+        # every later nodal_values[:,i] became a strided gather
+        base.nodal_values=numpy.column_stack(new_nodal_values) #type:ignore
         base.vector_fields=vector_fields
         
 
@@ -1070,148 +1286,27 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
         #    raise RuntimeError("Cartesian extrusion cannot be combined with tesselate_tri=True yet")
         if base.discontinuous and (base.D0_data.shape[1]>0 or base.DL_data.shape[1]>0):
             raise RuntimeError("Cartesian extrusion does not work with discontinuous=True, at least if D0 or DL fields are defined")
-        elem_types=base.elem_types
+        upper_limit=n_segments
 
+        def phi_row_for_step(step:int)->NPFloatArray:
+            # The axial position of the centre of each ring of created elements. This used to run
+            # over [0,2*pi] while the nodal fields are expanded over [0,L] with L=2*pi*numperiods/k,
+            # so cos(k*...) gave the D0/DL eigen fields k periods where the nodal ones had
+            # numperiods - they only agreed when k happened to equal numperiods.
+            M=upper_limit//step
+            return numpy.linspace(0,L,M,endpoint=False)+L/(2*M)+self.phase
 
-        upper_limit=n_segments#-phi_increm
+        base.elem_types,base.elem_indices,elemental_phis,counts=_extrude_element_connectivity(
+            base.elem_types,base.elem_indices,stride=stride,upper_limit=upper_limit,
+            phi_increm=phi_increm,phi_row_for_step=phi_row_for_step,
+            # Unlike the rotational extrusion this one does not close onto itself, so no wrapping
+            modulus=None,allow_line_c1=False)
 
-        mod_length=base.nodal_values.shape[0]
-        new_elem_types=[]
-        new_elem_indices=[]
-        elemental_phis=numpy.zeros((0,))
-        
-        mp = lambda i, o: (i + o * stride) #% mod_length #type:ignore
-        for d0dl_index,(elemtype,eis) in enumerate(zip(elem_types,base.elem_indices)):            
-            old_num_elems=len(new_elem_types)       
-            if elemtype==1: # LineC1                         
-                raise RuntimeError("Cartesian extrusion does not work with LineC1 elements")
-            elif elemtype == 2:  # LineC2
-                    for offs in range(0,upper_limit,2):
-                        new_elem_indices.append([mp(eis[0], offs), mp(eis[1], offs), mp(eis[1], offs + 1)]) #type:ignore
-                        new_elem_indices.append([mp(eis[0], offs+1), mp(eis[0], offs), mp(eis[1], offs + 1)]) #type:ignore
-                        new_elem_indices.append([mp(eis[0], offs + 2), mp(eis[0], offs+1), mp(eis[1], offs + 1)]) #type:ignore
-                        new_elem_indices.append([mp(eis[0], offs + 2), mp(eis[1], offs + 1),mp(eis[1], offs + 2)]) #type:ignore
-                        #new_elem_types+=[3,3,3,3] #type:ignore
-                        new_elem_indices.append([mp(eis[1], offs + 1),mp(eis[1], offs), mp(eis[2], offs) ]) #type:ignore
-                        new_elem_indices.append([mp(eis[1], offs + 1), mp(eis[2], offs), mp(eis[2], offs+1)]) #type:ignore
-                        new_elem_indices.append([mp(eis[1], offs + 1), mp(eis[2], offs+1), mp(eis[2], offs + 2)]) #type:ignore
-                        new_elem_indices.append([mp(eis[1], offs + 1), mp(eis[2], offs + 2), mp(eis[1], offs + 2)]) #type:ignore
-                        #print(new_elem_indices[-1],mod_length)
-                    #raise RuntimeError("This causes troubles ")
-                        new_elem_types += [3,3,3,3,3,3,3,3] #type:ignore
-                    elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//2,endpoint=True)+self.phase
-                    elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            elif elemtype==0: # Point -> Line
-                for offs in range(0, upper_limit, phi_increm):
-                    if phi_increm==2: # second order
-                        new_elem_indices.append([mp(eis[0], offs), mp(eis[0], offs+1), mp(eis[0], offs + 2)]) #type:ignore
-                        new_elem_types.append(2) #type:ignore
-                    else:
-                        new_elem_indices.append([mp(eis[0], offs), mp(eis[0], offs + 1)]) #type:ignore
-                        new_elem_types.append(1) #type:ignore
-                elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//phi_increm,endpoint=True)+self.phase
-                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            elif elemtype==8: # Quad9 -> Tris at the center and hex27 in bulk
-                for offs in range(0, upper_limit, phi_increm):
-                    #if zero_radial_index in eis:
-                    #    pass
-                    #else:
-                    hex27inds=[]
-                    for i in range(3):
-                        hex27inds += [mp(eis[6], offs + i), mp(eis[7], offs + i), mp(eis[8], offs + i)] #type:ignore
-                        hex27inds += [mp(eis[3], offs + i), mp(eis[4], offs + i), mp(eis[5], offs + i)] #type:ignore
-                        hex27inds+=[mp(eis[0], offs+i), mp(eis[1], offs +i), mp(eis[2], offs+i)] #type:ignore
-                    new_elem_indices.append(hex27inds) #type:ignore
-                    new_elem_types.append(14) #type:ignore
-                elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//phi_increm,endpoint=True)+self.phase  
-                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            elif elemtype==6: # Quad4 -> Tris at the center and hex in bulk
-                for offs in range(0, upper_limit, phi_increm):
-                        # TODO: Tri at center
-                        hexinds=[]
-                        for i in range(2):
-                            hexinds += [mp(eis[2], offs + i), mp(eis[3], offs + i)] #type:ignore
-                            hexinds+=[mp(eis[0], offs+i), mp(eis[1], offs +i)] #type:ignore
-                        new_elem_indices.append(hexinds) #type:ignore
-                        new_elem_types.append(11) #type:ignore
-                elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//phi_increm,endpoint=True)+self.phase  
-                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            elif elemtype==3 or elemtype==66: # Tri3 -> Tetras
-                for offs in range(0, upper_limit, phi_increm):
-                        # TODO: Special tetra at center
-                        new_elem_indices.append([mp(eis[0], offs+1),mp(eis[1], offs+1),mp(eis[2], offs+1),mp(eis[0],offs),mp(eis[1],offs),mp(eis[2], offs)]) #type:ignore
-                        new_elem_types+=[7] #type:ignore
-                elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//phi_increm,endpoint=True)+self.phase  
-                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            elif elemtype==9 or elemtype==99:
-                for offs in range(0, upper_limit, phi_increm):
-                        new_elem_indices.append([mp(eis[0],offs),mp(eis[1],offs),mp(eis[2], offs), #type:ignore
-                                                 mp(eis[0], offs + 2), mp(eis[1], offs + 2), mp(eis[2], offs + 2),
-                                                 mp(eis[3],offs),mp(eis[4],offs),mp(eis[5], offs),
-                                                 mp(eis[3], offs + 2), mp(eis[4], offs + 2), mp(eis[5], offs + 2),
-                                                 mp(eis[0], offs + 1), mp(eis[1], offs + 1), mp(eis[2], offs + 1)
-                                                 ]) #type:ignore
-                        new_elem_types+=[77] #type:ignore
-                elemental_phi_row=numpy.linspace(0,2*numpy.pi,upper_limit//phi_increm,endpoint=True)+self.phase  
-                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            else:
-                raise RuntimeError("Implement element type "+str(elemtype))
-            
-            # DL/D0 Data
-            num_created_elems=len(new_elem_types)-old_num_elems            
-            #print(num_created_elems//upper_limit,eis,elemtype)
-            if num_created_elems % len(elemental_phi_row)!=0:
-                print("ERROR NUM CREATED ELEMENTS:",num_created_elems,"LEN OF THE ELEMENTAL ANGLE ROW",len(elemental_phi_row),"UPPER LIMIT",upper_limit)
-                #raise RuntimeError("See above")
-            
-            new_elemental_phis=numpy.repeat(elemental_phi_row,num_created_elems//len(elemental_phi_row))
-            #print("LENS",len(new_elemental_phis),num_created_elems,num_created_elems//len(elemental_phi_row),num_created_elems)
-            #print(num_created_elems,len(new_elemental_phis),len(elemental_phi_row),elemtype)
-            elemental_phis=numpy.r_[elemental_phis,new_elemental_phis] #type:ignore
-            #start=0 # elemental_phis[-1] if len(elemental_phis)>0 else 0
-            #end=start+1
-            #elemental_phis=numpy.r_[elemental_phis,numpy.linspace(start,end,num_created_elems)]
-
-            #print(len(numpy.repeat(elemental_phi_row,num_created_elems//upper_limit)),num_created_elems)
-
-            if base.DL_data.shape[1]>0:
-                dlrow=[]
-                for dlfield in range(base.DL_data.shape[1]):  
-                    dlrow+=[[base.DL_data[d0dl_index][dlfield]]*len(new_elemental_phis)]
-                dlrow=numpy.transpose(numpy.array(dlrow))
-                if len(new_DL_data)==0:
-                    new_DL_data=dlrow
-                else:
-                    new_DL_data=numpy.concatenate((new_DL_data,dlrow),axis=1)
-
-            if base.D0_data.shape[1]>0:
-                d0row=[]
-                for d0field in range(base.D0_data.shape[1]):            
-                    d0row+=[[base.D0_data[d0dl_index][d0field]]*len(new_elemental_phis)]
-                d0row=numpy.transpose(numpy.array(d0row))
-                if len(new_D0_data)==0:
-                    new_D0_data=d0row
-                else:
-                    new_D0_data=numpy.r_[new_D0_data,d0row]
-
-
-
-        base.elem_types=numpy.array(new_elem_types) #type:ignore
-        maxl=0
-        for l in new_elem_indices: #type:ignore
-            maxl=max(maxl,len(l)) #type:ignore
-        base.elem_indices=numpy.zeros((len(new_elem_indices),maxl),dtype=int) #type:ignore
-        for i,ne in enumerate(new_elem_indices): #type:ignore
-            for j,e in enumerate(ne): #type:ignore
-                base.elem_indices[i,j]=e #type:ignore
-
-        if len(new_DL_data)>0:
-            base.DL_data=numpy.transpose(new_DL_data,axes=(1,2,0))
-            
-        if len(new_D0_data)>0:
-            assert isinstance(new_D0_data,numpy.ndarray)
-            base.D0_data=new_D0_data
-            assert base.D0_data.shape[0]==len(elemental_phis)
+        # Each output element inherits the elemental data of the element it was extruded from
+        if base.DL_data.shape[1]>0:
+            base.DL_data=numpy.repeat(base.DL_data,counts,axis=0)
+        if base.D0_data.shape[1]>0:
+            base.D0_data=numpy.repeat(base.D0_data,counts,axis=0)
 
         # Rotate DL and D0 with m if necessary:        
         if self.apply_k_mode_expansion and base.mesh.get_problem().get_last_eigenmodes_k() is not None: #type:ignore
@@ -1255,7 +1350,8 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                 new_inds={}
                 rev_inds={i:n for n,i in base.elemental_field_inds.items()}
                 cnt=0
-                for i in range(max(rev_inds.keys())):
+                # max()+1: without it the highest-numbered elemental field was silently dropped
+                for i in range(max(rev_inds.keys())+1):
                     if i in remove_indices:
                         continue
                     new_inds[rev_inds[i]]=cnt
@@ -1280,9 +1376,13 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
         angle: Angle to extrude the mesh to. If larger than 2*pi, it will be cut off at 2*pi.
         start_angle: Angle to start the extrusion at.
         rotate_eigendata_with_mode_m: If True, the eigendata will be rotated with the azimuthal mode number m. This is useful for azimuthal normal mode stability analysis.
+        collapse_axis_points: If True, a point element sitting on the symmetry axis stays a single
+            vertex instead of being swept into a ring of zero-length line elements. Set it to False
+            to reproduce the output of versions before this was fixed.
     """
-    def __init__(self,n_segments:int=32,angle:float=2*numpy.pi,start_angle:float=0.0,rotate_eigendata_with_mode_m:bool=True):
+    def __init__(self,n_segments:int=32,angle:float=2*numpy.pi,start_angle:float=0.0,rotate_eigendata_with_mode_m:bool=True,collapse_axis_points:bool=True):
         super(MeshDataRotationalExtrusion, self).__init__()
+        self.collapse_axis_points=collapse_axis_points
         self.n_segments=n_segments
         self.angle=float(angle)
         if self.angle>2*numpy.pi:
@@ -1301,13 +1401,11 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
         phis=numpy.linspace(0,self.angle,n_segments,endpoint=not closed)+self.start_angle #type:ignore
 
         r_pos=base.nodal_values[:, base.nodal_field_inds["coordinate_x"]]
-        zero_radial_index=numpy.argsort(r_pos)[0] #type:ignore
-        if r_pos[zero_radial_index]<-1.0e-9:
+        min_radial_index=int(numpy.argmin(r_pos))
+        if r_pos[min_radial_index]<-1.0e-9:
             raise RuntimeError("Cannot rotationally extrude meshes with negative x-coordinates (radius)")
-        elif r_pos[zero_radial_index]>1.0e-9:
-            zero_radial_index = set({})
-        else:
-            zero_radial_index=set(numpy.argwhere(r_pos<=1.0e-9)[:,0]) #type:ignore
+        # Nodes on the symmetry axis are shared by all segments instead of being copied per segment
+        axis_nodes=r_pos<=1.0e-9
 
 
         stride = base.nodal_values.shape[0]
@@ -1315,9 +1413,6 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
         new_nodal_values=[]
         new_nodal_field_inds=base.nodal_field_inds.copy()
         field_operators={}
-
-        new_D0_data=[]
-        new_DL_data=[]
 
         field_operators["coordinate_x"] = [lambda cx: numpy.outer(numpy.cos(phis), cx).flatten(), "coordinate_x"] #type:ignore
         field_operators["coordinate_y"] = [lambda cx: numpy.outer(numpy.sin(phis), cx).flatten(), "coordinate_x"] #type:ignore
@@ -1334,8 +1429,10 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                 rev_vector_fields[c] = a
 
         completed_eigen_vector_fields=set() #type:ignore
+        ms_by_prefix:dict[str,float]={} # so the mesh-position block below does not need a leaked loop variable
         if self.rotate_eigendata_with_mode_m and base.mesh.get_problem().get_last_eigenmodes_m() is not None: #type:ignore
             for eigenindex,prefixPair in base._additional_eigendata.items(): #type:ignore
+                ms_by_prefix[prefixPair[0]]=base.mesh.get_problem().get_last_eigenmodes_m()[eigenindex] #type:ignore
                 prefixRe=prefixPair[0]
                 prefixIm = prefixPair[1]
                 prefixRes = prefixPair[2]
@@ -1346,13 +1443,12 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                         fnRes=prefixRes+fn[len(prefixRe):]
                         del new_nodal_field_inds[fnRe]
                         del new_nodal_field_inds[fnIm]
-                        newindex = 0
-                        for name, index in sorted(new_nodal_field_inds.items(), key=lambda item: item[1]): #type:ignore
-                            new_nodal_field_inds[name] = newindex
-                            newindex += 1
                         new_nodal_field_inds[fnRes]=max(new_nodal_field_inds.values()) + 1
                         m=base.mesh.get_problem().get_last_eigenmodes_m()[eigenindex] #type:ignore
-                        field_operators[fnRes] = [lambda RealPart,ImagPart : numpy.outer(numpy.cos(m*phis), RealPart).flatten() + numpy.outer(numpy.sin(m*phis), ImagPart).flatten(), fnRe,fnIm] #type:ignore
+                        # k/phis (m/phis) are bound as defaults: these closures are only called much later, after
+                        # every loop has finished, so with more than one entry in _additional_eigendata
+                        # they all used to be evaluated with the LAST eigenindex's wavenumber.
+                        field_operators[fnRes] = [lambda RealPart,ImagPart,m=m,phis=phis : numpy.outer(numpy.cos(m*phis), RealPart).flatten() + numpy.outer(numpy.sin(m*phis), ImagPart).flatten(), fnRe,fnIm] #type:ignore
 
                         if fnRe in rev_vector_fields:
                             ReVector=rev_vector_fields[fnRe] #type:ignore
@@ -1383,11 +1479,11 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                                 phi_index=cindex                                
 
                         if r_index is not None and phi_index is not None:
-                            def get_x_component(ReR,ImR,ReP,ImP): #type:ignore
+                            def get_x_component(ReR,ImR,ReP,ImP,m=m,phis=phis): #type:ignore
                                 Vr_cos_phi=numpy.outer(numpy.cos(m * phis)*numpy.cos(phis),ReR).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.cos(phis),ImR).flatten() #type:ignore
                                 Vphi_sin_phi=numpy.outer(numpy.cos(m * phis)*numpy.sin(phis),ReP).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.sin(phis),ImP).flatten() #type:ignore
                                 return Vr_cos_phi+Vphi_sin_phi #type:ignore
-                            def get_y_component(ReR,ImR,ReP,ImP): #type:ignore
+                            def get_y_component(ReR,ImR,ReP,ImP,m=m,phis=phis): #type:ignore
                                 Vr_sin_phi=numpy.outer(numpy.cos(m * phis)*numpy.sin(phis),ReR).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.sin(phis),ImR).flatten() #type:ignore
                                 Vphi_cos_phi=numpy.outer(numpy.cos(m * phis)*numpy.cos(phis),ReP).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.cos(phis),ImP).flatten() #type:ignore
                                 return Vr_sin_phi-Vphi_cos_phi #type:ignore
@@ -1399,26 +1495,29 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                             completed_eigen_vector_fields.add(vecname) #type:ignore
                             if len(composRes)>2:
                                 new_nodal_field_inds[vecname + "_z"] = max(new_nodal_field_inds.values()) + 1
-                                field_operators[vecname+"_z"]= [lambda ReVy,ImVy: numpy.outer(numpy.cos(m * phis), ReVy).flatten()+numpy.outer(numpy.sin(m * phis), ImVy).flatten(),prefixRe + veccompos[0][len(prefixRes):-len("_x")] + "_y",prefixIm + veccompos[0][len(prefixRes):-len("_x")] + "_y"] #type:ignore
+                                field_operators[vecname+"_z"]= [lambda ReVy,ImVy,m=m,phis=phis: numpy.outer(numpy.cos(m * phis), ReVy).flatten()+numpy.outer(numpy.sin(m * phis), ImVy).flatten(),prefixRe + veccompos[0][len(prefixRes):-len("_x")] + "_y",prefixIm + veccompos[0][len(prefixRes):-len("_x")] + "_y"] #type:ignore
                             vector_fields[vecname]=[vecname+component for component in ["_x","_y","_z"][0:len(composRes)]]
                             #print(new_nodal_field_inds,vector_fields)
 
                 
-            # Also assemble the eigenperturbation of the position
-            if "EigenRe_coordinate_x" in base.nodal_field_inds:
-                
-                def get_x_component(ReR,ImR): #type:ignore
+            # Also assemble the eigenperturbation of the position. The field names are hardcoded, so
+            # this only ever fires for the default eigen_prefix_real with a single eigenindex; m is
+            # looked up rather than read off the loop above, which had left it dangling.
+            if "EigenRe_coordinate_x" in base.nodal_field_inds and "EigenRe_" in ms_by_prefix:
+                m=ms_by_prefix["EigenRe_"]
+
+                def get_x_component(ReR,ImR,m=m,phis=phis): #type:ignore
                     Vr_cos_phi=numpy.outer(numpy.cos(m * phis)*numpy.cos(phis),ReR).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.cos(phis),ImR).flatten() #type:ignore
                     #Vphi_sin_phi=numpy.outer(numpy.cos(m * phis)*numpy.sin(phis),ReP).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.sin(phis),ImP).flatten() #type:ignore
                     return Vr_cos_phi#+Vphi_sin_phi #type:ignore
-                def get_y_component(ReR,ImR): #type:ignore
+                def get_y_component(ReR,ImR,m=m,phis=phis): #type:ignore
                     Vr_sin_phi=numpy.outer(numpy.cos(m * phis)*numpy.sin(phis),ReR).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.sin(phis),ImR).flatten() #type:ignore
                     #Vphi_cos_phi=numpy.outer(numpy.cos(m * phis)*numpy.cos(phis),ReP).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.cos(phis),ImP).flatten() #type:ignore
                     return Vr_sin_phi#-Vphi_cos_phi #type:ignore
                 field_operators["Eigen_coordinate_x"]= [get_x_component,"EigenRe_coordinate_x","EigenIm_coordinate_x"] #type:ignore
                 field_operators["Eigen_coordinate_y"]= [get_y_component,"EigenRe_coordinate_x","EigenIm_coordinate_x"] #type:ignore
                 if "EigenRe_coordinate_y" in base.nodal_field_inds:
-                    field_operators["Eigen_coordinate_z"]= [lambda ReVy,ImVy: numpy.outer(numpy.cos(m * phis), ReVy).flatten()+numpy.outer(numpy.sin(m * phis), ImVy).flatten(),"EigenRe_coordinate_y","EigenIm_coordinate_y"] #type:ignore
+                    field_operators["Eigen_coordinate_z"]= [lambda ReVy,ImVy,m=m,phis=phis: numpy.outer(numpy.cos(m * phis), ReVy).flatten()+numpy.outer(numpy.sin(m * phis), ImVy).flatten(),"EigenRe_coordinate_y","EigenIm_coordinate_y"] #type:ignore
                     new_nodal_field_inds["Eigen_coordinate_z"] = max(new_nodal_field_inds.values()) + 1
                     vector_fields["Eigen_coordinate"]=["Eigen_coordinate"+component for component in ["_x","_y","_z"]]
                 else:                
@@ -1441,10 +1540,6 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
 
                     if vfield+"_phi" in new_nodal_field_inds:
                         del new_nodal_field_inds[vfield+"_phi"]
-                        newindex=0
-                        for name, index in sorted(new_nodal_field_inds.items(), key=lambda item: item[1]): #type:ignore
-                            new_nodal_field_inds[name]=newindex
-                            newindex+=1
 
                 else:
                     field_operators[vfield + "_x"] = [lambda vx: numpy.outer(numpy.cos(phis), vx).flatten(),vfield + "_x"] #type:ignore
@@ -1469,6 +1564,7 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                 new_nodal_field_inds["normal_y"] = max(new_nodal_field_inds.values()) + 1
 
 
+        _compact_field_indices(new_nodal_field_inds)
         for name,index in sorted(new_nodal_field_inds.items(),key=lambda item: item[1]): #type:ignore
             if name in field_operators.keys():
                 op=field_operators[name] #type:ignore
@@ -1486,7 +1582,9 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                 new_nodal_values.append(newdata) #type:ignore
 
         base.nodal_field_inds=new_nodal_field_inds
-        base.nodal_values=numpy.transpose(numpy.array(new_nodal_values)) #type:ignore        
+        # column_stack, not transpose(array(...)): the latter leaves a Fortran-ordered view, so
+        # every later nodal_values[:,i] became a strided gather
+        base.nodal_values=numpy.column_stack(new_nodal_values) #type:ignore
         base.vector_fields=vector_fields
 
 
@@ -1494,188 +1592,27 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
             raise RuntimeError("rotational extrusion cannot be combined with tesselate_tri=True yet")
         if base.discontinuous and (base.D0_data.shape[1]>0 or base.DL_data.shape[1]>0):
             raise RuntimeError("rotational extrusion does not work with discontinuous=True, at least if D0 or DL fields are defined")
-        elem_types=base.elem_types
-
 
         upper_limit=n_segments-(0 if closed else phi_increm)
 
-        mod_length=base.nodal_values.shape[0]
-        new_elem_types=[]
-        new_elem_indices=[]
-        elemental_phis=numpy.zeros((0,))
-        
-        mp = lambda i, o: (i + o * stride) % mod_length #type:ignore
-        for d0dl_index,(elemtype,eis) in enumerate(zip(elem_types,base.elem_indices)):            
-            old_num_elems=len(new_elem_types)       
-            if elemtype==1: # LineC1
-                
-                    if len(zero_radial_index.intersection(eis))>0:
-                        for offs in range(upper_limit):
-                            if eis[0] in zero_radial_index:
-                                new_elem_indices.append([eis[0],mp(eis[1],offs),mp(eis[1],offs+1)]) #type:ignore
-                                new_elem_types.append(3) #type:ignore
-                            elif eis[1] in zero_radial_index:
-                                new_elem_indices.append([eis[1], mp(eis[0],offs), mp(eis[0],offs+1)]) #type:ignore
-                                new_elem_types.append(3) #type:ignore
-                        elemental_phi_row=numpy.linspace(0,self.angle,upper_limit,endpoint=not closed)+self.start_angle  
-                        elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-                    else: # Two triangles
-                        for offs in range(upper_limit):
-                            new_elem_indices.append([mp(eis[0],offs), mp(eis[1],offs), mp(eis[1],offs+1)]) #type:ignore
-                            new_elem_types.append(3) #type:ignore
-                            new_elem_indices.append([mp(eis[0],offs),  mp(eis[1],offs+1),mp(eis[0],offs+1)]) #type:ignore
-                            new_elem_types.append(3) #type:ignore
-                        elemental_phi_row=numpy.linspace(0,self.angle,upper_limit,endpoint=not closed)+self.start_angle  
-                        elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
+        def phi_row_for_step(step:int)->NPFloatArray:
+            row=numpy.linspace(0,self.angle,upper_limit//step,endpoint=not closed)+self.start_angle
+            return row+row[-1]/(2*len(row))
 
-            elif elemtype == 2:  # LineC2                
-                    if len(zero_radial_index.intersection(eis))>0:
-                        # One tesselated triangle only
-                        for offs in range(0,upper_limit,2):
-                            if eis[0] in zero_radial_index:
-                                new_elem_indices.append([eis[0], mp(eis[1], offs), mp(eis[1], offs + 2)]) #type:ignore
-                                new_elem_indices.append([mp(eis[2], offs + 1), mp(eis[1], offs), mp(eis[2], offs)]) #type:ignore
-                                new_elem_indices.append([mp(eis[2], offs + 2), mp(eis[1], offs+2), mp(eis[2], offs+1)]) #type:ignore
-                                new_elem_indices.append([mp(eis[2], offs + 1), mp(eis[1], offs+2), mp(eis[1], offs)]) #type:ignore
-                                new_elem_types+=[3,3,3,3] #type:ignore
-                            else:          
-                                new_elem_indices.append([eis[2], mp(eis[1], offs+2), mp(eis[1], offs)]) #type:ignore
-                                new_elem_indices.append([mp(eis[0], offs + 1), mp(eis[1], offs), mp(eis[0], offs)]) #type:ignore
-                                new_elem_indices.append([mp(eis[0], offs + 2), mp(eis[1], offs+2), mp(eis[0], offs+1)]) #type:ignore
-                                new_elem_indices.append([mp(eis[0], offs + 1), mp(eis[1], offs+2), mp(eis[1], offs)]) #type:ignore
-                                new_elem_types+=[3,3,3,3] #type:ignore
-                        elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//2,endpoint=not closed)+self.start_angle  
-                        elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-                    else:
-                        for offs in range(0,upper_limit,2):
-                            new_elem_indices.append([mp(eis[0], offs), mp(eis[1], offs), mp(eis[1], offs + 1)]) #type:ignore
-                            new_elem_indices.append([mp(eis[0], offs+1), mp(eis[0], offs), mp(eis[1], offs + 1)]) #type:ignore
-                            new_elem_indices.append([mp(eis[0], offs + 2), mp(eis[0], offs+1), mp(eis[1], offs + 1)]) #type:ignore
-                            new_elem_indices.append([mp(eis[0], offs + 2), mp(eis[1], offs + 1),mp(eis[1], offs + 2)]) #type:ignore
-                            #new_elem_types+=[3,3,3,3] #type:ignore
-                            new_elem_indices.append([mp(eis[1], offs + 1),mp(eis[1], offs), mp(eis[2], offs) ]) #type:ignore
-                            new_elem_indices.append([mp(eis[1], offs + 1), mp(eis[2], offs), mp(eis[2], offs+1)]) #type:ignore
-                            new_elem_indices.append([mp(eis[1], offs + 1), mp(eis[2], offs+1), mp(eis[2], offs + 2)]) #type:ignore
-                            new_elem_indices.append([mp(eis[1], offs + 1), mp(eis[2], offs + 2), mp(eis[1], offs + 2)]) #type:ignore
-                        #raise RuntimeError("This causes troubles ")
-                            new_elem_types += [3,3,3,3,3,3,3,3] #type:ignore
-                        elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//2,endpoint=not closed)+self.start_angle  
-                        elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            elif elemtype==0: # Point -> Line
-                for offs in range(0, upper_limit, phi_increm):
-                    if eis[0] == zero_radial_index:
-                        new_elem_indices.append([eis[0]]) #type:ignore
-                        new_elem_types.append(0) #type:ignore
-                    else:
-                        if phi_increm==2: # second order
-                            new_elem_indices.append([mp(eis[0], offs), mp(eis[0], offs+1), mp(eis[0], offs + 2)]) #type:ignore
-                            new_elem_types.append(2) #type:ignore
-                        else:
-                            new_elem_indices.append([mp(eis[0], offs), mp(eis[0], offs + 1)]) #type:ignore
-                            new_elem_types.append(1) #type:ignore
-                elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//phi_increm,endpoint=not closed)+self.start_angle
-                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            elif elemtype==8: # Quad9 -> Tris at the center and hex27 in bulk
-                for offs in range(0, upper_limit, phi_increm):
-                    #if zero_radial_index in eis:
-                    #    pass
-                    #else:
-                    hex27inds=[]
-                    for i in range(3):
-                        hex27inds += [mp(eis[6], offs + i), mp(eis[7], offs + i), mp(eis[8], offs + i)] #type:ignore
-                        hex27inds += [mp(eis[3], offs + i), mp(eis[4], offs + i), mp(eis[5], offs + i)] #type:ignore
-                        hex27inds+=[mp(eis[0], offs+i), mp(eis[1], offs +i), mp(eis[2], offs+i)] #type:ignore
-                    new_elem_indices.append(hex27inds) #type:ignore
-                    new_elem_types.append(14) #type:ignore
-                elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//phi_increm,endpoint=not closed)+self.start_angle  
-                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            elif elemtype==6: # Quad4 -> Tris at the center and hex in bulk
-                for offs in range(0, upper_limit, phi_increm):
-                        # TODO: Tri at center
-                        hexinds=[]
-                        for i in range(2):
-                            hexinds += [mp(eis[2], offs + i), mp(eis[3], offs + i)] #type:ignore
-                            hexinds+=[mp(eis[0], offs+i), mp(eis[1], offs +i)] #type:ignore
-                        new_elem_indices.append(hexinds) #type:ignore
-                        new_elem_types.append(11) #type:ignore
-                elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//phi_increm,endpoint=not closed)+self.start_angle  
-                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            elif elemtype==3 or elemtype==66: # Tri3 -> Tetras
-                for offs in range(0, upper_limit, phi_increm):
-                        # TODO: Special tetra at center
-                        new_elem_indices.append([mp(eis[0], offs+1),mp(eis[1], offs+1),mp(eis[2], offs+1),mp(eis[0],offs),mp(eis[1],offs),mp(eis[2], offs)]) #type:ignore
-                        new_elem_types+=[7] #type:ignore
-                elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//phi_increm,endpoint=not closed)+self.start_angle  
-                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            elif elemtype==9 or elemtype==99:
-                for offs in range(0, upper_limit, phi_increm):
-                        new_elem_indices.append([mp(eis[0],offs),mp(eis[1],offs),mp(eis[2], offs), #type:ignore
-                                                 mp(eis[0], offs + 2), mp(eis[1], offs + 2), mp(eis[2], offs + 2),
-                                                 mp(eis[3],offs),mp(eis[4],offs),mp(eis[5], offs),
-                                                 mp(eis[3], offs + 2), mp(eis[4], offs + 2), mp(eis[5], offs + 2),
-                                                 mp(eis[0], offs + 1), mp(eis[1], offs + 1), mp(eis[2], offs + 1)
-                                                 ]) #type:ignore
-                        new_elem_types+=[77] #type:ignore
-                elemental_phi_row=numpy.linspace(0,self.angle,upper_limit//phi_increm,endpoint=not closed)+self.start_angle  
-                elemental_phi_row+=elemental_phi_row[-1]/(2*len(elemental_phi_row))
-            else:
-                raise RuntimeError("Implement element type "+str(elemtype))
-            
-            # DL/D0 Data
-            num_created_elems=len(new_elem_types)-old_num_elems            
-            #print(num_created_elems//upper_limit,eis,elemtype)
-            if num_created_elems % len(elemental_phi_row)!=0:
-                print("ERROR NUM CREATED ELEMENTS:",num_created_elems,"LEN OF THE ELEMENTAL ANGLE ROW",len(elemental_phi_row),"UPPER LIMIT",upper_limit)
-                raise RuntimeError("See above")
-            
-            new_elemental_phis=numpy.repeat(elemental_phi_row,num_created_elems//len(elemental_phi_row))
-            #print("LENS",len(new_elemental_phis),num_created_elems,num_created_elems//len(elemental_phi_row),num_created_elems)
-            #print(num_created_elems,len(new_elemental_phis),len(elemental_phi_row),elemtype)
-            elemental_phis=numpy.r_[elemental_phis,new_elemental_phis] #type:ignore
-            #start=0 # elemental_phis[-1] if len(elemental_phis)>0 else 0
-            #end=start+1
-            #elemental_phis=numpy.r_[elemental_phis,numpy.linspace(start,end,num_created_elems)]
+        base.elem_types,base.elem_indices,elemental_phis,counts=_extrude_element_connectivity(
+            base.elem_types,base.elem_indices,stride=stride,upper_limit=upper_limit,
+            phi_increm=phi_increm,phi_row_for_step=phi_row_for_step,
+            # The extrusion wraps around onto its own first layer when it closes the full circle
+            modulus=base.nodal_values.shape[0],axis_nodes=axis_nodes,
+            collapse_axis_points=self.collapse_axis_points)
 
-            #print(len(numpy.repeat(elemental_phi_row,num_created_elems//upper_limit)),num_created_elems)
-
-            if base.DL_data.shape[1]>0:
-                dlrow=[]
-                for dlfield in range(base.DL_data.shape[1]):  
-                    dlrow+=[[base.DL_data[d0dl_index][dlfield]]*len(new_elemental_phis)]
-                dlrow=numpy.transpose(numpy.array(dlrow))
-                if len(new_DL_data)==0:
-                    new_DL_data=dlrow
-                else:
-                    new_DL_data=numpy.concatenate((new_DL_data,dlrow),axis=1)
-
-            if base.D0_data.shape[1]>0:
-                d0row=[]
-                for d0field in range(base.D0_data.shape[1]):            
-                    d0row+=[[base.D0_data[d0dl_index][d0field]]*len(new_elemental_phis)]
-                d0row=numpy.transpose(numpy.array(d0row))
-                if len(new_D0_data)==0:
-                    new_D0_data=d0row
-                else:
-                    new_D0_data=numpy.r_[new_D0_data,d0row]
-
-
-
-        base.elem_types=numpy.array(new_elem_types) #type:ignore
-        maxl=0
-        for l in new_elem_indices: #type:ignore
-            maxl=max(maxl,len(l)) #type:ignore
-        base.elem_indices=numpy.zeros((len(new_elem_indices),maxl),dtype=int) #type:ignore
-        for i,ne in enumerate(new_elem_indices): #type:ignore
-            for j,e in enumerate(ne): #type:ignore
-                base.elem_indices[i,j]=e #type:ignore
-
-        if len(new_DL_data)>0:
-            base.DL_data=numpy.transpose(new_DL_data,axes=(1,2,0))
-            
-        if len(new_D0_data)>0:
-            assert isinstance(new_D0_data,numpy.ndarray)
-            base.D0_data=new_D0_data
-            assert base.D0_data.shape[0]==len(elemental_phis)
+        # Each output element inherits the elemental data of the element it was extruded from.
+        # Guarded on the field count because with no fields at all the arrays keep the old row
+        # count, and some callers still compare that against the pre-extrusion element count.
+        if base.DL_data.shape[1]>0:
+            base.DL_data=numpy.repeat(base.DL_data,counts,axis=0)
+        if base.D0_data.shape[1]>0:
+            base.D0_data=numpy.repeat(base.D0_data,counts,axis=0)
 
         # Rotate DL and D0 with m if necessary:        
         if self.rotate_eigendata_with_mode_m and base.mesh.get_problem().get_last_eigenmodes_m() is not None: #type:ignore
@@ -1719,7 +1656,8 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                 new_inds={}
                 rev_inds={i:n for n,i in base.elemental_field_inds.items()}
                 cnt=0
-                for i in range(max(rev_inds.keys())):
+                # max()+1: without it the highest-numbered elemental field was silently dropped
+                for i in range(max(rev_inds.keys())+1):
                     if i in remove_indices:
                         continue
                     new_inds[rev_inds[i]]=cnt
