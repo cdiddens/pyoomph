@@ -172,8 +172,24 @@ def test_state_file_is_partition_independent(write_nproc, read_nproc, tmp_path):
     """The file holds the whole particle set sorted by identity, so it says nothing about how the
     mesh was split and can be written at one process count and read at another."""
     statefile = str(tmp_path / "tracers.dump")
-    written = _run(write_nproc, tmp_path, "save", statefile=statefile)[0]
-    read = _run(read_nproc, tmp_path, "load", statefile=statefile)[0]
+    written_ranks = _run(write_nproc, tmp_path, "save", statefile=statefile)
+    read_ranks = _run(read_nproc, tmp_path, "load", statefile=statefile)
+    written, read = written_ranks[0], read_ranks[0]
     assert read["nglobal"] == written["nglobal"]
     assert read["ids"] == written["ids"]
     assert read["analytic_error"] < _ATOL
+
+    # The rolling position history the trail plots read has to come back too, and the gather that
+    # writes it has to be partition-independent like everything else in the file. Merged over the
+    # ranks by identity, since only the owner of a particle holds its history.
+    def merged(ranks):
+        out = {}
+        for r in ranks:
+            out.update(r["history_at_state"])
+        return out
+
+    wh, rh = merged(written_ranks), merged(read_ranks)
+    assert sorted(wh.keys()) == sorted(rh.keys())
+    assert min(len(v) for v in wh.values()) >= 6, "no history was recorded - the check is vacuous"
+    for k in wh:
+        assert rh[k] == wh[k], "the history of particle " + k + " did not survive the state file"

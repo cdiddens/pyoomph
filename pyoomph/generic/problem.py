@@ -724,8 +724,9 @@ class Problem(_pyoomph.Problem):
         # 0.1.0 stores the mesh structurally (see pyoomph/meshes/meshstate.py) instead of by rank-local
         # element/node numbering, which is what makes states of distributed problems possible at all
         # and lets serial and distributed runs read each other's files. 0.1.1 adds the sharding field
-        # to the header. 0.1.2 adds the adaptive time stepper's suggested next dt. Older files still load.
-        self._dump_version = "0.1.2"
+        # to the header. 0.1.2 adds the adaptive time stepper's suggested next dt. 0.1.3 adds the
+        # tracers' rolling position history, which the trail plots are drawn from. Older files still load.
+        self._dump_version = "0.1.3"
         self._last_bc_setting="init"
 
         self._output_step:int=0

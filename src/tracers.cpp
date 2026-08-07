@@ -27,6 +27,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <sstream>
 
 namespace pyoomph
@@ -219,15 +220,33 @@ namespace pyoomph
     return !has_locator_generation || mesh->get_topology_generation() != locator_generation;
   }
 
+  MeshPointLocator *TracerCollection::get_adjacency_locator()
+  {
+    if (!mesh)
+      throw_runtime_error("Tracer collection has no mesh");
+    // A new topology generation invalidates the element pointers themselves, so nothing cached is
+    // usable then. Otherwise take whatever is already built, however old its geometry: the walk
+    // only ever asks it which elements share a node with which, and that does not move.
+    if (!generation_changed())
+    {
+      if (locator[0])
+        return locator[0];
+      if (locator[1])
+        return locator[1];
+    }
+    return get_locator(0);
+  }
+
   MeshPointLocator *TracerCollection::get_locator(unsigned time_level)
   {
     if (!mesh)
       throw_runtime_error("Tracer collection has no mesh");
-    if (generation_changed())
+    if (generation_changed() || geometry_stale)
     {
       drop_locators();
       locator_generation = mesh->get_topology_generation();
       has_locator_generation = true;
+      geometry_stale = false;
     }
     if (time_level > 1)
       throw_runtime_error("Tracers only locate in time levels 0 and 1");
@@ -245,6 +264,7 @@ namespace pyoomph
   {
     mesh = m;
     drop_locators();
+    mark_geometry_stale();
     nodal_dim = m->get_nodal_dimension();
     const int ed = m->get_element_dimension();
     if (ed < 0)
@@ -484,25 +504,52 @@ namespace pyoomph
     return ret;
   }
 
-  std::vector<double> TracerCollection::get_history_of(TracerId id) const
+  // Unwrap one particle's ring into chronological (t, x...) samples, oldest first.
+  std::vector<double> TracerCollection::history_of(const TracerParticle *p) const
   {
     const unsigned stride = 1 + nodal_dim;
-    for (auto *p : tracers)
-    {
-      if (p->id != id)
-        continue;
-      std::vector<double> ret;
-      ret.reserve(p->hist_n * stride);
-      // Unwrap the ring into chronological order.
-      const unsigned cap = p->hist_n ? (unsigned)(p->hist.size() / stride) : 0;
-      for (unsigned k = 0; k < p->hist_n; k++)
-      {
-        const unsigned slot = (p->hist_head + cap - p->hist_n + k) % cap;
-        for (unsigned j = 0; j < stride; j++)
-          ret.push_back(p->hist[slot * stride + j]);
-      }
+    std::vector<double> ret;
+    if (!p->hist_n)
       return ret;
+    ret.reserve(p->hist_n * stride);
+    const unsigned cap = (unsigned)(p->hist.size() / stride);
+    for (unsigned k = 0; k < p->hist_n; k++)
+    {
+      const unsigned slot = (p->hist_head + cap - p->hist_n + k) % cap;
+      for (unsigned j = 0; j < stride; j++)
+        ret.push_back(p->hist[slot * stride + j]);
     }
+    return ret;
+  }
+
+  // The inverse: fill p's ring from `count` chronological samples, keeping the newest ones that fit.
+  void TracerCollection::set_history(TracerParticle *p, const double *samples, unsigned count)
+  {
+    const unsigned stride = 1 + nodal_dim;
+    p->hist_n = 0;
+    p->hist_head = 0;
+    if (!history_capacity)
+    {
+      p->hist.clear();
+      return;
+    }
+    p->hist.assign((size_t)history_capacity * stride, 0.0);
+    const unsigned take = std::min(count, history_capacity);
+    if (!take)
+      return;
+    const double *src = samples + (size_t)(count - take) * stride;
+    for (unsigned k = 0; k < take; k++)
+      for (unsigned j = 0; j < stride; j++)
+        p->hist[(size_t)k * stride + j] = src[(size_t)k * stride + j];
+    p->hist_n = take;
+    p->hist_head = take % history_capacity;
+  }
+
+  std::vector<double> TracerCollection::get_history_of(TracerId id) const
+  {
+    for (auto *p : tracers)
+      if (p->id == id)
+        return history_of(p);
     return std::vector<double>();
   }
 
@@ -889,6 +936,11 @@ namespace pyoomph
     const unsigned nd = nodal_dim, ed = elem_dim;
     const bool square = (nd == ed);
 
+    // Magnitude of the coordinates, which sets the rounding noise of the residual below.
+    double xmag = 1.0;
+    for (unsigned i = 0; i < nd; i++)
+      xmag = std::max(xmag, std::abs(target[i]));
+
     // Newton (square) / Gauss-Newton on the normal equations (codimension 1) in one element.
     // Returns true when the iteration converged AND landed inside the reference domain.
     auto try_element = [&](BulkElementBase *e, const std::vector<double> &seed,
@@ -946,7 +998,28 @@ namespace pyoomph
           sv[a] += ds[a];
           dsnorm += ds[a] * ds[a];
         }
-        if (std::sqrt(dsnorm) < 1e-14)
+        // Newton cannot push |ds| below the rounding noise of the residual, which is of order
+        // eps*|x|, divided by the scale of the element, |dX/ds|. On a mesh of 0.1-sized elements at
+        // x ~ 4 that floor is around 1e-14 itself, so the fixed 1e-14 that used to stand here was
+        // simply unreachable: the iteration spent all 25 rounds bouncing on the floor, reported
+        // failure, and a particle sitting comfortably inside its own element was dropped as lost.
+        // The further from the origin, the more of them - which is exactly what was observed.
+        // The smallest row norm of J is used, not the largest entry, so that a flat or stretched
+        // element - where one reference direction resolves far less than the others - relaxes the
+        // threshold rather than tightening it. What comes out is around 1e-12 in reference
+        // coordinates for the mesh above, still orders of magnitude finer than anything the
+        // sub-step controller can resolve.
+        double jscale = 1e300;
+        for (unsigned a = 0; a < ed; a++)
+        {
+          double rn = 0.0;
+          for (unsigned i = 0; i < nd; i++)
+            rn += J(a, i) * J(a, i);
+          jscale = std::min(jscale, std::sqrt(rn));
+        }
+        const double stol = std::max(1e-14, 64.0 * std::numeric_limits<double>::epsilon() * xmag /
+                                                std::max(jscale, 1e-300));
+        if (std::sqrt(dsnorm) < stol)
         {
           converged = true;
           break;
@@ -992,7 +1065,7 @@ namespace pyoomph
 
     // Left the element: it must be one of the neighbours, otherwise the sub-step was too long.
     std::vector<BulkElementBase *> candidates;
-    get_locator(0)->neighbour_elements(p->elem, candidates);
+    get_adjacency_locator()->neighbour_elements(p->elem, candidates);
     BulkElementBase *from = p->elem;
     for (auto *cand : candidates)
     {
@@ -1343,6 +1416,9 @@ namespace pyoomph
     stat_lost = 0;
     stat_migrated = 0;
     stat_transferred = 0;
+    // The solve that produced this step moved the nodes, so any locator built during the previous
+    // one describes a configuration that no longer exists.
+    mark_geometry_stale();
 
     unsigned nlevel_available = 0;
     while (nlevel_available < 3 && code_index[nlevel_available] >= 0)
@@ -1443,7 +1519,15 @@ namespace pyoomph
       for (auto *p : tracers)
       {
         if (p->hist.size() != (size_t)history_capacity * stride)
-          p->hist.assign((size_t)history_capacity * stride, 0.0);
+        {
+          // Re-ring rather than reset: this fires when a restored state meets an equation asking
+          // for a different capacity, and simply reassigning the buffer left hist_n and hist_head
+          // pointing into it as if the old samples were still there.
+          const std::vector<double> old = history_of(p);
+          set_history(p, old.data(), (unsigned)(old.size() / stride));
+          if (!history_capacity)
+            continue;
+        }
         p->hist[p->hist_head * stride] = tnow;
         for (unsigned i = 0; i < nodal_dim; i++)
           p->hist[p->hist_head * stride + 1 + i] = p->x[i];
@@ -1466,6 +1550,9 @@ namespace pyoomph
   {
     if (!mesh)
       throw_runtime_error("Cannot locate tracers before a mesh was set");
+    // Nothing asks for a relocation unless the mesh changed under the particles, and a state file
+    // restores a whole new configuration without touching the topology at all.
+    mark_geometry_stale();
     std::vector<TracerParticle *> survivors;
     survivors.reserve(tracers.size());
     for (auto *p : tracers)
@@ -1507,7 +1594,15 @@ namespace pyoomph
 
   // COLLECTIVE. Writes the whole particle set, id-sorted, so the file says nothing about how the
   // mesh was partitioned and can be read back at any process count.
-  void TracerCollection::_save_state(std::vector<double> &posarr, std::vector<long long> &tagarr)
+  //
+  // With `with_history` the rolling position history goes in as well. It is what the trail plots
+  // are drawn from, and leaving it out was not merely a cosmetic loss: a restored state came back
+  // with every particle in the right place and no trail at all, and the trails then grew back from
+  // scratch rather than continuing. Since the number of samples differs per particle, the counts go
+  // into `tagarr` (which becomes three entries per particle) and the samples are appended to
+  // `posarr` after the fixed-size blocks, so neither array needs a worst-case stride.
+  void TracerCollection::_save_state(std::vector<double> &posarr, std::vector<long long> &tagarr,
+                                     bool with_history)
   {
     const std::vector<double> allpos = gather_positions();
     const std::vector<double> allpay = gather_payloads();
@@ -1515,41 +1610,117 @@ namespace pyoomph
     const std::vector<int> alltags = gather_tags();
     const unsigned n = (unsigned)allids.size();
     const unsigned stride = nodal_dim + n_payload;
-    posarr.assign((size_t)n * stride, 0.0);
-    tagarr.assign((size_t)n * 2, 0);
+    const unsigned hstride = 1 + nodal_dim;
+
+    // Gathering the histories needs one uniform row length, so ask everybody for the longest one.
+    unsigned hmax = 0;
+    if (with_history)
+      for (auto *p : tracers)
+        hmax = std::max(hmax, p->hist_n);
+#ifdef OOMPH_HAS_MPI
+    if (with_history && is_distributed())
+    {
+      unsigned reduced = 0;
+      MPI_Allreduce(&hmax, &reduced, 1, MPI_UNSIGNED, MPI_MAX,
+                    mesh->communicator_pt()->mpi_comm());
+      hmax = reduced;
+    }
+#endif
+
+    std::vector<double> allhist;
+    const unsigned hcol = hmax ? 1 + hmax * hstride : 0;
+    if (hcol)
+    {
+      std::vector<double> local((size_t)tracers.size() * hcol, 0.0);
+      for (unsigned i = 0; i < tracers.size(); i++)
+      {
+        const std::vector<double> h = history_of(tracers[i]);
+        local[(size_t)i * hcol] = (double)(h.size() / hstride);
+        for (unsigned k = 0; k < h.size(); k++)
+          local[(size_t)i * hcol + 1 + k] = h[k];
+      }
+      allhist = gather_rows(local, hcol);
+    }
+
+    size_t htotal = 0;
+    std::vector<unsigned> hn(n, 0);
+    for (unsigned i = 0; i < n && hcol; i++)
+    {
+      hn[i] = (unsigned)allhist[(size_t)i * hcol];
+      htotal += hn[i];
+    }
+
+    posarr.assign((size_t)n * stride + htotal * hstride, 0.0);
+    tagarr.assign((size_t)n * (with_history ? 3 : 2), 0);
+    size_t hoff = (size_t)n * stride;
     for (unsigned i = 0; i < n; i++)
     {
-      tagarr[2 * i] = allids[i];
-      tagarr[2 * i + 1] = alltags[i];
+      const unsigned ts = with_history ? 3 : 2;
+      tagarr[(size_t)ts * i] = allids[i];
+      tagarr[(size_t)ts * i + 1] = alltags[i];
       for (unsigned d = 0; d < nodal_dim; d++)
         posarr[(size_t)i * stride + d] = allpos[(size_t)i * nodal_dim + d];
       for (unsigned d = 0; d < n_payload; d++)
         posarr[(size_t)i * stride + nodal_dim + d] = allpay[(size_t)i * n_payload + d];
+      if (!with_history)
+        continue;
+      tagarr[(size_t)ts * i + 2] = (long long)hn[i];
+      for (unsigned k = 0; k < hn[i] * hstride; k++)
+        posarr[hoff + k] = allhist[(size_t)i * hcol + 1 + k];
+      hoff += (size_t)hn[i] * hstride;
     }
   }
 
   // COLLECTIVE. The file holds the whole particle set, so every process reads all of it and keeps
   // the ones it owns - which is also what makes a file written at one process count readable at
   // another.
-  void TracerCollection::_load_state(const std::vector<double> &posarr, const std::vector<long long> &tagarr)
+  void TracerCollection::_load_state(const std::vector<double> &posarr,
+                                     const std::vector<long long> &tagarr, bool with_history)
   {
     clear();
     next_id = 1;
+    // The mesh was restored from the same file a moment ago, so it is in a configuration no
+    // locator built during this session knows about.
+    mark_geometry_stale();
     const unsigned stride = nodal_dim + n_payload;
-    const unsigned n = (unsigned)(tagarr.size() / 2);
+    const unsigned hstride = 1 + nodal_dim;
+    const unsigned ts = with_history ? 3 : 2;
+    const unsigned n = (unsigned)(tagarr.size() / ts);
     std::vector<double> pos((size_t)n * nodal_dim, 0.0), pay((size_t)n * n_payload, 0.0);
     std::vector<int> tags(n, 0);
     std::vector<long long> ids(n, 0);
+    std::vector<size_t> hoff(n, 0);
+    std::vector<unsigned> hn(n, 0);
+    size_t off = (size_t)n * stride;
     for (unsigned i = 0; i < n; i++)
     {
       for (unsigned d = 0; d < nodal_dim; d++)
         pos[(size_t)i * nodal_dim + d] = posarr[(size_t)i * stride + d];
       for (unsigned d = 0; d < n_payload; d++)
         pay[(size_t)i * n_payload + d] = posarr[(size_t)i * stride + nodal_dim + d];
-      ids[i] = tagarr[2 * i];
-      tags[i] = (int)tagarr[2 * i + 1];
+      ids[i] = tagarr[(size_t)ts * i];
+      tags[i] = (int)tagarr[(size_t)ts * i + 1];
+      if (!with_history)
+        continue;
+      hn[i] = (unsigned)tagarr[(size_t)ts * i + 2];
+      hoff[i] = off;
+      off += (size_t)hn[i] * hstride;
     }
     add_tracers_collective(pos, tags, pay, ids);
+
+    if (!with_history)
+      return;
+    // Only the particles this process ended up owning get their history back, so index them by id.
+    std::map<TracerId, unsigned> byid;
+    for (unsigned i = 0; i < n; i++)
+      byid[(TracerId)ids[i]] = i;
+    for (auto *p : tracers)
+    {
+      auto it = byid.find(p->id);
+      if (it == byid.end() || !hn[it->second])
+        continue;
+      set_history(p, &posarr[hoff[it->second]], hn[it->second]);
+    }
   }
 
 }

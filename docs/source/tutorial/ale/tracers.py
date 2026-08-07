@@ -37,15 +37,15 @@ from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 class TracerPlotter(MatplotlibPlotter):
     def define_plot(self):
         self.background_color = "darkgrey"
-        self.set_view(-0.05, -0.05, 4.05, 1.35)
+        self.set_view(0,0, 4, 1.35)
         cb = self.add_colorbar("velocity", position="bottom right")
         self.add_plot("domain/velocity", colorbar=cb)
         # The tracer collection is addressed by its name, exactly like a field. The trail is drawn
         # from the rolling position history, so it needs `history_time` to have been set below.
         tr = self.add_plot("domain/tracers")
         tr.trail = True
-        tr.color = "white"
-        tr.size = 5
+        tr.color = "black"
+        tr.size = 30
 
 
 class WavyChannel(Problem):

@@ -406,6 +406,14 @@ class TracerParticles(Equations):
         coll = self.get_collection()
         if coll is not None:
             coll._relocate_all(0)
+        # This hook also fires after a state file was read, which may put the clock back - a
+        # rollback, a restart from an earlier dump. The guard in after_transient_solve would then
+        # refuse to advect until the run had caught up with the time it last saw, leaving the
+        # particles frozen in place while the flow moved on. The restored particles have completed
+        # the step ending at the restored time, which is exactly what the guard has to be told.
+        if self._mesh is not None:
+            problem = self._mesh.get_problem()
+            self._last_advected_time = float(problem.get_current_time(as_float=True, dimensional=False))
 
     # ----------------------------------------------------------------------------- code generation
 

@@ -71,6 +71,7 @@ class TracerProblem(Problem):
         eqs += TracerParticles(vector(1 - var("coordinate_y") ** 2, 0),
                                seed=TracerSeedPoints(_seed_positions(self.corner_only)),
                                payloads={"residence": 1} if self.use_payloads else None,
+                               history_time=0.5,
                                rtol=1e-11, atol=1e-13)
         self += eqs @ "domain"
 
@@ -86,11 +87,22 @@ def run_case(mode, outdir, statefile=None, nsteps=55, dt=0.05):
         p.distribute()
     p.initialise()
 
+    def local_histories(collection):
+        # Local, not gathered: there is no collective for the history, so the ranks' dicts are
+        # merged by the test. Keyed by identity, which is what makes the merge partition-independent.
+        out = {}
+        for tid in collection.get_ids():
+            h = collection.get_history(int(tid))
+            out[str(int(tid))] = [float(v) for v in numpy.asarray(h).ravel()]
+        return out
+
+    hist_at_state = {}
     tr = p.tracers()
     if mode == "load":
         assert statefile is not None
         p.load_state(statefile)
         tr = p.tracers()
+        hist_at_state = local_histories(tr)
         # A restarted run gets fewer steps: the saved particles are already most of the way down the
         # channel, and running the full length again would simply push them out of the outlet - which
         # is correct behaviour, but would compare two different particle sets.
@@ -113,6 +125,7 @@ def run_case(mode, outdir, statefile=None, nsteps=55, dt=0.05):
 
     if mode == "save":
         p.save_state(statefile)
+        hist_at_state = local_histories(tr)
 
     end = tr.gather_positions()
     ids = list(tr.gather_ids())
@@ -138,6 +151,7 @@ def run_case(mode, outdir, statefile=None, nsteps=55, dt=0.05):
         "payloads": [float(row[0]) for row in pay] if len(pay) else [],
         "elapsed": elapsed,
         "analytic_error": err,
+        "history_at_state": hist_at_state,
     }
 
 

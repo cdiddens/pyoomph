@@ -170,8 +170,14 @@ namespace pyoomph
     // which then owns it. The caller must not keep it.
     bool transferred_away = false;
 
-    // Point locators over this mesh, one per time level, rebuilt when the mesh's topology
-    // generation changes. Cached because building one walks every element.
+    // Point locators over this mesh, one per time level. Cached because building one walks every
+    // element, indexes its nodes into a kd-tree and fits an affine inverse per element.
+    //
+    // A locator freezes the NODAL POSITIONS it was built from, so caching it on the topology
+    // generation alone was wrong on any moving mesh: the geometry moves without the topology
+    // changing, and a locator from an earlier configuration then reports points near the moved
+    // boundary as outside the mesh. `geometry_stale` is set at the points where the configuration
+    // may have moved since the last build - see mark_geometry_stale() - and forces the rebuild.
     //
     // These INCLUDE halo elements. A particle is deliberately allowed to advect through the halo
     // layer, whose nodal positions and dof values are synchronised copies of the owner's, so that
@@ -182,6 +188,7 @@ namespace pyoomph
     MeshPointLocator *locator[2] = {nullptr, nullptr};
     unsigned long locator_generation = 0;
     bool has_locator_generation = false;
+    bool geometry_stale = true;
 
     int mpi_nproc() const;
     int mpi_rank() const;
@@ -199,8 +206,15 @@ namespace pyoomph
     unsigned stat_global_locates = 0;
     unsigned stat_lost = 0, stat_migrated = 0, stat_transferred = 0;
 
+    // A locator whose GEOMETRY is valid for the mesh's current configuration at `time_level`.
     MeshPointLocator *get_locator(unsigned time_level);
+    // A locator to ask for node-element adjacency only. That answer is pure incidence, so any
+    // locator of the current topology generation gives it - which is what keeps the element walk
+    // from forcing a geometric rebuild on every timestep of a moving mesh.
+    MeshPointLocator *get_adjacency_locator();
     void drop_locators();
+    // Announce that the nodal positions may have moved since the locators were built.
+    void mark_geometry_stale() { geometry_stale = true; }
     // True when the mesh has announced a new generation since the locators were built.
     bool generation_changed() const;
 
@@ -234,6 +248,11 @@ namespace pyoomph
 
     TracerParticle *make_and_place(const std::vector<double> &pos, int tag,
                                    const std::vector<double> &payload_init);
+
+    // The two directions of the rolling history ring: unwrap it into chronological (t, x...)
+    // samples, and rebuild it from such samples, keeping the newest ones that fit the capacity.
+    std::vector<double> history_of(const TracerParticle *p) const;
+    void set_history(TracerParticle *p, const double *samples, unsigned count);
 
     // Gather `local` (ncol doubles per local particle) from every process and return it sorted by
     // particle id, so the answer is the same everywhere and independent of the partitioning. Also
@@ -315,8 +334,13 @@ namespace pyoomph
     // an unrefined element's deleted son is undefined behaviour that may not crash.
     unsigned get_relocations_last_step() const { return stat_global_locates; }
 
-    virtual void _save_state(std::vector<double> &posarr, std::vector<long long> &tagarr);
-    virtual void _load_state(const std::vector<double> &posarr, const std::vector<long long> &tagarr);
+    // `with_history` also serialises the rolling position history the trail plots read; it costs
+    // the samples themselves in the file and makes `tagarr` three entries per particle instead of
+    // two, so the caller has to keep it consistent with the state file format version.
+    virtual void _save_state(std::vector<double> &posarr, std::vector<long long> &tagarr,
+                             bool with_history = true);
+    virtual void _load_state(const std::vector<double> &posarr, const std::vector<long long> &tagarr,
+                             bool with_history = true);
 
     virtual void set_transfer_interface(unsigned boundary_index, TracerCollection *opp);
   };

@@ -50,8 +50,11 @@ class _TracerProblem(Problem):
 
     def __init__(self, advection, seeds, *, motion=None, on_interface=None, N=(8, 4),
                  rtol=1e-10, atol=1e-12, fixed_substeps=0, payloads=None,
-                 time_interpolation_order="auto", history_time=None, shear=0.0):
+                 time_interpolation_order="auto", history_time=None, shear=0.0, origin_x=0.0):
         super().__init__()
+        # Where the domain sits along x. Only ever moved away from the origin to make the rounding
+        # noise of the coordinates, which scales with |x|, large enough to matter.
+        self.origin_x = origin_x
         self.advection = advection
         self.seeds = seeds
         self.motion = motion
@@ -66,7 +69,7 @@ class _TracerProblem(Problem):
         self._X0 = None
 
     def define_problem(self):
-        self.add_mesh(RectangularQuadMesh(size=[4, 2], lower_left=[0, -1], N=list(self.N)))
+        self.add_mesh(RectangularQuadMesh(size=[4, 2], lower_left=[self.origin_x, -1], N=list(self.N)))
         eqs = PoissonEquation(source=0) + DirichletBC(u=0) @ "left" + DirichletBC(u=1) @ "right"
         tp = TracerParticles(self.advection, seed=TracerSeedPoints(self.seeds),
                              rtol=self._rtol, atol=self._atol,
@@ -330,6 +333,45 @@ def test_time_interpolation_order_is_honoured():
             for order in (1, 2)}
     assert errs[1] > 10 * errs[2], \
         "quadratic interpolation was not measurably better (linear %g, quadratic %g)" % (errs[1], errs[2])
+
+
+@pytest.mark.parametrize("offset", [0.0, 1.0e3], ids=["at_origin", "far_from_origin"])
+def test_no_particle_is_lost_in_the_interior_of_a_moving_mesh(offset):
+    """Nothing may be dropped while it is still comfortably inside the mesh.
+
+    The threshold on the Newton step that places a particle in its element used to be a fixed 1e-14
+    in reference coordinates. What that iteration can actually reach is the rounding noise of the
+    residual, eps*|x|, divided by the element scale |dX/ds| - which for a coarse mesh a few units
+    from the origin is already of that order and beyond it further out. The iteration then spent all
+    its rounds bouncing on the floor, the placement was reported as failed, and interior particles
+    disappeared one by one, the more of them the further from the origin. Hence the offset
+    parametrisation: at the origin the old code passes, far from it it loses most of the particles.
+    """
+    def wobble(x, y, t):
+        return (x + 0.05 * math.sin(1.3 * t) * (y + 1.0), y + 0.07 * math.sin(0.9 * t) * math.sin(x - offset))
+
+    # Away from the outflow edge, so a particle leaving through it cannot be mistaken for a loss.
+    seeds = [[offset + 0.4 + 0.13 * i, -0.8 + 0.11 * i] for i in range(12)]
+    p = _TracerProblem(vector(0.2, 0), seeds, motion=wobble, N=(16, 8), origin_x=offset)
+    tr, _start, end, _T = _run(p, "interior_loss_%g" % offset, endtime=1.0, dt=0.05)
+    assert len(end) == len(seeds), "%d of %d particles were lost inside the mesh" % (
+        len(seeds) - len(end), len(seeds))
+
+
+def test_a_moved_mesh_invalidates_the_cached_point_locator():
+    """A locator freezes the nodal positions it was built from, so caching it on the mesh's topology
+    generation alone is not enough: the geometry moves without the topology changing. Adding a
+    particle near the moved boundary then went through a locator describing where the mesh used to
+    be, and the point was reported as outside the mesh."""
+    def rise(x, y, t):
+        return (x, y + 0.6 * t)
+
+    p = _TracerProblem(vector(0, 0), [[2.0, 0.0]], motion=rise, N=(8, 4))
+    tr, _start, _end, _T = _run(p, "locator_staleness", endtime=1.0, dt=0.25)
+    # The mesh now spans y in [-0.4, 1.6]. A point above the ORIGINAL top edge is inside it, and
+    # only a locator that noticed the motion can say so.
+    assert tr.add_tracer([2.0, 1.4]) != 0, "a point inside the moved mesh was reported as outside"
+    assert tr.add_tracer([2.0, 1.8]) == 0, "a point above the moved mesh was accepted"
 
 
 # ----------------------------------------------------------------------------------------------
@@ -623,6 +665,42 @@ def test_state_file_round_trip_preserves_positions_ids_and_payloads(tmp_path):
     b.run(b.get_current_time() + 0.2, timestep=0.05, outstep=False, startstep=0.05)
     a.run(a.get_current_time() + 0.2, timestep=0.05, outstep=False, startstep=0.05)
     assert numpy.max(numpy.abs(tr_b.get_positions() - tr_a.get_positions())) < 1e-12
+
+
+def test_state_file_round_trip_preserves_the_position_history(tmp_path):
+    """The rolling history is what the trail plots are drawn from, and it used not to be written at
+    all: a restored state came back with every particle in the right place and no trail, which then
+    grew back from scratch instead of continuing."""
+    def problem(tag):
+        p = _TracerProblem(POISEUILLE, SEEDS, history_time=0.4)
+        p.set_output_directory("_tracer_" + tag)
+        p.quiet()
+        return p
+
+    a = problem("hist_save")
+    a.initialise()
+    a.run(0.3, timestep=0.05, outstep=False, startstep=0.05)
+    tr_a = a.tracers()
+    ids = list(tr_a.get_ids())
+    hist = {int(i): tr_a.get_history(int(i)).copy() for i in ids}
+    assert min(h.shape[0] for h in hist.values()) >= 3, "nothing to compare - no history was recorded"
+    dump = str(tmp_path / "hist.dump")
+    a.save_state(dump)
+
+    b = problem("hist_load")
+    b.initialise()
+    b.load_state(dump)
+    tr_b = b.tracers()
+    assert list(tr_b.get_ids()) == ids
+    for i in ids:
+        got = tr_b.get_history(int(i))
+        assert got.shape == hist[int(i)].shape
+        assert numpy.max(numpy.abs(got - hist[int(i)])) == 0.0
+
+    # and it continues rather than restarts: the next step appends to what was restored
+    n_before = tr_b.get_history(int(ids[0])).shape[0]
+    b.run(b.get_current_time() + 0.05, timestep=0.05, outstep=False, startstep=0.05)
+    assert tr_b.get_history(int(ids[0])).shape[0] == n_before + 1
 
 
 # ----------------------------------------------------------------------------------------------

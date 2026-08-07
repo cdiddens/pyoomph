@@ -1514,19 +1514,23 @@ class MeshFromTemplateBase(BaseMesh):
         numtracercols = len(self._tracers)
         state.int_data(lambda: numtracercols,
                        lambda n: state.assert_equal(n, numtracercols))
+        # The rolling position history came in with 0.1.3. Older files simply do not have it, and
+        # the two arrays are laid out differently with and without it, so the reader and the writer
+        # have to agree on this flag - which is what the version condition gives.
+        with_history = state.version_at_least(0, 1, 3)
         for tname in sorted(self._tracers.keys()):
             tcol = self.get_tracers(tname)
             assert tcol is not None
             state.string_data(
                 lambda: tname, lambda tn: state.assert_equal(tn, tname))
             if state.save:
-                pdata, tdata = tcol._save_state()
+                pdata, tdata = tcol._save_state(with_history)
                 state.numpy_data(lambda: pdata, lambda v: v)  # type:ignore
                 state.numpy_data(lambda: tdata, lambda v: v)  # type:ignore
             else:
                 pdata = state.numpy_data(lambda: 0, lambda v: v)  # type:ignore
                 tdata = state.numpy_data(lambda: 0, lambda v: v)  # type:ignore
-                tcol._load_state(pdata, tdata)  # type:ignore
+                tcol._load_state(pdata, tdata, with_history)  # type:ignore
 
 
 

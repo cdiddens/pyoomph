@@ -1926,12 +1926,14 @@ void PyReg_Mesh(nb::module_ &m)
 			 "Advects every particle through one accepted timestep, using adaptive Runge-Kutta sub-steps over the time-interpolated mesh configuration")
 		.def("_relocate_all", &pyoomph::TracerCollection::relocate_all, nb::arg("time_level") = 0,
 			 "Re-derives every particle's element and local coordinate from its stored position, in the mesh configuration at the given nodal time-history level. Needed after adaptation or remeshing; particles that no longer lie in the mesh are dropped")
-		.def("_save_state", [](pyoomph::TracerCollection *t)
-			 {std::vector<double> pos; std::vector<long long> ids; t->_save_state(pos,ids); return std::make_tuple(vector_to_ndarray(pos),vector_to_ndarray(ids)); },
-			 "Serialises positions/payloads and (id, tag) pairs of all particles, for checkpointing")
-		.def("_load_state", [](pyoomph::TracerCollection *t, std::vector<double> pos, std::vector<long long> ids)
-			 { t->_load_state(pos, ids); },
-			 "Replaces all particles by those of a previously saved state, restoring their identities")
+		.def("_save_state", [](pyoomph::TracerCollection *t, bool with_history)
+			 {std::vector<double> pos; std::vector<long long> ids; t->_save_state(pos,ids,with_history); return std::make_tuple(vector_to_ndarray(pos),vector_to_ndarray(ids)); },
+			 nb::arg("with_history") = true,
+			 "Serialises positions/payloads and (id, tag) pairs of all particles, for checkpointing. With with_history, the rolling position history the trail plots read is written as well, which makes the (id, tag) array three entries per particle and appends the samples to the position array")
+		.def("_load_state", [](pyoomph::TracerCollection *t, std::vector<double> pos, std::vector<long long> ids, bool with_history)
+			 { t->_load_state(pos, ids, with_history); },
+			 nb::arg("positions"), nb::arg("ids"), nb::arg("with_history") = true,
+			 "Replaces all particles by those of a previously saved state, restoring their identities and, if it is in the data, their position history. with_history must match what _save_state was called with")
 		.def("_set_transfer_interface", &pyoomph::TracerCollection::set_transfer_interface,
 			 "Registers that particles crossing the given mesh boundary are handed over to another collection instead of being dropped")
 		.def(

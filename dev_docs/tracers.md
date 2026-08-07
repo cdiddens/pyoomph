@@ -237,6 +237,50 @@ invariant broken.
 `..._stay_on_the_interface_after_a_remeshing_event` both fail without the carry-over; the bulk one
 passes either way and is there as a guard.
 
+## 5c. Three defects the wavy-channel tutorial exposed
+
+`docs/source/tutorial/ale/tracers.py` was the first case with a genuinely moving mesh, a domain
+several units wide and a state file written every output. It found three separate things, and the
+first two both presented as "particles disappear", which is why they are easy to conflate.
+
+* **The placement Newton could not reach its convergence threshold.** `place_at`'s inner iteration
+  declared success only when the step in reference coordinates fell below a fixed `1e-14`. What that
+  iteration can actually reach is the rounding noise of the residual, `eps*|x|`, divided by the
+  element scale `|dX/ds|`. On a mesh of 0.1-sized elements at `x ~ 4` that floor *is* about `1e-14`,
+  so the threshold was unreachable: the iteration spent all 25 rounds bouncing on it, the placement
+  was reported as failed, and the particle was dropped as having left the mesh - while sitting well
+  inside its own element. It is distance-dependent, which is what made it look arbitrary: in the
+  tutorial every loss was at `x >= 1.4` and none below, and 189 particles became 64 within two time
+  units. The threshold is now scaled by that floor, using the *smallest row norm* of `J` so that a
+  flat or stretched element relaxes it rather than tightening it.
+  `test_no_particle_is_lost_in_the_interior_of_a_moving_mesh` is parametrised on the distance from
+  the origin for exactly this reason: the `at_origin` case passes either way.
+* **The cached point locator did not notice that the mesh had moved.** A `MeshPointLocator` freezes
+  the nodal positions it was built from - kd-tree, element boxes, affine fits - and the collection
+  cached one per time level, keyed on the mesh's *topology* generation. But mesh motion changes the
+  geometry without changing the topology, so a locator built at one step was used to answer "is this
+  point inside the mesh" at the next. It showed up loading a state file: the mesh was restored to its
+  stored configuration and the particles near the moved boundary were then placed against a locator
+  describing the initial one, and were dropped as outside. There is now a `geometry_stale` flag, set
+  wherever the configuration may have moved (`advect_all`, `relocate_all`, `set_mesh`, `_load_state`).
+  The element walk asks `get_adjacency_locator()` instead, because node-element incidence does not
+  move - otherwise every step of a moving mesh would pay for a full locator rebuild.
+* **The rolling position history was not in the state file.** Only positions, payloads and identities
+  were, so a restored state came back with every particle in the right place and no trail at all, and
+  the trails then grew back from scratch rather than continuing. State format 0.1.3 adds it: the
+  per-particle sample count goes into the id/tag array, which becomes three entries per particle, and
+  the samples are appended after the fixed-size blocks so neither array needs a worst-case stride.
+  While fixing it, the ring buffer's reallocation on a capacity change turned out to reassign the
+  buffer while leaving `hist_n` and `hist_head` pointing into it as if the old samples were still
+  there; it re-rings properly now, which is also what lets a restored history survive being bound to
+  an equation asking for a different capacity.
+
+One more, in the same area: `after_transient_solve` guards against advecting twice at the same time,
+and a state file may put the clock *back* - a rollback, a restart from an earlier dump. The guard
+then refused to advect until the run had caught up with the time it last saw, leaving the particles
+frozen in place while the flow moved on. `after_remeshing`, which a state load goes through, now sets
+the guard to the restored time.
+
 ## 6. Where the accuracy stops
 
 Worth stating, because the tolerance knob does not reach it.
