@@ -177,6 +177,8 @@ namespace pyoomph
       BulkElementBase *e = dynamic_cast<BulkElementBase *>(source->element_pt(ie));
       if (!e)
         continue;
+      if (setup.skip_halo_elements && e->is_halo())
+        continue;
       element_index[e] = elements_by_index.size();
       elements_by_index.push_back(e);
 
@@ -614,88 +616,13 @@ namespace pyoomph
 
   bool MeshPointLocator::inside_reference_domain(unsigned slot, BulkElementBase *e, const double *s) const
   {
-    const double tol = setup.inside_tolerance;
-    if (element_ref_domain[slot] == RefDomain::Simplex)
-    {
-      double sum = 0.0;
-      for (unsigned d = 0; d < element_dim; d++)
-      {
-        if (s[d] < -tol)
-          return false;
-        sum += s[d];
-      }
-      return sum <= 1.0 + tol;
-    }
-    if (element_ref_domain[slot] == RefDomain::Box)
-    {
-      for (unsigned d = 0; d < element_dim; d++)
-        if (s[d] < e->s_min() - tol || s[d] > e->s_max() + tol)
-          return false;
-      return true;
-    }
-    // Both of these are documented on the element classes in wedges_and_pyramids.hpp: the wedge is
-    // a triangular prism, and the pyramid's cross-section shrinks with s2 ("s[0] and s[1] run from
-    // 0 to 1-s[2]").
-    if (element_ref_domain[slot] == RefDomain::Prism)
-    {
-      if (s[0] < -tol || s[1] < -tol || s[0] + s[1] > 1.0 + tol)
-        return false;
-      return s[2] >= e->s_min() - tol && s[2] <= e->s_max() + tol;
-    }
-    if (element_ref_domain[slot] == RefDomain::Pyramid)
-    {
-      if (s[2] < e->s_min() - tol || s[2] > e->s_max() + tol)
-        return false;
-      const double lim = 1.0 - s[2];
-      return s[0] >= -tol && s[0] <= lim + tol && s[1] >= -tol && s[1] <= lim + tol;
-    }
-    return false;
+    return pyoomph::inside_reference_domain(element_ref_domain[slot], e, element_dim, s,
+                                            setup.inside_tolerance);
   }
 
   void MeshPointLocator::clamp_to_reference_domain(unsigned slot, BulkElementBase *e, double *s) const
   {
-    switch (element_ref_domain[slot])
-    {
-    case RefDomain::Simplex:
-    {
-      // Clamp to {s_i >= 0, sum s_i <= 1}. Not the exact Euclidean projection onto the simplex, but
-      // it lands inside it, which is all the iteration needs from a step limiter.
-      for (unsigned d = 0; d < element_dim; d++)
-        s[d] = std::max(0.0, s[d]);
-      double sum = 0.0;
-      for (unsigned d = 0; d < element_dim; d++)
-        sum += s[d];
-      if (sum > 1.0 && sum > 0.0)
-        for (unsigned d = 0; d < element_dim; d++)
-          s[d] /= sum;
-      break;
-    }
-    case RefDomain::Box:
-      for (unsigned d = 0; d < element_dim; d++)
-        s[d] = std::min(std::max(s[d], e->s_min()), e->s_max());
-      break;
-    case RefDomain::Prism:
-      s[2] = std::min(std::max(s[2], e->s_min()), e->s_max());
-      s[0] = std::max(0.0, s[0]);
-      s[1] = std::max(0.0, s[1]);
-      if (s[0] + s[1] > 1.0)
-      {
-        const double sum = s[0] + s[1];
-        s[0] /= sum;
-        s[1] /= sum;
-      }
-      break;
-    case RefDomain::Pyramid:
-    {
-      s[2] = std::min(std::max(s[2], e->s_min()), e->s_max());
-      const double lim = 1.0 - s[2];
-      s[0] = std::min(std::max(s[0], 0.0), std::max(lim, 0.0));
-      s[1] = std::min(std::max(s[1], 0.0), std::max(lim, 0.0));
-      break;
-    }
-    default:
-      break;
-    }
+    pyoomph::clamp_to_reference_domain(element_ref_domain[slot], e, element_dim, s);
   }
 
   // Closest point on a codimension-1 element: minimise |x(s) - x| over s, by damped Gauss-Newton on
@@ -831,16 +758,9 @@ namespace pyoomph
     {
       BulkElementBase *e = elements_by_index[ie];
 
-      if (dynamic_cast<oomph::TElementBase *>(e))
-        element_ref_domain[ie] = RefDomain::Simplex;
-      else if (dynamic_cast<oomph::QElementGeometricBase *>(e))
-        element_ref_domain[ie] = RefDomain::Box;
-      else if (dynamic_cast<oomph::WedgeElementBase *>(e))
-        element_ref_domain[ie] = RefDomain::Prism;
-      else if (dynamic_cast<oomph::PyramidElementBase *>(e))
-        element_ref_domain[ie] = RefDomain::Pyramid;
-      // else: RefDomain::Unknown - no containment test, so no exact path, but the affine fit below
-      // is still built and still improves the Newton starting point.
+      // RefDomain::Unknown - no containment test, so no exact path, but the affine fit below is
+      // still built and still improves the Newton starting point.
+      element_ref_domain[ie] = reference_domain_kind(e);
 
       if (!build_affine_fit_for(e, ie))
         continue; // no usable fit at all: Newton from the element centre, as before
@@ -1488,6 +1408,28 @@ namespace pyoomph
       m = std::max(m, o);
     }
     return m;
+  }
+
+  void MeshPointLocator::neighbour_elements(BulkElementBase *e, std::vector<BulkElementBase *> &out) const
+  {
+    out.clear();
+    if (!e)
+      return;
+    for (unsigned n = 0; n < e->nnode(); n++)
+    {
+      auto it = node_lookup.find(dynamic_cast<pyoomph::Node *>(e->node_pt(n)));
+      if (it == node_lookup.end())
+        continue;
+      const unsigned ni = it->second;
+      for (unsigned k = node_elem_offsets[ni]; k < node_elem_offsets[ni + 1]; k++)
+      {
+        BulkElementBase *cand = node_elem_entries[k];
+        if (cand == e)
+          continue;
+        if (std::find(out.begin(), out.end(), cand) == out.end())
+          out.push_back(cand);
+      }
+    }
   }
 
   std::string MeshPointLocator::affine_fraction() const

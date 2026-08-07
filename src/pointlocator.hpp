@@ -64,6 +64,7 @@ The main author may be contacted at c.diddens@utwente.nl
 // pyoomph::Node is a typedef of a template instantiation (nodes.hpp), not a class, so it cannot be
 // forward declared - the header has to be pulled in.
 #include "nodes.hpp"
+#include "refdomain.hpp"
 
 namespace pyoomph
 {
@@ -118,6 +119,14 @@ namespace pyoomph
     // element size. Guards against a near-touching interface matching the wrong sheet, which a pure
     // nearest-point search cannot distinguish. Ignored for Invert.
     double max_projection_offset_factor = 0.5;
+
+    // Leave halo elements out of the index, so that a located point is owned by exactly one rank.
+    //
+    // Default off, because every existing consumer of this class transfers values and wants a halo
+    // element to answer just as well as the element it copies. Tracer particles are the opposite
+    // case: a particle located in a halo element would be advected redundantly on two ranks and
+    // reported twice.
+    bool skip_halo_elements = false;
   };
 
   // What a consumer wants evaluated at each located point. A bitfield rather than separate calls
@@ -273,15 +282,9 @@ namespace pyoomph
       Affine = 1,   // exact, one matrix multiply
       Bilinear2d = 2 // exact, one quadratic - a straight-edged but non-parallelogram 2d quad
     };
-    // Which reference domain a local coordinate has to land in to count as inside.
-    enum class RefDomain : unsigned char
-    {
-      Unknown = 0, // no containment test available: Newton only, though still affinely seeded
-      Simplex = 1, // s_i >= 0 and sum s_i <= 1
-      Box = 2,     // s_min <= s_i <= s_max
-      Prism = 3,   // wedge: s0,s1 >= 0, s0+s1 <= 1, s2 in [s_min,s_max]
-      Pyramid = 4  // s2 in [s_min,s_max], s0 and s1 in [0, 1-s2]
-    };
+    // Which reference domain a local coordinate has to land in to count as inside. The enum and the
+    // containment/clamping predicates live in refdomain.hpp because the tracer advection needs the
+    // same answers; RefDomain::Unknown means Newton only here, though still affinely seeded.
     std::vector<GeomKind> element_geom_kind;
     std::vector<RefDomain> element_ref_domain;
 
@@ -386,6 +389,13 @@ namespace pyoomph
     // pure optimisation - the result does not depend on it.
     LocationSet locate_batch(const std::vector<double> &coords, unsigned npoint,
                              const std::vector<unsigned> *hint_groups = nullptr) const;
+
+    // Elements of the source mesh sharing at least one node with `e` (`e` itself excluded), in no
+    // particular order. Adjacency only, so the answer does not depend on the locator's time level
+    // or coordinate space. The tracer advection walks this rather than searching: a particle whose
+    // sub-step leaves its element has entered one of these, and if it has not, the sub-step was too
+    // long and shrinking it is the right response.
+    void neighbour_elements(BulkElementBase *e, std::vector<BulkElementBase *> &out) const;
 
     // Convenience composition of locate_batch + LocationSet::evaluate, for one-shot callers that
     // will not evaluate again. Consumers that evaluate repeatedly (the projection solve) must keep
