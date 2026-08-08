@@ -79,6 +79,10 @@ if no_mpi_file.exists():
 	def mpi_share_root_failure(error:'Optional[BaseException]'=None, root:int=0, context:str="")->None: #type:ignore
 		if error is not None:
 			raise error
+
+	def mpi_share_any_failure(error:'Optional[BaseException]'=None, context:str="")->None: #type:ignore
+		if error is not None:
+			raise error
 else:
 	from mpi4py import MPI #type:ignore
 	import sys
@@ -150,6 +154,28 @@ else:
 		raise RuntimeError("MPI rank "+str(root)+" failed"+((" while "+context) if context else "")+
 						   " ("+description+"). This rank did not run that section itself and raises "
 						   "here so that the job ends rather than waiting for a rank that is gone.")
+
+	def mpi_share_any_failure(error:'Optional[BaseException]'=None, context:str="")->None: #type:ignore
+		"""Agree on a failure that ANY rank may have seen, and end the job on all of them.
+
+		The rooted mpi_share_root_failure above covers a section that only rank 0 runs. This one is
+		for a section every rank runs for itself, where any of them can be the one that fails -
+		reading a state file, say. Being collective, it doubles as the barrier such a section needs.
+		"""
+		if get_mpi_nproc()<=1:
+			if error is not None:
+				raise error
+			return
+		# Descriptions only, for the same reason as above: an arbitrary exception need not be
+		# picklable, and a gather that fails here would hang the run it is meant to rescue.
+		descriptions=MPI.COMM_WORLD.allgather(None if error is None else (type(error).__name__+": "+str(error))) #type:ignore
+		if error is not None:
+			raise error # the rank that saw it re-raises the original, so its traceback survives
+		for r,d in enumerate(descriptions): #type:ignore
+			if d is not None:
+				raise RuntimeError("MPI rank "+str(r)+" failed"+((" while "+context) if context else "")+
+								   " ("+d+"). This rank got through it itself and raises here so that "
+								   "the job ends rather than waiting for a rank that is gone.")
 
 	if get_mpi_nproc()>1:
 		print("MPI initialized, rank",get_mpi_rank(),"of",get_mpi_nproc())

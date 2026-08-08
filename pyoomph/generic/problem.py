@@ -647,6 +647,7 @@ class Problem(_pyoomph.Problem):
         #: to snapshot the state before each adaptation and fall back to it instead.
         self.adaptive_resolve_recovery:"AdaptiveResolveRecovery | None"=None
         self._state_snapshot_counter:int=0
+        self._state_snapshot_job_id:"int|None"=None # see _state_snapshot_name
         self._adapt_recovery_transient:bool=False # whether the solve being recovered is a timestep
         #: Minimum refinement level of all meshes.       
         self.min_refinement_level:int=0
@@ -7601,51 +7602,79 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         On a distributed problem this is **collective**: every rank contributes its part of the mesh,
         the data is merged into one partition-independent file (see dev_docs/distributed_state_files.md)
         and rank 0 writes it. The resulting file is the same one a serial run would write and can be
-        read back on any number of processes."""
+        read back on any number of processes.
+
+        Writing to a FILE is collective under MPI in every case, distributed or not: no rank returns
+        before the file is complete on disk, so a load_state of it right afterwards is safe. Writing
+        to a stream is rank-local, since the stream is."""
         distributed=self.is_distributed()
-        if (not distributed) and get_mpi_rank()>0 and isinstance(fname,str):
-            return # every rank holds the whole problem, so one of them writing the FILE is enough
+        to_file=isinstance(fname,str)
+        # Every rank holds the whole problem when it is not distributed, so one of them writing the
+        # FILE is enough. The others used to return right here - and then raced ahead into a
+        # load_state of that very file while rank 0 was still writing it: FileNotFoundError on one
+        # rank, and the rest hanging in the next PETSc collective waiting for a rank that is gone
+        # (Advanced_Linear_Dynamics/eigenbranch_continuation.py under mpirun -n 2). They wait at the
+        # collective at the end of this method instead, which also hands them rank 0's failure.
         # A stream is per-rank private, so there is no redundant writer to skip - and a snapshot that
         # only rank 0 held could not be restored, since every rank has to read the whole state back.
+        redundant_writer=(not distributed) and to_file and get_mpi_rank()>0
 
-        if not self.is_quiet() and not quiet and get_mpi_rank()==0:
-            print("Saving state ", fname)
-        if relative_to_output:
-            assert isinstance(fname,str), "relative_to_output makes no sense when writing to a stream"
-            fname=os.path.join(self.get_output_directory(),fname)
-        # On a DISTRIBUTED problem all ranks walk through define_state_file - that is where they hand
-        # their part of the mesh over - but only rank 0 writes anything, the others send their bytes
-        # to /dev/null, because the result is one merged, partition-independent stream.
-        #
-        # When the problem is NOT distributed there is no merge: every rank holds the whole problem
-        # and writes a complete stream of its own. Sending the others to /dev/null here would be
-        # wrong for a stream - the guard above already dropped the redundant writers of a FILE, so
-        # the only ranks still here are ones that need their own copy. (They used to be dropped
-        # unconditionally, which is why this line could assume rank 0.)
-        writes_here = (get_mpi_rank()==0) or (not distributed)
-        dump = DumpFile(fname if writes_here else os.devnull, True,compression_level=self.states_compression_level)
         error=None
-        try:
-            self.define_state_file(dump)
-            dump.write_footer("EOF_pyoomph")
-            dump.close()
-        except BaseException as e:
-            error=e
+        if not redundant_writer:
+            if not self.is_quiet() and not quiet and get_mpi_rank()==0:
+                print("Saving state ", fname)
+            if relative_to_output:
+                assert isinstance(fname,str), "relative_to_output makes no sense when writing to a stream"
+                fname=os.path.join(self.get_output_directory(),fname)
+            # On a DISTRIBUTED problem all ranks walk through define_state_file - that is where they
+            # hand their part of the mesh over - but only rank 0 writes anything, the others send
+            # their bytes to /dev/null, because the result is one merged, partition-independent
+            # stream.
+            #
+            # When the problem is NOT distributed there is no merge: every rank holds the whole
+            # problem and writes a complete stream of its own. Sending the others to /dev/null here
+            # would be wrong for a stream - the redundant writers of a FILE are already out, so the
+            # only ranks still here are ones that need their own copy. (They used to be dropped
+            # unconditionally, which is why this line could assume rank 0.)
+            writes_here = (get_mpi_rank()==0) or (not distributed)
+            dump = DumpFile(fname if writes_here else os.devnull, True,compression_level=self.states_compression_level)
+            try:
+                self.define_state_file(dump)
+                dump.write_footer("EOF_pyoomph")
+                dump.close()
+            except BaseException as e:
+                error=e
+        # Both of these are collective, and that is the point twice over: a rank that failed would
+        # otherwise leave the others waiting in the next collective - the run would hang instead of
+        # reporting the failure - and for a FILE they also pin every rank here until it is written.
         if distributed:
-            # Symmetric on purpose: a rank that failed here would otherwise leave the others waiting in
-            # the next collective, and the run would hang instead of reporting the failure.
-            comm=get_mpi_world_comm()
-            assert comm is not None
-            descriptions=comm.allgather(None if error is None else (type(error).__name__+": "+str(error)))
-            if error is None:
-                for r,d in enumerate(descriptions):
-                    if d is not None:
-                        raise RuntimeError("Rank "+str(r)+" failed while writing the state file ("+d+")")
-        if error is not None:
-            raise error
+            # Every rank ran define_state_file, so any of them can be the one that failed.
+            mpi_share_any_failure(error,context="writing the state file")
+        elif to_file:
+            # Only rank 0 wrote; the others skipped the section entirely and learn about it here.
+            mpi_share_root_failure(error,context="writing the state file")
+        elif error is not None:
+            raise error # a per-rank private stream: nothing to agree on
 
 
     def load_state(self, fname:str | IO[bytes],ignore_outstep:bool=False,relative_to_output:bool=False,ignore_eigendata:bool=False,ignore_continuation_data:bool=False,additional_info:dict[Any,Any]={},quiet:bool=False):
+        """Restore a state written by save_state. Every rank reads the whole file for itself.
+
+        **Collective** under MPI, in two ways that both matter. The load itself already was - it
+        rebuilds the global mesh and renumbers the equations - but the outcome was not: a rank that
+        could not read the file unwound alone while the others went on into the next collective and
+        waited there for good. So the outcome is agreed on here, and since that agreement is
+        collective it is also the barrier that keeps a rank from overwriting or deleting the file
+        while another one is still reading it."""
+        error=None
+        try:
+            self._load_state(fname,ignore_outstep,relative_to_output,ignore_eigendata,ignore_continuation_data,additional_info,quiet)
+        except BaseException as e:
+            error=e
+        mpi_share_any_failure(error,context="loading the state file "+(fname if isinstance(fname,str) else "<stream>"))
+        return True
+
+    def _load_state(self, fname:str | IO[bytes],ignore_outstep:bool=False,relative_to_output:bool=False,ignore_eigendata:bool=False,ignore_continuation_data:bool=False,additional_info:dict[Any,Any]={},quiet:bool=False):
         if not self.is_initialised():
             self.initialise()
         # No guard for distributed problems: every rank reads the whole file and picks out the part of
@@ -7721,9 +7750,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         there - the refinement pattern, the dofs, the history values, the pinned values, the current
         time and all dts - because this is the very same stream ``save_state`` writes."""
         if not to_memory:
-            fname=os.path.join(self.get_output_directory(),"_states",
-                               "_snapshot_{:d}_{:d}.dump".format(os.getpid(),self._state_snapshot_counter))
-            self._state_snapshot_counter+=1
+            fname=self._state_snapshot_name()
             os.makedirs(os.path.dirname(fname),exist_ok=True)
             self.save_state(fname,quiet=True)
             return fname
@@ -7740,13 +7767,42 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # (save_state skips the redundant-writer guard for streams), so there is nothing to share.
         return buf.getvalue()
 
+    def _state_snapshot_name(self)->str:
+        """The file name of the next on-disk snapshot - the SAME one on every rank.
+
+        The pid is in the name so that two runs sharing an output directory cannot overwrite each
+        other's snapshots. Under MPI it may not be the *local* pid, though: save_state writes one
+        file, rank 0's, and _restore_state has every rank read that file back. A per-rank name left
+        every other rank pointing at a file nobody had written, so the restore died with a
+        FileNotFoundError on those ranks - and before load_state agreed on its outcome, it hung the
+        rest of the job with it. Rank 0's pid is what identifies the job, and it is unique in the
+        same way the local one was.
+        """
+        if self._state_snapshot_job_id is None:
+            job_id=os.getpid()
+            if get_mpi_nproc()>1:
+                comm=get_mpi_world_comm()
+                assert comm is not None
+                job_id=cast(int,comm.bcast(job_id,root=0))
+            self._state_snapshot_job_id=job_id
+        fname=os.path.join(self.get_output_directory(),"_states",
+                           "_snapshot_{:d}_{:d}.dump".format(self._state_snapshot_job_id,self._state_snapshot_counter))
+        self._state_snapshot_counter+=1
+        return fname
+
     def _restore_state(self,snapshot:bytes | str)->None:
         """Put back a state taken by :py:meth:`_snapshot_state`."""
         self.load_state(snapshot if isinstance(snapshot,str) else io.BytesIO(snapshot),quiet=True)
 
     def _discard_state_snapshot(self,snapshot:bytes | str)->None:
-        if isinstance(snapshot,str) and os.path.exists(snapshot):
-            os.remove(snapshot)
+        # Only rank 0 wrote the file, so only rank 0 removes it - all ranks racing to unlink the one
+        # shared name means the loser raises on a file the winner has just taken away. No barrier is
+        # needed before it: load_state ends in a collective, so no rank can still be reading.
+        if isinstance(snapshot,str) and get_mpi_rank()==0:
+            try:
+                os.remove(snapshot)
+            except FileNotFoundError:
+                pass # discarded twice, e.g. when _first_pre and _pre are the same snapshot
 
     @contextlib.contextmanager
     def _suppress_unrefinement(self):
