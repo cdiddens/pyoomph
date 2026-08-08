@@ -1186,10 +1186,12 @@ namespace pyoomph
     }
         
 
-    std::map<std::pair<oomph::Node*,oomph::Node*>,std::vector<std::pair<BulkElementBase*,int>>> nodemap;
-    for (unsigned int ie=0;ie<this->nelement();ie++)
-    {     
-     BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->element_pt(ie));
+    // The two vertex nodes of a face identify it uniquely, so a face listed by two elements is an
+    // interior facet. Walked twice - once to group, once to emit - so the key derivation lives in
+    // one place.
+    auto faces_of_element = [](BulkElementBase *be)
+    {
+     std::vector<std::pair<int,std::pair<oomph::Node*,oomph::Node*>>> res;
      std::set<oomph::Node*> elem_vertices;
      for (unsigned int ivn=0;ivn<be->nvertex_node();ivn++) elem_vertices.insert(be->vertex_node_pt(ivn));
      std::vector<int> face_dirs;
@@ -1201,11 +1203,11 @@ namespace pyoomph
      {
        face_dirs={1,-1,2,-2};
      }
-     else 
+     else
      {
       throw_runtime_error("Should not enter here");
      }
-     
+
      for (auto face_dir : face_dirs)
      {
        unsigned nnode_on_face=be->nnode_on_face();
@@ -1221,35 +1223,51 @@ namespace pyoomph
         throw_runtime_error("Expected 2 vertex nodes on face, but got "+std::to_string(face_verts.size()));
        }
        for (unsigned int i=0;i<face_verts.size();i++) if (face_verts[i]->is_a_copy()) face_verts[i]=face_verts[i]->copied_node_pt();
-       std::sort(face_verts.begin(),face_verts.end());
-       std::pair<oomph::Node*,oomph::Node*> key={face_verts[0],face_verts[1]};
-       if (!nodemap.count(key))
-       {
-        nodemap[key]={std::make_pair(be,face_dir)};
-       }
-       else
-       {
-        nodemap[key].push_back(std::make_pair(be,face_dir));
-       }
+       std::sort(face_verts.begin(),face_verts.end()); // Only to canonicalise the key, the order in it carries no meaning
+       res.push_back({face_dir,{face_verts[0],face_verts[1]}});
      }
+     return res;
+    };
+
+    std::map<std::pair<oomph::Node*,oomph::Node*>,std::vector<std::pair<BulkElementBase*,int>>> nodemap;
+    for (unsigned int ie=0;ie<this->nelement();ie++)
+    {
+     BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->element_pt(ie));
+     for (const auto & f : faces_of_element(be)) nodemap[f.second].push_back(std::make_pair(be,f.first));
     }
-    
+
     for (const auto & nm : nodemap)
     {
      if (nm.second.size()>2)
      {
       throw_runtime_error("Found a facet with "+std::to_string(nm.second.size())+" attached elements");
      }
-     else if (nm.second.size()==2)
+    }
+
+    // Emit in element/face order rather than by iterating nodemap. nodemap is keyed on node POINTERS,
+    // so its iteration order follows heap addresses and therefore differs from process to process.
+    // That does not matter in serial, but oomph-lib's parallel assembly of a NON-distributed problem
+    // splits the global element list by index and assumes every rank sees the same list: with a
+    // rank-dependent facet order each rank assembled a different subset of the interior facets, so
+    // under a plain mpirun some DG facet contributions were counted twice and others dropped. The
+    // wrong Jacobian then also broke Newton convergence, and the extra step deadlocked in the PETSc
+    // solver once the ranks disagreed about whether the sparsity pattern could be reused.
+    for (unsigned int ie=0;ie<this->nelement();ie++)
+    {
+     BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->element_pt(ie));
+     for (const auto & f : faces_of_element(be))
      {
-       internal_elements.push_back(nm.second[0].first);
-       internal_face_dir.push_back(nm.second[0].second);
-       opposite_elements.push_back(nm.second[1].first);
-       opposite_face_dir.push_back(nm.second[1].second);      
-       opposite_already_at_index.push_back(-1);       
+       const auto & attached=nodemap.at(f.second);
+       if (attached.size()!=2) continue; // Exterior facet
+       if (attached[0].first!=be || attached[0].second!=f.first) continue; // Emitted from the other side
+       internal_elements.push_back(attached[0].first);
+       internal_face_dir.push_back(attached[0].second);
+       opposite_elements.push_back(attached[1].first);
+       opposite_face_dir.push_back(attached[1].second);
+       opposite_already_at_index.push_back(-1);
      }
     }
-    
+
     std::cout << "Number of internal facets to be constructed: " << internal_elements.size() << std::endl;
     
   }

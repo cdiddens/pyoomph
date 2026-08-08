@@ -286,6 +286,23 @@ class PETSCSolver(GenericLinearSystemSolver):
             return True
         return self._structure_matches(indptr,indices)
 
+    def _agree_on_reuse_structure_distributed(self,nrow_local:int,nnz_local:int,indptr:Any=None,indices:Any=None)->bool:
+        """Collective form of _can_reuse_structure_distributed: reuse only if EVERY rank can.
+
+        The two branches this picks between -- update the values in place, or destroy the Mat/KSP and
+        rebuild -- are both collective, so a rank that answers differently from the others does not
+        merely lose the reuse, it hangs the job in mismatched PETSc collectives (one rank in
+        MatAssemblyBegin while another is inside KSPDestroy). The per-rank inputs are meant to agree,
+        but they are derived from the LOCAL sparsity pattern and so cannot be trusted to: a genuine
+        pattern change that only shows up on some ranks is a possible outcome, not a contradiction.
+        One allreduce of a bool per solve is nothing next to a factorisation, and disagreeing now
+        costs a rebuild instead of a deadlock.
+        """
+        local=self._can_reuse_structure_distributed(nrow_local,nnz_local,indptr,indices)
+        if get_mpi_nproc()>1 and get_mpi_any(not local):
+            return False
+        return local
+
     def _before_assigning_equation_numbers(self):
         if self._dofs_to_field_info is not None:
             if len(self._dofs_to_field_info)>2:
@@ -675,12 +692,11 @@ class PETSCSolver(GenericLinearSystemSolver):
     def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
         #print("solve distributed with flag ",op_flag)
         if op_flag == 1:
-            # Same reuse logic as solve_serial. jacobian_structure_id is bumped inside the collective
-            # assign_eqn_numbers(), so every rank agrees on it and either all reuse or all rebuild --
-            # which matters, because rebuilding the Mat is itself collective and a split decision would
-            # deadlock. _can_reuse_structure compares the LOCAL row count and local nnz, both of which
-            # are per-rank quantities derived from the same global pattern.
-            if self._can_reuse_structure_distributed(nrow_local,nnz_local,row_start,col_index):
+            # Same reuse logic as solve_serial, but taken collectively: rebuilding the Mat is itself
+            # collective, so a split decision deadlocks rather than just losing the reuse. The inputs
+            # (jacobian_structure_id, local row count, local nnz, pattern digest) are all meant to
+            # agree across ranks, but the last three are LOCAL quantities and are not trusted to.
+            if self._agree_on_reuse_structure_distributed(nrow_local,nnz_local,row_start,col_index):
                 self.petsc_mat.setValuesCSR(row_start.astype(PETSc.IntType, copy=False), col_index.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)) #type:ignore
                 self.petsc_mat.assemble() #type:ignore
                 return
