@@ -138,7 +138,11 @@ for d in glob.glob("./*/"):
       continue
     if args.mpirun>0 and f=="parallel_running.py":
       # This one spawns its own mpirun, so launching it under one already gives nested MPI.
-      print("   SKIPPING",f,"-- it invokes mpirun by itself")
+      print("   SKIPPING",f,"-- it is just as spawner of other scripts")
+      continue
+    if args.mpirun>0 and f=="deflation.py":
+      # This one spawns its own mpirun, so launching it under one already gives nested MPI.
+      print("   SKIPPING",f,"-- custom assemblers not MPI capable yet")
       continue
     print("   Testing",f)
     cmd=[sys.executable, '-u', f]
