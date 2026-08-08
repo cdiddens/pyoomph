@@ -6256,12 +6256,18 @@ namespace oomph
       ncoef[m].resize(ndof, 0);
     }
 
-    if (Sparse_assemble_with_arrays_previous_allocation.size() == 0)
+    //FOR PYOOMPH: same shape check as in parallel_sparse_assemble() - see the comment there. This
+    //serial variant is only reached when Sparse_assembly_method is set to the two-arrays scheme, but
+    //it holds the identical stale-n_matrix trap.
+    if (Sparse_assemble_with_arrays_previous_allocation.size() < n_matrix)
     {
       Sparse_assemble_with_arrays_previous_allocation.resize(n_matrix);
-      for (unsigned m = 0; m < n_matrix; m++)
+    }
+    for (unsigned m = 0; m < n_matrix; m++)
+    {
+      if (Sparse_assemble_with_arrays_previous_allocation[m].size() != ndof)
       {
-        Sparse_assemble_with_arrays_previous_allocation[m].resize(ndof, 0);
+        Sparse_assemble_with_arrays_previous_allocation[m].assign(ndof, 0);
       }
     }
 
@@ -6809,12 +6815,21 @@ namespace oomph
     // coefs in each row.
     // if a matrix of this size has not been assembled before then resize this
     // storage
-    if (Sparse_assemble_with_arrays_previous_allocation.size() == 0)
+    //FOR PYOOMPH: the guard used to be size()==0 alone, i.e. the record kept the SHAPE of whichever
+    //assembly filled it first. get_eigenproblem_matrices() assembles n_matrix=2 while an ordinary
+    //Newton step assembles n_matrix=1, so every MPI eigensolve after a solve indexed [1] on a
+    //one-entry vector -> segfault. Check the shape, not just emptiness.
+    if (Sparse_assemble_with_arrays_previous_allocation.size() < n_matrix)
     {
       Sparse_assemble_with_arrays_previous_allocation.resize(n_matrix);
-      for (unsigned m = 0; m < n_matrix; m++)
+    }
+    for (unsigned m = 0; m < n_matrix; m++)
+    {
+      // A different row count means the hints describe other equations, so they are reset rather
+      // than grown (they are only allocation hints, so losing them costs a reallocation at worst).
+      if (Sparse_assemble_with_arrays_previous_allocation[m].size() != my_n_eqn)
       {
-        Sparse_assemble_with_arrays_previous_allocation[m].resize(my_n_eqn, 0);
+        Sparse_assemble_with_arrays_previous_allocation[m].assign(my_n_eqn, 0);
       }
     }
 

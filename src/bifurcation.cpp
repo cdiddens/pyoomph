@@ -1266,7 +1266,14 @@ namespace pyoomph
       problem_pt->GetDofPtr().push_back(&Y[n]);
       Y[n] = Phi[n] = -x[n] / length;
     }
-    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 1, true);
+    // The augmented dof vector must be built NON-distributed, like the base problem's own
+    // (assign_eqn_numbers() builds it with false whenever the problem is not distributed, and
+    // bifurcation tracking refuses distributed problems anyway). With true, every rank of an
+    // mpirun took Dof_distribution_pt->nrow_local() as the length of its Newton update and wrote
+    // it into GetDofPtr()[0...], so rank 1 applied the eigenvector block's increment to the base
+    // dofs and nobody updated the parameter: the fold Newton solve diverged to inf under MPI
+    // while converging serially. Inherited from upstream oomph-lib, whose handlers do the same.
+    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 1, false);
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
     delete dist_pt;
   }
@@ -1306,7 +1313,8 @@ namespace pyoomph
       problem_pt->GetDofPtr().push_back(&Y[n]);
       Y[n] = Phi[n] = eigenvector[n] / length;
     }
-    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 1, true);
+    // Non-distributed, for the reason given in the first constructor above.
+    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 1, false);
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
 
     delete dist_pt;
@@ -1350,7 +1358,8 @@ namespace pyoomph
       Y[n] = eigenvector[n] / length;
       Phi[n] = normalisation[n];
     }
-    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 1, true);
+    // Non-distributed, for the reason given in the first constructor above.
+    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 1, false);
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
     delete dist_pt;
   }
@@ -2040,7 +2049,8 @@ namespace pyoomph
     problem_pt->GetDofPtr().push_back(&Sigma);
     Sigma = 0.0;
 
-    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 2, true);
+    // Non-distributed: see MyFoldHandler's first constructor for what true does under MPI.
+    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 2, false);
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
     delete dist_pt;
   }
@@ -3623,7 +3633,8 @@ namespace pyoomph
     
     problem_pt->GetDofPtr().push_back(&T); 
     T_global_eqn=problem_pt->GetDofPtr().size()-1;
-    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * (Tadd.size()+1)+1 , true); 
+    // Non-distributed: see MyFoldHandler's first constructor for what true does under MPI.
+    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * (Tadd.size()+1)+1 , false); 
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
 
     

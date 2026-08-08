@@ -482,3 +482,22 @@ the halo/haloed NODE lists are not rebuilt until afterwards, so only the ELEMENT
 Only the h-adaptive adapt_mesh is hooked; p_adapt_mesh is not, as pyoomph has no p-refinable elements.
 See dev_docs/boundary_node_membership_repair.md.
 Upstream equivalent: none, this is a pyoomph fix.
+
+problem.cc (Changed on 8th August 2026):
+Sparse_assemble_with_arrays_previous_allocation caches, per matrix and per row, how many entries the
+previous assembly stored there, so the next one can allocate the row at the right size straight away.
+Both places that size it (Problem::parallel_sparse_assemble and the serial two-arrays variant of
+sparse_assemble_row_or_column_compressed) only did so "if (size()==0)", so the record kept the SHAPE
+of whichever assembly filled it first. That breaks as soon as a problem assembles different numbers of
+matrices: an ordinary Newton step assembles n_matrix=1, get_eigenproblem_matrices() assembles
+n_matrix=2 (Jacobian + mass matrix), and the eigen assembly then read
+Sparse_assemble_with_arrays_previous_allocation[1] on a one-entry vector. Under MPI that is not
+theoretical -- parallel_sparse_assemble is used for every nproc>1 run, distributed or not -- so
+mpirun -n 2 on any script that calls solve() and then solve_eigenproblem() segfaulted on the first
+eigen assembly (reproduced with docs/source/tutorial/advstab/movmesh/hanging_droplet.py). It looked
+mesh-dependent because assign_eqn_numbers() empties the record, so a remesh in between hid it, and
+serially the nproc==1 branch of get_eigenproblem_matrices() plus the default vectors_of_pairs assembly
+method avoid this storage altogether.
+Both sites now grow the outer vector to n_matrix and reset any row-count entry whose length does not
+match the current one, instead of trusting the first shape they ever saw.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
