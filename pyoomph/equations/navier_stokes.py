@@ -745,6 +745,33 @@ class NavierStokesFreeSurface(InterfaceEquations):
             else:
                 self.pin_redundant_lagrange_multipliers(mesh, self.kinbc_name, "mesh")
 
+    def with_balanced_end(self,*boundaries:str):
+        """
+        Adds the NavierStokesFreeSurfaceBalancedEnd equations to the given boundaries of the interface.
+        Thereby, the Neumann force is balanced at the specified end points.
+        Use this when you neither want to fix the position nor the contact angle at specific end points
+        """
+        res=self
+        for b in boundaries:
+            res+=NavierStokesFreeSurfaceBalancedEnd() @ b
+        return res
+
+class NavierStokesFreeSurfaceBalancedEnd(InterfaceEquations):
+    """
+    The NavierStokesFreeSurface without ``impose_marangoni_directly`` uses the surface divergence theorem to integrate the surface tension term by parts. This results in a Neumann term at the end points of the interface, which is not balanced by default. This Neumann terms can be used e.g. for contact angles, but if you do not want to impose any, you can cancel out the Neumann term by adding this equation to the end points of the interface. This will balance the surface tension at the end points, resulting in a free contact angle.
+    """
+    required_parent_type = NavierStokesFreeSurface
+    def define_residuals(self):
+        inter_eqs=self.get_parent_equations(NavierStokesFreeSurface)
+        assert isinstance(inter_eqs,NavierStokesFreeSurface)
+        if not inter_eqs.impose_marangoni_directly: # Only when we used the surface divergence theorem, the Neumann terms are there
+            sigma=inter_eqs.surface_tension        
+            n = self.get_normal() # Outward pointing tangent at the interface boundary
+            ns=inter_eqs.get_parent_equations(StokesEquations)
+            assert isinstance(ns,StokesEquations)
+            u_test=testfunction(ns.velocity_name)
+            self.add_weak(-sigma*n, u_test) # Balance the surface tension at the end points
+
 
 # TODO: Merge this with the free surface and activate it if there is an opposite side
 class ConnectVelocityAtInterface(InterfaceEquations):

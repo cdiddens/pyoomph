@@ -779,6 +779,52 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                 lname = self.velo_connect_prefix + f
                 self.pin_redundant_lagrange_multipliers(mesh, lname, f, opposite_interface=f)
 
+    def with_balanced_end(self,*boundaries:str):
+        """
+        Adds the :py:class:`MultiComponentNavierStokesInterfaceBalancedEnd` equations to the given boundaries of the interface.
+        Thereby, the Neumann force is balanced at the specified end points.
+        Use this when you neither want to fix the position nor the contact angle at specific end points
+        """
+        res=self
+        for b in boundaries:
+            res+=MultiComponentNavierStokesInterfaceBalancedEnd() @ b
+        return res
+
+
+class MultiComponentNavierStokesInterfaceBalancedEnd(InterfaceEquations):
+    """
+    The :py:class:`MultiComponentNavierStokesInterface` without ``surface_tension_gradient_directly`` uses the surface divergence theorem to integrate the surface tension term by parts. This results in a Neumann term at the end points of the interface, which is not balanced by default. This Neumann term can be used e.g. for contact angles, but if you do not want to impose any, you can cancel out the Neumann term by adding this equation to the end points of the interface. This will balance the surface tension at the end points, resulting in a free contact angle.
+    """
+    required_parent_type = MultiComponentNavierStokesInterface
+
+    def define_residuals(self):
+        inter_eqs=self.get_parent_equations(MultiComponentNavierStokesInterface)
+        assert isinstance(inter_eqs,MultiComponentNavierStokesInterface)
+        if inter_eqs.surface_tension_gradient_directly:
+            return # Only when we used the surface divergence theorem, the Neumann terms are there
+        ns=inter_eqs.get_parent_equations(NavierStokesEquations)
+        assert isinstance(ns,NavierStokesEquations)
+        n=self.get_normal() # Outward pointing tangent at the interface boundary
+        u_test=testfunction(ns.velocity_name)
+        # Must be the very same expression as the one entering weak(...,div(u_test)) in the parent, otherwise it does not cancel
+        if inter_eqs.surface_tension_projection_space is not None:
+            # The scale of _surf_tension is stored symbolically as spatial/test_scale(velocity) and is
+            # re-expanded in whatever domain the field is used in. Test scales gain a factor 1/spatial per
+            # domain level, so here at the end of the interface it would come out one length too large.
+            sigma=var("_surf_tension",domain="..")
+            if inter_eqs.surface_tension_theta!=1:
+                sigma=evaluate_in_past(sigma,1-inter_eqs.surface_tension_theta)
+            sigma*=test_scale_factor("velocity")/test_scale_factor("velocity",domain="..")
+            self.add_weak(-inter_eqs.surface_tension_factor*sigma,dot(n,u_test))
+        else:
+            sigma=inter_eqs.interface_props.surface_tension
+            if sigma is None:
+                raise RuntimeError("No surface tension set in the interface properties " + str(inter_eqs.interface_props))
+            if inter_eqs.surface_tension_theta!=1:
+                sigma=evaluate_in_past(sigma,1-inter_eqs.surface_tension_theta)
+            self.add_weak(-time_scheme(ns.momentum_scheme,inter_eqs.surface_tension_factor*sigma),dot(n,u_test))
+
+
 class CompositionDiffusionInfinityEquations(InterfaceEquations):
     """
         Represents the condition at infinity for the advection-diffusion equation, using the assumption that in the far field the mass fraction behaves as: 
