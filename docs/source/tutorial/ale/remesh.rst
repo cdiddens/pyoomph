@@ -5,7 +5,7 @@ Mesh reconstruction upon large deformations
 
 It happens frequently that a moving mesh deforms strongly so that the elements are not well suited for solving equations on it. In that case, it might be necessary to regenerate the mesh by fitting the interfaces with splines, recreate a new mesh and interpolate all defined fields, including their history values for time stepping, from the previous mesh to the new mesh. pyoomph invokes this with the :py:class:`~pyoomph.equations.generic.RemeshWhen` class, which must be added to bulk domains.
 
-*How* the new mesh is created is controlled by the property :py:attr:`~pyoomph.meshes.mesh.MeshTemplate.remesher` of the :py:class:`~pyoomph.meshes.mesh.MeshTemplate`. By default, a :py:class:`~pyoomph.meshes.gmsh.GmshTemplate` just calls its own :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.define_geometry` method again, i.e. you describe the new geometry yourself and thereby keep full control over the mesh. This approach is discussed in :numref:`secalegmshfields`.
+*How* the new mesh is created is controlled by the property :py:attr:`~pyoomph.meshes.mesh.MeshTemplate.remesher` of the :py:class:`~pyoomph.meshes.mesh.MeshTemplate`. By default, a :py:class:`~pyoomph.meshes.gmsh.GmshTemplate` just calls its own :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.define_geometry` method again, i.e. you describe the new geometry yourself and thereby keep full control over the mesh. This approach, which allows full control over the local mesh size, is discussed in :numref:`secalegmshfields`.
 
 Alternatively, the geometry of the new mesh can be reconstructed automatically from the deformed one by a :py:class:`~pyoomph.meshes.remesher.Remesher2d` instance from the module :py:mod:`pyoomph.meshes.remesher`, which is what we do here. It fits the current boundaries by splines and estimates suitable mesh sizes from the current element sizes, but it only works for two-dimensional meshes. To use it, we have to import the module and set the :py:attr:`~pyoomph.meshes.mesh.MeshTemplate.remesher` attribute to a :py:class:`~pyoomph.meshes.remesher.Remesher2d`, which requires the mesh template as first argument for the constructor:
 
@@ -50,6 +50,9 @@ As usual, the :py:class:`~pyoomph.equations.generic.RemeshingOptions` can be mod
 
 One additional option is to add an instance of the class :py:class:`~pyoomph.equations.ALE.SetLagrangianToEulerianAfterSolve` to the equations of the moving mesh domain. This will set the Lagrangian coordinates to the Eulerian coordinates after each successful time step. Thereby, the mesh displacement in :math:numref:`eqalelaplsmooth` will be zero at the beginning of the next time step.
 
+.. note::
+
+    We really recommend to use the advanced remeshing methods described in :numref:`secalegmshfields` for real cases. 
 
 .. only:: html
 
