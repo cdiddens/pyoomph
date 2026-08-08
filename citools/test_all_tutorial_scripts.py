@@ -8,6 +8,8 @@ parser.add_argument("--tcc", help="Used TCC", action="store_true")
 parser.add_argument("--no-petsc", help="Ignore PETSc check", action="store_true")
 parser.add_argument("--keep-logs", help="Keep log files also of successful tests", action="store_true")
 parser.add_argument("--keep-outdirs", help="Do not delete each script's output directory after it runs. Useful for comparing generated code across repeated runs (e.g. for determinism testing)", action="store_true")
+parser.add_argument("--mpirun", type=int, default=0, metavar="N", help="Run each script under 'mpirun -n N' instead of directly. Default 0, i.e. no mpirun")
+parser.add_argument("--distribute", help="Pass --distribute to each script, i.e. distribute the mesh over the ranks. Only meaningful together with --mpirun", action="store_true")
 # Folders to skip used to be read from sys.argv directly, which stopped working when argparse was
 # added - argparse rejects any positional argument it does not know about.
 parser.add_argument("skips", nargs="*", help="Bundle folders to skip, e.g. Temporal_ODEs")
@@ -113,13 +115,22 @@ for d in glob.glob("./*/"):
   print("TESTING FOLDER",d )
   for f in glob.glob("*.py"):
     if f=="bifurcation_fold_param_change.py":
+      # This is meant to crash when the parameter is changed, so it is not a regression test.
       continue
-    print("   Testing",f)  
+    if args.mpirun>0 and f=="parallel_running.py":
+      # This one spawns its own mpirun, so launching it under one already gives nested MPI.
+      print("   SKIPPING",f,"-- it invokes mpirun by itself")
+      continue
+    print("   Testing",f)
     cmd=[sys.executable, '-u', f]
+    if args.mpirun>0:
+      cmd=["mpirun","-n",str(args.mpirun)]+cmd
     if args.quick_test:
       cmd.append("--quick-test")
     if args.tcc:
       cmd.append("--tcc")
+    if args.distribute:
+      cmd.append("--distribute")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (stdout,_) = proc.communicate()
