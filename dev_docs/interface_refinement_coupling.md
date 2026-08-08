@@ -1,11 +1,8 @@
 # Conforming refinement across coupled domain interfaces
 
-Written 2026-07-28 on branch `interface_refine_coupling`, after the mixed-adaptive-mesh validation
-campaign (`mixed_adapt_validation.md`) closed.
-
-Status: **implemented.** All six stages, serially and under MPI. §14 records what building it turned up
-that this plan did not predict — including two defects the plan's own reasoning would not have caught,
-and one place (§2) where the plan is simply wrong about distribution.
+Status: **implemented**, serially and under MPI. §1–§11 are the design; **§13 records what building it
+turned up that the design did not predict** — including two defects the design's own reasoning would
+have produced, and one place (§2) where it is simply wrong about distribution.
 
 ---
 
@@ -237,7 +234,7 @@ override away, on every rank, silently.
 
 Change it to a **max-reduce over all copies**: halo → haloed, max at the owner, haloed → halo. This is
 semantically exact (the field is called `..._max_override`; the operation is a max), it is a strict
-superset of the current behaviour for the §9.8 defect it was written for (the rank with the larger
+superset of the current behaviour for the the rank-local error-override defect it was written for (adaptive_refinement.md §8.2) (the rank with the larger
 override still wins), and it is idempotent.
 
 ---
@@ -367,7 +364,7 @@ there, where the message can be useful, rather than in the KD-tree matcher.
 
 ## 10. Diagnostics
 
-Extend the pattern that caught §9.8. `InterfaceRefinementCoupler::check()` compares the two facet
+Extend the pattern that caught the rank-local error-override defect (adaptive_refinement.md §8.2). `InterfaceRefinementCoupler::check()` compares the two facet
 tables and reports non-matching facets by position, count, and level, on both sides.
 
 - `Problem.check_interface_conformity(throw_on_mismatch=False)` — collective, callable from Python.
@@ -394,66 +391,38 @@ tables and reports non-matching facets by position, count, and level, on both si
 
 ---
 
-## 12. Test plan
+## 12. Tests
 
-New helper `tests/two_domain_cases.py`, alongside `box_cases.py` / `box_cases_3d.py` and shared with
-the MPI harness exactly as those are — that sharing is what kept the serial and distributed campaigns
-from drifting apart, and the same applies here.
+`tests/two_domain_cases.py` is the single definition, shared with the MPI harness exactly as
+`box_cases.py` / `box_cases_3d.py` are — that sharing is what kept the serial and distributed
+campaigns from drifting apart. Two boxes sharing a face, every element family, 2D and 3D, serial and
+`mpirun --distribute`, covering: the error estimator active in one domain only; `RefineToLevel` and
+`RefineMaxElementSize` on one side only; a criterion stated **on the interface** rather than on the
+bulk (the case where a halo-holding rank has no interface element to read); refine-then-smooth so one
+side wants to unrefine and the other does not; `ConnectMeshAtInterface` + moving mesh with a hanging
+node on the interface; a chain A–B–C, to prove the fixed point closes; and differing
+`max_refinement_level` and `_initial_uniform_refinement_level` per domain.
 
-Two boxes sharing a face, every element family, 2D and 3D, serial and `mpirun --distribute`:
+Assertions run after **every** adapt, not only at the end: facet sets equal per pair, the KD-tree
+matcher does not throw, and under MPI the gathered residual, global `ndof` and MPI-reduced observables
+match the serial reference.
 
-a. error estimator active in one domain only
-b. `RefineToLevel` on one side only
-c. `RefineMaxElementSize` on one side only
-d. criterion stated **on the interface** rather than on the bulk — the case that broke §9.8, and the
-   one where a halo-holding rank has no interface element to read
-e. refine, then let the solution smooth so one side wants to unrefine and the other does not
-   (the §6 counterexample, built deliberately)
-f. `ConnectMeshAtInterface` + moving mesh, with a hanging node on the interface
-g. a chain A–B–C, to prove the fixed point closes
-h. differing `max_refinement_level` per domain (§9)
-i. differing `_initial_uniform_refinement_level` per domain
-
-Assertions after **every** adapt, not only at the end: facet sets equal per pair; the KD-tree matcher
-does not throw; under MPI the gathered residual, global `ndof` and MPI-reduced observables match the
-serial reference.
-
-**Negative-test every fix**: disable the coupler by env var, rebuild, confirm each test actually
-fails. A test that passes with the fix disabled is measuring nothing — §9.8's first `callback` test
+**Every fix was negative-tested**: disable the coupler by env var, rebuild, confirm each test actually
+fails. A test that passes with the fix disabled is measuring nothing — §13.9's first `callback` test
 was exactly that.
 
-Regression: [simple_fsi.py](docs/source/tutorial/multidom/simple_fsi.py) with the
-`RefineToLevel()@"liquid_solid"` workaround **removed** must run and agree with the reference.
-
-Mark the new modules `campaign` so the wheel builds skip them (`tests/README.md`).
-
----
-
-## 13. Staging
-
-Each stage is independently mergeable and leaves the tree working.
-
-| | | |
-|---|---|---|
-| **S0** | Diagnostics + failing tests. `check_interface_conformity`, env var, the §12 matrix as `xfail(strict=True)`. | Makes the bug visible and reproducible before anything moves. |
-| **S1** | Coupler registry, facet collection, MPI exchange primitive. No behaviour change — only the checker consumes it. | Lands the primitive under test. |
-| **S2** | Post-adapt repair loop (§8), merged with `enforce_refinement_balance` into one fixed point. | **The guarantee.** After this the xfails flip to passing; churn and data loss remain. |
-| **S3** | Error overrides to C++ (§5), including the max-reduce synchronisation change. | Pure refactor: the existing 581-test suite must be bit-identical. |
-| **S4** | Two-phase adapt (§7): patch oomph, split selection from execution, harmonise flags. | Removes the churn and the unrefine/re-refine data loss. |
-| **S5** | MPI hardening; fold conformity into the halo consistency check. | |
-| **S6** | Delete the Python heuristic ([problem.py:1753-1783](pyoomph/generic/problem.py#L1753-L1783)) and the tutorial workarounds; docs, CHANGELOG. | The feature is only done when the workarounds are gone. |
-
-S2 alone already fixes the user-visible crash. S3/S4 are quality: without them the interface coarsens
-by round trip rather than by decision.
+Regression: `docs/source/tutorial/multidom/simple_fsi.py` with its `RefineToLevel()@"liquid_solid"`
+workaround **removed** must run and agree with the reference. The feature is only done when the
+workarounds are gone.
 
 ---
 
-## 14. What building S0–S2 and S5 actually turned up
+## 13. What building it actually turned up
 
-Four things the plan above did not anticipate. Two are ordering constraints; two are defects that the
-plan's own reasoning would have produced.
+Ten things the design above did not anticipate. Two are ordering constraints; the rest are defects the
+design's own reasoning would have produced.
 
-### 14.1 `distribute()` refuses a non-uniformly refined mesh (ordering)
+### 13.1 `distribute()` refuses a non-uniformly refined mesh (ordering)
 
 oomph's `Problem::distribute()` throws *"at least one of your meshes is no longer uniformly refined"* —
 it has to preserve the tree forest. The repair refines part of a domain, which is by definition
@@ -468,7 +437,7 @@ remainder — where partial refinement is allowed and the repair can do its job.
 `Problem._defer_uneven_initial_refinement` / `_apply_deferred_initial_refinement`, held in place by
 `test_uneven_initial_levels_survive_distribution`.
 
-### 14.2 Side A and side B are not the same two domains on every rank (defect)
+### 13.2 Side A and side B are not the same two domains on every rank (defect)
 
 The one that cost the most to find, and the most general lesson here.
 
@@ -490,7 +459,7 @@ Fixed by orienting each pair canonically by `(domain name, boundary name)` and s
 list the same way. The general rule, which applies to anything else added here: **a collective decision
 may not depend on discovery order.** Not on pointer order, not on hash order, not on partition order.
 
-### 14.3 Conformity is necessary but not sufficient under MPI (design gap)
+### 13.3 Conformity is necessary but not sufficient under MPI (design gap)
 
 §2 claims facet conformity is exactly the matcher's precondition. That is true serially and false under
 distribution: `connect_interface_elements_by_kdtree` is **rank-local**, and the two domains share no
@@ -501,18 +470,18 @@ That is a halo-coverage property, supplied by the `set_must_be_kept_as_halo` mar
 `actions_before_distribute` — a different mechanism with a different failure mode, and the matcher's
 error message cannot tell the two apart. `check_interface_conformity` therefore counts and reports them
 **separately**: "no counterpart on the opposite side" vs "a counterpart, but not on the process that
-holds them". Without that split, §14.2 would have been diagnosed as a refinement bug and fixed in the
+holds them". Without that split, §13.2 would have been diagnosed as a refinement bug and fixed in the
 wrong place; with it, the first diagnostic run said "the halo layer does not cover the opposite domain"
 and pointed straight at the orientation.
 
-### 14.4 The geometry-free coarse-side test held up
+### 13.4 The geometry-free coarse-side test held up
 
 §8's test — a facet absent from the other side's facet set but with all its corners in the other side's
 vertex set was subdivided there — needed no adjustment for any of the four families, for quads meeting
 triangles across the interface, or for moving meshes. Nesting does all the work: a facet's corners
 survive as corners of its children. No point-in-facet predicate was ever needed.
 
-### 14.5 What S3 turned into
+### 13.5 Moving the error overrides into C++ (§5): two parts of three
 
 Two of the three parts of §5 landed; the third did not, and the reason is worth recording.
 
@@ -537,7 +506,7 @@ the interface element but written to a bulk element owned elsewhere — is alrea
 max-reduce above, so the port is now a refactor rather than a fix, and was not worth the regression risk
 in the same change.
 
-### 14.6 S4 landed, and it was worth it
+### 13.6 The two-phase adapt (§7) was worth it
 
 The split of oomph's `adapt()` went in as §7 described: a `select_elements_for_refinement_and_unrefinement`
 / `execute_selected_adaptation` pair in the vendored `refineable_mesh.{h,cc}`, with `adapt()` reduced to
@@ -567,7 +536,7 @@ The old Python heuristic (`# Ensure same refinement at connected interfaces`) is
 the `# TODO: Ensure same refinement at connected interfaces` thirty lines below it that had been the
 honest summary of the situation since the branch began.
 
-### 14.7 Differing `max_refinement_level` (§9), as actually resolved
+### 13.7 Differing `max_refinement_level` (§9), as actually resolved
 
 §9 offered two options and recommended clamping both sides to the minimum. That is the wrong one: it
 takes refinement away from a domain in its *interior*, where nothing requires it. What is implemented
@@ -598,7 +567,7 @@ offending facets and the two plausible causes. Pinned by
 `test_unsatisfiable_cap_is_diagnosed_not_left_to_the_matcher` and
 `test_lower_max_refinement_level_governs_the_interface`.
 
-### 14.8 Four domains at a cross point, and why the junction is well-posed
+### 13.8 Four domains at a cross point, and why the junction is well-posed
 
 `RectangularQuadMesh` split four ways (A|B over C|D) is a topology the two-domain matrix cannot reach,
 and it exercises two things:
@@ -641,7 +610,7 @@ For the record: `pin_redundant_lagrange_multipliers` is NOT what makes the junct
 multiplier only when every variable it constrains is already pinned, and at an interior cross point none
 of them is.
 
-### 14.9 Conformity is stated on facets, and some elements have none
+### 13.9 Conformity is stated on facets, and some elements have none
 
 Found on a real case rather than in the matrix: an evaporating droplet coupled to a gas domain
 (`DropletOnSubstrate`, pure triangles), with a Z2 estimator on the velocity in the **droplet only**, so
@@ -698,19 +667,19 @@ missing test was not a missing case. `two_domain_cases.max_vertex_level_jump` is
 `test_vertex_connected_elements_follow_the_forced_interface` asserts it, and its negative twin
 (`PYOOMPH_DISABLE_INTERFACE_VERTEX_BALANCE=1`) measures 3 where the fix measures 1.
 
-The general lesson, and it is the same shape as §14.3: **an invariant stated on one kind of mesh entity
+The general lesson, and it is the same shape as §13.3: **an invariant stated on one kind of mesh entity
 says nothing about the others.** Facet conformity was necessary, and it was never sufficient — not
-under MPI (§14.3, a halo property) and not at a vertex (here, a grading property). Both times the
+under MPI (§13.3, a halo property) and not at a vertex (here, a grading property). Both times the
 symptom was a check that reported success.
 
-### 14.10 Still open
+### 13.10 Still open
 
-* **`_override_bulk_errors_where_necessary` is still Python**, per §14.5. It is the propagation rather
+* **`_override_bulk_errors_where_necessary` is still Python**, per §13.5. It is the propagation rather
   than a criterion, its rank-locality problem is already covered by the max-reduce, and moving it needs
   `_opposite_interface_mesh` / `_parent` / `_interface_name` mirrored in C++ first. A refactor now, not a
   fix.
 * **`_internal_facets_` (DG) adaptivity** remains rejected outright, as it was before this work.
-* **A failing case poisons later cases in the same worker process.** Seen while bisecting §14.2: after a
+* **A failing case poisons later cases in the same worker process.** Seen while bisecting §13.2: after a
   case raised, the next one in the same `mpi_worker.py` process failed too. Pre-existing (the worker has
   always looped over cases in one process) and not investigated. It matters for reading MPI test output:
   the *first* failing case is the real one.

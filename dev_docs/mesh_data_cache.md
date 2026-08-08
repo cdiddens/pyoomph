@@ -98,55 +98,10 @@ if k[2] is not None or (k[6] is not None and k[6].depends_on_eigen()):     # mes
 changes what `clear(only_eigens=True)` flushes — and "silently" here means eigen output keeps stale
 data instead of raising.
 
-### 2.2 Proposal
+### 2.2 The typed key, as built
 
-A frozen dataclass in `meshdatacache.py`:
-
-```python
-@dataclass(frozen=True)
-class MeshDataCacheKey:
-    """Identifies one option set of extracted mesh data. Everything that changes the *content* of a
-    MeshDataCacheEntry must be a field here, otherwise two different requests share a cache slot."""
-    nondimensional: bool = False
-    tesselate_tri: bool = True
-    eigenvector: int | tuple[int, ...] | None = None
-    eigenmode: MeshDataEigenModes = "abs"
-    history_index: int = 0
-    with_halos: bool = False
-    operator: MeshDataCacheOperatorBase | None = None
-    discontinuous: bool = False
-    add_eigen_to_mesh_positions: bool = True
-    global_mesh: bool = False            # new, see part 2
-
-    @classmethod
-    def create(cls, *, eigenvector=None, **kwargs) -> "MeshDataCacheKey":
-        # lists/sets are unhashable and order-irrelevant; sorted tuple so that [1,0] and [0,1] hit
-        # the same slot (the current code uses tuple(set(...)), whose order is not guaranteed)
-        if isinstance(eigenvector, (list, set, tuple)):
-            eigenvector = tuple(sorted(set(eigenvector)))
-        return cls(eigenvector=eigenvector, **kwargs)
-
-    @property
-    def depends_on_eigen(self) -> bool:
-        return self.eigenvector is not None or (self.operator is not None
-                                                and self.operator.depends_on_eigen())
-```
-
-`clear` then reads
-
-```python
-for k, v in self._storage.items():
-    if only_eigens and not k.depends_on_eigen:
-        continue
-    v.clear()
-    remkeys.append(k)
-```
-
-Notes:
-
-### 2.3 What was actually done
-
-As above, with these details settled during implementation:
+A frozen dataclass, `MeshDataCacheKey`, with one field per option that changes the *content* of an
+entry. Details settled during implementation:
 
 * `MeshDataCacheKey.create()` normalizes any sequence of eigenvector indices to a **sorted** tuple, so
   `[1,0]` and `[0,1]` now hit the same slot (the old `tuple(set(...))` did not guarantee that).
@@ -525,31 +480,6 @@ The distributed plotting path was verified by hand (`mpirun -np 3 ... --distribu
 file, drawn from the full 289-node/512-element mesh, all ranks returning); it has no automated test
 yet because it needs a matplotlib rendering comparison.
 
-## 8b. Original test plan
-
-New `tests/test_mpi_global_meshdata.py`, marked `slow` (runs under `--full`), following the pattern of
-`tests/test_mpi_eigenvalues.py`. Meshes small enough for 2–4 ranks (the ≤40000-dof MPI rule in
-`CLAUDE.md`).
-
-The reference is always the **serial** run of the same problem: dump `nodal_values`, `elem_indices`,
-`elem_types`, `D0`/`DL` to an `.npz`, then compare against the merged arrays from
-`mpirun -np {2,3,4} ... --distribute`.
-
-1. Node and element counts equal the serial ones (this alone catches both under- and over-merging).
-2. Coordinates equal as a sorted set; field values equal after matching nodes by coordinate.
-3. Element connectivity equal as a set of frozensets of coordinates (index order is not comparable).
-4. `get_interface_line_segments()` on a merged interface mesh gives the same segment lengths as
-   serial — the topology test that per-rank data cannot pass.
-5. `global_mesh=True` under `mpirun` **without** `--distribute` returns data identical to serial on
-   every rank, with no MPI traffic.
-6. Coverage: 2D quads (`tesselate_tri` both ways), 2D triangles, 3D tets, an interface mesh, an
-   adaptively refined mesh (hanging nodes, so the tesselation adds sub-triangles), `discontinuous=True`,
-   and one eigenvector request.
-7. Deadlock guard: a test that calls `global_mesh=True` on all ranks twice in a row, to check that the
-   second (cached) call is symmetric.
-
-Per `CLAUDE.md`, the full suites are only run when asked.
-
 ---
 
 ## 9. Bugs found while reading this code
@@ -615,23 +545,7 @@ length longer than `nodal_values` and thus attached to the wrong nodes. They now
 
 ---
 
-## 10. Work plan
-
-| # | step | rebuild? | status |
-| --- | --- | --- | --- |
-| 1 | `MeshDataCacheKey` + thread it through storage/cache/entry; fixed 9.3, 9.4, 9.5 | no | **done** |
-| 2 | C++: `get_numpy_element_source_indices` + shared counting helper; halo filter; 9.1/9.2/9.6/9.7/9.8 | yes | **done** |
-| 3 | C++: `get_shared_node_numpy_indices` (+ `InterfaceMesh` override) | yes | **done** |
-| 4 | `meshdatamerge.py`: gather + union–find + remap, `MeshDataCacheEntry.from_arrays` | no | **done** |
-| 5 | Wire up `global_mesh` in storage/`Problem.get_cached_mesh_data`, plus the request scope (§3.4b) | no | **done** |
-| 6 | Tests (§8) | no | **done** |
-| 7 | Consumers: plotters use `global_mesh=True` and draw on rank 0 only | no | **done** |
-| 8 | Operator support via `required_cache_keys` (§3.5 phase 2) | no | open |
-| 9 | Remeshing boundary identification on the merged data | no | open |
-
----
-
-## 11. Decisions and what is left
+## 10. Decisions and what is left
 
 Settled: the parameter is `global_mesh`; the non-root ranks get `None`; all local expressions are
 evaluated eagerly at merge time; both plotters (`MatplotlibPlotter`, `PyVistaPlotter`) use

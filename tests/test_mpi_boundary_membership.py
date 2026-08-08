@@ -23,7 +23,7 @@
 #
 # ========================================================================
 
-# Nodal boundary membership under --distribute. See dev_docs/boundary_node_membership_repair.md.
+# Nodal boundary membership under --distribute. See dev_docs/boundary_node_membership.md.
 #
 # The post-adapt repair removes memberships that no tagged face backs. Under MPI a rank can hold a
 # node without holding the element whose tagged face carries it, so it deliberately decides only for

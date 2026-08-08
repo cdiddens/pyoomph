@@ -65,7 +65,7 @@ namespace pyoomph
     // flattened into real free dofs even when the node is reached as a master from a *neighbouring*
     // element (where it may be a C1 vertex and its own corners are not locally known). This is what
     // makes ConstrainFieldsToC1Space / ConstrainPositionsToC1Space compose with genuine adaptive
-    // hanging nodes. See dev_docs/hanging_nodes_redesign.md section 5.5.
+    // hanging nodes. See dev_docs/adaptive_refinement.md section 3.
     std::vector<std::pair<oomph::Node*, double>> c1_constraint_corners;
     // Where this node came from, as TOPOLOGY: the (father node, rounded father-shape weight) pairs of the
     // point at which a refinement created it -- exactly the key the per-round shared-node registries use

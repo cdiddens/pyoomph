@@ -66,7 +66,7 @@ The main author may be contacted at c.diddens@utwente.nl
 //
 // which is QMacroElement<2>::macro_map line for line; in 3d the same telescoping gives Gordon-Hall.
 // Verified numerically against oomph's own implementation over the whole reference domain, interior
-// included -- see tests/test_curved_boundaries.py and dev_docs/macro_elements_generalisation.md 10.1.
+// included -- see tests/test_curved_boundaries.py and dev_docs/macro_elements.md 2.1.
 //
 // Two things fall out for free. Facet node ordering stops mattering, because each weight is carried
 // together with the vertex it belongs to, so the permutation search the previous implementation needed
@@ -145,7 +145,7 @@ namespace pyoomph
     //
     // Copying costs nothing here: the macro element is only ever consulted for a mesh whose geometry is
     // fixed. On a moving mesh the Eulerian position is a dof and the macro element deliberately does not
-    // drive it (see dev_docs/macro_elements_generalisation.md 18.2), so there is no motion to follow.
+    // drive it (see dev_docs/macro_elements.md 7), so there is no motion to follow.
     std::vector<std::vector<double>> vertex_positions;
     std::vector<MacroCurvedFacet> curved_facets;
     // The inclusion-exclusion terms of the blend, one per sub-entity (in practice an edge) shared by

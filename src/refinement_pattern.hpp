@@ -33,7 +33,7 @@ The main author may be contacted at c.diddens@utwente.nl
 //
 // This first landing only introduces the abstraction and reproduces the historical
 // behaviour via IsotropicSameTypeRefinementPattern; it is a no-behaviour-change
-// refactor. See dev_docs/mixed_adaptive_meshes.md for the full plan.
+// refactor. See dev_docs/adaptive_refinement.md for the full plan.
 
 #pragma once
 

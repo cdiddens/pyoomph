@@ -57,7 +57,7 @@ building the 3D domains; these three are helper modules, not test modules. Shari
 harness is what keeps the serial and distributed campaigns from drifting apart.
 
 A number of 3D configurations are marked `xfail(strict=True)` with a reason: they are known defects, not
-gaps in coverage. See `dev_docs/mixed_adapt_validation.md` §9. Being strict, they will fail the suite as
+gaps in coverage. See `dev_docs/adaptive_refinement.md` §9. Being strict, they will fail the suite as
 soon as they start passing, which is the signal to remove the marker.
 
 ## Coupled interfaces between two domains

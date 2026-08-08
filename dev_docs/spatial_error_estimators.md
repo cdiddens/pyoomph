@@ -16,7 +16,7 @@ third fell out of writing up §7 and turned a documented constraint into a knob.
 
 §7.5 covers the user-facing tutorial section the three features are documented in, including two
 framings that were abandoned on evidence. Mesh-construction and plotting findings from building it
-live in [dev_docs/boundary_layer_meshes.md](dev_docs/boundary_layer_meshes.md).
+live in [mesh_construction.md](mesh_construction.md) §1.
 
 ---
 
@@ -643,7 +643,7 @@ filament entering away from the body.
 
 Building those pages turned up a set of mesh-construction and plotting findings that have nothing to
 do with error estimation; they are written up separately in
-[dev_docs/boundary_layer_meshes.md](dev_docs/boundary_layer_meshes.md). The short version: use a
+[mesh_construction.md](mesh_construction.md) §1. The short version: use a
 transfinite O-grid for a wall-bounded problem that will be adapted, because Gmsh's `BoundaryLayer`
 field produces a nicer initial mesh but stops converging after the second refinement; and velocity
 streamlines cannot be drawn over a deeply refined mesh, because matplotlib's `TriFinder` rejects the
@@ -692,14 +692,3 @@ Not covered: **MPI**. The threshold bisection is written to be rank-agnostic and
 place, but neither has been run under `mpirun`.
 
 ---
-
-## 9. Order of work
-
-Feature 1 first: self-contained, in one C++ file, with an unambiguous pass/fail. It is also the
-prerequisite for the interesting combination — driving a dof budget from an interface-resolution
-criterion.
-
-Feature 2 is Python-only and touches one function. §6 (moving the overrides into C++) is a third,
-separate piece of work with its own prerequisites, and should not be folded into either.
-
-Both features change `src/`, so `./build_for_develop.sh`, not `ninja`.

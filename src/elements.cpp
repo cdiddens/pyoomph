@@ -401,7 +401,7 @@ namespace pyoomph
 	// of freedom into shape_info->hanginfo_Pos[l]. This lets the generated ALE/solid-mechanics code
 	// correctly distribute a hanging node's position-Jacobian contributions to its masters. Returns
 	// true if any node in the element is hanging.
-	// See dev_docs/hanging_nodes_redesign.md. Central resolution of "which HangInfo governs
+	// See dev_docs/adaptive_refinement.md. Central resolution of "which HangInfo governs
 	// continuous space `space_info` at element-local node l_elem". Returns NULL if the node does not
 	// hang in that space. This is the single seam that later phases will redirect to pyoomph-owned
 	// named HangInfo pointers; for now it faithfully reproduces the per-space hangindex convention.
@@ -466,7 +466,7 @@ namespace pyoomph
 	// std::map::operator[], which DEFAULT-CONSTRUCTS an empty DenseMatrix<int> when the node is absent.
 	// Indexing that empty matrix is undefined behaviour; in practice it yields a junk equation number, which
 	// surfaces much later and far from the cause as the generated code's "local_eqn < eleminfo->ndof"
-	// assertion (dev_docs/mixed_adaptive_meshes.md §4.14). Registration happens in oomph's
+	// assertion (dev_docs/adaptive_refinement.md §9.4). Registration happens in oomph's
 	// assign_hanging_local_eqn_numbers, which walks only the GEOMETRIC hang of this element's OWN nodes, so
 	// a node reached by any other route -- notably the C1 position-constraint redistribution, whose corners
 	// may resolve onto coarse-side vertices of a 2:1 neighbour -- is legitimately absent, and that absence
@@ -488,7 +488,7 @@ namespace pyoomph
 				   "own nodes, so this node was reached by some other route -- e.g. the C1 position-constraint "
 				   "redistribution resolving onto a coarse-side vertex across a 2:1 interface. Without the "
 				   "registration there is no local equation number for it, so the contribution cannot be "
-				   "assembled. See dev_docs/mixed_adapt_validation.md §11.";
+				   "assembled. See dev_docs/adaptive_refinement.md §9.4.";
 			throw_runtime_error(oss.str());
 		}
 		return pe(0, i);
@@ -2912,7 +2912,7 @@ namespace pyoomph
 		// node so that flatten_hang_for_value() can recursively expand it into real free dofs even when
 		// the node is later encountered as a hang master from a neighbouring element (where it may be a
 		// C1 vertex, so its own corners are not locally derivable). See
-		// NodeWithFieldIndicesBase::c1_constraint_corners and dev_docs/hanging_nodes_redesign.md 5.5.
+		// NodeWithFieldIndicesBase::c1_constraint_corners and dev_docs/adaptive_refinement.md section 3.
 		const std::vector<std::vector<unsigned>> & c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
 		for (const std::vector<unsigned> & entry : c1_dummy_map)
 		{
@@ -6881,7 +6881,7 @@ namespace pyoomph
 		// flatten_hang_for_value / flatten_hang_for_position (using each constrained node's precomputed
 		// c1_constraint_corners). No separate equation numbers are required, because the flattened leaf
 		// dofs are exactly the coarse vertices that oomph-lib already registered as hang masters. See
-		// dev_docs/hanging_nodes_redesign.md section 5.5.
+		// dev_docs/adaptive_refinement.md section 3.
 		// std::cout << "ABOUT TO FILL ELEMINFO" << std::endl;
 		fill_element_info();
 		if (this->nnode())

@@ -1,15 +1,13 @@
 # Coordinate-system tensor operations: what is implemented, what is verified, what is left
 
-Written 2026-08-07 on branch `develop`, after the run of commits that moved `contract` and the
-divergence of a rank-2 tensor onto the standard adjacent-index convention (`8c6fbfb`, `89e6108`,
-`aa8ec89`, `a493590`, `926fe0c`).
+Written after the run of commits that moved `contract` and the divergence of a rank-2 tensor onto the
+standard adjacent-index convention.
 
-**Updated 2026-08-07, later the same day**: §2 and §5 are closed, and §3 is closed by a new kind of
-test (§6.5). The two normal-mode coordinate systems now implement all four operators on a bulk mesh,
-so `NavierStokesEquations(GCL=True)` works with both `azimuthal_stability=True` and
-`additional_cartesian_mode=True`, and so does viscoelastic normal-mode stability analysis. Three more
-wrong entries turned up in `AxisymmetricCoordinateSystem.directional_tensor_derivative` while deriving
-the azimuthal one; they are fixed, and §5 records what they were.
+Both normal-mode coordinate systems implement all four operators on a bulk mesh, so
+`NavierStokesEquations(GCL=True)` works with `azimuthal_stability=True` and with
+`additional_cartesian_mode=True`, and so does viscoelastic normal-mode stability analysis. Three wrong
+entries turned up in `AxisymmetricCoordinateSystem.directional_tensor_derivative` while deriving the
+azimuthal one; they are fixed, and §5 records what they were.
 
 §6 is the part worth reading even if none of the gaps matter to you: it records how these operators
 can be tested at all, which is less obvious than it looks and cost most of the effort.

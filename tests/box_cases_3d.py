@@ -35,7 +35,7 @@
 #     two live in the same discrete space, which is the sharp oracle for the C1 constraint.
 #
 # Refinement envelope: base 2x2x2 cells with uniform level 1 plus a level-2 band on "top". Measured (see
-# dev_docs/mixed_adapt_validation.md) to stay in the low thousands of elements and well under 1 GB, so it is
+# dev_docs/adaptive_refinement.md) to stay in the low thousands of elements and well under 1 GB, so it is
 # safe for a 2-rank MPI run and leaves room for more than one refinement level, as required.
 
 from pyoomph import *

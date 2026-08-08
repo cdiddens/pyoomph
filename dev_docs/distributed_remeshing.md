@@ -1,145 +1,79 @@
 # Remeshing under `--distribute`
 
-Status: **stages 0 to 4 done.** Remeshing a distributed problem works for **both** remeshing paths -
-recreation and `Remesher2d` - including codimension-2 interfaces and zeta parameterised boundaries,
-and needs no opt-in. Stage 5 is open; what is still refused is named in "The refusal, narrowed"
-below. File and line
-references are to the tree state at the time of writing (branch `develop`, after `7b8770a`).
-
-Remeshing a distributed problem did not work at all when this started, and it did not *say* so: at
-two ranks it ran to completion and produced a truncated domain, a replicated mesh and an equation
-count `nproc` times too large, without an error; at three and four ranks it hung. §1 below is that
-starting state, kept because it is what the tests exist to prevent coming back; §3 is what was done
-about it, stage by stage.
+Status: **works, with no opt-in.** `mpirun -n N python3 script.py --distribute` remeshes for both
+remeshing paths — recreation (`RemesherViaRecreation`, the default on any `MeshedMeshTemplate`) and
+the automatic `Remesher2d` — with `InternalInterpolator`, across codimension-2 interfaces (contact
+lines, axis points) and on boundaries parameterised by `zeta` by either assigner. What is still
+refused is named below; lifting it is §3.6.
 
 The two paths differ enough to be treated separately throughout:
 
-* **recreation** - `RemesherViaRecreation`, attached to every `MeshedMeshTemplate` by default. The
-  user's `define_geometry` runs again and rebuilds the geometry, usually from
-  `MeshedMeshTemplate.get_boundary_coordinates` (`pyoomph/meshes/mesh.py:881`).
-* **`Remesher2d`** - the geometry is reconstructed automatically from the deformed mesh's boundary
-  nodes (`pyoomph/meshes/remesher.py:328`).
-
-## 0. Where this stands
-
-Remeshing a distributed problem works. `mpirun -n N python3 script.py --distribute` remeshes, with no
-opt-in and nothing to configure, for:
-
-* both remeshing paths - recreation (`RemesherViaRecreation`, the default on any `MeshedMeshTemplate`)
-  and the automatic `Remesher2d`;
-* `InternalInterpolator`, the default transfer;
-* codimension-2 interfaces, i.e. contact lines and axis points;
-* boundaries parameterised by `zeta`, by either assigner.
-
-What is still refused, each by name and with what to do instead:
+* **recreation** — the user's `define_geometry` runs again and rebuilds the geometry, usually from
+  `MeshedMeshTemplate.get_boundary_coordinates`;
+* **`Remesher2d`** — the geometry is reconstructed automatically from the deformed mesh's boundary
+  nodes.
 
 | refused | why | see |
 | --- | --- | --- |
-| `ProjectionInternalInterpolator` | its projection integrates the old field at partition-local locations | stage 5 |
-| remeshing only *some* domains | the untouched ones stay partitioned, and oomph cannot distribute a mesh twice | stage 2 |
-| explicit `num_adapt > 0` | adapting leaves the new mesh non-uniformly refined, which `distribute()` rejects | stage 5 |
+| `ProjectionInternalInterpolator` | its projection integrates the old field at partition-local locations | §3.6 |
+| remeshing only *some* domains | the untouched ones stay partitioned, and oomph cannot distribute a mesh twice | §3.2 |
+| explicit `num_adapt > 0` | adapting leaves the new mesh non-uniformly refined, which `distribute()` rejects | §3.6 |
 
 The default `num_adapt` (from `max_refinement_level`) is dropped to 0 with a printed note rather than
 refused, since the caller did not ask for it by name. `Problem.experimental_distributed_remeshing`
-bypasses every refusal above, for developing what is left.
+bypasses every refusal, for developing what is left.
 
-Two behaviour changes to know about, both explained where they arose:
+**Two behaviour changes to know about**, both explained where they arose:
 
 * `Remesher2d` reconstructs its geometry in a canonical order now, so a **serial** script will not
-  reproduce its old node numbering (stage 4). The domain, its named boundaries and the mesh quality
-  are unchanged.
-* `define_geometry` is a **collective region** on a distributed mesh - do not branch on the rank
-  inside it (stage 1).
+  reproduce its old node numbering (§3.5). The domain, its named boundaries and the mesh quality are
+  unchanged.
+* `define_geometry` is a **collective region** on a distributed mesh — do not branch on the rank
+  inside it (§3.1).
 
 ---
 
-## 1. What actually happens
+## 1. What used to happen
 
-Measured with the reproducer in `pyoomph_runs/Bugs/MPIRemeshing/remesh.py`: a quarter disc meshed by
-Gmsh, `p.initialise()` then `p.force_remesh()`, under `mpirun -n {2,3,4} ... --distribute`.
+Kept because it is what the tests exist to prevent coming back. Measured on a quarter disc meshed by
+Gmsh, `initialise()` then `force_remesh()`, at 2, 3 and 4 ranks.
 
-### 1.1 Recreation, 2 ranks: silently wrong geometry
-
-`get_boundary_coordinates` asks `get_cached_mesh_data(name)` **without** `global_mesh`, so each rank
-gets only its own partition of `domain/interface`:
-
-```
-rank 0   19 points   (0, 1)             ... (0.92388, 0.38268)
-rank 1    7 points   (0.92388, 0.38268) ... (1, 0)
-```
-
-Each rank then describes a different geometry and runs Gmsh on it. `generate_mesh_to_file`
-(`pyoomph/meshes/gmsh.py:303`) writes the `.msh` through `run_on_rank_zero` and every rank afterwards
-loads *that one file*, so **rank 0's truncated wedge becomes the mesh on all ranks**. The
-reconstructed `.geo_unrolled` stops at 67.5 degrees and `create_lines` closes the domain with a chord
-from (0.924, 0.383) to the origin instead of along the substrate. Nothing raises.
-
-### 1.2 Recreation, 3 and 4 ranks: deadlock
-
-A rank whose partition holds no element of the requested boundary reaches `Mesh::to_numpy` with an
-empty mesh and gets `RuntimeError: No elements in mesh. Cannot convert to numpy.`
-(`src/nanobind/mesh.cpp:1449`). It unwinds out of `define_geometry` while the other ranks walk into
-the `mpi_barrier()` / `run_on_rank_zero` pair inside `generate_mesh_to_file`, and the job hangs.
-
-At three ranks it is **rank 0** that owns no interface elements, i.e. the merge root and the rank that
-writes the `.msh` is exactly the one that cannot see the boundary. At four ranks it is rank 3. This is
-not a corner case; it is what partitioning a domain by element count normally does.
-
-### 1.3 Both: the distribution is lost and `ndof` is multiplied by `nproc`
-
-```
-before   rank=0 nelem=39 nhalo=9 mesh_distributed=True  problem_distributed=True  ndof=269
-after    rank=0 nelem=47 nhalo=0 mesh_distributed=False problem_distributed=True  ndof=422
-after    rank=1 nelem=47 nhalo=0 mesh_distributed=False problem_distributed=True  ndof=422
-```
-
-The new mesh is built in full on every rank and never distributed, while oomph-lib's
-`Problem_has_been_distributed` stays `true`. `assign_eqn_numbers` therefore counts every locally-owned
-node once per rank: 422 = 2 x 211 nodes for a mesh whose true global count is 211. The `nproc`
-multiplier is the sharpest single symptom and makes a good assertion for the tests of §4.
-
-### 1.4 Both: the value transfer never crosses a rank boundary
-
-`MeshPointLocator` (`src/pointlocator.cpp`) contains no MPI code - `locate_batch` searches the local
-mesh only. Transferring from the old (distributed) mesh to the new (replicated) mesh therefore gives
-
-```
-WARNING: interpolating domain: 77 of 236 node(s) could not be located in the old mesh
-         and fell back to nearest-node blending instead of proper interpolation
-```
-
-and that blend (`Mesh::nodal_interpolate_from`, `src/mesh.cpp:3838`) runs over *local* nodes only. So
-those 77 nodes do not keep their value and do not fail either; they get a plausible wrong one. This is
-phase 5 of `dev_docs/mesh_point_locator.md`, which that document already gates on "`--distribute`
-remeshing existing at all".
-
-### 1.5 `Remesher2d`: fails before any of the above
-
-```
-RuntimeError: Cannot close line loop for surface domain.
-Loop so far: substrate  -interface
-Line list:   substrate  axis  interface
-```
-
-`Remesher2d._define_boundaries_for_domain` (`pyoomph/meshes/remesher.py:386`) walks
-`mesh.boundary_elements(bn)` on the local mesh. A partition is bounded partly by named boundaries and
-partly by the partition cut, and the cut carries no boundary name at all, so the collected curves can
-never close. The same method also skips boundaries with `nboundary_element(ind)==0`, which makes
-`_meshbounds` differ from rank to rank.
+* **Recreation at 2 ranks: silently wrong geometry.** `get_boundary_coordinates` asked for the mesh
+  data *without* `global_mesh`, so each rank got only its own partition of the interface (rank 0: 19
+  points from (0,1) to (0.92,0.38); rank 1: 7 points from there to (1,0)) and described a different
+  geometry to Gmsh. `generate_mesh_to_file` writes the `.msh` through `run_on_rank_zero` and every
+  rank then loads *that one file*, so **rank 0's truncated wedge became the mesh on all ranks** — the
+  reconstructed geometry stopped at 67.5° and closed the domain with a chord. Nothing raised.
+* **Recreation at 3 and 4 ranks: deadlock.** A rank whose partition holds no element of the requested
+  boundary got `RuntimeError: No elements in mesh. Cannot convert to numpy.` and unwound out of
+  `define_geometry` while the others walked into the `mpi_barrier()`/`run_on_rank_zero` pair inside
+  `generate_mesh_to_file`. At three ranks it is **rank 0** that owns no interface elements, i.e. the
+  merge root and the rank that writes the `.msh` is exactly the one that cannot see the boundary.
+  Not a corner case; it is what partitioning a domain by element count normally does.
+* **Both: the distribution lost, `ndof` multiplied by `nproc`.** The new mesh was built in full on
+  every rank and never distributed, while oomph's `Problem_has_been_distributed` stayed true, so
+  `assign_eqn_numbers` counted every locally-owned node once per rank. The sharpest single symptom,
+  and it makes a good assertion.
+* **Both: the value transfer never crossed a rank boundary.** `MeshPointLocator` contains no MPI code,
+  so a quarter of the nodes fell back to nearest-node blending *over local nodes only* — a plausible
+  wrong value rather than a failure.
+* **`Remesher2d` failed before any of the above**, with `Cannot close line loop for surface domain`:
+  its walk over `mesh.boundary_elements(bn)` sees a partition bounded partly by named boundaries and
+  partly by the partition cut, and the cut carries no boundary name, so the curves can never close.
 
 ---
 
-## 2. What already exists, and what has to be built
+## 2. What already existed
 
 Most of the reading half is done. `pyoomph/meshes/meshdatamerge.py` merges the per-rank mesh data of a
 distributed mesh into one entry on rank 0, **including interface meshes** (through the `-1`-padded
 shared-node scheme of `Mesh::get_shared_node_numpy_indices`), and `tests/test_mpi_global_meshdata.py`
 already asserts that the merged `get_interface_line_segments()` reproduces the single segment a serial
-run sees. `dev_docs/mesh_data_cache_global.md` §10 lists "remeshing boundary identification on the
+run sees. `dev_docs/mesh_data_cache.md` §10 lists "remeshing boundary identification on the
 merged data" as the one remaining consumer of that machinery; this campaign is that item.
 
 Ranks holding no element of a mesh are handled there too: `_local_payload` returns `None` for them
-instead of calling `to_numpy`, so routing §1.2 through the merge removes that crash at the source.
+instead of calling `to_numpy`, so routing the deadlock of §1 through the merge removes that crash at the source.
 
 One structural unknown was worth settling before planning anything: **`Problem::distribute()` can be
 called a second time, after a remesh.** Spike, two ranks, `distribute()` invoked by hand on the
@@ -158,9 +92,9 @@ refined, which is what `Problem::distribute` insists on (`problem.cc:650`).
 
 ---
 
-## 3. Stages
+## 3. How it works now
 
-### Stage 0 - stop the silent corruption. DONE.
+### 3.0 Making the failure visible and local
 
 Nothing here makes remeshing work; it makes the failure visible and local.
 
@@ -171,15 +105,15 @@ Nothing here makes remeshing work; it makes the failure visible and local.
   that finds nothing to do still returns quietly on a distributed problem.
 * `MeshedMeshTemplate._do_define_geometry` agrees across ranks on whether `define_geometry` succeeded
   (`get_mpi_any`, symmetric rather than rooted at 0 - the rank that fails is usually *not* rank 0, see
-  §1.2). A raise on one rank now ends the job with an error on every rank instead of hanging in the
+  §1). A raise on one rank now ends the job with an error on every rank instead of hanging in the
   next collective. This covers the initial mesh generation as well, where the same hang was possible.
 
   It can only catch exceptions, not hangs: a `define_geometry` whose ranks disagree on how many
-  collectives to enter still deadlocks inside them. Stage 1 makes `define_geometry` collective, so
+  collectives to enter still deadlocks inside them. §3.1 makes `define_geometry` collective, so
   that contract has to be documented there.
 * Tests: `tests/test_mpi_remeshing.py` (§4).
 
-### Stage 1 - global boundary coordinates (recreation geometry). DONE.
+### 3.1 Global boundary coordinates (the recreation geometry)
 
 `get_boundary_coordinates` asks for `global_mesh=True`, sorts the segments on rank 0 and
 **broadcasts the resulting polylines**. Broadcasting the sorted result rather than the merged entry
@@ -206,8 +140,8 @@ one** at 2, 3 and 4 ranks, and no rank rebuilds a truncated arc any more.
 `get_boundary_coordinates` calls, with the same arguments, in the same order; user code that branches
 on the rank inside `define_geometry` deadlocks. This is documented on `MeshedMeshTemplate`.
 
-It also *narrows* what stage 0's guard can catch, which is worth stating plainly because it is a
-genuine regression in robustness: before stage 1 the first collective came after `define_geometry`, so
+It also *narrows* what §3.0's guard can catch, which is worth stating plainly because it is a
+genuine regression in robustness: before §3.1 the first collective came after `define_geometry`, so
 any raise inside it was catchable. Now a rank that raises *before* reaching
 `get_boundary_coordinates` never joins its merge, and the others hang inside it - the guard is never
 reached. Nothing short of timeouts can catch that, which is exactly why the "do not branch on rank"
@@ -215,7 +149,7 @@ contract has to be a contract. The test for the guard therefore injects its fail
 collective (`mpi_remeshing_worker.Disc.fail_on_rank`), which is the case that can be caught: user code
 that gets through the collectives and then produces something invalid on one rank.
 
-**What is left over for stage 2.** With the geometry correct, the remaining damage is cleanly
+**What is left over for §3.2.** With the geometry correct, the remaining damage is cleanly
 isolated. Every rank now builds the *right* mesh (269 nodes, 60 elements - the same one the serial
 remesh produces), and the only thing wrong is that it is replicated:
 
@@ -225,9 +159,9 @@ remesh produces), and the only thing wrong is that it is replicated:
 | 3 | 269 | 807 | 269 |
 | 4 | 269 | 1076 | 269 |
 
-i.e. exactly `nproc` x the true count, confirming §1.3 at three partition counts rather than one.
+i.e. exactly `nproc` x the true count, confirming the `nproc` multiplier of §1 at three partition counts rather than one.
 
-### Stage 2 - re-distribute after remeshing. DONE.
+### 3.2 Re-distributing after the remesh
 
 `force_remesh()` builds the new mesh replicated on every rank (which is exactly what `initialise()`
 does before its own first `distribute()`), transfers the old solution, and then runs
@@ -266,9 +200,9 @@ What those two refusals are:
 
 Running the interpolation replicated is redundant work, but it is correct, it matches the startup
 flow, and peak memory is no worse than at startup, where the whole mesh exists on every rank anyway.
-Making it scalable, and lifting the adaption refusal, belongs to stage 5.
+Making it scalable, and lifting the adaption refusal, belongs to §3.6.
 
-### Stage 3 - cross-rank value transfer. DONE.
+### 3.3 Cross-rank value transfer
 
 The old mesh is distributed; the new one is replicated and **identically numbered on every rank**,
 which is what makes the cheap route work: each rank transfers whatever it can find in its own share
@@ -309,17 +243,17 @@ used to.
 field at the new mesh's integration points, which are located the same partition-local way - so it is
 refused, see below.
 
-### The refusal, narrowed
+### 3.3a The refusal, narrowed
 
-With stages 1-3 in place, `force_remesh()` on a distributed problem **works** for
+With §3.1–§3.3 in place, `force_remesh()` on a distributed problem **works** for
 `RemesherViaRecreation` together with `InternalInterpolator`, and needs no opt-in. What was refused
-from here on is listed in §0; each refusal names itself, and
+from here on is listed in the table at the top; each refusal names itself, and
 `Problem.experimental_distributed_remeshing` bypasses all of them.
 
-### Stage 3b - codimension-2 interfaces. DONE.
+### 3.4 Codimension-2 interfaces
 
 Contact lines and axis points are ordinary in real scripts - both droplet tutorials have one - and
-they are transferred by `nodal_interpolate_along_boundary`, a different mechanism that the stage 3
+they are transferred by `nodal_interpolate_along_boundary`, a different mechanism that the §3.3
 pooling does not reach: nearest-node matching along the boundary rather than point location.
 
 The difference that matters is that **every rank produces an answer for every node** there. It
@@ -327,7 +261,7 @@ matches against the nearest of *its* old boundary nodes, however far away that i
 "who found it" but "who found it closest". One `MPI_Allreduce` with `MPI_MINLOC` over the match
 distances picks the owner - ties broken by the lower rank, which the nodes on a partition boundary
 need - and only that rank's blend is kept, through the same
-`pool_node_values_across_ranks` that stage 3 uses.
+`pool_node_values_across_ranks` that §3.3 uses.
 
 Three things fell out of it:
 
@@ -346,7 +280,7 @@ Three things fell out of it:
 Verified against a serial run with equations on `domain/interface/axis`, at 2, 3 and 4 ranks: same
 node count, same field extrema, sums agreeing to ~1e-9.
 
-### Stage 3c - zeta coordinates. DONE.
+### 3.4a Zeta coordinates
 
 `AssignZetaCoordinatesByArclength` and `AssignZetaCoordinatesByEulerianCoordinate` refused a
 distributed mesh outright (`_refuse_if_distributed`), which blocked the two moving-interface tutorials
@@ -377,11 +311,11 @@ other transfer paths) and on `docs/source/tutorial/ale/beads_on_string.py`, whic
 distributed with the same three remeshing events as serially, the ranks in step, and a minimum radius
 tracking the serial one to ~5e-5 over the whole transient.
 
-### Stage 4 - `Remesher2d` from the merged boundaries. DONE.
+### 3.5 `Remesher2d` from the merged boundaries
 
 The automatic remesher reconstructs the geometry from the boundaries of the mesh it replaces, walking
 the local `Node` objects. A partition is bounded partly by named boundaries and partly by the
-partition cut, which carries no boundary name at all, so the curves could never close - §1.5.
+partition cut, which carries no boundary name at all, so the curves could never close - §1.
 
 `Remesher2dBoundaryLineCollection` now works on `RemeshBoundaryPoint`, a point addressed by its
 position rather than a node pointer, and the boundaries are collected in three steps: each rank
@@ -437,9 +371,9 @@ instead of quietly desynchronising the run.
 This was only reachable once `Remesher2d` could run distributed at all: `tests/test_mpi_rank_zero_failures.py`
 covers the agreement, but without `--distribute`.
 
-### Stage 5 - the MPI point locator. OPEN, and deliberately so.
+### 3.6 OPEN: the MPI point locator
 
-Phase 5 of `dev_docs/mesh_point_locator.md`: give `MeshPointLocator` its MPI routing layer. The API
+The MPI phase of `dev_docs/mesh_point_locator.md`: give `MeshPointLocator` its MPI routing layer. The API
 was designed for it (`LocationHandle::owner`, the reusable `LocationSet` schedule, the batched
 `evaluate`), and §5 there carries the cost model. It would make remeshing *scale* rather than merely
 work, and it is what the two remaining refusals are waiting for.
@@ -449,13 +383,13 @@ Scoped but not started, and the scoping is the useful part:
 * **The foundation is there.** The locator already keeps a per-element bounding box
   (`element_bbox_min/max`), so the per-rank boxes the routing needs are a union away.
 * **An `Allgatherv`-only version is not worth building.** Routing every query to every rank leaves
-  each rank searching every query - the same O(N) work stage 3 already does. All of the speed is in
+  each rank searching every query - the same O(N) work §3.3 already does. All of the speed is in
   the bounding-box routing, so a "correctness first, optimise later" split buys nothing here.
 * **Nothing is observable until the Python side moves too.** The routing layer's first consumer is a
   transfer from an old distributed mesh to a *new distributed* one, and `force_remesh` currently
   interpolates while the new mesh is still replicated. Both have to land together.
-* **The new mesh is replicated for a reason that stage 5 does not remove.** Gmsh generates the whole
-  mesh on every rank, exactly as at startup; what stage 5 removes is holding it replicated through
+* **The new mesh is replicated for a reason that §3.6 does not remove.** Gmsh generates the whole
+  mesh on every rank, exactly as at startup; what §3.6 removes is holding it replicated through
   the *transfer*, not the generation.
 
 The two refusals it would lift are narrow: `num_adapt > 0` (adapting the new mesh) and
@@ -464,7 +398,7 @@ replicated as now, distribute, then let the adaption rounds use oomph's own fath
 interpolation instead of re-reading the old mesh - at the cost of some accuracy on the nodes the
 adaption creates. That is a smaller, self-contained piece if the refusal ever becomes a nuisance.
 
-## 3d. Validated on real scripts
+## 3.7 Validated on real scripts
 
 Every tutorial the campaign touches - the ones that remesh, move their mesh, or parameterise a
 boundary by zeta - run under `mpirun -n 2 ... --distribute`:
@@ -503,45 +437,37 @@ fire, and `distribute()` re-partitions them together with their coupled interfac
 
 ## 4. Tests
 
-Following the `tests/mpi_*_worker.py` pattern, with a serial in-process run as the reference and
+`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 24 tests, ~54 s.
+Following the `tests/mpi_*_worker.py` pattern: a serial in-process run as the reference, and
 numbering-independent comparisons (node and element counts, a digest over sorted coordinates, field
-sums), at 2, 3 and 4 ranks:
+sums), at 2, 3 and 4 ranks. Everything except the refusals runs **without** the opt-in, i.e. in the
+configuration that ships.
 
-1. the boundary every rank rebuilds matches the serial one (stage 1, **done** - compared as a digest
-   over the polylines, against a serial run of the same worker, at 2, 3 and 4 ranks);
-2. the three-rank case specifically - rank 0 owning no interface element is what used to hang
-   (**done**, covered by the same test: at three ranks rank 0 is the rank with no interface element);
-3. `is_mesh_distributed()` true and `ndof` equal to the serial count after the remesh (stage 2,
-   **done** - at 2, 3 and 4 ranks; the `nproc` multiplier of §1.3 makes it a single decisive
-   assertion), plus the two refusals stage 2 has to make;
-4. field values after remeshing equal to serial, with **zero** "could not be located" fallbacks
-   (stage 3, **done** - compared through merged global mesh data at 2, 3 and 4 ranks, for each of the
-   three transfer mechanisms (point location, codimension-2 nearest-node, zeta) and for the
-   `Remesher2d` path, including sums weighted by position so that values landing on the wrong nodes
-   cannot cancel out);
-5. the `Remesher2d` path (**done**, as a variant of item 4);
-6. `mpirun` **without** `--distribute` keeps working unchanged throughout - `needs_merging()` already
-   short-circuits that case, but it is the regression that would go unnoticed.
+What each covers, and why:
 
-`tests/test_mpi_remeshing.py` + `tests/mpi_remeshing_worker.py`, marked `slow`, 24 tests, ~54 s,
-covering stages 0 to 4: the remaining refusals on **every** rank, the unchanged
-behaviour of `mpirun` without `--distribute` at 2 and 4 ranks, the collective agreement when one rank
-(0 or 2, since the agreement is symmetric) raises inside `define_geometry`, the merged boundary
-matching a serial reference run at 2, 3 and 4 ranks, `ndof` and `is_mesh_distributed()` matching the
-serial run after the re-partitioning, the transferred field matching it too (plain, codimension-2,
-zeta and `Remesher2d`), and the
-partial-remesh and explicit-`num_adapt` refusals.
+* **The boundary every rank rebuilds matches the serial one** — as a digest over the polylines. The
+  three-rank case is the one that matters most: rank 0 owning no interface element is what used to
+  hang.
+* **`is_mesh_distributed()` true and `ndof` equal to the serial count** after the remesh. The `nproc`
+  multiplier of §1 makes that a single decisive assertion.
+* **Field values after remeshing equal to serial, with zero "could not be located" fallbacks**, for
+  each of the three transfer mechanisms (point location, codimension-2 nearest-node, zeta) and for the
+  `Remesher2d` path. Sums are weighted by position too, so values landing on the wrong nodes cannot
+  cancel out.
+* **The collective agreement when one rank raises inside `define_geometry`** — rank 0 or rank 2, since
+  the agreement is symmetric.
+* **`mpirun` without `--distribute` unchanged** at 2 and 4 ranks. `needs_merging()` already
+  short-circuits that case, but it is the regression that would go unnoticed.
+* **Both refusals**, on **every** rank.
 
-Everything except the refusals runs **without** the opt-in, i.e. in the configuration that ships.
-
-Every run is under a timeout that fails rather than waits, so a regression in the agreement shows up
-as a failed test instead of a stuck suite - it has already caught one (see the end of stage 1). The
+Every run is under a timeout that fails rather than waits, so a regression in the agreement shows up as
+a failed test instead of a stuck suite — it has already caught one (see the end of §3.1). The
 partial-remesh test additionally asserts the exact return code, because the bug it pins down was a
 segfault *after* a correct error message.
 
 ---
 
-## 5. Found on the way. FIXED.
+## 5. Found on the way, and fixed
 
 Two things surfaced while running the tutorials distributed. Neither has anything to do with
 remeshing, and both made a distributed run of an otherwise working script produce nonsense:
@@ -576,14 +502,14 @@ as much). Tests: `tests/test_mpi_observables.py` (10 tests, ~18 s).
 ## 6. Open questions
 
 * `ParametricGmshMeshRemesher2d` subclasses `Remesher2d` but rebuilds its geometry from problem
-  parameters alone, so it needs none of stage 4. Untested distributed.
-* **Reading a state back** after a distributed remesh. Writing one works and is covered (stage 2
+  parameters alone, so it needs none of §3.5. Untested distributed.
+* **Reading a state back** after a distributed remesh. Writing one works and is covered (§3.2
   assigns the base element numbers for exactly that), but `dev_docs/distributed_state_files.md` §7
   says sharded state files cannot be read at all yet, and nothing here has tried a
   write-then-restart across a remesh.
 * The **3d** remeshers. Everything above is 2d: `Remesher2d` by name, and the boundary curves the
   recreation path rebuilds are polylines. A 3d surface has no `get_interface_line_segments`
-  equivalent, so stage 1 does not carry over as it stands.
+  equivalent, so §3.1 does not carry over as it stands.
 * `RemeshWhen`'s criterion is judged per rank and made unanimous afterwards
   (`_agree_on_domains_to_remesh`), so a distributed run remeshes as soon as *any* rank's elements are
   distorted enough. That is the safe direction, but it means a distributed run can remesh more often

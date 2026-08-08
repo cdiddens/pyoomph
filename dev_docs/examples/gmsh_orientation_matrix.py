@@ -1,6 +1,6 @@
 """Check GmshTemplate.fix_2d_orientation over all four planar element types.
 
-Companion to dev_docs/inverted_element_remeshing.md.
+Companion to dev_docs/mesh_construction.md.
 
 Each geometry is meshed three ways: with the curve loop wound counter-clockwise, with it
 wound clockwise and the fix disabled (the control, which must produce an inside-out mesh),

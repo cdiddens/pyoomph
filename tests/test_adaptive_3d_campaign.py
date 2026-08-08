@@ -27,13 +27,13 @@
 # [-0.5,0.5]^3, discretised in every geometrically possible combination of bricks, tetrahedra, wedges and
 # pyramids (see box_mesh_3d.py for which combinations exist and why the others cannot).
 #
-# WHAT PASSES AND WHAT DOES NOT (measured; see dev_docs/mixed_adapt_validation.md §9)
+# WHAT PASSES AND WHAT DOES NOT (measured; see dev_docs/adaptive_refinement.md §9)
 #
 #   * Single-space problems -- C1 Poisson, C2 Poisson, and the whole Neumann campaign -- pass on ALL 11
 #     layouts at all three refinement states, including two-level non-uniform 2:1 hanging.
 #   * Multi-space problems -- coupled C2+C1 Poisson, ConstrainFieldsToC1Space, Taylor-Hood Stokes, ALE --
 #     likewise pass on all 11 layouts at all three refinement states. Getting there took three fixes
-#     (dev_docs/mixed_adapt_validation.md 9.4/9.5): the per-value interpolation hooks for the wedge and
+#     (dev_docs/adaptive_refinement.md 9.1/9.2): the per-value interpolation hooks for the wedge and
 #     pyramid C2 elements, the C1-constraint vertex-node guard, and two wrong C1-corner tables.
 #
 # Everything in this module is expected to pass; there are no known-broken configurations left here.
@@ -65,7 +65,7 @@ _NEWTON_REDUCTION = 1e-10
 # What these tests certify is the DISCRETISATION and the analytic Jacobian, by driving a linear problem
 # to machine zero in one Newton step. That only works while the linear solve is exact to roundoff, and
 # on exactly one case of the sweep Pardiso is not: 3d-ale-hex_pyr-00 lands at 8.6e-9. It is not a
-# near-singular matrix (dev_docs/pardiso_static_pivoting.md is about backward errors of 1e-4 and worse,
+# near-singular matrix (dev_docs/linear_solvers.md §6 is about backward errors of 1e-4 and worse,
 # which is nowhere near this) and it is not a bad Jacobian -- the same assembled system solved with
 # SuperLU or UMFPACK gives 5.6e-15, i.e. the answer is right and only the solve was imprecise.
 #

@@ -35,7 +35,7 @@
 #
 #   * the conformity decision has to be made from GLOBAL facet data, not from what a rank can see, or
 #     ranks refine different elements and the halo layer drifts out of step with its owner (this is the
-#     same class of defect as dev_docs/mixed_adapt_validation.md section 9.8);
+#     same class of defect as dev_docs/adaptive_refinement.md section 8.2);
 #   * conformity alone is then still not sufficient for connect_interface_elements_by_kdtree, which is
 #     rank-local: the opposite element must also be PRESENT on the rank that needs it. That is a
 #     halo-coverage property, provided by the set_must_be_kept_as_halo marking in

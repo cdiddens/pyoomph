@@ -212,7 +212,7 @@ class BoxProblem(Problem):
         # what lets the distributed-vs-serial comparison stay meaningful across all of them.
         #
         # Why more than one: pyoomph's refinement criteria set a per-element error OVERRIDE, and those are
-        # computed rank-locally -- that is what defect C was (dev_docs/mixed_adapt_validation.md section
+        # computed rank-locally -- that is what defect C was (dev_docs/adaptive_refinement.md section
         # 9.8). The dangerous shape is a criterion stated on an INTERFACE mesh ("domain/top"): a rank holds
         # halo copies of bulk elements without holding the interface elements that would override their
         # error, so the ranks disagree about what to refine. Every criterion here is exercised in exactly

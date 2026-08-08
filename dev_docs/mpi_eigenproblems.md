@@ -184,7 +184,7 @@ through `Problem._require_non_distributed`:
   (`pyoomph/generic/bifurcation_tools.py`), which build global scipy matrices
 
 Bifurcation *tracking* itself is no longer on this list — see
-`dev_docs/distributed_bifurcation_tracking.md`. What is still refused inside it: `blocksolve=True`,
+`dev_docs/mpi_augmented_systems.md`. What is still refused inside it: `blocksolve=True`,
 and `adapt()` / arclength continuation while tracking, both for the history-dof reason in §3.
 
 ## 6. Testing

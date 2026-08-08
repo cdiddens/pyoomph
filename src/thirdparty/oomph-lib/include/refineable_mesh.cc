@@ -2378,7 +2378,7 @@ namespace oomph
             // addition is not associative, so results moved by ~1 ulp between two runs of the same
             // binary. That is small until it flips a refinement decision at a threshold, after which
             // meshes diverge outright -- observed as two MPI ranks refining opposite ends of a bubble
-            // and disagreeing about ndof. See dev_docs/hanging_value_nondeterminism.md.
+            // and disagreeing about ndof. See dev_docs/replicated_mpi_correctness.md §4.
             std::vector<std::pair<unsigned, std::pair<Node*, double> > > ordered_masters;
             ordered_masters.reserve(hang_weights.size());
             typedef std::map<Node*, double>::iterator IT;

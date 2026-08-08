@@ -4,7 +4,7 @@
 #
 # This combination used to be refused outright. It is now supported by flattening
 # each constrained/hanging dof into real free leaf dofs, composing the C1
-# constraint with the refinement hang map (see dev_docs/hanging_nodes_redesign.md
+# constraint with the refinement hang map (see dev_docs/adaptive_refinement.md
 # section 5.5).
 #
 # Correctness oracle: the problems here are LINEAR (Poisson, Laplace-smoothed

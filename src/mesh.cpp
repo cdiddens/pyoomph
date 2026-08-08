@@ -7560,7 +7560,7 @@ namespace pyoomph
   // afterwards), and the interface mesh then dies with "is not a boundary node".
   //
   // Found the hard way on a non-uniformly adapted tet cube, where four such nodes lost their marks one
-  // adapt before the elements around them were refined; see dev_docs/boundary_node_membership_repair.md.
+  // adapt before the elements around them were refined; see dev_docs/boundary_node_membership.md.
   // Skipping hanging nodes is deliberately conservative: a genuinely spurious mark on a hanging node
   // survives, which is exactly the behaviour there was before any of this, and it stops being hanging
   // (and gets cleaned up) as soon as the neighbourhood conforms.
@@ -7609,7 +7609,7 @@ namespace pyoomph
   // them lying on that boundary, so an element with two or more faces on the SAME boundary mislabels
   // the interior edges joining them, and each mislabelled edge seeds more at the next refinement.
   // The face tags do not have that weakness, so they are used to correct the node labels afterwards.
-  // See dev_docs/boundary_node_membership_repair.md.
+  // See dev_docs/boundary_node_membership.md.
   unsigned TemplatedMeshBase::repair_boundary_node_membership_from_face_tags()
   {
     Pending_boundary_membership_removals.clear();
@@ -7815,7 +7815,7 @@ namespace pyoomph
   // Groups the current active bulk elements by the vertex-node set of each facet, returning for
   // every facet the (element, local face index) pairs incident on it. Shape- and
   // split-scheme-neutral neighbour-finding primitive for the generic refinement engine; see the
-  // declaration in mesh.hpp and dev_docs/mixed_adaptive_meshes.md.
+  // declaration in mesh.hpp and dev_docs/adaptive_refinement.md.
   TemplatedMeshBase::FacetAdjacencyMap TemplatedMeshBase::build_facet_adjacency() const
   {
     FacetAdjacencyMap adj;

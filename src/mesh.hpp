@@ -677,7 +677,7 @@ namespace pyoomph
 		// facets (edges in 2d, faces in 3d), yielding for every facet the list of (element, local
 		// face index) pairs incident on it. This is the shape- and split-scheme-neutral
 		// neighbour-finding primitive for the generic refinement engine (see
-		// dev_docs/mixed_adaptive_meshes.md): unlike oomph's compass-based QuadTree/OcTree neighbour
+		// dev_docs/adaptive_refinement.md): unlike oomph's compass-based QuadTree/OcTree neighbour
 		// tables it works uniformly for triangles/tets/wedges/pyramids and mixed meshes. It is built
 		// from get_possible_face_indices() / get_vertex_nodes_of_face(), the same primitives the
 		// boundary detection uses.
@@ -721,7 +721,7 @@ namespace pyoomph
 		// The refinement rules give a new node the boundaries shared by all its generating nodes, which
 		// is a superset of the truth whenever an element has two or more faces on one and the same
 		// boundary. The tags do not have that weakness, so they are used to correct the node labels
-		// after every adapt. See dev_docs/boundary_node_membership_repair.md.
+		// after every adapt. See dev_docs/boundary_node_membership.md.
 		void collect_face_tag_node_sets(std::vector<std::set<oomph::Node *>> &truth, std::set<oomph::Node *> &decidable) const;
 		// Diagnostic: (spurious, missing) without changing anything. `missing` must be zero.
 		std::pair<unsigned, unsigned> check_boundary_node_membership_against_face_tags() const;

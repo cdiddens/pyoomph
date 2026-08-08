@@ -322,7 +322,7 @@ namespace pyoomph
 			// That stale halo element then makes the tet face-neighbour finder report a genuinely coarser
 			// neighbour where there is none, so a 2:1 hang is installed that does not exist globally, the
 			// hanging sets diverge between ranks, and with them the global equation numbering
-			// (dev_docs/mixed_adapt_validation.md §9.8). The loop bound was rank-local too, so ranks could
+			// (dev_docs/adaptive_refinement.md §8.2). The loop bound was rank-local too, so ranks could
 			// even run different numbers of rounds around the collective inside refine_selected_elements.
 			//
 			// Fix both: union the selected elements across all processes (keyed by quantized centroid, the

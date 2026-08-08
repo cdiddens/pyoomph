@@ -24,7 +24,7 @@
 # ========================================================================
 
 # Tests the shape/split-scheme-neutral facet-adjacency primitive used by the
-# generic mixed-mesh refinement engine (see dev_docs/mixed_adaptive_meshes.md).
+# generic mixed-mesh refinement engine (see dev_docs/adaptive_refinement.md).
 # On a freshly generated (conforming) mesh, every facet must be incident on
 # exactly 1 (boundary) or 2 (interior) element faces regardless of element shape.
 

@@ -260,7 +260,7 @@ def test_halo_consistency_check_stays_clean(tmp_path):
     # disagreeing about the elements they share fails the run outright instead of quietly producing a
     # wrong mesh.
     #
-    # This pins the invariant behind the defect-C fix (see dev_docs/mixed_adapt_validation.md section
+    # This pins the invariant behind the defect-C fix (see dev_docs/adaptive_refinement.md section
     # 9.8): pyoomph applies per-element refinement overrides rank-locally after oomph-lib's estimator has
     # synchronised its errors, so without Mesh::synchronise_elemental_errors() the ranks refine different
     # elements. It also pins the CHECK -- if the check itself stops working, the negative test below

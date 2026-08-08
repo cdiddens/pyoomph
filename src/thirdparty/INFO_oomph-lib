@@ -423,7 +423,7 @@ one-ulp difference could flip a refinement decision at a threshold, after which 
 outright -- observed as two MPI ranks refining opposite ends of a rising bubble, disagreeing about
 ndof, and killing the linear solve with "Column too large". It was equally present in SERIAL: the
 same binary on the same input produced different answers on consecutive runs. See
-dev_docs/hanging_value_nondeterminism.md for the reproducer and the full diagnosis.
+dev_docs/replicated_mpi_correctness.md §4 for the reproducer and the full diagnosis.
 Upstream equivalent: none, this is a pyoomph fix.
 
 refineable_quad_element.cc (Changed on 4th August 2026):
@@ -480,7 +480,7 @@ brace of "if (this->nelement()>0)" and before classify_halo_and_haloed_nodes(): 
 block is skipped on a rank holding no elements of a submesh, so a collective in there deadlocks, and
 the halo/haloed NODE lists are not rebuilt until afterwards, so only the ELEMENT lists can drive it.
 Only the h-adaptive adapt_mesh is hooked; p_adapt_mesh is not, as pyoomph has no p-refinable elements.
-See dev_docs/boundary_node_membership_repair.md.
+See dev_docs/boundary_node_membership.md.
 Upstream equivalent: none, this is a pyoomph fix.
 
 problem.cc (Changed on 8th August 2026):

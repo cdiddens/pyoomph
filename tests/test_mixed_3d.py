@@ -403,7 +403,7 @@ def test_mixed_multilevel_quadratic(label, mesh, lf):
 # cross-round half of that -- reusing a node an earlier round built -- used to be done by matching node
 # POSITIONS. That is only as good as the positions are, and a hanging node's position is a cache of its
 # masters which goes stale whenever something writes the dof vector from outside the Newton solver (see
-# dev_docs/mixed_adaptive_meshes.md 4.18/4.19). It is now the same key, snapshotted from the live nodes.
+# dev_docs/adaptive_refinement.md §7). It is now the same key, snapshotted from the live nodes.
 #
 # Displacing every hanging node before each adapt is exactly what that stale cache looks like, and is
 # harmless because the values are recomputed at the next assembly. The refinement pattern is keyed on the

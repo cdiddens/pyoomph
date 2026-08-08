@@ -190,7 +190,7 @@ namespace pyoomph
 	//////////////
 
 	// PYOOMPH_TIME_ADD_RESIDUAL=1 prints a per-phase breakdown of add_residual/expand_placeholders
-	// on stderr - how dev_docs/codegen_speed.md was measured. That phase has no other visibility.
+	// on stderr - how dev_docs/code_generation.md was measured. That phase has no other visibility.
 	// Namespace scope, not a function-local static: these are read once per visited expression node,
 	// and a function-local static would cost a guard-variable acquire load every time.
 	static const bool __time_add_residual_on = getenv("PYOOMPH_TIME_ADD_RESIDUAL") != NULL;
@@ -698,7 +698,7 @@ namespace pyoomph
 		}
 		// On by default; PYOOMPH_DISABLE_EXPAND_MEMO=1 turns it off. On material-library-heavy
 		// models the memo changes how GiNaC orders and signs the factors of a product - verified
-		// numerically equivalent, see dev_docs/codegen_speed.md.
+		// numerically equivalent, see dev_docs/code_generation.md.
 		if (!__expand_memo_on)
 			return do_replace(inp);
 		// Numbers are never cached. GiNaC compares and hashes them by value, not by representation,
@@ -4127,7 +4127,7 @@ namespace pyoomph
 		// dimensional 4-species benchmark, but a wash on twelve dimensional tutorials, while
 		// skipping normal() renumbers the CSE temporaries and reassociates products (100+ lines on
 		// marangoni_instability - all verified numerically equivalent, but that is not a reason to
-		// reassociate every dimensional Jacobian by default). See dev_docs/codegen_speed.md.
+		// reassociate every dimensional Jacobian by default). See dev_docs/code_generation.md.
 		static const bool fastcheck_enabled = getenv("PYOOMPH_UNIT_FASTCHECK") != NULL;
 		bool units_proven_to_cancel = false;
 		if (may_be_dimensional && fastcheck_enabled && !prescan_disabled)
@@ -6003,7 +6003,7 @@ namespace pyoomph
 		// fingerprint while generating different code -- which is exactly what Tier-2 shadow mode
 		// reported once apply_on_others made both variants appear in one residual.
 		// The codegen switches that can change what write_code() emits (see
-		// dev_docs/codegen_speed.md). Without these the same fingerprint would map to two different
+		// dev_docs/code_generation.md). Without these the same fingerprint would map to two different
 		// generated-code hashes depending on the environment, which makes Tier-2 shadow mode report
 		// a mismatch it cannot explain - and would let a future codegen-skipping Tier-2 reuse code
 		// generated under a different setting. PYOOMPH_ARCHIVE_EXPRESSIONS is deliberately absent:

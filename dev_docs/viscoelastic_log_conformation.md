@@ -787,13 +787,9 @@ that defect is "converges without X, diverges with X, for X that should be harml
   `oldroyd_b_shear_conformation`, which together give the fully developed log-conformation tensor for
   a prescribed shear rate. Nothing assembles a channel inflow profile from them yet.
 
-## 11. Order of work, if this is picked up again
-
-1. ~~Fix 6.2~~ - done, see 6.2.1. The workaround in `_in_plane_exponential` stays: the fix does not
-   make the genuinely degenerate rest state differentiable, because nothing can.
-2. ~~Promote the cylinder benchmark~~ - done, `tests/test_viscoelastic_cylinder.py`.
-3. ~~6.1 and 6.4~~ - 6.4 fixed, 6.1 sidestepped by using the library's convected derivatives.
-   6.3 and 6.3.1 remain: the debug facility and the nondeterministic assembly, neither of which this
-   work depends on.
-4. The wake experiment of section 8.4, which is the one open question about the numbers.
-5. Tutorial page and bibliography.
+**Already closed from that list, so it is not re-attempted:** 6.2 is fixed (see 6.2.1 — the workaround
+in `_in_plane_exponential` stays, because the fix does not make the genuinely degenerate rest state
+differentiable, and nothing can); the cylinder benchmark is `tests/test_viscoelastic_cylinder.py`;
+6.4 is fixed and 6.1 is sidestepped by using the library's convected derivatives. **The order to pick
+it up in:** the wake experiment of §8.4 first, since it is the one open question about the *numbers*,
+then the tutorial page and bibliography.

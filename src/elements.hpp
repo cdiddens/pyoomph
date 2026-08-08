@@ -273,7 +273,7 @@ namespace pyoomph
     // differentiates normal-dependent boundary conditions w.r.t. the moving mesh position.
     virtual void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double *  PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const;
     void update_in_solid_position_fd(const unsigned &i) override; // For FD with element_sizes, we have to update the element size buffer
-    // --- Named hanging-node accessors (see dev_docs/hanging_nodes_redesign.md) ---
+    // --- Named hanging-node accessors (see dev_docs/adaptive_refinement.md) ---
     // Single, auditable point where pyoomph maps an interpolation space to the oomph-lib HangInfo
     // that governs it at a given element-local node (or NULL if that node does not hang in that
     // space). Today these just resolve the per-space `hangindex` convention that codegen writes into
@@ -288,7 +288,7 @@ namespace pyoomph
     // Geometric (positional) hanging for the given element-local node, i.e. the info_Pos slot.
     oomph::HangInfo *hang_info_for_position(unsigned l_elem) const;
 
-    // --- Flattened hang/constraint composition (see dev_docs/hanging_nodes_redesign.md 5.5) ---
+    // --- Flattened hang/constraint composition (see dev_docs/adaptive_refinement.md section 3) ---
     // Does node n carry a CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1 constraint for value index v?
     bool node_is_c1_constrained_for_value(oomph::Node *n, unsigned v) const;
     // Does node n carry a POSITION_CONSTRAIN_TO_C1 constraint for coordinate index i?
@@ -635,7 +635,7 @@ namespace pyoomph
     // True if this element's nodes should be snapped onto the macro geometry. False on a moving
     // (ALE) mesh, where the Eulerian position is an unknown and forcing it would fight the solve --
     // there the macro element only drives the initial configuration, exactly as it does today. See
-    // dev_docs/macro_elements_generalisation.md 5; the full moving-mesh treatment is stage S5.
+    // dev_docs/macro_elements.md 7.
     bool macro_element_may_set_positions() const;
     // Evaluate the macro-element geometry itself: the Eulerian position this element's macro element
     // maps the local coordinate s to. Empty if the element has no macro element. Unlike
@@ -1010,7 +1010,7 @@ namespace pyoomph
     // The split scheme currently used to refine this element. Default: isotropic subdivision into
     // required_nsons() sons of the same type (IsotropicSameTypeRefinementPattern). Override (or make
     // configurable) to support anisotropic / heterogeneous splits; see
-    // dev_docs/mixed_adaptive_meshes.md.
+    // dev_docs/adaptive_refinement.md.
     virtual const RefinementPattern *refinement_pattern() const;
 
     // Fill this element as a C1 son of a PYRAMID father (mixed 6-pyramid + 4-tet red split). Works whether

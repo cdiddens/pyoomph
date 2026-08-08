@@ -1516,16 +1516,16 @@ namespace pyoomph
 	//
 	// Must run every iteration, not just once after the solve. No-op on a single process.
 	//
-	// This makes the ranks agree to ~1e-13, NOT bit-for-bit. The residue is a SEPARATE and still open
-	// defect, and not an MPI one: Mesh::interpolate_hanging_values() returns a different answer each time
-	// it runs on the same input, in a single-process serial run (~13 of 2014 positions, one ulp). MPI only
-	// supplies a second observer. Uninitialised memory (valgrind clean), heap-address container order
-	// (differs under setarch -R) and Python iteration order (differs under PYTHONHASHSEED=0) are all ruled
-	// out; threading and the JIT cache are untested. Reproducer, full elimination table and the wrong
-	// turns: dev_docs/hanging_value_nondeterminism.md.
+	// On its own this made the ranks agree only to ~1e-13. The residue was a SEPARATE defect, and not an
+	// MPI one: complete_hanging_nodes copied a std::map<Node*,double> straight into the HangInfo, so the
+	// masters were summed in HEAP ADDRESS order and interpolate_hanging_values() returned a different
+	// answer on each run of the same binary, in a single process. That is fixed (the masters are now
+	// written in mesh node-vector order), and the ranks agree bit-for-bit. The reproducer, the full
+	// elimination table -- valgrind, setarch -R, PYTHONHASHSEED all clean -- and the wrong turns are in
+	// dev_docs/replicated_mpi_correctness.md §3-§4.
 	//
-	// Shipping regardless: without this, 120 hanging nodes sit at ZERO on the ranks that do not assemble
-	// them, elemental errors differ by 60-92%, and the meshes diverge outright.
+	// Without this sync, 120 hanging nodes sit at ZERO on the ranks that do not assemble them, elemental
+	// errors differ by 60-92%, and the meshes diverge outright.
 	static inline void sync_hanging_values_if_parallel(pyoomph::Problem *prob)
 	{
 #ifdef OOMPH_HAS_MPI

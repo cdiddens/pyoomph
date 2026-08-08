@@ -1,6 +1,6 @@
 """Prescribed 2d deformation that folds a Laplace-smoothed mesh.
 
-Companion to dev_docs/inverted_element_remeshing.md.
+Companion to dev_docs/mesh_construction.md.
 
 A unit square is meshed with quads and smoothed harmonically. The only thing driving the
 problem is a prescribed boundary deformation: a Gaussian notch of growing depth is pushed

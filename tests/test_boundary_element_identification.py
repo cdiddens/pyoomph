@@ -216,7 +216,7 @@ def test_named_boundaries_are_unaffected_by_the_tag_route():
 
 # ------------------------------------------------------------------------------------------------
 # Nodal boundary membership, reconciled against the same face tags
-# (dev_docs/boundary_node_membership_repair.md)
+# (dev_docs/boundary_node_membership.md)
 # ------------------------------------------------------------------------------------------------
 #
 # The tags also correct the NODE labels after every adapt, because the refinement rules give a new

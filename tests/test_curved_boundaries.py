@@ -23,7 +23,7 @@
 #
 # ========================================================================
 
-# Curved boundaries via MacroElements -- see dev_docs/macro_elements_generalisation.md.
+# Curved boundaries via MacroElements -- see dev_docs/macro_elements.md.
 #
 # One acceptance criterion runs through all of this: a node that lies on a curved boundary must
 # satisfy that boundary's implicit equation to machine precision, no matter which element shape it
@@ -1175,7 +1175,7 @@ def test_curved_shared_interface_agrees_from_both_sides(curved, tmp_path):
 
 # --------------------------------------------------------------------------------------------
 # Boundary-node membership (dev_docs 15.2, characterised in 23, repaired per
-# dev_docs/boundary_node_membership_repair.md)
+# dev_docs/boundary_node_membership.md)
 # --------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("which", ["tri", "tetball", "gmshball"])

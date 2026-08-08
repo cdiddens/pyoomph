@@ -153,7 +153,7 @@ namespace pyoomph
     //
     // Cost, for an entity implemented in Python: this is one extra callback per evaluation on top of
     // parametric_to_position, and it roughly doubles the Python-side cost of the macro map (measured
-    // in dev_docs/macro_elements_generalisation.md 20.4). So prefer to fold a correction into
+    // in dev_docs/macro_elements.md 5.3). So prefer to fold a correction into
     // parametric_to_position when it can be expressed pointwise -- normalising a direction, say, which
     // is free there because that call happens anyway. Override this when the rule genuinely needs the
     // other samples: unwrapping a periodic coordinate relative to its neighbours, or a true slerp.
@@ -327,7 +327,7 @@ namespace pyoomph
   // linear interpolation (nlerp): the result is exactly on the sphere for any weights, and at weight
   // 1/2 -- the bisector, which is what edge refinement asks for -- it is exactly the arc midpoint.
   // The renormalisation lives in parametric_to_position, so the blend itself stays a plain weighted
-  // sum and no separate blend hook is needed. See dev_docs/macro_elements_generalisation.md 4.3.
+  // sum and no separate blend hook is needed. See dev_docs/macro_elements.md 5.1.
   class CurvedEntitySpherePart : public MeshTemplateCurvedEntity
   {
   protected:
@@ -913,7 +913,7 @@ namespace pyoomph
     // touches a curved surface along an edge without owning a facet there still has to curve that
     // edge -- otherwise it places the edge's new nodes on the chord while the element on the other
     // side places them on the surface, and the two disagree. Built lazily from `facets`, which is
-    // complete by the time any element is created. See dev_docs/macro_elements_generalisation.md 3.2.2.
+    // complete by the time any element is created. See dev_docs/macro_elements.md 2.3.
     std::map<std::pair<nodeindex_t, nodeindex_t>, MeshTemplateFacet *> curved_edge_map;
     bool curved_edge_map_built = false;
     void build_curved_edge_map();
