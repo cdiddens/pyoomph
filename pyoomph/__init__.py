@@ -131,6 +131,18 @@ class GeneralSolverCallback(_pyoomph.GeneralSolverCallback):
 		problem=self._get_current_problem()
 		if problem is None:
 			raise RuntimeError("The problem has not been set yet")
+		from .generic.mpi import get_mpi_nproc as _get_mpi_nproc, get_mpi_max as _get_mpi_max, get_mpi_min as _get_mpi_min #type:ignore
+		if _get_mpi_nproc()>1:
+			# n is the GLOBAL system size, so it must agree on every rank, distributed or not. When it
+			# does not, PETSc fails deep inside the preallocation with "Row too large" - which says
+			# nothing about the actual cause, namely that the ranks built different problems. That
+			# happens whenever anything in the setup is drawn per rank rather than shared: an unshared
+			# random initial condition makes the ranks solve slightly different problems, which makes
+			# their spatial error estimates differ, which makes them refine differently. Every rank is
+			# in this call, so the reduction below is safe and they all fail together.
+			nmin,nmax=_get_mpi_min(n),_get_mpi_max(n)
+			if nmin!=nmax:
+				raise RuntimeError("The MPI ranks disagree about the size of the linear system ("+str(n)+" on this one, between "+str(nmin)+" and "+str(nmax)+" over all of them). They are solving different problems, which means the setup is not identical on all ranks - typically a random initial condition or mesh refinement criterion that was drawn per rank instead of being shared (see DeterministicRandomField), or a quantity read from a per-rank file.")
 		return problem.get_la_solver().solve_distributed(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info) #,comm
 
 	def metis_partgraph_kway(self, nvertex,nconnection, xadj, adjacency_vector, vwgt, nparts, options, edgecut, part):

@@ -73,6 +73,9 @@ if no_mpi_file.exists():
 	def get_mpi_any_list(flags, comm=None): #type:ignore
 		return [bool(f) for f in flags] #type:ignore
 
+	def get_mpi_bcast(value, root:int=0, comm=None): #type:ignore
+		return value #type:ignore
+
 	def mpi_share_root_failure(error:'Optional[BaseException]'=None, root:int=0, context:str="")->None: #type:ignore
 		if error is not None:
 			raise error
@@ -117,6 +120,11 @@ else:
 		# rank-independent order.
 		gathered=comm.allgather([bool(f) for f in flags]) #type:ignore
 		return [any(votes) for votes in zip(*gathered)] #type:ignore
+
+	def get_mpi_bcast(value, root:int=0, comm=MPI.COMM_WORLD): #type:ignore
+		# For data that MUST be identical on every rank but is not by construction - anything drawn
+		# from a random number generator, in particular. Collective: every rank has to call it.
+		return comm.bcast(value, root=root) #type:ignore
 
 	def mpi_abort(errorcode:int=1)->None: #type:ignore
 		# Tears down the entire job, not just this rank. Only for failures a single rank cannot
