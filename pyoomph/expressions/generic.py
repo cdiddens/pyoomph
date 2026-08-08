@@ -382,7 +382,11 @@ def grad(arg:ExpressionOrNum,lagrangian:bool=False,nondim:bool=False,coordsys:Op
 		transpose of this. Consequently the advection term :math:`\\vec{u}\\cdot\\nabla\\vec{u}` is
 		``matproduct(grad(u),u)``, equivalently ``dot(grad(u),u)`` or ``grad(u) @ u``, and *not* ``dot(u,grad(u))``, which
 		is :math:`\\nabla(|\\vec{u}|^2/2)`. See also :py:func:`~pyoomph.expressions.div`, which contracts the second index
-		so that ``div(grad(u))`` is the vector Laplacian.
+		accordingly.
+
+		The argument must be a scalar or a vector: the gradient of a rank-2 tensor would be rank 3, which is not
+		implemented. Also, only first derivatives of the basis functions are available, so a second derivative of a
+		field, e.g. ``div(grad(u))``, cannot be assembled - use the integrated-by-parts form ``weak(grad(u),grad(v))``.
 	"""
 	if isinstance(arg,str):
 		arg=var(arg)
@@ -630,7 +634,7 @@ def material_derivative(f:ExpressionOrNum | str,velocity:ExpressionOrNum | str,A
 	adv_term=directional_derivative(f,velocity,nondim=nondim,lagrangian=lagrangian,coordsys=coordsys)
 	return dt_factor * partial_t(f, ALE=ALE, scheme=dt_scheme, nondim=nondim) + advection_factor * adv_term
 
-def convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,alpha:ExpressionOrNum=0,ALE:Literal["auto"] | bool=False,dt_scheme:OptionalTimeSteppingScheme=None,nondim:bool=False,lagrangian:bool=False,dt_factor:ExpressionOrNum=1,advection_factor:ExpressionOrNum=1,coordsys:OptionalCoordinateSystem=None)->Expression:
+def convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,alpha:ExpressionOrNum=0,ALE:Literal["auto"] | bool="auto",dt_scheme:OptionalTimeSteppingScheme=None,nondim:bool=False,lagrangian:bool=False,dt_factor:ExpressionOrNum=1,advection_factor:ExpressionOrNum=1,coordsys:OptionalCoordinateSystem=None)->Expression:
 	"""
 	Returns the Gordon-Schowalter convected derivative of a rank-2 tensor field :math:`\\mathbf{A}`, i.e. the one-parameter
 	family interpolating between the upper- and the lower-convected derivative:
@@ -646,8 +650,6 @@ def convected_derivative(A:ExpressionOrNum,velocity:ExpressionOrNum,alpha:Expres
 		velocity: Advection velocity.
 		alpha: Slip parameter of the family, see above.
 		ALE: Use ALE correction. If set to ``"auto"``, it will only be used if the coordinates are degrees of freedom.
-			Note that this defaults to ``False`` here, unlike in :py:func:`~pyoomph.expressions.generic.material_derivative`
-			and :py:func:`~pyoomph.expressions.generic.upper_convected_derivative`, which default to ``"auto"``.
 		dt_scheme: Used time stepping scheme. If set to None, the default time stepping scheme set at problem level will be used.
 		nondim: Using non-dimensional time. Defaults to False.
 		lagrangian: Using Lagrangian coordinates for the gradient.

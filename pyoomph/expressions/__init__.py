@@ -63,6 +63,8 @@ def sin(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the sine of the input expression or number.
 
+	The argument must be dimensionless.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -79,6 +81,8 @@ def cos(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the cosine of the input expression or number.
 
+	The argument must be dimensionless.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -93,6 +97,8 @@ def cos(x:ExpressionOrNum) -> Expression:
 def sinh(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the hyperbolic sine of the input expression or number.
+
+	The argument must be dimensionless.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -109,6 +115,8 @@ def cosh(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the hyperbolic cosine of the input expression or number.
 
+	The argument must be dimensionless.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -124,6 +132,8 @@ def tan(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the tangent of the input expression or number.
 
+	The argument must be dimensionless. Nothing guards against the poles at odd multiples of pi/2.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -137,6 +147,8 @@ def tan(x:ExpressionOrNum) -> Expression:
 def tanh(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the hyperbolic tangent of the input expression or number.
+
+	The argument must be dimensionless.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -153,6 +165,8 @@ def atan(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the inverse tangent of the input expression or number.
 
+	The argument must be dimensionless.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -167,6 +181,11 @@ def atan(x:ExpressionOrNum) -> Expression:
 def atan2(y:ExpressionOrNum,x:ExpressionOrNum) -> Expression:
 	"""
 	Compute atan2(y,x) of the input expression or number.
+
+	Unlike atan(y/x), this resolves the quadrant from the signs of both arguments and stays finite at x=0.
+
+	Both arguments must be dimensionless - a common unit is not divided out automatically, so pass e.g.
+	``atan2(y/(1*meter),x/(1*meter))`` rather than ``atan2(y,x)`` for dimensional coordinates.
 
 	Parameters:
 		y (ExpressionOrNum): First argument, expression or number.
@@ -185,6 +204,8 @@ def asin(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the inverse sine of the input expression or number.
 
+	The argument must be dimensionless and, for a real-valued result, within [-1,1].
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -198,6 +219,8 @@ def asin(x:ExpressionOrNum) -> Expression:
 def acos(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the inverse cosine of the input expression or number.
+
+	The argument must be dimensionless and, for a real-valued result, within [-1,1].
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -213,6 +236,8 @@ def asinh(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the inverse hyperbolic sine of the input expression or number.
 
+	The argument must be dimensionless.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -227,6 +252,8 @@ def acosh(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the inverse hyperbolic cosine of the input expression or number.
 
+	The argument must be dimensionless and, for a real-valued result, at least 1. Its derivative diverges at exactly 1, which can stall a Newton step starting there.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -240,6 +267,8 @@ def acosh(x:ExpressionOrNum) -> Expression:
 def atanh(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the inverse hyperbolic tangent of the input expression or number.
+
+	The argument must be dimensionless and, for a real-valued result, within (-1,1).
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -256,7 +285,7 @@ def erf(x:ExpressionOrNum) -> Expression:
 	Compute the error function of the input expression or number.
 
 	The argument must be dimensionless and is assumed to be real-valued. Differentiates to
-	2/sqrt(pi)*exp(-x**2), so it can be used in residuals without further ado.
+	``2/sqrt(pi)*exp(-x**2)``, so it can be used in residuals without further ado.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -289,6 +318,8 @@ def exp(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the exponential of the input expression or number.
 
+	The argument must be dimensionless.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -302,6 +333,8 @@ def exp(x:ExpressionOrNum) -> Expression:
 def log(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the logarithm of the input expression or number.
+
+	The argument must be dimensionless and, for a real-valued result, positive.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -317,6 +350,9 @@ def absolute(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the absolute of the input expression or number.
 
+	The argument may carry any unit, which the result inherits. Differentiates as ``signum(x)*dx``, i.e. as if it were
+	smooth, and hence has no delta contribution at x=0.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
@@ -330,7 +366,11 @@ def absolute(x:ExpressionOrNum) -> Expression:
 
 def signum(x:ExpressionOrNum) -> Expression:
 	"""
-	Compute the signum of the input expression or number.
+	Compute the signum of the input expression or number, i.e. 1 for x>0, -1 for x<0 and exactly 0 at x=0.
+
+	The argument may carry any unit (only its sign matters), the result is dimensionless. Like
+	:py:func:`~pyoomph.expressions.heaviside`, it differentiates to zero everywhere, i.e. the jump at the origin does
+	not enter the Jacobian.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -349,6 +389,9 @@ def maximum(x:ExpressionOrNum,y:ExpressionOrNum) -> Expression:
 	"""
 	Compute the maximum of both input expressions or numbers.
 
+	Both arguments must agree in units, which are then the units of the result; a plain 0 is accepted irrespective of
+	the unit of the other argument. Differentiates branch-wise, as ``dx*heaviside(x-y)+dy*heaviside(y-x)``.
+
 	Parameters:
 		x (ExpressionOrNum): First argument, expression or number.
   		y (ExpressionOrNum): Second argument. expression or number.
@@ -356,7 +399,7 @@ def maximum(x:ExpressionOrNum,y:ExpressionOrNum) -> Expression:
 	Returns:
 		Expression: max(x,y).
 
-	"""	
+	"""
 	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x) 	  	
 	y=y if isinstance(y,_pyoomph.Expression) else _pyoomph.Expression(y) 	
 	return _pyoomph.GiNaC_maximum(x,y)
@@ -366,6 +409,9 @@ def minimum(x:ExpressionOrNum,y:ExpressionOrNum) -> Expression:
 	"""
 	Compute the minimum of both input expressions or numbers.
 
+	Both arguments must agree in units, which are then the units of the result; a plain 0 is accepted irrespective of
+	the unit of the other argument. Differentiates branch-wise, as ``dx*heaviside(y-x)+dy*heaviside(x-y)``.
+
 	Parameters:
 		x (ExpressionOrNum): First argument, expression or number.
   		y (ExpressionOrNum): Second argument. expression or number.
@@ -373,7 +419,7 @@ def minimum(x:ExpressionOrNum,y:ExpressionOrNum) -> Expression:
 	Returns:
 		Expression: min(x,y).
 
-	"""	
+	"""
 	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x) 	  	
 	y=y if isinstance(y,_pyoomph.Expression) else _pyoomph.Expression(y) 	
 	return _pyoomph.GiNaC_minimum(x,y)
@@ -382,15 +428,23 @@ def imaginary_i():
 	"""
 	Return the imaginary unit i.
 
+	Residuals themselves must be real-valued; the imaginary unit is meant for the complex-valued expressions of e.g.
+	an eigenmode or a Helmholtz problem, which are split into their real and imaginary parts before the code is
+	generated. Use :py:func:`~pyoomph.expressions.real_part` and :py:func:`~pyoomph.expressions.imag_part` to do that
+	splitting by hand.
+
 	Returns:
 		Expression: The imaginary unit i.
 
-	"""	
+	"""
 	return _pyoomph.GiNaC_imaginary_i()
 
 def real_part(x:ExpressionOrNum) -> Expression:
 	"""
 	Compute the real part of the input expression or number.
+
+	Units are kept, i.e. the real part of a length is a length. Note that this assumes every field to be real-valued,
+	so that only an explicit :py:func:`~pyoomph.expressions.imaginary_i` makes a term imaginary.
 
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
@@ -406,13 +460,16 @@ def imag_part(x:ExpressionOrNum)->Expression:
     """
 	Compute the imaginary part of the input expression or number.
 
+	Units are kept, i.e. the imaginary part of a length is a length. Note that this assumes every field to be
+	real-valued, so that only an explicit :py:func:`~pyoomph.expressions.imaginary_i` makes a term imaginary.
+
 	Parameters:
 		x (ExpressionOrNum): The input expression or number.
 
 	Returns:
 		Expression: The imaginary part of the input.
 
-	"""	
+	"""
     x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(Expression(1)*x) 	
     return _pyoomph.GiNaC_get_imag_part(x)
     
@@ -421,7 +478,11 @@ def imag_part(x:ExpressionOrNum)->Expression:
 
 def square_root(what:ExpressionOrNum, order:int=2) -> Expression:
 	"""
-	Calculates the square root of the given expression or number.
+	Calculates the square root, or with ``order`` the ``order``-th root, of the given expression or number.
+
+	The argument may carry a unit, which is raised to the power 1/order along with it, i.e. the root of an area is a
+	length. It is just a shorthand for ``what**rational_num(1,order)``, hence an exact rational exponent rather than a
+	floating point one, which matters for the unit bookkeeping.
 
 	Parameters:
 		what (ExpressionOrNum): The expression or number to calculate the square root of.
@@ -448,9 +509,9 @@ def square_root(what:ExpressionOrNum, order:int=2) -> Expression:
 
 def heaviside(x:ExpressionOrNum):
     """
-	Heaviside step function: 1 for `x`>0, 0 for `x`<0 and 1/2 for `x`=0.
+	Heaviside step function, i.e. ``1`` for ``x>0``, ``0`` for ``x<0`` and ``1/2`` for ``x=0``.
 
-	`x` may carry any unit (its scale and unit are divided out), the result is always dimensionless.
+	The argument may carry any unit (its scale and unit are divided out), the result is always dimensionless.
 	Note that it differentiates to zero everywhere, i.e. the delta contribution at the jump is not
 	added to the Jacobian.
 
@@ -566,6 +627,10 @@ def partial_x(f:ExpressionOrNum, order:int=1) -> Expression:
 	"""
 	Compute the partial derivative of a given expression with respect to the x-coordinate.
 
+	It differentiates with respect to the independent Eulerian coordinate ``"coordinate_x"``, i.e. it is a
+	shorthand for :py:func:`~pyoomph.expressions.generic.diff` with respect to that coordinate. On a moving mesh,
+	use :py:func:`~pyoomph.expressions.generic.grad` instead if you want the mesh coordinates to be used.
+
 	Parameters:
 		f (ExpressionOrNum): The expression to differentiate.
 		order (int): The order of differentiation (default is 1).
@@ -588,6 +653,10 @@ def partial_y(f:ExpressionOrNum,order:int=1)->Expression:
 	"""
 	Compute the partial derivative of a given expression with respect to the y-coordinate.
 
+	It differentiates with respect to the independent Eulerian coordinate ``"coordinate_y"``, i.e. it is a
+	shorthand for :py:func:`~pyoomph.expressions.generic.diff` with respect to that coordinate. On a moving mesh,
+	use :py:func:`~pyoomph.expressions.generic.grad` instead if you want the mesh coordinates to be used.
+
 	Parameters:
 		f (ExpressionOrNum): The expression to differentiate.
 		order (int): The order of differentiation (default is 1).
@@ -607,7 +676,11 @@ def partial_y(f:ExpressionOrNum,order:int=1)->Expression:
 
 def partial_z(f:ExpressionOrNum,order:int=1)->Expression:
 	"""
-	Compute the partial derivative of a given expression with respect to the y-coordinate.
+	Compute the partial derivative of a given expression with respect to the z-coordinate.
+
+	It differentiates with respect to the independent Eulerian coordinate ``"coordinate_z"``, i.e. it is a
+	shorthand for :py:func:`~pyoomph.expressions.generic.diff` with respect to that coordinate. On a moving mesh,
+	use :py:func:`~pyoomph.expressions.generic.grad` instead if you want the mesh coordinates to be used.
 
 	Parameters:
 		f (ExpressionOrNum): The expression to differentiate.
@@ -649,7 +722,7 @@ def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:bool | None=None,nondim
 
 		Index order: for a rank-2 tensor, ``div(T)[i]`` is :math:`\\partial_j T_{ij}`, contracting the second index. This
 		makes ``div`` the adjoint of :py:func:`~pyoomph.expressions.generic.grad` (which stores
-		:math:`\\partial u_i/\\partial x_j`), so ``div(grad(u))`` is the vector Laplacian, and it makes ``div(T)`` the
+		:math:`\\partial u_i/\\partial x_j`) and ``div(T)`` the
 		integration-by-parts partner of ``weak(T,grad(v))`` together with the traction ``matproduct(T,n)``. For symmetric
 		tensors, i.e. every usual stress tensor, the distinction does not matter. Note that a flux tensor has to be
 		assembled accordingly: the momentum flux carrying :math:`\\vec{u}` along :math:`\\rho\\vec{q}` is

@@ -1,3 +1,5 @@
+.. _secspatialcoordsys:
+
 Changing the coordinate system
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

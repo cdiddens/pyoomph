@@ -59,16 +59,15 @@ SLEPc then quietly tests something else. Anything using eigensolvers, azimuthal 
 analysis needs the complex build.
 
 **The path differs per machine, so look it up rather than pasting one from here** - and check it, because
-a nonexistent entry in `PYTHONPATH` is not an error, it just leaves you without PETSc:
+a nonexistent entry in `PYTHONPATH` is not an error, it just leaves you without PETSc.
+On the development computers, `PETSC_DIR`, `PETSC_ARCH_REAL` and `PETSC_ARCH_COMPLEX` are defined.
+Include `$PETSC_DIR/$PETSC_ARCH_COMPLEX/lib` into `PYTHONPATH` to get complex PETSc and test it with
 
     find ~/code -maxdepth 5 -name petsc4py -type d      # the arch dir is its parent's parent
     PYTHONPATH=<candidate> python3 -c "from petsc4py import PETSc; import numpy; \
         assert PETSc.ScalarType is numpy.complex128; import slepc4py; print('complex PETSc ok')"
 
-On `duarte` that is `/home/cdiddens/code/petsc/pyoomph_petsc_arch_complex/lib`, with
-`pyoomph_petsc_arch_real` next to it as the real-scalar one. On `walhalla` it is
-`/home/cdiddens/code/packages/petsc_pyoomph/pyoomph_petsc_opt/lib`, with
-`/home/cdiddens/code/packages/petsc_pyoomph/pyoomph_petsc_real_opt/lib` as the real-scalar one.
+Likewise for real PETSc.
 
 
 The MPI and 3D-adaptivity suites are marked `slow` and are **skipped** without `--full`:
