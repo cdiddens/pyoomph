@@ -31,7 +31,19 @@ The following elementary mathematical functions are implemented and work on scal
         - Hyperbolic sine :math:`\sinh(x)`
     *   - ``cosh(x)``
         - Hyperbolic cosine :math:`\cosh(x)`
-    *   - ``tanh(x)``        
+    *   - ``tanh(x)``
         - Hyperbolic tangent :math:`\tanh(x)`
+    *   - ``asinh(x)``
+        - Inverse hyperbolic sine :math:`\operatorname{asinh}(x)`
+    *   - ``acosh(x)``
+        - Inverse hyperbolic cosine :math:`\operatorname{acosh}(x)`
+    *   - ``atanh(x)``
+        - Inverse hyperbolic tangent :math:`\operatorname{atanh}(x)`
+    *   - ``erf(x)``
+        - Error function :math:`\operatorname{erf}(x)`
+    *   - ``erfc(x)``
+        - Complementary error function :math:`\operatorname{erfc}(x)=1-\operatorname{erf}(x)`, which unlike the latter stays accurate for large :math:`x`
+
+The arguments of all of these must be dimensionless and, for ``erf`` and ``erfc``, real-valued.
 
 Further functions can be implemented using the :py:class:`~pyoomph.expressions.cb.CustomMathExpression` class from the module :py:mod:`pyoomph.expressions.cb`, see :numref:`sectemporalcustommath`.

@@ -57,6 +57,10 @@ double sqrt(double);
 double fabs(double);
 double fmax(double, double);
 double fmin(double, double);
+// tcc is called with -nostdinc, so every libm function used by generated code must be declared here. A missing one is
+// not a compile error but an implicit int-returning declaration, i.e. silently garbled results (erf/erfc used to be).
+double erf(double);
+double erfc(double);
 
 long long unsigned int strlen(const char *);
 char *strdup(const char *);

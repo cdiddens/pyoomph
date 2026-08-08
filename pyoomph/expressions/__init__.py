@@ -206,8 +206,84 @@ def acos(x:ExpressionOrNum) -> Expression:
 		Expression: The inverse cosine of the input.
 
 	"""
-	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x) 	
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
 	return _pyoomph.GiNaC_acos(x)
+
+def asinh(x:ExpressionOrNum) -> Expression:
+	"""
+	Compute the inverse hyperbolic sine of the input expression or number.
+
+	Parameters:
+		x (ExpressionOrNum): The input expression or number.
+
+	Returns:
+		Expression: The inverse hyperbolic sine of the input.
+
+	"""
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
+	return _pyoomph.GiNaC_asinh(x)
+
+def acosh(x:ExpressionOrNum) -> Expression:
+	"""
+	Compute the inverse hyperbolic cosine of the input expression or number.
+
+	Parameters:
+		x (ExpressionOrNum): The input expression or number.
+
+	Returns:
+		Expression: The inverse hyperbolic cosine of the input.
+
+	"""
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
+	return _pyoomph.GiNaC_acosh(x)
+
+def atanh(x:ExpressionOrNum) -> Expression:
+	"""
+	Compute the inverse hyperbolic tangent of the input expression or number.
+
+	Parameters:
+		x (ExpressionOrNum): The input expression or number.
+
+	Returns:
+		Expression: The inverse hyperbolic tangent of the input.
+
+	"""
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
+	return _pyoomph.GiNaC_atanh(x)
+
+def erf(x:ExpressionOrNum) -> Expression:
+	"""
+	Compute the error function of the input expression or number.
+
+	The argument must be dimensionless and is assumed to be real-valued. Differentiates to
+	2/sqrt(pi)*exp(-x**2), so it can be used in residuals without further ado.
+
+	Parameters:
+		x (ExpressionOrNum): The input expression or number.
+
+	Returns:
+		Expression: The error function of the input.
+
+	"""
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
+	return _pyoomph.GiNaC_erf(x)
+
+def erfc(x:ExpressionOrNum) -> Expression:
+	"""
+	Compute the complementary error function, i.e. 1-erf(x), of the input expression or number.
+
+	Prefer it over writing 1-erf(x) by hand: for large arguments, the latter is entirely
+	cancellation, whereas erfc retains its accuracy.
+
+	Parameters:
+		x (ExpressionOrNum): The input expression or number.
+
+	Returns:
+		Expression: The complementary error function of the input.
+
+	"""
+	x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
+	return _pyoomph.GiNaC_erfc(x)
 
 def exp(x:ExpressionOrNum) -> Expression:
 	"""
@@ -372,16 +448,17 @@ def square_root(what:ExpressionOrNum, order:int=2) -> Expression:
 
 def heaviside(x:ExpressionOrNum):
     """
-	Returns a piecewise function that evaluates to `iftrue` when `cond` is greater than or equal to zero,
-	and evaluates to `iffalse` otherwise.
-	
+	Heaviside step function: 1 for `x`>0, 0 for `x`<0 and 1/2 for `x`=0.
+
+	`x` may carry any unit (its scale and unit are divided out), the result is always dimensionless.
+	Note that it differentiates to zero everywhere, i.e. the delta contribution at the jump is not
+	added to the Jacobian.
+
 	Parameters:
-		cond (ExpressionOrNum): The condition to check.
-		iftrue (ExpressionOrNum): The value to return if `cond` is greater than or equal to zero.
-		iffalse (ExpressionOrNum): The value to return if `cond` is less than zero.
-	
+		x (ExpressionOrNum): The argument of the step function.
+
 	Returns:
-		Expression: The resulting piecewise function.
+		Expression: The step function of the input.
 	"""
     x=x if isinstance(x,_pyoomph.Expression) else _pyoomph.Expression(x)
     return _pyoomph.GiNaC_heaviside(x)
@@ -390,12 +467,16 @@ def piecewise_geq0(cond:ExpressionOrNum,iftrue:ExpressionOrNum,iffalse:Expressio
 	"""
 	Returns a piecewise function that evaluates to `iftrue` when `cond` is greater than or equal to zero,
 	and evaluates to `iffalse` otherwise.
-	
+
+	All three arguments may carry units: `cond` only decides the branch, so its unit is arbitrary and
+	divided out, whereas `iftrue` and `iffalse` must agree in units, which then are the units of the
+	result. A plain 0 is accepted as a branch irrespective of the unit of the other branch.
+
 	Parameters:
 		cond (ExpressionOrNum): The condition to check.
 		iftrue (ExpressionOrNum): The value to return if `cond` is greater than or equal to zero.
 		iffalse (ExpressionOrNum): The value to return if `cond` is less than zero.
-	
+
 	Returns:
 		Expression: The resulting piecewise function.
 	"""

@@ -511,6 +511,8 @@ namespace pyoomph
     DECLARE_FUNCTION_2P(minimum)   // min(a,b)
     DECLARE_FUNCTION_2P(maximum)   // max(a,b)
     DECLARE_FUNCTION_3P(piecewise_geq0) // Returns a if the condition (1st arg) is >=0, otherwise b
+    DECLARE_FUNCTION_1P(erf)       // Error function; GiNaC has no erf of its own, but C99 (and hence the generated code) does
+    DECLARE_FUNCTION_1P(erfc)      // Complementary error function, i.e. 1-erf, kept separate to retain its accuracy for large arguments
 
     // Thin GiNaC-function wrappers around the corresponding GiNaC::* simplification routines, applied after first expanding
     // all pyoomph placeholder functions (fields, test functions, ...) contained in the argument

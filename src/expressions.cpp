@@ -26,6 +26,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <cassert>
 #include <sstream>
 #include <limits>
+#include <cmath>
 
 using namespace GiNaC;
 
@@ -647,6 +648,66 @@ namespace pyoomph
 						{
 							throw_runtime_error("Should not end up here");
 						}
+					}
+				}
+				else if (is_ex_the_function(cl, expressions::piecewise_geq0))
+				{
+					// piecewise_geq0(cond,a,b): the units of the three arguments are unrelated to each other. Only the
+					// *sign* of cond decides the branch and base units are positive by construction, so cond's unit and
+					// its (nonnegative) scale can be divided out without changing the outcome. The two branch values are
+					// alternatives of the same quantity, so they must agree in units - that unit is the result's unit.
+					GiNaC::ex cfactor = 1, cunits = 1, crest = 1;
+					if (!collect_base_units(cl.op(0), cfactor, cunits, crest))
+					{
+						std::ostringstream oss;
+						oss << "Cannot extract the unit from the condition of " << cl << " , i.e. from " << cl.op(0);
+						throw_runtime_error(oss.str());
+					}
+					// cfactor is numeric here (a symbolic prefactor would have been folded into crest) and only its sign
+					// is relevant, so normalize the condition to O(1) instead of keeping the raw scale
+					GiNaC::ex cond_rest = (cfactor.is_zero() ? GiNaC::ex(0) : GiNaC::ex(crest * cfactor / abs(cfactor)));
+
+					std::vector<GiNaC::ex> branch_rest(2, 1), branch_scale(2, 1);
+					GiNaC::ex common_unit = 0;
+					GiNaC::ex dominant_factor = 0;
+					for (unsigned int i = 0; i < 2; i++)
+					{
+						GiNaC::ex sfactor = 1, sunit = 1, srest = 1;
+						if (!collect_base_units(cl.op(i + 1), sfactor, sunit, srest))
+						{
+							std::ostringstream oss;
+							oss << "Cannot extract the unit from branch " << i + 1 << " of " << cl << " , i.e. from " << cl.op(i + 1);
+							throw_runtime_error(oss.str());
+						}
+						sunit = GiNaC::expand(sunit);
+						if (!sfactor.is_zero()) // a plain zero branch is compatible with any unit
+						{
+							if (common_unit.is_zero())
+								common_unit = sunit;
+							else if (!sunit.is_equal(common_unit))
+							{
+								std::ostringstream oss;
+								oss << "Nonmatching units in the two branches of " << cl << ":  " << common_unit << " vs " << sunit << " in " << cl.op(i + 1) << std::endl;
+								throw_runtime_error(oss.str());
+							}
+						}
+						if (abs(sfactor) > dominant_factor)
+							dominant_factor = abs(sfactor);
+						branch_rest[i] = srest;
+						branch_scale[i] = sfactor;
+					}
+					if (dominant_factor.is_zero())
+					{
+						rest *= 0; // both branches are exactly zero, hence so is the whole expression
+					}
+					else
+					{
+						units *= common_unit;
+						units = GiNaC::expand(units);
+						factor *= dominant_factor;
+						rest *= pyoomph::expressions::piecewise_geq0(cond_rest,
+																	 branch_rest[0] * branch_scale[0] / dominant_factor,
+																	 branch_rest[1] * branch_scale[1] / dominant_factor);
 					}
 				}
 				else if (GiNaC::is_a<GiNaC::function>(cl))
@@ -3084,7 +3145,9 @@ namespace pyoomph
 									   .evalf_func(maximum_evalf)
 									   .set_return_type(GiNaC::return_types::commutative))
 
-		// piecewise_geq0(cond,a,b): returns a if cond>=0, else b. Relational conditions (cond as a GiNaC::relational, e.g.
+		// piecewise_geq0(cond,a,b): returns a if cond>=0, else b. The zero case used to be decided the other way round here
+		// (by the strict numeric::is_positive()) than in the generated code, so an already numeric cond==0 gave b while the
+		// very same expression gave a once it had passed through code generation. Relational conditions (cond as a GiNaC::relational, e.g.
 		// from Python's <,<=,>,>= comparisons) are not supported here -- see the disabled block below explaining why
 		// (Python operator overloads would need extra work); only a numeric/constant condition is evaluated directly,
 		// otherwise the call stays held and is only resolved at code-generation time via a C ternary (see
@@ -3116,17 +3179,11 @@ namespace pyoomph
 				   case info_flags::relation_greater_or_equal:
 					   return o==greater_or_equal;
 			*/
-			if (GiNaC::is_a<GiNaC::numeric>(cond))
+			if (GiNaC::is_a<GiNaC::numeric>(cond) || GiNaC::is_a<GiNaC::constant>(cond))
 			{
-				//std::cout << "NUMERIC  " << cond << "  " << GiNaC::ex_to<GiNaC::numeric>(cond).is_positive() << std::endl;
-				if (!GiNaC::ex_to<GiNaC::numeric>(cond).is_positive())
-					return b;
-				else
-					return a;
-			}
-			else if (GiNaC::is_a<GiNaC::constant>(cond))
-			{
-				if (!GiNaC::ex_to<GiNaC::numeric>(GiNaC::ex_to<GiNaC::constant>(cond).evalf()).is_positive())
+				// to_double() (the real part of a complex numeric) rather than is_positive()/is_negative(), which are false
+				// for anything not real and would send a complex-typed but real-valued condition down the wrong branch
+				if (GiNaC::to_double(GiNaC::ex_to<GiNaC::numeric>(cond.evalf())) < 0)
 					return b;
 				else
 					return a;
@@ -3156,6 +3213,99 @@ namespace pyoomph
 										 .print_func<print_csrc_double>(piecewise_geq0_csrc_float)
 										 .expl_derivative_func(piecewise_geq0_expl_derivative)
 										 .set_return_type(GiNaC::return_types::commutative))
+
+		// erf()/erfc(): GiNaC has no error function of its own, but C99 does, and GiNaC's generic C printer emits any
+		// function under its own (lowercased) name -- so nothing beyond the derivative and a numerical evaluation is
+		// needed here, and in particular no print_func.
+		//
+		// The real/imaginary part functions assume a real argument, as those of minimum/maximum/heaviside above do:
+		// erf(x+i*y) does not split into elementary functions (it takes the Faddeeva function), and the generated code
+		// calls the C erf(double), which cannot take a complex argument in the first place. Unlike those functions,
+		// however, an argument that visibly carries the imaginary unit -- which is how a normal-mode perturbation
+		// enters -- is rejected instead of silently being declared real.
+		static void erf_assert_real_argument(const ex &arg, const std::string &name)
+		{
+			if (arg.has(GiNaC::I))
+			{
+				std::ostringstream oss;
+				oss << "Cannot split " << name << "(" << arg << ") into real and imaginary parts: only real arguments are supported";
+				throw_runtime_error(oss.str());
+			}
+		}
+		static ex erf_eval(const ex &arg)
+		{
+			// erf(0)=0 is the only argument with an exactly representable value; everything else waits for evalf
+			if (GiNaC::is_a<GiNaC::numeric>(arg) && arg.is_zero())
+				return 0;
+			return erf(arg).hold();
+		}
+
+		static ex erf_evalf(const ex &arg)
+		{
+			if (GiNaC::is_a<GiNaC::numeric>(arg) && GiNaC::ex_to<GiNaC::numeric>(arg).is_real())
+				return GiNaC::numeric(std::erf(GiNaC::ex_to<GiNaC::numeric>(arg).to_double()));
+			return erf(arg).hold();
+		}
+
+		static ex erf_real_part(const ex &arg)
+		{
+			erf_assert_real_argument(arg, "erf");
+			return erf(arg).hold();
+		}
+
+		static ex erf_imag_part(const ex &arg)
+		{
+			erf_assert_real_argument(arg, "erf");
+			return 0;
+		}
+
+		static ex erf_expl_derivative(const ex &arg, const symbol &deriv_arg)
+		{
+			return arg.diff(deriv_arg) * 2 / GiNaC::sqrt(GiNaC::Pi) * GiNaC::exp(-arg * arg);
+		}
+
+		REGISTER_FUNCTION(erf, eval_func(erf_eval).evalf_func(erf_evalf)
+								   .expl_derivative_func(erf_expl_derivative)
+								   .real_part_func(erf_real_part).imag_part_func(erf_imag_part)
+								   .set_return_type(GiNaC::return_types::commutative))
+
+		// erfc() is kept as a function in its own right instead of being rewritten to 1-erf(): for large arguments the
+		// difference is entirely cancellation, and C's erfc() is what retains the accuracy there
+		static ex erfc_eval(const ex &arg)
+		{
+			if (GiNaC::is_a<GiNaC::numeric>(arg) && arg.is_zero())
+				return 1;
+			return erfc(arg).hold();
+		}
+
+		static ex erfc_evalf(const ex &arg)
+		{
+			if (GiNaC::is_a<GiNaC::numeric>(arg) && GiNaC::ex_to<GiNaC::numeric>(arg).is_real())
+				return GiNaC::numeric(std::erfc(GiNaC::ex_to<GiNaC::numeric>(arg).to_double()));
+			return erfc(arg).hold();
+		}
+
+		static ex erfc_real_part(const ex &arg)
+		{
+			erf_assert_real_argument(arg, "erfc");
+			return erfc(arg).hold();
+		}
+
+		static ex erfc_imag_part(const ex &arg)
+		{
+			erf_assert_real_argument(arg, "erfc");
+			return 0;
+		}
+
+		static ex erfc_expl_derivative(const ex &arg, const symbol &deriv_arg)
+		{
+			return -arg.diff(deriv_arg) * 2 / GiNaC::sqrt(GiNaC::Pi) * GiNaC::exp(-arg * arg);
+		}
+
+		REGISTER_FUNCTION(erfc, eval_func(erfc_eval).evalf_func(erfc_evalf)
+									.expl_derivative_func(erfc_expl_derivative)
+									.real_part_func(erfc_real_part).imag_part_func(erfc_imag_part)
+									.set_return_type(GiNaC::return_types::commutative))
 
 		////////////////
 

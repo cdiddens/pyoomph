@@ -884,6 +884,26 @@ void PyReg_Expressions(nb::module_ &m)
 		{ return 0 + GiNaC::atan2(y, x); },
 		nb::arg("y"), nb::arg("x"), "Calculates atan2(y, x)");
 	m.def(
+		"GiNaC_asinh", [](const GiNaC::ex &arg)
+		{ return 0 + GiNaC::asinh(arg); },
+		nb::arg("arg"), "Calculates asinh");
+	m.def(
+		"GiNaC_acosh", [](const GiNaC::ex &arg)
+		{ return 0 + GiNaC::acosh(arg); },
+		nb::arg("arg"), "Calculates acosh");
+	m.def(
+		"GiNaC_atanh", [](const GiNaC::ex &arg)
+		{ return 0 + GiNaC::atanh(arg); },
+		nb::arg("arg"), "Calculates atanh");
+	m.def(
+		"GiNaC_erf", [](const GiNaC::ex &arg)
+		{ return 0 + pyoomph::expressions::erf(arg); },
+		nb::arg("arg"), "Calculates the error function");
+	m.def(
+		"GiNaC_erfc", [](const GiNaC::ex &arg)
+		{ return 0 + pyoomph::expressions::erfc(arg); },
+		nb::arg("arg"), "Calculates the complementary error function, i.e. 1-erf");
+	m.def(
 		"GiNaC_exp", [](const GiNaC::ex &arg)
 		{ return 0 + GiNaC::exp(arg); },
 		nb::arg("arg"), "Calculates exp");
