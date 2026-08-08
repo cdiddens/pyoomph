@@ -5163,13 +5163,21 @@ class Problem(_pyoomph.Problem):
                 self.invalidate_cached_mesh_data()
             else:
                 parameter.value=parameter.value+ds
-                if max_ds is not None:
-                    if callable(max_ds_func):
-                        max_ds=max_ds_func(parameter.value)
-                        max_ds=abs(max_ds)
-                        print("MAX DS SET TO",max_ds)
-                    assert not callable(max_ds)
-                    ds=min(abs(1.5*ds),max_ds)*(1 if ds>0 else -1)
+                if callable(max_ds_func):
+                    max_ds=max_ds_func(parameter.value)
+                    max_ds=abs(max_ds)
+                    print("MAX DS SET TO",max_ds)
+                assert not callable(max_ds)
+                # Enlarge the step while marching towards the first sign change. This used to be
+                # skipped entirely unless max_ds was given, so a caller without max_ds marched at
+                # the initial step all the way to the bifurcation -- 89 steps of 200 for the m=3
+                # mode of the Rayleigh-Benard tutorial. Once the sign has changed we are bisecting
+                # the bracket and must not grow anymore, otherwise the halving below is undone.
+                if not firstSignChange:
+                    dsnew=abs(1.5*ds)
+                    if max_ds is not None:
+                        dsnew=min(dsnew,max_ds)
+                    ds=dsnew*(1 if ds>0 else -1)
             if reset_arclength:
                 self.reset_arc_length_parameters()
             if before_eigensolving is not None:
@@ -5206,7 +5214,10 @@ class Problem(_pyoomph.Problem):
                     continue
 
                 firstSignChange = True
-                dsmagn = max(abs(ds), abs(ds0))
+                # Bisect the bracket [param0,param1], which is |ds0| wide. ds itself must not be
+                # used here: it has already been enlarged for the next march step, so stepping
+                # back by half of it would overshoot backwards past param0.
+                dsmagn = abs(ds0)
                 ds = -0.5 * dsmagn * (-1 if ds < 0 else 1)
             else:
                 if firstSignChange:

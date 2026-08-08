@@ -25,6 +25,13 @@ With ``pressure_factor`` in the :py:class:`~pyoomph.equations.navier_stokes.Navi
 
 Furthermore, we have to fix the null space of the pressure, originating from the fact that only no-slip boundary conditions are used. Usually, we just pin e.g. a single corner to some pressure value. However, this is problematic, since it will also pin the corresponding eigenfunction value to zero there. A typical Dirichlet condition would just remove the pressure value at this corner from the unknowns and hence also from the pressure eigenfunction. Therefore, the volume average of the pressure is enforced to be zero instead. All pressure values remain unpinned and will have a degree of freedom in the eigenvector as well. However, when considering modes :math:`m\neq 0`, the average pressure of the eigenfunction will be automatically zero, since :math:`\exp(im\phi)` averages to zero. In that case, we must deactivate this constraint to prevent overconstrainment. This is achieved by the keyword argument ``set_zero_on_normal_mode_eigensolve`` in the pressure null space removal :py:meth:`~pyoomph.equations.navier_stokes.StokesEquations.with_pressure_integral_constraint`.
 
+The conductive base state we want to perform the stability analysis about is known analytically, so there is no need to solve for it numerically at all. With :math:`\vec{u}=0`, the temperature is just the linear conduction profile :math:`T=-y`, and the momentum balance reduces to :math:`\nabla p=T\mathbf{e}_y`, i.e. the hydrostatic :math:`p=-y^2/2`, where the offset :math:`1/6` is the one for which the imposed constraint :math:`\langle p\rangle=0` holds. We can hence just impose it as :py:class:`~pyoomph.equations.generic.InitialCondition`:
+
+.. literalinclude:: rayleigh_benard_azimuthal_stability.py
+   :language: python
+   :start-at: # The conductive base state is known analytically
+   :end-at: eqs += InitialCondition(T=-y, pressure=1/6-y**2/2)
+
 The boundary conditions are straightforward:
 
 .. literalinclude:: rayleigh_benard_azimuthal_stability.py
@@ -39,14 +46,9 @@ Note that the :py:class:`~pyoomph.equations.navier_stokes.NoSlipBC` will also se
    :start-at: # Magic function: It will perform all necessary adjustments, i.e.
    :end-at: problem.setup_for_stability_analysis(azimuthal_stability=True,analytic_hessian=True)
 
-The stationary conductive base state (:math:`u=0`, linear temperature profile, hydrostatic pressure) does not depend on the velocity at all. We therefore restrict the very first solve to the pressure and temperature degrees of freedom only, using :py:meth:`~pyoomph.generic.problem.Problem.select_dofs` in a ``with`` block:
+Since the base state is already imposed as initial condition, no stationary solve is required before the stability analysis. Note that :math:`T=-y` lies in the finite element space and is therefore represented exactly, whereas the discrete counterpart of the quadratic pressure differs from the analytical expression by a term of order :math:`h^2`. This is irrelevant here: neither the Jacobian nor the mass matrix depends on the pressure, so the eigenvalues are unaffected, and the difference is absorbed by the first bifurcation tracking solve below.
 
-.. literalinclude:: rayleigh_benard_azimuthal_stability.py
-   :language: python
-   :start-at: # Solve once to get the right pressure and temperature field. Velocity can stay zero here
-   :end-at: problem.solve()
-
-With the base state at hand, we loop over the azimuthal modes :math:`m=0,1,2,3` we are interested in. For each mode, we start at a small aspect ratio :math:`\Gamma=0.5` and a guess :math:`\operatorname{Ra}=10`, which is certainly stable. Since the conductive base state does not depend on :math:`\operatorname{Ra}` at all, we do not have to solve the (unchanged) stationary problem again for each trial value of :math:`\operatorname{Ra}`; we only have to recompute the eigenvalues. This is exactly what :py:meth:`~pyoomph.generic.problem.Problem.find_bifurcation_via_eigenvalues` does: called as a generator with ``do_solve=False``, it bisects on :math:`\operatorname{Ra}` (with initial step ``initstep=200``) until the largest of the ``neigen`` requested eigenvalues (for the azimuthal mode ``azimuthal_m=m``) has a real part closer to zero than ``epsilon``, yielding the current parameter and eigenvalue at each step:
+With the base state at hand, we loop over the azimuthal modes :math:`m=0,1,2,3` we are interested in. For each mode, we start at a small aspect ratio :math:`\Gamma=0.5` and a guess :math:`\operatorname{Ra}=3000`. The starting value must be stable for every mode we consider, since :py:meth:`~pyoomph.generic.problem.Problem.find_bifurcation_via_eigenvalues` aborts otherwise. Since the conductive base state does not depend on :math:`\operatorname{Ra}` at all, we do not have to solve the (unchanged) stationary problem again for each trial value of :math:`\operatorname{Ra}`; we only have to recompute the eigenvalues. This is exactly what :py:meth:`~pyoomph.generic.problem.Problem.find_bifurcation_via_eigenvalues` does: called as a generator with ``do_solve=False``, it bisects on :math:`\operatorname{Ra}` (with initial step ``initstep=200``) until the largest of the ``neigen`` requested eigenvalues (for the azimuthal mode ``azimuthal_m=m``) has a real part closer to zero than ``epsilon``, yielding the current parameter and eigenvalue at each step:
 
 .. literalinclude:: rayleigh_benard_azimuthal_stability.py
    :language: python

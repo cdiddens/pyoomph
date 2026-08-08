@@ -63,6 +63,13 @@ class RBConvectionProblem(Problem):
         # And advection-diffusion for temperature
         eqs += AdvectionDiffusionEquations(fieldnames="T",diffusivity=1, space="C1")
 
+        # The conductive base state is known analytically, so we do not have to solve for it at all.
+        # The temperature is just the linear conduction profile, and with u=0 the momentum balance
+        # reduces to RaPr*grad(p) = RaPr*T*e_y, i.e. the hydrostatic p=-y**2/2. The offset 1/6 is
+        # the one for which the imposed constraint <p>=0 holds.
+        y=var("coordinate_y")
+        eqs += InitialCondition(T=-y, pressure=1/6-y**2/2)
+
         # Boundary conditions
         eqs += DirichletBC(T=0)@"bottom"
         eqs += DirichletBC(T=-1)@"top"
@@ -88,16 +95,21 @@ if __name__=="__main__":
         #    the corresponding versions for the azimuthal mode m!=0
         problem.setup_for_stability_analysis(azimuthal_stability=True,analytic_hessian=True)
 
-        # Solve once to get the right pressure and temperature field. Velocity can stay zero here
-        with problem.select_dofs() as dofs:
-            dofs.unselect("domain/velocity_x","domain/velocity_y")
-            problem.solve()
-        
+        # No initial solve is required: the base state is already set as initial condition above.
+        # The Jacobian and the mass matrix do not depend on the pressure at all, so the O(h**2)
+        # difference between the analytical p and its discrete counterpart does not affect the
+        # eigenvalues; it is absorbed by the first bifurcation tracking solve below.
+
         # Iterate over all desired modes m
         for m in [0,1,2,3]:
             problem.Gamma.value=0.5 # Start at some aspect ratio
-            # Find a good guess for the critical Ra by eigenvalue bisection
-            problem.Ra.value=10
+            # Find a good guess for the critical Ra by eigenvalue bisection.
+            # The start must be stable for every m, otherwise find_bifurcation_via_eigenvalues
+            # bails out with "Starting already with an unstable solution". At Gamma=0.5 the lowest
+            # onset is the one of m=1 at Ra=3773, so 3000 is a valid lower bound for all modes
+            # here, and starting right below the first onset spares the eigensolves that a far
+            # smaller guess would spend in the stable regime.
+            problem.Ra.value=3000
             # We increase by steps of 200, but we don't have to solve the system, since the stationary solution is independent of Ra
             # we also pass the mode we want to solve for
             for currentRa,currentEigen in problem.find_bifurcation_via_eigenvalues("Ra",initstep=200,do_solve=False,neigen=4,azimuthal_m=m,epsilon=1e-2):
