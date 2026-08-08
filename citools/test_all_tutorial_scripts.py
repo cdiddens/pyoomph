@@ -76,15 +76,34 @@ sys.path.insert(0, str(Path("../docs/source/tutorial").resolve()))
 import tutorial_bundle
 
 
-if not args.no_petsc:
-  try:
-    from  petsc4py import PETSc
-  except ImportError:
-    raise ImportError("petsc4py not found, cannot run tests with eigenvalue solvers. Please install petsc4py and make sure it is in the PYTHONPATH")
+# In a subprocess, deliberately: importing petsc4py here would call MPI_Init in *this* process, and
+# PETSc's MPI_Init sets some twenty PMIX_*/OMPI_* variables via C setenv(). Python's os.environ never
+# sees those, but exec() hands the real C environ to the tested scripts, where the mpirun of
+# --mpirun finds PMIX_NAMESPACE/PMIX_RANK, concludes it is already running inside an MPI job and
+# exits 1 without printing anything at all - i.e. every single script "failing" with an empty log.
+# Keeping this process free of MPI is what makes --mpirun work; nothing here needs PETSc itself.
+_PETSC_PROBE="""
+try:
+  from petsc4py import PETSc
+except ImportError:
+  print("NO_PETSC4PY")
+  raise SystemExit
+import numpy
+print("COMPLEX" if PETSc.ScalarType is numpy.complex128 else "NOT_COMPLEX")
+"""
 
-  import numpy
-  assert PETSc.ScalarType is numpy.complex128, "PETSc does not support complex numbers, cannot run tests with eigenvalue solvers. Please install a version of PETSc with complex support and make sure petsc4py is using that version."
-  
+if not args.no_petsc:
+  probe=subprocess.run([sys.executable,"-c",_PETSC_PROBE],capture_output=True,text=True)
+  verdict=probe.stdout.split()
+  if "NO_PETSC4PY" in verdict:
+    raise ImportError("petsc4py not found, cannot run tests with eigenvalue solvers. Please install petsc4py and make sure it is in the PYTHONPATH")
+  if "NOT_COMPLEX" in verdict:
+    raise AssertionError("PETSc does not support complex numbers, cannot run tests with eigenvalue solvers. Please install a version of PETSc with complex support and make sure petsc4py is using that version.")
+  if "COMPLEX" not in verdict:
+    # Neither answer: petsc4py imported and then died (a mismatched libpetsc aborts here). Say that,
+    # rather than blaming complex support for a crash the probe's own output already explains.
+    raise RuntimeError("Could not determine whether PETSc supports complex numbers - the check exited with %d and said:\n%s"%(probe.returncode,(probe.stderr or probe.stdout).strip()))
+
 
 problems=tutorial_bundle.check_consistency()
 for problem in problems:
