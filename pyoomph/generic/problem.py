@@ -742,6 +742,7 @@ class Problem(_pyoomph.Problem):
         self._azimuthal_mode_param_m=None
         self._normal_mode_param_k=None
         self._azimuthal_stability=_AzimuthalStabilityInfo()
+        self._bifurcation_eigenvector_scaling:Literal["unit","auto"]="unit" # last choice passed to activate_bifurcation_tracking, so an adaption can restore it
         self._bifurcation_reactivation_after_adaptation=None
         self._cartesian_normal_mode_stability=_CartesianNormalModeStabilityInfo()
         self._bifurcation_tracking_parameter_name:str | None=None
@@ -1843,7 +1844,9 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("Check on the bifurcation tracking, whether the values of m and k are still correct")
             self._adapt_eigenindex=0 # We will adapt with the first eigenfunction, which is the one that is critical at the bifurcation point. We could also make this user-definable in the future
             self.deactivate_bifurcation_tracking()            
-            self._bifurcation_reactivation_after_adaptation={"mode":biftrack_mode,"param":biftrack_param,"azimuthal_m":m,"cartesian_k":k}
+            # Carry the eigenvector-scaling choice across the adaption too, so that reactivating
+            # does not silently drop back to the default constraint scaling.
+            self._bifurcation_reactivation_after_adaptation={"mode":biftrack_mode,"param":biftrack_param,"azimuthal_m":m,"cartesian_k":k,"eigenvector_scaling":self._bifurcation_eigenvector_scaling}
         #Resetting the element error override
         if self._custom_assembler is not None:
             raise RuntimeError("Adaption with custom assembler not supported yet")
@@ -4412,7 +4415,7 @@ class Problem(_pyoomph.Problem):
             info=self._bifurcation_reactivation_after_adaptation
             self.deactivate_bifurcation_tracking()            
             print("Reactivating bifurcation tracking after adaption with info",info,"eigenvalue",self._last_eigenvalues)
-            self.activate_bifurcation_tracking(info["param"],info["mode"],azimuthal_mode=info["azimuthal_m"],cartesian_wavenumber_k=info["cartesian_k"])
+            self.activate_bifurcation_tracking(info["param"],info["mode"],azimuthal_mode=info["azimuthal_m"],cartesian_wavenumber_k=info["cartesian_k"],eigenvector_scaling=info.get("eigenvector_scaling","unit"))
             self._bifurcation_reactivation_after_adaptation=None
             #self.reset_arc_length_parameters() # There is not much you can do here
             
@@ -4899,6 +4902,12 @@ class Problem(_pyoomph.Problem):
         """
         if spatial_adapt>0 and self.get_bifurcation_tracking_mode()!="":
             raise RuntimeError("Cannot perform spatial adaptation during arclength continuation when bifurcation tracking is active. You can do the arclength step with spatial_adapt=0 followed by a solve(spatial_adapt="+str(spatial_adapt)+") to achieve a similar effect.")
+        if self.is_distributed() and self.get_bifurcation_tracking_mode()!="":
+            # Arclength continuation needs the dofs at history time levels (Problem::get_dofs(t,...)),
+            # which are still refused when distributed -- otherwise this dies several frames deep in
+            # C++ with a message about history dofs rather than about the thing being attempted.
+            # Locating a bifurcation with solve() does work distributed; continuing it does not yet.
+            raise RuntimeError("Arclength continuation while bifurcation tracking is active is not supported on a distributed (--distribute) problem yet (it needs history dofs, which are not distributed). A plain solve() to locate the bifurcation does work distributed.")
         self._activate_solver_callback()        
         self.invalidate_cached_mesh_data()
         if not self.is_initialised():
@@ -5476,7 +5485,7 @@ class Problem(_pyoomph.Problem):
         """
         self.activate_bifurcation_tracking(None,bifurcation_type=branch_type,eigenvector=eigenvector,eigenvalue_for_branch_tracking=eigenvalue)
 
-    def activate_bifurcation_tracking(self,parameter:str | _pyoomph.GiNaC_GlobalParam | None,bifurcation_type:Literal["hopf", "fold", "pitchfork", "azimuthal", "cartesian_normal_mode", "real", "complex", "normal_mode"] | None=None,blocksolve:bool=False,eigenvector:NPFloatArray | NPComplexArray | int | None=None,omega:float | None=None,azimuthal_mode:int | None=None,cartesian_wavenumber_k:ExpressionOrNum | None=None,eigenvalue_for_branch_tracking:complex | None=None):
+    def activate_bifurcation_tracking(self,parameter:str | _pyoomph.GiNaC_GlobalParam | None,bifurcation_type:Literal["hopf", "fold", "pitchfork", "azimuthal", "cartesian_normal_mode", "real", "complex", "normal_mode"] | None=None,blocksolve:bool=False,eigenvector:NPFloatArray | NPComplexArray | int | None=None,omega:float | None=None,azimuthal_mode:int | None=None,cartesian_wavenumber_k:ExpressionOrNum | None=None,eigenvalue_for_branch_tracking:complex | None=None,eigenvector_scaling:Literal["unit","auto"]="unit"):
         """
         Activates bifurcation tracking for the specified parameter and bifurcation type. Subsequent calls of solve(...) and arclength_continuation(...) will then track the bifurcation.
 
@@ -5487,9 +5496,18 @@ class Problem(_pyoomph.Problem):
             eigenvector (Optional[Union[NPFloatArray, NPComplexArray, int]]): The eigenvector to use for tracking. Defaults to None, which means the eigenvector corresponding to the eigenvalue with largest real part. Can be either an index or a custom vector.
             omega (Optional[float]): The omega value for Hopf bifurcation tracking. Defaults to None, then it will be Im(lambda).
             azimuthal_mode (Optional[int]): The azimuthal mode for azimuthal bifurcation tracking. Defaults to None.
+            eigenvector_scaling: How the eigenvector normalization constraint is scaled. "unit" (default) keeps the
+                historical behaviour: the eigenvector guess is normalized to unit length and the constraint reads
+                c.y = 1, so on a problem with N degrees of freedom the eigenvector unknowns are of order 1/sqrt(N).
+                "auto" instead normalizes the guess by its largest entry and moves the constraint's right-hand side
+                to match, keeping the eigenvector unknowns and the constraint row of order one however large the
+                problem is. This is recommended for very large systems. It does not move the bifurcation itself,
+                only the (always arbitrary) amplitude of the reported eigenfunction.
         """
 
-        self._require_non_distributed("Bifurcation tracking")
+        # Distributed (--distribute) support is decided per bifurcation type AFTER the type has been
+        # resolved (see the check further down); no blanket refusal here anymore.
+        self._bifurcation_eigenvector_scaling=eigenvector_scaling
         self.reset_arc_length_parameters()
 
         if parameter is None:
@@ -5606,6 +5624,15 @@ class Problem(_pyoomph.Problem):
                     print("WARNING: Bifurcation tracking in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this warning.")
             if not self.is_quiet():
                 print("Bifurcation tracking activated for "+parameter)
+        if self.is_distributed():
+            # The handlers ported to distributed operation in src/bifurcation.cpp. The remaining
+            # refusals sit on genuinely serial machinery (blocksolve rebuilds replicated dof
+            # vectors; orbit tracking overwrites arbitrary global dofs during assembly).
+            _distributed_supported={"fold","hopf","pitchfork","azimuthal","cartesian_normal_mode"}
+            if bifurcation_type not in _distributed_supported:
+                raise RuntimeError("Bifurcation tracking of type '"+str(bifurcation_type)+"' is not supported on a distributed (--distribute) problem yet. Run it without --distribute.")
+            if blocksolve:
+                raise RuntimeError("blocksolve=True is not supported for bifurcation tracking on a distributed (--distribute) problem")
         self._bifurcation_tracking_parameter_name=parameter
         if bifurcation_type=="fold":
 #            must_reapply_bcs=self._equation_system._before_eigen_solve(self.get_eigen_solver(), 0)
@@ -5620,9 +5647,13 @@ class Problem(_pyoomph.Problem):
                 eigenvector = next(iter(self.get_last_eigenvectors()), None)
             assert not isinstance(eigenvector,int)
             if eigenvector is None or len(eigenvector)==0:
-                self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,[],[],0.0,{})
+                if self.is_distributed():
+                    # The no-guess fold constructor derives its guess from a serial linear solve on
+                    # a replicated vector; the C++ side throws the same way, but this traceback is clearer.
+                    raise RuntimeError("Fold tracking on a distributed (--distribute) problem requires an explicit eigenvector guess -- solve an eigenproblem first or pass eigenvector=...")
+                self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,[],[],0.0,{},eigenvector_scaling)
             else:
-                self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,numpy.real(eigenvector),[],0.0,{}) #type:ignore
+                self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,numpy.real(eigenvector),[],0.0,{},eigenvector_scaling) #type:ignore
         elif bifurcation_type=="hopf":
             if azimuthal_mode is not None or cartesian_wavenumber_k is not None:
                 raise RuntimeError("Cannot use azimuthal_mode or cartesian_wavenumber_k for Hopf solving")
@@ -5649,7 +5680,7 @@ class Problem(_pyoomph.Problem):
                 #eigenvector = prerotate_eigenvector(eigenvector)
                 #print(eigenvector)
 
-                self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,numpy.real(eigenvector),numpy.imag(eigenvector),omega,{}) #type:ignore
+                self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,numpy.real(eigenvector),numpy.imag(eigenvector),omega,{},eigenvector_scaling) #type:ignore
         elif bifurcation_type=="pitchfork":
             if azimuthal_mode is not None or cartesian_wavenumber_k is not None:
                 raise RuntimeError("Cannot use azimuthal_mode or cartesian_wavenumber_k for pitchfork solving")
@@ -5659,7 +5690,7 @@ class Problem(_pyoomph.Problem):
                 eigenvector=next(iter(self.get_last_eigenvectors()),None)
             if eigenvector is None:
                 raise RuntimeError("Pitchfork tracking requires at least a symmetry vector passed via the eigenvector kwarg")
-            self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,numpy.real(eigenvector),[],0.0,{}) #type:ignore
+            self._start_bifurcation_tracking(parameter,bifurcation_type,blocksolve,numpy.real(eigenvector),[],0.0,{},eigenvector_scaling) #type:ignore
         elif bifurcation_type=="azimuthal":
             if self._azimuthal_mode_param_m is None:
                 raise RuntimeError("Cannot use azimuthal bifurcation tracking if not called setup_for_stability_analysis(azimuthal_stability=True) before")
@@ -5714,7 +5745,7 @@ class Problem(_pyoomph.Problem):
             contribs={"azimuthal_real_eigen":self._azimuthal_stability.real_contribution_name,"azimuthal_imag_eigen":self._azimuthal_stability.imag_contribution_name}
 
   
-            self._start_bifurcation_tracking(parameter, bifurcation_type, blocksolve, numpy.real(eigenvector),numpy.imag(eigenvector), omega,contribs) #type:ignore
+            self._start_bifurcation_tracking(parameter, bifurcation_type, blocksolve, numpy.real(eigenvector),numpy.imag(eigenvector), omega,contribs,eigenvector_scaling) #type:ignore
             self.assembly_handler_pt().set_global_equations_forced_zero(base_zero_dofs,eigen_zero_dofs) #type:ignore
             
         elif bifurcation_type=="cartesian_normal_mode":            
@@ -5771,7 +5802,7 @@ class Problem(_pyoomph.Problem):
             #print("GOING FOR IT ",parameter, bifurcation_type, blocksolve,  -omega,contribs)
             #print("KVALUE",self._normal_mode_param_k.value,"HAS IMAG",has_imag)
             
-            self._start_bifurcation_tracking(parameter, bifurcation_type, blocksolve, numpy.real(eigenvector),numpy.imag(eigenvector), omega,contribs) #type:ignore
+            self._start_bifurcation_tracking(parameter, bifurcation_type, blocksolve, numpy.real(eigenvector),numpy.imag(eigenvector), omega,contribs,eigenvector_scaling) #type:ignore
             self.assembly_handler_pt().set_global_equations_forced_zero(base_zero_dofs,eigen_zero_dofs) #type:ignore            
             
         else:

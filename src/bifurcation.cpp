@@ -165,6 +165,265 @@ namespace pyoomph
 
   }
 
+  //////////////////////////////////////////////////////////
+  // AugmentedDofDistributionHelper -- see bifurcation.hpp for the design rationale.
+  //////////////////////////////////////////////////////////
+
+  void AugmentedDofDistributionHelper::initialise(Problem *problem)
+  {
+    Problem_pt = problem;
+#ifdef OOMPH_HAS_MPI
+    Distributed = problem->distributed();
+    if (Distributed)
+    {
+      // Keep the problem's original distribution OBJECT alive: the halo scheme built below stores
+      // a raw pointer to it, and global_dof_pt() resolves base equations against it while the
+      // problem itself carries the augmented distribution.
+      Base_distribution_pt = problem->GetDofDistributionPt();
+      problem->RebuildDofHaloScheme();
+    }
+    else
+#endif
+    {
+      Base_distribution_copy.build(*problem->GetDofDistributionPt());
+    }
+  }
+
+  oomph::LinearAlgebraDistribution *AugmentedDofDistributionHelper::base_dist_pt()
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Distributed) return Base_distribution_pt;
+#endif
+    return &Base_distribution_copy;
+  }
+
+  unsigned AugmentedDofDistributionHelper::base_nrow() const
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Distributed) return Base_distribution_pt->nrow();
+#endif
+    return Base_distribution_copy.nrow();
+  }
+
+  unsigned AugmentedDofDistributionHelper::base_nrow_local() const
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Distributed) return Base_distribution_pt->nrow_local();
+#endif
+    return Base_distribution_copy.nrow();
+  }
+
+  unsigned AugmentedDofDistributionHelper::base_first_row() const
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Distributed) return Base_distribution_pt->first_row();
+#endif
+    return 0;
+  }
+
+  void AugmentedDofDistributionHelper::build_base_vector(oomph::DoubleVectorWithHaloEntries &v) const
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Distributed)
+    {
+      v.build(Base_distribution_pt, 0.0);
+      v.build_halo_scheme(Problem_pt->GetHaloSchemePt());
+      return;
+    }
+#endif
+    v.build(&Base_distribution_copy, 0.0);
+  }
+
+  void AugmentedDofDistributionHelper::setup_count_and_nelement(oomph::DoubleVectorWithHaloEntries &count, unsigned &nelement) const
+  {
+    unsigned n_element = Problem_pt->mesh_pt()->nelement();
+    unsigned n_non_halo_element_local = 0;
+    for (unsigned e = 0; e < n_element; e++)
+    {
+      GeneralisedElement *elem_pt = Problem_pt->mesh_pt()->element_pt(e);
+#ifdef OOMPH_HAS_MPI
+      // Halo elements are not assembled, so they must not enter the per-equation weights either --
+      // otherwise the 1/Count factors of the normalization constraint no longer telescope to 1.
+      if (elem_pt->is_halo()) continue;
+#endif
+      ++n_non_halo_element_local;
+      unsigned n_var = elem_pt->ndof();
+      for (unsigned n = 0; n < n_var; n++)
+      {
+        count.global_value(elem_pt->eqn_number(n)) += 1.0;
+      }
+    }
+#ifdef OOMPH_HAS_MPI
+    if (Distributed)
+    {
+      // An equation on a rank boundary is touched by elements of several ranks: make Count the
+      // global element count per equation, and Nelement the global non-halo element count (the
+      // -1/Nelement constants of the normalization residual must sum to -1 over ALL ranks).
+      count.sum_all_halo_and_haloed_values();
+      MPI_Allreduce(&n_non_halo_element_local, &nelement, 1, MPI_UNSIGNED, MPI_SUM,
+                    Problem_pt->communicator_pt()->mpi_comm());
+      return;
+    }
+#endif
+    nelement = n_non_halo_element_local;
+  }
+
+  void AugmentedDofDistributionHelper::build_augmented_dofs(const std::vector<Block> &naive_layout)
+  {
+    const unsigned Ndof = base_nrow();
+#ifdef OOMPH_HAS_MPI
+    if (Distributed)
+    {
+      const unsigned my_rank = Problem_pt->communicator_pt()->my_rank();
+      const unsigned nproc = Problem_pt->communicator_pt()->nproc();
+
+      // Naive start offset of each block in the historical [base | k*Ndof+m] numbering
+      std::vector<unsigned long> naive_start(naive_layout.size() + 1);
+      naive_start[0] = Ndof; // the base dofs come first in every layout
+      for (unsigned b = 0; b < naive_layout.size(); b++)
+        naive_start[b + 1] = naive_start[b] + (naive_layout[b].vec ? Ndof : 1);
+      const unsigned long total = naive_start[naive_layout.size()];
+
+      // Per-rank interleaved translation table, modeled on upstream PitchForkHandler
+      // (assembly_handler.cc): rank d's augmented rows are its base rows, then -- in naive block
+      // order -- its rows of each eigenvector block, with each scalar as one row on rank 0.
+      Global_eqn_number.assign(total, 0);
+      unsigned long global_eqn_count = 0;
+      unsigned long augmented_first_row = 0, augmented_n_row_local = 0;
+      for (unsigned d = 0; d < nproc; d++)
+      {
+        if (my_rank == d) augmented_first_row = global_eqn_count;
+        const unsigned n_row_local = Base_distribution_pt->nrow_local(d);
+        const unsigned first_row = Base_distribution_pt->first_row(d);
+        for (unsigned n = 0; n < n_row_local; n++)
+        {
+          Global_eqn_number[first_row + n] = global_eqn_count++;
+        }
+        for (unsigned b = 0; b < naive_layout.size(); b++)
+        {
+          if (naive_layout[b].vec)
+          {
+            for (unsigned n = 0; n < n_row_local; n++)
+            {
+              Global_eqn_number[naive_start[b] + first_row + n] = global_eqn_count++;
+            }
+          }
+          else if (d == 0)
+          {
+            Global_eqn_number[naive_start[b]] = global_eqn_count++;
+          }
+        }
+        if (my_rank == d) augmented_n_row_local = global_eqn_count - augmented_first_row;
+      }
+
+      // Push the locally owned augmented dofs in exactly the local row order of the table above
+      // (the Newton update writes dx[l] onto Dof_pt[l] for l < nrow_local, so any mismatch here
+      // silently applies increments to the wrong unknowns).
+      const unsigned n_row_local = Base_distribution_pt->nrow_local();
+      for (unsigned b = 0; b < naive_layout.size(); b++)
+      {
+        if (naive_layout[b].vec)
+        {
+          for (unsigned n = 0; n < n_row_local; n++)
+          {
+            Problem_pt->GetDofPtr().push_back(&(*naive_layout[b].vec)[n]);
+          }
+        }
+        else if (my_rank == 0)
+        {
+          Problem_pt->GetDofPtr().push_back(naive_layout[b].scalar_pt);
+        }
+      }
+
+      Augmented_distribution_pt = new oomph::LinearAlgebraDistribution(
+          Problem_pt->communicator_pt(), (unsigned)augmented_first_row, (unsigned)augmented_n_row_local, (unsigned)total);
+      Problem_pt->SetDofDistributionPt(Augmented_distribution_pt);
+    }
+    else
+#endif
+    {
+      // Replicated: historical behavior -- every rank pushes everything, non-distributed in-place
+      // build (see the comment in MyFoldHandler's constructor for why non-distributed is essential).
+      unsigned long total = Ndof;
+      for (unsigned b = 0; b < naive_layout.size(); b++)
+      {
+        if (naive_layout[b].vec)
+        {
+          for (unsigned n = 0; n < Ndof; n++)
+          {
+            Problem_pt->GetDofPtr().push_back(&(*naive_layout[b].vec)[n]);
+          }
+          total += Ndof;
+        }
+        else
+        {
+          Problem_pt->GetDofPtr().push_back(naive_layout[b].scalar_pt);
+          total += 1;
+        }
+      }
+      Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(), (unsigned)total, false);
+    }
+    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+  }
+
+  double AugmentedDofDistributionHelper::allreduce_max(double local) const
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Distributed)
+    {
+      double global = local;
+      MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_MAX, Problem_pt->communicator_pt()->mpi_comm());
+      return global;
+    }
+#endif
+    return local;
+  }
+
+  double AugmentedDofDistributionHelper::allreduce_sum(double local) const
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Distributed)
+    {
+      double global = local;
+      MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_SUM, Problem_pt->communicator_pt()->mpi_comm());
+      return global;
+    }
+#endif
+    return local;
+  }
+
+  void AugmentedDofDistributionHelper::synchronise_scalars(std::initializer_list<double *> scalars) const
+  {
+#ifdef OOMPH_HAS_MPI
+    if (!Distributed) return;
+    std::vector<double> buf;
+    buf.reserve(scalars.size());
+    for (double *s : scalars) buf.push_back(*s);
+    MPI_Bcast(buf.data(), (int)buf.size(), MPI_DOUBLE, 0, Problem_pt->communicator_pt()->mpi_comm());
+    unsigned i = 0;
+    for (double *s : scalars) *s = buf[i++];
+#endif
+  }
+
+  void AugmentedDofDistributionHelper::restore_base_distribution()
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Distributed)
+    {
+      Problem_pt->GetDofPtr().resize(Base_distribution_pt->nrow_local());
+      Problem_pt->SetDofDistributionPt(Base_distribution_pt);
+      delete Augmented_distribution_pt;
+      Augmented_distribution_pt = NULL;
+      Global_eqn_number.clear();
+      Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+      return;
+    }
+#endif
+    Problem_pt->GetDofPtr().resize(Base_distribution_copy.nrow());
+    Problem_pt->GetDofDistributionPt()->build(Base_distribution_copy);
+    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+  }
+
 
   //====================================================================
   /// Constructor: Initialise the hopf handler by solving for an initial guess of Phi
@@ -175,37 +434,30 @@ namespace pyoomph
   MyHopfHandler::MyHopfHandler(Problem *const &problem_pt,
                                double *const &parameter_pt) : Solve_which_system(0), Parameter_pt(parameter_pt), Omega(0.0)
   {
-
+    // This constructor derives the eigenvector guess from a SERIAL linear solve on a replicated
+    // vector -- not portable to a distributed problem, where a guess must be supplied explicitly.
+    if (problem_pt->distributed())
+    {
+      throw_runtime_error("Hopf tracking on a distributed (--distribute) problem requires an explicit eigenvector guess -- solve an eigenproblem first or pass eigenvector=...");
+    }
     call_param_change_handler = false;
     eigenweight = 1.0;
     // Set the problem pointer
     Problem_pt = problem_pt;
     // Set the number of non-augmented degrees of freedom
     Ndof = problem_pt->ndof();
+    Dist_helper.initialise(problem_pt);
 
     // create the linear algebra distribution for this solver
     // currently only global (non-distributed) distributions are allowed
     LinearAlgebraDistribution *dist_pt = new LinearAlgebraDistribution(problem_pt->communicator_pt(), Ndof, false);
 
     // Resize the vectors of additional dofs
-    Phi.resize(Ndof);
-    Psi.resize(Ndof);
+    Dist_helper.build_base_vector(Phi);
+    Dist_helper.build_base_vector(Psi);
     C.resize(Ndof);
-    Count.resize(Ndof, 0);
-
-    // Loop over all the elements in the problem
-    unsigned n_element = problem_pt->mesh_pt()->nelement();
-    for (unsigned e = 0; e < n_element; e++)
-    {
-      GeneralisedElement *elem_pt = problem_pt->mesh_pt()->element_pt(e);
-      // Loop over the local freedoms in an element
-      unsigned n_var = elem_pt->ndof();
-      for (unsigned n = 0; n < n_var; n++)
-      {
-        // Increase the associated global equation number counter
-        ++Count[elem_pt->eqn_number(n)];
-      }
-    }
+    Dist_helper.build_base_vector(Count);
+    Dist_helper.setup_count_and_nelement(Count, Nelement);
 
     // Calculate the value Phi by
     // solving the system JPhi = dF/dlambda
@@ -256,12 +508,11 @@ namespace pyoomph
     }
     length = sqrt(length);
 
-    // Now add the real part of the null space components to the problem
-    // unknowns and initialise it all
+    // Now initialise the real part of the null space components (this constructor is
+    // serial-by-construction, so Phi/Psi hold all Ndof rows here)
     // This is dumb at the moment ... fix with eigensolver?
     for (unsigned n = 0; n < Ndof; n++)
     {
-      problem_pt->GetDofPtr().push_back(&Phi[n]);
       C[n] = Phi[n] = -x[n] / length;
     }
 
@@ -282,22 +533,12 @@ namespace pyoomph
       }
     }
 
-    // Next add the imaginary parts of the null space components to the problem
-    for (unsigned n = 0; n < Ndof; n++)
-    {
-      problem_pt->GetDofPtr().push_back(&Psi[n]);
-    }
-    // Now add the parameter
-    problem_pt->GetDofPtr().push_back(parameter_pt);
-    // Finally add the frequency
-    problem_pt->GetDofPtr().push_back(&Omega);
-
-    // rebuild the dof dist
-    Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(),
-                                              Ndof * 3 + 2, false);
-    
-    // Remove all previous sparse storage used during Jacobian assembly
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+    // Add [Phi | Psi | param | Omega] to the problem unknowns and rebuild the augmented dof
+    // distribution (non-distributed in place, as this constructor refuses --distribute above)
+    Dist_helper.build_augmented_dofs({AugmentedDofDistributionHelper::Block::vector(&Phi),
+                                      AugmentedDofDistributionHelper::Block::vector(&Psi),
+                                      AugmentedDofDistributionHelper::Block::scalar(Parameter_pt),
+                                      AugmentedDofDistributionHelper::Block::scalar(&Omega)});
 
     // delete the dist_pt
     delete dist_pt;
@@ -322,59 +563,51 @@ namespace pyoomph
     Problem_pt = problem_pt;
     // Set the number of non-augmented degrees of freedom
     Ndof = problem_pt->ndof();
+    Dist_helper.initialise(problem_pt);
 
     // Resize the vectors of additional dofs
-    Phi.resize(Ndof);
-    Psi.resize(Ndof);
+    Dist_helper.build_base_vector(Phi);
+    Dist_helper.build_base_vector(Psi);
     C.resize(Ndof);
-    Count.resize(Ndof, 0);
+    Dist_helper.build_base_vector(Count);
+    Dist_helper.setup_count_and_nelement(Count, Nelement);
 
-    // Loop over all the elements in the problem
-    unsigned n_element = problem_pt->mesh_pt()->nelement();
-    for (unsigned e = 0; e < n_element; e++)
+    // Rotate/normalise the guess on REPLICATED copies (the guesses arrive full-length and
+    // identical on every rank, and the rotation involves global dot products), then scatter the
+    // owned rows into the -- possibly distributed -- unknowns.
+    oomph::Vector<double> phi_rot(Ndof), psi_rot(Ndof);
+    for (unsigned n = 0; n < Ndof; n++)
     {
-      GeneralisedElement *elem_pt = problem_pt->mesh_pt()->element_pt(e);
-      // Loop over the local freedoms in an element
-      unsigned n_var = elem_pt->ndof();
-      for (unsigned n = 0; n < n_var; n++)
-      {
-        // Increase the associated global equation number counter
-        ++Count[elem_pt->eqn_number(n)];
-      }
+      phi_rot[n] = phi[n];
+      psi_rot[n] = psi[n];
     }
-
-    // Normalise the guess for phi
+    rotate_complex_eigenvector_nicely(phi_rot, psi_rot);
 
     for (unsigned n = 0; n < Ndof; n++)
     {
-      Phi[n]=phi[n];
-      Psi[n]=psi[n];
+      C[n] = phi_rot[n];
     }
-    rotate_complex_eigenvector_nicely(Phi, Psi);
-
-    for (unsigned n = 0; n < Ndof; n++)
+    const unsigned n_row_local = Dist_helper.base_nrow_local();
+    const unsigned first_row = Dist_helper.base_first_row();
+    for (unsigned n = 0; n < n_row_local; n++)
     {
-      problem_pt->GetDofPtr().push_back(&Phi[n]);
-      C[n] = Phi[n];
+      Phi[n] = phi_rot[first_row + n];
+      Psi[n] = psi_rot[first_row + n];
     }
-
-    for (unsigned n = 0; n < Ndof; n++)
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
     {
-      problem_pt->GetDofPtr().push_back(&Psi[n]);
+      Phi.synchronise();
+      Psi.synchronise();
     }
+#endif
 
-
-    // Now add the parameter
-    problem_pt->GetDofPtr().push_back(parameter_pt);
-    // Finally add the frequency
-    problem_pt->GetDofPtr().push_back(&Omega);
-
-    // rebuild the Dof_distribution_pt
-    Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(),
-                                              Ndof * 3 + 2, false);
-    //std::cout << "Rebuild DofDistribution for " << Ndof * 3 + 2 << " dofs vs " << Problem_pt->GetDofDistributionPt()->nrow_local() << " PTR Is " << Problem_pt->GetDofDistributionPt() << std::endl;                                            
-    // Remove all previous sparse storage used during Jacobian assembly
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+    // Add [Phi | Psi | param | Omega] and rebuild the augmented dof distribution (non-distributed
+    // in place when replicated, pointer swap when distributed; see AugmentedDofDistributionHelper)
+    Dist_helper.build_augmented_dofs({AugmentedDofDistributionHelper::Block::vector(&Phi),
+                                      AugmentedDofDistributionHelper::Block::vector(&Psi),
+                                      AugmentedDofDistributionHelper::Block::scalar(Parameter_pt),
+                                      AugmentedDofDistributionHelper::Block::scalar(&Omega)});
   }
 
   //=======================================================================
@@ -394,20 +627,25 @@ namespace pyoomph
       delete block_hopf_solver_pt;
     }
     // Now return the problem to its original size
-    Problem_pt->GetDofPtr().resize(Ndof);
-    Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(),
-                                              Ndof, false);
-    // Remove all previous sparse storage used during Jacobian assembly
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+    Dist_helper.restore_base_distribution();
   }
 
   void MyHopfHandler::set_eigenweight(double ew)
   {
-    for (unsigned n = 0; n < Ndof; n++)
+    // Phi/Psi are the unknowns here: rescale the owned rows and refresh the halos
+    const unsigned n_row_local = Dist_helper.distributed() ? Dist_helper.base_nrow_local() : Ndof;
+    for (unsigned n = 0; n < n_row_local; n++)
     {
       Phi[n] *= ew / eigenweight;
       Psi[n] *= ew / eigenweight;
     }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      Phi.synchronise();
+      Psi.synchronise();
+    }
+#endif
     eigenweight = ew;
   }
 
@@ -522,7 +760,8 @@ namespace pyoomph
     {
       global_eqn = 3 * Ndof + 1;
     }
-    return global_eqn;
+    // Naive numbering -> per-rank interleaved augmented numbering when distributed (identity otherwise)
+    return Dist_helper.global_eqn(global_eqn);
   }
 
   //==================================================================
@@ -559,8 +798,7 @@ namespace pyoomph
       bool lambda_tracking=(Parameter_pt==Problem_pt->get_lambda_tracking_real());
 
       // Initialise the pen-ultimate residual
-      residuals[3 * raw_ndof] = -1.0 /
-                                (double)(Problem_pt->mesh_pt()->nelement()) * eigenweight;
+      residuals[3 * raw_ndof] = -Normalization_rhs / (double)Nelement * eigenweight;
       residuals[3 * raw_ndof + 1] = 0.0;
 
       // Now multiply to fill in the residuals
@@ -573,20 +811,20 @@ namespace pyoomph
           unsigned global_unknown = elem_pt->eqn_number(j);
           // Real part
           residuals[raw_ndof + i] +=
-              jacobian(i, j) * Phi[global_unknown] - Omega * M(i, j) * Psi[global_unknown];
+              jacobian(i, j) * Phi.global_value(global_unknown) - Omega * M(i, j) * Psi.global_value(global_unknown);
           // Imaginary part
           residuals[2 * raw_ndof + i] +=
-              jacobian(i, j) * Psi[global_unknown] + Omega * M(i, j) * Phi[global_unknown];
+              jacobian(i, j) * Psi.global_value(global_unknown) + Omega * M(i, j) * Phi.global_value(global_unknown);
         }
         // Get the global equation number
         unsigned global_eqn = elem_pt->eqn_number(i);
 
         // Real part
-        residuals[3 * raw_ndof] += (Phi[global_eqn] * C[global_eqn]) /
-                                   Count[global_eqn];
+        residuals[3 * raw_ndof] += (Phi.global_value(global_eqn) * C[global_eqn]) /
+                                   Count.global_value(global_eqn);
         // Imaginary part
-        residuals[3 * raw_ndof + 1] += (Psi[global_eqn] * C[global_eqn]) /
-                                       Count[global_eqn];
+        residuals[3 * raw_ndof + 1] += (Psi.global_value(global_eqn) * C[global_eqn]) /
+                                       Count.global_value(global_eqn);
       }
 
       if (lambda_tracking)
@@ -596,8 +834,8 @@ namespace pyoomph
           for (unsigned j = 0; j < raw_ndof; j++)
           {
             unsigned global_unknown = elem_pt->eqn_number(j);
-            residuals[raw_ndof + i] += (*Parameter_pt) * M(i, j) * Phi[global_unknown];          
-            residuals[2 * raw_ndof + i] +=  (*Parameter_pt) * M(i, j) * Psi[global_unknown];              
+            residuals[raw_ndof + i] += (*Parameter_pt) * M(i, j) * Phi.global_value(global_unknown);
+            residuals[2 * raw_ndof + i] +=  (*Parameter_pt) * M(i, j) * Psi.global_value(global_unknown);
           }
         }
       }
@@ -676,7 +914,7 @@ namespace pyoomph
   {
 
     bool lambda_tracking=(Parameter_pt==Problem_pt->get_lambda_tracking_real());
-    bool ana_dparam = lambda_tracking || Problem_pt->is_dparameter_calculated_analytically(Problem_pt->GetDofPtr()[3 * Ndof]);
+    bool ana_dparam = lambda_tracking || Problem_pt->is_dparameter_calculated_analytically(Parameter_pt);
     bool ana_hessian = ana_dparam && Problem_pt->are_hessian_products_calculated_analytically() && dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
 
     // The standard case
@@ -707,13 +945,13 @@ namespace pyoomph
             jacobian(2 * raw_ndof + n, 2 * raw_ndof + m) = jacobian(n, m);
             jacobian(2 * raw_ndof + n, raw_ndof + m) = Omega * M(n, m);
             unsigned global_eqn = elem_pt->eqn_number(m);
-            jacobian(raw_ndof + n, 3 * raw_ndof + 1) -= M(n, m) * Psi[global_eqn];
-            jacobian(2 * raw_ndof + n, 3 * raw_ndof + 1) += M(n, m) * Phi[global_eqn];
+            jacobian(raw_ndof + n, 3 * raw_ndof + 1) -= M(n, m) * Psi.global_value(global_eqn);
+            jacobian(2 * raw_ndof + n, 3 * raw_ndof + 1) += M(n, m) * Phi.global_value(global_eqn);
           }
 
           unsigned local_eqn = elem_pt->eqn_number(n);
-          jacobian(3 * raw_ndof, raw_ndof + n) = C[local_eqn] / Count[local_eqn];
-          jacobian(3 * raw_ndof + 1, 2 * raw_ndof + n) = C[local_eqn] / Count[local_eqn];
+          jacobian(3 * raw_ndof, raw_ndof + n) = C[local_eqn] / Count.global_value(local_eqn);
+          jacobian(3 * raw_ndof + 1, 2 * raw_ndof + n) = C[local_eqn] / Count.global_value(local_eqn);
         }
 
         const double FD_step = this->FD_step;
@@ -726,9 +964,10 @@ namespace pyoomph
         // Loop over the dofs
         for (unsigned n = 0; n < raw_ndof; n++)
         {
-          // Just do the x's
-          unsigned long global_eqn = eqn_number(elem_pt, n);
-          double *unknown_pt = Problem_pt->GetDofPtr()[global_eqn];
+          // Just do the x's -- perturb via the element's own BASE equation number (halo-aware
+          // when distributed), not the handler's translated augmented number
+          unsigned long base_eqn = elem_pt->eqn_number(n);
+          double *unknown_pt = Problem_pt->global_dof_pt(base_eqn);
           double init = *unknown_pt;
           *unknown_pt += FD_step;
 
@@ -769,7 +1008,7 @@ namespace pyoomph
         if (ana_dparam)
         {
           Vector<double> dres_dparam(augmented_ndof, 0.0);
-          this->get_dresiduals_dparameter(elem_pt, Problem_pt->GetDofPtr()[3 * Ndof], dres_dparam);
+          this->get_dresiduals_dparameter(elem_pt, Parameter_pt, dres_dparam);
           for (unsigned m = 0; m < augmented_ndof - 2; m++)
           {
             jacobian(m, 3 * raw_ndof) = dres_dparam[m];
@@ -778,7 +1017,7 @@ namespace pyoomph
         else
         {
           // Now do the global parameter
-          double *unknown_pt = Problem_pt->GetDofPtr()[3 * Ndof];
+          double *unknown_pt = Parameter_pt;
           double init = *unknown_pt;
           *unknown_pt += FD_step;
 
@@ -839,8 +1078,8 @@ namespace pyoomph
         {
           unsigned global_eqn = elem_pt->eqn_number(i);
 
-          Eig_local[i] = Phi[global_eqn];
-          Eig_local[raw_ndof + i] = Psi[global_eqn];
+          Eig_local[i] = Phi.global_value(global_eqn);
+          Eig_local[raw_ndof + i] = Psi.global_value(global_eqn);
         }
         multi_assm.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_code_instance()->get_func_table()->current_res_jac, &residuals, &jacobian, &M));
 
@@ -849,7 +1088,7 @@ namespace pyoomph
         pyoomph_elem_pt->get_multi_assembly(multi_assm);
 
         // Residuals
-        residuals[3 * raw_ndof] = -1.0 / (double)(Problem_pt->mesh_pt()->nelement()) * eigenweight;
+        residuals[3 * raw_ndof] = -Normalization_rhs / (double)Nelement * eigenweight;
         residuals[3 * raw_ndof + 1] = 0.0;
         for (unsigned i = 0; i < raw_ndof; i++)
         {
@@ -863,8 +1102,8 @@ namespace pyoomph
             residuals[2 * raw_ndof + i] += jacobian(i, j) * Eig_local[raw_ndof + j] + Omega * M(i, j) * Eig_local[j];
           }
           unsigned global_eqn = elem_pt->eqn_number(i);
-          residuals[3 * raw_ndof] += (Phi[global_eqn] * C[global_eqn]) / Count[global_eqn];
-          residuals[3 * raw_ndof + 1] += (Psi[global_eqn] * C[global_eqn]) / Count[global_eqn];
+          residuals[3 * raw_ndof] += (Phi.global_value(global_eqn) * C[global_eqn]) / Count.global_value(global_eqn);
+          residuals[3 * raw_ndof + 1] += (Psi.global_value(global_eqn) * C[global_eqn]) / Count.global_value(global_eqn);
         }
         
         // Jacobian
@@ -892,8 +1131,8 @@ namespace pyoomph
           }
 
           unsigned local_eqn = elem_pt->eqn_number(n);
-          jacobian(3 * raw_ndof, raw_ndof + n) = C[local_eqn] / Count[local_eqn];         // dR[Param]/dPhi
-          jacobian(3 * raw_ndof + 1, 2 * raw_ndof + n) = C[local_eqn] / Count[local_eqn]; // dR[Omega]/dPsi
+          jacobian(3 * raw_ndof, raw_ndof + n) = C[local_eqn] / Count.global_value(local_eqn);         // dR[Param]/dPhi
+          jacobian(3 * raw_ndof + 1, 2 * raw_ndof + n) = C[local_eqn] / Count.global_value(local_eqn); // dR[Omega]/dPsi
         }
 
         if (lambda_tracking)
@@ -964,9 +1203,9 @@ namespace pyoomph
         {
           unsigned global_unknown = elem_pt->eqn_number(m);
           // Real part
-          residuals[n] += M(n, m) * Psi[global_unknown];
+          residuals[n] += M(n, m) * Psi.global_value(global_unknown);
           // Imaginary part
-          residuals[raw_ndof + n] -= M(n, m) * Phi[global_unknown];
+          residuals[raw_ndof + n] -= M(n, m) * Phi.global_value(global_unknown);
         }
       }
     } // End of complex augmented case
@@ -1012,12 +1251,12 @@ namespace pyoomph
           unsigned global_unknown = elem_pt->eqn_number(j);
           // Real part
           dres_dparam[raw_ndof + i] +=
-              djac_dparam(i, j) * Phi[global_unknown] +
-              Omega * dM_dparam(i, j) * Psi[global_unknown];
+              djac_dparam(i, j) * Phi.global_value(global_unknown) +
+              Omega * dM_dparam(i, j) * Psi.global_value(global_unknown);
           // Imaginary part
           dres_dparam[2 * raw_ndof + i] +=
-              djac_dparam(i, j) * Psi[global_unknown] -
-              Omega * dM_dparam(i, j) * Phi[global_unknown];
+              djac_dparam(i, j) * Psi.global_value(global_unknown) -
+              Omega * dM_dparam(i, j) * Phi.global_value(global_unknown);
         }
       }
     }
@@ -1068,9 +1307,20 @@ namespace pyoomph
   void MyHopfHandler::get_eigenfunction(
       Vector<DoubleVector> &eigenfunction)
   {
-    // There is a real and imaginary part of the null vector
+    // There is a real and imaginary part of the null vector. The contract is a globally
+    // replicated, non-distributed vector on every rank, so gather when distributed.
     eigenfunction.resize(2);
     LinearAlgebraDistribution dist(Problem_pt->communicator_pt(), Ndof, false);
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      eigenfunction[0] = Phi;
+      eigenfunction[1] = Psi;
+      eigenfunction[0].redistribute(&dist);
+      eigenfunction[1].redistribute(&dist);
+      return;
+    }
+#endif
     // Rebuild the vector
     eigenfunction[0].build(&dist, 0.0);
     eigenfunction[1].build(&dist, 0.0);
@@ -1084,9 +1334,32 @@ namespace pyoomph
 
   std::vector<std::complex<double>> MyHopfHandler::get_nicely_rotated_eigenfunction()
   {
+    // Gather the (possibly distributed) eigenvector into replicated copies first; the rotation
+    // involves global dot products and its result must be identical on every rank.
     std::vector<std::complex<double>> eigenfunction(Ndof);
-    oomph::Vector<double> PhiRot=Phi;
-    oomph::Vector<double> PsiRot=Psi;
+    oomph::Vector<double> PhiRot(Ndof), PsiRot(Ndof);
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      oomph::DoubleVector tmp_phi = Phi, tmp_psi = Psi;
+      std::vector<double> g_phi, g_psi;
+      Problem::gather_double_vector_to_global(tmp_phi, g_phi);
+      Problem::gather_double_vector_to_global(tmp_psi, g_psi);
+      for (unsigned n = 0; n < Ndof; n++)
+      {
+        PhiRot[n] = g_phi[n];
+        PsiRot[n] = g_psi[n];
+      }
+    }
+    else
+#endif
+    {
+      for (unsigned n = 0; n < Ndof; n++)
+      {
+        PhiRot[n] = Phi[n];
+        PsiRot[n] = Psi[n];
+      }
+    }
     rotate_complex_eigenvector_nicely(PhiRot,PsiRot);
     for (unsigned n = 0; n < Ndof; n++)
     {
@@ -1100,6 +1373,9 @@ namespace pyoomph
   //===================================================================
   void MyHopfHandler::solve_standard_system()
   {
+    // The block modes rebuild replicated in-place dof vectors -- refused when distributed
+    // (only reachable through the BlockHopfLinearSolver, which is refused there anyway)
+    if (Dist_helper.distributed()) throw_runtime_error("Hopf tracking block-solve modes are not supported on a distributed (--distribute) problem");
     if (Solve_which_system != 1)
     {
       Solve_which_system = 1;
@@ -1117,6 +1393,7 @@ namespace pyoomph
   //===================================================================
   void MyHopfHandler::solve_complex_system()
   {
+    if (Dist_helper.distributed()) throw_runtime_error("Hopf tracking block-solve modes are not supported on a distributed (--distribute) problem");
     // If we were not solving the complex system resize the unknowns
     // accordingly
     if (Solve_which_system != 2)
@@ -1142,6 +1419,7 @@ namespace pyoomph
   //=================================================================
   void MyHopfHandler::solve_full_system()
   {
+    if (Dist_helper.distributed() && Solve_which_system) throw_runtime_error("Hopf tracking block-solve modes are not supported on a distributed (--distribute) problem");
     // If we are starting from another system
     if (Solve_which_system)
     {
@@ -1178,33 +1456,107 @@ namespace pyoomph
   // continuation. Also prints diagnostic dot products of C against the current Phi/Psi.
   void MyHopfHandler::realign_C_vector()
   {
-
+    // The dof entries Ndof+n / 2*Ndof+n point INTO Phi/Psi, so read the members directly (owned
+    // rows plus a reduction when distributed) instead of the replicated dof-pointer table.
     double dot = 0.0;
     double doti = 0.0;
     double phisqr = 0.0;
     double psisqr = 0.0;
-    for (unsigned n = 0; n < Ndof; n++)
+    const unsigned n_row_local = Dist_helper.distributed() ? Dist_helper.base_nrow_local() : Ndof;
+    const unsigned first_row = Dist_helper.distributed() ? Dist_helper.base_first_row() : 0;
+    for (unsigned n = 0; n < n_row_local; n++)
     {
-      double phin = *(Problem_pt->GetDofPtr()[Ndof + n]);
-      double psin = *(Problem_pt->GetDofPtr()[2 * Ndof + n]);
-      dot += C[n] * phin;
+      double phin = Phi[n];
+      double psin = Psi[n];
+      dot += C[first_row + n] * phin;
       phisqr += phin * phin;
-      doti += C[n] * psin;
+      doti += C[first_row + n] * psin;
       psisqr += psin * psin;
     }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      double local_vals[4] = {dot, doti, phisqr, psisqr}, global_vals[4];
+      MPI_Allreduce(local_vals, global_vals, 4, MPI_DOUBLE, MPI_SUM, Problem_pt->communicator_pt()->mpi_comm());
+      dot = global_vals[0];
+      doti = global_vals[1];
+      phisqr = global_vals[2];
+      psisqr = global_vals[3];
+    }
+#endif
     std::cerr << "DOT OF C and PHi is " << dot << " and PHi^2 = " << phisqr << std::endl;
     std::cerr << "DOT OF C and Psi is " << doti << " and Psi^2 = " << psisqr << std::endl;
 
     double lf = eigenweight / sqrt(phisqr);
+    for (unsigned n = 0; n < n_row_local; n++)
+    {
+      Phi[n] *= lf;
+      Psi[n] *= lf;
+    }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      Phi.synchronise();
+      Psi.synchronise();
+      // C stays replicated: rebuild it from the gathered, freshly rescaled Phi
+      oomph::DoubleVector tmp_phi = Phi;
+      std::vector<double> g_phi;
+      Problem::gather_double_vector_to_global(tmp_phi, g_phi);
+      for (unsigned n = 0; n < Ndof; n++) C[n] = g_phi[n];
+      return;
+    }
+#endif
     for (unsigned n = 0; n < Ndof; n++)
     {
-      double *phin = (Problem_pt->GetDofPtr()[Ndof + n]);
-      double *psin = (Problem_pt->GetDofPtr()[2 * Ndof + n]);
-      (*phin) *= lf;
-      (*psin) *= lf;
-      C[n] = (*phin);
+      C[n] = Phi[n];
     }
   }
+
+  // Opt-in rescaling of the normalisation constraint; see the comment on the declaration in
+  // bifurcation.hpp for why. The max is taken over the real and imaginary parts JOINTLY, so the
+  // complex eigenvector is scaled as one object and its phase is untouched.
+  void MyHopfHandler::apply_maxabs_normalization()
+  {
+    const unsigned n_row_local = Dist_helper.distributed() ? Dist_helper.base_nrow_local() : Ndof;
+    const unsigned first_row = Dist_helper.distributed() ? Dist_helper.base_first_row() : 0;
+    double local_max = 0.0;
+    for (unsigned n = 0; n < n_row_local; n++)
+    {
+      local_max = std::max(local_max, std::fabs(Phi[n]));
+      local_max = std::max(local_max, std::fabs(Psi[n]));
+    }
+    const double m = Dist_helper.allreduce_max(local_max);
+    if (m <= 0.0) return;
+    for (unsigned n = 0; n < n_row_local; n++)
+    {
+      Phi[n] /= m;
+      Psi[n] /= m;
+    }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      Phi.synchronise();
+      Psi.synchronise();
+    }
+#endif
+    for (unsigned n = 0; n < Ndof; n++) C[n] /= m;
+    double local_dot = 0.0;
+    for (unsigned n = 0; n < n_row_local; n++) local_dot += C[first_row + n] * Phi[n];
+    Normalization_rhs = Dist_helper.allreduce_sum(local_dot) / eigenweight;
+  }
+
+#ifdef OOMPH_HAS_MPI
+  // After a Newton update only the owned rows of Phi/Psi (and, on rank 0, the parameter and
+  // Omega) are current: refresh the halo copies and broadcast the scalars. Called from
+  // Problem::synchronise_all_dofs at the end of each update.
+  void MyHopfHandler::synchronise()
+  {
+    if (!Dist_helper.distributed()) return;
+    Phi.synchronise();
+    Psi.synchronise();
+    Dist_helper.synchronise_scalars({Parameter_pt, &Omega});
+  }
+#endif
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1213,28 +1565,25 @@ namespace pyoomph
   // x; both Y and the fixed normalization vector Phi are initialized to this same direction.
   MyFoldHandler::MyFoldHandler(Problem *const &problem_pt, double *const &parameter_pt) : Solve_which_system(Full_augmented), Parameter_pt(parameter_pt)
   {
+    // This constructor derives the eigenvector guess from a SERIAL linear solve on a replicated
+    // vector -- not portable to a distributed problem, where a guess must be supplied explicitly.
+    if (problem_pt->distributed())
+    {
+      throw_runtime_error("Fold tracking on a distributed (--distribute) problem requires an explicit eigenvector guess -- solve an eigenproblem first or pass eigenvector=...");
+    }
     call_param_change_handler = false;
     eigenweight = 1.0;
     FD_step = 1e-8;
     Problem_pt = problem_pt;
     Ndof = problem_pt->ndof();
+    Dist_helper.initialise(problem_pt);
 
     LinearAlgebraDistribution *dist_pt = new LinearAlgebraDistribution(problem_pt->communicator_pt(), Ndof, false);
 
     Phi.resize(Ndof);
-    Y.resize(Ndof);
-    Count.resize(Ndof, 0);
-
-    unsigned n_element = problem_pt->mesh_pt()->nelement();
-    for (unsigned e = 0; e < n_element; e++)
-    {
-      GeneralisedElement *elem_pt = problem_pt->mesh_pt()->element_pt(e);
-      unsigned n_var = elem_pt->ndof();
-      for (unsigned n = 0; n < n_var; n++)
-      {
-        ++Count[elem_pt->eqn_number(n)];
-      }
-    }
+    Dist_helper.build_base_vector(Y);
+    Dist_helper.build_base_vector(Count);
+    Dist_helper.setup_count_and_nelement(Count, Nelement);
 
     LinearSolver *const linear_solver_pt = problem_pt->linear_solver_pt();
 
@@ -1253,7 +1602,6 @@ namespace pyoomph
     {
       linear_solver_pt->disable_resolve();
     }
-    problem_pt->GetDofPtr().push_back(parameter_pt);
     double length = 0.0;
     for (unsigned n = 0; n < Ndof; n++)
     {
@@ -1263,18 +1611,17 @@ namespace pyoomph
 
     for (unsigned n = 0; n < Ndof; n++)
     {
-      problem_pt->GetDofPtr().push_back(&Y[n]);
       Y[n] = Phi[n] = -x[n] / length;
     }
     // The augmented dof vector must be built NON-distributed, like the base problem's own
-    // (assign_eqn_numbers() builds it with false whenever the problem is not distributed, and
-    // bifurcation tracking refuses distributed problems anyway). With true, every rank of an
-    // mpirun took Dof_distribution_pt->nrow_local() as the length of its Newton update and wrote
-    // it into GetDofPtr()[0...], so rank 1 applied the eigenvector block's increment to the base
-    // dofs and nobody updated the parameter: the fold Newton solve diverged to inf under MPI
-    // while converging serially. Inherited from upstream oomph-lib, whose handlers do the same.
-    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 1, false);
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+    // (assign_eqn_numbers() builds it with false whenever the problem is not distributed; the
+    // distributed case takes the pointer-swap path inside the helper instead). With true, every
+    // rank of an mpirun took Dof_distribution_pt->nrow_local() as the length of its Newton update
+    // and wrote it into GetDofPtr()[0...], so rank 1 applied the eigenvector block's increment to
+    // the base dofs and nobody updated the parameter: the fold Newton solve diverged to inf under
+    // MPI while converging serially. Inherited from upstream oomph-lib, whose handlers do the same.
+    Dist_helper.build_augmented_dofs({AugmentedDofDistributionHelper::Block::scalar(Parameter_pt),
+                                      AugmentedDofDistributionHelper::Block::vector(&Y)});
     delete dist_pt;
   }
 
@@ -1287,21 +1634,13 @@ namespace pyoomph
     FD_step = 1e-8;
     Problem_pt = problem_pt;
     Ndof = problem_pt->ndof();
-    LinearAlgebraDistribution *dist_pt = new LinearAlgebraDistribution(problem_pt->communicator_pt(), Ndof, false);
+    Dist_helper.initialise(problem_pt);
     Phi.resize(Ndof);
-    Y.resize(Ndof);
-    Count.resize(Ndof, 0);
-    unsigned n_element = problem_pt->mesh_pt()->nelement();
-    for (unsigned e = 0; e < n_element; e++)
-    {
-      GeneralisedElement *elem_pt = problem_pt->mesh_pt()->element_pt(e);
-      unsigned n_var = elem_pt->ndof();
-      for (unsigned n = 0; n < n_var; n++)
-      {
-        ++Count[elem_pt->eqn_number(n)];
-      }
-    }
-    problem_pt->GetDofPtr().push_back(parameter_pt);
+    Dist_helper.build_base_vector(Y);
+    Dist_helper.build_base_vector(Count);
+    Dist_helper.setup_count_and_nelement(Count, Nelement);
+    // The guess arrives replicated (full length, identical on every rank; see
+    // start_bifurcation_tracking), so global sums and Phi need no communication.
     double length = 0.0;
     for (unsigned n = 0; n < Ndof; n++)
     {
@@ -1310,14 +1649,21 @@ namespace pyoomph
     length = sqrt(length);
     for (unsigned n = 0; n < Ndof; n++)
     {
-      problem_pt->GetDofPtr().push_back(&Y[n]);
-      Y[n] = Phi[n] = eigenvector[n] / length;
+      Phi[n] = eigenvector[n] / length;
     }
-    // Non-distributed, for the reason given in the first constructor above.
-    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 1, false);
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
-
-    delete dist_pt;
+    const unsigned n_row_local = Dist_helper.base_nrow_local();
+    const unsigned first_row = Dist_helper.base_first_row();
+    for (unsigned n = 0; n < n_row_local; n++)
+    {
+      Y[n] = eigenvector[first_row + n] / length;
+    }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed()) Y.synchronise();
+#endif
+    // Non-distributed in-place build when replicated / pointer swap to a genuinely distributed
+    // augmented distribution otherwise; see the comment in the first constructor above.
+    Dist_helper.build_augmented_dofs({AugmentedDofDistributionHelper::Block::scalar(Parameter_pt),
+                                      AugmentedDofDistributionHelper::Block::vector(&Y)});
   }
 
   // Constructs the fold handler with an explicit eigenvector guess and an independently chosen
@@ -1331,21 +1677,12 @@ namespace pyoomph
     FD_step = 1e-8;
     Problem_pt = problem_pt;
     Ndof = problem_pt->ndof();
-    LinearAlgebraDistribution *dist_pt = new LinearAlgebraDistribution(problem_pt->communicator_pt(), Ndof, false);
+    Dist_helper.initialise(problem_pt);
     Phi.resize(Ndof);
-    Y.resize(Ndof);
-    Count.resize(Ndof, 0);
-    unsigned n_element = problem_pt->mesh_pt()->nelement();
-    for (unsigned e = 0; e < n_element; e++)
-    {
-      GeneralisedElement *elem_pt = problem_pt->mesh_pt()->element_pt(e);
-      unsigned n_var = elem_pt->ndof();
-      for (unsigned n = 0; n < n_var; n++)
-      {
-        ++Count[elem_pt->eqn_number(n)];
-      }
-    }
-    problem_pt->GetDofPtr().push_back(parameter_pt);
+    Dist_helper.build_base_vector(Y);
+    Dist_helper.build_base_vector(Count);
+    Dist_helper.setup_count_and_nelement(Count, Nelement);
+    // Both inputs arrive replicated (see the second constructor above).
     double length = 0.0;
     for (unsigned n = 0; n < Ndof; n++)
     {
@@ -1354,14 +1691,21 @@ namespace pyoomph
     length = sqrt(length);
     for (unsigned n = 0; n < Ndof; n++)
     {
-      problem_pt->GetDofPtr().push_back(&Y[n]);
-      Y[n] = eigenvector[n] / length;
       Phi[n] = normalisation[n];
     }
-    // Non-distributed, for the reason given in the first constructor above.
-    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 1, false);
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
-    delete dist_pt;
+    const unsigned n_row_local = Dist_helper.base_nrow_local();
+    const unsigned first_row = Dist_helper.base_first_row();
+    for (unsigned n = 0; n < n_row_local; n++)
+    {
+      Y[n] = eigenvector[first_row + n] / length;
+    }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed()) Y.synchronise();
+#endif
+    // Non-distributed in-place build when replicated / pointer swap when distributed; see the
+    // comment in the first constructor above.
+    Dist_helper.build_augmented_dofs({AugmentedDofDistributionHelper::Block::scalar(Parameter_pt),
+                                      AugmentedDofDistributionHelper::Block::vector(&Y)});
   }
 
   // Number of augmented dofs of the element, depending on Solve_which_system: the full
@@ -1433,6 +1777,8 @@ namespace pyoomph
 
   // Maps a local dof index to the global equation number in the augmented numbering:
   // [0,Ndof) original dofs, Ndof the bifurcation parameter, [Ndof+1,2*Ndof+1) the eigenvector Y.
+  // Under --distribute this naive numbering is translated to the per-rank interleaved layout by
+  // the helper (identity otherwise).
   unsigned long MyFoldHandler::eqn_number(GeneralisedElement *const &elem_pt,
                                           const unsigned &ieqn_local)
   {
@@ -1450,7 +1796,7 @@ namespace pyoomph
     {
       global_eqn = Ndof + 1 + elem_pt->eqn_number(ieqn_local - 1 - raw_ndof);
     }
-    return global_eqn;
+    return Dist_helper.global_eqn(global_eqn);
   }
 
   // Assembles the residuals for whichever block Solve_which_system selects. For Full_augmented,
@@ -1486,25 +1832,25 @@ namespace pyoomph
       {
         elem_pt->get_jacobian(residuals, jacobian);
       }
-      residuals[raw_ndof] = -1.0 / Problem_pt->mesh_pt()->nelement() * eigenweight;
+      residuals[raw_ndof] = -Normalization_rhs / Nelement * eigenweight;
       for (unsigned i = 0; i < raw_ndof; i++)
       {
         residuals[raw_ndof + 1 + i] = 0.0;
         for (unsigned j = 0; j < raw_ndof; j++)
         {
-          residuals[raw_ndof + 1 + i] += jacobian(i, j) * Y[elem_pt->eqn_number(j)];
+          residuals[raw_ndof + 1 + i] += jacobian(i, j) * Y.global_value(elem_pt->eqn_number(j));
         }
         unsigned global_eqn = elem_pt->eqn_number(i);
-        residuals[raw_ndof] += (Phi[global_eqn] * Y[global_eqn]) / Count[global_eqn];
+        residuals[raw_ndof] += (Phi[global_eqn] * Y.global_value(global_eqn)) / Count.global_value(global_eqn);
       }
 
       if (Parameter_pt==Problem_pt->get_lambda_tracking_real())
-      {      
+      {
         for (unsigned i = 0; i < raw_ndof; i++)
         {
           for (unsigned j = 0; j < raw_ndof; j++)
           {
-            residuals[raw_ndof + 1 + i] += (*Parameter_pt)*mass_matrix(i, j) * Y[elem_pt->eqn_number(j)];
+            residuals[raw_ndof + 1 + i] += (*Parameter_pt)*mass_matrix(i, j) * Y.global_value(elem_pt->eqn_number(j));
           }
         }
       }
@@ -1539,7 +1885,7 @@ namespace pyoomph
   {
     // If true, we do not track a fold by adjusting the parameter, but track an eigenvalue branch
     bool lambda_continuation=  (Parameter_pt==Problem_pt->get_lambda_tracking_real());
-    bool ana_dparam = lambda_continuation || Problem_pt->is_dparameter_calculated_analytically(Problem_pt->GetDofPtr()[Ndof]);    
+    bool ana_dparam = lambda_continuation || Problem_pt->is_dparameter_calculated_analytically(Parameter_pt);
     bool ana_hessian = ana_dparam && Problem_pt->are_hessian_products_calculated_analytically() && dynamic_cast<BulkElementBase *>(elem_pt);
 
     unsigned augmented_ndof = ndof(elem_pt);
@@ -1558,7 +1904,7 @@ namespace pyoomph
       elem_pt->get_jacobian(newres, jacobian);
       const double FD_step = 1.0e-8;
       {
-        double *unknown_pt = Problem_pt->GetDofPtr()[Ndof];
+        double *unknown_pt = Parameter_pt;
         double init = *unknown_pt;
         *unknown_pt += FD_step;
 
@@ -1577,7 +1923,7 @@ namespace pyoomph
       for (unsigned n = 0; n < raw_ndof; n++)
       {
         unsigned local_eqn = elem_pt->eqn_number(n);
-        jacobian(augmented_ndof - 1, n) = Phi[local_eqn] / Count[local_eqn];
+        jacobian(augmented_ndof - 1, n) = Phi[local_eqn] / Count.global_value(local_eqn);
       }
     }
     break;
@@ -1601,7 +1947,7 @@ namespace pyoomph
         Vector<double> Y_local(raw_ndof);
         for (unsigned _e = 0; _e < raw_ndof; _e++)
         {
-          Y_local[_e] = Y[elem_pt->eqn_number(_e)];
+          Y_local[_e] = Y.global_value(elem_pt->eqn_number(_e));
         }
 
         pyoomph::BulkElementBase *pyoomph_elem_pt = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
@@ -1622,7 +1968,7 @@ namespace pyoomph
         pyoomph_elem_pt->get_multi_assembly(assemble_info);
 
         // Fill augmented residuals
-        residuals[raw_ndof] = -1.0 / Problem_pt->mesh_pt()->nelement() * eigenweight;
+        residuals[raw_ndof] = -Normalization_rhs / Nelement * eigenweight;
         for (unsigned i = 0; i < raw_ndof; i++)
         {
           residuals[raw_ndof + 1 + i] = 0.0;
@@ -1631,7 +1977,7 @@ namespace pyoomph
             residuals[raw_ndof + 1 + i] += jacobian(i, j) * Y_local[j];
           }
           unsigned global_eqn = elem_pt->eqn_number(i);
-          residuals[raw_ndof] += (Phi[global_eqn] * Y[global_eqn]) / Count[global_eqn];
+          residuals[raw_ndof] += (Phi[global_eqn] * Y.global_value(global_eqn)) / Count.global_value(global_eqn);
         }
 
         // And the Jacobian
@@ -1645,16 +1991,16 @@ namespace pyoomph
             jacobian(raw_ndof + 1 + m, n) = dJduPhiH(m, n);
           }
           unsigned global_eqn = elem_pt->eqn_number(n);
-          jacobian(raw_ndof, raw_ndof + 1 + n) = Phi[global_eqn] / Count[global_eqn];
+          jacobian(raw_ndof, raw_ndof + 1 + n) = Phi[global_eqn] / Count.global_value(global_eqn);
         }
 
          if (lambda_continuation)
-         {      
+         {
           for (unsigned n = 0; n < raw_ndof; n++)
           {
             for (unsigned m = 0; m < raw_ndof; m++)
             {
-              residuals[raw_ndof + 1 + n] += (*Parameter_pt)*M(n, m) * Y[elem_pt->eqn_number(m)];
+              residuals[raw_ndof + 1 + n] += (*Parameter_pt)*M(n, m) * Y_local[m];
               jacobian(raw_ndof + 1 + n, raw_ndof + 1 + m) += (*Parameter_pt)*M(n, m);
               jacobian(raw_ndof + 1 + n, raw_ndof) += M(n, m) * Y_local[m];
               jacobian(raw_ndof + 1 + m, n) += (*Parameter_pt)*dMduPhiH(m, n);
@@ -1682,13 +2028,13 @@ namespace pyoomph
         {
           DenseMatrix<double> djac_dparam(raw_ndof, raw_ndof, 0.0);
           Vector<double> dres_dparam(raw_ndof, 0.0);
-          elem_pt->get_djacobian_dparameter(Problem_pt->GetDofPtr()[Ndof], dres_dparam, djac_dparam);
+          elem_pt->get_djacobian_dparameter(Parameter_pt, dres_dparam, djac_dparam);
           for (unsigned n = 0; n < raw_ndof; n++)
           {
             jacobian(n, raw_ndof) = dres_dparam[n];
             for (unsigned l = 0; l < raw_ndof; l++)
             {
-              jacobian(raw_ndof + 1 + n, raw_ndof) += djac_dparam(n, l) * Y[elem_pt->eqn_number(l)];
+              jacobian(raw_ndof + 1 + n, raw_ndof) += djac_dparam(n, l) * Y.global_value(elem_pt->eqn_number(l));
             }
           }
         }
@@ -1697,7 +2043,7 @@ namespace pyoomph
 
           double FD_step = this->FD_step;
           {
-            double *unknown_pt = Problem_pt->GetDofPtr()[Ndof];
+            double *unknown_pt = Parameter_pt;
             double init = *unknown_pt;
             *unknown_pt += FD_step;
             //            Problem_pt->actions_after_change_in_bifurcation_parameter();
@@ -1709,7 +2055,7 @@ namespace pyoomph
                 jacobian(n, raw_ndof) = (newres[n] - residuals[n]) / FD_step;
                 for (unsigned l = 0; l < raw_ndof; l++)
                 {
-                  jacobian(raw_ndof + 1 + n, raw_ndof) += (newjac(n, l) - jacobian(n, l)) * Y[elem_pt->eqn_number(l)] /
+                  jacobian(raw_ndof + 1 + n, raw_ndof) += (newjac(n, l) - jacobian(n, l)) * Y.global_value(elem_pt->eqn_number(l)) /
                                                           FD_step;
                 }
               }
@@ -1726,7 +2072,7 @@ namespace pyoomph
                 jacobian(n, raw_ndof) = (newres[n] - newres_m[n]) / (2 * FD_step);
                 for (unsigned l = 0; l < raw_ndof; l++)
                 {
-                  jacobian(raw_ndof + 1 + n, raw_ndof) += (newjac(n, l) - newjac_m(n, l)) * Y[elem_pt->eqn_number(l)] /
+                  jacobian(raw_ndof + 1 + n, raw_ndof) += (newjac(n, l) - newjac_m(n, l)) * Y.global_value(elem_pt->eqn_number(l)) /
                                                           (2 * FD_step);
                 }
               }
@@ -1738,8 +2084,11 @@ namespace pyoomph
 
         for (unsigned n = 0; n < raw_ndof; n++)
         {
-          unsigned long global_eqn = eqn_number(elem_pt, n);
-          double *unknown_pt = Problem_pt->GetDofPtr()[global_eqn];
+          // The element's own (base) equation number, deliberately NOT the handler's translated
+          // augmented one: we perturb a base dof, and global_dof_pt resolves base numbers halo-aware
+          // when distributed (plain Dof_pt indexing otherwise, as before).
+          unsigned long base_eqn = elem_pt->eqn_number(n);
+          double *unknown_pt = Problem_pt->global_dof_pt(base_eqn);
           double init = *unknown_pt;
           *unknown_pt += FD_step;
           //          Problem_pt->actions_before_newton_convergence_check(); /// ALICE
@@ -1751,7 +2100,7 @@ namespace pyoomph
             {
               for (unsigned l = 0; l < raw_ndof; l++)
               {
-                jacobian(raw_ndof + 1 + k, n) += (newjac(k, l) - jacobian(k, l)) * Y[elem_pt->eqn_number(l)] / FD_step;
+                jacobian(raw_ndof + 1 + k, n) += (newjac(k, l) - jacobian(k, l)) * Y.global_value(elem_pt->eqn_number(l)) / FD_step;
               }
             }
           }
@@ -1767,7 +2116,7 @@ namespace pyoomph
             {
               for (unsigned l = 0; l < raw_ndof; l++)
               {
-                jacobian(raw_ndof + 1 + k, n) += (newjac(k, l) - newjac_m(k, l)) * Y[elem_pt->eqn_number(l)] / (2 * FD_step);
+                jacobian(raw_ndof + 1 + k, n) += (newjac(k, l) - newjac_m(k, l)) * Y.global_value(elem_pt->eqn_number(l)) / (2 * FD_step);
               }
             }
           }
@@ -1779,7 +2128,7 @@ namespace pyoomph
         for (unsigned n = 0; n < raw_ndof; n++)
         {
           unsigned global_eqn = elem_pt->eqn_number(n);
-          jacobian(raw_ndof, raw_ndof + 1 + n) = Phi[global_eqn] / Count[global_eqn];
+          jacobian(raw_ndof, raw_ndof + 1 + n) = Phi[global_eqn] / Count.global_value(global_eqn);
         }
       }
     }
@@ -1825,7 +2174,7 @@ namespace pyoomph
         dres_dparam[raw_ndof + 1 + i] = 0.0;
         for (unsigned j = 0; j < raw_ndof; j++)
         {
-          dres_dparam[raw_ndof + 1 + i] += djac_dparam(i, j) * Y[elem_pt->eqn_number(j)];
+          dres_dparam[raw_ndof + 1 + i] += djac_dparam(i, j) * Y.global_value(elem_pt->eqn_number(j));
         }
       }
     }
@@ -1859,17 +2208,64 @@ namespace pyoomph
     elem_pt->get_hessian_vector_products(Y, C, product);
   }
 
-  // Returns the (single, real) null eigenvector Y found at the fold.
+  // Returns the (single, real) null eigenvector Y found at the fold. The contract is a globally
+  // replicated, non-distributed vector on every rank (the nanobind binding and Python-side
+  // consumers copy all Ndof entries), so when distributed the local rows are gathered first.
   void MyFoldHandler::get_eigenfunction(Vector<DoubleVector> &eigenfunction)
   {
     eigenfunction.resize(1);
     LinearAlgebraDistribution dist(Problem_pt->communicator_pt(), Ndof, false);
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      eigenfunction[0] = Y; // copy of the distributed local rows (halo entries are not part of a DoubleVector)
+      eigenfunction[0].redistribute(&dist);
+      return;
+    }
+#endif
     eigenfunction[0].build(&dist, 0.0);
     for (unsigned n = 0; n < Ndof; n++)
     {
       eigenfunction[0][n] = Y[n];
     }
   }
+
+  // See the shared comment on MyHopfHandler::apply_maxabs_normalization.
+  void MyFoldHandler::apply_maxabs_normalization()
+  {
+    const unsigned n_row_local = Dist_helper.distributed() ? Dist_helper.base_nrow_local() : Ndof;
+    const unsigned first_row = Dist_helper.distributed() ? Dist_helper.base_first_row() : 0;
+    double local_max = 0.0;
+    for (unsigned n = 0; n < n_row_local; n++) local_max = std::max(local_max, std::fabs(Y[n]));
+    const double m = Dist_helper.allreduce_max(local_max);
+    if (m <= 0.0) return; // a zero guess has nothing to rescale; leave the default constraint alone
+    for (unsigned n = 0; n < n_row_local; n++) Y[n] /= m;
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed()) Y.synchronise();
+#endif
+    // Phi is the replicated normalisation vector. Rescale it too, so the constraint ROW is O(1) as
+    // well -- with an unscaled unit-length Phi its Jacobian entries Phi_i/Count_i would still be
+    // O(1/sqrt(N)), which is half of what this is meant to fix. Then take the right-hand side to be
+    // the dot product the rescaled guess actually has, so it satisfies the constraint exactly.
+    // (Phi.Y is Phi.Phi in the usual case where Phi was set from the guess, but the third
+    // constructor takes an independent normalisation vector and this stays correct for it.)
+    for (unsigned n = 0; n < Ndof; n++) Phi[n] /= m;
+    double local_dot = 0.0;
+    for (unsigned n = 0; n < n_row_local; n++) local_dot += Phi[first_row + n] * Y[n];
+    Normalization_rhs = Dist_helper.allreduce_sum(local_dot) / eigenweight;
+  }
+
+#ifdef OOMPH_HAS_MPI
+  // After a Newton update only the owned rows of Y (and, on rank 0, the parameter) are current:
+  // refresh the halo copies and broadcast the parameter value so every rank assembles with the
+  // same state. Called from Problem::synchronise_all_dofs at the end of each update.
+  void MyFoldHandler::synchronise()
+  {
+    if (!Dist_helper.distributed()) return;
+    Y.synchronise();
+    Dist_helper.synchronise_scalars({Parameter_pt});
+  }
+#endif
 
   // Restores the problem to its original (non-augmented) size, undoing whatever
   // Solve_which_system mode it was left in.
@@ -1883,15 +2279,16 @@ namespace pyoomph
       Problem_pt->linear_solver_pt() = block_fold_solver_pt->linear_solver_pt();
       delete block_fold_solver_pt;
     }
-    Problem_pt->GetDofPtr().resize(Ndof);
-    Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(), Ndof, false);
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+    Dist_helper.restore_base_distribution();
   }
 
   // Switches to the Block_augmented_J mode (original dofs + parameter, no eigenvector) - used
   // e.g. by AugmentedBlockFoldLinearSolver's block-elimination scheme for the fold system.
   void MyFoldHandler::solve_augmented_block_system()
   {
+    // The block modes rebuild the dof vector with every-rank scalars and replicated in-place
+    // distributions -- meaningless on a distributed problem (blocksolve is refused there anyway).
+    if (Dist_helper.distributed()) throw_runtime_error("Fold tracking block-solve modes are not supported on a distributed (--distribute) problem");
     if (Solve_which_system != Block_augmented_J)
     {
       if (Solve_which_system == Block_J)
@@ -1908,6 +2305,7 @@ namespace pyoomph
   // Switches to the Block_J mode (original dofs only, plain Jacobian, no augmentation at all).
   void MyFoldHandler::solve_block_system()
   {
+    if (Dist_helper.distributed()) throw_runtime_error("Fold tracking block-solve modes are not supported on a distributed (--distribute) problem");
     if (Solve_which_system != Block_J)
     {
       Problem_pt->GetDofPtr().resize(Ndof);
@@ -1920,6 +2318,7 @@ namespace pyoomph
   // Switches back to the Full_augmented mode (original dofs + eigenvector Y + parameter).
   void MyFoldHandler::solve_full_system()
   {
+    if (Dist_helper.distributed() && Solve_which_system != Full_augmented) throw_runtime_error("Fold tracking block-solve modes are not supported on a distributed (--distribute) problem");
     if (Solve_which_system != Full_augmented)
     {
       if (Solve_which_system == Block_J)
@@ -1953,22 +2352,36 @@ namespace pyoomph
   // normalization convention here was not verified against the original oomph-lib FoldHandler.
   void MyFoldHandler::realign_C_vector()
   {
-
+    // The dof entries Ndof+1+n point INTO Y itself, so this always was a rescale of Y by the sum
+    // of its own squares -- now read directly from the member (owned rows + reduction when
+    // distributed) instead of through the replicated dof-pointer table that no longer exists there.
     double dot = 0.0;
     double phisqr = 0.0;
-    for (unsigned n = 0; n < Ndof; n++)
+    const unsigned n_row_local = Dist_helper.distributed() ? Dist_helper.base_nrow_local() : Ndof;
+    for (unsigned n = 0; n < n_row_local; n++)
     {
-      double phin = *(Problem_pt->GetDofPtr()[Ndof + 1 + n]);
+      double phin = Y[n];
       dot += Y[n] * phin;
       phisqr += phin * phin;
     }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      double local_vals[2] = {dot, phisqr}, global_vals[2];
+      MPI_Allreduce(local_vals, global_vals, 2, MPI_DOUBLE, MPI_SUM, Problem_pt->communicator_pt()->mpi_comm());
+      dot = global_vals[0];
+      phisqr = global_vals[1];
+    }
+#endif
     std::cerr << "DOT OF C and PHi is " << dot << " and PHi^2 = " << phisqr << std::endl;
 
-    for (unsigned n = 0; n < Ndof; n++)
+    for (unsigned n = 0; n < n_row_local; n++)
     {
-      double phin = *(Problem_pt->GetDofPtr()[Ndof + 1 + n]);
-      Y[n] = phin / phisqr; // Renormalize the c vector
+      Y[n] = Y[n] / phisqr; // Renormalize the c vector
     }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed()) Y.synchronise();
+#endif
   }
 
   //////////////////////////////////////////////////
@@ -1988,23 +2401,14 @@ namespace pyoomph
     symmetryweight = 1.0;
     Problem_pt = problem_pt;
     Ndof = problem_pt->ndof();
-    LinearAlgebraDistribution *dist_pt = new LinearAlgebraDistribution(problem_pt->communicator_pt(), Ndof, false);
+    Dist_helper.initialise(problem_pt);
     Psi.resize(Ndof);
-    Y.resize(Ndof);
     C.resize(Ndof);
-    Count.resize(Ndof, 0);
+    Dist_helper.build_base_vector(Y);
+    Dist_helper.build_base_vector(Count);
+    Dist_helper.setup_count_and_nelement(Count, Nelement);
     unsigned n_element = problem_pt->mesh_pt()->nelement();
-    Nelement = n_element;
-    for (unsigned e = 0; e < n_element; e++)
-    {
-      GeneralisedElement *elem_pt = problem_pt->mesh_pt()->element_pt(e);
-      unsigned n_var = elem_pt->ndof();
-      for (unsigned n = 0; n < n_var; n++)
-      {
-        ++Count[elem_pt->eqn_number(n)];
-      }
-    }
-    problem_pt->GetDofPtr().push_back(parameter_pt);
+    // The symmetry vector arrives replicated (full length, identical on every rank)
     double length = 0.0;
     for (unsigned n = 0; n < Ndof; n++)
     {
@@ -2013,14 +2417,17 @@ namespace pyoomph
     length = sqrt(length);
     for (unsigned n = 0; n < Ndof; n++)
     {
-      problem_pt->GetDofPtr().push_back(&Y[n]);
-      C[n] = Y[n] = symmetry_vector[n] / length;
+      C[n] = Psi[n] = symmetry_vector[n] / length;
     }
-    for (unsigned n = 0; n < Ndof; n++)
+    const unsigned n_row_local = Dist_helper.base_nrow_local();
+    const unsigned first_row = Dist_helper.base_first_row();
+    for (unsigned n = 0; n < n_row_local; n++)
     {
-      // problem_pt->GetDofPtr().push_back(&Psi[n]);
-      Psi[n] = symmetry_vector[n] / length;
+      Y[n] = symmetry_vector[first_row + n] / length;
     }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed()) Y.synchronise();
+#endif
 
     if (problem_pt->improved_pitchfork_tracking_on_unstructured_meshes)
       setup_U_times_Psi_residual_indices();
@@ -2033,26 +2440,38 @@ namespace pyoomph
         for (unsigned e = 0; e < n_element; e++)
         {
           GeneralisedElement *elem_pt = problem_pt->mesh_pt()->element_pt(e);
+#ifdef OOMPH_HAS_MPI
+          if (elem_pt->is_halo()) continue; // halo elements would double-count the integral
+#endif
           DenseMatrix<double> psi_i_times_psi_j(elem_pt->ndof());
           initial_orthogonality += this->get_integrated_U_dot_Psi(elem_pt, psi_i_times_psi_j);
         }
       }
       else
       {
-        for (unsigned n = 0; n < Ndof; n++)
+        // Dof_pt holds only the local base rows here (nothing has been pushed yet)
+        for (unsigned n = 0; n < n_row_local; n++)
         {
-          initial_orthogonality += Psi[n] * (*problem_pt->GetDofPtr()[n]);
+          initial_orthogonality += Psi[first_row + n] * (*problem_pt->GetDofPtr()[n]);
         }
       }
+#ifdef OOMPH_HAS_MPI
+      if (Dist_helper.distributed())
+      {
+        double global_orth = 0.0;
+        MPI_Allreduce(&initial_orthogonality, &global_orth, 1, MPI_DOUBLE, MPI_SUM, problem_pt->communicator_pt()->mpi_comm());
+        initial_orthogonality = global_orth;
+      }
+#endif
       std::cout << "Initial pitchfork symmetry breaking orthogonality <psi,u>=" << initial_orthogonality << std::endl;
     }
-    problem_pt->GetDofPtr().push_back(&Sigma);
     Sigma = 0.0;
 
-    // Non-distributed: see MyFoldHandler's first constructor for what true does under MPI.
-    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * 2 + 2, false);
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
-    delete dist_pt;
+    // [u | param | Y | Sigma]: non-distributed in-place build when replicated (see MyFoldHandler's
+    // first constructor for what 'true' did under MPI), pointer swap when distributed.
+    Dist_helper.build_augmented_dofs({AugmentedDofDistributionHelper::Block::scalar(Parameter_pt),
+                                      AugmentedDofDistributionHelper::Block::vector(&Y),
+                                      AugmentedDofDistributionHelper::Block::scalar(&Sigma)});
   }
 
   // Rescales the fixed symmetry vector Psi by ew/eigenweight and records the new weight.
@@ -2068,9 +2487,7 @@ namespace pyoomph
   // Restores the problem to its original (non-augmented) size.
   MyPitchForkHandler::~MyPitchForkHandler()
   {
-    Problem_pt->GetDofPtr().resize(Ndof);
-    Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(), Ndof, false);
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+    Dist_helper.restore_base_distribution();
   }
 
   // Computes the element-local contribution to integral(U.Psi) via the mass-matrix-like
@@ -2161,23 +2578,24 @@ namespace pyoomph
   // 2*Ndof+1 the symmetry-breaking amplitude Sigma.
   unsigned long MyPitchForkHandler::eqn_number(oomph::GeneralisedElement *const &elem_pt, const unsigned &ieqn_local)
   {
+    // Naive numbering -> per-rank interleaved augmented numbering when distributed (identity otherwise)
     unsigned raw_ndof = elem_pt->ndof();
     if (ieqn_local < raw_ndof)
     {
-      return elem_pt->eqn_number(ieqn_local);
+      return Dist_helper.global_eqn(elem_pt->eqn_number(ieqn_local));
     }
     // The bifurcation parameter equation
     else if (ieqn_local == raw_ndof)
     {
-      return Ndof;
+      return Dist_helper.global_eqn(Ndof);
     }
     else if (ieqn_local < (2 * raw_ndof + 1))
     {
-      return Ndof + 1 + elem_pt->eqn_number(ieqn_local - 1 - raw_ndof);
+      return Dist_helper.global_eqn(Ndof + 1 + elem_pt->eqn_number(ieqn_local - 1 - raw_ndof));
     }
     else
     {
-      return 2 * Ndof + 1;
+      return Dist_helper.global_eqn(2 * Ndof + 1);
     }
   }
 
@@ -2205,7 +2623,7 @@ namespace pyoomph
       elem_pt->get_jacobian(residuals, jacobian);
     }
     residuals[raw_ndof] = 0.0;
-    residuals[2 * raw_ndof + 1] = -1.0 / Problem_pt->mesh_pt()->nelement() * eigenweight;
+    residuals[2 * raw_ndof + 1] = -Normalization_rhs / Nelement * eigenweight;
     for (unsigned i = 0; i < raw_ndof; i++)
     {
       unsigned local_eqn = elem_pt->eqn_number(i);
@@ -2213,9 +2631,9 @@ namespace pyoomph
       for (unsigned j = 0; j < raw_ndof; j++)
       {
         unsigned local_unknown = elem_pt->eqn_number(j);
-        residuals[raw_ndof + 1 + i] += jacobian(i, j) * Y[local_unknown];
+        residuals[raw_ndof + 1 + i] += jacobian(i, j) * Y.global_value(local_unknown);
       }
-      residuals[2 * raw_ndof + 1] += (Y[local_eqn] * C[local_eqn]) / Count[local_eqn];
+      residuals[2 * raw_ndof + 1] += (Y.global_value(local_eqn) * C[local_eqn]) / Count.global_value(local_eqn);
     }
     if (Problem_pt->improved_pitchfork_tracking_on_unstructured_meshes)
     {
@@ -2235,8 +2653,8 @@ namespace pyoomph
       for (unsigned i = 0; i < raw_ndof; i++)
       {
         unsigned local_eqn = elem_pt->eqn_number(i);
-        residuals[i] += Sigma * Psi[local_eqn] / Count[local_eqn];
-        residuals[raw_ndof] += ((*Problem_pt->global_dof_pt(local_eqn)) * Psi[local_eqn]) / Count[local_eqn];
+        residuals[i] += Sigma * Psi[local_eqn] / Count.global_value(local_eqn);
+        residuals[raw_ndof] += ((*Problem_pt->global_dof_pt(local_eqn)) * Psi[local_eqn]) / Count.global_value(local_eqn);
       }
     }
   }
@@ -2249,7 +2667,7 @@ namespace pyoomph
   // (see the FD loops further below), analogous to MyFoldHandler::get_jacobian().
   void MyPitchForkHandler::get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
   {
-    bool ana_dparam = Problem_pt->is_dparameter_calculated_analytically(Problem_pt->GetDofPtr()[Ndof]);
+    bool ana_dparam = Problem_pt->is_dparameter_calculated_analytically(Parameter_pt);
     bool ana_hessian = ana_dparam && Problem_pt->are_hessian_products_calculated_analytically() && dynamic_cast<BulkElementBase *>(elem_pt);
 
     unsigned augmented_ndof = ndof(elem_pt);
@@ -2267,7 +2685,7 @@ namespace pyoomph
       Vector<double> Y_local(raw_ndof);
       for (unsigned _e = 0; _e < raw_ndof; _e++)
       {
-        Y_local[_e] = Y[elem_pt->eqn_number(_e)];
+        Y_local[_e] = Y.global_value(elem_pt->eqn_number(_e));
       }
       Vector<double> Psi_local(raw_ndof);
       for (unsigned _e = 0; _e < raw_ndof; _e++)
@@ -2287,7 +2705,7 @@ namespace pyoomph
       }
       pyoomph_elem_pt->get_multi_assembly(assemble_info);
 
-      residuals[2 * raw_ndof + 1] = -1.0 / Problem_pt->mesh_pt()->nelement() * eigenweight;
+      residuals[2 * raw_ndof + 1] = -Normalization_rhs / Nelement * eigenweight;
       // Fill augmented residuals
       for (unsigned i = 0; i < raw_ndof; i++)
       {
@@ -2298,7 +2716,7 @@ namespace pyoomph
           residuals[raw_ndof + 1 + i] += jacobian(i, j) * Y_local[j];
         }
 
-        residuals[2 * raw_ndof + 1] += (Y[local_eqn] * C[local_eqn]) / Count[local_eqn];
+        residuals[2 * raw_ndof + 1] += (Y.global_value(local_eqn) * C[local_eqn]) / Count.global_value(local_eqn);
       }
 
       // And the Jacobian
@@ -2306,7 +2724,7 @@ namespace pyoomph
       {
         unsigned local_eqn = elem_pt->eqn_number(n);
         jacobian(n, raw_ndof) = dres_dparam[n];
-        jacobian(2 * raw_ndof + 1, raw_ndof + 1 + n) = C[local_eqn] / Count[local_eqn];
+        jacobian(2 * raw_ndof + 1, raw_ndof + 1 + n) = C[local_eqn] / Count.global_value(local_eqn);
         for (unsigned m = 0; m < raw_ndof; m++)
         {
           jacobian(raw_ndof + 1 + n, raw_ndof) += djac_dparam(n, m) * Y_local[m];
@@ -2335,10 +2753,10 @@ namespace pyoomph
         for (unsigned i = 0; i < raw_ndof; i++)
         {
           unsigned local_eqn = elem_pt->eqn_number(i);
-          residuals[i] += Sigma * Psi[local_eqn] / Count[local_eqn];
-          jacobian(i, 2 * raw_ndof + 1) += Psi[local_eqn] / Count[local_eqn];
-          residuals[raw_ndof] += ((*Problem_pt->global_dof_pt(local_eqn)) * Psi[local_eqn]) / Count[local_eqn];
-          jacobian(raw_ndof, i) = Psi[local_eqn] / Count[local_eqn];
+          residuals[i] += Sigma * Psi[local_eqn] / Count.global_value(local_eqn);
+          jacobian(i, 2 * raw_ndof + 1) += Psi[local_eqn] / Count.global_value(local_eqn);
+          residuals[raw_ndof] += ((*Problem_pt->global_dof_pt(local_eqn)) * Psi[local_eqn]) / Count.global_value(local_eqn);
+          jacobian(raw_ndof, i) = Psi[local_eqn] / Count.global_value(local_eqn);
         }
       }
     }
@@ -2354,7 +2772,7 @@ namespace pyoomph
           jacobian(raw_ndof + 1 + n, raw_ndof + 1 + m) = jacobian(n, m);
         }
         unsigned local_eqn = elem_pt->eqn_number(n);
-        jacobian(2 * raw_ndof + 1, raw_ndof + 1 + n) = C[local_eqn] / Count[local_eqn];
+        jacobian(2 * raw_ndof + 1, raw_ndof + 1 + n) = C[local_eqn] / Count.global_value(local_eqn);
       }
 
       if (Problem_pt->improved_pitchfork_tracking_on_unstructured_meshes)
@@ -2366,8 +2784,8 @@ namespace pyoomph
         for (unsigned i = 0; i < raw_ndof; i++)
         {
           unsigned local_eqn = elem_pt->eqn_number(i);
-          jacobian(i, 2 * raw_ndof + 1) = Psi[local_eqn] / Count[local_eqn];
-          jacobian(raw_ndof, i) = Psi[local_eqn] / Count[local_eqn];
+          jacobian(i, 2 * raw_ndof + 1) = Psi[local_eqn] / Count.global_value(local_eqn);
+          jacobian(raw_ndof, i) = Psi[local_eqn] / Count.global_value(local_eqn);
         }
       }
       const double FD_step = 1.0e-8;
@@ -2375,8 +2793,10 @@ namespace pyoomph
 
       for (unsigned n = 0; n < raw_ndof; ++n)
       {
-        unsigned long global_eqn = Problem_pt->assembly_handler_pt()->eqn_number(elem_pt,n);
-        double *unknown_pt = Problem_pt->global_dof_pt(global_eqn);
+        // The element's own BASE equation number -- the handler's eqn_number() now returns the
+        // TRANSLATED augmented number when distributed, which global_dof_pt must not be fed with
+        unsigned long base_eqn = elem_pt->eqn_number(n);
+        double *unknown_pt = Problem_pt->global_dof_pt(base_eqn);
         double init = *unknown_pt;
         *unknown_pt += FD_step;
         newres_p.initialise(0.0);
@@ -2427,7 +2847,7 @@ namespace pyoomph
       {
         unsigned local_unknown = elem_pt->eqn_number(j);
         dres_dparam[raw_ndof + 1 + i] +=
-            djac_dparam(i, j) * Y[local_unknown];
+            djac_dparam(i, j) * Y.global_value(local_unknown);
       }
     }
   }
@@ -2440,11 +2860,20 @@ namespace pyoomph
   {
     elem_pt->get_hessian_vector_products(Y, C, product);
   }
-  // Returns the (single, real) null eigenvector Y found at the pitchfork.
+  // Returns the (single, real) null eigenvector Y found at the pitchfork. Globally replicated on
+  // every rank (gathered when distributed), like the other handlers' get_eigenfunction.
   void MyPitchForkHandler::get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction)
   {
     eigenfunction.resize(1);
     LinearAlgebraDistribution dist(Problem_pt->communicator_pt(), Ndof, false);
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      eigenfunction[0] = Y;
+      eigenfunction[0].redistribute(&dist);
+      return;
+    }
+#endif
     eigenfunction[0].build(&dist, 0.0);
     for (unsigned n = 0; n < Ndof; n++)
     {
@@ -2455,6 +2884,39 @@ namespace pyoomph
   {
     // Is full system anyways.. Nothing to be done
   }
+
+  // See the shared comment on MyHopfHandler::apply_maxabs_normalization. Only Y and the
+  // normalisation vector C are touched; Psi defines the symmetry constraint, a different equation,
+  // and rescaling it would change what that constraint means.
+  void MyPitchForkHandler::apply_maxabs_normalization()
+  {
+    const unsigned n_row_local = Dist_helper.distributed() ? Dist_helper.base_nrow_local() : Ndof;
+    const unsigned first_row = Dist_helper.distributed() ? Dist_helper.base_first_row() : 0;
+    double local_max = 0.0;
+    for (unsigned n = 0; n < n_row_local; n++) local_max = std::max(local_max, std::fabs(Y[n]));
+    const double m = Dist_helper.allreduce_max(local_max);
+    if (m <= 0.0) return;
+    for (unsigned n = 0; n < n_row_local; n++) Y[n] /= m;
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed()) Y.synchronise();
+#endif
+    for (unsigned n = 0; n < Ndof; n++) C[n] /= m;
+    double local_dot = 0.0;
+    for (unsigned n = 0; n < n_row_local; n++) local_dot += C[first_row + n] * Y[n];
+    Normalization_rhs = Dist_helper.allreduce_sum(local_dot) / eigenweight;
+  }
+
+#ifdef OOMPH_HAS_MPI
+  // After a Newton update only the owned rows of Y (and, on rank 0, the parameter and Sigma) are
+  // current: refresh the halo copies and broadcast the scalars. Called from
+  // Problem::synchronise_all_dofs at the end of each update.
+  void MyPitchForkHandler::synchronise()
+  {
+    if (!Dist_helper.distributed()) return;
+    Y.synchronise();
+    Dist_helper.synchronise_scalars({Parameter_pt, &Sigma});
+  }
+#endif
 
   // Inspects every generated bulk element code once and records, for each, the residual-form
   // index of the base state and (if present) of the "_simple_mass_matrix_of_defined_fields"
@@ -2535,70 +2997,57 @@ namespace pyoomph
     Problem_pt = problem_pt;           // Store the problem
     // Set the number of non-augmented degrees of freedom
     Ndof = problem_pt->ndof();
+    Dist_helper.initialise(problem_pt);
 
     // Resize the vectors of additional dofs
-    real_eigenvector.resize(Ndof,0);
-    imag_eigenvector.resize(Ndof,0);
+    Dist_helper.build_base_vector(real_eigenvector);
+    Dist_helper.build_base_vector(imag_eigenvector);
     normalization_vector.resize(Ndof,0);
-    Count.resize(Ndof, 0);
+    Dist_helper.build_base_vector(Count);
+    Dist_helper.setup_count_and_nelement(Count, Nelement);
 
-    // Loop over all the elements in the problem
-    unsigned n_element = problem_pt->mesh_pt()->nelement(); // Number of elements
-    for (unsigned e = 0; e < n_element; e++)
-    {
-      GeneralisedElement *elem_pt = problem_pt->mesh_pt()->element_pt(e);
-      // Loop over the local freedoms in an element
-      unsigned n_var = elem_pt->ndof();
-      for (unsigned n = 0; n < n_var; n++)
-      {
-        // Increase the associated global equation number counter
-        ++Count[elem_pt->eqn_number(n)];
-      }
-    }
-
-
+    // Rotate/normalise the guess on REPLICATED copies (the guesses arrive full-length and
+    // identical on every rank, and the rotation involves global dot products), then scatter the
+    // owned rows into the -- possibly distributed -- unknowns.
+    oomph::Vector<double> re_rot(Ndof), im_rot(Ndof);
     for (unsigned n=0;n<Ndof;n++)
     {
-      real_eigenvector[n]=real_eigen[n];
-      imag_eigenvector[n]=imag_eigen[n];
+      re_rot[n]=real_eigen[n];
+      im_rot[n]=imag_eigen[n];
     }
-    rotate_complex_eigenvector_nicely(real_eigenvector,imag_eigenvector);
+    rotate_complex_eigenvector_nicely(re_rot,im_rot);
     //std::cout << "BIFTRACKER GOT " << (*parameter_pt) << " " << Omega << " HAS IMAG " << has_imaginary_part << std::endl;
-    for (unsigned n=0;n<Ndof;n++) normalization_vector[n]=real_eigenvector[n];
-    for (unsigned n=0;n<Ndof;n++)
+    for (unsigned n=0;n<Ndof;n++) normalization_vector[n]=re_rot[n];
+    const unsigned n_row_local = Dist_helper.base_nrow_local();
+    const unsigned first_row = Dist_helper.base_first_row();
+    for (unsigned n=0;n<n_row_local;n++)
     {
-       problem_pt->GetDofPtr().push_back(&real_eigenvector[n]);
+      real_eigenvector[n]=re_rot[first_row+n];
+      imag_eigenvector[n]=im_rot[first_row+n];
     }
-    if (has_imaginary_part)
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
     {
-      for (unsigned n=0;n<Ndof;n++)
-      {
-       problem_pt->GetDofPtr().push_back(&imag_eigenvector[n]);
-      }
+      real_eigenvector.synchronise();
+      imag_eigenvector.synchronise();
     }
-    
+#endif
 
-    // Now add the parameter as degree of freedom
-    problem_pt->GetDofPtr().push_back(parameter_pt);
-    // Finally add the unknown imaginary part of the eigenvalue as degree of freedom
-    if (has_imaginary_part) problem_pt->GetDofPtr().push_back(&Omega);
-
-    // rebuild the Dof_distribution_pt
-    Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(), (has_imaginary_part ? Ndof *  3 + 2 : Ndof*2+1), false);
-    // Remove all previous sparse storage used during Jacobian assembly
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
-    
+    // [u | Re(v) | (Im(v)) | param | (Omega)]: non-distributed in-place build when replicated,
+    // pointer swap when distributed (see AugmentedDofDistributionHelper)
+    std::vector<AugmentedDofDistributionHelper::Block> blocks;
+    blocks.push_back(AugmentedDofDistributionHelper::Block::vector(&real_eigenvector));
+    if (has_imaginary_part) blocks.push_back(AugmentedDofDistributionHelper::Block::vector(&imag_eigenvector));
+    blocks.push_back(AugmentedDofDistributionHelper::Block::scalar(Parameter_pt));
+    if (has_imaginary_part) blocks.push_back(AugmentedDofDistributionHelper::Block::scalar(&Omega));
+    Dist_helper.build_augmented_dofs(blocks);
   }
 
   // Destructor (used for cleaning up memory)
   AzimuthalSymmetryBreakingHandler::~AzimuthalSymmetryBreakingHandler()
   {
     // Now return the problem to its original size
-    Problem_pt->GetDofPtr().resize(Ndof);
-    Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(),
-                                              Ndof, false);
-    // Remove all previous sparse storage used during Jacobian assembly
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+    Dist_helper.restore_base_distribution();
   }
 
   // This will return the degrees of freedom of a single element of the augmented system
@@ -2750,9 +3199,10 @@ namespace pyoomph
       if (ieqn_local == 2 * raw_ndof)
       {
         global_eqn = 2 * Ndof;
-      }      
+      }
     }
-    return global_eqn;
+    // Naive numbering -> per-rank interleaved augmented numbering when distributed (identity otherwise)
+    return Dist_helper.global_eqn(global_eqn);
   }
 
   // This will calculate the residual contribution of the original weak form by calling the function of the element
@@ -2795,12 +3245,12 @@ namespace pyoomph
     // Initialise the pen-ultimate residual
     if (has_imaginary_part)
     {
-      residuals[3 * raw_ndof] = -1.0 /(double)(Problem_pt->mesh_pt()->nelement())* eigenweight;
+      residuals[3 * raw_ndof] = -Normalization_rhs /(double)Nelement* eigenweight;
       residuals[3 * raw_ndof + 1] = 0.0;
     }
     else
     {
-      residuals[2 * raw_ndof] = -1.0 /(double)(Problem_pt->mesh_pt()->nelement())* eigenweight;
+      residuals[2 * raw_ndof] = -Normalization_rhs /(double)Nelement* eigenweight;
     }
 
     // Now multiply to fill in the residuals
@@ -2811,29 +3261,31 @@ namespace pyoomph
       for (unsigned j = 0; j < raw_ndof; j++)
       {
         unsigned global_unknown = elem_pt->eqn_number(j);
+        const double re_ev = real_eigenvector.global_value(global_unknown);
+        const double im_ev = has_imaginary_part ? imag_eigenvector.global_value(global_unknown) : 0.0;
         // First residual
-        if (has_imaginary_part) 
+        if (has_imaginary_part)
         {
-          residuals[raw_ndof + i] +=jacobian_real(i, j) * real_eigenvector[global_unknown] - jacobian_imag(i, j) * imag_eigenvector[global_unknown] - Omega * (M_real(i, j) * imag_eigenvector[global_unknown] + M_imag(i, j) * real_eigenvector[global_unknown]);        
-          residuals[2 * raw_ndof + i] += jacobian_real(i, j) * imag_eigenvector[global_unknown] + jacobian_imag(i, j) * real_eigenvector[global_unknown] + Omega * (M_real(i, j) * real_eigenvector[global_unknown] + M_imag(i, j) * imag_eigenvector[global_unknown]);
+          residuals[raw_ndof + i] +=jacobian_real(i, j) * re_ev - jacobian_imag(i, j) * im_ev - Omega * (M_real(i, j) * im_ev + M_imag(i, j) * re_ev);
+          residuals[2 * raw_ndof + i] += jacobian_real(i, j) * im_ev + jacobian_imag(i, j) * re_ev + Omega * (M_real(i, j) * re_ev + M_imag(i, j) * im_ev);
         }
         else
         {
-          residuals[raw_ndof + i] +=jacobian_real(i, j) * real_eigenvector[global_unknown];        
+          residuals[raw_ndof + i] +=jacobian_real(i, j) * re_ev;
         }
       }
       // Get the global equation number
       unsigned global_eqn = elem_pt->eqn_number(i);
 
-      if (has_imaginary_part) 
+      if (has_imaginary_part)
       {
-        residuals[3 * raw_ndof] += (real_eigenvector[global_eqn] * normalization_vector[global_eqn]) / Count[global_eqn];
+        residuals[3 * raw_ndof] += (real_eigenvector.global_value(global_eqn) * normalization_vector[global_eqn]) / Count.global_value(global_eqn);
         // Imaginary eigenvector normalization
-        residuals[3 * raw_ndof + 1] += (imag_eigenvector[global_eqn] * normalization_vector[global_eqn]) / Count[global_eqn];
+        residuals[3 * raw_ndof + 1] += (imag_eigenvector.global_value(global_eqn) * normalization_vector[global_eqn]) / Count.global_value(global_eqn);
       }
       else
       {
-        residuals[2 * raw_ndof] += (real_eigenvector[global_eqn] * normalization_vector[global_eqn]) / Count[global_eqn];
+        residuals[2 * raw_ndof] += (real_eigenvector.global_value(global_eqn) * normalization_vector[global_eqn]) / Count.global_value(global_eqn);
       }
     }
 
@@ -2844,14 +3296,16 @@ namespace pyoomph
         for (unsigned j = 0; j < raw_ndof; j++)
         {
           unsigned global_unknown = elem_pt->eqn_number(j);
-          if (has_imaginary_part) 
+          const double re_ev = real_eigenvector.global_value(global_unknown);
+          if (has_imaginary_part)
           {
-            residuals[raw_ndof + i] +=(*Parameter_pt) * (M_real(i, j) * real_eigenvector[global_unknown] - M_imag(i, j) * imag_eigenvector[global_unknown]);        
-            residuals[2 * raw_ndof + i] += (*Parameter_pt) * (M_real(i, j) * imag_eigenvector[global_unknown] + M_imag(i, j) * real_eigenvector[global_unknown]);
+            const double im_ev = imag_eigenvector.global_value(global_unknown);
+            residuals[raw_ndof + i] +=(*Parameter_pt) * (M_real(i, j) * re_ev - M_imag(i, j) * im_ev);
+            residuals[2 * raw_ndof + i] += (*Parameter_pt) * (M_real(i, j) * im_ev + M_imag(i, j) * re_ev);
           }
           else
           {
-            residuals[raw_ndof + i] +=(*Parameter_pt) *M_real(i, j) * real_eigenvector[global_unknown];        
+            residuals[raw_ndof + i] +=(*Parameter_pt) *M_real(i, j) * re_ev;
           }
         }
       }
@@ -2862,8 +3316,9 @@ namespace pyoomph
     // Loop through the RAW dofs
     for (unsigned i = 0; i < raw_ndof; i++)
     {
-      // Get global equation number to assess whether a boundary condition applies to it
-      unsigned long global_eqn = eqn_number(elem_pt, i);
+      // The forced-zero sets hold BASE equation numbers, so use the element's own numbering --
+      // the handler's eqn_number() returns the TRANSLATED augmented number when distributed
+      unsigned long global_eqn = elem_pt->eqn_number(i);
       // Assess whether a boundary condition applies to dof
       if (base_dofs_forced_zero.count(global_eqn))
       {
@@ -2891,7 +3346,8 @@ namespace pyoomph
   void AzimuthalSymmetryBreakingHandler::get_jacobian(oomph::GeneralisedElement *const &elem_pt, oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
   {
     bool lambda_tracking=(Parameter_pt==Problem_pt->get_lambda_tracking_real());
-    bool ana_dparam = lambda_tracking || Problem_pt->is_dparameter_calculated_analytically(Problem_pt->GetDofPtr()[3 * Ndof]);
+    // (This used to read GetDofPtr()[3*Ndof], which was even out of bounds without an imaginary part)
+    bool ana_dparam = lambda_tracking || Problem_pt->is_dparameter_calculated_analytically(Parameter_pt);
     // Currently, we only calculate hessian analytically, if also ana_dparam is set (it is usually the case)
     bool ana_hessian = ana_dparam && Problem_pt->are_hessian_products_calculated_analytically() && dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
 
@@ -2937,10 +3393,10 @@ namespace pyoomph
             jacobian(2 * raw_ndof + n, 2 * raw_ndof + m) = jacobian_real(n, m) - Omega * M_imag(n, m);
             jacobian(2 * raw_ndof + n, raw_ndof + m) = jacobian_imag(n, m) + Omega * M_real(n, m);
             unsigned global_eqn = elem_pt->eqn_number(m);
-            jacobian(raw_ndof + n, 3 * raw_ndof + 1) += M_real(n, m) * imag_eigenvector[global_eqn] +
-                                                        M_imag(n, m) * real_eigenvector[global_eqn];
-            jacobian(2 * raw_ndof + n, 3 * raw_ndof + 1) -= M_real(n, m) * real_eigenvector[global_eqn] -
-                                                            M_imag(n, m) * imag_eigenvector[global_eqn];
+            jacobian(raw_ndof + n, 3 * raw_ndof + 1) += M_real(n, m) * imag_eigenvector.global_value(global_eqn) +
+                                                        M_imag(n, m) * real_eigenvector.global_value(global_eqn);
+            jacobian(2 * raw_ndof + n, 3 * raw_ndof + 1) -= M_real(n, m) * real_eigenvector.global_value(global_eqn) -
+                                                            M_imag(n, m) * imag_eigenvector.global_value(global_eqn);
           }
           else
           {
@@ -2951,12 +3407,12 @@ namespace pyoomph
         unsigned local_eqn = elem_pt->eqn_number(n);
         if (has_imaginary_part)
         {
-          jacobian(3 * raw_ndof, raw_ndof + n) = normalization_vector[local_eqn] / Count[local_eqn];
-          jacobian(3 * raw_ndof + 1, 2 * raw_ndof + n) = normalization_vector[local_eqn] / Count[local_eqn];
+          jacobian(3 * raw_ndof, raw_ndof + n) = normalization_vector[local_eqn] / Count.global_value(local_eqn);
+          jacobian(3 * raw_ndof + 1, 2 * raw_ndof + n) = normalization_vector[local_eqn] / Count.global_value(local_eqn);
         }
         else
         {
-          jacobian(2 * raw_ndof, raw_ndof + n) = normalization_vector[local_eqn] / Count[local_eqn];
+          jacobian(2 * raw_ndof, raw_ndof + n) = normalization_vector[local_eqn] / Count.global_value(local_eqn);
         }
       }
 
@@ -2967,9 +3423,10 @@ namespace pyoomph
       // Loop over the dofs
       for (unsigned n = 0; n < raw_ndof; n++)
       {
-        // Just do the x's
-        unsigned long global_eqn = eqn_number(elem_pt, n);
-        double *unknown_pt = Problem_pt->GetDofPtr()[global_eqn];
+        // Just do the x's -- perturb via the element's own BASE equation number (halo-aware when
+        // distributed), not the handler's translated augmented number
+        unsigned long base_eqn = elem_pt->eqn_number(n);
+        double *unknown_pt = Problem_pt->global_dof_pt(base_eqn);
         double init = *unknown_pt;
         *unknown_pt += FD_step;
 
@@ -2996,8 +3453,8 @@ namespace pyoomph
       // Either calculate the parameter derivatives analitically (ana_dparam=true) or calculate by finite difference.
       if (ana_dparam)
       {
-        Vector<double> dres_dparam(augmented_ndof, 0.0);        
-        this->get_dresiduals_dparameter(elem_pt, Problem_pt->GetDofPtr()[(has_imaginary_part ? 3 : 2) * Ndof], dres_dparam);
+        Vector<double> dres_dparam(augmented_ndof, 0.0);
+        this->get_dresiduals_dparameter(elem_pt, Parameter_pt, dres_dparam);
         for (unsigned m = 0; m < augmented_ndof - (has_imaginary_part ? 2 : 1); m++)
         {
           jacobian(m, (has_imaginary_part ? 3 : 2) * raw_ndof) = dres_dparam[m];
@@ -3005,7 +3462,7 @@ namespace pyoomph
       }
       else
       {
-        double *unknown_pt = Problem_pt->GetDofPtr()[(has_imaginary_part ? 3 : 2) * Ndof];
+        double *unknown_pt = Parameter_pt;
         double init = *unknown_pt;
         *unknown_pt += FD_step;
 
@@ -3041,8 +3498,8 @@ namespace pyoomph
       for (unsigned _e = 0; _e < raw_ndof; _e++)
       {
         unsigned index = elem_pt->eqn_number(_e);
-        Eig[_e] = real_eigenvector[index];
-        if (has_imaginary_part) Eig[raw_ndof + _e] = imag_eigenvector[index];
+        Eig[_e] = real_eigenvector.global_value(index);
+        if (has_imaginary_part) Eig[raw_ndof + _e] = imag_eigenvector.global_value(index);
       }
 
       DenseMatrix<double> JHess_real((has_imaginary_part ? 2 : 1) * raw_ndof, raw_ndof, 0.0), MHess_real((has_imaginary_part ? 2 : 1) * raw_ndof, raw_ndof, 0.0);
@@ -3083,7 +3540,7 @@ namespace pyoomph
 
       // We will fill in the augmented residual vector once more by hand here. Otherwise, it we would call this->get_residual, we would assemble several matrices multiple times
       // Now multiply to fill in the residuals
-      residuals[(has_imaginary_part ? 3 : 2) * raw_ndof] = -1.0 / (double)(Problem_pt->mesh_pt()->nelement())* eigenweight;
+      residuals[(has_imaginary_part ? 3 : 2) * raw_ndof] = -Normalization_rhs / (double)Nelement* eigenweight;
       if (has_imaginary_part) residuals[3 * raw_ndof + 1] = 0.0;
       for (unsigned i = 0; i < raw_ndof; i++)
       {
@@ -3102,8 +3559,8 @@ namespace pyoomph
           }
         }
         unsigned global_eqn = elem_pt->eqn_number(i);
-        residuals[(has_imaginary_part ? 3 : 2) * raw_ndof] += (real_eigenvector[global_eqn] * normalization_vector[global_eqn]) / Count[global_eqn];
-        if (has_imaginary_part) residuals[3 * raw_ndof + 1] += (imag_eigenvector[global_eqn] * normalization_vector[global_eqn]) / Count[global_eqn];
+        residuals[(has_imaginary_part ? 3 : 2) * raw_ndof] += (real_eigenvector.global_value(global_eqn) * normalization_vector[global_eqn]) / Count.global_value(global_eqn);
+        if (has_imaginary_part) residuals[3 * raw_ndof + 1] += (imag_eigenvector.global_value(global_eqn) * normalization_vector[global_eqn]) / Count.global_value(global_eqn);
       }
 
       for (unsigned m = 0; m < raw_ndof; m++)
@@ -3145,8 +3602,8 @@ namespace pyoomph
           }
         }
         unsigned local_eqn = elem_pt->eqn_number(m);
-        jacobian((has_imaginary_part ? 3 : 2) * raw_ndof, raw_ndof + m) = normalization_vector[local_eqn] / Count[local_eqn];
-        if (has_imaginary_part)   jacobian(3 * raw_ndof + 1, 2 * raw_ndof + m) = normalization_vector[local_eqn] / Count[local_eqn];
+        jacobian((has_imaginary_part ? 3 : 2) * raw_ndof, raw_ndof + m) = normalization_vector[local_eqn] / Count.global_value(local_eqn);
+        if (has_imaginary_part)   jacobian(3 * raw_ndof + 1, 2 * raw_ndof + m) = normalization_vector[local_eqn] / Count.global_value(local_eqn);
       }
 
 
@@ -3157,27 +3614,29 @@ namespace pyoomph
           for (unsigned j = 0; j < raw_ndof; j++)
           {
             unsigned global_unknown = elem_pt->eqn_number(j);
-            if (has_imaginary_part) 
+            const double re_ev = real_eigenvector.global_value(global_unknown);
+            if (has_imaginary_part)
             {
-              residuals[raw_ndof + i] +=(*Parameter_pt) * (M_real(i, j) * real_eigenvector[global_unknown] - M_imag(i, j) * imag_eigenvector[global_unknown]);        
-              residuals[2 * raw_ndof + i] += (*Parameter_pt) * (M_real(i, j) * imag_eigenvector[global_unknown] + M_imag(i, j) * real_eigenvector[global_unknown]);
-              //jacobian(raw_ndof + i,j)+=(*Parameter_pt) * (MHess_real(i, j) * real_eigenvector[global_unknown] - MHess_imag(i, j) * imag_eigenvector[global_unknown]);        
-              //jacobian(2*raw_ndof + i,j)+=(*Parameter_pt) * (MHess_real(i, j) * imag_eigenvector[global_unknown] + MHess_imag(i, j) * real_eigenvector[global_unknown]);        
-              jacobian(raw_ndof + i,j)+=(*Parameter_pt) * (MHess_real(i, j)  - MHess_imag(i+raw_ndof, j) );        
-              jacobian(2*raw_ndof + i,j)+=(*Parameter_pt) * (MHess_real(i+raw_ndof, j) + MHess_imag(i, j));                    
+              const double im_ev = imag_eigenvector.global_value(global_unknown);
+              residuals[raw_ndof + i] +=(*Parameter_pt) * (M_real(i, j) * re_ev - M_imag(i, j) * im_ev);
+              residuals[2 * raw_ndof + i] += (*Parameter_pt) * (M_real(i, j) * im_ev + M_imag(i, j) * re_ev);
+              //jacobian(raw_ndof + i,j)+=(*Parameter_pt) * (MHess_real(i, j) * re_ev - MHess_imag(i, j) * im_ev);
+              //jacobian(2*raw_ndof + i,j)+=(*Parameter_pt) * (MHess_real(i, j) * im_ev + MHess_imag(i, j) * re_ev);
+              jacobian(raw_ndof + i,j)+=(*Parameter_pt) * (MHess_real(i, j)  - MHess_imag(i+raw_ndof, j) );
+              jacobian(2*raw_ndof + i,j)+=(*Parameter_pt) * (MHess_real(i+raw_ndof, j) + MHess_imag(i, j));
               jacobian(raw_ndof + i,raw_ndof + j)+=(*Parameter_pt)*M_real(i, j);
               jacobian(raw_ndof + i,2*raw_ndof + j)+=-(*Parameter_pt)*M_imag(i, j);
               jacobian(2*raw_ndof + i,raw_ndof + j)+=(*Parameter_pt)*M_imag(i, j);
               jacobian(2*raw_ndof + i,2*raw_ndof + j)+=(*Parameter_pt)*M_real(i, j);
-              jacobian(raw_ndof + i, 3 * raw_ndof)+=(M_real(i, j) * real_eigenvector[global_unknown] - M_imag(i, j) * imag_eigenvector[global_unknown]);
-              jacobian(2*raw_ndof + i, 3 * raw_ndof)+=(M_real(i, j) * imag_eigenvector[global_unknown] + M_imag(i, j) * real_eigenvector[global_unknown]);
+              jacobian(raw_ndof + i, 3 * raw_ndof)+=(M_real(i, j) * re_ev - M_imag(i, j) * im_ev);
+              jacobian(2*raw_ndof + i, 3 * raw_ndof)+=(M_real(i, j) * im_ev + M_imag(i, j) * re_ev);
             }
             else
             {
-              residuals[raw_ndof + i] +=(*Parameter_pt) *M_real(i, j) * real_eigenvector[global_unknown];        
-              jacobian(raw_ndof + i,j)+=(*Parameter_pt) * (MHess_real(i, j) );        
+              residuals[raw_ndof + i] +=(*Parameter_pt) *M_real(i, j) * re_ev;
+              jacobian(raw_ndof + i,j)+=(*Parameter_pt) * (MHess_real(i, j) );
               jacobian(raw_ndof + i,raw_ndof + j)+=(*Parameter_pt)*M_real(i, j);
-              jacobian(raw_ndof + i, 2 * raw_ndof)+=M_real(i, j) * real_eigenvector[global_unknown];        
+              jacobian(raw_ndof + i, 2 * raw_ndof)+=M_real(i, j) * re_ev;
             }
           }
         }
@@ -3193,8 +3652,9 @@ namespace pyoomph
     // Loop through the dofs
     for (unsigned i = 0; i < raw_ndof; i++)
     {
-      // Get global equation number to assess whether a boundary condition applies to it
-      unsigned long global_eqn = eqn_number(elem_pt, i);
+      // The forced-zero sets hold BASE equation numbers, so use the element's own numbering --
+      // the handler's eqn_number() returns the TRANSLATED augmented number when distributed
+      unsigned long global_eqn = elem_pt->eqn_number(i);
       // Assess whether a boundary condition applies to dof
       if (base_dofs_forced_zero.count(global_eqn))
       {
@@ -3390,43 +3850,45 @@ namespace pyoomph
       for (unsigned j = 0; j < raw_ndof; j++)
       {
         unsigned global_unknown = elem_pt->eqn_number(j);
+        const double re_ev = real_eigenvector.global_value(global_unknown);
         // Real part
         if (has_imaginary_part)
         {
+          const double im_ev = imag_eigenvector.global_value(global_unknown);
           if (lambda_tracking && parameter_pt==Parameter_pt)
           {
-              dres_dparam[raw_ndof + i] += (dM_real_dparam(i, j) * real_eigenvector[global_unknown] - dM_imag_dparam(i, j) * imag_eigenvector[global_unknown]);        
-              dres_dparam[2 * raw_ndof + i] += (dM_real_dparam(i, j) * imag_eigenvector[global_unknown] + dM_imag_dparam(i, j) * real_eigenvector[global_unknown]);    
+              dres_dparam[raw_ndof + i] += (dM_real_dparam(i, j) * re_ev - dM_imag_dparam(i, j) * im_ev);
+              dres_dparam[2 * raw_ndof + i] += (dM_real_dparam(i, j) * im_ev + dM_imag_dparam(i, j) * re_ev);
           }
           else
           {
             dres_dparam[raw_ndof + i] +=
-                djac_real_dparam(i, j) * real_eigenvector[global_unknown] - djac_imag_dparam(i, j) * imag_eigenvector[global_unknown] -
-                Omega * (dM_real_dparam(i, j) * imag_eigenvector[global_unknown] + dM_imag_dparam(i, j) * real_eigenvector[global_unknown]);
+                djac_real_dparam(i, j) * re_ev - djac_imag_dparam(i, j) * im_ev -
+                Omega * (dM_real_dparam(i, j) * im_ev + dM_imag_dparam(i, j) * re_ev);
             // Imaginary part
             dres_dparam[2 * raw_ndof + i] +=
-                djac_real_dparam(i, j) * imag_eigenvector[global_unknown] + djac_imag_dparam(i, j) * real_eigenvector[global_unknown] +                
-                Omega * (dM_real_dparam(i, j) * real_eigenvector[global_unknown] - dM_imag_dparam(i, j) * imag_eigenvector[global_unknown]);
+                djac_real_dparam(i, j) * im_ev + djac_imag_dparam(i, j) * re_ev +
+                Omega * (dM_real_dparam(i, j) * re_ev - dM_imag_dparam(i, j) * im_ev);
             if (lambda_tracking)
             {
-              dres_dparam[raw_ndof + i] += (*Parameter_pt) * (dM_real_dparam(i, j) * real_eigenvector[global_unknown] - dM_imag_dparam(i, j) * imag_eigenvector[global_unknown]);        
-              dres_dparam[2 * raw_ndof + i] += (*Parameter_pt) * (dM_real_dparam(i, j) * imag_eigenvector[global_unknown] + dM_imag_dparam(i, j) * real_eigenvector[global_unknown]);    
+              dres_dparam[raw_ndof + i] += (*Parameter_pt) * (dM_real_dparam(i, j) * re_ev - dM_imag_dparam(i, j) * im_ev);
+              dres_dparam[2 * raw_ndof + i] += (*Parameter_pt) * (dM_real_dparam(i, j) * im_ev + dM_imag_dparam(i, j) * re_ev);
             }
           }
-                    
+
         }
         else
         {
           if (lambda_tracking && parameter_pt==Parameter_pt)
           {
-            dres_dparam[raw_ndof + i] += dM_real_dparam(i, j) * real_eigenvector[global_unknown];
+            dres_dparam[raw_ndof + i] += dM_real_dparam(i, j) * re_ev;
           }
           else
           {
-            dres_dparam[raw_ndof + i] +=djac_real_dparam(i, j) * real_eigenvector[global_unknown];
+            dres_dparam[raw_ndof + i] +=djac_real_dparam(i, j) * re_ev;
             if (lambda_tracking)
             {
-              dres_dparam[raw_ndof + i] += (*Parameter_pt) * dM_real_dparam(i, j) * real_eigenvector[global_unknown];
+              dres_dparam[raw_ndof + i] += (*Parameter_pt) * dM_real_dparam(i, j) * re_ev;
             }
           }
         }
@@ -3445,10 +3907,24 @@ namespace pyoomph
   // Get the eigenfunction
   void AzimuthalSymmetryBreakingHandler::get_eigenfunction(oomph::Vector<oomph::DoubleVector> &eigenfunction)
   {
-    // There is a real and imaginary part of the eigen vector
+    // There is a real and imaginary part of the eigen vector. The contract is a globally
+    // replicated, non-distributed vector on every rank, so gather when distributed.
     eigenfunction.resize((has_imaginary_part ? 2 : 1)); // So we must return two real vectors (Re and Im)
     // build a distribution for the storage of the eigenvector parts
     LinearAlgebraDistribution dist(Problem_pt->communicator_pt(), Ndof, false); // The eigenvectors have Ndof entries, i.e. the number of dofs of the original problem
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      eigenfunction[0] = real_eigenvector;
+      eigenfunction[0].redistribute(&dist);
+      if (has_imaginary_part)
+      {
+        eigenfunction[1] = imag_eigenvector;
+        eigenfunction[1].redistribute(&dist);
+      }
+      return;
+    }
+#endif
     // Rebuild the vector
     eigenfunction[0].build(&dist, 0.0);
     if (has_imaginary_part) eigenfunction[1].build(&dist, 0.0);
@@ -3460,13 +3936,70 @@ namespace pyoomph
     }
   }
 
+  // See the shared comment on MyHopfHandler::apply_maxabs_normalization. The max is taken over the
+  // real and imaginary parts jointly, so the complex eigenvector's phase is untouched.
+  void AzimuthalSymmetryBreakingHandler::apply_maxabs_normalization()
+  {
+    const unsigned n_row_local = Dist_helper.distributed() ? Dist_helper.base_nrow_local() : Ndof;
+    const unsigned first_row = Dist_helper.distributed() ? Dist_helper.base_first_row() : 0;
+    double local_max = 0.0;
+    for (unsigned n = 0; n < n_row_local; n++)
+    {
+      local_max = std::max(local_max, std::fabs(real_eigenvector[n]));
+      if (has_imaginary_part) local_max = std::max(local_max, std::fabs(imag_eigenvector[n]));
+    }
+    const double m = Dist_helper.allreduce_max(local_max);
+    if (m <= 0.0) return;
+    for (unsigned n = 0; n < n_row_local; n++)
+    {
+      real_eigenvector[n] /= m;
+      if (has_imaginary_part) imag_eigenvector[n] /= m;
+    }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      real_eigenvector.synchronise();
+      if (has_imaginary_part) imag_eigenvector.synchronise();
+    }
+#endif
+    for (unsigned n = 0; n < Ndof; n++) normalization_vector[n] /= m;
+    double local_dot = 0.0;
+    for (unsigned n = 0; n < n_row_local; n++) local_dot += normalization_vector[first_row + n] * real_eigenvector[n];
+    Normalization_rhs = Dist_helper.allreduce_sum(local_dot) / eigenweight;
+  }
+
+#ifdef OOMPH_HAS_MPI
+  // After a Newton update only the owned rows of the eigenvector parts (and, on rank 0, the
+  // parameter and Omega) are current: refresh the halo copies and broadcast the scalars.
+  // Called from Problem::synchronise_all_dofs at the end of each update.
+  void AzimuthalSymmetryBreakingHandler::synchronise()
+  {
+    if (!Dist_helper.distributed()) return;
+    real_eigenvector.synchronise();
+    if (has_imaginary_part) imag_eigenvector.synchronise();
+    if (has_imaginary_part)
+      Dist_helper.synchronise_scalars({Parameter_pt, &Omega});
+    else
+      Dist_helper.synchronise_scalars({Parameter_pt});
+  }
+#endif
+
    void AzimuthalSymmetryBreakingHandler::set_eigenweight(double ew)
   {
-    for (unsigned n = 0; n < Ndof; n++)
+    // The eigenvector parts are the unknowns here: rescale the owned rows and refresh the halos
+    const unsigned n_row_local = Dist_helper.distributed() ? Dist_helper.base_nrow_local() : Ndof;
+    for (unsigned n = 0; n < n_row_local; n++)
     {
       real_eigenvector[n] *= ew / eigenweight;
       imag_eigenvector[n] *= ew / eigenweight;
     }
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed())
+    {
+      real_eigenvector.synchronise();
+      imag_eigenvector.synchronise();
+    }
+#endif
     eigenweight = ew;
   }
 

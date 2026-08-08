@@ -28,6 +28,7 @@ This file is strongly based  on the oomph-lib library (see thirdparty/oomph-lib/
 #pragma once
 
 #include "assembly_handler.h"
+#include "double_vector_with_halo.h"
 #include <set>
 #include <complex>
 #include "mesh.h"
@@ -124,6 +125,106 @@ namespace pyoomph
     virtual bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const { return false; }
   };
 
+  // The dof-bookkeeping half of a bifurcation-tracking handler, shared by all of them. A handler
+  // appends its extra unknowns (eigenvector components, the parameter, Omega/Sigma) to the
+  // problem's dof vector; how that has to happen depends on whether the problem is DISTRIBUTED:
+  //
+  //  - serial / plain mpirun (replicated): every rank holds all base dofs, so every rank pushes
+  //    the parameter and all Ndof eigenvector pointers, and the augmented distribution is built
+  //    non-distributed IN PLACE -- exactly the historical behavior (see the long comment in
+  //    MyFoldHandler's constructor about why non-distributed is essential there).
+  //
+  //  - distributed (--distribute): modeled on upstream oomph-lib's distributed PitchForkHandler
+  //    (assembly_handler.cc). Each rank pushes only its OWN rows of each eigenvector block, the
+  //    scalars live on rank 0 alone, and the naive augmented numbering (base | blocks offset by
+  //    k*Ndof) is translated through a per-rank interleaved table so that each rank's augmented
+  //    rows are contiguous: [rank0: base | scalars/eigen rows ... | rank1: base | eigen rows ...].
+  //    The problem's dof distribution is then POINTER-swapped to a new augmented distribution
+  //    rather than rebuilt in place: the dof halo scheme (used by Problem::global_dof_pt and the
+  //    handlers' halo vectors) keeps a raw pointer to the distribution object it was built
+  //    against, so the base object must stay alive and untouched.
+  class AugmentedDofDistributionHelper
+  {
+  public:
+    // One group of the handler's naive augmented dof layout, in naive order: either a single
+    // scalar unknown (the parameter, Omega, Sigma) or a full base-sized eigenvector block.
+    class Block
+    {
+    public:
+      double *scalar_pt = NULL;
+      oomph::DoubleVectorWithHaloEntries *vec = NULL;
+      static Block scalar(double *s)
+      {
+        Block b;
+        b.scalar_pt = s;
+        return b;
+      }
+      static Block vector(oomph::DoubleVectorWithHaloEntries *v)
+      {
+        Block b;
+        b.vec = v;
+        return b;
+      }
+    };
+
+    // Must be called FIRST in every handler constructor, before any dof is pushed and while the
+    // DEFAULT assembly handler is still installed: snapshots the base distribution and (when
+    // distributed) rebuilds the problem's dof halo scheme against the base equations.
+    void initialise(Problem *problem);
+
+    // Halo-skipping count of how many elements contribute to each base equation (summed across
+    // ranks when distributed) plus the GLOBAL number of non-halo elements. 'count' must already be
+    // built via build_base_vector(). Non-distributed this reproduces the historical loops exactly.
+    void setup_count_and_nelement(oomph::DoubleVectorWithHaloEntries &count, unsigned &nelement) const;
+
+    // Builds 'v' on the base dof distribution (all Ndof rows when replicated, the local rows when
+    // distributed) and attaches the problem's halo scheme when distributed.
+    void build_base_vector(oomph::DoubleVectorWithHaloEntries &v) const;
+
+    // Pushes the dof pointers of the given naive layout (owned rows of vector blocks; scalars on
+    // rank 0 only when distributed), builds the naive->distributed equation translation table and
+    // installs the augmented dof distribution (in place when replicated, pointer swap when
+    // distributed). Also drops the sparse-assembly allocation cache, as every layout change must.
+    void build_augmented_dofs(const std::vector<Block> &naive_layout);
+
+    // Naive augmented equation number (the historical k*Ndof+m scheme) -> actual augmented
+    // equation number. Identity unless distributed.
+    inline unsigned long global_eqn(unsigned long naive) const
+    {
+      return Global_eqn_number.empty() ? naive : Global_eqn_number[naive];
+    }
+
+    // Broadcast the values of the rank-0-owned scalar unknowns to all ranks (no-op unless
+    // distributed); the handlers call this from their synchronise() override after each Newton
+    // update, since only rank 0's Dof_pt holds these entries.
+    void synchronise_scalars(std::initializer_list<double *> scalars) const;
+
+    // Destructor path: resize the dof vector back to the base length and restore the base
+    // distribution (in-place rebuild when replicated, pointer swap-back when distributed).
+    void restore_base_distribution();
+
+    // Global reductions over per-rank partial results (identity unless distributed), used by the
+    // eigenvector rescaling below.
+    double allreduce_max(double local) const;
+    double allreduce_sum(double local) const;
+
+    bool distributed() const { return Distributed; }
+    unsigned base_nrow() const;
+    unsigned base_nrow_local() const;
+    unsigned base_first_row() const;
+    oomph::LinearAlgebraDistribution *base_dist_pt();
+
+  private:
+    Problem *Problem_pt = NULL;
+    bool Distributed = false;
+    // Replicated mode: a value snapshot to rebuild in place from. Distributed mode: the problem's
+    // original distribution OBJECT (not owned), kept alive across the pointer swap.
+    oomph::LinearAlgebraDistribution Base_distribution_copy;
+    oomph::LinearAlgebraDistribution *Base_distribution_pt = NULL;
+    oomph::LinearAlgebraDistribution *Augmented_distribution_pt = NULL; // owned, distributed mode only
+    std::vector<unsigned long> Global_eqn_number;                       // empty unless distributed
+  };
+
   // Reimplementation of the Hopf-Handler with some changes
   // Assembly handler that augments the original residuals R(u,p) (p being the bifurcation
   // parameter) with the equations tracking a Hopf bifurcation, i.e. a pair of complex
@@ -145,11 +246,19 @@ namespace pyoomph
     double *Parameter_pt;          // The control parameter being varied to locate/track the Hopf point
     unsigned Ndof;                 // Number of dofs of the original (non-augmented) problem
     double Omega;                  // Unknown angular frequency of the oscillation at the bifurcation
-    oomph::Vector<double> Phi;     // Real part of the critical (null) eigenvector
-    oomph::Vector<double> Psi;     // Imaginary part of the critical (null) eigenvector
-    oomph::Vector<double> C;       // Fixed normalization vector enforcing non-triviality of (Phi,Psi)
-    oomph::Vector<int> Count;      // Number of elements contributing to each global equation, used to distribute/normalize shared equations
+    // Phi/Psi are UNKNOWNS of the augmented system (their rows are distributed and carry halo
+    // entries when --distribute); C is a read-only constant set from an everywhere-identical
+    // guess, so it stays fully replicated -- same reasoning as MyFoldHandler's Phi.
+    oomph::DoubleVectorWithHaloEntries Phi;   // Real part of the critical (null) eigenvector
+    oomph::DoubleVectorWithHaloEntries Psi;   // Imaginary part of the critical (null) eigenvector
+    oomph::Vector<double> C;                  // Fixed normalization vector enforcing non-triviality of (Phi,Psi)
+    oomph::DoubleVectorWithHaloEntries Count; // Number of elements contributing to each global equation, used to distribute/normalize shared equations
+    unsigned Nelement;             // GLOBAL number of (non-halo) elements, for the normalization constant
     double eigenweight;            // Scaling weight applied to the eigenvector equations relative to the base residuals
+    // Right-hand side of the normalisation constraint C.Phi = Normalization_rhs*eigenweight; 1.0
+    // unless apply_maxabs_normalization() replaced it.
+    double Normalization_rhs = 1.0;
+    AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
 
   public:
     bool call_param_change_handler;
@@ -239,6 +348,25 @@ namespace pyoomph
 
     void realign_C_vector(); // Reset the C-vector (which enforces the non-triviality of the eigenvector)
 
+    // Opt-in rescaling of the normalisation constraint, requested from Python by
+    // activate_bifurcation_tracking(..., eigenvector_scaling="auto").
+    //
+    // By default the eigenvector guess is normalised to unit LENGTH and the constraint reads
+    // c.y = 1. On a large problem a unit-length vector has entries of order 1/sqrt(N): the
+    // eigenvector unknowns are then tiny, and so are the constraint row's Jacobian entries
+    // c_i/Count_i, while the residual it is compared against is O(1). This instead normalises the
+    // guess by its LARGEST entry, so the unknowns are O(1) whatever N is, and sets the constraint's
+    // right-hand side to c.c -- which the rescaled guess satisfies exactly, so the starting point is
+    // no worse than before. The located bifurcation is unchanged; only the eigenfunction's
+    // amplitude, which was always arbitrary, comes out differently.
+    void apply_maxabs_normalization();
+
+#ifdef OOMPH_HAS_MPI
+    // Refresh the halo copies of Phi/Psi and broadcast the rank-0-owned parameter and Omega after
+    // a Newton update (called from Problem::synchronise_all_dofs; no-op unless distributed).
+    void synchronise() override;
+#endif
+
     // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
     bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
@@ -277,13 +405,20 @@ namespace pyoomph
     Problem *Problem_pt;
     unsigned Ndof;                 // Number of dofs of the original (non-augmented) problem
     double Sigma;                  // Amplitude of the symmetry-breaking component of u (unknown, tracked as part of the augmented system)
-    oomph::Vector<double> Y;       // Null eigenvector of the Jacobian at the pitchfork point
-    oomph::Vector<double> Psi;     // Fixed vector defining the (anti-)symmetry constraint on u
-    oomph::Vector<double> C;       // Fixed normalization vector enforcing non-triviality of Y
-    oomph::Vector<int> Count;      // Number of elements contributing to each global equation
+    // Y is an UNKNOWN (distributed rows + halo entries under --distribute); Psi and C are
+    // read-only constants set from an everywhere-identical symmetry vector, so they stay fully
+    // replicated -- same reasoning as MyFoldHandler's Phi.
+    oomph::DoubleVectorWithHaloEntries Y;     // Null eigenvector of the Jacobian at the pitchfork point
+    oomph::Vector<double> Psi;                // Fixed vector defining the (anti-)symmetry constraint on u
+    oomph::Vector<double> C;                  // Fixed normalization vector enforcing non-triviality of Y
+    oomph::DoubleVectorWithHaloEntries Count; // Number of elements contributing to each global equation
     double *Parameter_pt;          // The control parameter being varied to locate/track the pitchfork
     double eigenweight, symmetryweight; // Scaling weights for the eigenvector- and symmetry-constraint equations, respectively
-    unsigned Nelement;
+    unsigned Nelement;             // GLOBAL number of (non-halo) elements, for the normalization constant
+    // Right-hand side of the normalisation constraint C.Y = Normalization_rhs*eigenweight; 1.0
+    // unless apply_maxabs_normalization() replaced it.
+    double Normalization_rhs = 1.0;
+    AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
     // Per generated-code lookup of which residual-assembly variant is the base state vs. mass matrix
     std::map<const pyoomph::DynamicBulkElementCode *, PitchForkResidualContributionList> residual_contribution_indices;
     // Builds residual_contribution_indices by inspecting all generated element codes once up front.
@@ -322,6 +457,16 @@ namespace pyoomph
     // Switches back to assembling the full augmented system (see MyHopfHandler::solve_full_system for the analogous pattern).
     void solve_full_system();
 
+    // See the shared comment on MyHopfHandler::apply_maxabs_normalization. Rescales Y and C only;
+    // the symmetry vector Psi, which defines a different constraint, is left alone.
+    void apply_maxabs_normalization();
+
+#ifdef OOMPH_HAS_MPI
+    // Refresh the halo copies of Y and broadcast the rank-0-owned parameter and Sigma after a
+    // Newton update (called from Problem::synchronise_all_dofs; no-op unless distributed).
+    void synchronise() override;
+#endif
+
     // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
     bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
@@ -353,11 +498,20 @@ namespace pyoomph
     unsigned Solve_which_system;   // Current mode, one of the enum values above
     Problem *Problem_pt;
     unsigned Ndof;                 // Number of dofs of the original (non-augmented) problem
-    oomph::Vector<double> Phi;     // Fixed normalization vector enforcing non-triviality of Y
-    oomph::Vector<double> Y;       // Null eigenvector of the Jacobian at the fold point
-    oomph::Vector<int> Count;      // Number of elements contributing to each global equation
+    // Phi is a read-only constant after construction and set from a guess that is identical on
+    // every rank, so it stays fully replicated (Ndof doubles per rank) even when distributed --
+    // that removes any synchronisation obligation for it. Y and Count are indexed by global
+    // equation number inside the element loops, so when distributed they carry halo entries.
+    oomph::Vector<double> Phi;              // Fixed normalization vector enforcing non-triviality of Y
+    oomph::DoubleVectorWithHaloEntries Y;     // Null eigenvector of the Jacobian at the fold point (unknown)
+    oomph::DoubleVectorWithHaloEntries Count; // Number of elements contributing to each global equation
+    unsigned Nelement;             // GLOBAL number of (non-halo) elements, for the normalization constant
     double *Parameter_pt;          // The control parameter being varied to locate/track the fold
     double eigenweight;            // Scaling weight applied to the eigenvector equations relative to the base residuals
+    // Right-hand side of the normalisation constraint Phi.Y = Normalization_rhs*eigenweight. 1.0,
+    // i.e. the historical behaviour, unless apply_maxabs_normalization() replaced it; see there.
+    double Normalization_rhs = 1.0;
+    AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
 
   public:
     unsigned get_problem_ndof() { return Ndof; }
@@ -406,6 +560,17 @@ namespace pyoomph
     void solve_full_system();
     void realign_C_vector(); // Reset the C-vector (which enforces the non-triviality of the eigenvector)
 
+    // Rescale the eigenvector guess by its largest entry and set the constraint's right-hand side
+    // to Phi.Phi, so that the guess satisfies the constraint exactly while its entries stay O(1).
+    // See the shared comment on MyHopfHandler::apply_maxabs_normalization.
+    void apply_maxabs_normalization();
+
+#ifdef OOMPH_HAS_MPI
+    // Refresh the halo copies of Y and broadcast the rank-0-owned parameter after a Newton update
+    // (called from Problem::synchronise_all_dofs; no-op unless distributed).
+    void synchronise() override;
+#endif
+
     // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
     bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const override;
   };
@@ -427,8 +592,11 @@ namespace pyoomph
   {
     Problem *Problem_pt;                    // Pointer to the problem class
     unsigned Ndof;                          // Degrees of freedom of the original problem (non-augmented)
-    oomph::Vector<double> real_eigenvector; // Storage for the real and imaginary eigenvector (which will be a part of the unknowns)
-    oomph::Vector<double> imag_eigenvector;
+    // The eigenvector parts are UNKNOWNS of the augmented system (distributed rows + halo entries
+    // under --distribute); the normalization vector is a read-only constant set from an
+    // everywhere-identical guess and stays fully replicated -- same reasoning as MyFoldHandler's Phi.
+    oomph::DoubleVectorWithHaloEntries real_eigenvector; // Storage for the real and imaginary eigenvector (which will be a part of the unknowns)
+    oomph::DoubleVectorWithHaloEntries imag_eigenvector;
 
     // A vector used to normalize the eigenvector (i.e. to prevent that real_eigenvector=0,
     // which trivially solves the eigenproblem with eigenvalue 0)
@@ -438,9 +606,11 @@ namespace pyoomph
     // The contributions to the normalization constraints will be hence added multiple times for these degrees
     // of freedom by different elements. Therefore, we have to normalize by the number of elements contributing
     // to each equation
-    oomph::Vector<int> Count;
+    oomph::DoubleVectorWithHaloEntries Count;
+    unsigned Nelement;    // GLOBAL number of (non-halo) elements, for the normalization constant
     double Omega;         // Imaginary part of the eigenvalue to be determined
     double *Parameter_pt; // Pointer to the critical parameter to find by this bifurcation analysis
+    AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
 
     // Each generated C code has three residual forms: These are stored in this mapping
     std::map<const pyoomph::DynamicBulkElementCode *, AzimuthalSymmetryBreakingResidualContributionList>
@@ -462,7 +632,10 @@ namespace pyoomph
                                                // indices are the base equations, not the indices of the eigendegrees!).
                                                // For e.g. m=1, equation of velocity_x at axis is part of base_dofs_forced_zero,
                                                // but not of eigen_dofs_forced_zero
-    double eigenweight=1.0;                                               
+    double eigenweight=1.0;
+    // Right-hand side of the normalisation constraint normalization_vector.Re(v) =
+    // Normalization_rhs*eigenweight; 1.0 unless apply_maxabs_normalization() replaced it.
+    double Normalization_rhs = 1.0;
   public:
     unsigned get_problem_ndof() { return Ndof; } // Returning the degrees of freedom of the original system (non-augmented)
     void set_eigenweight(double ew);
@@ -524,6 +697,15 @@ namespace pyoomph
     const double &omega() const { return Omega; } // and the value of the imaginary part of the eigenvalue
 
     void solve_full_system();
+
+    // See the shared comment on MyHopfHandler::apply_maxabs_normalization.
+    void apply_maxabs_normalization();
+
+#ifdef OOMPH_HAS_MPI
+    // Refresh the halo copies of the eigenvector parts and broadcast the rank-0-owned parameter
+    // and Omega after a Newton update (called from Problem::synchronise_all_dofs; no-op unless distributed).
+    void synchronise() override;
+#endif
 
     //  void realign_C_vector(); //Reset the C-vector (which enforces the non-triviality of the eigenvector)
 

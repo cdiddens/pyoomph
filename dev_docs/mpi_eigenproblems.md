@@ -172,18 +172,20 @@ differ by 9e-8, which is round-off divided by the cancellation and not a propert
 
 These assemble the eigenproblem matrices themselves and read the result as a square global matrix,
 or sit on augmented-system assembly that throws from C++ ("This likely does not work in distributed
-parallel", `sparse_assemble_row_or_column_compressed_base_problem`). They now refuse early, by name,
+parallel", `sparse_assemble_row_or_column_compressed_base_problem`). They refuse early, by name,
 through `Problem._require_non_distributed`:
 
-- bifurcation tracking and eigenbranch continuation
 - periodic orbit tracking / Floquet
 - the multi-assembly tensor cache
 - Lyapunov exponents
 - the periodic driving response
 - `refine_eigenfunction()` — for the history-dof reason in §3, not for an assembly reason
+- bifurcation branch switching, left eigenvectors and normal forms
+  (`pyoomph/generic/bifurcation_tools.py`), which build global scipy matrices
 
-Bifurcation tracking in parallel is a separate project: the augmented handlers in
-`src/bifurcation.cpp` are serial by construction.
+Bifurcation *tracking* itself is no longer on this list — see
+`dev_docs/distributed_bifurcation_tracking.md`. What is still refused inside it: `blocksolve=True`,
+and `adapt()` / arclength continuation while tracking, both for the history-dof reason in §3.
 
 ## 6. Testing
 

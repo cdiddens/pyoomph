@@ -1152,7 +1152,8 @@ namespace pyoomph
 	// vector holds only nrow_local() doubles, so reading/writing it by GLOBAL equation number runs past the
 	// end of the buffer. These two helpers convert between the (possibly distributed) DoubleVector and a
 	// globally indexed std::vector; serially they are a plain copy, since the vector is not distributed.
-	static void gather_double_vector_to_global(oomph::DoubleVector &v, std::vector<double> &res)
+	// (Static members of Problem so that the bifurcation handlers can reuse them, e.g. in get_eigenfunction.)
+	void Problem::gather_double_vector_to_global(oomph::DoubleVector &v, std::vector<double> &res)
 	{
 		if (v.distributed())
 		{
@@ -1165,7 +1166,7 @@ namespace pyoomph
 	}
 
 	// Fill v (built on the given, possibly distributed, distribution) from a globally indexed std::vector.
-	static void scatter_global_to_double_vector(const std::vector<double> &src, oomph::DoubleVector &v,
+	void Problem::scatter_global_to_double_vector(const std::vector<double> &src, oomph::DoubleVector &v,
 											   oomph::LinearAlgebraDistribution *target_dist)
 	{
 		if (target_dist->distributed())
@@ -1184,6 +1185,24 @@ namespace pyoomph
 				v[i] = src[i];
 		}
 	}
+
+#ifdef OOMPH_HAS_MPI
+	// Fresh dof halo scheme for the CURRENT equation numbering. Deletes the previous scheme first:
+	// oomph's setup_dof_halo_scheme() plain-overwrites Halo_scheme_pt, which both leaks and -- worse --
+	// would leave a scheme built against a stale numbering in place if the allocation pattern hid the
+	// leak. Must be called while the DEFAULT assembly handler is installed (the scheme is built from
+	// get_my_eqns() of the current handler, and it has to describe the BASE equations).
+	void Problem::RebuildDofHaloScheme()
+	{
+		if (this->Halo_scheme_pt)
+		{
+			delete this->Halo_scheme_pt;
+			this->Halo_scheme_pt = NULL;
+			this->Halo_dof_pt.clear();
+		}
+		this->setup_dof_halo_scheme();
+	}
+#endif
 
 	// Dof values at history time level t (t=0 is the current time), as a plain std::vector<double>
 	std::vector<double> Problem::get_history_dofs(unsigned t)
@@ -2585,7 +2604,7 @@ namespace pyoomph
 	// lambda_tracking_real parameter instead (used for eigenbranch tracking not tied to an actual problem
 	// parameter). eigenv1/eigenv2 seed the real/imaginary parts of the initial null-eigenvector guess
 	// (truncated/zero-padded to ndof()). Passing param=="" (or typus=="" / "none") deactivates tracking.
-	void Problem::start_bifurcation_tracking(const std::string param, const std::string typus, const bool &blocksolve, const std::vector<double> &eigenv1, const std::vector<double> &eigenv2, const double &omega, std::map<std::string, std::string> special_residual_forms)
+	void Problem::start_bifurcation_tracking(const std::string param, const std::string typus, const bool &blocksolve, const std::vector<double> &eigenv1, const std::vector<double> &eigenv2, const double &omega, std::map<std::string, std::string> special_residual_forms, const std::string eigenvector_scaling)
 	{
 		if (param == "" || typus == "" || typus == "none")
 		{
@@ -2607,12 +2626,18 @@ namespace pyoomph
 		}
 		
 		//		this->set_analytic_dparameter(valptr);
-		oomph::DoubleVector ev1(this->dof_distribution_pt());
+		// The guesses arrive as full-length arrays, identical on every rank (SLEPc eigenvectors are
+		// scattered toAll on the Python side). Build the DoubleVectors NON-distributed: operator[]
+		// indexes LOCAL rows, so filling ndof() entries into a vector on the distributed dof
+		// distribution would overrun its nrow_local()-sized buffer. The handler constructors index
+		// these guesses by GLOBAL equation number and scatter the owned rows themselves.
+		oomph::LinearAlgebraDistribution ev_dist(this->communicator_pt(), this->ndof(), false);
+		oomph::DoubleVector ev1(&ev_dist);
 		for (unsigned i = 0; i < std::min((size_t)eigenv1.size(), (size_t)this->ndof()); i++)
 		{
 			ev1[i] = eigenv1[i];
 		}
-		oomph::DoubleVector ev2(this->dof_distribution_pt());
+		oomph::DoubleVector ev2(&ev_dist);
 		for (unsigned i = 0; i < std::min((size_t)eigenv2.size(), (size_t)this->ndof()); i++)
 		{
 			ev2[i] = eigenv2[i];
@@ -2649,6 +2674,21 @@ namespace pyoomph
 		}
 		else
 			throw_runtime_error("Cannot track unknown bifurcation type: " + typus);
+
+		// Post-construction, like set_global_equations_forced_zero above: rescale the eigenvector
+		// guess by its largest entry and move the normalisation constraint's right-hand side with it,
+		// so that the eigenvector unknowns stay O(1) on a large problem instead of O(1/sqrt(ndof)).
+		if (eigenvector_scaling == "auto")
+		{
+			auto *handler = this->assembly_handler_pt();
+			if (auto *h = dynamic_cast<MyFoldHandler *>(handler)) h->apply_maxabs_normalization();
+			else if (auto *h = dynamic_cast<MyHopfHandler *>(handler)) h->apply_maxabs_normalization();
+			else if (auto *h = dynamic_cast<MyPitchForkHandler *>(handler)) h->apply_maxabs_normalization();
+			else if (auto *h = dynamic_cast<AzimuthalSymmetryBreakingHandler *>(handler)) h->apply_maxabs_normalization();
+			else throw_runtime_error("eigenvector_scaling='auto' is not implemented for bifurcation type " + typus);
+		}
+		else if (eigenvector_scaling != "unit")
+			throw_runtime_error("Unknown eigenvector_scaling '" + eigenvector_scaling + "': expected 'unit' or 'auto'");
 	}
 
 	// Inverse of get_current_pinned_values(): writes inp (in the same nodal-value / [position] / internal

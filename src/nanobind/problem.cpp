@@ -970,10 +970,12 @@ void PyReg_Problem(nb::module_ &m)
 		.def("_set_arclength_parameter", &pyoomph::Problem::set_arclength_parameter, nb::arg("name"), nb::arg("value"),
 			 "Set an internal named arclength-continuation setting (e.g. \"use_continuation_timestepper\" or \"Desired_newton_iterations_ds\") to ``value``.")
 		.def("_start_bifurcation_tracking", &pyoomph::Problem::start_bifurcation_tracking,
-			 nb::arg("parameter_name"), nb::arg("bifurcation_type"), nb::arg("block_solve"), nb::arg("eigenvector1"), nb::arg("eigenvector2"), nb::arg("omega"), nb::arg("special_residual_forms"),
+			 nb::arg("parameter_name"), nb::arg("bifurcation_type"), nb::arg("block_solve"), nb::arg("eigenvector1"), nb::arg("eigenvector2"), nb::arg("omega"), nb::arg("special_residual_forms"), nb::arg("eigenvector_scaling") = "unit",
 			 "Activate bifurcation tracking with respect to the global parameter ``parameter_name``. ``bifurcation_type`` selects the kind of bifurcation "
 			 "(e.g. fold, pitchfork, Hopf or azimuthal), ``eigenvector1``/``eigenvector2`` are the (real/imaginary) starting eigenvector guess(es), ``omega`` "
-			 "the starting guess for the (Hopf/azimuthal) eigenvalue frequency, and ``special_residual_forms`` maps residual names to alternative forms used for the tracking equations.")
+			 "the starting guess for the (Hopf/azimuthal) eigenvalue frequency, and ``special_residual_forms`` maps residual names to alternative forms used for the tracking equations. "
+			 "``eigenvector_scaling`` selects how the eigenvector normalisation constraint is scaled: \"unit\" (default) keeps a unit-length eigenvector guess and the constraint c.y=1, "
+			 "whereas \"auto\" normalises the guess by its largest entry and moves the constraint's right-hand side to match, keeping the eigenvector unknowns of order one on large problems.")
 		.def("_start_orbit_tracking", &pyoomph::Problem::start_orbit_tracking,
 			 nb::arg("history"), nb::arg("period"), nb::arg("bspline_order"), nb::arg("gl_order"), nb::arg("knots"), nb::arg("T_constraint_mode"),
 			 "Activate periodic orbit tracking (see PeriodicOrbitHandler), starting from the time ``history`` of dof snapshots covering one period ``period``. "

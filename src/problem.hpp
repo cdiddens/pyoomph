@@ -891,7 +891,10 @@ namespace pyoomph
     // Sets up the augmented (bordered) system for tracking a bifurcation of the given typus ("fold","pitchfork","hopf","azimuthal",...)
     // in parameter param, starting from the eigenvector(s) eigenv1/eigenv2 (real/imaginary parts) and, for
     // Hopf-like bifurcations, angular frequency omega.
-    void start_bifurcation_tracking(const std::string param, const std::string typus, const bool &blocksolve, const std::vector<double> &eigenv1, const std::vector<double> &eigenv2, const double &omega, std::map<std::string, std::string> special_residual_forms);
+    // eigenvector_scaling: "unit" (default, historical) leaves the normalisation constraint at
+    // c.y = 1 with a unit-length eigenvector guess; "auto" rescales the guess by its largest entry
+    // and moves the constraint's right-hand side accordingly (see apply_maxabs_normalization).
+    void start_bifurcation_tracking(const std::string param, const std::string typus, const bool &blocksolve, const std::vector<double> &eigenv1, const std::vector<double> &eigenv2, const double &omega, std::map<std::string, std::string> special_residual_forms, const std::string eigenvector_scaling = "unit");
     //void start_custom_augmented_system(oomph::AssemblyHandler *handler);
     void reset_augmented_dof_vector_to_nonaugmented(); // Discards any augmentation (bifurcation tracking, arclength, custom) dofs and returns to the plain physical dof vector
     void add_augmented_dofs(DofAugmentations &aug); // Appends the dofs registered in aug to the problem's dof vector
@@ -903,7 +906,24 @@ namespace pyoomph
     // Required for custom bifurcation trackers
     oomph::Vector<double *> &GetDofPtr() { return this->Dof_pt; }
     oomph::LinearAlgebraDistribution *GetDofDistributionPt() { return this->Dof_distribution_pt; }
+    // Swap the problem's dof distribution POINTER. The distributed bifurcation handlers must not
+    // rebuild the base distribution in place: the dof halo scheme (and thus global_dof_pt()) keeps a
+    // raw pointer to the distribution object it was built against, so the base object has to stay
+    // alive and untouched while an augmented distribution is installed (upstream PitchForkHandler
+    // does the same pointer swap).
+    void SetDofDistributionPt(oomph::LinearAlgebraDistribution *dist_pt) { this->Dof_distribution_pt = dist_pt; }
     oomph::Vector<oomph::Vector<unsigned>> &GetSparcseAssembleWithArraysPA() { return this->Sparse_assemble_with_arrays_previous_allocation; }
+#ifdef OOMPH_HAS_MPI
+    oomph::DoubleVectorHaloScheme *GetHaloSchemePt() { return this->Halo_scheme_pt; }
+    // setup_dof_halo_scheme() allocates a fresh scheme without freeing the previous one (upstream
+    // leaks on repeated activation); this wrapper deletes the stale scheme first so repeated
+    // bifurcation-tracking activations do not leak and never mix schemes of different meshes.
+    void RebuildDofHaloScheme();
+#endif
+    // oomph::DoubleVector::operator[] indexes LOCAL rows; these convert between a (possibly
+    // distributed) DoubleVector and a globally indexed std::vector (see problem.cpp for details).
+    static void gather_double_vector_to_global(oomph::DoubleVector &v, std::vector<double> &res);
+    static void scatter_global_to_double_vector(const std::vector<double> &src, oomph::DoubleVector &v, oomph::LinearAlgebraDistribution *target_dist);
 
     virtual void quiet(bool _quiet); // Suppresses/re-enables oomph-lib's and pyoomph's own informational output
     virtual bool _set_solved_residual(std::string name, bool raise_error=true,bool remove_dofs_without_jacobian_row=true); // Switches which named residual (see residual_names) subsequent assembly/solves act on
