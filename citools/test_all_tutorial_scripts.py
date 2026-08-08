@@ -140,7 +140,7 @@ for d in glob.glob("./*/"):
       # This one spawns its own mpirun, so launching it under one already gives nested MPI.
       print("   SKIPPING",f,"-- it is just as spawner of other scripts")
       continue
-    if args.mpirun>0 and f=="deflation.py":
+    if args.mpirun>0 and (f=="deflated_solve.py" or f=="deflated_continuation.py"):
       # This one spawns its own mpirun, so launching it under one already gives nested MPI.
       print("   SKIPPING",f,"-- custom assemblers not MPI capable yet")
       continue
