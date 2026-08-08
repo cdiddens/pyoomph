@@ -19,7 +19,9 @@ KEEP_RUNS=30
 # ------------------------------------------------------------------ environment ----
 #
 # cron starts with almost no environment: no conda, no venv, often no /usr/local/bin in
-# PATH. Anything you normally have in .bashrc has to be re-established here.
+# PATH. The nightly therefore sources ~/.bashrc itself, with PS1 set so that the usual
+# "return unless interactive" guard at the top does not skip it -- so whatever your own
+# shell has is normally already there. What that does NOT cover goes here.
 
 # Either a path to a file that is sourced before the build, or the commands themselves.
 # Typical contents:
@@ -32,11 +34,17 @@ ENV_SETUP=""
 
 PYTHON="python3"
 
-# The tutorial pipeline and every eigenvalue/stability example need a PETSc built with
-# complex scalars; test_all_tutorial_scripts.py refuses to start without one. This is
-# prepended to PYTHONPATH. Leave empty only if the default python already sees a complex
-# petsc4py.
-PETSC_PYTHONPATH="$HOME/code/packages/petsc_pyoomph/pyoomph_petsc_opt/lib"
+# PETSc is not configured here. test_all_tutorial_scripts.py needs both builds -- the
+# real-scalar one for the ordinary tutorials, the complex one for the normal-mode stability
+# examples -- and takes them from three variables the nightly picks up out of ~/.bashrc:
+#
+#   PETSC_DIR=$HOME/code/packages/petsc_pyoomph
+#   PETSC_ARCH_REAL=pyoomph_petsc_real_opt
+#   PETSC_ARCH_COMPLEX=pyoomph_petsc_opt
+#
+# Plain assignments are fine -- the nightly exports whatever it finds, so the same three
+# lines that feed an interactive petsc_real/petsc_complex alias also feed the nightly. If
+# your .bashrc cannot provide them, set them from ENV_SETUP above instead.
 
 # Hard limits, in seconds. A hung solve otherwise keeps the lock until the next night.
 TIMEOUT_BUILD=7200       # 2 h

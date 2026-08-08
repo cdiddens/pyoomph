@@ -5,7 +5,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--quick-test", help="Stops after the first successful Newton method. Useful for quick testing", action="store_true")
 parser.add_argument("--tcc", help="Used TCC", action="store_true")
-parser.add_argument("--no-petsc", help="Ignore PETSc check", action="store_true")
+parser.add_argument("--no-petsc", help="Do not select a PETSc build at all: skip the $PETSC_DIR/$PETSC_ARCH_REAL/$PETSC_ARCH_COMPLEX check and run every script with the inherited PYTHONPATH", action="store_true")
 parser.add_argument("--keep-logs", help="Keep log files also of successful tests", action="store_true")
 parser.add_argument("--keep-outdirs", help="Do not delete each script's output directory after it runs. Useful for comparing generated code across repeated runs (e.g. for determinism testing)", action="store_true")
 parser.add_argument("--mpirun", type=int, default=0, metavar="N", help="Run each script under 'mpirun -n N' instead of directly. Default 0, i.e. no mpirun")
@@ -92,17 +92,66 @@ import numpy
 print("COMPLEX" if PETSc.ScalarType is numpy.complex128 else "NOT_COMPLEX")
 """
 
-if not args.no_petsc:
-  probe=subprocess.run([sys.executable,"-c",_PETSC_PROBE],capture_output=True,text=True)
+# Which PETSc a script gets is decided per script, not once for the whole run. The complex build is
+# the slower of the two - every scalar is two doubles - and it is not what a user running an ordinary
+# tutorial has loaded, so testing everything against it tests a configuration nobody uses. Only the
+# normal-mode stability scripts genuinely need it: the azimuthal / Cartesian mode decomposition
+# assembles a complex Jacobian, and a real PETSc cannot hold it.
+#
+# Recognised by the call that switches the mode decomposition on. The negative lookahead keeps
+# setup_for_stability_analysis(azimuthal_stability=False) - which utils/periodic_driving_response.py
+# passes explicitly - on the real build where it belongs.
+_COMPLEX_NEEDED=re.compile(r"(?:azimuthal_stability|additional_cartesian_mode)\s*=\s*(?!False\b)")
+
+def needs_complex_petsc(script):
+  return _COMPLEX_NEEDED.search(Path(script).read_text(errors="replace")) is not None
+
+def petsc_pythonpath(arch,varname):
+  """The directory holding petsc4py for one of the two builds, from $PETSC_DIR/$arch."""
+  root=Path(os.environ["PETSC_DIR"])/arch
+  # PETSc's own build installs it as $PETSC_DIR/$PETSC_ARCH/lib/petsc4py, but pointing the variable
+  # straight at that lib directory is just as sensible a thing for a user to have done.
+  candidates=[root/"lib",root]
+  for cand in candidates:
+    if (cand/"petsc4py").is_dir():
+      return cand
+  raise FileNotFoundError("No petsc4py found for $%s=%s - looked in %s"%(varname,arch,", ".join(str(c) for c in candidates)))
+
+def env_with_petsc(petscdir):
+  env=dict(os.environ)
+  # Prepended, not replaced: PYTHONPATH is where the tutorial bundle's own helper modules can live.
+  env["PYTHONPATH"]=os.pathsep.join([str(petscdir)]+([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+  return env
+
+def check_petsc(env,arch,varname,want_complex):
+  probe=subprocess.run([sys.executable,"-c",_PETSC_PROBE],capture_output=True,text=True,env=env)
   verdict=probe.stdout.split()
+  where="$%s=%s (%s)"%(varname,arch,env["PYTHONPATH"].split(os.pathsep)[0])
   if "NO_PETSC4PY" in verdict:
-    raise ImportError("petsc4py not found, cannot run tests with eigenvalue solvers. Please install petsc4py and make sure it is in the PYTHONPATH")
-  if "NOT_COMPLEX" in verdict:
-    raise AssertionError("PETSc does not support complex numbers, cannot run tests with eigenvalue solvers. Please install a version of PETSc with complex support and make sure petsc4py is using that version.")
-  if "COMPLEX" not in verdict:
-    # Neither answer: petsc4py imported and then died (a mismatched libpetsc aborts here). Say that,
-    # rather than blaming complex support for a crash the probe's own output already explains.
-    raise RuntimeError("Could not determine whether PETSc supports complex numbers - the check exited with %d and said:\n%s"%(probe.returncode,(probe.stderr or probe.stdout).strip()))
+    raise ImportError("petsc4py is not importable from "+where)
+  wanted="COMPLEX" if want_complex else "NOT_COMPLEX"
+  if wanted in verdict:
+    return
+  if ("NOT_COMPLEX" if want_complex else "COMPLEX") in verdict:
+    raise AssertionError("The PETSc at %s has %s scalars, but %s is supposed to be the %s build"%(where,"real" if want_complex else "complex",varname,"complex" if want_complex else "real-scalar"))
+  # Neither answer: petsc4py imported and then died (a mismatched libpetsc aborts here). Say that,
+  # rather than blaming complex support for a crash the probe's own output already explains.
+  raise RuntimeError("Could not determine the scalar type of the PETSc at %s - the check exited with %d and said:\n%s"%(where,probe.returncode,(probe.stderr or probe.stdout).strip()))
+
+env_real=env_complex=None
+if not args.no_petsc:
+  missing=[v for v in ("PETSC_DIR","PETSC_ARCH_REAL","PETSC_ARCH_COMPLEX") if not os.environ.get(v)]
+  if missing:
+    raise EnvironmentError("Set %s to select the two PETSc builds (e.g. PETSC_DIR=~/code/petsc, "
+                           "PETSC_ARCH_REAL=pyoomph_petsc_arch_real, "
+                           "PETSC_ARCH_COMPLEX=pyoomph_petsc_arch_complex), or pass --no-petsc to run "
+                           "with whatever PYTHONPATH already provides."%(", ".join("$"+v for v in missing)))
+  env_real=env_with_petsc(petsc_pythonpath(os.environ["PETSC_ARCH_REAL"],"PETSC_ARCH_REAL"))
+  env_complex=env_with_petsc(petsc_pythonpath(os.environ["PETSC_ARCH_COMPLEX"],"PETSC_ARCH_COMPLEX"))
+  check_petsc(env_real,os.environ["PETSC_ARCH_REAL"],"PETSC_ARCH_REAL",want_complex=False)
+  check_petsc(env_complex,os.environ["PETSC_ARCH_COMPLEX"],"PETSC_ARCH_COMPLEX",want_complex=True)
+  print("Real-scalar PETSc:",env_real["PYTHONPATH"].split(os.pathsep)[0])
+  print("Complex PETSc:    ",env_complex["PYTHONPATH"].split(os.pathsep)[0],"(normal-mode stability scripts only)")
 
 
 problems=tutorial_bundle.check_consistency()
@@ -144,7 +193,8 @@ for d in glob.glob("./*/"):
       # This one spawns its own mpirun, so launching it under one already gives nested MPI.
       print("   SKIPPING",f,"-- custom assemblers not MPI capable yet")
       continue
-    print("   Testing",f)
+    env=None if args.no_petsc else (env_complex if needs_complex_petsc(f) else env_real)
+    print("   Testing",f,"-- with the complex PETSc" if env is not None and env is env_complex else "")
     cmd=[sys.executable, '-u', f]
     if args.mpirun>0:
       cmd=["mpirun","-n",str(args.mpirun)]+cmd
@@ -154,7 +204,7 @@ for d in glob.glob("./*/"):
       cmd.append("--tcc")
     if args.distribute:
       cmd.append("--distribute")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (stdout,_) = proc.communicate()
     optional=missing_optional_module(stdout) if proc.returncode!=0 else None

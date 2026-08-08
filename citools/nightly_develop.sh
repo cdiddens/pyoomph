@@ -50,7 +50,6 @@ LOG_DIR="$HOME/pyoomph_nightly_logs"
 KEEP_RUNS=30
 ENV_SETUP=""
 PYTHON="python3"
-PETSC_PYTHONPATH=""
 TIMEOUT_BUILD=7200
 TIMEOUT_PYTEST=7200
 TIMEOUT_TUTORIALS=28800
@@ -404,8 +403,46 @@ if [ -n "$ENV_SETUP" ]; then
         eval "$ENV_SETUP" >>"$RUN_DIR/env.log" 2>&1 || note "ENV_SETUP failed"
     fi
 fi
-if [ -n "$PETSC_PYTHONPATH" ]; then
-    export PYTHONPATH="$PETSC_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
+
+# The two PETSc builds come from the same place the interactive shell gets them: .bashrc.
+# test_all_tutorial_scripts.py wants PETSC_DIR plus PETSC_ARCH_REAL and PETSC_ARCH_COMPLEX -- it runs
+# the ordinary tutorials against the real-scalar build and only the normal-mode stability ones
+# against the complex one -- and duplicating those paths in the nightly config was one more thing to
+# forget when a PETSc is rebuilt under a new arch name.
+#
+# Three things stop a plain `. ~/.bashrc` from doing it, and all three are load-bearing here:
+#   * cron's shell is not interactive, and the stock Debian .bashrc returns immediately unless PS1 is
+#     set. Setting PS1 for the duration is what makes the file run at all.
+#   * rc files reference unset variables freely, which under `set -u` aborts the whole nightly.
+#   * the variables are commonly *assigned* rather than exported (they are on walhalla, in the
+#     per-host file .bashrc sources), so without the explicit export below they would stay shell
+#     variables of this script and never reach the runner's environment.
+# Its noise -- `bind` failing without line editing, and so on -- goes to env.log. Its exit status is
+# not checked: an rc file very often ends in a `[ -f x ] && . x` that is simply false, so a nonzero
+# status here means nothing. What matters is whether the variables arrived, which is checked next.
+if [ -r "$HOME/.bashrc" ]; then
+    _saved_ps1="${PS1:-}"
+    PS1='nightly$ '
+    set +u
+    # shellcheck disable=SC1091
+    . "$HOME/.bashrc" >>"$RUN_DIR/env.log" 2>&1
+    set -u
+    PS1="$_saved_ps1"
+fi
+PETSC_MISSING=""
+for _v in PETSC_DIR PETSC_ARCH_REAL PETSC_ARCH_COMPLEX; do
+    if [ -n "${!_v:-}" ]; then
+        export "${_v?}"
+    else
+        PETSC_MISSING="${PETSC_MISSING:+$PETSC_MISSING }\$$_v"
+    fi
+done
+if [ -n "$PETSC_MISSING" ]; then
+    # Not fatal here: the tutorial step will say so itself, loudly, and the build and pytest steps
+    # are still worth running. But the report should not have to be read backwards to find out why.
+    note "PETSc not configured: $PETSC_MISSING unset after ~/.bashrc -- the tutorial step will fail"
+else
+    note "PETSc: real=$PETSC_DIR/$PETSC_ARCH_REAL complex=$PETSC_DIR/$PETSC_ARCH_COMPLEX"
 fi
 # Keep matplotlib and friends from looking for an X server under cron.
 export MPLBACKEND="${MPLBACKEND:-Agg}"
@@ -576,8 +613,13 @@ if [ "$BUILD_RC" -eq 0 ]; then
     if command -v mpirun >/dev/null 2>&1; then
         say "  mpirun: $(command -v mpirun)"
     else
-        say "  mpirun: NOT ON PATH -- every MPI test skipped itself. Fix ENV_SETUP in $CONFIG;"
-        say "          cron does not read your .bashrc."
+        say "  mpirun: NOT ON PATH -- every MPI test skipped itself. The nightly sources ~/.bashrc,"
+        say "          so either it does not put mpirun on PATH under cron, or ENV_SETUP in $CONFIG has to."
+    fi
+    if [ -n "$PETSC_MISSING" ]; then
+        say "  PETSc: $PETSC_MISSING unset after ~/.bashrc -- the tutorial step could not start."
+    else
+        say "  PETSc: real $PETSC_DIR/$PETSC_ARCH_REAL, complex $PETSC_DIR/$PETSC_ARCH_COMPLEX"
     fi
     if [ -n "$PYTEST_SKIPS" ]; then
         say "  skipped by pytest:"
