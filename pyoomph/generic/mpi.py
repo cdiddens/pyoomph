@@ -178,11 +178,16 @@ else:
 								   "the job ends rather than waiting for a rank that is gone.")
 
 	if get_mpi_nproc()>1:
-		print("MPI initialized, rank",get_mpi_rank(),"of",get_mpi_nproc())
+		# Before the banner, not after: the banner is the first thing that would otherwise be
+		# printed once per rank.
+		from .logging import setup_mpi_console as _setup_mpi_console
+		_mode=_setup_mpi_console(get_mpi_rank(),get_mpi_nproc())
 		if get_mpi_rank()==0:
 			import mpi4py
 			mpi4py.rc(initialize=False) #type:ignore
-			print("MPI config",mpi4py.get_config())
+			print("MPI initialized with "+str(get_mpi_nproc())+" ranks, config "+str(mpi4py.get_config()))
+			if _mode=="condensed":
+				print("  (showing rank 0 only; use --mpi-output=all for every rank, =off for the raw output)")
 
 
 def run_on_rank_zero(func, context:str="")->None:

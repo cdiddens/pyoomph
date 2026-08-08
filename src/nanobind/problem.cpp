@@ -42,6 +42,7 @@ namespace nb = nanobind;
 #include <fstream>
 
 #include "../problem.hpp"
+#include "../logging.hpp"
 #include "../bifurcation.hpp"
 #include "../expressions.hpp"
 #include "../mesh.hpp"
@@ -226,6 +227,15 @@ void PyReg_Problem(nb::module_ &m)
 
 	m.def("_write_to_log_file", &pyoomph::write_to_log_file, nb::arg("message"),
 		  "Write ``message`` to the currently open problem log file (see Problem._open_log_file()); does nothing if no log file is open.");
+
+	m.def("_setup_mpi_console", &pyoomph::setup_mpi_console, nb::arg("rank"), nb::arg("nproc"), nb::arg("mode"),
+		  "Install the MPI console filter for oomph-lib's output. ``mode`` is 'condensed' (only rank 0 "
+		  "reaches the terminal, lines indented and blank runs collapsed), 'all' (every rank, tagged with "
+		  "its rank and written one whole line at a time) or 'off' (unfiltered). Called by "
+		  "pyoomph.generic.logging.setup_mpi_console(), which applies the same policy to Python's print().");
+
+	m.def("_flush_console", &pyoomph::flush_console,
+		  "Write out any partial line still held in the MPI console line buffer and flush the terminal.");
 
 	m.def(
 		"_get_core_information", []()

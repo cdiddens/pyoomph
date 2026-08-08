@@ -2790,7 +2790,10 @@ namespace pyoomph
 		else
 		{
 			this->linear_solver_pt()->enable_doc_time();
-			oomph::oomph_info.stream_pt() = &std::cout;
+			// Back to pyoomph's tee, not to std::cout: restoring the raw stream used to silently
+			// detach oomph-lib's output from the log file (and now from the MPI console filter) for
+			// the rest of the run, for every problem that had ever been quiet.
+			oomph::oomph_info.stream_pt() = pyoomph::get_console_stream();
 		}
 	}
 

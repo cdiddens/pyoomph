@@ -2554,6 +2554,10 @@ class Problem(_pyoomph.Problem):
         # flag is within noise either way, since -O3 -march=native is already the default.
         self.cmdlineparser.add_argument('--fast-math', help="activate fast math compiler flags (only with distutils, not with tcc). Rarely pays off: consider wrapping expensive terms in subexpression() instead, which is faster and does not change the arithmetic", action='store_true')
         self.cmdlineparser.add_argument('--distribute',help="Distribute mesh in parallel",action='store_true')
+        # Registered here mainly so that it shows up in --help and is consumed rather than handed on
+        # to PETSc as an unrecognised option; it is read from sys.argv much earlier than this, in
+        # pyoomph.generic.logging, because the MPI banner is printed at import time.
+        self.cmdlineparser.add_argument('--mpi-output',help="Console output under mpirun: 'condensed' (default, rank 0 only), 'all' (every rank, tagged) or 'off' (unfiltered)",type=str,choices=["condensed","all","off"])
         self.cmdlineparser.add_argument('--outdir', help="output directory",type=str)
         self.cmdlineparser.add_argument('--suppress_code_writing',help="do not write FEM codes. Useful for debugging",action='store_true')
         self.cmdlineparser.add_argument('--suppress_compilation',help="do not compile FEM codes. Useful for debugging",action='store_true')
@@ -2616,6 +2620,12 @@ class Problem(_pyoomph.Problem):
 
         if self.cmdlineargs.outdir:
             self._outdir=self.cmdlineargs.outdir
+
+        if self.cmdlineargs.mpi_output:
+            # Re-applied through argparse so that an invalid value is caught here with a proper usage
+            # error, and so that ignore_command_line=True gets the default back.
+            from .logging import setup_mpi_console
+            setup_mpi_console(get_mpi_rank(),get_mpi_nproc(),self.cmdlineargs.mpi_output)
 
         if self.cmdlineargs.suppress_code_writing:
             self._suppress_code_writing=True
@@ -3312,12 +3322,18 @@ class Problem(_pyoomph.Problem):
             keyfile=None
             
         if self.logfile_name is not None:
-            if not self.only_write_logfile_on_proc0 and get_mpi_rank()>=1:
+            if not self.only_write_logfile_on_proc0:
                 raise RuntimeError("Cannot write log file on all processors yet")
-            self._open_log_file(os.path.join(self._outdir,self.logfile_name),True)
+            # ...which is exactly why every rank must not open it: they all opened the same file
+            # and wrote into it independently, so an MPI log came out as interleaved half-lines.
+            # The wrappers still go on all ranks - writing to the log is a no-op where none is open,
+            # and they are what keeps the console output line-atomic.
+            if get_mpi_rank()<=0:
+                self._open_log_file(os.path.join(self._outdir,self.logfile_name),True)
             from . logging import pyoomph_activate_logging_to_file
             pyoomph_activate_logging_to_file()
-            self._write_log_header()
+            if get_mpi_rank()<=0:
+                self._write_log_header()
             # Plain scripts (no "with" block, no explicit release()) never reach release()
             # before the interpreter shuts down - __del__ bails out at sys.is_finalizing() -
             # so the elapsed-time footer would be lost. Register an atexit fallback that writes
