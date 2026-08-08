@@ -69,6 +69,26 @@ def missing_optional_module(output):
       return (name,"is installed but cannot be loaded here ("+m.group(1).decode()+")")
   return None
 
+# Under --mpirun the ranks' output is followed by mpirun's own epilogue ("Primary job terminated
+# normally...", "mpirun detected that one or more processes exited with non-zero status"), each in a
+# block fenced by a line of dashes. missing_optional_module() looks at the last line only - see there
+# for why - so without dropping that epilogue every optional-package skip would be counted as a real
+# failure in the MPI pass, which is exactly the noise the skip mechanism exists to avoid.
+_DASH_RULE=re.compile(rb"^-{20,}$")
+
+def strip_mpirun_epilogue(output):
+  lines=output.rstrip().splitlines()
+  while len(lines)>=2 and _DASH_RULE.match(lines[-1].strip()):
+    for i in range(len(lines)-2,-1,-1):
+      if _DASH_RULE.match(lines[i].strip()):
+        del lines[i:]
+        break
+    else:
+      break # an unpaired rule: not one of mpirun's blocks, leave the output alone
+    while lines and not lines[-1].strip():
+      lines.pop()
+  return b"\n".join(lines)
+
 # The bundle of tutorial scripts is no longer a committed zip file - it is assembled from the
 # tutorial sources, both here and during the documentation build (see docs/source/conf.py).
 # So this pipeline tests the scripts as they currently are in the tree.
@@ -207,7 +227,9 @@ for d in glob.glob("./*/"):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (stdout,_) = proc.communicate()
-    optional=missing_optional_module(stdout) if proc.returncode!=0 else None
+    optional=None
+    if proc.returncode!=0:
+      optional=missing_optional_module(strip_mpirun_epilogue(stdout) if args.mpirun>0 else stdout)
     if optional is not None:
       mod,why=optional
       print("   SKIPPED",f,"--",_OPTIONAL_MODULES[mod],why)

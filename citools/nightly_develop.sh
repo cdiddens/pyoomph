@@ -6,10 +6,10 @@
 #     0 1 * * *  /path/to/pyoomph/citools/nightly_develop.sh
 #
 # It fast-forwards an existing checkout to origin/develop, rebuilds, runs the full pytest
-# suite and the full tutorial pipeline, and mails the result to MAIL_TO. If origin/develop
-# has not moved since the last run it does nothing at all and sends no mail, so a quiet
-# inbox means "nobody pushed", not "the nightly died" -- check $LOG_DIR/nightly.log if in
-# doubt, every wake-up leaves a line there.
+# suite and the tutorial pipeline twice -- serially and under mpirun -- and mails the result
+# to MAIL_TO. If origin/develop has not moved since the last run it does nothing at all and
+# sends no mail, so a quiet inbox means "nobody pushed", not "the nightly died" -- check
+# $LOG_DIR/nightly.log if in doubt, every wake-up leaves a line there.
 #
 # Configuration lives outside the repository, in ~/.pyoomph_nightly.conf (override with
 # PYOOMPH_NIGHTLY_CONF). See nightly_develop.conf.example; it holds the SMTP password, so
@@ -53,6 +53,8 @@ PYTHON="python3"
 TIMEOUT_BUILD=7200
 TIMEOUT_PYTEST=7200
 TIMEOUT_TUTORIALS=28800
+TIMEOUT_TUTORIALS_MPI=28800
+TUTORIAL_MPI_RANKS=4   # second tutorial pass under mpirun -n N; 0 switches it off
 MAIL_TO=""   # empty means "do not send"; set it in the config file, not here
 MAIL_FROM="pyoomph-nightly@$(hostname -f 2>/dev/null || hostname)"
 SMTP_HOST=""
@@ -466,6 +468,14 @@ run_step() { # name, logfile, timeout, shell command -> sets STEP_RC
 
 hms() { printf '%dh%02dm%02ds' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 
+step_line() { # label, status, seconds (omit for a step that did not run)
+    if [ -n "${3:-}" ]; then
+        STEP_LINES+=("$(printf '%-22s %-22s %s' "$1" "$2" "$(hms "$3")")")
+    else
+        STEP_LINES+=("$(printf '%-22s %s' "$1" "$2")")
+    fi
+}
+
 # ---------------------------------------------------------------------- build ---
 
 run_step build "$RUN_DIR/build.log" "$TIMEOUT_BUILD" \
@@ -474,9 +484,9 @@ BUILD_RC=$STEP_RC
 BUILD_SECS=$STEP_SECS
 if [ "$BUILD_RC" -ne 0 ]; then
     FAILED_STEPS+=("build")
-    STEP_LINES+=("build           FAILED (rc=$BUILD_RC)   $(hms "$BUILD_SECS")")
+    step_line "build" "FAILED (rc=$BUILD_RC)" "$BUILD_SECS"
 else
-    STEP_LINES+=("build           ok                  $(hms "$BUILD_SECS")")
+    step_line "build" "ok" "$BUILD_SECS"
 fi
 
 # --------------------------------------------------------------------- pytest ---
@@ -505,75 +515,143 @@ if [ "$BUILD_RC" -eq 0 ]; then
     PYTEST_SUMMARY="$(grep -E '^=+.*(passed|failed|error|no tests ran).*=+$' "$RUN_DIR/pytest.log" 2>/dev/null | tail -n 1)"
     if [ "$PYTEST_RC" -ne 0 ]; then
         FAILED_STEPS+=("pytest")
-        STEP_LINES+=("pytest --full   FAILED (rc=$PYTEST_RC)   $(hms "$PYTEST_SECS")")
+        step_line "pytest --full" "FAILED (rc=$PYTEST_RC)" "$PYTEST_SECS"
     else
-        STEP_LINES+=("pytest --full   ok                  $(hms "$PYTEST_SECS")")
+        step_line "pytest --full" "ok" "$PYTEST_SECS"
     fi
 else
-    STEP_LINES+=("pytest --full   skipped (build failed)")
+    step_line "pytest --full" "skipped (build failed)"
 fi
 
 # ------------------------------------------------------------------ tutorials ---
+#
+# Two passes over the same set of scripts: serially, and -- unless TUTORIAL_MPI_RANKS is 0 or
+# mpirun is not on PATH -- under `mpirun -n $TUTORIAL_MPI_RANKS` without --distribute, so every
+# rank builds the whole mesh and solves it. That is what a user gets who starts a script under
+# mpirun without thinking about distribution, and it exercises a different half of the parallel
+# code than the distributed pytest suites do.
+#
+# The passes cannot be run back to back and their logs collected afterwards: the runner rebuilds
+# citools/pyoomph_tutorial_scripts/ from the tutorial sources at startup, deleting the per-script
+# logs the previous pass left there. Hence the copy at the end of each pass.
+#
+# Together they are by far the longest part of the nightly. A machine that cannot afford both sets
+# TUTORIAL_MPI_RANKS=0 in the config; the flock at the top means a run that overruns into the next
+# night costs a night rather than two overlapping runs.
 
-TUT_RC=0
-TUT_SECS=0
-TUT_FAILURES=""
-TUT_SKIPS=""
-TUT_BAD=0
-if [ "$BUILD_RC" -eq 0 ]; then
-    run_step tutorials "$RUN_DIR/tutorials.log" "$TIMEOUT_TUTORIALS" \
-        "cd $(printf '%q' "$REPO_DIR") && $(printf '%q' "$PYTHON") -u citools/test_all_tutorial_scripts.py"
-    TUT_RC=$STEP_RC
-    TUT_SECS=$STEP_SECS
+PASS_LABELS=()
+PASS_SECS=()
+PASS_FAILURES=()
+PASS_SKIPS=()
+PASS_SELFSKIPS=()
+PASS_BAD=()
+PASS_LOG=()
+PASS_LOGDIR=()
 
-    # The runner always exits 0; the verdict is in its output.
-    TUT_FAILURES="$(grep -E '=+ FAILED ' "$RUN_DIR/tutorials.log" 2>/dev/null)"
+run_tutorial_pass() { # label, tag, timeout, extra arguments for the runner
+    local label="$1" tag="$2" tmo="$3" extra="$4" log logdir rc bad failures skips selfskips secs
+    log="$RUN_DIR/tutorials_$tag.log"
+    logdir="$RUN_DIR/tutorial_logs_$tag"
+
+    run_step "tutorials ($label)" "$log" "$tmo" \
+        "cd $(printf '%q' "$REPO_DIR") && $(printf '%q' "$PYTHON") -u citools/test_all_tutorial_scripts.py $extra"
+    rc=$STEP_RC
+    secs=$STEP_SECS
+
+    # The runner always exits 0; the verdict is in its output. PROBLEM: lines are the bundle's own
+    # consistency check (duplicated scripts that have drifted apart); they also fail the run, but
+    # they are printed before the first script and would be out of reach of the log tail below.
+    failures="$(grep -E '^PROBLEM: |=+ FAILED ' "$log" 2>/dev/null)"
     # Scripts the runner did not count against the verdict because an optional package is missing
     # (preCICE). Not a failure, but not coverage either, so it goes in the report the same way the
     # pytest skips do.
-    TUT_SKIPS="$(sed -n '/^SKIPPED FOR MISSING OPTIONAL DEPENDENCIES:/,/^$/p' "$RUN_DIR/tutorials.log" \
-                 2>/dev/null | grep -E '^ +\S+ needs ')"
-    [ "$TUT_RC" -ne 0 ] && TUT_BAD=1
-    [ -n "$TUT_FAILURES" ] && TUT_BAD=1
-    grep -q '^SOME TESTS FAILED' "$RUN_DIR/tutorials.log" 2>/dev/null && TUT_BAD=1
-    grep -q '^ALL TESTS PASSED' "$RUN_DIR/tutorials.log" 2>/dev/null || TUT_BAD=1
+    skips="$(sed -n '/^SKIPPED FOR MISSING OPTIONAL DEPENDENCIES:/,/^$/p' "$log" \
+             2>/dev/null | grep -E '^ +\S+ needs ')"
+    # And the ones the runner itself refuses to start under mpirun -- parallel_running.py spawns its
+    # own mpirun, the deflation scripts use a custom assembler that is not MPI-capable yet. Reported
+    # for the same reason: the MPI pass covers slightly less than the serial one.
+    selfskips="$(grep -E '^ +SKIPPING .* -- ' "$log" 2>/dev/null | sed 's/^ *//' | sort -u)"
+    bad=0
+    [ "$rc" -ne 0 ] && bad=1
+    [ -n "$failures" ] && bad=1
+    grep -q '^SOME TESTS FAILED' "$log" 2>/dev/null && bad=1
+    grep -q '^ALL TESTS PASSED' "$log" 2>/dev/null || bad=1
 
-    # The next run wipes citools/pyoomph_tutorial_scripts/, so the per-script logs of the
-    # failures have to be copied out now.
-    TUT_LOGDIR="$RUN_DIR/tutorial_logs"
     if [ -d "$REPO_DIR/citools/pyoomph_tutorial_scripts" ]; then
-        mkdir -p "$TUT_LOGDIR"
+        mkdir -p "$logdir"
         (cd "$REPO_DIR/citools/pyoomph_tutorial_scripts" && find . -name '*.log' -print0 |
             while IFS= read -r -d '' f; do
-                cp "$f" "$TUT_LOGDIR/$(printf '%s' "${f#./}" | tr '/' '_')" 2>/dev/null
+                cp "$f" "$logdir/$(printf '%s' "${f#./}" | tr '/' '_')" 2>/dev/null
             done)
-        rmdir "$TUT_LOGDIR" 2>/dev/null
+        rmdir "$logdir" 2>/dev/null
     fi
 
-    if [ "$TUT_BAD" -ne 0 ]; then
-        FAILED_STEPS+=("tutorials")
-        STEP_LINES+=("tutorials       FAILED              $(hms "$TUT_SECS")")
+    PASS_LABELS+=("$label")
+    PASS_SECS+=("$secs")
+    PASS_FAILURES+=("$failures")
+    PASS_SKIPS+=("$skips")
+    PASS_SELFSKIPS+=("$selfskips")
+    PASS_BAD+=("$bad")
+    PASS_LOG+=("$log")
+    PASS_LOGDIR+=("$logdir")
+
+    if [ "$bad" -ne 0 ]; then
+        FAILED_STEPS+=("tutorials ($label)")
+        step_line "tutorials $label" "FAILED" "$secs"
     else
-        STEP_LINES+=("tutorials       ok                  $(hms "$TUT_SECS")")
+        step_line "tutorials $label" "ok" "$secs"
     fi
+}
+
+MPI_TUTORIALS_SKIPPED=""
+if [ "$BUILD_RC" -eq 0 ]; then
+    run_tutorial_pass "serial" serial "$TIMEOUT_TUTORIALS" ""
+
+    case "${TUTORIAL_MPI_RANKS:-0}" in
+        ''|*[!0-9]*)
+            MPI_TUTORIALS_SKIPPED="TUTORIAL_MPI_RANKS=\"${TUTORIAL_MPI_RANKS:-}\" is not a number -- fix $CONFIG"
+            step_line "tutorials mpi" "skipped (bad config)" ;;
+        0)
+            MPI_TUTORIALS_SKIPPED="TUTORIAL_MPI_RANKS=0 switches the MPI pass off"
+            step_line "tutorials mpi" "skipped (switched off)" ;;
+        *)
+            if command -v mpirun >/dev/null 2>&1; then
+                run_tutorial_pass "mpirun -n $TUTORIAL_MPI_RANKS" mpi "$TIMEOUT_TUTORIALS_MPI" \
+                    "--mpirun $TUTORIAL_MPI_RANKS"
+            else
+                MPI_TUTORIALS_SKIPPED="mpirun is not on PATH"
+                step_line "tutorials mpi" "skipped (no mpirun)"
+            fi ;;
+    esac
 else
-    STEP_LINES+=("tutorials       skipped (build failed)")
+    step_line "tutorials" "skipped (build failed)"
 fi
 
 # --------------------------------------------------------------------- report ---
 
 # A run where the MPI modules skipped themselves is not a green run, it is an untested
 # one, and it must not look identical to a real pass in the subject line. The same goes for
-# tutorial scripts the runner had to skip for want of an optional package.
+# tutorial scripts the runner had to skip for want of an optional package, and for the whole
+# MPI tutorial pass when it could not be started.
 MPI_SKIPPED=0
 printf '%s' "$PYTEST_SKIPS" | grep -q 'test_mpi_' && MPI_SKIPPED=1
+
+# The same script is skipped by both passes, so the union rather than the sum.
+TUT_SKIPS_ALL=""
+for i in "${!PASS_SKIPS[@]}"; do
+    [ -n "${PASS_SKIPS[$i]}" ] && TUT_SKIPS_ALL="${TUT_SKIPS_ALL}${PASS_SKIPS[$i]}"$'\n'
+done
+TUT_SKIPS_ALL="$(printf '%s' "$TUT_SKIPS_ALL" | grep -v '^$' | sort -u)"
 
 if [ ${#FAILED_STEPS[@]} -eq 0 ]; then
     VERDICT="PASS"
     SKIPNOTE=""
     [ "$MPI_SKIPPED" -ne 0 ] && SKIPNOTE="the MPI tests"
-    if [ -n "$TUT_SKIPS" ]; then
-        SKIPNOTE="${SKIPNOTE:+$SKIPNOTE and }$(printf '%s\n' "$TUT_SKIPS" | wc -l) tutorial script(s)"
+    if [ -n "$MPI_TUTORIALS_SKIPPED" ] && [ "$BUILD_RC" -eq 0 ]; then
+        SKIPNOTE="${SKIPNOTE:+$SKIPNOTE and }the MPI tutorial pass"
+    fi
+    if [ -n "$TUT_SKIPS_ALL" ]; then
+        SKIPNOTE="${SKIPNOTE:+$SKIPNOTE and }$(printf '%s\n' "$TUT_SKIPS_ALL" | wc -l) tutorial script(s)"
     fi
     if [ -n "$SKIPNOTE" ]; then
         SUBJECT="[pyoomph nightly] $BRANCH ${REMOTE_SHA:0:12} PASS -- but $SKIPNOTE were SKIPPED"
@@ -613,8 +691,15 @@ if [ "$BUILD_RC" -eq 0 ]; then
     if command -v mpirun >/dev/null 2>&1; then
         say "  mpirun: $(command -v mpirun)"
     else
-        say "  mpirun: NOT ON PATH -- every MPI test skipped itself. The nightly sources ~/.bashrc,"
-        say "          so either it does not put mpirun on PATH under cron, or ENV_SETUP in $CONFIG has to."
+        say "  mpirun: NOT ON PATH -- every MPI test skipped itself, and the MPI tutorial pass could"
+        say "          not run either. The nightly sources ~/.bashrc, so either it does not put mpirun"
+        say "          on PATH under cron, or ENV_SETUP in $CONFIG has to."
+    fi
+    if [ -n "$MPI_TUTORIALS_SKIPPED" ]; then
+        say "  tutorials under mpirun: NOT RUN -- $MPI_TUTORIALS_SKIPPED"
+    else
+        say "  tutorials: run twice, serially and under mpirun -n $TUTORIAL_MPI_RANKS (no --distribute,"
+        say "             i.e. every rank builds the whole mesh)"
     fi
     if [ -n "$PETSC_MISSING" ]; then
         say "  PETSc: $PETSC_MISSING unset after ~/.bashrc -- the tutorial step could not start."
@@ -627,18 +712,29 @@ if [ "$BUILD_RC" -eq 0 ]; then
     else
         say "  skipped by pytest: nothing"
     fi
-    if [ -n "$TUT_SKIPS" ]; then
+    if [ -n "$TUT_SKIPS_ALL" ]; then
         say "  tutorial scripts skipped for a missing optional package:"
-        printf '%s\n' "$TUT_SKIPS" | sed 's/^ */    /' >>"$REPORT"
+        printf '%s\n' "$TUT_SKIPS_ALL" | sed 's/^ */    /' >>"$REPORT"
     else
         say "  tutorial scripts skipped: nothing"
     fi
+    for i in "${!PASS_LABELS[@]}"; do
+        if [ -n "${PASS_SELFSKIPS[$i]}" ]; then
+            say "  not run in the ${PASS_LABELS[$i]} pass (the runner excludes them there):"
+            printf '%s\n' "${PASS_SELFSKIPS[$i]}" | sed 's/^/    /' >>"$REPORT"
+        fi
+    done
 fi
 
 if [ "$VERDICT" = "PASS" ]; then
     say ""
     [ -n "$PYTEST_SUMMARY" ] && say "pytest: $PYTEST_SUMMARY"
-    say "Tutorial pipeline: all scripts ran. (preCICE runs still need a manual check.)"
+    if [ -n "$MPI_TUTORIALS_SKIPPED" ]; then
+        say "Tutorial pipeline: all scripts ran serially; the mpirun pass did not run."
+    else
+        say "Tutorial pipeline: all scripts ran, serially and under mpirun -n $TUTORIAL_MPI_RANKS."
+    fi
+    say "(preCICE runs still need a manual check.)"
 else
     if [ "$BUILD_RC" -ne 0 ]; then
         say ""
@@ -674,32 +770,33 @@ else
         fi
     fi
 
-    if [ "$TUT_BAD" -ne 0 ]; then
+    for i in "${!PASS_LABELS[@]}"; do
+        [ "${PASS_BAD[$i]}" -ne 0 ] || continue
         say ""
-        say "TUTORIAL PIPELINE FAILED"
+        say "TUTORIAL PIPELINE FAILED (${PASS_LABELS[$i]})"
         say "========================"
-        if [ -n "$TUT_FAILURES" ]; then
-            printf '%s\n' "$TUT_FAILURES" >>"$REPORT"
+        if [ -n "${PASS_FAILURES[$i]}" ]; then
+            printf '%s\n' "${PASS_FAILURES[$i]}" >>"$REPORT"
         else
-            say "(the runner reported a failure without naming a script -- see tutorials.log)"
-            quote_log "$RUN_DIR/tutorials.log" "tutorials"
+            say "(the runner reported a failure without naming a script -- see $(basename "${PASS_LOG[$i]}"))"
+            quote_log "${PASS_LOG[$i]}" "tutorials ${PASS_LABELS[$i]}"
         fi
         # One tail per failing script, capped: a broken core commit fails all 127 of them
         # and the mail would be unreadable. The rest are on disk in $RUN_DIR.
-        if [ -d "$RUN_DIR/tutorial_logs" ]; then
+        if [ -d "${PASS_LOGDIR[$i]}" ]; then
             n=0
-            for f in "$RUN_DIR/tutorial_logs"/*.log; do
+            for f in "${PASS_LOGDIR[$i]}"/*.log; do
                 [ -f "$f" ] || continue
                 n=$((n + 1))
                 if [ "$n" -gt 10 ]; then
                     say ""
-                    say "(further failing-script logs omitted -- all of them are in $RUN_DIR/tutorial_logs)"
+                    say "(further failing-script logs omitted -- all of them are in ${PASS_LOGDIR[$i]})"
                     break
                 fi
                 quote_log "$f" "tutorial $(basename "$f" .log)"
             done
         fi
-    fi
+    done
 fi
 
 say ""

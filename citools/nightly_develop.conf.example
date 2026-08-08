@@ -47,9 +47,18 @@ PYTHON="python3"
 # your .bashrc cannot provide them, set them from ENV_SETUP above instead.
 
 # Hard limits, in seconds. A hung solve otherwise keeps the lock until the next night.
-TIMEOUT_BUILD=7200       # 2 h
-TIMEOUT_PYTEST=7200      # 2 h  (the full suite is ~11 min when healthy)
-TIMEOUT_TUTORIALS=28800  # 8 h  (a full tutorial pass is over an hour when healthy)
+TIMEOUT_BUILD=7200           # 2 h
+TIMEOUT_PYTEST=7200          # 2 h  (the full suite is ~11 min when healthy)
+TIMEOUT_TUTORIALS=28800      # 8 h  (a full tutorial pass is over an hour when healthy)
+TIMEOUT_TUTORIALS_MPI=28800  # 8 h  (the same scripts again, under mpirun)
+
+# The tutorial scripts are run a second time under `mpirun -n N`, without --distribute, so
+# that every rank builds the whole mesh -- which is what a user gets who simply starts a
+# script under mpirun. Set it to 0 on a machine that cannot afford the second pass, or to
+# fewer ranks than there are cores; oversubscribing makes every solve slower and can turn
+# the pass into a timeout. It is skipped by itself, with a note in the report, when mpirun
+# is not on PATH.
+TUTORIAL_MPI_RANKS=4
 
 # ------------------------------------------------------------------------ mail ----
 
