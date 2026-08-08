@@ -1388,9 +1388,14 @@ namespace pyoomph
     // Loop over all patches to get recovered flux value coefficients
     //===============================================================
 
-    // Map to store sets of pointers to the recovered flux coefficient matrices
-    // for each node.
-    std::map<oomph::Node *, std::set<DenseMatrix<double> *>> flux_coeff_pt;
+    // Map storing, for each node, the patches it belongs to -- by INDEX into
+    // vector_of_recovered_flux_coefficient_pt below, not by pointer.
+    //
+    // It used to hold the coefficient-matrix POINTERS, which orders the nodal average over patches
+    // by heap address, i.e. by whatever the allocator happened to hand out. Averaging in patch order
+    // instead makes the elemental errors a reproducible function of the mesh and the state, which is
+    // what the adaptivity decisions downstream are entitled to assume.
+    std::map<oomph::Node *, std::set<unsigned>> flux_coeff_pt;
 
     // We store the pointers to the recovered flux coefficient matrices for
     // various patches in a vector so we can delete them later
@@ -1421,30 +1426,21 @@ namespace pyoomph
     // This isn't a global variable
     int n_patch = adjacent_elements_pt.size(); // also needed by serial version
 
-    // Default values for serial AND parallel distributed problem
-    int itbegin = 0;
-
-    int itend = n_patch;
-
-#ifdef OOMPH_HAS_MPI
-    int range = n_patch;
-
-    // Work out values for parallel non-distributed problem
-    if (!(mesh_pt->is_mesh_distributed()))
-    {
-      // setup the loop variables
-      range = n_patch / n_proc; // number of patches on each proc
-
-      itbegin = my_rank * range;
-      itend = (my_rank + 1) * range;
-
-      // if on the last processor, ensure the end matches
-      if (my_rank == (n_proc - 1))
-      {
-        itend = n_patch;
-      }
-    }
-#endif
+    // Every rank computes every patch, in every configuration: serially, on a distributed mesh
+    // (where n_patch is this rank's own share to begin with) and on a replicated mesh under mpirun.
+    //
+    // That last case used to split the patches over the ranks and broadcast the recovered flux
+    // coefficients back, which is where the elemental errors stopped being the same number on every
+    // rank -- measured on rising_bubble.py at 4 ranks, the largest eigen-based elemental error came
+    // out as 0.0215209, 0.0218846, 0.0218788 and 0.0218793, i.e. differing in the third significant
+    // digit, from bit-identical dofs and a bit-identical eigenvector. A replicated problem whose
+    // ranks disagree about the error estimate refines to four different meshes, and the next solve
+    // then dies on a matrix and a vector of different sizes (or, worse, assembles a Jacobian out of
+    // four different meshes and merely converges badly). Recomputing every patch on every rank is
+    // the only thing that makes the estimate a function of the state alone.
+    // It is not even obviously slower: the split it replaces paid one MPI_Bcast per patch.
+    const int itbegin = 0;
+    const int itend = n_patch;
 
     // Set up matrices and vectors which will be sent later
     // - full matrix of all recovered coefficients
@@ -1497,110 +1493,10 @@ namespace pyoomph
       } // end of if(nelem>=2)
     }
 
-    // Now broadcast the result from each process to every other process
-    // if the mesh has not yet been distributed and MPI is initialised
+    // The merge below used to be the "distributed mesh" branch of an if/else whose other half
+    // split the patches over the ranks and broadcast them back; see the comment on itbegin/itend
+    // above for why that half is gone. It is now the only path.
 
-#ifdef OOMPH_HAS_MPI
-
-    if (!mesh_pt->is_mesh_distributed() && MPI_Helpers::mpi_has_been_initialised())
-    {
-      // Get communicator from namespace
-      OomphCommunicator *comm_pt = MPI_Helpers::communicator_pt();
-
-      // All local recovered fluxes have been calculated, so now share result
-      for (int iproc = 0; iproc < n_proc; iproc++)
-      {
-        // Broadcast number of patches processed
-        int n_patches = vector_of_recovered_flux_coefficient_pt_to_send.size();
-        MPI_Bcast(&n_patches, 1, MPI_INT, iproc, comm_pt->mpi_comm());
-
-        // Loop over these patches, broadcast recovered flux coefficients
-        for (int ipatch = 0; ipatch < n_patches; ipatch++)
-        {
-          // Number of elements in this patch
-          Vector<int> elements(0);
-          unsigned nelements = 0;
-
-          // Which processor are we on?
-          if (my_rank == iproc)
-          {
-            elements = vector_of_elements_in_patch_to_send[ipatch];
-            nelements = elements.size();
-          }
-
-          // Broadcast elements
-          comm_pt->broadcast(iproc, elements);
-
-          // Now get recovered flux coefficients
-          DenseMatrix<double> *recovered_flux_coefficient_pt;
-
-          // Which processor are we on?
-          if (my_rank == iproc)
-          {
-            recovered_flux_coefficient_pt =
-                vector_of_recovered_flux_coefficient_pt_to_send[ipatch];
-          }
-          else
-          {
-            recovered_flux_coefficient_pt = new DenseMatrix<double>;
-          }
-
-          // broadcast this matrix from the loop processor
-          DenseMatrix<double> mattosend = *recovered_flux_coefficient_pt;
-          comm_pt->broadcast(iproc, mattosend);
-
-          // Set pointer on all processors
-          *recovered_flux_coefficient_pt = mattosend;
-
-          // End of parallel broadcasting
-          vector_of_recovered_flux_coefficient_pt.push_back(recovered_flux_coefficient_pt);
-
-          // Loop over elements in patch (work out nelements again after bcast)
-          nelements = elements.size();
-
-          Vector<ElementWithZ2ErrorEstimator *> patch_el_pt;
-          for (unsigned e = 0; e < nelements; e++)
-          {
-            // Get pointer to element
-            ElementWithZ2ErrorEstimator *el_pt =
-                dynamic_cast<ElementWithZ2ErrorEstimator *>(
-                    mesh_pt->element_pt(elements[e]));
-            patch_el_pt.push_back(el_pt);
-
-            // Loop over all nodes in element
-            unsigned num_nod = el_pt->nnode();
-            for (unsigned n = 0; n < num_nod; n++)
-            {
-              // Get the node
-              oomph::Node *nod_pt = el_pt->node_pt(n);
-              // Add the pointer to the current flux coefficient matrix
-              // to the set for the node
-              // Mesh not distributed here so nod_pt cannot be halo
-              flux_coeff_pt[nod_pt].insert(recovered_flux_coefficient_pt);
-            }
-          }
-
-          // The coefficients that were just broadcast are expressed in the sending rank's
-          // patch-local frame, so this rank needs that frame to evaluate them. Rebuild it rather
-          // than broadcast it: the mesh is not distributed here, so every rank holds all the
-          // elements of the patch, the element list has just been broadcast in the sender's order,
-          // and build_recovery_frame is deterministic given that list. Cheaper than serialising a
-          // frame per patch, and it cannot drift out of sync with the sender.
-          if (frames_in_use && my_rank != iproc)
-          {
-            RecoveryFrame frame;
-            build_recovery_frame(patch_el_pt, dim, frame);
-            frame_of_coefficients[recovered_flux_coefficient_pt] = frame;
-          }
-
-        } // end loop over patches on current processor
-
-      } // end loop over processors
-    }
-    else // is_mesh_distributed=true
-    {
-
-#endif // end ifdef OOMPH_HAS_MPI for parallel job without mesh distribution
 
       // Do the same for a distributed mesh as for a serial job
       // up to the point where the elemental error is calculated
@@ -1621,6 +1517,7 @@ namespace pyoomph
         recovered_flux_coefficient_pt =
             vector_of_recovered_flux_coefficient_pt_to_send[ipatch];
 
+        const unsigned this_patch = vector_of_recovered_flux_coefficient_pt.size();
         vector_of_recovered_flux_coefficient_pt.push_back(recovered_flux_coefficient_pt);
 
         for (int e = 0; e < nelements; e++)
@@ -1636,17 +1533,12 @@ namespace pyoomph
           {
             // Get the node
             oomph::Node *nod_pt = el_pt->node_pt(n);
-            // Add the pointer to the current flux coefficient matrix
-            // to the set for this node
-            flux_coeff_pt[nod_pt].insert(recovered_flux_coefficient_pt);
+            // Record this patch for this node
+            flux_coeff_pt[nod_pt].insert(this_patch);
           }
         }
 
       } // End loop over patches on current processor
-
-#ifdef OOMPH_HAS_MPI
-    } // End if(is_mesh_distributed)
-#endif
 
     // Cleanup patch storage scheme
     for (IT it = adjacent_elements_pt.begin();
@@ -1691,14 +1583,15 @@ namespace pyoomph
 
         for (unsigned i = 0; i < num_flux_terms; i++) rec_flux_map(nod_pt, i) = 0.0;
 
-        typedef std::set<DenseMatrix<double> *>::iterator IT;
+        typedef std::set<unsigned>::iterator IT;
         for (IT it = flux_coeff_pt[nod_pt].begin(); it != flux_coeff_pt[nod_pt].end(); it++)
         {
+          DenseMatrix<double> *const coeff_pt = vector_of_recovered_flux_coefficient_pt[*it];
           // Loudly, not silently: a missing frame would otherwise default-construct to an inactive
           // one and evaluate this patch's coefficients in global coordinates, which is not merely
           // less accurate but meaningless - they were fitted in a different basis.
           std::map<DenseMatrix<double> *, RecoveryFrame>::const_iterator fit =
-              frame_of_coefficients.find(*it);
+              frame_of_coefficients.find(coeff_pt);
           if (fit == frame_of_coefficients.end())
           {
             throw OomphLibError("No recovery frame recorded for a patch's flux coefficients",
@@ -1711,7 +1604,7 @@ namespace pyoomph
           shape_rec(xrec, dim, psi_r);
           for (unsigned i = 0; i < num_flux_terms; i++)
             for (unsigned icoeff = 0; icoeff < num_recovery_terms; icoeff++)
-              rec_flux_map(nod_pt, i) += (*(*it))(icoeff, i) * psi_r[icoeff];
+              rec_flux_map(nod_pt, i) += (*coeff_pt)(icoeff, i) * psi_r[icoeff];
         }
 
         if (npatches > 0)
@@ -1724,17 +1617,18 @@ namespace pyoomph
       DenseMatrix<double> averaged_flux_coeff(num_recovery_terms, num_flux_terms, 0.0);
 
       // Loop over matrices for different patches and add contributions
-      typedef std::set<DenseMatrix<double> *>::iterator IT;
+      typedef std::set<unsigned>::iterator IT;
       for (IT it = flux_coeff_pt[nod_pt].begin();
            it != flux_coeff_pt[nod_pt].end(); it++)
       {
+        DenseMatrix<double> *const coeff_pt = vector_of_recovered_flux_coefficient_pt[*it];
         for (unsigned i = 0; i < num_recovery_terms; i++)
         {
           for (unsigned j = 0; j < num_flux_terms; j++)
 
           {
             // ...just add it -- we'll divide by the number of patches later
-            averaged_flux_coeff(i, j) += (*(*it))(i, j);
+            averaged_flux_coeff(i, j) += (*coeff_pt)(i, j);
           }
         }
       }

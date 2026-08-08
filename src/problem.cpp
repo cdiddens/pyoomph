@@ -1921,9 +1921,13 @@ namespace pyoomph
 		oomph::DoubleVector resdv(this->dof_distribution_pt());
 		resdv.clear();
 		get_derivative_wrt_global_parameter(valptr, resdv);
-		std::vector<double> res(this->ndof());
-		for (unsigned int i = 0; i < res.size(); i++)
-			res[i] = resdv[i];
+		// The assembly rebuilds resdv on the distribution oomph-lib picks for the Jacobian, which under
+		// mpirun is distributed even when the problem is not, so resdv holds nrow_local() doubles and
+		// indexing it over the global dof range would read past the end of the buffer. The caller wants
+		// the whole vector.
+		std::vector<double> res;
+		gather_double_vector_to_global(resdv, res);
+		res.resize(this->ndof());
 		return res;
 	}
 

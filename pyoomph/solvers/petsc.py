@@ -586,7 +586,10 @@ class PETSCSolver(GenericLinearSystemSolver):
         #    self.petsc_mat.setOption(19, 0) #type:ignore
         #    self.petsc_mat.shift(0) #type:ignore
 
-        self.ksp = PETSc.KSP().create() #type:ignore
+        # The KSP has to live on the same communicator as the matrix it is built on: solve_serial()
+        # builds its Mat on COMM_SELF (a replicated system solved redundantly per rank), while
+        # solve_distributed() builds one on COMM_WORLD. The default here was COMM_WORLD either way.
+        self.ksp = PETSc.KSP().create(comm=self.petsc_mat.getComm()) #type:ignore
         self.ksp.setOperators(self.petsc_mat) #type:ignore
         if not self._do_not_set_any_args:
             self.ksp.setType('preonly') #type:ignore
@@ -639,7 +642,15 @@ class PETSCSolver(GenericLinearSystemSolver):
             # (createAIJ then copies the CSR into PETSc's own AIJ storage. A zero-copy
             # MatCreateSeqAIJWithArrays was tried but silently breaks hypre/BoomerAMG -- CG diverges
             # with KSP reason DIVERGED_ITS -- so we keep the safe, universally-correct copying path.)
-            self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(PETSc.IntType, copy=False), rowind.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)),comm=get_mpi_world_comm()) #type:ignore
+            # COMM_SELF, not COMM_WORLD: this entry point is handed a COMPLETE n x n CSR, and under
+            # mpirun every rank is handed the same one -- oomph-lib's own solves go through
+            # solve_distributed() as soon as there is more than one rank, so what reaches here on an
+            # mpirun are replicated systems built in Python (PeriodicDrivingResponse, the Lyapunov and
+            # Halley utilities). On COMM_WORLD, PETSc reads size=(n,n) as this rank's LOCAL block and
+            # rejects the global row_start ("size(I) is 809, expected 203" in linear_response_drum.py).
+            # Solving it redundantly per rank is also what keeps the replicated problem replicated, and
+            # it involves no collective, so it cannot deadlock against a rank that took another branch.
+            self.petsc_mat = PETSc.Mat().createAIJ(size=(n, n), csr=(colptr.astype(PETSc.IntType, copy=False), rowind.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)),comm=PETSc.COMM_SELF) #type:ignore
 
             self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
             # Force diagonal:
@@ -650,6 +661,9 @@ class PETSCSolver(GenericLinearSystemSolver):
             self.petsc_mat.assemble()
             self._structure_id = self.problem.jacobian_structure_id
             self._structure_nnz = nnz
+            # Never let solve_distributed() adopt this COMM_SELF matrix as its own: -1 is the "no
+            # distributed matrix cached" sentinel, and nrow_local is never negative.
+            self._structure_nrow_local = -1
             self._remember_structure(colptr,rowind)
 
             self.x = PETSc.Vec().createSeq(n) #type:ignore
@@ -660,7 +674,9 @@ class PETSCSolver(GenericLinearSystemSolver):
             # reassignment, and only when a fieldsplit preconditioner actually needs the indices.
             if self._dofs_to_field_info is None and self._field_split_required():
                 self.setup_field_split()
-            bv = PETSc.Vec().createWithArray(b) #type:ignore
+            # On the matrix's own communicator (COMM_SELF here, see op_flag==1) -- the default would be
+            # COMM_WORLD, which under mpirun does not match the Mat and self.x.
+            bv = PETSc.Vec().createWithArray(b,comm=PETSc.COMM_SELF) #type:ignore
             self.petsc_rhs=bv
             self._setup_solver_if_needed()
 

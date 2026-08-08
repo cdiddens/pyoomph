@@ -500,11 +500,19 @@ namespace pyoomph
       linear_solver_pt->disable_resolve();
     }
 
+    // x comes back in whatever distribution the linear solver chose. The problem is not distributed
+    // here, but on an mpirun oomph-lib still assembles the Jacobian over a UNIFORM DISTRIBUTED
+    // layout (create_new_linear_algebra_distribution()), so x holds only nrow_local() doubles and
+    // reading x[n] over the global dof range walks off the end of the buffer. That produced a NaN
+    // guess and a Hopf Newton solve starting at inf on every mpirun while converging serially.
+    std::vector<double> xg;
+    Problem::gather_double_vector_to_global(x, xg);
+
     // Normalise the solution x
     double length = 0.0;
     for (unsigned n = 0; n < Ndof; n++)
     {
-      length += x[n] * x[n];
+      length += xg[n] * xg[n];
     }
     length = sqrt(length);
 
@@ -513,7 +521,7 @@ namespace pyoomph
     // This is dumb at the moment ... fix with eigensolver?
     for (unsigned n = 0; n < Ndof; n++)
     {
-      C[n] = Phi[n] = -x[n] / length;
+      C[n] = Phi[n] = -xg[n] / length;
     }
 
     // Set the imaginary part so that the appropriate residual is
@@ -1602,16 +1610,23 @@ namespace pyoomph
     {
       linear_solver_pt->disable_resolve();
     }
+    // Same trap as in MyHopfHandler's no-guess constructor: on an mpirun of a NON-distributed
+    // problem the solver still works on a uniform distributed layout, so x[n] over the global dof
+    // range reads past the local buffer. The fold guess came out NaN and the augmented Newton solve
+    // reported "Initial Maximum residuals inf" straight away (kuramoto_sivanshinsky_bifurcation.py).
+    std::vector<double> xg;
+    Problem::gather_double_vector_to_global(x, xg);
+
     double length = 0.0;
     for (unsigned n = 0; n < Ndof; n++)
     {
-      length += x[n] * x[n];
+      length += xg[n] * xg[n];
     }
     length = sqrt(length);
 
     for (unsigned n = 0; n < Ndof; n++)
     {
-      Y[n] = Phi[n] = -x[n] / length;
+      Y[n] = Phi[n] = -xg[n] / length;
     }
     // The augmented dof vector must be built NON-distributed, like the base problem's own
     // (assign_eqn_numbers() builds it with false whenever the problem is not distributed; the

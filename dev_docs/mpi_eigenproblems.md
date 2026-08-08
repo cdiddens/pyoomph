@@ -264,3 +264,11 @@ what actually checks the blocks tile `[0, ndof)`.
   just slower — worth a look now that the path works.
 - **Azimuthal stability on a distributed mesh is tested but not exercised at scale.** The test
   problems are small.
+- **Eigenvectors are replicated on every rank** (`_vector_to_global_array` gathers with
+  `Scatter.toAll`), which is the right trade at today's sizes and the wrong one for a genuinely
+  large problem. See [dev_docs/replicated_mpi_correctness.md](replicated_mpi_correctness.md) §5.
+
+Two bugs in oomph-lib's `CRDoubleMatrix::redistribute`, on the path
+`get_eigenproblem_matrices` takes when the problem is *not* distributed, made every eigenproblem with
+fewer equations than ranks abort; see
+[dev_docs/replicated_mpi_correctness.md](replicated_mpi_correctness.md) §2.

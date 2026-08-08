@@ -20,6 +20,13 @@ live in [dev_docs/boundary_layer_meshes.md](dev_docs/boundary_layer_meshes.md).
 
 ---
 
+Under `mpirun` without `--distribute`, the Z2 patch loop used to be split over the ranks and the
+recovered coefficients broadcast back, which did **not** reproduce the same elemental errors on every
+rank (third significant digit, from bit-identical state) and so refined a replicated problem to
+`nproc` different meshes. Every rank now computes every patch. Why the broadcast merge disagreed at
+all is still unexplained — see
+[dev_docs/replicated_mpi_correctness.md](replicated_mpi_correctness.md) §3 and §4.
+
 ## 1. The pipeline as it stands
 
 Every adaptation path in pyoomph funnels through one function. `Problem::adapt`

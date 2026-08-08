@@ -501,3 +501,37 @@ method avoid this storage altogether.
 Both sites now grow the outer vector to n_matrix and reset any row-count entry whose length does not
 match the current one, instead of trusting the first shape they ever saw.
 Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
+
+matrices.cc (Changed on 8th August 2026, CRDoubleMatrix::redistribute with ranks that own no rows):
+Both branches of CRDoubleMatrix::redistribute() computed the per-rank nnz offsets by scanning, for
+each step, for the rank whose first_row equals a running row counter. That only works while every
+first_row is distinct, and they are not as soon as a rank owns no rows: LinearAlgebraDistribution's
+uniform layout of 2 rows over 4 ranks is first_row [0,0,1,1] with nrow_local [0,1,0,1]. The scan then
+locked onto rank 0 -- empty, so the counter never advanced -- for all four steps, and nnz_count came
+out as zero. The value and column-index buffers are allocated from that count, so the rows arriving
+from the other ranks were received straight past the end of a zero-sized heap block; the symptom was
+"corrupted size vs. prev_size" out of an MPI_Type_free further down in the same function, i.e. nowhere
+near the write. Reached from get_eigenproblem_matrices(), whose non-distributed MPI branch assembles
+over a distributed layout and redistributes back to a replicated one, so any eigenvalue problem with
+fewer equations than ranks aborted (docs/source/tutorial/advstab/cartesiannormal/turing_dispersion.py,
+a 0d 2-dof problem, on 3 or more ranks).
+Both now walk the ranks in ascending first_row order directly. Ties are harmless because only an empty
+rank can share another's first_row and it contributes no nonzeros, so its place in the order does not
+move any offset.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
+
+matrices.cc (Changed on 8th August 2026, CRDoubleMatrix::redistribute send-wait sized by the recv count):
+Both branches waited for their non-blocking sends with
+
+    unsigned n_send_req = send_req.size();
+    if (n_recv_req > 0) { Vector<MPI_Status> send_status(n_recv_req);
+                          MPI_Waitall(n_send_req, &send_req[0], &send_status[0]); }
+
+i.e. guarded and sized by the number of RECEIVES. The two counts are equal only when the source and
+target distributions are mirror images of each other. Redistributing 2 rows over 4 ranks (first_row
+[0,0,1,1], nrow_local [0,1,0,1]) gives rank 1 three sends and one receive, so MPI_Waitall wrote three
+statuses into a one-element buffer; and a rank with sends but no receives skipped the wait entirely,
+so build_without_copy() below freed the send buffers while MPI was still reading them
+("munmap_chunk(): invalid pointer" on rank 1 of turing_dispersion.py at 4 ranks). Now guarded and
+sized by n_send_req.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
