@@ -12,6 +12,7 @@ Pyoomph Tutorial
 
    tutorial/preface.rst
    tutorial/installation.rst
+   tutorial/philosophy.rst
    tutorial/temporal.rst
    tutorial/spatial.rst
    tutorial/pde.rst         
