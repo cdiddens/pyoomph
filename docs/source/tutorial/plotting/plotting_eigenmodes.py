@@ -83,7 +83,7 @@ if __name__ == "__main__":
         problem.solve() # stationary solve
 
         # from the previous example we know that the fold bifurcation happens close to 0.28
-        problem.param_gamma.value=0.28
+        problem.go_to_param(gamma=0.28,startstep=0.01)
         problem.solve() # solve at gamma=0.28
 
         # Activate bifurcation tracking
