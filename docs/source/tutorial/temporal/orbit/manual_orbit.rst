@@ -19,6 +19,10 @@ Then, we manually start orbit tracking to solve for an initial orbit and subsequ
 		        
 As described above, we first start in chaos, then run some initial steps followed by a longer stretch where we write output. This output is loaded, scanned for the best near-recurrence with a period close to :math:`3`, smoothed by a low-pass filter and subsequently used as a guess for the orbit. To that end, we first use :py:meth:`~pyoomph.generic.problem.Problem.set_current_dofs` to set the starting point of the orbit guess and ship the remaining history values to :py:meth:`~pyoomph.generic.problem.Problem.activate_periodic_orbit_handler`. Afterwards, the continuation is analogous to the previous example.
 
+Note that the guess is built on rank 0 alone and broadcast with ``get_mpi_bcast``. Under ``mpirun``, only rank 0 writes ``lorenz.txt`` while every rank would read it back, with nothing synchronising the two: a rank arriving while rank 0 is still writing sees a shorter trajectory, picks a different stretch and hence a different number of history dofs, so the ranks would set up orbit systems of different sizes and hang in the first collective of the subsequent solve.
+
+Since the guess is taken from a chaotic trajectory, which of the infinitely many unstable orbits we land on is decided by roundoff. Running the same script under ``mpirun`` uses a different linear solver than a serial run does, which is enough to end up at a different point of the attractor and therefore at a different orbit of the family. That is a property of the chaos, not of the orbit solver: given the same guess, the orbit solve and the continuation return the same orbit to the last digit, irrespective of the number of ranks.
+
 
 
 ..  figure:: orbits_in_chaos.*

@@ -769,7 +769,12 @@ class _ODEFileOutput(_BaseODEOutput):
         assert self.fname is not None
         self.fname = os.path.join(newdir, os.path.basename(self.fname))
         if self.fname!=oldname:
-            self.file.close()
+            # close() rather than self.file.close(): init() only opens the file on rank 0, so on every
+            # other rank self.file is None. Under mpirun those ranks raised an AttributeError here
+            # while rank 0 carried on, i.e. the run hung in rank 0's next collective rather than
+            # failing. PeriodicOrbitHandler.output_orbit() switches the output directory on every
+            # continuation step, so docs/.../orbit/manual_orbit.py hit it immediately.
+            self.close()
             if os.path.exists(self.fname):  
                 self.init(eqtree,{"TODO":"Fill further information here"},self._mpi_rank)
             else:
