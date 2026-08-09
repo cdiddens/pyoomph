@@ -19,9 +19,10 @@ KEEP_RUNS=30
 # ------------------------------------------------------------------ environment ----
 #
 # cron starts with almost no environment: no conda, no venv, often no /usr/local/bin in
-# PATH. The nightly therefore sources ~/.bashrc itself, with PS1 set so that the usual
-# "return unless interactive" guard at the top does not skip it -- so whatever your own
-# shell has is normally already there. What that does NOT cover goes here.
+# PATH. The nightly therefore starts an interactive `bash -i`, which reads ~/.bashrc the
+# ordinary way, and takes PATH, LD_LIBRARY_PATH, PYTHONPATH and the three PETSC_* variables
+# below out of it -- so whatever your own shell has is normally already there. Anything the
+# rc file does not set, or that is not in that list, goes here.
 
 # Either a path to a file that is sourced before the build, or the commands themselves.
 # Typical contents:

@@ -36,7 +36,7 @@ SELF="$(readlink -f "$0")"
 if [ "${PYOOMPH_NIGHTLY_REEXEC:-}" != "1" ]; then
     copy="$(mktemp "${TMPDIR:-/tmp}/pyoomph_nightly.XXXXXXXX.sh")" || exit 1
     cat "$SELF" >"$copy" && chmod +x "$copy" || exit 1
-    export PYOOMPH_NIGHTLY_REEXEC=1 PYOOMPH_NIGHTLY_SELF_COPY="$copy"
+    export PYOOMPH_NIGHTLY_REEXEC=1 PYOOMPH_NIGHTLY_SELF_COPY="$copy" PYOOMPH_NIGHTLY_ORIGIN="$SELF"
     exec "$copy" "$@"
 fi
 
@@ -331,7 +331,9 @@ if [ "$REMOTE_SHA" = "$LAST_SHA" ] && [ "$FORCE" = 0 ]; then
     exit 0
 fi
 
-RUN_DIR="$LOG_DIR/$(date '+%Y%m%d-%H%M%S')"
+# Reused across the hand-over to an updated version of this script (see "new version" below), so
+# that the hand-over does not leave an orphaned log directory behind.
+RUN_DIR="${PYOOMPH_NIGHTLY_RUN_DIR:-$LOG_DIR/$(date '+%Y%m%d-%H%M%S')}"
 mkdir -p "$RUN_DIR" || exit 1
 note "testing origin/$BRANCH ${REMOTE_SHA:0:12} (logs in $RUN_DIR)"
 
@@ -380,6 +382,33 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------- new version ---
+#
+# What is running is the copy taken at the top, i.e. the version of this file from *before* the
+# fast-forward. A commit that changes the nightly and the thing it drives at the same time would
+# therefore be tested with the old nightly: on 2026-08-09 the tutorial runner had just started to
+# require $PETSC_ARCH_REAL/$PETSC_ARCH_COMPLEX, the script that would have provided them was in the
+# same push, and the tutorial step died in its first second. So hand over to the new version once.
+#
+# The state file is deliberately still unwritten here, so the new instance walks into exactly the
+# situation this one did -- origin/$BRANCH ahead of last_tested.sha -- and simply carries on. Its
+# `exec 9>` reopens the lock file, which drops this instance's flock along with the old descriptor
+# before it takes its own, so the hand-over does not lock the run out of its own lock.
+if [ "${PYOOMPH_NIGHTLY_UPDATED:-}" != "1" ] && [ -n "${PYOOMPH_NIGHTLY_ORIGIN:-}" ] &&
+   [ -r "$PYOOMPH_NIGHTLY_ORIGIN" ] && ! cmp -s "$PYOOMPH_NIGHTLY_ORIGIN" "$SELF"; then
+    note "the update changed $PYOOMPH_NIGHTLY_ORIGIN -- restarting with the new version"
+    newcopy="$(mktemp "${TMPDIR:-/tmp}/pyoomph_nightly.XXXXXXXX.sh")" || exit 1
+    if cat "$PYOOMPH_NIGHTLY_ORIGIN" >"$newcopy" && chmod +x "$newcopy"; then
+        # exec does not run the EXIT trap, so this copy is unlinked by hand. Bash holds the file
+        # open while it reads it, so unlinking the running script is safe.
+        rm -f "$SELF"
+        export PYOOMPH_NIGHTLY_UPDATED=1 PYOOMPH_NIGHTLY_SELF_COPY="$newcopy" PYOOMPH_NIGHTLY_RUN_DIR="$RUN_DIR"
+        exec "$newcopy" "$@"
+    fi
+    rm -f "$newcopy"
+    note "could not copy the new version -- carrying on with the old one"
+fi
+
 # From here on the commit counts as tested, whatever the outcome: a commit that breaks the
 # build would otherwise be retried -- and mailed about -- every night until someone pushes
 # a fix. The two aborts above deliberately happen before this, because a dirty or diverged
@@ -406,30 +435,60 @@ if [ -n "$ENV_SETUP" ]; then
     fi
 fi
 
-# The two PETSc builds come from the same place the interactive shell gets them: .bashrc.
+# Everything the machine's own setup provides -- the compiler environment, mpirun, and above all the
+# two PETSc builds -- comes from the same place the user's shell gets it: .bashrc. In particular
 # test_all_tutorial_scripts.py wants PETSC_DIR plus PETSC_ARCH_REAL and PETSC_ARCH_COMPLEX -- it runs
-# the ordinary tutorials against the real-scalar build and only the normal-mode stability ones
+# the ordinary tutorials against the real-scalar build and only the ones with complex spectra (the
+# normal-mode stability and the periodic-orbit/Floquet scripts, which the runner picks out by itself)
 # against the complex one -- and duplicating those paths in the nightly config was one more thing to
 # forget when a PETSc is rebuilt under a new arch name.
 #
-# Three things stop a plain `. ~/.bashrc` from doing it, and all three are load-bearing here:
-#   * cron's shell is not interactive, and the stock Debian .bashrc returns immediately unless PS1 is
-#     set. Setting PS1 for the duration is what makes the file run at all.
-#   * rc files reference unset variables freely, which under `set -u` aborts the whole nightly.
-#   * the variables are commonly *assigned* rather than exported (they are on walhalla, in the
-#     per-host file .bashrc sources), so without the explicit export below they would stay shell
-#     variables of this script and never reach the runner's environment.
-# Its noise -- `bind` failing without line editing, and so on -- goes to env.log. Its exit status is
-# not checked: an rc file very often ends in a `[ -f x ] && . x` that is simply false, so a nonzero
-# status here means nothing. What matters is whether the variables arrived, which is checked next.
+# It is fetched from a genuinely interactive `bash -i` rather than by sourcing ~/.bashrc into this
+# shell, because sourcing it does not work: rc files guard themselves against non-interactive use,
+# and the stock Debian guard is
+#     case $- in *i*) ;; *) return;; esac
+# which tests the shell's interactive *flag*. That flag can only be set when bash starts, so the
+# `PS1='nightly$ '` trick this script used until 2026-08-09 -- which does defeat the older
+# `[ -z "$PS1" ] && return` idiom -- returned at line 9 of .bashrc and quietly delivered nothing.
+# The nightly ran for months with no PETSc in its environment; it only became a failure when the
+# tutorial runner started to require the two arches by name, and then failed in the first second.
+#
+# The probe shell inherits this environment and runs the rc file on top of it, so what it prints is
+# exactly "what the nightly has, plus what .bashrc adds" -- including variables that are merely
+# assigned rather than exported, since it prints the values rather than passing the environment on.
+# Only the variables named here are taken over; a wholesale import would also carry PWD, SHLVL and
+# friends. `bash -i` without a terminal complains about job control, and rc files are chatty: that
+# goes to env.log. </dev/null and the timeout are in case an rc file wants to talk to a user who is
+# not there (a `read`, an auto-attaching tmux).
+#
+# setsid is not decoration. An interactive bash that HAS a controlling terminal but is not the
+# terminal's foreground process group stops itself on purpose -- initialize_job_control() sends
+# itself SIGTTIN and waits to be brought to the foreground, which nobody is going to do here. Under
+# cron that never happens, there is no terminal at all; started by hand from a shell it deadlocks on
+# the spot, as it did on 2026-08-09. A session of its own means the probe cannot open /dev/tty, so
+# it settles for "no job control in this shell" and gets on with it -- the same situation cron gives
+# it. --kill-after for the same reason: a process stopped that way never handles the plain SIGTERM.
+NIGHTLY_ENV_VARS=(PATH LD_LIBRARY_PATH PYTHONPATH PETSC_DIR PETSC_ARCH_REAL PETSC_ARCH_COMPLEX)
 if [ -r "$HOME/.bashrc" ]; then
-    _saved_ps1="${PS1:-}"
-    PS1='nightly$ '
-    set +u
-    # shellcheck disable=SC1091
-    . "$HOME/.bashrc" >>"$RUN_DIR/env.log" 2>&1
-    set -u
-    PS1="$_saved_ps1"
+    _probe='printf "__PYOOMPH_ENV__\n"'
+    for _v in "${NIGHTLY_ENV_VARS[@]}"; do
+        _probe="$_probe; printf '%s\\n' \"\${$_v:-}\""
+    done
+    _detach=""
+    command -v setsid >/dev/null 2>&1 && _detach="setsid -w"
+    # shellcheck disable=SC2086  # unquoted on purpose: empty means "no setsid on this machine"
+    _probe_out="$($_detach timeout --kill-after=10 60 bash -ic "$_probe" </dev/null 2>>"$RUN_DIR/env.log")"
+    if printf '%s\n' "$_probe_out" | grep -qx '__PYOOMPH_ENV__'; then
+        # Everything before the marker is the rc file's own chatter on stdout.
+        _i=0
+        while IFS= read -r _line; do
+            [ -n "$_line" ] && export "${NIGHTLY_ENV_VARS[$_i]}=$_line"
+            _i=$((_i + 1))
+            [ "$_i" -ge "${#NIGHTLY_ENV_VARS[@]}" ] && break
+        done <<<"$(printf '%s\n' "$_probe_out" | sed -n '/^__PYOOMPH_ENV__$/,$p' | tail -n +2)"
+    else
+        note "could not read the interactive environment from ~/.bashrc -- see env.log"
+    fi
 fi
 PETSC_MISSING=""
 for _v in PETSC_DIR PETSC_ARCH_REAL PETSC_ARCH_COMPLEX; do
@@ -552,6 +611,15 @@ run_tutorial_pass() { # label, tag, timeout, extra arguments for the runner
     local label="$1" tag="$2" tmo="$3" extra="$4" log logdir rc bad failures skips selfskips secs
     log="$RUN_DIR/tutorials_$tag.log"
     logdir="$RUN_DIR/tutorial_logs_$tag"
+
+    # The runner drops the previous pass's per-script logs when it rebuilds the bundle -- but only
+    # if it gets that far. When it dies before that (on 2026-08-09: the PETSc arches were not in its
+    # environment, so it raised in its first second), the harvest below picks up whatever logs the
+    # previous pass, or a previous night, or a hand-started run left behind, and the report quotes
+    # them as failures of this pass. Clearing first makes the harvest show only this pass's work.
+    if [ -d "$REPO_DIR/citools/pyoomph_tutorial_scripts" ]; then
+        find "$REPO_DIR/citools/pyoomph_tutorial_scripts" -name '*.log' -delete 2>/dev/null
+    fi
 
     run_step "tutorials ($label)" "$log" "$tmo" \
         "cd $(printf '%q' "$REPO_DIR") && $(printf '%q' "$PYTHON") -u citools/test_all_tutorial_scripts.py $extra"
@@ -692,8 +760,8 @@ if [ "$BUILD_RC" -eq 0 ]; then
         say "  mpirun: $(command -v mpirun)"
     else
         say "  mpirun: NOT ON PATH -- every MPI test skipped itself, and the MPI tutorial pass could"
-        say "          not run either. The nightly sources ~/.bashrc, so either it does not put mpirun"
-        say "          on PATH under cron, or ENV_SETUP in $CONFIG has to."
+        say "          not run either. The nightly takes PATH from an interactive bash, so either"
+        say "          ~/.bashrc does not put mpirun on it, or ENV_SETUP in $CONFIG has to."
     fi
     if [ -n "$MPI_TUTORIALS_SKIPPED" ]; then
         say "  tutorials under mpirun: NOT RUN -- $MPI_TUTORIALS_SKIPPED"

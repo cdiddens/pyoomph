@@ -115,15 +115,22 @@ print("COMPLEX" if PETSc.ScalarType is numpy.complex128 else "NOT_COMPLEX")
 # Which PETSc a script gets is decided per script, not once for the whole run. The complex build is
 # the slower of the two - every scalar is two doubles - and it is not what a user running an ordinary
 # tutorial has loaded, so testing everything against it tests a configuration nobody uses. Only the
-# normal-mode stability scripts genuinely need it: the azimuthal / Cartesian mode decomposition
-# assembles a complex Jacobian, and a real PETSc cannot hold it.
+# scripts that genuinely need it get it: the azimuthal / Cartesian mode decomposition assembles a
+# complex Jacobian, and a real PETSc cannot hold it.
 #
 # Recognised by the call that switches the mode decomposition on. The negative lookahead keeps
 # setup_for_stability_analysis(azimuthal_stability=False) - which utils/periodic_driving_response.py
 # passes explicitly - on the real build where it belongs.
 _COMPLEX_NEEDED=re.compile(r"(?:azimuthal_stability|additional_cartesian_mode)\s*=\s*(?!False\b)")
 
+# The periodic-orbit scripts have no such marker in their source - they need the complex build for
+# what they solve rather than for how the Jacobian is assembled - so they are named outright: the
+# Hopf tracker and the Floquet multipliers of an orbit are complex quantities.
+_COMPLEX_BY_NAME={"langford_floquet.py","hopf_switch.py","langford_time_integration.py"}
+
 def needs_complex_petsc(script):
+  if Path(script).name in _COMPLEX_BY_NAME:
+    return True
   return _COMPLEX_NEEDED.search(Path(script).read_text(errors="replace")) is not None
 
 def petsc_pythonpath(arch,varname):
@@ -171,7 +178,7 @@ if not args.no_petsc:
   check_petsc(env_real,os.environ["PETSC_ARCH_REAL"],"PETSC_ARCH_REAL",want_complex=False)
   check_petsc(env_complex,os.environ["PETSC_ARCH_COMPLEX"],"PETSC_ARCH_COMPLEX",want_complex=True)
   print("Real-scalar PETSc:",env_real["PYTHONPATH"].split(os.pathsep)[0])
-  print("Complex PETSc:    ",env_complex["PYTHONPATH"].split(os.pathsep)[0],"(normal-mode stability scripts only)")
+  print("Complex PETSc:    ",env_complex["PYTHONPATH"].split(os.pathsep)[0],"(normal-mode stability and periodic-orbit scripts only)")
 
 
 problems=tutorial_bundle.check_consistency()
