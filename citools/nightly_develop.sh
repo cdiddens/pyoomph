@@ -71,6 +71,13 @@ CONFIG="${PYOOMPH_NIGHTLY_CONF:-$HOME/.pyoomph_nightly.conf}"
 if [ -f "$CONFIG" ]; then
     # shellcheck disable=SC1090
     . "$CONFIG" || { echo "cannot read $CONFIG" >&2; exit 1; }
+    # Configs written before d2cf20c set this to point the run at a PETSc build. Nothing has read it
+    # since, and a config that still has it looks configured while the run has no PETSc at all --
+    # which is what left the MPI tests untested for months. Say so rather than ignoring it silently.
+    if [ -n "${PETSC_PYTHONPATH:-}" ]; then
+        echo "note: PETSC_PYTHONPATH in $CONFIG is obsolete and ignored; PETSC_DIR and" >&2
+        echo "      PETSC_ARCH_REAL/PETSC_ARCH_COMPLEX (from ~/.bashrc) are used instead." >&2
+    fi
 fi
 
 FORCE=0
@@ -505,6 +512,40 @@ if [ -n "$PETSC_MISSING" ]; then
 else
     note "PETSc: real=$PETSC_DIR/$PETSC_ARCH_REAL complex=$PETSC_DIR/$PETSC_ARCH_COMPLEX"
 fi
+
+# The PYTHONPATH the pytest step runs with, built from $PETSC_DIR/$PETSC_ARCH_COMPLEX rather than
+# taken from ~/.bashrc.
+#
+# Without an importable petsc4py the MPI half of the suite does not test anything, and does not say
+# so clearly either: the modules that guard on it (test_mpi_adaptivity{,_3d}, test_mpi_eigenvalues,
+# test_mpi_bifurcation_tracking) skip with "petsc4py not available", while the ones that do not run
+# mpirun regardless, fall back to Pardiso in the workers and fail on its "cannot be used under MPI"
+# guard. The 2026-08-09 run was 82 failed / 1184 passed / 99 skipped for exactly that reason, with
+# every one of those failures an artefact of the environment. It went unnoticed because the nightly
+# has never had PETSc here: PYTHONPATH comes from the interactive shell, which does not set it (the
+# petsc_real/petsc_complex aliases do, per invocation), and the PETSC_PYTHONPATH that older configs
+# set for this has not been read by this script since d2cf20c.
+#
+# The complex build, not the real one: it runs everything the real one does, and it is additionally
+# what the eigenvalue tests need -- test_tensor_index_conventions and
+# test_mpi_eigenvalues::test_distributed_axisymmetric_flow fail against a real-scalar PETSc, the
+# latter with "Your PETSc/SLEPc installation cannot handle a complex eigenvalue problem". One arch
+# for the whole suite is therefore enough, and it is the complex one.
+#
+# Scoped to the pytest step instead of exported: the tutorial step needs BOTH builds and picks them
+# itself from PETSC_ARCH_REAL/PETSC_ARCH_COMPLEX, so it has no use for an inherited choice.
+PYTEST_PYTHONPATH=""
+if [ -n "${PETSC_DIR:-}" ] && [ -n "${PETSC_ARCH_COMPLEX:-}" ]; then
+    PYTEST_PYTHONPATH="$PETSC_DIR/$PETSC_ARCH_COMPLEX/lib"
+    # A nonexistent entry in PYTHONPATH is not an error, it just silently leaves the run without
+    # PETSc -- which is the failure this whole block exists to prevent, so check rather than assume.
+    if [ ! -d "$PYTEST_PYTHONPATH/petsc4py" ]; then
+        note "no petsc4py under $PYTEST_PYTHONPATH -- the MPI tests will skip or fail; check \$PETSC_ARCH_COMPLEX"
+    fi
+    # Prepended, not replacing: whatever the interactive shell provides stays reachable behind it.
+    [ -n "${PYTHONPATH:-}" ] && PYTEST_PYTHONPATH="$PYTEST_PYTHONPATH:$PYTHONPATH"
+fi
+
 # Keep matplotlib and friends from looking for an X server under cron.
 export MPLBACKEND="${MPLBACKEND:-Agg}"
 
@@ -561,12 +602,17 @@ PYTEST_SUMMARY=""
 if [ "$BUILD_RC" -eq 0 ]; then
     # The documented invocation is `python -m pytest *.py --full` from inside tests/
     # (see tests/README.md); --full is what adds the slow 3D campaign and the MPI modules.
-    # -rfEs: failures, errors AND skips. The skips matter -- the six test_mpi_* modules
-    # skipif() themselves out when mpirun or an MPI-capable solver is missing, so a cron
-    # environment without mpirun turns the entire MPI half into a silent green. They are
-    # reported even on a PASS for that reason.
+    # -rfEs: failures, errors AND skips. The skips matter -- the test_mpi_* modules skipif()
+    # themselves out when mpirun or an MPI-capable solver is missing, so a cron environment
+    # without mpirun turns the entire MPI half into a silent green. They are reported even on
+    # a PASS for that reason. (PYTEST_PYTHONPATH above is what now supplies that solver; the
+    # skips are still worth printing, because mpirun itself can go missing the same way.)
+    _pytest_env=""
+    # Only when non-empty: PYTHONPATH= with nothing after it is not the same as leaving it
+    # unset, it puts the current directory on sys.path.
+    [ -n "$PYTEST_PYTHONPATH" ] && _pytest_env="PYTHONPATH=$(printf '%q' "$PYTEST_PYTHONPATH") "
     run_step pytest "$RUN_DIR/pytest.log" "$TIMEOUT_PYTEST" \
-        "cd $(printf '%q' "$REPO_DIR")/tests && $(printf '%q' "$PYTHON") -m pytest *.py --full -rfEs"
+        "cd $(printf '%q' "$REPO_DIR")/tests && ${_pytest_env}$(printf '%q' "$PYTHON") -m pytest *.py --full -rfEs"
     PYTEST_RC=$STEP_RC
     PYTEST_SECS=$STEP_SECS
     PYTEST_FAILURES="$(grep -E '^(FAILED|ERROR) ' "$RUN_DIR/pytest.log" 2>/dev/null)"
@@ -773,6 +819,7 @@ if [ "$BUILD_RC" -eq 0 ]; then
         say "  PETSc: $PETSC_MISSING unset after ~/.bashrc -- the tutorial step could not start."
     else
         say "  PETSc: real $PETSC_DIR/$PETSC_ARCH_REAL, complex $PETSC_DIR/$PETSC_ARCH_COMPLEX"
+        say "         pytest ran against the complex build (PYTHONPATH=$PYTEST_PYTHONPATH)"
     fi
     if [ -n "$PYTEST_SKIPS" ]; then
         say "  skipped by pytest:"

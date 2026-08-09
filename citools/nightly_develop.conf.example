@@ -46,6 +46,17 @@ PYTHON="python3"
 # Plain assignments are fine -- the nightly exports whatever it finds, so the same three
 # lines that feed an interactive petsc_real/petsc_complex alias also feed the nightly. If
 # your .bashrc cannot provide them, set them from ENV_SETUP above instead.
+#
+# The pytest step needs them too, and builds its own PYTHONPATH from PETSC_DIR and
+# PETSC_ARCH_COMPLEX -- one arch for the whole suite, the complex one, because it runs
+# everything the real one does and is additionally what the eigenvalue tests need. Without
+# it the MPI half of the suite does not test anything: the modules that guard on petsc4py
+# skip, and the ones that do not fail on Pardiso's "cannot be used under MPI". PYTHONPATH
+# from ~/.bashrc is NOT enough on a machine where the petsc_real/petsc_complex aliases set
+# it per invocation rather than at login -- which is the usual arrangement.
+#
+# (Configs written before d2cf20c set PETSC_PYTHONPATH for this. Nothing reads it any more;
+# the nightly prints a note if it is still there.)
 
 # Hard limits, in seconds. A hung solve otherwise keeps the lock until the next night.
 TIMEOUT_BUILD=7200           # 2 h
