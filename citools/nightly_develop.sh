@@ -459,13 +459,24 @@ fi
 # friends. `bash -i` without a terminal complains about job control, and rc files are chatty: that
 # goes to env.log. </dev/null and the timeout are in case an rc file wants to talk to a user who is
 # not there (a `read`, an auto-attaching tmux).
+#
+# setsid is not decoration. An interactive bash that HAS a controlling terminal but is not the
+# terminal's foreground process group stops itself on purpose -- initialize_job_control() sends
+# itself SIGTTIN and waits to be brought to the foreground, which nobody is going to do here. Under
+# cron that never happens, there is no terminal at all; started by hand from a shell it deadlocks on
+# the spot, as it did on 2026-08-09. A session of its own means the probe cannot open /dev/tty, so
+# it settles for "no job control in this shell" and gets on with it -- the same situation cron gives
+# it. --kill-after for the same reason: a process stopped that way never handles the plain SIGTERM.
 NIGHTLY_ENV_VARS=(PATH LD_LIBRARY_PATH PYTHONPATH PETSC_DIR PETSC_ARCH_REAL PETSC_ARCH_COMPLEX)
 if [ -r "$HOME/.bashrc" ]; then
     _probe='printf "__PYOOMPH_ENV__\n"'
     for _v in "${NIGHTLY_ENV_VARS[@]}"; do
         _probe="$_probe; printf '%s\\n' \"\${$_v:-}\""
     done
-    _probe_out="$(timeout 60 bash -ic "$_probe" </dev/null 2>>"$RUN_DIR/env.log")"
+    _detach=""
+    command -v setsid >/dev/null 2>&1 && _detach="setsid -w"
+    # shellcheck disable=SC2086  # unquoted on purpose: empty means "no setsid on this machine"
+    _probe_out="$($_detach timeout --kill-after=10 60 bash -ic "$_probe" </dev/null 2>>"$RUN_DIR/env.log")"
     if printf '%s\n' "$_probe_out" | grep -qx '__PYOOMPH_ENV__'; then
         # Everything before the marker is the rc file's own chatter on stdout.
         _i=0
