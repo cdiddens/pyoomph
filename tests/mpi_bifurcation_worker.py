@@ -165,7 +165,7 @@ def _eigenfunction_observables(p, index=0):
         p.set_all_values_at_current_time(backup_dofs, backup_pinned, False)
 
 
-def fold_case(N=8, lam0=4.0, outdir=None, eigenvector_scaling="unit"):
+def fold_case(N=8, lam0=4.0, outdir=None, eigenvector_scaling="unit", with_guess=True):
     """Locate the Bratu fold in lam by eigen-solve + fold tracking."""
     prob = BratuProblem(N=N)
     with prob as p:
@@ -177,8 +177,12 @@ def fold_case(N=8, lam0=4.0, outdir=None, eigenvector_scaling="unit"):
         p.initialise()
         p.lam.value = lam0
         p.solve()
-        # The guess for the fold's null eigenvector: the eigenvalue closest to zero from above.
-        p.solve_eigenproblem(2, quiet=True)
+        if with_guess:
+            # The guess for the fold's null eigenvector: the eigenvalue closest to zero from above.
+            p.solve_eigenproblem(2, quiet=True)
+        # else: no eigenvector at all, so MyFoldHandler's no-guess constructor derives one itself by
+        # solving against d(residual)/d(lam). That is a different code path, and the one the tutorial
+        # kuramoto_sivanshinsky_bifurcation.py takes.
         p.activate_bifurcation_tracking("lam", "fold", eigenvector_scaling=eigenvector_scaling)
         p.solve()
 
@@ -351,8 +355,13 @@ def azimuthal_case(N=8, outdir=None):
     return _reaction_case(AzimuthalReactionProblem(N=N), "azimuthal", 10.0, 4.0, 1, outdir)
 
 
+def fold_noguess_case(N=8, lam0=4.0, outdir=None):
+    """The same fold, but found without ever solving an eigenproblem: see fold_case(with_guess)."""
+    return fold_case(N=N, lam0=lam0, outdir=outdir, with_guess=False)
+
+
 _CASES = {"fold": fold_case, "hopf": hopf_case, "azimuthal": azimuthal_case,
-          "pitchfork": pitchfork_case}
+          "pitchfork": pitchfork_case, "fold_noguess": fold_noguess_case}
 
 
 def main():

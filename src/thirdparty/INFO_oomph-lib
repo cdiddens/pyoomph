@@ -555,3 +555,31 @@ whichever backend is in use. The backend teardown calls (opt_flag 3) stay inside
 pyoomph shim has no handle to tear down and its Python solvers do not implement that op_flag.
 Upstream equivalent: none yet; upstream never hits it, because its SuperLU_DIST backend does set
 Dist_solver_data_pt.
+
+problem.cc (Changed on 9th August 2026, get_residuals into a replicated vector filled rank 0 only):
+Problem::get_residuals() routes every nproc>1 run -- distributed or not -- through
+parallel_sparse_assemble(), which sends each element contribution to
+target_dist_pt->rank_of_global_row(eqn). For a NON-distributed target distribution that lookup can
+only ever answer 0: first_row(p) is 0 and nrow_local(p) is nrow on every p, so rank 0's row range
+already contains every equation. The other ranks received nothing and kept the zeros the vector was
+built with, which made the return value of get_residuals() depend on the rank whenever the caller
+handed in a replicated vector. Problem::get_derivative_wrt_global_parameter() does exactly that (it
+assembles into the caller's result vector), so d(residual)/d(parameter) came back correct on rank 0
+and identically zero everywhere else. The fold/Hopf handlers derive their eigenvector guess by
+solving against that vector, so under mpirun they solved against a right-hand side that was zero
+outside rank 0's rows: the guess pointed somewhere else than serially, and the augmented Newton solve
+converged onto a different fold -- docs/source/tutorial/pde/patterns/kuramoto_sivanshinsky_bifurcation.py
+reported gamma=0.27625 under mpirun against 0.28259 serially, both fully converged.
+The replicated case now broadcasts the assembled vector from rank 0 after the assembly.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
+
+problem.cc (Changed on 9th August 2026, FD parameter derivative mixed two distributions):
+The finite-difference branch of Problem::get_derivative_wrt_global_parameter() left its second
+residual vector (newres) unbuilt, so get_residuals() gave it whatever
+create_new_linear_algebra_distribution() returns -- under mpirun the uniform DISTRIBUTED layout, even
+for an undistributed problem. The difference loop then indexes newres and result by the same local
+row while result may be replicated (it is when the bifurcation handlers call in), reading past the end
+of newres's buffer for every row beyond the first rank's share. newres is now built on result's
+distribution before the assembly. Only the FD branch is affected; pyoomph registers its global
+parameters as analytically differentiable, so it normally takes the branch above it.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.

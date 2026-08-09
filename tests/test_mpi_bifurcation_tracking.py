@@ -250,6 +250,26 @@ def test_replicated_mpirun_tracking_matches_serial(tmp_path, case):
     _assert_matches_serial("%s replicated np=2" % case, serial, per_rank, False)
 
 
+def test_replicated_mpirun_fold_without_eigenvector_guess(tmp_path):
+    """Fold tracking with no eigenproblem solved first: MyFoldHandler's no-guess constructor.
+
+    It builds its own guess by solving against d(residual)/d(parameter), and that vector came back
+    filled on rank 0 only, because Problem::get_residuals() assembles a REPLICATED target vector
+    entirely onto rank 0 (see INFO_oomph-lib, 9th August 2026). The guess therefore pointed
+    elsewhere under mpirun than serially and the augmented Newton solve converged onto a different
+    fold -- fully converged on both sides, so only a comparison against the serial answer catches it.
+    Replicated only: the constructor refuses --distribute and demands an explicit guess there.
+    """
+    serial = _serial_reference(tmp_path, case="fold_noguess")
+    # The guess is only a guess: it must find the same fold as the eigenvector-guided run.
+    serial_guided = _serial_reference(tmp_path, case="fold")
+    assert abs(serial["param"] - serial_guided["param"]) <= _PARAM_RTOL * abs(serial_guided["param"])
+    per_rank = _run_mpi(2, tmp_path, distribute=False, case="fold_noguess")
+    _check_no_errors(per_rank)
+    _assert_ranks_agree(per_rank)
+    _assert_matches_serial("fold without guess, replicated np=2", serial, per_rank, False)
+
+
 def test_maxabs_eigenvector_scaling_distributed(tmp_path):
     """eigenvector_scaling="auto" must locate the same fold, distributed, with O(1) unknowns.
 

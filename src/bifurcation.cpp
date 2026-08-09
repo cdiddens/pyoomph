@@ -71,6 +71,23 @@ namespace oomph
 namespace pyoomph
 {
 
+  // Puts the rhs (and the vector that will hold the solution) of an upcoming resolve() on the
+  // distribution the linear solver factorised on. Under mpirun oomph-lib assembles and factorises
+  // on a uniform DISTRIBUTED layout even when the problem itself is not distributed, while the
+  // parameter derivative these constructors resolve against comes back replicated. The solver would
+  // redistribute the rhs itself -- but only after printing SuperLUSolver::resolve()'s "distribution
+  // of rhs vector does not match that of the solver" warning once per rank, and it would leave the
+  // result vector's distribution disagreeing with the rhs's, which PARANOID rejects outright.
+  static void move_onto_solver_distribution(oomph::LinearSolver *const &linear_solver_pt,
+                                            oomph::DoubleVector &rhs, oomph::DoubleVector &result)
+  {
+    oomph::LinearAlgebraDistribution *const solver_dist_pt = linear_solver_pt->distribution_pt();
+    if (!solver_dist_pt || !solver_dist_pt->built()) return;
+    if (*rhs.distribution_pt() == *solver_dist_pt) return;
+    rhs.redistribute(solver_dist_pt);
+    result.build(solver_dist_pt, 0.0);
+  }
+
   // Rotates the complex eigenvector real_eigen+i*imag_eigen (in place) by a phase exp(-i*phi)
   // to a canonical orientation: phi is chosen (by sampling n_phi_samples initial guesses and
   // refining each with a few Newton iterations) so that <Re,Im>=0 and <Re,Re> is maximized,
@@ -488,6 +505,7 @@ namespace pyoomph
     DoubleVector input_x(x);
 
     // Now resolve the system with the new RHS and overwrite the solution
+    move_onto_solver_distribution(linear_solver_pt, input_x, x);
     linear_solver_pt->resolve(input_x, x);
 
     // Restore the storage status of the linear solver
@@ -1601,6 +1619,7 @@ namespace pyoomph
     linear_solver_pt->solve(problem_pt, x);
     problem_pt->get_derivative_wrt_global_parameter(parameter_pt, x);
     DoubleVector input_x(x);
+    move_onto_solver_distribution(linear_solver_pt, input_x, x);
     linear_solver_pt->resolve(input_x, x);
     if (enable_resolve)
     {

@@ -3950,6 +3950,25 @@ namespace oomph
       // Fill in the residuals data
       residuals.set_external_values(res[0], true);
 
+      // FOR PYOOMPH: A NON-distributed target distribution comes back filled on rank 0 only.
+      // parallel_sparse_assemble() sends every contribution to
+      // target_dist_pt->rank_of_global_row(eqn), and for a replicated distribution first_row(p)==0
+      // and nrow_local(p)==nrow on every p, so that lookup always answers 0 -- the other ranks
+      // receive nothing and keep the zeros they were built with. Callers that hand in a replicated
+      // vector (Problem::get_derivative_wrt_global_parameter() does, whenever the caller's result
+      // vector is replicated) then silently get a zero right-hand side everywhere except rank 0.
+      // That is how the fold tracker's eigenvector guess, which is a solve against
+      // d(residual)/d(parameter), came out different under mpirun than serially and put the fold
+      // of kuramoto_sivanshinsky_bifurcation.py at a different parameter value.
+      if (!dist_pt->distributed())
+      {
+        MPI_Bcast(residuals.values_pt(),
+                  residuals.nrow(),
+                  MPI_DOUBLE,
+                  0,
+                  Communicator_pt->mpi_comm());
+      }
+
       // Delete new assembly handler
       delete Assembly_handler_pt;
       // Reset the assembly handler to the original
@@ -8046,7 +8065,12 @@ namespace oomph
       get_residuals(result);
 
       // Storage for the new residuals
-      DoubleVector newres;
+      // FOR PYOOMPH: built on the SAME distribution as result. Left unbuilt, get_residuals() picks
+      // create_new_linear_algebra_distribution(), which under mpirun is the uniform DISTRIBUTED
+      // layout even for an undistributed problem -- while result may well be replicated, as it is
+      // when it comes from the bifurcation handlers. The difference loop below indexes both by the
+      // same local row, so that combination read past the end of newres's buffer.
+      DoubleVector newres(result.distribution_pt(), 0.0);
 
       // Increase the global parameter
       const double FD_step = 1.0e-8;
