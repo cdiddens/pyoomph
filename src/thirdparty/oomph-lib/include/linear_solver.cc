@@ -2812,17 +2812,28 @@ namespace oomph
 
       Dist_solver_data_pt = 0;
 
-      // Delete internal copy of the matrix
-      delete[] Dist_value_pt;
-      delete[] Dist_index_pt;
-      delete[] Dist_start_pt;
-      Dist_value_pt = 0;
-      Dist_index_pt = 0;
-      Dist_start_pt = 0;
-
       // and the distribution
       this->clear_distribution();
     }
+
+    //FOR PYOOMPH: the internal copy of the matrix is deleted here, OUTSIDE the
+    // "if (Dist_solver_data_pt != 0)" above, which is where upstream deletes it.
+    // pyoomph replaces SuperLU_DIST with its own shim
+    // (superlu_dist_distributed_matrix() in src/nanobind/solver.cpp), which keeps the
+    // factorisation on the Python side and never writes a handle into the "data"
+    // out-parameter. Dist_solver_data_pt therefore stays NULL for the whole run and
+    // upstream's block never executes, while factorise_distributed() new[]s a fresh copy
+    // of the local matrix on every single factorisation. Nothing ever deleted it:
+    // ~3.8 MB per Newton step per rank on the mcflow/marangoni_instability tutorial, which
+    // grew without bound until the OOM killer took the job down under mpirun -n 4.
+    // Guarding on the pointers themselves rather than on the solver handle is what makes
+    // the delete happen in both cases, and it stays a no-op when it has already run.
+    delete[] Dist_value_pt;
+    delete[] Dist_index_pt;
+    delete[] Dist_start_pt;
+    Dist_value_pt = 0;
+    Dist_index_pt = 0;
+    Dist_start_pt = 0;
 #endif
   }
 

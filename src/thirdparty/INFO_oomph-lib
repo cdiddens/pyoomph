@@ -535,3 +535,23 @@ so build_without_copy() below freed the send buffers while MPI was still reading
 ("munmap_chunk(): invalid pointer" on rank 1 of turing_dispersion.py at 4 ranks). Now guarded and
 sized by n_send_req.
 Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
+
+linear_solver.cc (Changed on 9th August 2026, SuperLUSolver::clean_up_memory leaked the distributed matrix copy):
+SuperLUSolver::factorise_distributed() takes its own copy of the local matrix (Dist_value_pt,
+Dist_index_pt, Dist_start_pt) on every call, because SuperLU_DIST is allowed to overwrite what it is
+handed. clean_up_memory() deletes that copy, but the whole MPI block it sits in is guarded by
+"if (Dist_solver_data_pt != 0)" -- the opaque handle the SuperLU_DIST backend writes into its "data"
+out-parameter. pyoomph replaces that backend with its own shim
+(superlu_dist_distributed_matrix() in src/nanobind/solver.cpp, which forwards to the Python linear
+solver); the shim keeps its factorisation on the Python side and never writes a handle back, so
+Dist_solver_data_pt stays NULL for the entire run and the delete[] never executed. factorise() calls
+clean_up_memory() first and then allocates a fresh copy, so every Newton step leaked
+nnz_local*12 + (nrow_local+1)*4 bytes per rank -- 3.8 MB per step on
+docs/source/tutorial/mcflow/marangoni_instability.py, whose four ranks together reached 12.8 GB in
+5.5 minutes and were killed by the OOM killer partway through the run. Serial runs are unaffected:
+they go through the SuperLU serial entry point, which makes no such copy.
+The three delete[]s are now outside that guard and keyed on the pointers themselves, so they run
+whichever backend is in use. The backend teardown calls (opt_flag 3) stay inside the guard, since the
+pyoomph shim has no handle to tear down and its Python solvers do not implement that op_flag.
+Upstream equivalent: none yet; upstream never hits it, because its SuperLU_DIST backend does set
+Dist_solver_data_pt.
