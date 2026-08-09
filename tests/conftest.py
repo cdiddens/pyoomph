@@ -66,6 +66,18 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
+    # Every MPI module launches its worker under mpirun and reads results back as
+    # "PYOOMPH_MPI_RESULT <json>" lines that EVERY rank prints, then asserts it got one per rank.
+    # pyoomph's default MPI console mode is "condensed", which lets only rank 0's stdout reach the
+    # terminal, so the harness saw a single line and every one of the 160 MPI tests failed with
+    # "case ... reported from 1 of 2 ranks". "off" (no filtering at all) is the mode that fits: "all"
+    # does emit every rank, but tags each line "[rank N] ", which no longer starts with the marker
+    # the harness matches on.
+    # Set here rather than in the 16 launchers: they all copy os.environ into the child's env, so one
+    # assignment covers them and any module added later. Forced rather than setdefault() -- a
+    # developer with PYOOMPH_MPI_OUTPUT exported in their shell would otherwise silently break the
+    # whole MPI suite, and no test wants to vary this.
+    os.environ["PYOOMPH_MPI_OUTPUT"] = "off"
     config.addinivalue_line(
         "markers",
         "slow: large sweep or mpirun-based; skipped unless --full (or PYOOMPH_FULL_TESTS=1) is given")
