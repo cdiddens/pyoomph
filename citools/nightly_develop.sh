@@ -438,7 +438,8 @@ fi
 # Everything the machine's own setup provides -- the compiler environment, mpirun, and above all the
 # two PETSc builds -- comes from the same place the user's shell gets it: .bashrc. In particular
 # test_all_tutorial_scripts.py wants PETSC_DIR plus PETSC_ARCH_REAL and PETSC_ARCH_COMPLEX -- it runs
-# the ordinary tutorials against the real-scalar build and only the normal-mode stability ones
+# the ordinary tutorials against the real-scalar build and only the ones with complex spectra (the
+# normal-mode stability and the periodic-orbit/Floquet scripts, which the runner picks out by itself)
 # against the complex one -- and duplicating those paths in the nightly config was one more thing to
 # forget when a PETSc is rebuilt under a new arch name.
 #
