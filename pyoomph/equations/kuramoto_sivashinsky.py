@@ -96,3 +96,7 @@ class KuramotoSivashinskyBoundary(Equations):
 		_, curv_test = var_and_test(peq.curvfieldname)
 		n = self.get_normal()
 		self.add_residual(-weak(dot(n,grad(hbulk)),curv_test))
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

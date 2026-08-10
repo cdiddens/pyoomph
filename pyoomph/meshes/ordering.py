@@ -149,3 +149,7 @@ def sort_point_indices(pts: NPFloatArray, indices: Sequence[int] | None = None, 
         indices = range(pts.shape[1])
     # A single point is a degenerate segment: it cannot be reversed, so only the sorting acts.
     return [s[0] for s in sort_line_segments(pts, [[i] for i in indices], sort_along_axis=sort_along_axis, start_near_point=start_near_point, spatial_unit=spatial_unit, whom=whom)]
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

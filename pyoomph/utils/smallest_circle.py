@@ -136,3 +136,6 @@ def is_in_circle(c:_CircleDef2d | None, p:_Point2d)->bool:
 def _cross_product(x0:float, y0:float, x1:float, y1:float, x2:float, y2:float)->float:
 	return (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -665,3 +665,7 @@ class TracerPeriodicBoundaryCondition(InterfaceEquations):
         # As above: the parent binds its collection in its own _init_output, which may run after
         # before_assigning_equations_preorder did.
         self._wire()
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

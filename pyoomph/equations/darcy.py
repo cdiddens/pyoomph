@@ -211,3 +211,7 @@ def CompositionPorousNavierStokesConnection(fluid_props:AnyFluidProperties):
     connfields = ["massfrac_" + n for n in fluid_props.required_adv_diff_fields]
     psinter += ConnectFieldsAtInterface(connfields)
     return psinter
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

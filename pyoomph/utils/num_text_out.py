@@ -208,3 +208,7 @@ class LoadedTextDataFile:
 
     def __array__(self, dtype:Any=None) -> NPFloatArray:
         return numpy.asarray(self.data, dtype=dtype)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

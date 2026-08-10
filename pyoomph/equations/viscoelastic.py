@@ -1077,3 +1077,7 @@ def steady_shear_conformation(model: ViscoelasticConstitutiveModel, weissenberg:
     return matrix([[c_isotropic + c_flow * weissenberg ** 2, c_shear * weissenberg, 0],
                    [c_shear * weissenberg, c_isotropic + c_gradient * weissenberg ** 2, 0],
                    [0, 0, c_isotropic]])
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

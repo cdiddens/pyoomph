@@ -367,3 +367,7 @@ if _running_under_mpi():
 		if _get_mpi_rank()==0:  # one warning per run, not one per rank
 			_warn_no_mpi_capable_solver(str(_chosen))
 	del _chosen
+
+
+from .typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

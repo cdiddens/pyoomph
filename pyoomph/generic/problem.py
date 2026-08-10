@@ -8252,3 +8252,7 @@ class _DofSelector:
                 boundinds.add(ind)
         #print(selected,unselected,boundinds)
         mesh._pin_all_my_dofs(unselected,selected,boundinds)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

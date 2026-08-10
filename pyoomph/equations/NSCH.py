@@ -346,3 +346,7 @@ class DisjunctDomainMarkerNSCH(Equations):
         self._update_marker(mesh)
         return super().on_apply_boundary_conditions(mesh)
         
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

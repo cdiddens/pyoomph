@@ -813,3 +813,7 @@ class UnconstrainPositionsFromC1Space(Equations):
                     n.remove_additional_dof_constraint(POSITION_CONSTRAIN_TO_C1, i)
                     
         return super().before_assigning_equations_preorder(mesh)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -34,6 +34,7 @@ from .generic import get_interface_field_connection_space, TestScaling, Scaling
 from ..meshes.bcs import BoundaryCondition,DirichletBC
 from ..meshes.mesh import AnyMesh, InterfaceMesh
 from ..expressions import *  # Import grad et al
+from ..typings import *
 from ..expressions.units import degree
 
 
@@ -1197,3 +1198,7 @@ class StokesFlowRadialFarField(InterfaceEquations):
         normstrain=matproduct(strain,n)
         p,ptest=var_and_test(stokes_eqs.pressure_name)
         self.add_weak(-normstrain+self.pinfty*n,utest)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

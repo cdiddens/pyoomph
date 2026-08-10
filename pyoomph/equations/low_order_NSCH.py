@@ -30,6 +30,7 @@ from __future__ import annotations
 from .. import *
 from ..expressions import *
 from ..materials import *
+from ..typings import *
 
 
 # Piecewise potential to prevent overshooting
@@ -309,3 +310,7 @@ class LowOrderNSCHWetting(InterfaceEquations):
         else:
             s=testfunction("phi")
         self.add_weak(peqs.epsilon**2*gphi_norm*cos(self.theta),s)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

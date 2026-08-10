@@ -3479,3 +3479,7 @@ class UnconstrainFieldsFromC1Space(ConstrainFieldsToC1Space):
     """
     def __init__(self, *args:str,where:Callable[[list[float]], bool] | None=None):
         super().__init__(*args,unconstrain_instead=True,where=where)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

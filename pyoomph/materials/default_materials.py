@@ -30,6 +30,7 @@ from .generic import *
 from ..expressions import *
 from ..expressions.units import *
 from .UNIFAC import *
+from ..typings import *
 
 
 @MaterialProperties.register()
@@ -626,3 +627,7 @@ class PureSolidStainlessSteel(PureSolidProperties):
         self.mass_density = 7.8 * gram / (centi*meter)**3
         self.thermal_conductivity=16.3*watt/(meter*kelvin)
         self.specific_heat_capacity=0.5*kilo*joule/(kilogram*kelvin)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -849,3 +849,7 @@ class GenericEigenSolver:
 		# Under MPI it is agreed across ranks by construction, see the allreduce above.
 		self.last_assembly_was_complex=is_complex
 		return matJ,matM,n,is_complex
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

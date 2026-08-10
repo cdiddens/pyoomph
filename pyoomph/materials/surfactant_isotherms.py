@@ -31,6 +31,7 @@
 from ..expressions.phys_consts import gas_constant
 from ..expressions.units import *
 from ..expressions import *
+from ..typings import *
 from .generic import BaseInterfaceProperties,LiquidGasInterfaceProperties, LiquidSolidInterfaceProperties
 
 # Default rates: Please use the ones appropriate for the surfactant you are using
@@ -293,3 +294,7 @@ class VanDerWaalsIsotherm(SurfactantIsotherm):
         Gamma=self.get_Gamma_variable()
         T=self.get_T_variable()
         return self.k_des*Gamma*exp(Gamma/(self.GammaInfty-Gamma) -self.beta*Gamma/(gas_constant*T))
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -305,3 +305,7 @@ class AdvectionDiffusionInfinity(InterfaceEquations):
                 raise RuntimeError("Far-field monopole conditions are only implemented for real_dim in {1,2,3}, not "+str(real_dim))
             self.add_residual(weak(diffuD * coordsys_dim_factor * (y - val) * dot(n, d) / (dot(d, d)) , y_test) )
             
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

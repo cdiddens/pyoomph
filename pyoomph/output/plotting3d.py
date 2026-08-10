@@ -92,3 +92,5 @@ class PyVistaPlotter(BasePlotter):
         return _convert_mesh_to_meshio(self.get_problem(), self._get_mesh_data(msh,problem_name=problem_name))
 
 
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -225,3 +225,6 @@ class DropletMesh3d(MeshTemplate):
             if len(intersect)==4:
                 self.add_facet_to_boundary("droplet_gas", list(intersect))
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

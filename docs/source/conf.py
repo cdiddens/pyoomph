@@ -76,6 +76,12 @@ modindex_common_prefix = ['pyoomph.']
 # Do not inherit e.g. the define_residuals or something for InitialCondition, etc
 autodoc_inherit_docstrings=False
 
+# Every pyoomph module now sets __all__ (via typings._set_public_api) so that "from module import *"
+# does not hand the user the typing helpers. autodoc, however, stops filtering by __module__ as soon
+# as __all__ exists, which would document each module's re-exported names all over again - e.g. every
+# name pyoomph.equations.navier_stokes pulls in from pyoomph.expressions. Keep the previous behaviour.
+autodoc_default_options = {"ignore-module-all": True}
+
 # sphinx_autodoc_typehints resolves "if TYPE_CHECKING:" blocks by actually executing them, to
 # make forward-referenced types resolvable. pyoomph/meshes/mesh.py deliberately has TYPE_CHECKING-
 # only classes (_MeshFromTemplate1dTypingBase, _InterfaceMeshTypingBase, ...) that combine a

@@ -755,3 +755,7 @@ class RemeshableGmshTemplate2d(GmshTemplate):
     def __init__(self,loaded_from_mesh_file:str | None=None):
         super().__init__(loaded_from_mesh_file=loaded_from_mesh_file)
         warnings.warn("RemeshableGmshTemplate2d is deprecated. Use a plain GmshTemplate instead, which remeshes by recreation by default.",DeprecationWarning,stacklevel=2)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

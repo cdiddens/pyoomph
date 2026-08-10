@@ -1134,3 +1134,7 @@ class AverageConstraint(_AverageOrIntegralConstraintBase):
     def get_integral_contribution(self,field:str)-> ExpressionOrNum:
         return self.constraints[field] # Consider the offset for the average
     
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

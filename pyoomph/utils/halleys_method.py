@@ -74,3 +74,7 @@ class HalleySolver:
         for i in range(ntstep):
             if not was_steady[i]:
                 self.problem.time_stepper_pt(i).undo_make_steady()     
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

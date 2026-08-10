@@ -258,3 +258,7 @@ class CSplineInterpolator(CustomMultiReturnExpression):
         if nargs!=1:
             raise ValueError("Expected 1 argument")
         return 1
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

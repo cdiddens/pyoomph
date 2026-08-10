@@ -660,3 +660,7 @@ def get_analytical_popov_evaporation_rate(contact_angle:ExpressionOrNum,base_rad
         d2_sqr = (r - base_radius) ** 2 + z ** 2
         tau_toro = se(log(square_root(d1_sqr / d2_sqr)))        
         return se(evap_by_tau(tau_toro)/base_radius*(c_sat-c_far)*Dvap)    
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

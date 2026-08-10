@@ -125,3 +125,7 @@ class MUMPSSolver(GenericLinearSystemSolver):
         else:
             raise RuntimeError("Unknown mode "+str(op_flag))
         
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

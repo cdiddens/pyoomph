@@ -2239,3 +2239,7 @@ def new_pure_gas(name:str,mass_density:ExpressionOrNum=1000*kilogram/meter**3,dy
             if specific_heat_capacity is not None:
                 self.specific_heat_capacity=specific_heat_capacity
     return get_pure_gas(_name)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

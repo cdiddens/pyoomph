@@ -241,3 +241,7 @@ class ASGS(GenericStabilizationMethod):
         u,w=var_and_test("velocity")
         self.add_residual(weak(tau2*div(u),div(w)))
         return super().define_residuals()
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

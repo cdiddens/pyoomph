@@ -41,3 +41,7 @@ c_of_light=2.99792458e8*meter/second # speed of light in vacuum
 mu_0=4*pi*1e-7*henry/meter # vacuum permeability
 
 elementary_charge=1.602176634e-19*coloumb # elementary charge
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -304,3 +304,6 @@ class ScipyEigenSolver(GenericEigenSolver):
 			return evals, evects,J,M
 			#return evals,numpy.transpose(evects)
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

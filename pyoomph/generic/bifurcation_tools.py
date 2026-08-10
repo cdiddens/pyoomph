@@ -1844,3 +1844,7 @@ class NormalFormCalculator:
                 res["param_predictor"]=lambda dp : 0
                 res["perturbation_predictor"]=lambda dp: zeta*dp
             return res
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

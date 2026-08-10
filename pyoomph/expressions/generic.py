@@ -1394,3 +1394,7 @@ def rational_num(numer_or_float_str: int | str, denom: int = 1) -> Expression:
 		return num(numer_or_float_str, rational=True)
 	else:
 		return _pyoomph.GiNaC_rational_number(numer_or_float_str, denom)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
 from ..expressions import *
+from ..typings import *
 from ..expressions.units import meter,second,joule,newton,degree,milli
 import scipy.optimize #type:ignore
 from ..generic.codegen import EquationTree,InterfaceEquations,GlobalLagrangeMultiplier,WeakContribution,BaseEquations,ODEEquations,Equations
@@ -802,3 +803,7 @@ class SimplePopovContactLineEquations(ODEEquations):
         super()._init_output(eqtree,continue_info,rank)
         assert isinstance(eqtree._mesh,ODEStorageMesh) 
         self._on_mesh = eqtree._mesh 
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

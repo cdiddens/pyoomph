@@ -33,6 +33,7 @@ A module to compute the linear response of a system to a periodic driving force.
  
 import scipy.linalg
 from .. import *
+from ..typings import *
 from ..expressions import ExpressionNumOrNone, partial_t, pi
 import scipy
 
@@ -371,3 +372,7 @@ class PeriodicDrivingResponse():
         history_dofs=numpy.array(history_dofs)        
         self.problem.set_current_dofs(history_dofs[0])
         return self.problem.activate_periodic_orbit_handler(T,history_dofs=history_dofs[1:],mode=mode,order=order,GL_order=GL_order,T_constraint=T_constraint)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

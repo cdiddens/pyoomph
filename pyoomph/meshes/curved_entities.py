@@ -55,3 +55,6 @@ class CurvedEntityCircle(_pyoomph.MeshTemplateCurvedEntity):
       # separately would only move the cut somewhere else instead of removing it.
       param[1:] -= 2 * numpy.pi * numpy.round((param[1:] - param[0]) / (2 * numpy.pi))
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

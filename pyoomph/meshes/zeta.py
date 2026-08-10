@@ -583,3 +583,7 @@ class DebugZetaCoordinate(InterfaceEquations):
     def after_remeshing(self, eqtree: "EquationTree"):
         self.update_zetas()
         return super().after_remeshing(eqtree)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

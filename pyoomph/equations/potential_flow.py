@@ -480,3 +480,7 @@ class PotentialFlowFreeInterface(_PotentialFlowInterfaceEquations):
         else:        
             self.pin_redundant_lagrange_multipliers(mesh,"_lagr_dynbc","mesh")
         
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -758,3 +758,7 @@ class PointMesh(MeshTemplate):
         dom=self.new_domain(self.domain_name)        
         dom.set_nodal_dimension(self.nodal_dimension)
         dom.add_point_element(self.add_node_unique(0))
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

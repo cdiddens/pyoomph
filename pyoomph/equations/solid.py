@@ -1,6 +1,7 @@
 from __future__ import annotations
 from .. import *
 from ..expressions import *
+from ..typings import *
 from .ALE import BaseMovingMeshEquations
 
 class BaseSolidConstitutiveLaw:
@@ -375,3 +376,7 @@ class FSIConnection(InterfaceEquations):
         for direct in comps:
             self.pin_redundant_lagrange_multipliers(mesh,"_mesh_connection_"+direct,["mesh_"+direct])
             self.pin_redundant_lagrange_multipliers(mesh,"_velo_connection_"+direct,["velocity_"+direct])
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

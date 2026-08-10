@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from ..generic import Equations,InterfaceEquations
 from ..expressions import * #Import grad et al
+from ..typings import *
 from ..expressions.coordsys import AxisymmetricCoordinateSystem
 
 #Only works in axisymmetric and 2d cartesian
@@ -170,3 +171,6 @@ class StreamFunctionFromVelocityInterface(InterfaceEquations):
         else:
             self.add_residual(weak(n[0] * u[1] - n[1] * u[0],phi_test))
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

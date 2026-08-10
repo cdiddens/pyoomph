@@ -1676,3 +1676,7 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                     new_inds[rev_inds[i]]=cnt
                     cnt+=1                
                 base.elemental_field_inds=new_inds
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

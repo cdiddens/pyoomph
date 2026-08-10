@@ -691,3 +691,7 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
             call_args.append(var("temperature",domain=domain))
         print("CALL ARGS",call_args)
         return self.__call__(*call_args)[self.argument_order_with_passive.index(component)]
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

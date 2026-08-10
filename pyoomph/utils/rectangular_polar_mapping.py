@@ -191,3 +191,7 @@ class MeshDataPolarToCartesian(MeshDataCacheOperatorBase):
             base.nodal_values[:,base.nodal_field_inds[compos[1]]]=ur*numpy.sin(phis) + uphi*numpy.cos(phis)
 
 rectangular_to_polar=RectangularToPolarMappingCoordinateSystem()
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -965,3 +965,7 @@ class InteriorBoundaryOrientation(InterfaceEquations):
         
     def define_residuals(self):
         self.add_local_function("__interface_constraint",self.indicator)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

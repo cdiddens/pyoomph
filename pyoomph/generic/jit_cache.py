@@ -467,3 +467,7 @@ def clear_cache(cache_dir: str | None = None) -> bool:
         _global_cache = None
         _global_cache_dir_used = None
     return existed
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

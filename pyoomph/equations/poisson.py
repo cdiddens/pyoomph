@@ -204,3 +204,7 @@ class DiffusionEquation(PoissonEquation):
         u,u_test=var_and_test(self.name) #u and u_test are now the shape function expansion of u and the corresponding test function (Galerkin)
         dx=self.get_dx()									#and the integral dx size
         self.add_residual(self.temporal_factor*partial_t(u)*u_test*dx)	#Add the residual
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

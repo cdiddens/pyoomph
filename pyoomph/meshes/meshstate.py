@@ -401,3 +401,7 @@ def load_mesh_state(mesh: "AnySpatialMesh", state: "DumpFile") -> None:
     idx = _lookup(read["elem_keys"], elem_keys, "element")
     data, lens = _block_gather(read["elem_data"], read["elem_lens"], idx)
     mesh.load_elemental_state(data, lens)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

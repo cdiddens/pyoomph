@@ -356,3 +356,7 @@ def run_with_global_mesh_data(problems: dict[str, "Problem"], func: Callable[[],
     _scope_problems = {}
     # Collective and rooted at 0, so it doubles as the barrier this block would otherwise need
     mpi_share_root_failure(error, context=context or "gathering the global mesh data")
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

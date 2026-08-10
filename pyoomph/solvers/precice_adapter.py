@@ -30,6 +30,7 @@ from __future__ import annotations
 import precice
 
 from ..expressions import *
+from ..typings import *
 from ..generic.codegen import EquationTree, ODEStorageMesh, BaseEquations, Equations, ODEEquations
 from ..generic.problem import Problem
 from ..meshes.mesh import AnyMesh
@@ -690,3 +691,6 @@ def get_pyoomph_precice_adapter():
     return _pyoomph_precice_adapter
     
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

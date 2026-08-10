@@ -30,6 +30,10 @@ from typing import Union,Any,Optional,TYPE_CHECKING,Type,Set,Literal,List,Dict,o
 from collections import OrderedDict
 from collections.abc import Sequence, Iterable, Callable, Iterator, Generator
 
+import typing as typing_module
+import collections as collections_module
+import collections.abc as collections_abc_module
+
 import numpy
 import numpy.typing
 
@@ -49,5 +53,33 @@ def assert_type(obj:Any,typ:_AnyPyoomphType)->_AnyPyoomphType:
         return cast(type[typ],obj) # type: ignore
     
 __all__ = ["Union","Any","Sequence","Iterable","Callable","Iterator","Optional","TYPE_CHECKING","NPFloatArray","NPIntArray","NPComplexArray","NPUInt64Array","NPInt32Array","Type","Set","Literal","List","Dict","overload","Tuple","cast","NPAnyArray","NPBoolArray","TypeVar","Generator","OrderedDict","SupportsFloat","TypeAlias","assert_type","TypedDict"]
+
+
+# The names above that are just re-exports of the standard library. Modules all over pyoomph do
+# "from ..typings import *" for their annotations, and since a module without __all__ exports every
+# public name it happens to hold, these travelled along every wildcard chain and ended up in the user's
+# namespace as well: "from pyoomph import *" defined Callable, Iterator, List, cast, ... The names are
+# only meant for annotating pyoomph's own code.
+# "cast" is the exception: the tutorials use it in user code (cast("MyProblem", self.get_problem()) to
+# narrow a type for the IDE) and have always gotten it from "from pyoomph import *", so it stays exported.
+_STDLIB_TYPING_REEXPORTS = frozenset(
+    n for n in __all__
+    if n != "cast"
+    and any(getattr(m, n, None) is globals()[n] for m in (typing_module, collections_module, collections_abc_module))
+)
+
+
+def _set_public_api(namespace: "Dict[str,Any]") -> None:
+    """Set __all__ of the calling module to everything public in it except the typing helpers above.
+
+    Call as ``_set_public_api(globals())`` at the very end of a module (after all definitions and
+    imports). Only "from module import *" is affected - the names stay reachable as attributes and via
+    explicit imports, so pyoomph's own "from ..typings import *" keeps working everywhere. Imported
+    modules (numpy, os, ...) are deliberately left in: tutorial scripts use numpy after a bare
+    "from pyoomph import *".
+    """
+    namespace["__all__"] = sorted(
+        n for n in namespace if not n.startswith("_") and n not in _STDLIB_TYPING_REEXPORTS
+    )
 
 

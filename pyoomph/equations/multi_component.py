@@ -33,6 +33,7 @@ from ..equations.generic import InitialCondition, SpatialErrorEstimator, FiniteE
 from ..expressions import *  # Import grad et al
 from .navier_stokes import NavierStokesEquations #type:ignore
 from ..materials.generic import *
+from ..typings import *
 from ..materials.mass_transfer import MassTransferModelBase
 from .SUPG import ElementSizeForSUPG
 from .generic import get_interface_field_connection_space
@@ -1184,3 +1185,7 @@ class SurfactantsAtSolidInterface(InterfaceEquations):
             w_test = testfunction("massfrac_" + s)
             assert liq_c is not None
             self.add_residual(weak(transfer * liq_c.molar_mass, w_test))
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

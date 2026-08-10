@@ -428,3 +428,5 @@ class LubricationEquationOnNavierStokes(Equations):
          self.add_residual((1 / P) * dot(-tang_shear, tang_test) * dx)  # Shear connection
 
 
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

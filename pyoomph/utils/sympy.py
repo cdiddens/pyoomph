@@ -158,3 +158,7 @@ def pyoomph_to_sympy(expr:ExpressionOrNum,handle_undefined=None):
         print(typeinfo)
         raise RuntimeError("Cannot convert yet "+str(expr))
     
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

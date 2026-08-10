@@ -26,3 +26,7 @@
 # ========================================================================
  
 from .generic import *
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -275,3 +275,6 @@ class SimpleNSCHWettingInterface(CahnHilliardWettingInterface):
     def __init__(self,sigma_fs_plus:ExpressionOrNum | None=None,sigma_fs_minus:ExpressionOrNum | None=None,contact_angle_plus:ExpressionOrNum | None=None,contact_angle_minus:ExpressionOrNum | None=None):
         super(SimpleNSCHWettingInterface, self).__init__(sigma_fs_plus, sigma_fs_minus, contact_angle_plus, contact_angle_minus)
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

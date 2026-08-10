@@ -373,3 +373,7 @@ class FixedMeshMaxQuadraticNonlinearAssembly(CustomAssemblyBase):
 
     def get_last_mass_and_jacobian_matrices(self)->tuple[csr_matrix | None,csr_matrix | None]:
         return self._lastMatM,self._lastMatJ
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -1764,3 +1764,7 @@ class InvertMatrix(CustomMultiReturnExpression):
             raise NotImplementedError(f"InvertMatrix.generate_c_code: n={n}, matrix_type={mt} not implemented")
 
         return "\n".join(lines)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

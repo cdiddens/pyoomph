@@ -77,3 +77,7 @@ class HarmonicOscillator(ODEEquations):
 			self.add_residual(EQ_y * y_test+EQ_yp*yptest)
 
 	
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -2292,3 +2292,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             else:
                 raise ValueError(
                     "Please set Dirichlet active either to True or False")
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

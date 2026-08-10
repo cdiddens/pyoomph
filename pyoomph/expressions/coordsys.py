@@ -1974,3 +1974,6 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         return self.substitute_values_for_additional_local_coordinates(Expression(sum([g_contra[a,b]*dot(t[a].evalm(),diff(arg,s[b]).evalm()) for a in range(eaug) for b in range(eaug)])))
     
 
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

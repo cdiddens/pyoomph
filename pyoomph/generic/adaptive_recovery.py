@@ -387,3 +387,7 @@ class AdaptiveResolveRecovery:
             # setting the user has no reason to suspect.
             overrides["max_newton_iterations"] = int(math.ceil(problem.max_newton_iterations/relax))
         return problem._temporary_newton_settings(**overrides)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

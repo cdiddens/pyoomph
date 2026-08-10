@@ -995,3 +995,7 @@ class TQMeshTemplate(MeshedMeshTemplate):
                 mid = 0.5 * (vertices[edge[0]] + vertices[edge[1]])
                 entity = curved[name].entity_at(float(mid[0]), float(mid[1]))
             self.add_facet_to_boundary(name, [n1, n2], [n1, n2], entity)
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

@@ -771,3 +771,7 @@ def time_derivative_of_integral(expr:ExpressionOrNum,scheme:Literal["BDF1","BDF2
     # the residual it belongs to.
     res+=_pyoomph.GiNaC_mass_matrix_marker()*expr
     return res/scale_factor("temporal") # And we divide by the temporal scaling, since the time derivative is scaled with the temporal scaling
+
+
+from ..typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"
