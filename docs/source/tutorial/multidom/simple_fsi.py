@@ -41,7 +41,12 @@ class SimpleFSIProblem(Problem):
         
         # Fluid-structure interaction at the mutual interface
         leqs+=FSIConnection()@"liquid_solid"
-        
+        # The FSIConnection only pulls on the liquid nodes lying on the interface. Around the tips of the
+        # leaflets, where the imposed motion varies quickly along the interface, the first layer of liquid
+        # elements has to absorb the whole mismatch to the almost stationary interior and eventually inverts.
+        # Stiffening that layer spreads the deformation over the elements further inside.
+        leqs+=InterfaceMeshStiffening(5)@"liquid_solid"
+
         # Adaptivity. The two domains are adapted individually, but pyoomph keeps both sides of the
         # mutual interface at the same refinement, so the error estimator can drive it freely. This used
         # to require RefineToLevel()@"liquid_solid" on BOTH sides -- forcing the interface to maximum
