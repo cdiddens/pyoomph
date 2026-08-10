@@ -47,6 +47,21 @@ namespace nb = nanobind;
 namespace pyoomph
 {
 
+	// "Cannot convert meter^(-1) to double" is the usual shape of a nondimensionalisation mistake,
+	// but on its own it reads like an internal failure. Name the leftover unit as such, since that
+	// is what the user has to get rid of.
+	static std::string leftover_unit_hint(const GiNaC::ex &e)
+	{
+		GiNaC::ex factor, unit, rest;
+		if (!expressions::collect_base_units(e, factor, unit, rest) || unit.is_equal(GiNaC::ex(1)))
+			return "";
+		std::ostringstream oss;
+		oss << ": it still carries the physical unit " << unit
+			<< ", so it is not a plain number. Divide it by that unit or by the corresponding scale "
+			<< "(e.g. scale_factor(\"spatial\")) to make it dimensionless.";
+		return oss.str();
+	}
+
 	// Wraps a buffer this class owns as a numpy array for a Python callback, WITHOUT copying it.
 	// The owner matters: nanobind casts an ndarray built from a bare pointer under
 	// rv_policy::automatic_reference, and ndarray_export() decides to copy from
@@ -659,25 +674,25 @@ void PyReg_Expressions(nb::module_ &m)
 			 }, nb::rv_policy::reference, "Return a copy of this expression with every GiNaC_GlobalParam symbol replaced by its current numerical value.")
 		.def("is_zero", &GiNaC::ex::is_zero, "Whether this expression is symbolically (structurally) zero.")
 		.def("__float__", [](const GiNaC::ex &self)
-			 { try 
+			 { try
 			   {
 			     double res=pyoomph::expressions::eval_to_double(self);
-			     return res; 
+			     return res;
 			   }
-			   catch (const std::exception &e) 
+			   catch (const std::exception &e)
 			   {
-			     std::ostringstream oss; oss<<"Cannot convert " << self << " to double";
+			     std::ostringstream oss; oss<<"Cannot convert " << self << " to double"; oss<<pyoomph::leftover_unit_hint(self);
 			     throw_runtime_error(oss.str());
 			   } }, "Numerically evaluate this expression and return it as a Python float; raises if it cannot be evaluated to a real number.")
 		.def("__complex__", [](const GiNaC::ex &self)
-			 { try 
+			 { try
 			   {
 			     std::complex<double> res=pyoomph::expressions::eval_to_complex(self);
-			     return res; 
+			     return res;
 			   }
-			   catch (const std::exception &e) 
+			   catch (const std::exception &e)
 			   {
-			     std::ostringstream oss; oss<<"Cannot convert " << self << " to complex";
+			     std::ostringstream oss; oss<<"Cannot convert " << self << " to complex"; oss<<pyoomph::leftover_unit_hint(self);
 			     throw_runtime_error(oss.str());
 			   } }, "Numerically evaluate this expression and return it as a Python complex; raises if it cannot be evaluated to a number.")
 		.def("__int__", [](const GiNaC::ex &self)

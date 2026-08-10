@@ -3800,6 +3800,141 @@ namespace pyoomph
 		}
 	}
 
+	// Truncates the string form of an expression: a single residual contribution of, say, the
+	// Navier-Stokes equations prints as tens of thousands of characters and buries the part of the
+	// message that actually says what is wrong. PYOOMPH_FULL_UNIT_ERROR=1 keeps everything.
+	static std::string shortened_expression(const GiNaC::ex &e, size_t maxlen)
+	{
+		std::ostringstream oss;
+		oss << e;
+		std::string s = oss.str();
+		if (getenv("PYOOMPH_FULL_UNIT_ERROR") || s.size() <= maxlen)
+			return s;
+		return s.substr(0, maxlen) + " [...] (truncated, set PYOOMPH_FULL_UNIT_ERROR=1 for the full expression)";
+	}
+
+	// Report for a contribution that is not dimensionless after nondimensionalisation.
+	//
+	// The old message dumped the raw GiNaC input form, the expanded form, and a single
+	// (factor, unit, rest) split of the whole expression. For the by far most common mistake - a sum
+	// whose terms do not share the same units - that split fails outright ("CANNOT SEPARATE UNITS AND
+	// REST"), so the message reported the failure of the diagnostic rather than the mistake, and never
+	// even named the base unit that survived. Splitting the sum first and collecting the units per
+	// term instead separates the two failure modes that need entirely different fixes: terms that
+	// disagree with each other (something in the equation is wrong) versus terms that agree but are
+	// not dimensionless (a scale is missing or wrong).
+	std::string FiniteElementCode::format_dimensional_error(const GiNaC::ex &input, const GiNaC::ex &expanded, const std::string &what)
+	{
+		std::ostringstream oss;
+		oss << std::endl;
+
+		std::vector<std::string> leftover;
+		for (auto &bu : base_units)
+			if (expanded.has(bu.second))
+				leftover.push_back(bu.first);
+
+		oss << what << " is not dimensionless." << std::endl;
+		if (!leftover.empty())
+		{
+			oss << "It still carries the base unit";
+			if (leftover.size() > 1) oss << "s";
+			oss << ": ";
+			for (size_t i = 0; i < leftover.size(); i++)
+				oss << (i ? ", " : "") << leftover[i];
+			oss << std::endl;
+		}
+		oss << "Every contribution must be free of units once the scales have been divided out." << std::endl;
+
+		// Split the sum and classify each term by its units. Expand first: the caller hands in a
+		// .normal()ised expression, in which a mixed-unit sum typically hides inside a product
+		// ((a*kelvin + b*meter*second)/second) and would be classified as one inseparable term.
+		GiNaC::ex flat = GiNaC::expand(expanded);
+		std::vector<GiNaC::ex> terms;
+		if (GiNaC::is_a<GiNaC::add>(flat))
+			for (size_t i = 0; i < flat.nops(); i++)
+				terms.push_back(flat.op(i));
+		else
+			terms.push_back(flat);
+
+		std::vector<GiNaC::ex> group_units;
+		std::vector<std::vector<GiNaC::ex>> group_terms;
+		std::vector<GiNaC::ex> inseparable;
+		for (auto &t : terms)
+		{
+			GiNaC::ex factor, unit, rest;
+			if (!expressions::collect_base_units(t, factor, unit, rest))
+			{
+				inseparable.push_back(t);
+				continue;
+			}
+			size_t g = 0;
+			for (; g < group_units.size(); g++)
+				if ((unit / group_units[g]).normal().is_equal(GiNaC::ex(1)))
+					break;
+			if (g == group_units.size())
+			{
+				group_units.push_back(unit);
+				group_terms.push_back({});
+			}
+			group_terms[g].push_back(factor * rest);
+		}
+
+		if (!inseparable.empty())
+		{
+			oss << std::endl
+				<< "The units of " << inseparable.size() << " term(s) cannot be separated from the rest at all." << std::endl
+				<< "This happens when a dimensional quantity ends up as the argument of a function that" << std::endl
+				<< "requires a dimensionless one (sin, exp, log, ...), or when terms of different units are" << std::endl
+				<< "added inside such an argument. The first such term is:" << std::endl
+				<< "  " << shortened_expression(inseparable[0], 600) << std::endl;
+		}
+
+		if (group_units.size() > 1)
+		{
+			oss << std::endl
+				<< "The " << terms.size() << " additive terms carry " << group_units.size()
+				<< " different units - no choice of scales can make such a sum dimensionless:" << std::endl;
+			for (size_t g = 0; g < group_units.size(); g++)
+			{
+				oss << "  [" << (g + 1) << "] unit " << group_units[g] << "   (" << group_terms[g].size() << " term"
+					<< (group_terms[g].size() > 1 ? "s" : "") << ")" << std::endl;
+				for (size_t i = 0; i < group_terms[g].size() && i < 3; i++)
+					oss << "        " << shortened_expression(group_terms[g][i], 300) << std::endl;
+				if (group_terms[g].size() > 3)
+					oss << "        ... and " << (group_terms[g].size() - 3) << " further term(s) of this unit" << std::endl;
+			}
+			oss << std::endl;
+			for (size_t g = 1; g < group_units.size(); g++)
+				oss << "  [" << (g + 1) << "]/[1] = " << (group_units[g] / group_units[0]).normal()
+					<< "  -> one of the two is off by exactly this factor." << std::endl;
+		}
+		else if (group_units.size() == 1 && !group_units[0].is_equal(GiNaC::ex(1)))
+		{
+			oss << std::endl
+				<< (terms.size() == 1 ? "It carries the unit " : "All terms agree on the unit ")
+				<< group_units[0] << ", i.e. it is consistent with itself but" << std::endl
+				<< "not dimensionless. Usually a scale is missing or wrong: check set_scaling(...) at problem level" << std::endl
+				<< "and define_scaling()/set_scaling(...) at equation level. For a residual contribution, also check" << std::endl
+				<< "the test function scale (test_scale_factor) of the field it is projected on." << std::endl;
+		}
+
+		if (!this->expanded_scales.empty())
+		{
+			oss << std::endl
+				<< "Scales used in domain '" << this->get_full_domain_name() << "':" << std::endl;
+			for (auto &entry : this->expanded_scales)
+				oss << "  " << entry.first << " = " << entry.second << std::endl;
+		}
+
+		oss << std::endl
+			<< "As written:" << std::endl
+			<< "  " << shortened_expression(input, 1200) << std::endl;
+		if (!input.is_equal(expanded))
+			oss << "Fully expanded:" << std::endl
+				<< "  " << shortened_expression(expanded, 1200) << std::endl;
+		return oss.str();
+	}
+
 	// Expands all placeholders in `what` (see expand_placeholders) and then checks that the result is
 	// dimensionally consistent: every base unit occurring in it must cancel out exactly (to power 1,
 	// via the `sublist` substitution built from `base_units`), i.e. the final expression must be
@@ -3938,30 +4073,14 @@ namespace pyoomph
 			{
 				if (expa.has(bu.second))
 				{
-					std::ostringstream oss;
-					oss << std::endl
-						<< "INPUT FORM:" << what << std::endl;
-					oss << "EXPANDED FORM:" << expa << std::endl;
+					// Last chance: the units may still cancel once collected
 					GiNaC::ex factor, unit, rest;
-					if (!expressions::collect_base_units(expa, factor, unit, rest))
+					if (expressions::collect_base_units(expa, factor, unit, rest) && unit.is_equal(1))
 					{
-						oss << "CANNOT SEPARATE UNITS AND REST" << std::endl;
+						sublist.append(bu.second == 1);
+						continue;
 					}
-					else
-					{
-						oss << "UNITS AND REST ARE SEPARABLE" << std::endl;
-						// Last chance:
-						if (unit.is_equal(1))
-						{
-							sublist.append(bu.second == 1);
-							continue;
-						}
-					}
-					oss << "NUMERICAL FACTOR: " << factor << std::endl;
-					oss << "COLLECTED UNITS: " << unit << std::endl;
-					oss << "REMAINING PART: " << rest << std::endl;
-
-					throw_runtime_error("Found a dimensional contribution in the added expression:" + oss.str());
+					throw_runtime_error(this->format_dimensional_error(what, expa, "The added expression (" + where + ")"));
 				}
 				sublist.append(bu.second == 1);
 			}
@@ -4187,35 +4306,14 @@ namespace pyoomph
 		{
 			if (may_be_dimensional && !units_proven_to_cancel && expa.has(bu.second))
 			{
-				std::ostringstream oss;
-				oss << std::endl
-					<< "INPUT FORM:" << add << std::endl;
-				oss << "EXPANDED FORM:" << expa << std::endl;
+				// Last chance: the units may still cancel once collected
 				GiNaC::ex factor, unit, rest;
-				if (!expressions::collect_base_units(expa, factor, unit, rest))
+				if (expressions::collect_base_units(expa, factor, unit, rest) && unit.is_equal(1))
 				{
-					oss << "CANNOT SEPARATE UNITS AND REST" << std::endl;
+					sublist.append(bu.second == 1);
+					continue;
 				}
-				else
-				{
-					oss << "UNITS AND REST ARE SEPARABLE" << std::endl;
-					// Last chance:
-					if (unit.is_equal(1))
-					{
-						sublist.append(bu.second == 1);
-						continue;
-					}
-				}
-				oss << "NUMERICAL FACTOR: " << factor << std::endl;
-				oss << "COLLECTED UNITS: " << unit << std::endl;
-				oss << "REMAINING PART: " << rest << std::endl;
-				oss << "USED SCALES: " << std::endl;
-				for (auto entry : this->expanded_scales)
-				{
-					oss << "  " << entry.first << " = " << entry.second << std::endl;
-				}
-
-				throw_runtime_error("Found a dimensional contribution in the added residual:" + oss.str());
+				throw_runtime_error(this->format_dimensional_error(add, expa, "The added residual contribution"));
 			}
 			sublist.append(bu.second == 1);
 		}
@@ -7064,10 +7162,10 @@ namespace pyoomph
 		GiNaC::ex rest = 1;
 		if ((!pyoomph::expressions::collect_base_units(expression, factor, units, rest)) || (units != 1))
 		{
-			std::ostringstream oss;
-			oss << "Wrong physical dimensions [got " << units << "] in Dirichlet or initial condition for field '" << fieldname << "': " << expression << std::endl
-				<< " GOT UNITS " << units << "  FACTOR " << factor << " REST " << rest;
-			throw_runtime_error(oss.str());
+			// The expression arriving here has already been divided by the scale of the field, so a
+			// leftover unit is exactly the mismatch between the value the user gave and that scale.
+			throw_runtime_error(this->format_dimensional_error(expression, expression,
+															   "The Dirichlet or initial condition for field '" + fieldname + "' (divided by the scale of '" + fieldname + "')"));
 		}
 		expression = factor * units * rest;
 

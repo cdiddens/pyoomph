@@ -1075,6 +1075,7 @@ namespace pyoomph
       FiniteElementField *get_field_by_name(std::string name);
       FiniteElementField *register_field(std::string name, std::string spacename);
       GiNaC::ex expand_all_and_ensure_nondimensional(GiNaC::ex what, std::string where, GiNaC::ex *collected_units_and_factor = NULL); // Expands placeholders/fields in "what" and checks/divides out that the result is unit-free, optionally returning the collected unit+numeric factor
+      std::string format_dimensional_error(const GiNaC::ex &input, const GiNaC::ex &expanded, const std::string &what); // Human-readable report for a contribution that is still dimensional: groups the additive terms by their units
       virtual void add_residual(GiNaC::ex add, bool allow_contributions_without_dx); // Adds "add" to the currently active residual (residual_index); allow_contributions_without_dx permits terms without an explicit dx/dX integration measure (e.g. nodal-delta contributions)
       virtual void write_generic_spatial_integration_header(std::ostream &os, std::string indent, GiNaC::ex eulerian_part, GiNaC::ex lagrangian_part, std::string required_table_and_flag);
       virtual void write_generic_spatial_integration_footer(std::ostream &os, std::string indent);

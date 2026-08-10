@@ -716,12 +716,21 @@ class MeshTemplate(_pyoomph.MeshTemplate):
                 resL.append(self.nondim_size(b))
             return resL
         res: float
-        if isinstance(a, float) or isinstance(a, int) or isinstance(a,_pyoomph.GiNaC_GlobalParam) or isinstance(a,numpy.floating) or isinstance(a,numpy.integer):
-            res = (float(a / self.get_problem().get_scaling("spatial")))
-        elif isinstance(a, _pyoomph.Expression):  # type:ignore
-            res = ((a / self.get_problem().get_scaling("spatial")).float_value())
-        else:
-            raise ValueError("Strange spatial argument for a mesh:"+str(a)+" of type "+str(type(a)))
+        spatial = self.get_problem().get_scaling("spatial")
+        try:
+            if isinstance(a, float) or isinstance(a, int) or isinstance(a,_pyoomph.GiNaC_GlobalParam) or isinstance(a,numpy.floating) or isinstance(a,numpy.integer):
+                res = (float(a / spatial))
+            elif isinstance(a, _pyoomph.Expression):  # type:ignore
+                res = ((a / spatial).float_value())
+            else:
+                raise ValueError("Strange spatial argument for a mesh:"+str(a)+" of type "+str(type(a)))
+        except RuntimeError as e:
+            # Mixing a dimensionless mesh coordinate with a dimensional spatial scale only surfaced as
+            # "Cannot convert meter^(-1) to double" from the float conversion, which does not say which
+            # of the two sides is the problem.
+            raise RuntimeError("Cannot nondimensionalise the mesh coordinate/size "+str(a)+" with the spatial scale "+str(spatial)+" of the problem.\n"
+                               "If the problem uses dimensional scales (set_scaling(spatial=...)), all mesh coordinates and sizes must be given dimensionally as well, e.g. size=1*meter.\n"
+                               "Original error: "+str(e)) from e
         return res
 
     def add_nodes(self, *args: Sequence[float]) -> int | tuple[int, ...] | None:
