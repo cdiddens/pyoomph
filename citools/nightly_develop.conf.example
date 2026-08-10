@@ -135,3 +135,9 @@ SMTP_FORCE_IPV4=1
 # Number of lines of each failing log that is quoted in the mail body. The full logs stay
 # in LOG_DIR on the test machine.
 MAIL_LOG_TAIL=60
+
+# How many scripts the Timing section of the mail names per tutorial pass - the slowest ones,
+# and the ones whose time changed most between the serial and the mpirun pass. The complete
+# per-script tables are written to timings_*.txt in the run's log directory either way. 0
+# leaves the section out of the mail.
+TIMING_TOP=10

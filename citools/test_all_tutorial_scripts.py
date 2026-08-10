@@ -17,8 +17,72 @@ args = parser.parse_args()
 
 os.chdir(Path(__file__).parent)
 
-import glob,re,subprocess
+import glob,re,subprocess,time
 import shutil
+
+# Every run stamps "Elapsed time: <h:mm:ss.ffffff>" into its log file when the Problem is released
+# (Problem._write_log_footer). That is the number worth comparing between a serial and an mpirun
+# pass, or between two linear solvers: it starts at initialise() and so covers the problem setup,
+# the code generation and compilation and every solve, but not the interpreter start-up and the
+# imports, which are a large and constant part of the subprocess's wall time. It is harvested right
+# after each script, because the output directory holding it is deleted again a few lines later.
+_LOGFILE_NAME="_pyoomph_logfile.txt" # Problem.logfile_name
+_ELAPSED_LINE=re.compile(r"^Elapsed time:\s*(.+?)\s*$")
+
+def elapsed_seconds(logfile):
+  """The seconds behind the "Elapsed time:" footer of one pyoomph log file, or None."""
+  try:
+    with open(logfile,"rb") as lf:
+      lf.seek(0,os.SEEK_END)
+      lf.seek(max(0,lf.tell()-4096)) # the footer is the last handful of lines
+      tail=lf.read().decode("utf-8",errors="replace")
+  except OSError:
+    return None
+  for line in reversed(tail.splitlines()):
+    m=_ELAPSED_LINE.match(line.strip())
+    if m is None:
+      continue
+    text=m.group(1)
+    days=0.0
+    if "day" in text: # str(timedelta) spells the days out: "1 day, 0:02:03.4"
+      head,_,text=text.partition(",")
+      try:
+        days=float(head.split()[0])
+      except (IndexError,ValueError):
+        return None
+      text=text.strip()
+    parts=text.split(":")
+    if len(parts)!=3:
+      return None
+    try:
+      return days*86400.0+int(parts[0])*3600.0+int(parts[1])*60.0+float(parts[2])
+    except ValueError:
+      return None
+  return None
+
+def simulation_seconds(started_at):
+  """(seconds, number of log files) over every pyoomph run the script just finished did.
+
+  Summed rather than taken from one file: a script may build several problems one after another,
+  and parallel_running.py even starts further scripts of its own under mpirun.
+
+  Only files written by this run count. Output directories of earlier scripts in the same folder
+  can still be lying around - only the one named after the script is deleted afterwards, and
+  --keep-outdirs keeps even that - and their footers would otherwise be added to every later
+  script's time.
+  """
+  total,found=0.0,0
+  for logfile in Path(".").rglob(_LOGFILE_NAME):
+    try:
+      if logfile.stat().st_mtime<started_at-1.0:
+        continue
+    except OSError:
+      continue
+    secs=elapsed_seconds(logfile)
+    if secs is not None:
+      total+=secs
+      found+=1
+  return (total if found else None),found
 
 # Third-party packages a few tutorial bundles need that a plain pyoomph install does not pull in.
 # A script that dies on the import of one of these has not regressed - the machine simply cannot run
@@ -198,6 +262,8 @@ all_okay=not problems # inconsistent duplicated scripts already count as a failu
 
 skips=args.skips
 skipped_for_missing=[]
+timings=[]  # (folder, script, seconds, number of log files, whether the script failed)
+untimed=[]  # ran, but left no "Elapsed time" footer anywhere
 
 
 for d in glob.glob("./*/"):
@@ -231,9 +297,11 @@ for d in glob.glob("./*/"):
       cmd.append("--tcc")
     if args.distribute:
       cmd.append("--distribute")
+    started_at=time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (stdout,_) = proc.communicate()
+    secs,numlogs=simulation_seconds(started_at)
     optional=None
     if proc.returncode!=0:
       optional=missing_optional_module(strip_mpirun_epilogue(stdout) if args.mpirun>0 else stdout)
@@ -251,7 +319,15 @@ for d in glob.glob("./*/"):
       logf=Path(f).stem+".log"
       with open(logf,"wb") as lf:
         lf.write(stdout)
-    
+
+    if secs is not None:
+      print("      simulation time: %.2f s"%secs+(" (%d runs)"%numlogs if numlogs>1 else ""))
+      timings.append((d.strip("/").strip("./"),f,secs,numlogs,proc.returncode!=0))
+    elif optional is None:
+      # A script that never got as far as building a Problem, or one that was killed hard enough
+      # to skip the atexit footer. Named at the end so the total is not silently short.
+      untimed.append((d.strip("/").strip("./"),f))
+
     if not args.keep_outdirs:
       shutil.rmtree(Path(f).stem,ignore_errors=True)
 
@@ -270,6 +346,19 @@ if skipped_for_missing:
   print("SKIPPED FOR MISSING OPTIONAL DEPENDENCIES:")
   for folder,script,mod,why in skipped_for_missing:
     print("   %s/%s needs %s, which %s"%(folder,script,_OPTIONAL_MODULES[mod],why))
+  print()
+
+# Slowest first, since that is the end of the list one reads. The fixed "TIME" prefix is what the
+# nightly greps for (see citools/nightly_develop.sh), so keep the column layout if you touch this.
+if timings:
+  print()
+  print("SIMULATION TIMES (the \"Elapsed time\" each run recorded in its %s):"%_LOGFILE_NAME)
+  for folder,script,secs,numlogs,failed in sorted(timings,key=lambda t:-t[2]):
+    extra="".join([" (%d runs)"%numlogs if numlogs>1 else "", " (FAILED)" if failed else ""])
+    print("   TIME %10.2f s  %s/%s%s"%(secs,folder,script,extra))
+  print("   TIME TOTAL %.2f s over %d script(s)"%(sum(t[2] for t in timings),len(timings)))
+  if untimed:
+    print("   TIME MISSING for %d script(s): %s"%(len(untimed),", ".join(folder+"/"+script for folder,script in untimed)))
   print()
 
 if all_okay:

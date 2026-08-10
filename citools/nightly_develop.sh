@@ -65,6 +65,7 @@ SMTP_SECURITY="starttls"
 SMTP_FORCE_IPV4=""
 MAIL_LOG_TAIL=60
 PYTEST_DETAIL_LINES=150
+TIMING_TOP=10   # how many scripts the timing section of the mail names; 0 switches the section off
 BRANCH="develop"
 
 CONFIG="${PYOOMPH_NIGHTLY_CONF:-$HOME/.pyoomph_nightly.conf}"
@@ -652,9 +653,12 @@ PASS_SELFSKIPS=()
 PASS_BAD=()
 PASS_LOG=()
 PASS_LOGDIR=()
+PASS_TIMES=()
+PASS_TIMETOTAL=()
+PASS_TIMEMISSING=()
 
 run_tutorial_pass() { # label, tag, timeout, extra arguments for the runner
-    local label="$1" tag="$2" tmo="$3" extra="$4" log logdir rc bad failures skips selfskips secs
+    local label="$1" tag="$2" tmo="$3" extra="$4" log logdir rc bad failures skips selfskips secs times
     log="$RUN_DIR/tutorials_$tag.log"
     logdir="$RUN_DIR/tutorial_logs_$tag"
 
@@ -685,6 +689,17 @@ run_tutorial_pass() { # label, tag, timeout, extra arguments for the runner
     # own mpirun, the deflation scripts use a custom assembler that is not MPI-capable yet. Reported
     # for the same reason: the MPI pass covers slightly less than the serial one.
     selfskips="$(grep -E '^ +SKIPPING .* -- ' "$log" 2>/dev/null | sed 's/^ *//' | sort -u)"
+
+    # "TIME <seconds> s <folder>/<script>" per script, from the runner's SIMULATION TIMES section:
+    # the elapsed time each run recorded for itself, which is what makes the serial and the mpirun
+    # pass comparable at all. The full table is kept on disk; the mail only names the slowest few.
+    times="$RUN_DIR/timings_$tag.txt"
+    grep -E '^ +TIME +[0-9]' "$log" 2>/dev/null | sed 's/^ *//' >"$times"
+    [ -s "$times" ] || { rm -f "$times"; times=""; }
+    PASS_TIMES+=("$times")
+    PASS_TIMETOTAL+=("$(grep -E '^ +TIME TOTAL ' "$log" 2>/dev/null | sed 's/^ *TIME TOTAL *//')")
+    PASS_TIMEMISSING+=("$(grep -E '^ +TIME MISSING for ' "$log" 2>/dev/null | sed 's/^ *TIME MISSING for *//')")
+
     bad=0
     [ "$rc" -ne 0 ] && bad=1
     [ -n "$failures" ] && bad=1
@@ -838,6 +853,52 @@ if [ "$BUILD_RC" -eq 0 ]; then
             say "  not run in the ${PASS_LABELS[$i]} pass (the runner excludes them there):"
             printf '%s\n' "${PASS_SELFSKIPS[$i]}" | sed 's/^/    /' >>"$REPORT"
         fi
+    done
+fi
+
+# ---------------------------------------------------------------------- timing ---
+#
+# On a green run as much as on a red one: a change that halves a solve, an MPI pass that turns out
+# slower than the serial one, or a machine that has quietly become slower show up nowhere else, and
+# only as a series over several nights -- so the numbers have to be in every report, not just in the
+# ones somebody goes looking for.
+HAVE_TIMINGS=0
+for i in "${!PASS_LABELS[@]}"; do
+    [ -n "${PASS_TIMES[$i]}" ] && HAVE_TIMINGS=1
+done
+if [ "$HAVE_TIMINGS" = 1 ] && [ "${TIMING_TOP:-0}" -gt 0 ] 2>/dev/null; then
+    say ""
+    say "Timing"
+    say "------"
+    say "  What each script's own run recorded as its elapsed time: problem setup, code generation"
+    say "  and compilation and every solve, but not the interpreter start-up and the imports. The"
+    say "  complete per-script tables are in $RUN_DIR/timings_*.txt."
+    for i in "${!PASS_LABELS[@]}"; do
+        say ""
+        say "  ${PASS_LABELS[$i]}: ${PASS_TIMETOTAL[$i]:-(nothing recorded)}"
+        [ -n "${PASS_TIMEMISSING[$i]}" ] && say "    no time recorded for ${PASS_TIMEMISSING[$i]}"
+        if [ -n "${PASS_TIMES[$i]}" ]; then
+            say "    slowest (up to $TIMING_TOP):"
+            # The runner already sorts them, slowest first.
+            head -n "$TIMING_TOP" "${PASS_TIMES[$i]}" |
+                awk '{ printf "      %10.2f s  %s\n", $2, $4 }' >>"$REPORT"
+        fi
+    done
+    # Every later pass against the first (i.e. the serial one), which is what says whether running
+    # under mpirun actually bought anything. Scripts only one of the passes ran are left out; the
+    # Coverage section above says which those are.
+    for i in "${!PASS_LABELS[@]}"; do
+        [ "$i" -gt 0 ] || continue
+        [ -n "${PASS_TIMES[0]}" ] && [ -n "${PASS_TIMES[$i]}" ] || continue
+        say ""
+        say "  ${PASS_LABELS[0]} -> ${PASS_LABELS[$i]}, largest changes:"
+        awk 'NR==FNR { a[$4]=$2+0; next }
+             ($4 in a) {
+                 d=$2+0-a[$4]; ad=(d<0 ? -d : d)
+                 printf "%.6f\t      %10.2f s -> %10.2f s  %+7.1f%%  %s\n", \
+                        ad, a[$4], $2+0, (a[$4]>0 ? 100*d/a[$4] : 0), $4
+             }' "${PASS_TIMES[0]}" "${PASS_TIMES[$i]}" |
+            sort -rn | head -n "$TIMING_TOP" | cut -f2- >>"$REPORT"
     done
 fi
 
