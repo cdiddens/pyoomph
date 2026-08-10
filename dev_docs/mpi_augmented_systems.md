@@ -331,6 +331,12 @@ Three ways to make the pipeline parallel, evaluated for regime (a):
 on `COMM_WORLD`, so it requires either `COMM_SELF` PETSc objects or forcing a different backend under
 MPI. It also buys no speedup at all and extends to (b) not at all.
 
+> Not to be confused with the gather-to-root solve that the serial backends now use under `mpirun`
+> ([linear_solvers.md](linear_solvers.md) §9). That is a different thing: the system is solved **once**,
+> on rank 0, not redundantly on all of them, and the element loop stays split. It is a fallback for a
+> backend that cannot solve in parallel at all, not a design for the trackers — it does not reduce
+> memory per rank and does not extend to (b) either. Option A stays rejected.
+
 **Option B — fully row-distributed.** The multi-assembly returns each rank's row block, the trackers work
 on local blocks with allreduces for every inner product, and the border rows/columns live on a designated
 rank. This is the endpoint for regime (b) and the only design that reduces memory per rank. It touches

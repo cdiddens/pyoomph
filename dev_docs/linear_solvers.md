@@ -533,9 +533,14 @@ hopeless solves.
 | `accelerate` | `AccelerateSolverError` | `SparseMatrixIsSingular` / `SparseFactorizationFailed` |
 
 Everything else propagates untouched, `KeyboardInterrupt` included — which is also why it needs no
-special case of its own. Deliberately *not* converted: Pardiso's refusal to run under MPI, PETSc's
-missing-MUMPS and field-split errors, Accelerate's `SparseParameterError` and `SparseInternalError`,
-every "unknown mode" internal check. No smaller time step makes Pardiso MPI-parallel.
+special case of its own. Deliberately *not* converted: PETSc's missing-MUMPS and field-split errors,
+Accelerate's `SparseParameterError` and `SparseInternalError`, every "unknown mode" internal check, and
+the refusal to gather a custom solve routine onto rank 0 (§9.2). None of those get better with a smaller
+time step.
+
+(Pardiso's blanket refusal to run under MPI used to be on this list. It is gone — see §9 — but the
+principle it illustrated stands: MKL Pardiso is still not MPI-parallel, the system is merely gathered
+onto one rank for it.)
 
 Accelerate is the one that raises from C++, and it is split by exception **type** rather than by parsing
 the message: `checkStatus()` throws a `MacAccelerateNumericalFailure` for exactly the two statuses that
@@ -664,3 +669,138 @@ mat-vec for the residual check cost more than simply redoing the numbers.
 So `try_to_reuse_solver` stays **off by default**, and the recommendation is to leave it off — its
 premise, that reusing numerical factors beats recomputing them, stopped holding once phase 11 was no
 longer part of "recomputing them". **The cheap thing became cheap enough that the clever thing lost.**
+
+---
+
+## 9. A serial backend under `mpirun`: gather onto rank 0
+
+### 9.1 Why it is needed at all
+
+oomph-lib picks the distributed solver path on the **process count**, not on the mesh
+(`linear_solver.cc:850`):
+
+```cpp
+if (Solver_type == Distributed ||
+    (Solver_type == Default && problem_pt->communicator_pt()->nproc() > 1))
+```
+
+So under any `mpirun -n N>1`, with or without `--distribute`, `solve_serial` is never reached from a
+Newton solve and every serial backend refused: Pardiso raised in its constructor, SuperLU/UMFPACK raised
+"cannot solve distributed", Accelerate inherited the base refusal. On a machine without PETSc that made
+`mpirun` unusable outright — pyoomph warned about it and then died at the first solve.
+
+`GenericLinearSystemSolver._solve_distributed_on_root` closes that: gather the row-distributed system
+onto rank 0, call the backend's own `solve_serial` there, scatter the solution back. Opt-in per backend
+via `gathers_to_root_under_mpi`, so a backend that has not thought about MPI keeps getting the refusal
+instead of a silent serialisation.
+
+**It does not scale and is not meant to.** Only the element loop stays parallel. `petsc_mumps` remains
+the automatic MPI default; this is what makes an explicit `--pardiso`/`--superlu` under `mpirun` work,
+and what a machine without PETSc falls back to.
+
+### 9.2 Reusing `solve_serial` is the whole point
+
+Pardiso previously had its own `_solve_distributed`. It duplicated the gather but not the machinery
+around it: no symbolic-factorisation reuse, `try_to_reuse_solver` raising `NotImplementedError`, and it
+passed the **local** `b` into `custom_solve_routine` next to the line using the gathered one. Calling
+`solve_serial` on rank 0 instead inherits all of it. Measured under `mpirun -n 2`, five Newton steps: 1
+full factorisation and 4 phase-22 refreshes on rank 0 — identical to serial.
+
+Two preconditions come with the flag, and they are what makes it safe:
+
+* **`solve_serial` must issue no MPI collective.** It runs on rank 0 alone. `custom_solve_routine` is
+  the one thing on that path that could, so it is refused up front, on a replicated condition, before
+  the first collective.
+* **The factorisation slot must not be shared with anything else.** `PeriodicDrivingResponse`, the
+  Lyapunov utilities and Halley's method build a *replicated* system in Python and call `solve_serial`
+  on **every** rank, into the same slot rank 0's gathered factors live in. They now call
+  `_note_external_serial_solve()` first, so a back-substitution landing on the wrong factors fails
+  loudly rather than being silently wrong on every rank at once.
+
+### 9.3 The refusal it replaces was describing a bug that had been fixed
+
+`pardiso.py` refused MPI on the grounds that a gathered solve is written back onto only each rank's half
+of a replicated dof vector, leaving stale or NaN residuals. That is not what happens.
+`Problem::newton_solve` redistributes `dx` onto `Dof_distribution_pt` (`problem.cc:9356`), which is built
+**non**-distributed without `--distribute` (`problem.cc:2354`), and `DoubleVector::redistribute` then
+takes its `MPI_Allgatherv` branch (`double_vector.cc:358`) — every rank ends up with the whole `dx`.
+
+Verified before any of this was written, with a throwaway gather-to-root subclass and no library edits,
+on a 529-dof nonlinear Poisson Newton solve:
+
+| | plain `mpirun` | `--distribute` |
+|---|---|---|
+| ranks agree with each other | **bitwise** | bitwise |
+| matches serial | `‖u‖ = 2.605673453267989` at 1, 2 and 3 ranks | same |
+
+The claim predates the two `CRDoubleMatrix::redistribute` fixes of 8 Aug 2026
+(`src/thirdparty/INFO_oomph-lib`). This is the second time that has happened — see the note in
+[replicated_mpi_correctness.md](replicated_mpi_correctness.md) §2 about disabling a workaround and
+checking whether the real fix already covers it. It did.
+
+### 9.4 The waiting ranks must sleep, not spin
+
+MPI's blocking collectives busy-poll (`mpi_yield_when_idle=0` by default), so N−1 ranks waiting out a
+factorisation pin N−1 cores at 100% — starving exactly the OpenMP/MKL threads rank 0 was supposed to
+get. Sleeping only inside pyoomph's own waits is not enough either: a rank that returns from Python
+immediately enters the `MPI_Allreduce` at the end of `superlu_dist_distributed_matrix`
+(`src/nanobind/solver.cpp`) and spins *there*. **Every call must therefore end on a collective all ranks
+leave at the same instant**, which is why the outcome agreement is not optional decoration.
+
+`mpi_wait_idle` (`pyoomph/generic/mpi.py`) spins briefly — `Test()` is also what drives progress on a
+build without a progress thread — then backs off to `time.sleep` between 0.1 ms and 5 ms. Interleaved
+A/B on a 1.5 s stand-in factorisation, `-n 2`:
+
+| wait | idle rank CPU | wall | fraction |
+|---|---|---|---|
+| polled (`mpi_wait_idle`) | 0.05 s | 3.03 s | **1.5 %** |
+| blocking (`req.Wait()`) | 3.01 s | 3.01 s | **100 %** |
+
+Wall time is identical, so the polling costs nothing. There is no timeout: a timeout that fires on one
+rank *is* the deadlock it would be reporting. It prints a one-off note after 10 minutes instead, so a
+hang is diagnosable from the log rather than silent.
+
+**Freeing the cores only helps if rank 0 may use them.** Open MPI 4.1 maps by core at `-n ≤ 2` and by
+socket above it, so at `-n 2` rank 0 is pinned to one CPU and its threads have nowhere to go. pyoomph
+cannot change that from inside the process — binding is applied by `mpirun` before `exec`, and
+`InitMPI` runs at import of `pyoomph/generic/mpi.py`. So it is detected and reported, not worked around:
+the one-time rank-0 notice compares `sched_getaffinity` against `cpu_count` and, when they differ, says
+to re-run with `mpirun --bind-to none` and to set the thread count via `problem.set_num_threads(...)`.
+Setting `OMPI_MCA_mpi_yield_when_idle` globally was rejected: it would degrade every *other* MPI path,
+whose collectives are short and balanced, to buy what the polled waits already deliver.
+
+### 9.5 Failure has two routes, because the C++ layer only has one
+
+`src/nanobind/solver.cpp` `MPI_Allreduce`s a "did this rank report a solver failure" flag right after the
+Python call, and its comment says it exists for "a backend that gathers the system onto one rank". So a
+**`SolverError`** needs nothing new: rank 0 raises, the other ranks return normally, and all of them come
+out with a retryable `NewtonSolverError`. On that path `b` deliberately keeps the right-hand side rather
+than a fabricated solution — if anything ever swallowed the `NewtonSolverError`, a bounded wrong step is
+far easier to notice than a zero one, which looks like convergence.
+
+Anything **else** cannot use that route: the shim rethrows a non-`SolverError` *before* reaching its
+reduce, so rank 0 would unwind while the others sat in it. That case is agreed in Python first
+(`_agree_on_gathered_outcome`, one polled `Iallreduce`) and then routed through `mpi_share_any_failure`,
+which also covers a *non-root* rank failing — something the C++ mechanism cannot see at all.
+
+### 9.6 Eigenproblems
+
+`ScipyEigenSolver` gets the same treatment under `--distribute`, where each rank assembles only its own
+`(nrow_local, n)` block: gather into one square matrix on rank 0, solve, broadcast. It recurses through
+`solve()` itself with `custom_J_and_M`, which is already defined to take a whole global matrix, so
+ARPACK, the dense fallback, the `ncv` retries and the sorting are reused rather than duplicated. The
+matrix manipulators — which `get_J_M_n_and_type` *skips* when distributed, because they rewrite whole
+rows of a square matrix — apply on rank 0, where that is what it holds.
+
+No eigensolver pyoomph ships now answers `distributed_possible() == False`. The check stays for backends
+defined outside pyoomph, which are the only thing that can still trip it.
+
+### 9.7 Two pre-existing defects this uncovered
+
+* **`factory_solver` could not find `superlu`/`umfpack`.** They live in `pyoomph/solvers/scipy.py`, and
+  the lookup only special-cased `petsc_mumps`. They were registered *by accident* — via the SuperLU
+  fallback in `pyoomph/__init__.py`, or via `solvers.pardiso`'s `from .scipy import ScipyEigenSolver`.
+  Under `mpirun` the cascade picks `petsc_mumps`, so neither happens and an explicit `--superlu` failed
+  with `No module named 'pyoomph.solvers.superlu'`.
+* **`assemble_jacobian` had never worked under MPI**, for the same underlying reason as this whole
+  section: it fed oomph's *local* CSR into a global-shaped `scipy.sparse.csr_matrix`.

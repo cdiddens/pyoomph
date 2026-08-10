@@ -6,7 +6,9 @@ line references are to the tree state at the time of writing.
 
 **Goal.** Solve `J v = lambda M v` in parallel via SLEPc whenever pyoomph runs on more than one
 process — with `--distribute`, and equally without it, since the eigensolve parallelises either way.
-scipy/ARPACK cannot participate: it only ever sees one process' matrices.
+scipy/ARPACK cannot participate: it only ever sees one process' matrices. (It is no longer *refused*
+under `--distribute` — the matrices are gathered onto rank 0 and solved there, see
+[linear_solvers.md](linear_solvers.md) §9.6 — but that is a fallback, not parallelism.)
 
 ---
 
@@ -114,9 +116,13 @@ element, so no rank misses one of its own. The base-class implementation raises,
 with no distributed equivalent stops the run instead of silently not applying its constraint.
 
 **`distributed_possible()` is finally consulted.** It had been declared on both solver base classes
-for a long time and called from nowhere. `Problem._solve_eigenproblem_helper` now asks it, and
-`ScipyEigenSolver` answers no — otherwise scipy would solve each rank's row block as if it were the
-whole eigenproblem and return numbers that look entirely reasonable.
+for a long time and called from nowhere. `Problem._solve_eigenproblem_helper` now asks it — otherwise a
+backend that cannot see a partitioned matrix would solve each rank's row block as if it were the whole
+eigenproblem and return numbers that look entirely reasonable.
+
+> `ScipyEigenSolver` used to be the one backend that answered no. It now gathers onto rank 0 instead
+> (§9.6 of [linear_solvers.md](linear_solvers.md)), so no in-tree eigensolver trips this check any
+> more; it guards backends defined outside pyoomph.
 
 ## 4. Three bugs found on the way, all outside the eigensolver
 
@@ -179,6 +185,8 @@ through `Problem._require_non_distributed`:
 - the multi-assembly tensor cache
 - Lyapunov exponents
 - the periodic driving response
+  (both of these build a replicated system and call `solve_serial` on every rank — see
+  [linear_solvers.md](linear_solvers.md) §9.2 for why they now have to say so first)
 - `refine_eigenfunction()` — for the history-dof reason in §3, not for an assembly reason
 - bifurcation branch switching, left eigenvectors and normal forms
   (`pyoomph/generic/bifurcation_tools.py`), which build global scipy matrices

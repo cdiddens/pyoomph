@@ -81,6 +81,12 @@ ranks, dead on 3 or more.
 > parallel assembly is correct here — and it was removed rather than left in as a second path. Worth
 > remembering for the next one of these: **disable the workaround and check whether the real fix already
 > covers it.**
+>
+> That advice paid off a second time. Pardiso refused MPI outright because a gather-to-root solve was
+> believed to write back onto only half of a replicated dof vector; `dx.redistribute` onto the
+> non-distributed `Dof_distribution_pt` in fact allgathers it to full length on every rank, and the
+> refusal predated these same fixes. Measured, then deleted — see
+> [linear_solvers.md](linear_solvers.md) §9.3.
 
 **`PETScSolver.solve_serial`** (`pyoomph/solvers/petsc.py`) is the mirror image: it is handed a
 *complete* `n x n` CSR (the replicated systems built in Python by `PeriodicDrivingResponse` and the

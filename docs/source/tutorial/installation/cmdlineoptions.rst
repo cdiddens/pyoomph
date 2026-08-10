@@ -31,6 +31,21 @@ The linear solver flags are mutually exclusive (passing e.g. both ``--pardiso`` 
 ``--pardiso``
       Use the (MKL) Pardiso solver.
 
+.. note::
+
+   ``--superlu``, ``--umfpack``, ``--pardiso`` and ``--accelerate`` are not MPI-parallel. They can
+   still be used under ``mpirun``: the assembled system is gathered onto rank 0 and solved there while
+   the other processes wait. The assembly stays parallel, so this is a real speed-up over a serial run
+   for assembly-dominated problems, but the solve itself does not scale and rank 0 needs the whole
+   matrix in memory. For a genuinely distributed solve use ``--petsc_mumps`` (or ``--mumps``), which is
+   also what pyoomph selects by default under ``mpirun`` when PETSc/MUMPS is available.
+
+   Because the waiting processes have to leave their cores free for rank 0's threads, they sleep
+   rather than spin. On most MPI implementations the processes are pinned to individual cores by
+   default, which stops rank 0 from using the freed ones -- run ``mpirun --bind-to none`` and set the
+   thread count with :py:meth:`~pyoomph.generic.problem.Problem.set_num_threads` if you want rank 0 to
+   spread out. pyoomph prints a one-off note when it detects this.
+
 ``--mumps``
       Use the MUMPS solver.
 
@@ -92,10 +107,10 @@ Output and code generation
       This requires the SLEPc eigensolver (``slepc`` or ``slepc_mumps``) and a PETSc providing a
       parallel direct solver (MUMPS or SuperLU_DIST) for the shift-and-invert transform; if either is
       missing, the run stops with an explanation rather than silently solving the same problem once
-      per process. The ``scipy`` eigensolver cannot be used under ``--distribute``, since it would
-      only ever see one process' share of the matrices; it too refuses rather than returning a wrong
-      answer. Eigenvectors are returned at full length on every process, exactly as in a serial run,
-      so plotting and output of eigenmodes need no changes.
+      per process. The ``scipy`` eigensolver sees one process' share of the matrices only, so under
+      ``--distribute`` they are gathered onto rank 0 and the eigenproblem is solved there -- correct,
+      but not parallel, so SLEPc remains the right choice. Eigenvectors are returned at full length on
+      every process, exactly as in a serial run, so plotting and output of eigenmodes need no changes.
 
       Bifurcation tracking, eigenbranch continuation, periodic orbit tracking / Floquet analysis,
       Lyapunov exponents, the periodic driving response and adapting the mesh to an eigenfunction
