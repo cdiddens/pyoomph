@@ -95,20 +95,20 @@ if __name__=="__main__":
                 maxds=ds*100 # Limit the maximum step size
                 while problem.mu.value<2.05:
                         ds=problem.arclength_continuation("mu",ds,max_ds=maxds)                      
-                        F=orbit.get_floquet_multipliers(n=3,shift=3) # Calculate some Floquet multipliers 
-                        # However, not always three multipliers are found. We have to consider the cases                                                             
-                        if len(F)==3:
-                                # Three multipliers found: The trivial one and two complex conjugate ones
-                                F=numpy.delete(F,numpy.argmin(numpy.abs(F-1)))
-                                nontrivial_floquet=F[0] # Take one of the complex conjugate multipliers
-                        elif len(F)==2:
-                                # Only two multipliers found: The trivial one and one real one
-                                F=numpy.delete(F,numpy.argmin(numpy.abs(F-1)))
-                                nontrivial_floquet=F[0] # Take the remaining multiplier                         
+                        F=orbit.get_floquet_multipliers(n=3,shift=3) # Calculate some Floquet multipliers
+                        # The number of multipliers returned is not fixed: the ones close to zero are
+                        # discarded, and how many of those are resolved well enough to survive that cut
+                        # depends on the eigensolver (it differs between a serial and an mpirun run).
+                        # So remove the trivial multiplier and take the dominant one of the remainder,
+                        # which is what get_floquet_multipliers sorts last.
+                        if len(F)>0:
+                                F=numpy.delete(F,numpy.argmin(numpy.abs(F-1))) # Remove the trivial multiplier
+                        if len(F)>0:
+                                nontrivial_floquet=F[-1] # Sorted by magnitude, so this is the relevant one
                         else:
-                                # Only one multiplier found: The trivial one
-                                nontrivial_floquet=0 # The others are then very close to 0
-                                
+                                # Nothing but the trivial multiplier: The others are then very close to 0
+                                nontrivial_floquet=0
+
                         if numpy.imag(nontrivial_floquet)<0:
                                 # conjugate a multiplier with negative imaginary part
                                 nontrivial_floquet=numpy.conjugate(nontrivial_floquet)

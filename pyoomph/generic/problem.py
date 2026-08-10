@@ -983,18 +983,75 @@ class Problem(_pyoomph.Problem):
 
 
     @overload
-    def assemble_jacobian(self,with_residual:Literal[True]=...,which_one:str=...)->tuple[NPFloatArray,DefaultMatrixType]: ...
+    def assemble_jacobian(self,with_residual:Literal[True]=...,which_one:str=...,global_csr:bool=...)->tuple[NPFloatArray,DefaultMatrixType]: ...
 
     @overload
-    def assemble_jacobian(self,with_residual:Literal[False],which_one:str=...)->DefaultMatrixType: ...
+    def assemble_jacobian(self,with_residual:Literal[False],which_one:str=...,global_csr:bool=...)->DefaultMatrixType: ...
 
-    def assemble_jacobian(self,with_residual:bool=True,which_one:str="")->DefaultMatrixType | tuple[NPFloatArray, DefaultMatrixType]:
-        res, n, _nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr=self._assemble_residual_jacobian(which_one)        
-        J = scipy.sparse.csr_matrix((J_values_arr, J_colindex_arr, J_row_start_arr), shape=(n, n)) #type:ignore ## TODO: Not J_nrow_local ?
+    def assemble_jacobian(self,with_residual:bool=True,which_one:str="",global_csr:bool=True)->DefaultMatrixType | tuple[NPFloatArray, DefaultMatrixType]:
+        """Assemble the Jacobian (and optionally the residual vector) as a scipy sparse matrix.
+
+        Args:
+            with_residual: Also return the residual vector, as (residuals, Jacobian).
+            which_one: Name of the residual/Jacobian combination to assemble. Defaults to the one
+                currently active.
+            global_csr: Return the whole (n x n) Jacobian on every process. Under mpirun oomph
+                row-partitions the matrix even without --distribute, so this costs an allgather and
+                replicates the matrix on each rank. Pass False to get this rank's row block instead,
+                shaped (nrow_local, n) with global column indices - cheaper, but the caller then has
+                to know its own first_row. Irrelevant without MPI, where the two agree.
+
+        Returns:
+            The Jacobian, or (residuals, Jacobian) if with_residual. The residuals are always the
+            full global vector, irrespective of global_csr.
+        """
+        res, n, _nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr=self._assemble_residual_jacobian(which_one)
+        # _assemble_residual_jacobian hands back the Jacobian in LOCAL CSR, because the PETSc callers
+        # want exactly that. Under mpirun the row_start array is then shorter than n+1 and scipy
+        # rejects it outright, so the row blocks have to be glued back together for the (n x n) form
+        # that every caller of this method, and the gathered residual returned alongside, works in.
+        if global_csr:
+            J_values_arr,J_colindex_arr,J_row_start_arr=self._gather_distributed_csr_rows(n,J_nrow_local,J_values_arr,J_colindex_arr,J_row_start_arr)
+            shape=(n,n)
+        else:
+            shape=(J_nrow_local,n)
+        J = scipy.sparse.csr_matrix((J_values_arr, J_colindex_arr, J_row_start_arr), shape=shape) #type:ignore
         if with_residual:
             return res,J #type:ignore
         else:
             return J
+
+    def _gather_distributed_csr_rows(self,n:int,nrow_local:int,values:NPFloatArray,colindex:NPIntArray,row_start:NPIntArray)->tuple[NPFloatArray,NPIntArray,NPIntArray]:
+        """Assemble a globally indexed CSR triple from the local row block each rank holds.
+
+        Returns the input unchanged when there is nothing to gather (serial, or a matrix that oomph
+        left replicated). The column indices of a distributed CRDoubleMatrix are already global; only
+        the rows have to be concatenated, in rank order, since oomph hands out ascending first_row.
+        """
+        from .mpi import get_mpi_nproc,get_mpi_world_comm
+        nproc=get_mpi_nproc()
+        if nproc<=1:
+            return values,colindex,row_start
+        comm=get_mpi_world_comm()
+        assert comm is not None
+        nrows_per_rank=comm.allgather(int(nrow_local)) #type:ignore
+        if sum(nrows_per_rank)!=n:
+            # Replicated: every rank already holds all n rows (sum could only match by accident here,
+            # since a replicated block is n rows long on each of the nproc>1 ranks).
+            return values,colindex,row_start
+        all_values=comm.allgather(numpy.asarray(values)) #type:ignore
+        all_colindex=comm.allgather(numpy.asarray(colindex)) #type:ignore
+        all_row_start=comm.allgather(numpy.asarray(row_start)) #type:ignore
+        glob_row_start=numpy.zeros(n+1,dtype=numpy.asarray(row_start).dtype)
+        nnz_offset=0
+        row_offset=0
+        for rs,vals in zip(all_row_start,all_values): #type:ignore
+            nloc=len(rs)-1 #type:ignore
+            glob_row_start[row_offset:row_offset+nloc]=rs[:-1]+nnz_offset #type:ignore
+            row_offset+=nloc
+            nnz_offset+=len(vals) #type:ignore
+        glob_row_start[n]=nnz_offset
+        return numpy.concatenate(all_values),numpy.concatenate(all_colindex),glob_row_start #type:ignore
 
     def remove_equations(self, path:str, of_type:type[BaseEquations] | None=None, only_if:Callable[[BaseEquations],bool]=lambda eqn: True,fail_if_not_exist:bool=False):
         if hasattr(self,"_equation_system"):
