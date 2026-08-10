@@ -357,7 +357,15 @@ def mpi_gather_csr_rows(layout:MPIRowLayout,values,col_index,row_start,root:int=
 	rank=get_mpi_rank()
 	n,nnz_total=layout.n,layout.nnz_total
 	nrow_local=int(layout.vec_counts[rank])
-	vals_g=numpy.empty(nnz_total,dtype=numpy.float64) if rank==root else None
+	# The eigenproblem matrices are complex whenever an imaginary contribution was assembled, so the
+	# element type follows the data rather than being assumed real.
+	vdtype=numpy.dtype(numpy.asarray(values).dtype)
+	if vdtype==numpy.complex128:
+		vmpi=MPI.C_DOUBLE_COMPLEX
+	else:
+		vdtype=numpy.dtype(numpy.float64)
+		vmpi=MPI.DOUBLE
+	vals_g=numpy.empty(nnz_total,dtype=vdtype) if rank==root else None
 	cols_g=numpy.empty(nnz_total,dtype=numpy.int32) if rank==root else None
 	rs_g=numpy.empty(n+1,dtype=numpy.int32) if rank==root else None
 	# Offset this rank's row-start heads by its own nonzero displacement before sending, so the root
@@ -365,10 +373,10 @@ def mpi_gather_csr_rows(layout:MPIRowLayout,values,col_index,row_start,root:int=
 	# local until the request completes: it is the send buffer, and CPython would otherwise be free
 	# to collect it while MPI is still reading it.
 	rs_local=numpy.asarray(row_start[:nrow_local],dtype=numpy.int32)+layout.nnz_displs[rank]
-	vals_l=numpy.asarray(values,dtype=numpy.float64)
+	vals_l=numpy.asarray(values,dtype=vdtype)
 	cols_l=numpy.asarray(col_index,dtype=numpy.int32)
 	for send,recv,counts,displs,mtype in (
-			(vals_l,vals_g,layout.nnz_counts,layout.nnz_displs,MPI.DOUBLE),
+			(vals_l,vals_g,layout.nnz_counts,layout.nnz_displs,vmpi),
 			(cols_l,cols_g,layout.nnz_counts,layout.nnz_displs,MPI.INT),
 			(rs_local,rs_g,layout.vec_counts,layout.vec_displs,MPI.INT)):
 		req=comm.Igatherv(send,[recv,counts,displs,mtype] if rank==root else None,root=root) #type:ignore

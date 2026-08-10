@@ -222,24 +222,6 @@ def solve_case(N=8, neigen=3, eigensolver="slepc", azimuthal_m=None, problem="di
         return res
 
 
-def guard_case(N=8, eigensolver="scipy", outdir=None):
-    """A backend that cannot see a partitioned matrix must SAY so rather than answer wrongly."""
-    prob = DiffusionProblem(N=N)
-    with prob as p:
-        if outdir is not None:
-            p.set_output_directory(outdir)
-        p.quiet()
-        p.set_linear_solver("petsc_mumps")
-        p.set_eigensolver(eigensolver)
-        p.initialise()
-        p.solve()
-        try:
-            p.solve_eigenproblem(2, quiet=True)
-        except RuntimeError as e:
-            return {"raised": True, "message": str(e), "distributed": bool(p.is_distributed())}
-        return {"raised": False, "message": "", "distributed": bool(p.is_distributed())}
-
-
 def rotate_case(N=8, normalize_max=True, outdir=None):
     """rotate_eigenvectors() must give the same answer from a local row block as from a full vector.
 
@@ -300,7 +282,7 @@ def main():
     ap.add_argument("--eigensolver", default="slepc")
     ap.add_argument("--azimuthal-m", type=int, default=-1)
     ap.add_argument("--problem", default="diffusion", choices=sorted(_PROBLEMS))
-    ap.add_argument("--mode", default="eigen", choices=["eigen", "guard", "rotate"])
+    ap.add_argument("--mode", default="eigen", choices=["eigen", "rotate"])
     ap.add_argument("--normalize-max", type=int, default=1)
     ap.add_argument("--outdir", required=True)
     args, _ = ap.parse_known_args()
@@ -309,9 +291,7 @@ def main():
     payload = {"rank": get_mpi_rank(), "nproc": get_mpi_nproc(),
                "case": "%s_N%d_%s_m%s" % (args.problem, args.size, args.eigensolver, str(azi))}
     try:
-        if args.mode == "guard":
-            payload.update(guard_case(N=args.size, eigensolver=args.eigensolver, outdir=args.outdir))
-        elif args.mode == "rotate":
+        if args.mode == "rotate":
             payload.update(rotate_case(N=args.size, normalize_max=bool(args.normalize_max),
                                        outdir=args.outdir))
         else:

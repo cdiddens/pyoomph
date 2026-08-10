@@ -361,17 +361,23 @@ def test_distributed_axisymmetric_flow(tmp_path):
     _assert_matches_serial("distributed axisymmetric flow m=1", per_rank, serial)
 
 
-def test_scipy_eigensolver_refuses_distributed(tmp_path):
-    """A backend that cannot see a partitioned matrix must say so, not answer wrongly.
+@pytest.mark.parametrize("nproc", [2, 3])
+def test_scipy_eigensolver_gathers_when_distributed(tmp_path, nproc):
+    """scipy/ARPACK under --distribute: gathered onto rank 0, and it must agree with serial.
 
-    scipy/ARPACK only ever sees one process' rows. Without the distributed_possible() check it would
-    solve each rank's row block as if it were the whole eigenproblem and return numbers that look
-    entirely reasonable.
+    ARPACK only ever sees one process' rows, so on a partitioned problem it used to be refused
+    outright -- solving a rank's row block as if it were the whole eigenproblem returns numbers that
+    look entirely reasonable. It is now gathered into one square matrix on rank 0 and solved there
+    instead. That is not parallel (SLEPc is, and stays the default), but it is correct, and it is the
+    difference between scipy being usable under --distribute and not being usable at all.
+
+    Deliberately NOT checked with _assert_solve_was_split: this solve is meant to run on one rank.
+    What must still hold is that every rank comes back with the same eigenpairs at full global
+    length, which is what the broadcast is for.
     """
-    per_rank = _run_mpi(2, tmp_path, distribute=True, mode="guard", eigensolver="scipy")
+    serial = _serial_reference(tmp_path, eigensolver="scipy")
+    per_rank = _run_mpi(nproc, tmp_path, distribute=True, eigensolver="scipy")
     _check_no_errors(per_rank)
-    for r in per_rank:
-        assert r["distributed"], "rank %d was not distributed" % r["rank"]
-        assert r["raised"], "rank %d silently solved a distributed eigenproblem with scipy" % r["rank"]
-        assert "distribute" in r["message"], \
-            "rank %d raised, but the message does not mention distribution: %s" % (r["rank"], r["message"])
+    assert per_rank[0]["distributed"], "the run was not actually distributed"
+    _assert_ranks_agree(per_rank)
+    _assert_matches_serial("scipy gathered np=%d" % nproc, per_rank, serial)

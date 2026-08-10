@@ -4801,10 +4801,14 @@ class Problem(_pyoomph.Problem):
         self.invalidate_cached_mesh_data(only_eigens=True)
         self.setup_forced_zero_dof_list_for_eigenproblems()
         eigen_solver=self.get_eigen_solver()
-        # distributed_possible() has been on both solver base classes for a long time without anything
-        # ever asking it. Ask it here: on a distributed problem each rank assembles only its own row
-        # block, and a backend that cannot see that would quietly solve the block as if it were the
-        # whole eigenproblem and return plausible, wrong eigenvalues.
+        # On a distributed problem each rank assembles only its own row block, and a backend that
+        # cannot see that would quietly solve the block as if it were the whole eigenproblem and
+        # return plausible, wrong eigenvalues.
+        #
+        # No eigensolver pyoomph ships answers no any more: SLEPc is genuinely distributed, and the
+        # scipy/ARPACK family (including the Pardiso and Accelerate shift-invert variants derived from
+        # it) gathers onto rank 0 instead of refusing. The check stays for a backend defined outside
+        # pyoomph, which is the only thing that can still trip it.
         if self.is_distributed() and not eigen_solver.distributed_possible():
             raise RuntimeError("The eigensolver '"+str(getattr(eigen_solver,"idname",type(eigen_solver).__name__))+"' cannot solve an eigenproblem on a distributed (--distribute) problem. Use SLEPc instead, e.g. problem.set_eigensolver('slepc_mumps'), or run without --distribute.")
         if ncv is not None:
