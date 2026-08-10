@@ -3255,12 +3255,19 @@ namespace pyoomph
 			}
 			if (eleminfo.nodal_coords[i])
 			{
-				// Only these are allocated, the rest is allocated in the nodes
-				for (unsigned int j = eleminfo.nodal_dim + codeinst->get_func_table()->lagr_dim+this->dim() ; j < this->codeinst->get_func_table()->info_Pos.numfields; j++)
+				// The Eulerian and Lagrangian slots point into the node, but everything from the local
+				// coordinates onwards (local coordinate buffer, then the FaceElement zeta buffers) is
+				// new'ed in fill_element_info and owned here. This loop used to start one block later,
+				// at +this->dim(), i.e. it freed the zeta buffers and leaked the local coordinates --
+				// dim*nnode doubles per element per fill. fill_element_info() runs on every element
+				// after every mesh adaption, so an adaptive run leaked ~1 MB per adaption (measured on
+				// a 1900-dof adaptive Poisson problem) and grew without bound; under mpirun every rank
+				// pays it separately.
+				for (unsigned int j = eleminfo.nodal_dim + codeinst->get_func_table()->lagr_dim ; j < this->codeinst->get_func_table()->info_Pos.numfields; j++)
 				{
-					
+
 					if (eleminfo.nodal_coords[i][j]) delete eleminfo.nodal_coords[i][j];
-				}				
+				}
 				free(eleminfo.nodal_coords[i]);
 				eleminfo.nodal_coords[i] = NULL;
 			}
