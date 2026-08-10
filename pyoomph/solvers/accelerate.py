@@ -66,6 +66,11 @@ class AccelerateSolverError(SolverError):
 @GenericLinearSystemSolver.register_solver()
 class MacAccelerateLinearSolver(GenericLinearSystemSolver):
     idname = "accelerate"
+    # Accelerate is serial, but oomph routes every mpirun through the distributed entry point, so
+    # without this a plain `mpirun -n 2` could not solve at all on a Mac. The base class gathers the
+    # system onto rank 0 and calls solve_serial() below there (which issues no MPI collective, as the
+    # flag requires, and keeps its symbolic-factorization reuse).
+    gathers_to_root_under_mpi=True
     def __init__(self, problem:"Problem", method:MacAccelerateMethod="qr"):
         super().__init__(problem)
         self.solver=_pyoomph.MacAccelerateSparseSolver()

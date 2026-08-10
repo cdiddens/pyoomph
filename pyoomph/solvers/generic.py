@@ -30,10 +30,17 @@ from __future__ import annotations
 from ..meshes.mesh import ODEStorageMesh
 from ..typings import *
 import numpy
+import os
 import weakref
 
 
 import scipy.sparse #type:ignore
+
+
+# Passed for the arrays a given op_flag leaves unused, so the backends see a real (empty) array rather
+# than None: oomph passes a null pointer there and the shim then hands Python a zero-length ndarray.
+_EMPTY_F64=numpy.zeros(0,dtype=numpy.float64)
+_EMPTY_I32=numpy.zeros(0,dtype=numpy.int32)
 
 
 class SolverError(RuntimeError):
@@ -208,14 +215,184 @@ class GenericLinearSystemSolver:
 
 
 	def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
+		if self.gathers_to_root_under_mpi:
+			return self._solve_distributed_on_root(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info)
 		raise RuntimeError("This solver cannot be used with multiple MPI processes.")
 
 	def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
 		raise NotImplementedError("You need to specialise the function 'solve_serial'")
 
-	
+
 	def distributed_possible(self)->bool:
 		return True
+
+	#################### Gather-to-root: a serial backend under mpirun ####################
+
+	# Whether solve_distributed() may fall back to gathering the whole system onto rank 0 and calling
+	# this solver's own solve_serial() there. Opt-in, so a backend that has not thought about MPI keeps
+	# getting the loud refusal above rather than a silent serialisation.
+	#
+	# Setting it asserts two things about solve_serial(): it performs no MPI collective (it runs on rank
+	# 0 alone, so anything collective inside it hangs the job), and it does not mind being called with
+	# a system much larger than this rank assembled.
+	gathers_to_root_under_mpi:bool=False
+
+	# True for a backend that genuinely solves in parallel. Only used to word the messages: a gathering
+	# backend works, it just does not scale, and the two should not read the same.
+	solves_natively_distributed:bool=False
+
+	_gather_layout:"Any"=None
+	_gather_notice_printed:bool=False
+
+	def _note_external_serial_solve(self)->None:
+		"""Tell the solver that someone called solve_serial() directly, outside solve_distributed().
+
+		Several utilities (Lyapunov exponents, the periodic driving response, Halley's method) build a
+		globally REPLICATED system in Python and call solve_serial() on every rank. That writes the same
+		factorisation slot the gathered path keeps rank 0's factors in. Interleaved with a gathered
+		Newton solve, rank 0 would then back-substitute against the wrong factors while the other ranks
+		had no way to notice. Dropping the layout makes the next gathered back-substitution fail loudly
+		instead.
+		"""
+		self._gather_layout=None
+
+	def _agree_on_gathered_outcome(self,code:int)->int:
+		"""Collective: agree on how the gathered solve went. 0 = fine, 1 = SolverError, 2 = anything else.
+
+		Every rank must call this, and the answer decides what all of them do next -- which is the whole
+		point: rank 0 is the only one that solves, so it is the only one that can see the failure, and a
+		branch taken on anything else would split the ranks between different collectives.
+		"""
+		import numpy
+		from mpi4py import MPI #type:ignore
+		from ..generic.mpi import get_mpi_world_comm,mpi_wait_idle
+		comm=get_mpi_world_comm()
+		assert comm is not None
+		send=numpy.array([code],dtype=numpy.int32)
+		recv=numpy.zeros(1,dtype=numpy.int32)
+		req=comm.Iallreduce(send,recv,op=MPI.MAX) #type:ignore
+		mpi_wait_idle(req,"the gathered solve on rank 0")
+		return int(recv[0])
+
+	def _report_gather_to_root_once(self,n:int)->None:
+		"""Say once, on rank 0, that the system is being solved on one rank -- and what that costs."""
+		if self._gather_notice_printed:
+			return
+		self._gather_notice_printed=True
+		from ..generic.mpi import get_mpi_rank,get_mpi_nproc
+		if get_mpi_rank()!=0 or self.problem.is_quiet():
+			return
+		msg=("NOTE: the linear solver '"+str(getattr(self,"idname",type(self).__name__))+"' is not "
+			 "MPI-parallel, so the assembled system ("+str(n)+" dofs) is gathered onto rank 0 and solved "
+			 "there while the other "+str(get_mpi_nproc()-1)+" rank(s) wait. Assembly stays parallel; the "
+			 "solve does not scale. Use petsc_mumps for a genuinely distributed solve.")
+		# Freeing the other cores only helps if rank 0 is allowed to use them, and Open MPI binds by
+		# core at -n 2 and by socket above it. pyoomph cannot change that from inside the process:
+		# binding is applied by mpirun before exec.
+		if hasattr(os,"sched_getaffinity"):
+			allowed=len(os.sched_getaffinity(0))
+			total=os.cpu_count() or allowed
+			if allowed<total:
+				msg+=("\n      Rank 0 may use "+str(allowed)+" of "+str(total)+" CPUs, so its threads cannot "
+					  "take the cores the waiting ranks give up. Re-run with 'mpirun --bind-to none' and "
+					  "set the thread count via problem.set_num_threads(...).")
+		print(msg,flush=True)
+
+	def _solve_distributed_on_root(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
+		"""Gather the row-distributed system onto rank 0, solve it there, scatter the solution back.
+
+		oomph-lib routes every run with nproc>1 through the distributed entry point, whether or not the
+		problem was distributed (SuperLUSolver::solve branches on nproc(), not on the mesh), so a serial
+		backend is otherwise unusable under mpirun at all. This makes it usable: the element loop is
+		still split across the ranks, only the factorisation is serialised.
+
+		Nothing here writes ``data`` or ``info``. ``data`` arrives as None -- pyoomph's shim never puts a
+		handle there, which is also why op_flag==3 never arrives (oomph guards its cleanup on that same
+		handle being non-null).
+		"""
+		import numpy
+		from ..generic.mpi import (get_mpi_rank,get_mpi_nproc,mpi_row_layout,mpi_gather_csr_rows,
+								   mpi_gather_vector,mpi_scatter_vector,mpi_share_any_failure)
+		# Every branch below is decided either on op_flag (which oomph passes identically to all ranks)
+		# or on the agreed outcome code. Nothing branches on a local count.
+		if op_flag==3:
+			self._gather_layout=None
+			return
+		if op_flag not in (1,2):
+			raise RuntimeError("Cannot handle op_flag "+str(op_flag)+" in the gather-to-root solve")
+		if get_mpi_nproc()<=1:
+			# Only reachable if a solver was forced to Distributed on a single process; the "local"
+			# block is then the whole system and there is nothing to gather.
+			self.solve_serial(op_flag,n,nnz_local,1 if op_flag==2 else 0,values,col_index,row_start,b,n,1)
+			return
+		# Replicated condition, checked before the first collective so all ranks refuse together. The
+		# custom solve routine would run on rank 0 alone, and the augmented handlers reach back into
+		# the problem from inside it; the custom assembler is not supported under MPI anyway.
+		if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine(): #type:ignore
+			raise RuntimeError("A custom solve routine (deflation, an augmented assembly handler) cannot "
+							   "be used together with a linear solver that gathers the system onto rank 0 "
+							   "under MPI: it would run on rank 0 only. Use petsc_mumps, or run serially.")
+
+		rank=get_mpi_rank()
+		error:BaseException | None=None
+		if op_flag==1:
+			self._report_gather_to_root_once(n)
+			layout=mpi_row_layout(n,first_row,nrow_local,nnz_local)
+			assert layout is not None
+			self._gather_layout=layout
+			gathered=mpi_gather_csr_rows(layout,values,col_index,row_start)
+			if rank==0:
+				assert gathered is not None
+				vals_g,cols_g,rs_g=gathered
+				try:
+					# The argument convention is the one oomph uses serially for a CRDoubleMatrix
+					# (linear_solver.cc:2261-2264, 2303-2314): CSR data through the SuperLU-named
+					# (values, rowind, colptr) slots, nrhs=0 and b unused on a factorise, transpose=1.
+					self.solve_serial(1,n,layout.nnz_total,0,vals_g,cols_g,rs_g,_EMPTY_F64,n,1)
+				except BaseException as e:
+					error=e
+			code=self._agree_on_gathered_outcome(0 if error is None else (1 if isinstance(error,SolverError) else 2))
+		else:
+			layout=self._gather_layout
+			# Replicated: op_flag==1 always precedes a back-substitution (oomph gates the call on the
+			# factorisation having been allocated) and sets the layout on every rank before it can fail.
+			if layout is None:
+				raise RuntimeError("A gathered back-substitution was requested without a preceding "
+								   "gathered factorisation. Something solved with this backend outside "
+								   "the distributed path in between.")
+			local_code=0
+			if len(b)!=int(layout.vec_counts[rank]):
+				error=RuntimeError("The gathered layout expects "+str(int(layout.vec_counts[rank]))+
+								   " local rows on this rank, but the right-hand side has "+str(len(b))+".")
+				local_code=2
+			b_global=mpi_gather_vector(layout,b if local_code==0 else numpy.zeros(int(layout.vec_counts[rank])))
+			if rank==0 and local_code==0:
+				assert b_global is not None
+				try:
+					self.solve_serial(2,n,0,1,_EMPTY_F64,_EMPTY_I32,_EMPTY_I32,b_global,n,1)
+				except BaseException as e:
+					error=e
+					local_code=1 if isinstance(e,SolverError) else 2
+			code=self._agree_on_gathered_outcome(local_code)
+			if code==0:
+				mpi_scatter_vector(layout,b_global,b)
+		if code==0:
+			return
+		if code==1:
+			# A SolverError is left to the shim in src/nanobind/solver.cpp, which MPI_Allreduces the
+			# "did this rank report a solver failure" flag right after this call and turns it into a
+			# retryable NewtonSolverError on every rank -- it says so explicitly, for exactly this case.
+			# So only rank 0 raises, and b keeps the right-hand side rather than a fabricated solution:
+			# if anything ever swallowed the NewtonSolverError, a bounded wrong step is far easier to
+			# notice than a zero one, which looks like convergence.
+			self._gather_layout=None
+			if error is not None:
+				raise error
+			return
+		# Anything else cannot go through the shim: it rethrows a non-SolverError BEFORE reaching its
+		# Allreduce, so rank 0 would unwind while the others sat in it. Agree here instead.
+		self._gather_layout=None
+		mpi_share_any_failure(error,context="solving the gathered linear system on rank 0")
 
 	@classmethod
 	def register_solver(cls,*,override:bool=False)->Callable[[_TypeGenericLASolver],_TypeGenericLASolver]:
@@ -233,9 +410,12 @@ class GenericLinearSystemSolver:
 		if name in GenericLinearSystemSolver._registered_solvers.keys():
 			return GenericLinearSystemSolver._registered_solvers[name](problem)
 		else:
-			libname=name
-			if libname=="petsc_mumps":
-				libname="petsc"
+			# The module a backend lives in, where it is not simply named after it. superlu/umfpack
+			# were only ever registered by accident: pyoomph/__init__.py imports solvers.scipy inside
+			# its superlu fallback, and solvers.pardiso pulls it in for the eigensolver. Under mpirun
+			# the default cascade picks petsc_mumps, so neither happens and an explicit --superlu then
+			# failed with "No module named 'pyoomph.solvers.superlu'".
+			libname={"petsc_mumps":"petsc","superlu":"scipy","umfpack":"scipy"}.get(name,name)
 			try:
 				import importlib
 				#__import__(name)

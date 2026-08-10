@@ -297,20 +297,22 @@ def _running_under_mpi() -> bool:
 def _warn_no_mpi_capable_solver(name:str) -> None:
 	import warnings
 	warnings.warn(
-		"pyoomph is running with multiple MPI processes, but no MPI-capable direct solver was found; "
-		"falling back to '"+name+"', which is not MPI-parallel. Install PETSc/SLEPc with MUMPS support "
-		"(then --petsc_mumps / the automatic default applies) -- see "
+		"pyoomph is running with multiple MPI processes, but no distributed direct solver was found, so "
+		"'"+name+"' will be used. It is not MPI-parallel: the assembled system is gathered onto rank 0 and "
+		"solved there while the other ranks wait, so the assembly scales but the solve does not, and rank 0 "
+		"needs the whole matrix in memory. Install PETSc/SLEPc with MUMPS support for a genuinely "
+		"distributed solve (then --petsc_mumps / the automatic default applies) -- see "
 		"https://pyoomph.readthedocs.io/en/latest/tutorial/installation/petscslepc.html",
 		RuntimeWarning,
 		stacklevel=2,
 	)
 
 
-# Under MPI (mpirun -n N, N>1) the platform-preferred serial solvers are not usable: MKL Pardiso is not
-# MPI-parallel at all (it raises in its constructor) and Accelerate is macOS-serial. PETSc+MUMPS is the
-# only distributed-capable direct solver pyoomph ships, so it becomes the default whenever it is present,
-# regardless of platform. Falls through to the normal serial cascade (with a warning) if it is missing,
-# so that a run without PETSc still starts and can be steered explicitly from the command line.
+# Under MPI (mpirun -n N, N>1) the platform-preferred serial solvers still work -- the base solver class
+# gathers the system onto rank 0 for them -- but they do not scale: only the assembly is parallel.
+# PETSc+MUMPS is the only distributed-capable direct solver pyoomph ships, so it becomes the default
+# whenever it is present, regardless of platform. Falls through to the normal serial cascade (with a
+# warning saying what that costs) if it is missing.
 if _running_under_mpi() and _set_petsc_mumps_linear_solver():
 	pass
 elif _is_macos and _is_arm64:

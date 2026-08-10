@@ -38,7 +38,6 @@ import sys
 
 from more_itertools import first
 
-from ..generic.mpi import mpi_barrier,get_mpi_nproc,get_mpi_rank,get_mpi_world_comm
 from ..typings import *
 import numpy
 
@@ -743,24 +742,23 @@ from scipy.sparse import  csr_matrix #type:ignore
 class PardisoSolver(GenericLinearSystemSolver):
     idname = "pardiso"
 
+    # MKL Pardiso is not MPI-parallel, so under mpirun the base class gathers the system onto rank 0
+    # and calls solve_serial() below there. That reuses everything on this class -- symbolic
+    # factorisation reuse, solve_checked's backward-error test, the repairs -- which a separate
+    # distributed implementation could not, and none of it issues an MPI collective, as the flag
+    # requires. MKL's cluster_sparse_solver would be genuinely parallel, but is only reachable through
+    # PETSc as mkl_cpardiso.
+    #
+    # This used to raise instead, on the grounds that a gathered solve is written back onto only half
+    # of a replicated dof vector. That is not what happens: Problem::newton_solve redistributes dx onto
+    # Dof_distribution_pt, which is non-distributed without --distribute, and DoubleVector::redistribute
+    # then MPI_Allgathervs it to full length on every rank. Measured on a 529-dof Newton solve at 1, 2
+    # and 3 ranks, both regimes: every rank's dof vector is bitwise identical and matches the serial
+    # one. The claim predates the two CRDoubleMatrix::redistribute fixes of 8 Aug 2026.
+    gathers_to_root_under_mpi=True
+
     def __init__(self, problem:"Problem",verbose:bool=False):
         super().__init__(problem)
-        # MKL Pardiso is not MPI-parallel. Neither MPI mode works correctly:
-        #  - with --distribute it is unsupported outright (the distributed mesh cannot be handled);
-        #  - without --distribute the mesh is replicated (is_distributed()==False) while the linear
-        #    algebra is still row-partitioned across ranks, so the gather-to-root solve returns the
-        #    correct solution but only each rank's half is written back into its (full, replicated)
-        #    dof vector. The un-owned dofs are never synchronised, so the subsequent residual
-        #    assembly reads stale/uninitialised values -> intermittently wrong or NaN residuals.
-        # Fail fast with a clear message instead of silently returning garbage.
-        if get_mpi_nproc() > 1:
-            raise RuntimeError(
-                "The Pardiso linear solver cannot be used under MPI (running with "
-                + str(get_mpi_nproc()) + " processes): MKL Pardiso is not MPI-parallel, and pyoomph's "
-                "gather-to-root fallback does not correctly propagate the solution back onto a "
-                "replicated (non-distributed) mesh. Use Pardiso only in serial (a single process), or "
-                "for MPI runs switch to a distributed-capable solver, e.g. --petsc_mumps (or --petsc "
-                "with an iterative preconditioner) together with --distribute.")
         self._current_pardiso = None
         self.try_to_reuse_solver=False
         self.verbose=verbose
@@ -1048,103 +1046,6 @@ class PardisoSolver(GenericLinearSystemSolver):
 
         return 0  # TODO: Return sign of Jacobian
 
-    def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
-        # Only rank 0 ever holds a factorisation here (gather-to-root), so only rank 0 has anything to
-        # invalidate; on the others this is a no-op and needs no collective agreement.
-        try:
-            return self._solve_distributed(op_flag,allow_permutations,n,nnz_local,nrow_local,first_row,values,col_index,row_start,b,nprow,npcol,doc,data,info)
-        except Exception:
-            self._invalidate_factorisation()
-            raise
-
-    def _solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
-        # NOTE: This does not solve the system via MPI Pardiso. Instead it solves it on the root process and scatters the solution. This is not optimal, but MKL Pardiso is not MPI parallel. MKL cluster_sparse_solver is, but this must be accessed via PETSc using mkl_cpardiso
-        from mpi4py import MPI
-        rank=get_mpi_rank()
-        nproc=get_mpi_nproc()
-        if op_flag==1:
-            global_col_index = col_index
-            rows = numpy.empty(len(col_index), dtype=np.int64)
-            for i in range(nrow_local):
-                rows[row_start[i]:row_start[i + 1]] = first_row + i
-            # NOTE: `data` is the oomph-lib solver-state handle, which this (non-native-MPI)
-            # Pardiso wrapper does not use - it is passed as None. The local non-zero count is
-            # already supplied as the `nnz_local` argument (and only `values`/`col_index`/`row_start`
-            # are needed below), so do NOT recompute it from `data` (that raised
-            # "object of type 'NoneType' has no len()").
-            cols = global_col_index
-            data_values = values
-            comm=get_mpi_world_comm()
-            assert comm is not None
-            #all_nnz = comm.gather(nnz_local, root=0)
-            all_rows = comm.gather(rows, root=0)
-            all_cols = comm.gather(cols, root=0)
-            all_data = comm.gather(data_values, root=0)
-
-            if rank==0:
-                assert all_rows is not None and all_cols is not None and all_data is not None
-                global_rows = np.concatenate(all_rows)
-                global_cols = np.concatenate(all_cols)
-                global_data = np.concatenate(all_data)
-                #assert isinstance(A,csr_matrix)
-                A = csr_matrix((global_data, (global_rows,global_cols)),shape=(n, n))
-                A.eliminate_zeros()
-                A.sort_indices()
-                if self._current_pardiso:
-                    self._current_pardiso.clear()  # TODO: Only if matrix is entirely changed
-                mode = 11
-                self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=False,repair_bad_solves=self.repair_bad_solves)
-                self._current_pardiso.factor()
-
-                
-            mpi_barrier()            
-        elif op_flag==2:
-            comm=get_mpi_world_comm()
-            assert comm is not None
-            counts = comm.gather(len(b), root=0)
-            if rank == 0:
-                counts = np.array(counts, dtype=np.int32)    
-                displs = np.zeros(len(counts), dtype=np.int32)
-                displs[1:] = np.cumsum(counts[:-1])
-#                x_global = sol.copy()
-                b_global = np.empty(n, dtype=b.dtype)
-            else:
-                displs = None
-                b_global = None
-            
-            comm.Gatherv(sendbuf=b,recvbuf=[b_global, counts, displs, MPI.DOUBLE],root=0)
-
-            sol:NPFloatArray | NPComplexArray | None = None
-            if rank==0:
-                self.setup_solver()
-                assert self._current_pardiso is not None
-                assert b_global is not None
-                pd = self._current_pardiso
-                if self.try_to_reuse_solver:
-                    raise NotImplementedError("try_to_reuse_solver not implemented yet when running with MPI")
-                # solve_checked for the same reason as the serial branch: nothing else verifies this one.
-                if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve_checked(rhs), b) #type:ignore
-                else:
-                    sol = self._current_pardiso.solve_checked(self.get_b(n,b_global))
-
-            if rank == 0:
-                assert sol is not None
-                counts = np.array(counts, dtype=np.int32)
-                displs = np.zeros(len(counts), dtype=np.int32)
-                displs[1:] = np.cumsum(counts[:-1])
-                x_global = sol.copy()
-            else:
-                displs = None
-                x_global = None
-            #print("GATHERV SOLUTION",displs,counts)
-            x_local = np.empty(len(b), dtype=np.float64)
-            
-            comm.Scatterv([x_global, counts, displs, MPI.DOUBLE],x_local,root=0)
-            b[:] = x_local[:]
-            mpi_barrier()
-        else:
-            raise RuntimeError("Not implemented")
 
 from .scipy import ScipyEigenSolver,DefaultMatrixType
 

@@ -50,6 +50,11 @@ class ScipySolverError(SolverError):
 @GenericLinearSystemSolver.register_solver()
 class SuperLUSerial(GenericLinearSystemSolver):
 	idname="superlu"
+	# scipy's SuperLU/UMFPACK are serial, but oomph routes every mpirun through the distributed entry
+	# point, so without this a plain `mpirun -n 2` could not solve at all. The base class gathers the
+	# system onto rank 0 and calls solve_serial() below there. solve_serial() issues no collective, as
+	# that flag requires.
+	gathers_to_root_under_mpi=True
 	def __init__(self,problem:"Problem",useUmfpack:bool=False):
 		super().__init__(problem)
 		scipy.sparse.linalg.use_solver(useUmfpack=useUmfpack) #type:ignore
@@ -115,12 +120,6 @@ class SuperLUSerial(GenericLinearSystemSolver):
 			raise RuntimeError("Cannot handle SuperLU mode "+str(op_flag)+" yet")
 			return 666
 		return 0		#TODO: Return sign of Jacobian
-
-	def distributed_possible(self) -> bool:
-		return False
-
-	def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
-		raise RuntimeError("SuperLU solver cannot solve distributed")
 
 @GenericLinearSystemSolver.register_solver()
 class UMFPACKSerial(SuperLUSerial):

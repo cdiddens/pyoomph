@@ -53,6 +53,8 @@ if TYPE_CHECKING:
 @GenericLinearSystemSolver.register_solver()
 class MUMPSSolver(GenericLinearSystemSolver):
     idname = "mumps"
+    # Genuinely distributed (set_distributed_assembled), so no gather-to-root fallback.
+    solves_natively_distributed=True
 
     def __init__(self, problem:"Problem"):
         super().__init__(problem)

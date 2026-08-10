@@ -130,6 +130,11 @@ class LyapunovExponentCalculator(GenericProblemHooks):
         matM.sort_indices()
         # --- Solve for the new perturbations ---
         la = problem.get_la_solver()
+        # Tell the solver its factorisation slot is being reused for a system pyoomph built here, not
+        # for the one solve_distributed() gathered. Under mpirun the gathered Newton solve keeps
+        # rank 0's factors in that same slot, and a back-substitution landing on these ones instead
+        # would be silently wrong on every rank at once.
+        la._note_external_serial_solve()
         la.solve_serial(1,n,matJ.nnz,1,matJ.data,matJ.indices,matJ.indptr,numpy.zeros(n),0,1)
 
         for i in range(self.k):

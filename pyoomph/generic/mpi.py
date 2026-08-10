@@ -26,6 +26,7 @@
 # ========================================================================
  
  
+import os
 import pathlib
 from typing import TYPE_CHECKING, Optional
 
@@ -210,6 +211,204 @@ def run_on_rank_zero(func, context:str="")->None:
 	# Collective, and rooted at 0: no rank leaves before rank 0 has finished the section, so this
 	# also does the job of the barrier such a block used to be followed by.
 	mpi_share_root_failure(error, context=context)
+
+
+# How long a rank waiting for another one polls before it starts sleeping, and how long it sleeps at
+# most once it does. The spin phase matters because time.sleep() cannot resolve better than roughly
+# 60 us on Linux, which would dominate the thousands of short collectives a small problem issues; the
+# 5 ms cap bounds the wake-up delay after a long factorisation to something negligible while leaving
+# the rank at ~200 wakeups/s, i.e. no measurable CPU at all.
+_MPI_IDLE_SPIN_CALLS=int(os.environ.get("PYOOMPH_MPI_IDLE_SPIN","2000"))
+_MPI_IDLE_MIN_SLEEP=1e-4
+_MPI_IDLE_MAX_SLEEP=float(os.environ.get("PYOOMPH_MPI_IDLE_MAX_SLEEP","5e-3"))
+# Printed once, and only to say that a rank has been waiting long enough that something is probably
+# wrong. Deliberately NOT a timeout that raises: raising on one rank is the deadlock it would be
+# trying to report.
+_MPI_IDLE_WARN_AFTER=float(os.environ.get("PYOOMPH_MPI_IDLE_WARN_AFTER","600"))
+_mpi_idle_warned:set[str]=set()
+
+
+def mpi_wait_idle(request, context:str="")->None:
+	"""Wait for a non-blocking MPI ``request`` by polling, giving the CPU up in between.
+
+	MPI's blocking calls busy-poll: with the default ``mpi_yield_when_idle=0``, a rank sitting in
+	``Gatherv`` or ``Allreduce`` keeps a core at 100%. That is fine for the short, balanced
+	collectives a distributed solver issues, and quite wrong for a gather-to-root solve, where N-1
+	ranks wait out a whole factorisation on rank 0 - burning exactly the cores that rank 0's
+	OpenMP/MKL threads were supposed to get.
+
+	Spins briefly first (Test() is also what drives progress on a build without a progress thread,
+	so it is not wasted), then backs off to sleeping. time.sleep releases the GIL and the ranks are
+	single-threaded, so nothing else needs it.
+	"""
+	if request.Test():
+		return
+	for _ in range(_MPI_IDLE_SPIN_CALLS):
+		if request.Test():
+			return
+	import time
+	delay=_MPI_IDLE_MIN_SLEEP
+	waited=0.0
+	while True:
+		time.sleep(delay)
+		if request.Test():
+			return
+		waited+=delay
+		delay=min(2*delay,_MPI_IDLE_MAX_SLEEP)
+		if waited>_MPI_IDLE_WARN_AFTER and context and context not in _mpi_idle_warned:
+			_mpi_idle_warned.add(context)
+			print("NOTE: MPI rank "+str(get_mpi_rank())+" has been waiting "+str(int(waited))+
+				  " s for "+context+". If the run never finishes, this is where it stopped: some rank "
+				  "did not reach the matching collective.",flush=True)
+
+
+class MPIRowLayout:
+	"""Who owns which rows of a row-partitioned vector/matrix, and where their nonzeros go.
+
+	Built once per factorisation from one allgather, then reused for the right-hand side and the
+	solution, which share the row split. Every field is derived from allgathered data, so it is
+	identical on every rank - which is what makes it safe to branch on.
+	"""
+
+	__slots__=("n","nproc","vec_counts","vec_displs","nnz_counts","nnz_displs","nnz_total")
+
+	def __init__(self,n:int,vec_counts,vec_displs,nnz_counts,nnz_displs,nnz_total:int):
+		self.n=n
+		self.nproc=len(vec_counts)
+		self.vec_counts=vec_counts
+		self.vec_displs=vec_displs
+		self.nnz_counts=nnz_counts
+		self.nnz_displs=nnz_displs
+		self.nnz_total=nnz_total
+
+
+def mpi_row_layout_from_gathered(entries,n:int)->MPIRowLayout:
+	"""Build an MPIRowLayout from the allgathered ``(first_row, nrow_local, nnz_local)`` per rank.
+
+	Split out from the collective so it can be tested with fabricated inputs and no mpirun - the
+	offsets are the error-prone part of a gather, and a wrong one produces a plausible matrix rather
+	than a crash.
+
+	The blocks are ordered by ``first_row``, never by rank: oomph hands out ascending first_row for
+	its own uniform split, but a distributed problem's dof distribution need not, and a rank owning
+	no rows at all has the same first_row as its successor.
+	"""
+	import numpy
+	nproc=len(entries)
+	# Ties can only involve a rank with nrow_local==0, which contributes no nonzeros either, so
+	# breaking them by rank cannot move any other rank's offset.
+	order=sorted(range(nproc),key=lambda r:(entries[r][0],r))
+	nnz_displs=[0]*nproc
+	nnz_total=0
+	for r in order:
+		nnz_displs[r]=nnz_total
+		nnz_total+=int(entries[r][2])
+	expect=0
+	for r in order:
+		if int(entries[r][0])!=expect:
+			raise RuntimeError("The MPI ranks' row blocks do not tile [0,"+str(n)+") - rank "+str(r)+
+							   " starts at "+str(entries[r][0])+" where "+str(expect)+" was expected. "
+							   "The ranks disagree about the row distribution of the linear system.")
+		expect+=int(entries[r][1])
+	if expect!=n:
+		raise RuntimeError("The MPI ranks' row blocks cover "+str(expect)+" rows, but the system has "+
+						   str(n)+".")
+	# The gathered row_start array is int32 (that is what oomph hands out), so the offsets have to fit.
+	# Over the limit they wrap into negative values and describe a different, entirely plausible matrix.
+	if nnz_total>=2**31-1:
+		raise RuntimeError("The gathered system has "+str(nnz_total)+" nonzeros, which does not fit the "
+						   "int32 row-start indices used here. Use a natively distributed solver "
+						   "(petsc_mumps) for a system this size.")
+	return MPIRowLayout(n,
+						numpy.array([int(e[1]) for e in entries],dtype=numpy.int32),
+						numpy.array([int(e[0]) for e in entries],dtype=numpy.int32),
+						numpy.array([int(e[2]) for e in entries],dtype=numpy.int32),
+						numpy.array(nnz_displs,dtype=numpy.int32),
+						nnz_total)
+
+
+def mpi_row_layout(n:int,first_row:int,nrow_local:int,nnz_local:int,comm=None)->'Optional[MPIRowLayout]':
+	"""Collective: agree on the row layout of a distributed matrix. None on a single process."""
+	if get_mpi_nproc()<=1:
+		return None
+	if comm is None:
+		comm=get_mpi_world_comm()
+	assert comm is not None
+	entries=comm.allgather((int(first_row),int(nrow_local),int(nnz_local))) #type:ignore
+	return mpi_row_layout_from_gathered(entries,n)
+
+
+def mpi_gather_csr_rows(layout:MPIRowLayout,values,col_index,row_start,root:int=0,comm=None,context:str=""):
+	"""Gather the local CSR row blocks into one globally indexed CSR triple on ``root``.
+
+	Returns ``(values, col_index, row_start)`` on ``root`` and ``None`` everywhere else. The column
+	indices of a distributed CRDoubleMatrix are already global, so only the rows have to be stitched.
+
+	Typed Gatherv rather than the pickling ``comm.gather``: this runs once per Newton step on the
+	largest object in the solve. Pickling would copy the block into a bytes object, unpickle it into
+	a second array on the root and concatenate into a third - three copies of the whole matrix, on
+	the one rank that is already the memory bottleneck.
+	"""
+	import numpy
+	from mpi4py import MPI #type:ignore
+	if comm is None:
+		comm=get_mpi_world_comm()
+	assert comm is not None
+	rank=get_mpi_rank()
+	n,nnz_total=layout.n,layout.nnz_total
+	nrow_local=int(layout.vec_counts[rank])
+	vals_g=numpy.empty(nnz_total,dtype=numpy.float64) if rank==root else None
+	cols_g=numpy.empty(nnz_total,dtype=numpy.int32) if rank==root else None
+	rs_g=numpy.empty(n+1,dtype=numpy.int32) if rank==root else None
+	# Offset this rank's row-start heads by its own nonzero displacement before sending, so the root
+	# can drop them straight into place instead of walking every block again afterwards. Kept in a
+	# local until the request completes: it is the send buffer, and CPython would otherwise be free
+	# to collect it while MPI is still reading it.
+	rs_local=numpy.asarray(row_start[:nrow_local],dtype=numpy.int32)+layout.nnz_displs[rank]
+	vals_l=numpy.asarray(values,dtype=numpy.float64)
+	cols_l=numpy.asarray(col_index,dtype=numpy.int32)
+	for send,recv,counts,displs,mtype in (
+			(vals_l,vals_g,layout.nnz_counts,layout.nnz_displs,MPI.DOUBLE),
+			(cols_l,cols_g,layout.nnz_counts,layout.nnz_displs,MPI.INT),
+			(rs_local,rs_g,layout.vec_counts,layout.vec_displs,MPI.INT)):
+		req=comm.Igatherv(send,[recv,counts,displs,mtype] if rank==root else None,root=root) #type:ignore
+		mpi_wait_idle(req,context or "gathering the matrix onto rank "+str(root))
+	if rank!=root:
+		return None
+	assert rs_g is not None
+	rs_g[n]=nnz_total
+	return vals_g,cols_g,rs_g
+
+
+def mpi_gather_vector(layout:MPIRowLayout,b,root:int=0,comm=None,context:str=""):
+	"""Gather the local row blocks of a vector into one global array on ``root`` (None elsewhere)."""
+	import numpy
+	from mpi4py import MPI #type:ignore
+	if comm is None:
+		comm=get_mpi_world_comm()
+	assert comm is not None
+	rank=get_mpi_rank()
+	out=numpy.empty(layout.n,dtype=numpy.float64) if rank==root else None
+	send=numpy.asarray(b,dtype=numpy.float64)
+	req=comm.Igatherv(send,[out,layout.vec_counts,layout.vec_displs,MPI.DOUBLE] if rank==root else None,root=root) #type:ignore
+	mpi_wait_idle(req,context or "gathering the right-hand side onto rank "+str(root))
+	return out
+
+
+def mpi_scatter_vector(layout:MPIRowLayout,x,out,root:int=0,comm=None,context:str=""):
+	"""Scatter a global vector held on ``root`` back into each rank's own row block ``out``."""
+	import numpy
+	from mpi4py import MPI #type:ignore
+	if comm is None:
+		comm=get_mpi_world_comm()
+	assert comm is not None
+	rank=get_mpi_rank()
+	send=None if rank!=root else numpy.asarray(x,dtype=numpy.float64)
+	local=numpy.empty(int(layout.vec_counts[rank]),dtype=numpy.float64)
+	req=comm.Iscatterv([send,layout.vec_counts,layout.vec_displs,MPI.DOUBLE] if rank==root else None,local,root=root) #type:ignore
+	mpi_wait_idle(req,context or "scattering the solution from rank "+str(root))
+	out[:]=local[:]
+	return out
 
 
 PYMETIS_MISSING_MESSAGE="PyMetis is not installed, cannot perform graph partitioning for distributed meshes. Please install PyMetis via e.g. 'pip install pymetis'"

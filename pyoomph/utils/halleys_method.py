@@ -36,6 +36,11 @@ class HalleySolver:
         while True:
             Rorig=R.copy()
             J=self.problem.assemble_jacobian(with_residual=False,which_one="")
+            # Tell the solver its factorisation slot is being reused for a system pyoomph built here, not
+            # for the one solve_distributed() gathered. Under mpirun the gathered Newton solve keeps
+            # rank 0's factors in that same slot, and a back-substitution landing on these ones instead
+            # would be silently wrong on every rank at once.
+            self.problem.get_la_solver()._note_external_serial_solve()
             self.problem.get_la_solver().solve_serial(1,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0) #type:ignore[attr-defined] # scipy.sparse.csr_matrix attrs unresolved without scipy-stubs (blocked on numpy<2 pin)
             self.problem.get_la_solver().solve_serial(2,J.shape[0],J.nnz,1,J.data,J.indices,J.indptr,R,0,0) #type:ignore[attr-defined]
             

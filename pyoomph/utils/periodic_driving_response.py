@@ -199,6 +199,11 @@ class PeriodicDrivingResponse():
             fullmat=fullmat.tocsr()                        
             sol=rhs.copy()
 
+            # Tell the solver its factorisation slot is being reused for a system pyoomph built here, not
+            # for the one solve_distributed() gathered. Under mpirun the gathered Newton solve keeps
+            # rank 0's factors in that same slot, and a back-substitution landing on these ones instead
+            # would be silently wrong on every rank at once.
+            self.problem.get_la_solver()._note_external_serial_solve()
             self.problem.get_la_solver().solve_serial(1,fullmat.shape[0],fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,sol,0,1)        
             self.problem.get_la_solver().solve_serial(2,fullmat.shape[0],fullmat.nnz,1,fullmat.data,fullmat.indptr,fullmat.indptr,sol,0,1)            
             result=sol[:n]+sol[n:-2]*1j        
@@ -256,8 +261,11 @@ class PeriodicDrivingResponse():
         rhs[-2]=1
         rhs[-1]=0
         fullmat=scipy.sparse.bmat([[matJ,self.omega_param.value*matM,lambda_in_vr],[self.omega_param.value*matM,-matJ,None],[vr_in_lambda,None,None]]).copy()        
-        fullmat=fullmat.tocsr()                        
-        self.problem.get_la_solver().solve_serial(1,fullmat.shape[0],fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,rhs,0,0)        
+        fullmat=fullmat.tocsr()
+        # Same reason as above: this is pyoomph's own replicated system, not the one the gathered
+        # solve_distributed() left in the solver's factorisation slot.
+        self.problem.get_la_solver()._note_external_serial_solve()
+        self.problem.get_la_solver().solve_serial(1,fullmat.shape[0],fullmat.nnz,1,fullmat.data,fullmat.indices,fullmat.indptr,rhs,0,0)
         self.problem.get_la_solver().solve_serial(2,fullmat.shape[0],fullmat.nnz,1,fullmat.data,fullmat.indptr,fullmat.indptr,rhs,0,0)
         sol=rhs
         result=sol[:n]+sol[n:-2]*1j        

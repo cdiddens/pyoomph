@@ -143,6 +143,8 @@ def _increase_mumps_icntl14(option:str,quiet:bool)->bool:
 @GenericLinearSystemSolver.register_solver()
 class PETSCSolver(GenericLinearSystemSolver):
     idname = "petsc"
+    # Genuinely row-distributed (MPIAIJ), so it never falls back to the base class's gather-to-root.
+    solves_natively_distributed=True
 
     def __init__(self, problem:"Problem"):
         super().__init__(problem)
