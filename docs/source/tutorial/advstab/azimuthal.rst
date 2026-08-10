@@ -26,7 +26,7 @@ As usual, the base Jacobian :math:`\mathbf{J}^{(0)}`, mass matrix :math:`\mathbf
 
 Lastly, the boundary conditions at the axis of symmetry are of fundamental importance. For conventional axisymmetry, one demands that :math:`\partial_r s^{(0)}=\partial_r v_z^{(0)}=0` and :math:`v_r^{(0)}=v_\phi^{(0)}=0`, since one otherwise gets a singularity at the axis. However, for azimuthal modes, this can be different. For :math:`m=1`, we get :math:`s^{(m)}=v_z^{(m)}=0`, since otherwise these values are not well defined at :math:`r=0` when varying :math:`\phi`. However, :math:`v_r^{(m)}` and :math:`v_\phi^{(m)}` may be non-zero for :math:`m=1`, since these basis vectors of these components exactly rotate with the :math:`\phi` in exactly the same manner as the :math:`m=1`-mode. There, however, :math:`\partial_r v_r^{(m)}=\partial_r v_\phi^{(m)}=0` is required. For all other :math:`m`, all vector components and scalars have to vanish, i.e. :math:`v_r^{(m)}=v_\phi^{(m)}=v_z^{(m)}=s^{(m)}=0`.
 
-These :math:`m`-dependent boundary conditions are automatically taken care of in the :py:class:`~pyoomph.meshes.bcs.AxisymmetryBC` object. It will impose exactly the correct boundary conditions for all vector and scalar fields.
+These :math:`m`-dependent boundary conditions are automatically taken care of in the :py:class:`~pyoomph.equations.generic.AxisymmetryBC` object. It will impose exactly the correct boundary conditions for all vector and scalar fields.
 
 For more details on this, we refer to our article :cite:`Diddens2024`.
 

@@ -219,7 +219,8 @@ Interfaces between two domains (or `eqs @ "boundary_name"`) become their own
 
 ## Generic building-block equations
 
-In `pyoomph/meshes/bcs.py` (boundary conditions — use with `@"boundary_name"`):
+In `pyoomph/equations/generic.py` (boundary conditions — use with `@"boundary_name"`; they used to
+live in `pyoomph/meshes/bcs.py`, which no longer exists):
 
 | Class | Purpose |
 |---|---|
@@ -229,6 +230,11 @@ In `pyoomph/meshes/bcs.py` (boundary conditions — use with `@"boundary_name"`)
 | `EnforcedDirichlet(**fields)` | Dirichlet enforced weakly (Lagrange multiplier) instead of strong pinning. |
 | `PeriodicBC(...)` | Periodic boundary matching. |
 | `PythonDirichletBC`, `PinWhere`, `UnpinDofs` | Programmatic/conditional dof pinning. |
+| `AxisymmetryBC` | The r=0 conditions, including the m-dependent ones for azimuthal stability. |
+
+`InactiveDirichletBC`, `AxisymmetryBCForScalarD0Field`, `PinMeshAtDistanceToInterface` and
+`InteriorBoundaryOrientation` are the rarer ones and live in `pyoomph/equations/additional.py`,
+which is not pulled in by `from pyoomph import *` - import it explicitly.
 
 In `pyoomph/equations/generic.py`:
 
@@ -236,7 +242,7 @@ In `pyoomph/equations/generic.py`:
 |---|---|
 | `InitialCondition(**fields)` | Set initial values per field, e.g. `InitialCondition(u=bump_expr)`. |
 | `SpatialErrorEstimator(*fluxes, **fields)` | Drives h-adaptivity from jumps of `grad(field)` (or custom flux expressions) across elements. |
-| `RefineToLevel`/`RefineToMaxLevel`/`RefineMaxElementSize`/`RefineAccordingToElement` | Mesh-refinement controls. |
+| `RefineToLevel` | Mesh-refinement control (`RefineMaxElementSize`/`RefineAccordingToElement` are in `pyoomph/equations/additional.py`). |
 | `RemeshWhen(...)` | Trigger automatic 2D remeshing on mesh distortion. |
 | `ProjectExpression(**projs)` | L2-project an arbitrary expression onto a field, for output/diagnostics. |
 | `TemporalErrorEstimator(**fieldfactors)` | Drives adaptive time-stepping (used with `run(..., temporal_error=...)`). |
@@ -260,8 +266,9 @@ them over hand-rolled weak forms when the physics matches. All live under
 
 - **`poisson.py`**: `PoissonEquation(name="u", source=None, coefficient=1)` —
   `-div(coeff*grad(u))=f`, supports continuous and DG spaces. `DiffusionEquation`
-  adds a time derivative to get `∂t u - div(D grad(u)) = f`. `PoissonFlux` (Neumann),
-  `PoissonFarFieldMonopoleCondition` (unbounded domains).
+  adds a time derivative to get `∂t u - div(D grad(u)) = f`. Neumann conditions are the
+  generic `NeumannBC` (`NeumannBC(u=-g)` imposes `coeff*grad(u).n = g`);
+  `PoissonFarFieldMonopoleCondition` handles unbounded domains.
 - **`advection_diffusion.py`**: `AdvectionDiffusionEquations(fieldnames="advdiffu", diffusivity=1, wind=var("velocity"), source=...)`
   for scalar transport; `AdvectionDiffusionFluxInterface`, `AdvectionDiffusionInfinity`.
 - **`navier_stokes.py`**: `StokesEquations(dynamic_viscosity=1, mode="TH"|"CR"|"SV"|"mini"|...)`

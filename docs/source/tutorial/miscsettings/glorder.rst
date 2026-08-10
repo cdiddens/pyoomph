@@ -7,7 +7,7 @@ Pyoomph uses the Gauss quadrature to perform the spatial integrals of the weak f
 
 Either, the default integration order can be set globally by the :py:attr:`~pyoomph.generic.problem.Problem.default_spatial_integration_order` property of the problem class. It takes a positive ``int`` value to account for the number of nodes per one-dimensional element for which it should be exact in case of a linear expression (e.g. :math:`2` for ``"C1"`` and :math:`3` for ``"C2"``, since a 1d line element has exactly this amount of nodes). The integration orders :math:`2`-:math:`5` are implemented. Any lower or higher value will select the lower or upper value.
 
-Alternatively, you can set the integration order for a domain - and, if not overridden in the same way, also for all its interfaces - by adding a :py:class:`~pyoomph.equations.generic.SpatialIntegrationOrder` object to the equation tree, where the order :math:`2`-:math:`5` has to be passed to the constructor.
+Alternatively, you can set the integration order for a domain - and, if not overridden in the same way, also for all its interfaces - by adding a :py:class:`~pyoomph.equations.additional.SpatialIntegrationOrder` object to the equation tree, where the order :math:`2`-:math:`5` has to be passed to the constructor.
 
 You can hence easily check whether a higher integration order gives better results. This is rarely a vast improvement and comes at the cost of increased computation time for the assembly of the residual and Jacobian, but one can (and should) give it a try if the problem is nonlinear.
 

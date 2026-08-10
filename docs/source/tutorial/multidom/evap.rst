@@ -41,7 +41,7 @@ In the :py:meth:`~pyoomph.generic.problem.Problem.define_problem`, we first set 
 
 We also calculate the equilibrium ``contact_angle`` if not set explicitly. This is used only if ``pinned_contact_line`` is ``False``.
 
-The droplet bulk equations are just Navier-Stokes with a moving mesh along with a free surface at the liquid-gas interface, a slip length condition at the substrate and a few :py:class:`~pyoomph.meshes.bcs.DirichletBC` terms:
+The droplet bulk equations are just Navier-Stokes with a moving mesh along with a free surface at the liquid-gas interface, a slip length condition at the substrate and a few :py:class:`~pyoomph.equations.generic.DirichletBC` terms:
 
 .. literalinclude:: evaporating_water_droplet.py
    :language: python
@@ -65,7 +65,7 @@ For the contact line dynamics, we have two options, depending on the value of ``
    :start-at: # Different contact line dynamics
    :end-at: d_eqs += NavierStokesContactAngle(contact_angle=self.contact_angle) @ "droplet_gas/droplet_substrate"  # and constant contact angle
 
-With the :py:class:`~pyoomph.meshes.bcs.EnforcedBC`, the radial velocity is adjusted so that ``partial_t(var("mesh_x"),ALE=False)=mesh_velocity()[0]=0`` holds, i.e. the contact line is stationary. Intrinsically, this is again done by a Lagrange multiplier within the :py:class:`~pyoomph.meshes.bcs.EnforcedBC`. Of course, this only works with a slip length boundary condition at the substrate, not with a no-slip condition. A no-slip condition would remove the possibility to add a traction to the radial velocity here. Both contact line models, i.e. the pinned and the freely moving constant contact angle condition do essentially the same: They impose a traction at the contact line. However, the ``NavierStokesContactAngle`` adds exactly the weak term that is required to attain the prescribed contact angle (cf. :numref:`secALEdropspread`). With the :py:class:`~pyoomph.meshes.bcs.EnforcedBC`, we essentially enforce exactly that contact angle for which the contact line remains stationary.
+With the :py:class:`~pyoomph.equations.generic.EnforcedBC`, the radial velocity is adjusted so that ``partial_t(var("mesh_x"),ALE=False)=mesh_velocity()[0]=0`` holds, i.e. the contact line is stationary. Intrinsically, this is again done by a Lagrange multiplier within the :py:class:`~pyoomph.equations.generic.EnforcedBC`. Of course, this only works with a slip length boundary condition at the substrate, not with a no-slip condition. A no-slip condition would remove the possibility to add a traction to the radial velocity here. Both contact line models, i.e. the pinned and the freely moving constant contact angle condition do essentially the same: They impose a traction at the contact line. However, the ``NavierStokesContactAngle`` adds exactly the weak term that is required to attain the prescribed contact angle (cf. :numref:`secALEdropspread`). With the :py:class:`~pyoomph.equations.generic.EnforcedBC`, we essentially enforce exactly that contact angle for which the contact line remains stationary.
 
 The gas equations are just a diffusion equation, i.e. an :py:class:`~pyoomph.equations.advection_diffusion.AdvectionDiffusionEquations` without ``wind``, i.e. without any advection:
 

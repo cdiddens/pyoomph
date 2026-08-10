@@ -51,7 +51,7 @@ from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.navier_stokes import NavierStokesEquations, NoSlipBC
 from pyoomph.equations.advection_diffusion import AdvectionDiffusionEquations
-from pyoomph.meshes.bcs import AxisymmetryBC
+from pyoomph.equations.generic import AxisymmetryBC
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc
 

@@ -84,7 +84,7 @@ The first part of the equations is trivial, just ``StokesEquations`` with output
    :start-at: eqs=StokesEquations(self.fluid_viscosity) # Stokes equation and output
    :end-at: eqs+=DirichletBC(velocity_x=0,velocity_y=0)@"liquid_sphere" # and no-slip on the object
 
-Then, the Lagrange multiplier, i.e. the terminal velocity :math:`U`, is introduced. We use :py:class:`~pyoomph.generic.codegen.GlobalLagrangeMultiplier` for that, which will introduce a single global degree of freedom ``UStokes``. Furthermore, the constant offset of :math:`F_g` (``F_buo``) is subtracted, i.e. accounting for this term in :math:numref:`eqspatialstokeslawcontraint`. Both the definition of ``UStokes`` and the offset term are simultaneously done by passing ``UStokes=-F_buo`` to the :py:class:`~pyoomph.generic.codegen.GlobalLagrangeMultiplier`. The Lagrange multiplier equation is then augmented by a :py:class:`~pyoomph.equations.generic.Scaling` and a :py:class:`~pyoomph.equations.generic.TestScaling`, which sets the scale of ``UStokes`` to the ``"velocity"`` scale and the scale of its test function, i.e. :math:`V`, to an inverse of the ``"force"`` scale. With the latter, :math:numref:`eqspatialstokeslawcontraint` will become nondimensional, i.e. the units of force will cancel out upon the internal replacement of the variables and test functions by their non-dimensional counterparts:
+Then, the Lagrange multiplier, i.e. the terminal velocity :math:`U`, is introduced. We use :py:class:`~pyoomph.equations.generic.GlobalLagrangeMultiplier` for that, which will introduce a single global degree of freedom ``UStokes``. Furthermore, the constant offset of :math:`F_g` (``F_buo``) is subtracted, i.e. accounting for this term in :math:numref:`eqspatialstokeslawcontraint`. Both the definition of ``UStokes`` and the offset term are simultaneously done by passing ``UStokes=-F_buo`` to the :py:class:`~pyoomph.equations.generic.GlobalLagrangeMultiplier`. The Lagrange multiplier equation is then augmented by a :py:class:`~pyoomph.equations.generic.Scaling` and a :py:class:`~pyoomph.equations.generic.TestScaling`, which sets the scale of ``UStokes`` to the ``"velocity"`` scale and the scale of its test function, i.e. :math:`V`, to an inverse of the ``"force"`` scale. With the latter, :math:numref:`eqspatialstokeslawcontraint` will become nondimensional, i.e. the units of force will cancel out upon the internal replacement of the variables and test functions by their non-dimensional counterparts:
 
 .. literalinclude:: stokes_flow_around_object.py
    :language: python
@@ -92,7 +92,7 @@ Then, the Lagrange multiplier, i.e. the terminal velocity :math:`U`, is introduc
    :end-at: self.add_equations(U_eqs @ "globals") # add it to an ODE domain named "globals"
 
 .. note::
-	The :py:class:`~pyoomph.generic.problem.Problem` class has a method :py:meth:`~pyoomph.generic.problem.Problem.add_global_dof`, which simplifies the addition of a :py:class:`~pyoomph.generic.codegen.GlobalLagrangeMultiplier` with a :py:class:`~pyoomph.equations.generic.Scaling` and a :py:class:`~pyoomph.equations.generic.TestScaling` and a potential global contribution to its residual.
+	The :py:class:`~pyoomph.generic.problem.Problem` class has a method :py:meth:`~pyoomph.generic.problem.Problem.add_global_dof`, which simplifies the addition of a :py:class:`~pyoomph.equations.generic.GlobalLagrangeMultiplier` with a :py:class:`~pyoomph.equations.generic.Scaling` and a :py:class:`~pyoomph.equations.generic.TestScaling` and a potential global contribution to its residual.
 
 Since the Lagrange multiplier is global, we cannot add it to any mesh. Instead, it has to be added to an own domain, which we call ``"globals"`` here.
 
@@ -116,7 +116,7 @@ We then bind this variable, where again the ``domain`` argument is crucial and p
    :start-at: U=var("UStokes",domain="globals") # bind U from the domain "globals"
    :end-at: eqs += DragContribution(U)@"liquid_sphere" # The constraint is now fully assembled
 
-Finally, the value of :math:`U` must be used as far field condition. To that end, we implement the analytical solution :math:numref:`eqspatialstokeslawfarfield` into pyoomph and enforce it at the far field boundary. We cannot use a :py:class:`~pyoomph.meshes.bcs.DirichletBC` here, since the analytical solution depends on :math:`U`, which is part of the unknowns, but :py:class:`~pyoomph.meshes.bcs.DirichletBC` terms should only depend on independent variables as e.g. ``"time"``:
+Finally, the value of :math:`U` must be used as far field condition. To that end, we implement the analytical solution :math:numref:`eqspatialstokeslawfarfield` into pyoomph and enforce it at the far field boundary. We cannot use a :py:class:`~pyoomph.equations.generic.DirichletBC` here, since the analytical solution depends on :math:`U`, which is part of the unknowns, but :py:class:`~pyoomph.equations.generic.DirichletBC` terms should only depend on independent variables as e.g. ``"time"``:
 
 .. literalinclude:: stokes_flow_around_object.py
    :language: python

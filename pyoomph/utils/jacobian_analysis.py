@@ -29,7 +29,7 @@ from __future__ import annotations
 """Find over- and under-constrained degrees of freedom from the Jacobian.
 
 A redundant boundary condition - two constraints acting on the same degree of freedom,
-e.g. a kinematic boundary condition and an :py:class:`~pyoomph.meshes.bcs.EnforcedDirichlet`
+e.g. a kinematic boundary condition and an :py:class:`~pyoomph.equations.generic.EnforcedDirichlet`
 meeting at a contact line - makes the Jacobian exactly rank deficient. Newton then stalls
 or wanders off, with nothing in the residual output pointing at the culprit.
 

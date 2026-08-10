@@ -28,7 +28,6 @@ from __future__ import annotations
  
  
 from ..generic import Equations, InterfaceEquations
-from ..meshes.bcs import AutomaticNeumannCondition
 from ..expressions import * #Import grad et al
 
 
@@ -98,13 +97,6 @@ class PoissonEquation(Equations):
             stab=1 if order==0 else self.DG_alpha*(order+1)*order
             return -weak(self.coefficient*(u-value)*n,grad(u_test)) -weak(self.coefficient*grad(u),u_test*n)+ weak(self.coefficient*stab/h*(u-value),u_test)
         return None
-
-
-class PoissonFlux(AutomaticNeumannCondition):
-
-    required_parent_type = PoissonEquation
-    neumann_sign = -1
-
 
 
 class PoissonFarFieldMonopoleCondition(InterfaceEquations):

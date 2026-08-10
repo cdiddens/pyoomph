@@ -26,6 +26,7 @@
 # ========================================================================
  
 from .simplemeshes import RectangularQuadMesh,LineMesh,CuboidBrickMesh
-from .bcs import DirichletBC,NeumannBC,EnforcedBC,PinWhere,PeriodicBC,AxisymmetryBC,InactiveDirichletBC,InteriorBoundaryOrientation,EnforcedDirichlet,UnpinDofs
+# The boundary conditions moved to pyoomph.equations.generic / .additional - they are equations,
+# not mesh infrastructure, and pyoomph.meshes must not import pyoomph.equations (it is set up first).
 from .mesh import MeshTemplate,MeshedMeshTemplate,AnyMesh,AnySpatialMesh
-__all__ = ["LineMesh","RectangularQuadMesh","CuboidBrickMesh","DirichletBC","NeumannBC","EnforcedBC","MeshTemplate","MeshedMeshTemplate","PinWhere","PeriodicBC","AxisymmetryBC","InactiveDirichletBC","InteriorBoundaryOrientation","AnyMesh","AnySpatialMesh","EnforcedDirichlet","UnpinDofs"]
+__all__ = ["LineMesh","RectangularQuadMesh","CuboidBrickMesh","MeshTemplate","MeshedMeshTemplate","AnyMesh","AnySpatialMesh"]

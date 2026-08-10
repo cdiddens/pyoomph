@@ -39,7 +39,7 @@ As a test class, we advect again a bump, but this time in one dimension:
    :start-at: class OneDimAdvectionDiffusionProblem(Problem):
    :end-at: self.add_equations(eqs@"domain")
 
-It is necessary to add an :py:class:`~pyoomph.equations.SUPG.ElementSizeForSUPG` object to calculate the element size if SUPG is active. The rest is trivial, but note that we again use :py:class:`~pyoomph.meshes.bcs.DirichletBC` on both sides. Neumann conditions would have to be augmented by SUPG correction terms stemming from the consistent partial integration that leads to :math:numref:`eqpdeconvdiffuweakSUPG`.
+It is necessary to add an :py:class:`~pyoomph.equations.SUPG.ElementSizeForSUPG` object to calculate the element size if SUPG is active. The rest is trivial, but note that we again use :py:class:`~pyoomph.equations.generic.DirichletBC` on both sides. Neumann conditions would have to be augmented by SUPG correction terms stemming from the consistent partial integration that leads to :math:numref:`eqpdeconvdiffuweakSUPG`.
 
 
 With a simple run code, we can compare the results with and without SUPG:

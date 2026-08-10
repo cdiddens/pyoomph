@@ -29,6 +29,7 @@ from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.navier_stokes import *
 from pyoomph.equations.ALE import *
+from pyoomph.equations.additional import InteriorBoundaryOrientation
 
 # Create a rectangular mesh with an interface in between
 class RectangularQuadMeshWithInterface(RectangularQuadMesh):

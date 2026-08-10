@@ -43,7 +43,7 @@ Then, the equations have to be assembled. If the user does not explicitly select
 
 The liquid equations mainly consist of the :py:func:`~pyoomph.equations.multi_component.CompositionFlowEquations` with the ``liquid_mixture`` properties and the given ``hele_shaw_thickness`` along with a few boundary conditions and a static :py:class:`~pyoomph.equations.multi_component.MultiComponentNavierStokesInterface` with the ``interface_props``. As discussed in the section before, the latter will automatically impose a free surface (static here, since no equations for mesh motion are added) with the :py:attr:`~pyoomph.materials.generic.LiquidGasInterfaceProperties.surface_tension` property of the ``interface_props``. Also the evaporation model is considered and it will couple automatically to the ``"gas"`` domain. Note that we switch the space of the advection-diffusion equations for the required mass fraction fields to ``"C2"``, i.e. second order fields and also add ``spatial_errors`` for the spatial adaptivity. The free interface is always refined to the maximum level by the :py:class:`~pyoomph.equations.generic.RefineToLevel` object.
 
-The gas equations are now just :py:func:`~pyoomph.equations.multi_component.CompositionDiffusionEquations` with a prescribed far field :py:class:`~pyoomph.meshes.bcs.DirichletBC` based on the initial composition of the ``gas_mixture``:
+The gas equations are now just :py:func:`~pyoomph.equations.multi_component.CompositionDiffusionEquations` with a prescribed far field :py:class:`~pyoomph.equations.generic.DirichletBC` based on the initial composition of the ``gas_mixture``:
 
 .. literalinclude:: marangoni_instability.py
    :language: python

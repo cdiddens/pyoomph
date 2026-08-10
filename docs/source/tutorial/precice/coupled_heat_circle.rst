@@ -32,7 +32,7 @@ Likewise, reading and imposing the vectorial flux on the Neumann participant is 
    :start-at: coupling_eqs+=PreciceReadData(flux="Heat-Flux",vector_dim=2)
    :end-at: coupling_eqs+=NeumannBC(u=-dot(var("flux"),var("normal")))
 
-Here, we have to consider the minus sign in the :py:class:`~pyoomph.meshes.bcs.NeumannBC`, since it has to agree with the weak formulation.
+Here, we have to consider the minus sign in the :py:class:`~pyoomph.equations.generic.NeumannBC`, since it has to agree with the weak formulation.
 
 The rest is mainly the same. However, in the config file :download:`precice-config-circle.xml`, we relax a bit the threshold for convergence and use `acceleration <https://precice.org/configuration-acceleration.html>`__. Therefore, this problem requires less simulation time than the previous example.
 

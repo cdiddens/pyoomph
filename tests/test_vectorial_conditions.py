@@ -46,7 +46,8 @@ from pyoomph import Problem, DirichletBC, InitialCondition
 from pyoomph.expressions import vector, var
 from pyoomph.equations.navier_stokes import NavierStokesEquations
 from pyoomph.equations.poisson import PoissonEquation
-from pyoomph.meshes.bcs import AxisymmetryBC, InactiveDirichletBC
+from pyoomph.equations.generic import AxisymmetryBC
+from pyoomph.equations.additional import InactiveDirichletBC
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 
 

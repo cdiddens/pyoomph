@@ -49,6 +49,7 @@
 # own partition).
 
 from pyoomph import *
+from pyoomph.equations.additional import RefineMaxElementSize, RefineAccordingToElement  # not in "from pyoomph import *"
 from pyoomph.expressions import *
 from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.equations.navier_stokes import StokesEquations

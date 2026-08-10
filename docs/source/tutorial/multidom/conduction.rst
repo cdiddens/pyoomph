@@ -25,7 +25,7 @@ On the domains A and B, we want to solve the (nondimensional) temperature conduc
    \nabla\cdot\left(k_\text{B}\nabla T_\text{B}\right)&=0&\text{on domainB}
    \end{aligned}
 
-with the, in general different, thermal conductivities :math:`k_\text{A}` and :math:`k_\text{B}`. The solution shall be subject to the boundary conditions :math:`T_\text{A}(0)=0` and :math:`T_\text{B}(L)=1`. At the mutual interface ``"interface"`` at :math:`x_\text{I}`, we want to have a continuous temperature, i.e. :math:`T_\text{A}(x_\text{I})=T_\text{B}(x_\text{I})`. While the former boundary conditions can be realized by trivial :py:class:`~pyoomph.meshes.bcs.DirichletBC`, the latter requires some additional consideration, since it involves the temperature field on two different domains. We can write the boundary condition as a constraint with an associated Lagrange multiplier :math:`\lambda` defined on the interface ``"interface"``. As usual, the constraint can be thought of as a minimization of the Lagrange multiplier contribution
+with the, in general different, thermal conductivities :math:`k_\text{A}` and :math:`k_\text{B}`. The solution shall be subject to the boundary conditions :math:`T_\text{A}(0)=0` and :math:`T_\text{B}(L)=1`. At the mutual interface ``"interface"`` at :math:`x_\text{I}`, we want to have a continuous temperature, i.e. :math:`T_\text{A}(x_\text{I})=T_\text{B}(x_\text{I})`. While the former boundary conditions can be realized by trivial :py:class:`~pyoomph.equations.generic.DirichletBC`, the latter requires some additional consideration, since it involves the temperature field on two different domains. We can write the boundary condition as a constraint with an associated Lagrange multiplier :math:`\lambda` defined on the interface ``"interface"``. As usual, the constraint can be thought of as a minimization of the Lagrange multiplier contribution
 
 .. math:: \lambda \; \left(T_\text{A}-T_\text{B}\right)
 
@@ -71,7 +71,7 @@ The driver code is quite trivial
 		    
 
 
-We add only one mesh, but assemble two Poisson equations, each with a different ``coefficient`` and with different :py:class:`~pyoomph.meshes.bcs.DirichletBC` terms. At the very end, the equations are restricted to ``"domainA"`` and ``"domainB"``, respectively. The ``ConnectTAtInterface`` can be either added to ``"domainA/interface"`` or ``"domainB/interface"``, but not on both simultaneously, since this would overconstrain the problem. The result is plotted in :numref:`figmultidomtempconduction1d`.
+We add only one mesh, but assemble two Poisson equations, each with a different ``coefficient`` and with different :py:class:`~pyoomph.equations.generic.DirichletBC` terms. At the very end, the equations are restricted to ``"domainA"`` and ``"domainB"``, respectively. The ``ConnectTAtInterface`` can be either added to ``"domainA/interface"`` or ``"domainB/interface"``, but not on both simultaneously, since this would overconstrain the problem. The result is plotted in :numref:`figmultidomtempconduction1d`.
 
 In terms of physics within this problem, we wonder, of course, whether the heat flux :math:`\vec{q}=-k\nabla T` is indeed the same across the interface. Since the normals in ``"domainA"`` and ``"domainB"`` at the ``"interface"`` obey the relation :math:`\vec{n}_\text{A}=-\vec{n}_\text{B}`, a continuous heat flux would mean that
 

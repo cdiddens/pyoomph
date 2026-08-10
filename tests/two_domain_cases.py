@@ -55,8 +55,8 @@ from pyoomph.expressions import *
 from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.equations.navier_stokes import StokesEquations
 from pyoomph.equations.ALE import LaplaceSmoothedMesh, ConnectMeshAtInterface
-from pyoomph.equations.generic import (ConnectFieldsAtInterface, RefineToLevel, RefineMaxElementSize,
-                                       RefineAccordingToElement, SpatialErrorEstimator)
+from pyoomph.equations.generic import ConnectFieldsAtInterface, RefineToLevel, SpatialErrorEstimator
+from pyoomph.equations.additional import RefineMaxElementSize, RefineAccordingToElement
 from pyoomph.meshes.mesh import MeshTemplate
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 

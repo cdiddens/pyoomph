@@ -31,8 +31,8 @@ from __future__ import annotations
 from .. import WeakContribution, GlobalLagrangeMultiplier
 from ..generic import Equations, InterfaceEquations
 from .generic import get_interface_field_connection_space, TestScaling, Scaling
-from ..meshes.bcs import BoundaryCondition,DirichletBC
-from ..meshes.mesh import AnyMesh, InterfaceMesh
+from .generic import DirichletBC
+from ..meshes.mesh import AnyMesh, InterfaceMesh, assert_spatial_mesh
 from ..expressions import *  # Import grad et al
 from ..typings import *
 from ..expressions.units import degree
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from ..generic.codegen import EquationTree
     from ..materials.generic import AnyFluidProperties
     from ..generic.problem import Problem
+    from ..meshes import AnySpatialMesh
 
 
 
@@ -110,7 +111,37 @@ def _select_global_element_index(mesh)->"int | None":
     return best_ie
 
 
-class PressureFixationTaylorHood(BoundaryCondition):
+class _PressureFixation(Equations):
+    """
+    Base of the three pressure fixations below: an equation that pins one pressure degree of freedom
+    by reaching into the mesh from Python, because which degree that is cannot be stated as an
+    expression - it depends on the elements and nodes the mesh actually has, and under MPI on which
+    rank owns them.
+
+    ``setup()`` resolves what is fixed for a given mesh and runs once per mesh; ``apply()`` does the
+    pinning and runs on every application of the boundary conditions.
+    """
+
+    def __init__(self):
+        super(_PressureFixation, self).__init__()
+        self.mesh:"AnySpatialMesh | None" = None
+        self.active = True
+
+    def setup(self):
+        pass
+
+    def apply(self):
+        pass
+
+    def on_apply_boundary_conditions(self, mesh:"AnyMesh"):
+        mesh=assert_spatial_mesh(mesh)
+        if (self.mesh is None) or (self.mesh != mesh):
+            self.mesh = mesh
+            self.setup()
+        self.apply()
+
+
+class PressureFixationTaylorHood(_PressureFixation):
     def __init__(self, pname,value:float | None):
         super().__init__()
         self.value:float | None = value
@@ -172,7 +203,7 @@ class PressureFixationTaylorHood(BoundaryCondition):
 
 
 
-class PressureFixationScottVogelius(BoundaryCondition):
+class PressureFixationScottVogelius(_PressureFixation):
     def __init__(self, pname,value:float | None):
         super().__init__()
         self.value = value
@@ -197,7 +228,7 @@ class PressureFixationScottVogelius(BoundaryCondition):
             raise RuntimeError("Do not use pressure_fixation with angular eigensolving. Use [Navier]StokesEquation(...).with_pressure_integral_constraint(problem) instead...")
         return False
 
-class PressureFixationCrouzeixRaviart(BoundaryCondition):
+class PressureFixationCrouzeixRaviart(_PressureFixation):
     def __init__(self, pname, value:float | None):
         super().__init__()
         self.value = value

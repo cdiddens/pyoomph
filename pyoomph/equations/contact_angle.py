@@ -30,7 +30,8 @@ from ..expressions import *
 from ..typings import *
 from ..expressions.units import meter,second,joule,newton,degree,milli
 import scipy.optimize #type:ignore
-from ..generic.codegen import EquationTree,InterfaceEquations,GlobalLagrangeMultiplier,WeakContribution,BaseEquations,ODEEquations,Equations
+from ..generic.codegen import EquationTree,InterfaceEquations,BaseEquations,ODEEquations,Equations
+from .generic import GlobalLagrangeMultiplier,WeakContribution
 from ..equations.generic import InitialCondition,DependentIntegralObservable
 from ..meshes.mesh import InterfaceMesh, ODEStorageMesh, AnyMesh
 from .multi_component import MultiComponentNavierStokesInterface

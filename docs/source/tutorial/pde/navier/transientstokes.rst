@@ -5,7 +5,7 @@ Transient and nonlinear generalization of Stokes' law
 
 Please refer to :numref:`secspatialstokes_law` for understanding the problem setup. We will only address the required changes here.
 
-First of all, we do not only have to balance the drag force :math:`F_\text{d}` with the buoyancy force :math:`F_g`, but also the inertia :math:`M\dot{U}` matters, where :math:`M` is the mass of the spherical object. To that end, instead of using the :py:class:`~pyoomph.generic.codegen.GlobalLagrangeMultiplier` we write a simple :py:class:`~pyoomph.generic.codegen.ODEEquations` class to account for Newton's law of motion:
+First of all, we do not only have to balance the drag force :math:`F_\text{d}` with the buoyancy force :math:`F_g`, but also the inertia :math:`M\dot{U}` matters, where :math:`M` is the mass of the spherical object. To that end, instead of using the :py:class:`~pyoomph.equations.generic.GlobalLagrangeMultiplier` we write a simple :py:class:`~pyoomph.generic.codegen.ODEEquations` class to account for Newton's law of motion:
 
 .. literalinclude:: navier_stokes_around_object.py
    :language: python
@@ -35,7 +35,7 @@ We then have to exchange the ``StokesEquations`` by the ``NavierStokesEquations`
    :start-at: U = var("UStokes", domain="globals")  # bind U from the domain "globals"
    :end-at: eqs = NavierStokesEquations(dynamic_viscosity=self.fluid_viscosity,mass_density=self.fluid_density,bulkforce=inertia_correction)  # Stokes equation and output
 
-Instead of the :py:class:`~pyoomph.generic.codegen.GlobalLagrangeMultiplier` we add the developed ``NewtonEquation``:
+Instead of the :py:class:`~pyoomph.equations.generic.GlobalLagrangeMultiplier` we add the developed ``NewtonEquation``:
 
 .. literalinclude:: navier_stokes_around_object.py
    :language: python

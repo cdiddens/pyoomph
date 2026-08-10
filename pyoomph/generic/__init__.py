@@ -26,8 +26,13 @@
 # ========================================================================
  
 from .problem import Problem,GenericProblemHooks
-from .codegen import Equations,CombinedEquations,ODEEquations,ScalingException,InterfaceEquations,GlobalLagrangeMultiplier,WeakContribution,ResidualContribution,ScalarField,VectorField,ForceZeroOnEigenSolve,ConstrainFieldsToC1Space,UnconstrainFieldsFromC1Space
+# Only the base classes live in codegen now - the equation classes a user actually instantiates
+# (WeakContribution, ScalarField, GlobalLagrangeMultiplier, ...) moved to pyoomph.equations.generic,
+# from where the top-level "from pyoomph import *" picks them up. They are deliberately not
+# re-imported here: pyoomph.generic is imported first while the package is still initialising, and
+# pulling pyoomph.equations in at that point would make the import order circular.
+from .codegen import Equations,CombinedEquations,ODEEquations,ScalingException,InterfaceEquations
 
 __all__ = ["Problem", "GenericProblemHooks","Equations",
            "CombinedEquations", "ScalingException",
-           "ODEEquations","InterfaceEquations","GlobalLagrangeMultiplier","WeakContribution","ResidualContribution","ScalarField","VectorField","ForceZeroOnEigenSolve","ConstrainFieldsToC1Space","UnconstrainFieldsFromC1Space"]
+           "ODEEquations","InterfaceEquations"]

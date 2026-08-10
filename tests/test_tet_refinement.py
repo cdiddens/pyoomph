@@ -40,6 +40,7 @@ import numpy as np
 import pytest
 
 from pyoomph import *
+from pyoomph.equations.additional import RefineAccordingToElement  # not in "from pyoomph import *"
 from pyoomph.expressions import *
 from pyoomph.meshes.mesh import MeshTemplate
 from pyoomph.equations.poisson import PoissonEquation

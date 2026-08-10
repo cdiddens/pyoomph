@@ -34,14 +34,14 @@ We have to tell gmsh that the eye should be removed from the fish. It is actuall
 
 
 
-In the problem class, a :py:class:`~pyoomph.meshes.bcs.NeumannBC` is added to the ``"eye"`` boundary
+In the problem class, a :py:class:`~pyoomph.equations.generic.NeumannBC` is added to the ``"eye"`` boundary
 
 .. literalinclude:: mesh_gmsh_fish_with_holes.py
    :language: python
    :start-at: eqs += NeumannBC(u=1*meter) @ "eye"
    :end-at: eqs += NeumannBC(u=1*meter) @ "eye"
 
-so that the result looks as depicted in :numref:`figspatialfishgmsheye`. Since our :py:class:`~pyoomph.equations.poisson.PoissonEquation` has a ``coefficient`` in ``meter**2``, the :py:class:`~pyoomph.meshes.bcs.NeumannBC` boundary condition has to be in units of ``meter``. 
+so that the result looks as depicted in :numref:`figspatialfishgmsheye`. Since our :py:class:`~pyoomph.equations.poisson.PoissonEquation` has a ``coefficient`` in ``meter**2``, the :py:class:`~pyoomph.equations.generic.NeumannBC` boundary condition has to be in units of ``meter``. 
 
 .. only:: html
 

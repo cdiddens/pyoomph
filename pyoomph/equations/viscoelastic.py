@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 
 from ..generic import Equations
-from ..meshes.bcs import EnforcedBC
+from .generic import EnforcedBC
 from ..expressions import *  # Import grad et al
 from ..expressions.coordsys import AxisymmetricCoordinateSystem, AxisymmetryBreakingCoordinateSystem, CartesianCoordinateSystem
 from ..expressions.tensor_funcs import (DiagonalizeSymmetricTensor, LogConfTensorDecompositionAxisymmetric,
@@ -821,7 +821,7 @@ class ViscoelasticInflowBC(EnforcedBC):
     Prescribing only the velocity at an inlet leaves the polymer unstretched there, so the solution
     spends the whole upstream length relaxing towards the profile it should have had on entry. This
     imposes that profile instead. The argument is the same inflow velocity that the
-    :py:class:`~pyoomph.meshes.bcs.DirichletBC` above uses; the velocity gradient is obtained from it
+    :py:class:`~pyoomph.equations.generic.DirichletBC` above uses; the velocity gradient is obtained from it
     by differentiating symbolically with respect to the coordinates. A fully developed profile is a
     function of the transverse coordinate alone, so that gives the shear rate and nothing else. Pass
     ``velocity_gradient`` instead to give :math:`\nabla\vec{u}` directly.
@@ -854,7 +854,7 @@ class ViscoelasticInflowBC(EnforcedBC):
     the Dirichlet mode would converge straight away. Where a model offers both, prefer the default.
 
     Note that this does not touch the velocity itself: add the usual
-    :py:class:`~pyoomph.meshes.bcs.DirichletBC` for that, with the same profile.
+    :py:class:`~pyoomph.equations.generic.DirichletBC` for that, with the same profile.
 
     Args:
         velocity: the imposed inflow velocity profile, as a vector expression.

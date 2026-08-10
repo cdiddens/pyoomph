@@ -880,7 +880,8 @@ class Problem(_pyoomph.Problem):
         Returns:
             tuple: A tuple containing the variable and test function associated with the degree of freedom.
         """            
-        from ..generic.codegen import GlobalLagrangeMultiplier,var,testfunction
+        from ..equations.generic import GlobalLagrangeMultiplier
+        from ..generic.codegen import var,testfunction
         from ..equations.generic import Scaling,TestScaling,InitialCondition
         neweqs=GlobalLagrangeMultiplier(**{name:equation_contribution},only_for_stationary_solve=only_for_stationary_solve,set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve)
         if scaling is not None:
@@ -4101,7 +4102,7 @@ class Problem(_pyoomph.Problem):
         """
         Find out which degrees of freedom and which equations make the Jacobian singular, which is
         the usual reason why Newton's method stalls after a boundary condition has been applied
-        twice, e.g. an :py:class:`~pyoomph.meshes.bcs.EnforcedDirichlet` on a contact line where a
+        twice, e.g. an :py:class:`~pyoomph.equations.generic.EnforcedDirichlet` on a contact line where a
         kinematic boundary condition is already acting.
 
         It prints the dofs left undetermined, the equations that conflict, and everything sitting on

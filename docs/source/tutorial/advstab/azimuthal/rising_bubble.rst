@@ -33,7 +33,7 @@ Here, :math:`U` is the velocity of the bubble, which is determined by enforcing 
    :start-at: def define_problem(self):
    :end-at: eqs+=WeakContribution(-dot(var("coordinate"),var("normal"))/3,Ptest)@"interface"
 
-We still have to add moving mesh equations and some missing boundary conditions. The :py:class:`~pyoomph.meshes.bcs.AxisymmetryBC` ensures again the toggling of the :math:`m`-dependent boundary conditions for the eigenfunction at :math:`r=0`. It automatically transfers to e.g. the intersection ``"interface/axis"``, where we have to modify e.g. the Lagrange multiplier for the kinematic boundary condition.
+We still have to add moving mesh equations and some missing boundary conditions. The :py:class:`~pyoomph.equations.generic.AxisymmetryBC` ensures again the toggling of the :math:`m`-dependent boundary conditions for the eigenfunction at :math:`r=0`. It automatically transfers to e.g. the intersection ``"interface/axis"``, where we have to modify e.g. the Lagrange multiplier for the kinematic boundary condition.
 
 
 .. literalinclude:: rising_bubble.py
