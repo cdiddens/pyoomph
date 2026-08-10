@@ -34,6 +34,7 @@ from ..generic.codegen import EquationTree,InterfaceEquations,GlobalLagrangeMult
 from ..equations.generic import InitialCondition,DependentIntegralObservable
 from ..meshes.mesh import InterfaceMesh, ODEStorageMesh, AnyMesh
 from .multi_component import MultiComponentNavierStokesInterface
+from .navier_stokes import _cox_voinov_angle_at_contact_line
 
 _DefaultCLSpeed=1e-5*meter/second
 
@@ -164,7 +165,7 @@ class UnpinnedContactLine(GenericContactLineModel):
         Returns:
             The velocity with which the contact line moves towards the equilibrium contact angle.
         """
-        theta_eq=self.get_equilibrium_contact_angle_expression(dyncl)
+        theta_eq=self.get_imposed_contact_angle_expression(dyncl)
         if dyncl is None:
             theta_act=theta_act_for_popov
         else:
@@ -183,6 +184,17 @@ class UnpinnedContactLine(GenericContactLineModel):
         if self.theta_eq is None:
             raise RuntimeError("Unpinned contact line has no equilibrium contact angle set. Set it in the constructor or use the set_missing_information to pass the initial contact angle as default value in the Problem.define_problem method")
         return subexpression(self.theta_eq)
+
+    def get_imposed_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None") -> ExpressionOrNum:
+        """
+        The angle the contact line is actually driven towards. This is the equilibrium angle of the model, but bent by
+        the Cox-Voinov relation up to the mesh size if the :py:class:`DynamicContactLineEquations` were set up with
+        ``cox_voinov``. The simple Popov model has no mesh at all, so it is always the plain equilibrium angle there.
+        """
+        theta_eq=self.get_equilibrium_contact_angle_expression(dyncl)
+        if dyncl is None:
+            return theta_eq
+        return dyncl.apply_cox_voinov_correction(theta_eq)
 
     def equations_for_simple_popov_model(self,theta_act_name:str,rc_name:str)->BaseEquations:
         eqs=GlobalLagrangeMultiplier(theta_eq=var("theta_eq")-self.get_equilibrium_contact_angle_expression(None))
@@ -212,14 +224,14 @@ class UnpinnedContactLine(GenericContactLineModel):
 
         # Impose weakly the equilibrium contact angle (e.g. in case of stationary solves)
         sigma_value=dyncl.get_surface_tension_at_cl_expression()
-        theta_eq=self.get_equilibrium_contact_angle_expression(dyncl)
+        theta_eq=self.get_imposed_contact_angle_expression(dyncl)
         m = sin(theta_eq) * dyncl.wall_normal + cos(theta_eq) * dyncl.wall_tangent
         dyncl.add_residual(weak(sigma_value, dot(m, u_test)))
 
 
         if self.cl_speed_scale is None:
             # Impose contact angle directly via Lagrange
-            theta_desired=self.get_equilibrium_contact_angle_expression(dyncl)
+            theta_desired=self.get_imposed_contact_angle_expression(dyncl)
             theta_present=dyncl.get_actual_contact_angle_expression()
             dyncl.add_residual(weak(theta_present-theta_desired,vl_test*scale_factor("velocity")))
             dyncl.add_residual(weak(vl, dot(u_test, dyncl.wall_tangent)))
@@ -244,6 +256,10 @@ class UnpinnedContactLine(GenericContactLineModel):
         dx=dyncl.get_dx()
         dyncl.add_integral_function("_theta_eq_integral",self.get_equilibrium_contact_angle_expression(dyncl)*dx)
         dyncl.add_dependent_integral_function("eq_contact_angle",lambda _theta_eq_integral,_cl_integral:_theta_eq_integral/_cl_integral)
+        if dyncl.cox_voinov:
+            # eq_contact_angle stays the microscopic angle, so also output the bent one that is actually imposed
+            dyncl.add_integral_function("_theta_imposed_integral",self.get_imposed_contact_angle_expression(dyncl)*dx)
+            dyncl.add_dependent_integral_function("imposed_contact_angle",lambda _theta_imposed_integral,_cl_integral:_theta_imposed_integral/_cl_integral)
         if nd>0:
             dyncl.add_integral_function("_clpos_integral_x",var("coordinate_x")*dx)
             dyncl.add_dependent_integral_function("cl_pos_x",lambda _clpos_integral_x,_cl_integral:_clpos_integral_x/_cl_integral)
@@ -391,7 +407,9 @@ class StickSlipContactLine(UnpinnedContactLine):
         pin_when = None
         unpin_when = None
 
-        theta_eq = self.get_equilibrium_contact_angle_expression(dyncl)
+        # Thresholds given as factors scale the angle the contact line is driven towards, and they are compared against
+        # the measured angle, which lives on the mesh scale as well. So use the bent angle here, not the microscopic one.
+        theta_eq = self.get_imposed_contact_angle_expression(dyncl)
 
         # Now add the dynamics
         for entry, info in self._dynamics.items():
@@ -516,7 +534,7 @@ class StickSlipContactLine(UnpinnedContactLine):
 
     def add_additional_functions(self,dyncl:"DynamicContactLineEquations"):
         super(StickSlipContactLine, self).add_additional_functions(dyncl)
-        theta_eq = self.get_equilibrium_contact_angle_expression(dyncl)
+        theta_eq = self.get_imposed_contact_angle_expression(dyncl) # as in define_stick_slip_dynamics_residuals
         dx=dyncl.get_dx()
         for entry, info in self._dynamics.items():
             unpin, above, _ = entry
@@ -683,10 +701,14 @@ class DynamicContactLineEquations(InterfaceEquations):
             surface_tension_name: Optional. The name of the surface tension. Default is "surf_tens_at_cl".
             override_dynamics_name: Optional. The name of the override dynamics field. Default is "_override_cl_dynamics".
             with_observables: Optional. If True, the observables for the contact line will be added. Default is False.
+            cox_voinov: Optional. If True, the angle imposed by the model is bent by the Cox-Voinov relation from the microscopic cutoff length up to the mesh size, which makes the result considerably less sensitive to the mesh size at the contact line. Default is False.
+            U_wall: Optional. Velocity vector of the substrate, only used for ``cox_voinov``. The contact line speed entering the capillary number is measured relative to it, so that advancing and receding sides get the correct sign automatically. Default is 0, i.e. a substrate at rest.
+            cox_voinov_microscopic_length: Optional. Microscopic cutoff length (e.g. the slip length) of the Cox-Voinov relation. Must be set whenever ``cox_voinov`` is used.
+            cox_voinov_min_angle: Optional. Lower clamp of the bent angle. Default is 1 degree.
     """
     required_parent_type = MultiComponentNavierStokesInterface
 
-    def __init__(self,model:GenericContactLineModel,wall_normal:ExpressionOrNum=vector(0,1),wall_tangent:ExpressionNumOrNone=None,unpinned_indicator_name:str="_is_unpinned",velocity_enforcing_name:str="_cl_velo_lagr",actual_theta_name:str="measured_contact_angle",surface_tension_name:str="surf_tens_at_cl",override_dynamics_name:str="_override_cl_dynamics",with_observables:bool=False):
+    def __init__(self,model:GenericContactLineModel,wall_normal:ExpressionOrNum=vector(0,1),wall_tangent:ExpressionNumOrNone=None,unpinned_indicator_name:str="_is_unpinned",velocity_enforcing_name:str="_cl_velo_lagr",actual_theta_name:str="measured_contact_angle",surface_tension_name:str="surf_tens_at_cl",override_dynamics_name:str="_override_cl_dynamics",with_observables:bool=False,cox_voinov:bool=False,U_wall:ExpressionOrNum=0,cox_voinov_microscopic_length:ExpressionNumOrNone=None,cox_voinov_min_angle:ExpressionOrNum=1*degree):
         super(DynamicContactLineEquations, self).__init__()
         self.model=model
         self.wall_normal=wall_normal
@@ -705,7 +727,11 @@ class DynamicContactLineEquations(InterfaceEquations):
         self.enforce_proj_interface_velo_for_surfs_name="_enforce_uinterf_proj"
         self.project_surface_tension=True
         self.with_observables=with_observables
-        self.model._setup_for_equation(self) 
+        self.cox_voinov=cox_voinov
+        self.U_wall=U_wall
+        self.cox_voinov_microscopic_length=cox_voinov_microscopic_length
+        self.cox_voinov_min_angle=cox_voinov_min_angle
+        self.model._setup_for_equation(self)
         self._on_mesh:InterfaceMesh | None=None
 
     def define_fields(self):
@@ -731,6 +757,17 @@ class DynamicContactLineEquations(InterfaceEquations):
 
     def get_actual_contact_angle_expression(self):
         return var(self.actual_theta_name)
+
+    def apply_cox_voinov_correction(self,microscopic_angle:ExpressionOrNum)->ExpressionOrNum:
+        """
+        Bends the angle the contact line model wants to impose from the microscopic cutoff length up to the size of the
+        attached free surface element, cf. :py:func:`~pyoomph.equations.navier_stokes.cox_voinov_apparent_angle`. Since
+        the measured contact angle is a mesh scale quantity as well, this is the angle all model dynamics compare with.
+        Returns the angle unchanged unless ``cox_voinov`` was set.
+        """
+        if not self.cox_voinov:
+            return microscopic_angle
+        return subexpression(_cox_voinov_angle_at_contact_line(self,microscopic_angle,self.get_surface_tension_at_cl_expression(),self.wall_tangent,self.U_wall,self.cox_voinov_microscopic_length,self.cox_voinov_min_angle))
 
     def define_residuals(self):
         theta_act, theta_act_test = var_and_test(self.actual_theta_name)

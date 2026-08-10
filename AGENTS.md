@@ -296,7 +296,10 @@ them over hand-rolled weak forms when the physics matches. All live under
   `DynamicContactLineEquations(model=..., wall_normal=...)`, e.g.
   `PinnedContactLine()`, `UnpinnedContactLine(theta_eq=..., cl_speed_exponent=1)`
   (Cox-Voinov for exponent 3), `YoungDupreContactLine(...)`, `WenzelContactLine(...)`,
-  `CassieBaxterContactLine(...)`.
+  `CassieBaxterContactLine(...)`. Both `DynamicContactLineEquations` and
+  `NavierStokesContactAngle` optionally take `cox_voinov=True` (plus `U_wall` and
+  `cox_voinov_microscopic_length`), which imposes the angle bent by Cox-Voinov up to the
+  size of the attached free surface element instead of the microscopic one.
 - **`lubrication.py`**: `LubricationEquations(mu=, sigma=, disjoining_pressure=...)`
   for thin-film/lubrication-theory flows (film height + pressure).
 - **`darcy.py`**: `DarcyEquation(fluid_props, permeability=, porosity=)` for porous-media flow.

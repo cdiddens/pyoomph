@@ -1109,26 +1109,88 @@ class NavierStokesAzimuthalComponent(Equations):
 
 
 
-class NavierStokesContactAngle(InterfaceEquations):
-        
+def cox_voinov_apparent_angle(microscopic_angle:ExpressionOrNum,capillary_number:ExpressionOrNum,element_length:ExpressionOrNum,microscopic_length:ExpressionOrNum,min_angle:ExpressionOrNum=1*degree)->Expression:
     """
-        Enforces a constant contact angle for a droplet. 
+    Cox-Voinov relation (doi:10.1017/S0022112086000332), i.e. the viscous bending of the interface between a microscopic
+    cutoff length and a distance ``element_length`` from the contact line:
+
+    .. math:: \\theta^3=\\theta_\\text{micro}^3+9\\,\\mathrm{Ca}\\,\\ln\\left(h/\\ell\\right)
+
+    Imposing this angle instead of the microscopic one at the numerical contact line supplies the bending that happens
+    below the mesh resolution, so that the imposed angle follows the mesh size and the macroscopic shape does not.
+
+    Args:
+        microscopic_angle: The microscopic (equilibrium) contact angle.
+        capillary_number: :math:`\\mathrm{Ca}=\\mu U/\\sigma`, positive for an advancing contact line.
+        element_length: Distance from the contact line up to which the bending is unresolved, i.e. the mesh size.
+        microscopic_length: The microscopic cutoff length, e.g. the slip length.
+        min_angle: Lower clamp of the resulting angle, see below.
+
+    Returns:
+        The apparent contact angle at the distance ``element_length`` from the contact line.
+    """
+    # A mesh finer than the cutoff leaves nothing unresolved to correct for, hence the clamp at zero.
+    log_ratio=maximum(log(element_length/microscopic_length),0)
+    cubed=microscopic_angle**3+9*capillary_number*log_ratio
+    # A strongly receding contact line drives the cube negative, where the cube root is not real anymore. Cox-Voinov has
+    # broken down well before that point anyway (this is the film deposition regime), so clamp rather than produce NaNs.
+    return square_root(maximum(cubed,min_angle**3),3)
+
+
+def _cox_voinov_angle_at_contact_line(cl_eqs:InterfaceEquations,microscopic_angle:ExpressionOrNum,surface_tension:ExpressionOrNum,wall_tangent:ExpressionOrNum,U_wall:ExpressionOrNum,microscopic_length:ExpressionNumOrNone,min_angle:ExpressionOrNum)->Expression:
+    """
+    Assembles the Cox-Voinov corrected contact angle for equations defined on a contact line, i.e. on the boundary of a
+    free surface. Everything but the microscopic length and the substrate velocity is taken from the surroundings: the
+    unresolved length is the size of the attached free surface element, the viscosity comes from the flow equations in
+    the bulk below the free surface and the surface tension from the free surface itself.
+    """
+    if microscopic_length is None:
+        raise RuntimeError("The Cox-Voinov correction requires a microscopic cutoff length, e.g. the slip length. Please set cox_voinov_microscopic_length")
+    free_surface=cl_eqs.get_parent_domain()
+    bulk=free_surface.get_parent_domain()
+    if bulk is None:
+        raise RuntimeError("The Cox-Voinov correction must be applied at a contact line, i.e. at the boundary of a free surface of a bulk domain")
+    flow_eqs=bulk.get_equations().get_equation_of_type(StokesEquations)
+    if isinstance(flow_eqs,(list,tuple)):
+        if len(flow_eqs)!=1:
+            raise RuntimeError("Found "+str(len(flow_eqs))+" flow equations in the bulk domain "+bulk.get_full_name()+", cannot get a unique viscosity for the Cox-Voinov correction")
+        flow_eqs=flow_eqs[0]
+    if flow_eqs is None:
+        raise RuntimeError("The Cox-Voinov correction requires (Navier-)Stokes equations in the bulk domain below the free surface to get the viscosity from")
+    assert isinstance(flow_eqs,StokesEquations)
+    # Mesh size at the contact line: the length (or sqrt(area) in 3d) of the adjacent free surface element
+    h=var("cartesian_element_length_h",domain="..")
+    # Contact line speed relative to the substrate. The wall tangent points into the liquid, so a contact line moving
+    # against it wets new substrate, i.e. advances, which is where Cox-Voinov bends the interface upwards.
+    u_cl=-dot(mesh_velocity()-U_wall,wall_tangent)
+    Ca=subexpression(flow_eqs.dynamic_viscosity*u_cl/surface_tension)
+    return cox_voinov_apparent_angle(microscopic_angle,Ca,h,microscopic_length,min_angle)
+
+
+class NavierStokesContactAngle(InterfaceEquations):
+
+    """
+        Enforces a constant contact angle for a droplet.
 
         This class requires the parent equations to be of type StokesEquations, meaning that if StokesEquations (or subclasses) are not defined in the parent domain, an error will be raised.
 
-        Args:    
+        Args:
             contact_angle (ExpressionOrNum): Contact angle of the droplet. Defaults to 90 * degree.
             wall_normal (Expression): Normal vector of the wall (should be normalized). Defaults to vector([0, 1]).
             wall_tangent: Tangential vector of the wall (should be normalized). If None, it is calculated using the bac-cab rule to point inward to the bulk domain, along the substrate (i.e. orthogonal to the wall normal).            with_respect_to_tangent (bool): If True, the contact angle is defined with respect to the tangent vector. Defaults to None.
+            cox_voinov (bool): Impose the Cox-Voinov bent angle at the mesh scale instead of ``contact_angle`` itself, which makes the result considerably less sensitive to the mesh size at the contact line. Defaults to False.
+            U_wall (ExpressionOrNum): Velocity vector of the substrate, only used for ``cox_voinov``. The contact line speed entering the capillary number is measured relative to it, so that advancing and receding sides get the correct sign automatically. Defaults to 0, i.e. a substrate at rest.
+            cox_voinov_microscopic_length (ExpressionNumOrNone): Microscopic cutoff length (e.g. the slip length) of the Cox-Voinov relation. Must be set whenever ``cox_voinov`` is used.
+            cox_voinov_min_angle (ExpressionOrNum): Lower clamp of the bent angle. Defaults to 1 degree.
     """
-    
+
     #required_parent_type = NavierStokesFreeSurface
 
     def __init__(self, contact_angle:ExpressionOrNum=90 * degree, *, wall_normal:Expression=vector([0, 1]), wall_tangent:Expression | None=None,
-                 with_respect_to_tangent:bool=True):
+                 with_respect_to_tangent:bool=True,cox_voinov:bool=False,U_wall:ExpressionOrNum=0,cox_voinov_microscopic_length:ExpressionNumOrNone=None,cox_voinov_min_angle:ExpressionOrNum=1*degree):
         super(NavierStokesContactAngle, self).__init__()
         self.wall_normal = 0+wall_normal
-        
+
         if wall_tangent is None:
             # bac-cab rule assuming the wall_normal is normalized. Pointing inward to the bulk domain, along the substrate (i.e. orthogonal to the wall normal)
             self.wall_tangent=self.wall_normal*dot(self.wall_normal,var("normal",domain=".."))-var("normal",domain="..")
@@ -1137,12 +1199,12 @@ class NavierStokesContactAngle(InterfaceEquations):
             self.wall_tangent = 0+wall_tangent
         self.contact_angle = 0+contact_angle
         self.with_respect_to_tangent = with_respect_to_tangent
+        self.cox_voinov=cox_voinov
+        self.U_wall=U_wall
+        self.cox_voinov_microscopic_length=cox_voinov_microscopic_length
+        self.cox_voinov_min_angle=cox_voinov_min_angle
 
     def define_residuals(self):
-        if self.with_respect_to_tangent:
-            m = sin(self.contact_angle) * self.wall_normal + cos(self.contact_angle) * self.wall_tangent
-        else:
-            m = cos(self.contact_angle) * self.wall_normal + sin(self.contact_angle) * self.wall_tangent
         _, utest = var_and_test("velocity")
         from ..equations.multi_component import MultiComponentNavierStokesInterface
         nseq = self.get_parent_equations(of_type=NavierStokesFreeSurface)
@@ -1170,7 +1232,16 @@ class NavierStokesContactAngle(InterfaceEquations):
             # TODO: Use surface tension projection if present
             assert isinstance(nseq,MultiComponentNavierStokesInterface)
             sigma = 0+nseq.interface_props.surface_tension
-        
+
+        theta=self.contact_angle
+        if self.cox_voinov:
+            theta=_cox_voinov_angle_at_contact_line(self,theta,sigma,self.wall_tangent,self.U_wall,self.cox_voinov_microscopic_length,self.cox_voinov_min_angle)
+
+        if self.with_respect_to_tangent:
+            m = sin(theta) * self.wall_normal + cos(theta) * self.wall_tangent
+        else:
+            m = cos(theta) * self.wall_normal + sin(theta) * self.wall_tangent
+
         #self.add_local_function("mx",m[0])
         #self.add_local_function("my",m[1])
         self.add_residual( weak(sigma , dot(m, utest)))

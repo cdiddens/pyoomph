@@ -4843,7 +4843,10 @@ namespace pyoomph
 						this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "psi");
 					}
 				}
-				else if (this->opposite_interface_code->bulk_code && sp.get_code() == this->opposite_interface_code->bulk_code)
+				// Note the opposite_interface_code null check: unlike the branches above, this one is also reached on a
+				// plain interface without an opposite side (e.g. a contact line asking for an element size that is
+				// neither its own nor its bulk's), where dereferencing it segfaults instead of reporting the error below.
+				else if (this->opposite_interface_code && this->opposite_interface_code->bulk_code && sp.get_code() == this->opposite_interface_code->bulk_code)
 				{
 					this->mark_shapes_required(for_what, this->opposite_interface_code->bulk_code->get_my_position_space(), es_name);
 					if (this->opposite_interface_code->bulk_code->coordinates_as_dofs && !sp.is_lagrangian())
