@@ -43,6 +43,7 @@ we already had, just not on the refined mesh".
 import math
 
 from ..typings import *
+from ..expressions.generic import ExpressionNumOrNone  # only used in an annotation, but that is no reason to leave it unbound
 
 if TYPE_CHECKING:
     from .problem import Problem
