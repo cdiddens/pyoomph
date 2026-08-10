@@ -269,8 +269,117 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
         F=(self.C1*I1min+self.C2*I1min**2+self.C3*I1min**3+self.kappa*(J-1)**2)/2                                
         #self.add_functional_minimization(scale_factor("spatial")*F,dxdX,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
         self.add_functional_minimization(F,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
-        
 
+
+class InterfaceMeshStiffening(InterfaceEquations):
+    """
+    Stiffens the mesh in the layer of *bulk* elements attached to an interface, without touching the
+    bulk equations themselves.
+
+    Interface conditions that drag the mesh along -- most prominently
+    :py:class:`~pyoomph.equations.solid.FSIConnection`, which slaves the fluid mesh position to the
+    solid displacement -- only constrain the nodes lying *on* the interface. Wherever the imposed
+    motion varies quickly along the interface (around corners and tips of an FSI structure, in
+    particular), the first layer of bulk elements has to absorb the entire mismatch between the
+    strongly moving interface nodes and the almost stationary interior, and is sheared or squashed
+    far more than the elements further inside.
+
+    This equation counteracts that by evaluating a mesh smoothing operator on the interface, but with
+    *gradients of the bulk* mesh test function, i.e. of ``testfunction("mesh",domain="..")``. The shape
+    function of a node that is not on the face does vanish on the face, but its gradient does not, so
+    the term reaches the interior nodes of the attached elements although it is only integrated over
+    the interface. It is the surface-concentrated limit of a bulk integral over a layer of thickness
+    ``h``, which is why the element size enters the prefactor: ``factor`` is then just the *relative*
+    extra stiffness of that layer, i.e. ``factor=1`` roughly doubles the mesh stiffness there. The
+    distortion is thereby pushed further into the domain, where more elements can share it.
+
+    Since it is a quadratic form in the gradient of the displacement, the contribution is positive
+    semi-definite and can therefore only add stiffness -- it cannot render the mesh problem indefinite.
+    It is nevertheless rank-deficient (only the face integration points are sampled), so it must be
+    used *in addition to*, never instead of, a bulk moving mesh equation.
+
+    ``factor`` may be any expression, e.g. one that is only large close to a corner, if the stiffening
+    shall be applied locally. Since the element size in the prefactor is the one of the *current*
+    (deformed) mesh - the undeformed one would need ``element_size_Lagrangian``, which oomph-lib does
+    not provide on face elements - the term is weakly nonlinear even when the bulk mesh equation is
+    linear, costing a few extra Newton steps. Pass ``stiffness`` to fix the prefactor and keep a linear
+    mesh problem.
+
+    Args:
+        factor: Extra stiffness of the attached element layer, relative to the bulk mesh stiffness. Default is 1.
+        mode: Which operator to use, see below. Default is ``"elastic"``.
+        stiffness: Absolute prefactor, overriding ``factor`` times the bulk mesh stiffness times the element size.
+        nu: Poisson ratio, only used for ``mode="elastic"``. Default is 3/10, as in :py:class:`PseudoElasticMesh`.
+        coordsys: Optional coordinate system override. Defaults to the one of the interface.
+
+    The available modes are:
+
+        * ``"elastic"``: penalizes the linear elastic energy of the displacement, the interface analogue of
+          :py:class:`PseudoElasticMesh`.
+        * ``"laplace"``: penalizes the full ``grad(x-X)``, the interface analogue of :py:class:`LaplaceSmoothedMesh`.
+        * ``"normal"``: penalizes only ``grad(x-X)*n``, i.e. it drives the displacement to be constant along the
+          normal direction, so that the attached elements follow the interface as rigidly as possible.
+
+    On a fluid-structure problem with a bending flap, all three keep the fluid mesh well away from the
+    tangling that the unstiffened mesh runs into; ``"elastic"`` was marginally the best of them, and going
+    from ``factor=5`` to ``factor=25`` changed little, since a surface term cannot rigidify the layer
+    completely.
+    """
+
+    required_parent_type = BaseMovingMeshEquations
+
+    def __init__(self,factor:ExpressionOrNum=1,*,mode:Literal["normal","laplace","elastic"]="elastic",stiffness:ExpressionOrNum | None=None,nu:ExpressionOrNum=rational_num(3,10),coordsys:BaseCoordinateSystem | None=None):
+        super().__init__()
+        if mode not in {"normal","laplace","elastic"}:
+            raise ValueError("mode must be 'normal', 'laplace' or 'elastic', not "+str(mode))
+        self.factor=factor
+        self.mode:Literal["normal","laplace","elastic"]=mode
+        self.stiffness=stiffness
+        self.nu=nu
+        self.coordsys=coordsys
+
+    def get_nondimensional_bulk_element_size(self)->Expression:
+        """The typical size of the attached bulk element, nondimensionalized by the spatial scale."""
+        # The size on the undeformed mesh would be the more natural choice here, since the operator itself
+        # is Lagrangian, but "element_size_Lagrangian" needs J_lagrangian_at_knot, which oomph-lib does not
+        # implement for face elements. The Eulerian size of the attached bulk element is used instead.
+        return nondim("cartesian_element_length_h",domain=self.get_parent_domain())
+
+    def get_stiffness(self)->ExpressionOrNum:
+        """The absolute prefactor of the interface contribution."""
+        if self.stiffness is not None:
+            return self.stiffness
+        try:
+            bulk_stiffness=self.get_parent_equations().get_squared_spatial_factor()
+        except RuntimeError:
+            # Not all mesh smoothers expose a single stiffness prefactor (the hyperelastic ones do not).
+            # Their residual is nondimensionalized with scale_factor("spatial")**2 all the same.
+            bulk_stiffness=scale_factor("spatial")**2
+        return self.factor*bulk_stiffness*self.get_nondimensional_bulk_element_size()
+
+    def define_residuals(self):
+        # domain=".." is essential: on the interface itself, "mesh" would only be expanded in the face
+        # shape functions and the term could not reach the interior nodes of the attached elements.
+        # The gradients must be Lagrangian ones - pyoomph cannot differentiate the Lagrangian coordinate
+        # with respect to the Eulerian one, so an Eulerian grad(x-X) is not available anyhow.
+        x=var("mesh",domain="..")
+        X=var("lagrangian",domain="..")
+        xtest=testfunction("mesh",domain="..")
+        gradient:Callable[[Expression],Expression]=lambda v: grad(v,coordsys=self.coordsys,lagrangian=True)
+        displ=x-X
+        if self.mode=="normal":
+            n=var("normal")
+            a,b=dot(gradient(displ),n),dot(gradient(xtest),n)
+        elif self.mode=="laplace":
+            a,b=gradient(displ),gradient(xtest)
+        else:
+            mu=1/(2*(1+self.nu))
+            lmbda=self.nu/((1+self.nu)*(1-2*self.nu))
+            lmbda=2*mu*lmbda/(lmbda+2*mu)
+            eps:Callable[[Expression],Expression]=lambda v: sym(gradient(v))
+            a=lmbda*trace(eps(displ))*identity_matrix()+2*mu*eps(displ)
+            b=eps(xtest)
+        self.add_weak(self.get_stiffness()*a,b,lagrangian=True,coordinate_system=self.coordsys)
 
 
 class PinMeshCoordinates(Equations):

@@ -1612,7 +1612,10 @@ namespace pyoomph
 						break;
 					}
 				}
-				if (require_dx_terms ||   required.Pos.psi  || required.DL.dx_psi || required.normal || required.elemsize_Eulerian || required.elemsize_Eulerian_cartesian)
+				// Pos.dx_psi/Pos.dX_psi must be included: an interface term acting on gradients of the bulk
+				// position test function (e.g. InterfaceMeshStiffening) touches bulk_eleminfo->pos_local_eqn
+				// without ever requiring the bare Pos.psi, and used to end up with unremapped local equations.
+				if (require_dx_terms ||   required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.DL.dx_psi || required.normal || required.elemsize_Eulerian || required.elemsize_Eulerian_cartesian)
 				{
 
 					unsigned nfields = this->nodal_dimension();
@@ -12951,7 +12954,11 @@ namespace pyoomph
 				auto * space_info=fft->present_continuous_spaces[i];			
 				require_dx_psi|=required->continuous_spaces[space_info->space_index].dx_psi;
 			}
-			if (require_dx_psi ||   required->Pos.psi  || required->DL.dx_psi || required->normal || required->elemsize_Eulerian || required->elemsize_Eulerian_cartesian) 
+			// Pos.dx_psi/Pos.dX_psi are part of the condition for the same reason as in
+			// fill_hang_info_with_equations: without them, an interface term that only uses gradients of the
+			// bulk position test function does not get the bulk nodes' positions registered, so the equation
+			// remapping cannot resolve them and the contribution is silently lost.
+			if (require_dx_psi ||   required->Pos.psi || required->Pos.dx_psi || required->Pos.dX_psi || required->DL.dx_psi || required->normal || required->elemsize_Eulerian || required->elemsize_Eulerian_cartesian)
 			{
 				// Add required geometric external data to be finite differenced
 				
