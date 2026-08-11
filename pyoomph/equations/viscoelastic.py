@@ -561,7 +561,7 @@ class ViscoelasticEquations(Equations):
 
         return matrix([[get(i, j) for j in range(3)] for i in range(3)])
 
-    def _diagonal(self, entries: list[ExpressionOrNum]) -> Expression:
+    def _diagonal(self, entries: Sequence[ExpressionOrNum]) -> Expression:
         return matrix([[entries[i] if i == j else 0 for j in range(3)] for i in range(3)])
 
     def _se(self, M: Expression) -> Expression:
@@ -890,7 +890,8 @@ class ViscoelasticInflowBC(EnforcedBC):
     def _gradient(self) -> Expression:
         if self.velocity_gradient is not None:
             return self.velocity_gradient
-        assert self.velocity is not None
+        velocity = self.velocity
+        assert velocity is not None
         # Differentiated symbolically with respect to the coordinates, not with grad(). grad() would
         # resolve the derivative through the shape functions of the boundary element, and the result
         # is then no longer a pointwise expression, which a strong Dirichlet value has to be.
@@ -898,7 +899,7 @@ class ViscoelasticInflowBC(EnforcedBC):
         # a function of the transverse coordinate alone, so its streamwise derivative comes out as
         # zero by itself, which is exactly the fully developed assumption.
         def derivative(component: int, coordinate: str) -> ExpressionOrNum:
-            return symbolic_diff(self.velocity[component], coordinate, hold_until_codegen=False)
+            return symbolic_diff(velocity[component], coordinate, hold_until_codegen=False)
 
         entries: list[list[ExpressionOrNum]] = [
             [derivative(i, "coordinate_x"), derivative(i, "coordinate_y"), 0] for i in range(2)]
@@ -909,7 +910,7 @@ class ViscoelasticInflowBC(EnforcedBC):
             # unidirectional inflow the closed-form mode assumes, but not for a general one.
             radial = 1 if coordinate_system.use_x_as_symmetry_axis else 0
             radius = var("coordinate_y" if coordinate_system.use_x_as_symmetry_axis else "coordinate_x")
-            entries[2][2] = self.velocity[radial] / radius
+            entries[2][2] = velocity[radial] / radius
         return matrix(entries)
 
     # The model's viscometric solution, rebuilt in whatever frame the inflow profile happens to be

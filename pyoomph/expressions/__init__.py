@@ -729,7 +729,7 @@ def div(arg:ExpressionOrNum,lagrangian:bool=False,matrix:bool | None=None,nondim
 		``dyadic(u,rho*q)``, so that :math:`F_{ij}=\\rho u_i q_j`.
 	"""
 	
-	if isinstance(arg,float) or isinstance(arg,int):
+	if isinstance(arg,float) or isinstance(arg,int) or isinstance(arg,_pyoomph.GiNaC_GlobalParam):
 		return Expression(0)
 	with_scaling=not nondim
 	flag=(1 if with_scaling else 0)+(0 if matrix is None else (2 if matrix==False else 4) ) + (8 if lagrangian else 0) #Code the flag

@@ -727,7 +727,7 @@ def directional_derivative(f:ExpressionOrNum,direction:ExpressionOrNum,nondim:bo
 		gradient: on an interface, ``directional_derivative(var("c"),u)`` only differentiates along the surface, even if
 		``c`` is defined in the bulk. Use ``var("c",domain="..")`` for the bulk gradient.
 	"""
-	if isinstance(f,float) or isinstance(f,int):
+	if isinstance(f,float) or isinstance(f,int) or isinstance(f,_pyoomph.GiNaC_GlobalParam):
 		return Expression(0)
 	flag=(0 if nondim else 1) + (8 if lagrangian else 0) #Code the flag
 	if coordsys is None:

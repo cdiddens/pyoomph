@@ -972,15 +972,18 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
             # A one-dimensional mesh has no second in-plane direction, so nothing is perturbed along y
             y,Yk=None,None
 
+        # y and Yk are absent together, but each test below has to name the one it dereferences: a
+        # guard on y alone leaves Yk optional for a type checker.
         def d_dx(q:Expression)->Expression:  # d/dx at fixed y and z
-            corr=diff(Xk, x)*diff(q, x) + (diff(Yk, x)*diff(q, y) if y is not None else 0)
+            corr=diff(Xk, x)*diff(q, x) + (diff(Yk, x)*diff(q, y) if y is not None and Yk is not None else 0)
             return diff(q, x) - mm*corr
 
-        def d_dy(q:Expression)->Expression:  # d/dy at fixed x and z
+        def d_dy(q:Expression)->Expression:  # d/dy at fixed x and z, only returned for ndim==2
+            assert y is not None and Yk is not None
             return diff(q, y) - mm*(diff(Xk, y)*diff(q, x) + diff(Yk, y)*diff(q, y))
 
         def d_dz(q:Expression)->Expression:  # d/dz at fixed x and y, i.e. along the additional direction
-            conv=Xk*diff(q, x) + (Yk*diff(q, y) if y is not None else 0)
+            conv=Xk*diff(q, x) + (Yk*diff(q, y) if y is not None and Yk is not None else 0)
             return diff(q, xadd) - mm*I*k*conv
 
         return [d_dx,d_dy,d_dz] if ndim==2 else [d_dx,d_dz]
@@ -1625,18 +1628,21 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             # along y and the operators below reduce to the plane-polar ones.
             y, Yp = None, None
 
+        # y and Yp are absent together, but each test below has to name the one it dereferences: a
+        # guard on y alone leaves Yp optional for a type checker.
         def d_dr(q:Expression)->Expression:  # d/dr at fixed z and phi
-            corr = diff(Xp, x)*diff(q, x) + (diff(Yp, x)*diff(q, y) if y is not None else 0)
+            corr = diff(Xp, x)*diff(q, x) + (diff(Yp, x)*diff(q, y) if y is not None and Yp is not None else 0)
             return diff(q, x) - mm*corr
 
-        def d_dz(q:Expression)->Expression:  # d/dz at fixed r and phi
+        def d_dz(q:Expression)->Expression:  # d/dz at fixed r and phi, replaced by zero for ndim==1
+            assert y is not None and Yp is not None
             return diff(q, y) - mm*(diff(Xp, y)*diff(q, x) + diff(Yp, y)*diff(q, y))
 
         def d_dphi_over_r(q:Expression)->Expression:  # (1/r)*d/dphi at fixed r and z
-            conv = Xp*diff(q, x) + (Yp*diff(q, y) if y is not None else 0)
+            conv = Xp*diff(q, x) + (Yp*diff(q, y) if y is not None and Yp is not None else 0)
             return diff(q, phi)/x - mm*(I*m*conv/x + Xp*diff(q, phi)/x**2)
 
-        def over_r(q:Expression)->Expression:  # q/r
+        def over_r(q:ExpressionOrNum)->Expression:  # q/r
             return q/x - mm*Xp*q/x**2
 
         if ndim == 1:

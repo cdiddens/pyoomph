@@ -292,6 +292,10 @@ class ArrayWithUnits:
 def assert_dimensional_value(dim_val:ExpressionOrNum,required_unit:ExpressionOrNum | None=None):
     if isinstance(dim_val,(float,int)):
         return dim_val,1
+    if isinstance(dim_val,_pyoomph.GiNaC_GlobalParam):
+        # Not accepted by collect_units itself; wrapped it splits into its current value and unit 1,
+        # which is the same freeze-the-number-now that the plain float branch above does.
+        dim_val=0+dim_val
     factor, unit, rest, success = _pyoomph.GiNaC_collect_units(dim_val)
     if not success:
         raise ValueError(str(dim_val)+" is not a simple dimensional value, i.e. a product of a numerical value and a unit")

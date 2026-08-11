@@ -350,7 +350,7 @@ class InterfaceMeshStiffening(InterfaceEquations):
         if self.stiffness is not None:
             return self.stiffness
         try:
-            bulk_stiffness=self.get_parent_equations().get_squared_spatial_factor()
+            bulk_stiffness=cast(BaseMovingMeshEquations, self.get_parent_equations()).get_squared_spatial_factor()
         except RuntimeError:
             # Not all mesh smoothers expose a single stiffness prefactor (the hyperelastic ones do not).
             # Their residual is nondimensionalized with scale_factor("spatial")**2 all the same.

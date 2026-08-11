@@ -174,9 +174,9 @@ class UnpinnedContactLine(GenericContactLineModel):
         assert theta_act is not None
         assert self.cl_speed_scale is not None
         if self.cl_speed_exponent==1:
-            return self.cl_speed_scale*(theta_eq-theta_act)
+            return Expression(self.cl_speed_scale*(theta_eq-theta_act))
         else:
-            return self.cl_speed_scale*(theta_eq**self.cl_speed_exponent-theta_act**self.cl_speed_exponent)
+            return Expression(self.cl_speed_scale*(theta_eq**self.cl_speed_exponent-theta_act**self.cl_speed_exponent))
 
     def get_unpinned_indicator(self,dyncl:"DynamicContactLineEquations | None",simple_popov_unpinned_indicator_name:str | None=None)->Expression:
         return Expression(1) # Always unpinned

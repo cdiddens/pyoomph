@@ -612,7 +612,7 @@ class InitialCondition(BaseEquations):
 
     def __init__(self, *, degraded_start: bool | Literal["auto"] = "auto", IC_name: str = "", **kwargs: ExpressionOrNum):
         super(InitialCondition, self).__init__()
-        self._ics = {n: 0 + v for n, v in kwargs.items()}
+        self._ics: dict[str, ExpressionOrNum] = {n: Expression(0 + v) for n, v in kwargs.items()}
         self._ic_name = IC_name
         self._degraded_start = degraded_start
 
@@ -797,7 +797,7 @@ class ExtremumObservables(Equations):
             expr=expr()
         if isinstance(expr,(int,float)): # Does not really make sense here
             expr=_pyoomph.Expression(expr)
-        cg._register_extremum_function(name, expr)
+        cg._register_extremum_function(name, Expression(expr))
         
     def define_residuals(self):
         for name,expr in self.named_extrema.items():

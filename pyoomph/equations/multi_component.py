@@ -80,8 +80,8 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
         res += CompositionInitialCondition(fluid_props,isothermal,initial_temperature)
     if spatial_errors is not None:
         if spatial_errors is True:
-            compo_fields = {"massfrac_" + n: 1.0 for n in fluid_props.required_adv_diff_fields}
-            res += SpatialErrorEstimator(for_which="both", **compo_fields)
+            compo_fields = ["massfrac_" + n for n in fluid_props.required_adv_diff_fields]
+            res += SpatialErrorEstimator(*compo_fields, for_which="both")
         elif spatial_errors is not False:
             raise RuntimeError("TODO")
     return res
@@ -143,8 +143,8 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         res += CompositionInitialCondition(fluid_props,isothermal,initial_temperature)
     if spatial_errors is not None:
         if spatial_errors is True:
-            compo_fields = {"massfrac_" + n: 1.0 for n in fluid_props.required_adv_diff_fields}
-            res += SpatialErrorEstimator(for_which="both", velocity=1, **compo_fields)
+            compo_fields = ["massfrac_" + n for n in fluid_props.required_adv_diff_fields]
+            res += SpatialErrorEstimator(*compo_fields, for_which="both", velocity=1)
         elif isinstance(spatial_errors,dict):
             res += SpatialErrorEstimator(**spatial_errors)
         elif spatial_errors is not False:
