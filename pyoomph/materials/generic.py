@@ -1325,6 +1325,12 @@ class UNIFACPyoomphExpressionGenerator(UNIFACExpressionGeneratorBase):
     def get_temperature_in_kelvin(self) -> Expression:
         return var("temperature")/kelvin
     def pow(self,a:ExpressionOrNum,b:ExpressionOrNum) -> ExpressionOrNum:
+        # A GlobalParameter has no ** of its own, and the exponent here can be one (e.g. continuing
+        # in modified_volume_fraction_exponent). Wrapped it stays live in the expression.
+        if isinstance(a,_pyoomph.GiNaC_GlobalParam):
+            a=0+a
+        if isinstance(b,_pyoomph.GiNaC_GlobalParam):
+            b=0+b
         return a**b
     def subexpression(self,expr:ExpressionOrNum) -> ExpressionOrNum:
         #return expr

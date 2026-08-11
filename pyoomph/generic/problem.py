@@ -48,7 +48,7 @@ from pathlib import Path
 
 import argparse
 import numpy
-from ..meshes.mesh import  AnyMesh,AnySpatialMesh, MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d, ODEStorageMesh, InterfaceMesh,MeshFromTemplate,MeshFromTemplateBase,MeshTemplate
+from ..meshes.mesh import  AnyMesh,AnySpatialMesh,BulkTemplateMesh, MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d, ODEStorageMesh, InterfaceMesh,MeshFromTemplate,MeshFromTemplateBase,MeshTemplate
 from .codegen import EquationTree,BaseEquations, FiniteElementCodeGenerator,CombinedEquations,DummyEquations, InterfaceEquations #ODEEquations
 from ..solvers.generic import DefaultMatrixType, EigenSolverWhich, GenericLinearSystemSolver,GenericEigenSolver
 from ..expressions.units import *
@@ -4334,7 +4334,7 @@ class Problem(_pyoomph.Problem):
         conns.sort(key=lambda c:(c[0].get_name(),c[1],c[2].get_name(),c[3]))
         return conns
 
-    def _defer_uneven_initial_refinement(self) -> list[tuple["MeshFromTemplateBase",int]]:
+    def _defer_uneven_initial_refinement(self) -> list[tuple["BulkTemplateMesh",int]]:
         """Hold back the part of the initial uniform refinement that coupled domains do not share.
 
         Domains that start at different uniform levels are non-conforming from the outset. Repairing
@@ -4358,7 +4358,7 @@ class Problem(_pyoomph.Problem):
         conns=self._collect_coupled_interfaces()
         if not conns:
             return []
-        original:dict[MeshFromTemplateBase,int]={}
+        original:dict[BulkTemplateMesh,int]={}
         for ma,_bna,mb,_bnb,_off in conns:
             for m in (ma,mb):
                 if isinstance(m,MeshFromTemplateBase) and m not in original:
@@ -4378,7 +4378,7 @@ class Problem(_pyoomph.Problem):
         return [(m,original[m]-m._initial_uniform_refinement_level) for m in original
                 if original[m]>m._initial_uniform_refinement_level]
 
-    def _apply_deferred_initial_refinement(self,deferred:list[tuple["MeshFromTemplateBase",int]]):
+    def _apply_deferred_initial_refinement(self,deferred:list[tuple["BulkTemplateMesh",int]]):
         """Apply what _defer_uneven_initial_refinement held back, once distribution is done."""
         if not deferred:
             return
@@ -6427,13 +6427,13 @@ class Problem(_pyoomph.Problem):
         else:
             self.get_eigen_solver().setup_matrix_contributions("",None)
 
-    def solve(self,*,spatial_adapt:int=0,timestep:ExpressionNumOrNone | list[ExpressionNumOrNone]=None,shift_values:bool=True,temporal_error:float | None=None,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,suppress_resolve_after_adapt:bool=False,newton_solver_tolerance:float | None=None,do_not_set_IC:bool=False,globally_convergent_newton:bool=False)->ExpressionOrNum: #,continuation=None)
+    def solve(self,*,spatial_adapt:int=0,timestep:ExpressionNumOrNone | list[ExpressionNumOrNone] | tuple[ExpressionNumOrNone,...]=None,shift_values:bool=True,temporal_error:float | None=None,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,suppress_resolve_after_adapt:bool=False,newton_solver_tolerance:float | None=None,do_not_set_IC:bool=False,globally_convergent_newton:bool=False)->ExpressionOrNum: #,continuation=None)
         """
         Solves the problem stationary, unless a timestep is given. In that case, the time step is taken.
 
         Parameters:
             spatial_adapt (int): The level of spatial adaptation. Default is 0.
-            timestep (Union[ExpressionNumOrNone, List[ExpressionNumOrNone]]): The time step(s) for the transient solve. Can be a single value or a list of values. Default is None, meaning stationary solve without advancing in time.
+            timestep (Union[ExpressionNumOrNone, List[ExpressionNumOrNone], Tuple[ExpressionNumOrNone,...]]): The time step(s) for the transient solve. Can be a single value or a list/tuple of values, which are then taken one after the other. Default is None, meaning stationary solve without advancing in time.
             shift_values (bool): Whether to shift the values during the solve, i.e. shifting the history value buffer. Default is True.
             temporal_error (Optional[float]): The temporal error for adaptive time stepping. Default is None.
             max_newton_iterations (Optional[int]): Override the maximum number of Newton iterations. Default is None.
@@ -7195,8 +7195,9 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 reason=type(r).__name__+": "+r.distributed_limitation
                 if reason not in reasons:
                     reasons.append(reason)
-        if getattr(interpolator,"distributed_limitation",None) is not None:
-            reasons.append(interpolator.__name__+": "+interpolator.distributed_limitation)
+        interpolator_limitation=interpolator.distributed_limitation
+        if interpolator_limitation is not None:
+            reasons.append(interpolator.__name__+": "+interpolator_limitation)
         if not reasons:
             return
         raise RuntimeError("Remeshing is not supported on a distributed (--distribute) problem in this "

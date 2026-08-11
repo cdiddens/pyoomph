@@ -383,7 +383,7 @@ def mpi_gather_csr_rows(layout:MPIRowLayout,values,col_index,row_start,root:int=
 		mpi_wait_idle(req,context or "gathering the matrix onto rank "+str(root))
 	if rank!=root:
 		return None
-	assert rs_g is not None
+	assert vals_g is not None and cols_g is not None and rs_g is not None # the receive buffers, allocated on the root
 	rs_g[n]=nnz_total
 	return vals_g,cols_g,rs_g
 

@@ -322,7 +322,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
     def __init__(self,start_near_point:tuple[ExpressionOrNum, ExpressionOrNum] | None=None,sort_along_axis:SortAlongAxis | None=None,normalized:bool=True,segment_jump_offset:float=1.0,individual_segments:bool=True):
         super().__init__()
         self.start_near_point=start_near_point
-        self.sort_along_axis=sort_along_axis
+        self.sort_along_axis:SortAlongAxis | None=sort_along_axis # spelled out: an inferred attribute type would widen the literals to str
         self.normalized=normalized
 
         self.segment_jump_offset=segment_jump_offset  # Add this offset to the arclength when a new segment is started
@@ -359,6 +359,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         if self.sort_along_axis is not None:
             direction=({"x+":(1.0,0.0),"x-":(-1.0,0.0),"y+":(0.0,1.0),"y-":(0.0,-1.0)})[str(self.sort_along_axis)]
         else:
+            assert self.start_near_point is not None # check_sorting_arguments(require_one=True) in __init__ has already insisted on one of the two
             cx=sum(pts[0,i] for i in loop)/n
             cy=sum(pts[1,i] for i in loop)/n
             dx,dy=float(self.start_near_point[0])-cx,float(self.start_near_point[1])-cy

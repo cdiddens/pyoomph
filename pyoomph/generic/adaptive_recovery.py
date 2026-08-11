@@ -66,11 +66,14 @@ class SpatialAdaptResolveError(RuntimeError):
 
 
 class _Snapshot:
-    """One in-memory state file plus the bookkeeping to tell snapshots apart in messages."""
+    """One state file plus the bookkeeping to tell snapshots apart in messages.
+
+    ``data`` is whatever Problem._snapshot_state handed out and _restore_state takes back: the raw
+    bytes in memory, or the name of a temporary file when keep_snapshots_in_memory is off."""
 
     __slots__ = ("data", "isolve", "just_adapted", "ndof")
 
-    def __init__(self, data: bytes, isolve: int, just_adapted: bool, ndof: int):
+    def __init__(self, data: bytes | str, isolve: int, just_adapted: bool, ndof: int):
         self.data = data
         self.isolve = isolve
         self.just_adapted = just_adapted
@@ -366,7 +369,8 @@ class AdaptiveResolveRecovery:
             if dt is None:
                 dt = problem.get_scaling("temporal")
             self._say(problem, "relaxing with", self.pseudo_transient_steps, "pseudo-timesteps of dt =", dt)
-            problem.solve(timestep=[dt] * self.pseudo_transient_steps, spatial_adapt=0)
+            dts: list[ExpressionNumOrNone] = [dt] * self.pseudo_transient_steps
+            problem.solve(timestep=dts, spatial_adapt=0)
             with self._retry_solver_settings(problem):
                 return True, self._invoke(do_solve, 0, False)
 

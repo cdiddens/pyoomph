@@ -470,7 +470,9 @@ class BaseEquations(_pyoomph.Equations):
         # "combined element" is this very object -- a BaseEquations, which has no _vectorfields and
         # would report an empty list. The domains themselves always know.
         known:dict[str,list[str]]={}
-        cg:"FiniteElementCodeGenerator | None"=self.get_current_code_generator()
+        # Typed as the C++ base, which is what _get_parent_domain hands back; only get_equations and
+        # the parent link are used here, and both live there.
+        cg:"_pyoomph.FiniteElementCode | None"=self.get_current_code_generator()
         while cg is not None:
             vfs=getattr(cg.get_equations(),"_vectorfields",None)
             if vfs:
@@ -1481,6 +1483,8 @@ class BaseEquations(_pyoomph.Equations):
             expr=expr()
         if isinstance(expr,(int,float)):
             expr=_pyoomph.Expression(expr)
+        elif isinstance(expr,_pyoomph.GiNaC_GlobalParam):
+            expr=0+expr # a parameter is not an Expression yet; wrapped it stays live, i.e. the output follows it
         entries,diminfo=cg._register_local_function(name, expr)
         if diminfo==0: # vector
             assert isinstance(master,Equations)
@@ -1680,6 +1684,7 @@ class EquationTree:
         the subtree of each replaced domain only - the new meshes carry no directives yet, whereas
         a domain that was not replaced still has its own and would collect a duplicate per remesh."""
         if (self._mesh is not None) and (self._equations is not None):
+            assert self._codegen is not None
             oldcg = self._equations._get_current_codegen()
             self._equations._set_current_codegen(self._codegen)
             self._equations.register_refinement_directives(self._codegen)

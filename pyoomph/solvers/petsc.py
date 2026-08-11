@@ -736,9 +736,9 @@ class PETSCSolver(GenericLinearSystemSolver):
             # this is the only createAIJ in the file that was still passing them through unconverted --
             # so the distributed path disagreed with both the serial one and its own update call below.
             # On a matching build every conversion is a no-op returning the same view.
-            self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),
-                                                   csr=(row_start.astype(PETSc.IntType, copy=False),
-                                                        col_index.astype(PETSc.IntType, copy=False),
+            self.petsc_mat = PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),), #type:ignore
+                                                   csr=(row_start.astype(PETSc.IntType, copy=False), #type:ignore
+                                                        col_index.astype(PETSc.IntType, copy=False), #type:ignore
                                                         values.astype(PETSc.ScalarType, copy=False))) #type:ignore
 
             self.petsc_mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
@@ -1492,9 +1492,9 @@ class FieldSplitPETSCSolver(PETSCSolver):
     def assemble_preconditioner(self,name:str,restrict_on_field_split:int | None=None)->Any:               
         _res, n, _M_nzz, nrow_local, M_values_arr, M_colindex_arr, M_row_start_arr=self.problem._assemble_residual_jacobian(name)
         # Same dtype conversion as everywhere else in this file; see solve_distributed().
-        P=PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),),
-                                csr=(M_row_start_arr.astype(PETSc.IntType, copy=False),
-                                     M_colindex_arr.astype(PETSc.IntType, copy=False),
+        P=PETSc.Mat().createAIJ(size=((nrow_local, n), (nrow_local, n),), #type:ignore
+                                csr=(M_row_start_arr.astype(PETSc.IntType, copy=False), #type:ignore
+                                     M_colindex_arr.astype(PETSc.IntType, copy=False), #type:ignore
                                      M_values_arr.astype(PETSc.ScalarType, copy=False))) #type:ignore # TODO: Must be destroyed!
         if restrict_on_field_split is not None:
             assert self._fieldsplit is not None

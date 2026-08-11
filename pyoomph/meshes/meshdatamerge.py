@@ -130,7 +130,7 @@ def _local_payload(msh: AnySpatialMesh, key: MeshDataCacheKey) -> dict[str, Any]
         # Node rows are per-element node copies here, so nothing is shared between rows in the first
         # place - and the shared scheme is expressed in the continuous node numbering, which does not
         # apply to them at all.
-        shared: dict[int, NPIntArray] = {}
+        shared: dict[int, NPAnyIntArray] = {}
     else:
         shared = {p: numpy.asarray(msh.get_shared_node_numpy_indices(p), dtype=numpy.int64)
                   for p in range(nproc) if p != myrank}
@@ -159,7 +159,8 @@ def _check_metadata(payloads: list[dict[str, Any] | None]) -> dict[str, Any]:
 
 
 def _merge_on_root(payloads: list[dict[str, Any] | None], msh: AnySpatialMesh, key: MeshDataCacheKey) -> MeshDataCacheEntry | None:
-    present = [r for r, p in enumerate(payloads) if p is not None]
+    have = {r: p for r, p in enumerate(payloads) if p is not None}  # rank -> what that rank contributed
+    present = list(have)
     if not present:
         return None
     ref = _check_metadata(payloads)
@@ -172,8 +173,8 @@ def _merge_on_root(payloads: list[dict[str, Any] | None], msh: AnySpatialMesh, k
         for p in present:
             if p <= r:
                 continue
-            a = payloads[r]["shared"].get(p)
-            b = payloads[p]["shared"].get(r)
+            a = have[r]["shared"].get(p)
+            b = have[p]["shared"].get(r)
             if a is None or b is None or len(a) == 0 or len(b) == 0:
                 continue
             if len(a) != len(b):
@@ -190,7 +191,7 @@ def _merge_on_root(payloads: list[dict[str, Any] | None], msh: AnySpatialMesh, k
     global_of_root[representatives] = numpy.arange(len(representatives))
     uid_to_global = global_of_root[roots]
 
-    all_nodal = numpy.concatenate([payloads[r]["nodal_values"] for r in present], axis=0)
+    all_nodal = numpy.concatenate([have[r]["nodal_values"] for r in present], axis=0)
     nodal_values = all_nodal[representatives]
 
     # The identification is exact, so copies of one node must carry the same coordinates. If they do
@@ -207,10 +208,10 @@ def _merge_on_root(payloads: list[dict[str, Any] | None], msh: AnySpatialMesh, k
                                "the distributed mesh data does not describe the same nodes on both sides")
 
     # --- elements -----------------------------------------------------------------------------
-    width = max(payloads[r]["elem_indices"].shape[1] if payloads[r]["elem_indices"].size else 0 for r in present)
-    elem_rows: list[NPIntArray] = []
+    width = max(have[r]["elem_indices"].shape[1] if have[r]["elem_indices"].size else 0 for r in present)
+    elem_rows: list[NPAnyIntArray] = []
     for r in present:
-        ei = payloads[r]["elem_indices"]
+        ei = have[r]["elem_indices"]
         if ei.size == 0:
             continue
         mapped = numpy.zeros((ei.shape[0], width), dtype=numpy.int64)
@@ -221,10 +222,10 @@ def _merge_on_root(payloads: list[dict[str, Any] | None], msh: AnySpatialMesh, k
         mapped[:, :ei.shape[1]] = numpy.where(valid, uid_to_global[numpy.clip(ei, 0, nnodes[r] - 1) + offsets[r]], 0)
         elem_rows.append(mapped)
     elem_indices = numpy.concatenate(elem_rows, axis=0) if elem_rows else numpy.zeros((0, width), dtype=numpy.int64)
-    elem_types = numpy.concatenate([payloads[r]["elem_types"] for r in present], axis=0)
+    elem_types = numpy.concatenate([have[r]["elem_types"] for r in present], axis=0)
 
     def cat_elemental(what: str) -> NPFloatArray:
-        return numpy.concatenate([payloads[r][what] for r in present], axis=0)
+        return numpy.concatenate([have[r][what] for r in present], axis=0)
 
     def map_nodal(arrays: list[NPFloatArray]) -> NPFloatArray:
         return numpy.concatenate(arrays, axis=0)[representatives]
@@ -232,24 +233,24 @@ def _merge_on_root(payloads: list[dict[str, Any] | None], msh: AnySpatialMesh, k
     if key.discontinuous:
         # Node rows are the per-element node blocks, so they are elemental data in disguise: no node is
         # shared between rows and the identification above does not apply to them.
-        D0_data = map_nodal([payloads[r]["D0_data"] for r in present])
-        DL_data = map_nodal([payloads[r]["DL_data"] for r in present])
+        D0_data = map_nodal([have[r]["D0_data"] for r in present])
+        DL_data = map_nodal([have[r]["DL_data"] for r in present])
     else:
         D0_data = cat_elemental("D0_data")
         DL_data = cat_elemental("DL_data")
 
     merged_eigendata: dict[int, dict[str, Any]] = {}
-    for ev in payloads[present[0]]["merged_eigendata"].keys():
+    for ev in have[present[0]]["merged_eigendata"].keys():
         entry: dict[str, Any] = {}
         for what in ("nodal_values", "DL_data", "D0_data"):
-            parts = [payloads[r]["merged_eigendata"][ev][what] for r in present]
+            parts = [have[r]["merged_eigendata"][ev][what] for r in present]
             if what == "nodal_values" or key.discontinuous:
                 entry[what] = tuple(map_nodal([p[i] for p in parts]) for i in (0, 1))
             else:
                 entry[what] = tuple(numpy.concatenate([p[i] for p in parts], axis=0) for i in (0, 1))
         merged_eigendata[ev] = entry
 
-    nodal_local_exprs = {name: map_nodal([payloads[r]["nodal_local_exprs"][name] for r in present])
+    nodal_local_exprs = {name: map_nodal([have[r]["nodal_local_exprs"][name] for r in present])
                          for name in ref["nodal_local_exprs"].keys()}
 
     return MeshDataCacheEntry.from_arrays(msh, key, nodal_values=nodal_values, elem_indices=elem_indices,
@@ -323,7 +324,7 @@ def _serve_global_mesh_data_requests() -> None:
         _request_scope_depth -= 1
 
 
-def run_with_global_mesh_data(problems: dict[str, "Problem"], func: Callable[[], None], context: str = "") -> None:
+def run_with_global_mesh_data(problems: Mapping[str, "Problem | None"], func: Callable[[], None], context: str = "") -> None:
     """Run ``func`` on rank 0 (on every rank in a serial run) while the others serve its merge requests.
 
     Inside ``func``, rank 0 may ask for ``global_mesh=True`` data on its own; each request is announced

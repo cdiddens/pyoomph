@@ -138,6 +138,14 @@ class _BaseNumpyOutput(_BaseOutputter):
         assert not isinstance(m,ODEStorageMesh)
         self.mesh=m
 
+    # Overloaded like Problem.get_cached_mesh_data itself: only a global request can come back empty,
+    # so a local one does not force every caller to rule None out.
+    @overload
+    def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=...,tesselate_tri:bool=...,eigenvector:int | Sequence[int] | None=...,eigenmode:"MeshDataEigenModes"=...,history_index:int=...,with_halos:bool=...,operator:"MeshDataCacheOperatorBase | None"=...,discontinuous:bool=...,add_eigen_to_mesh_positions:bool=...,global_mesh:Literal[False]=...)->"MeshDataCacheEntry": ...
+
+    @overload
+    def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=...,tesselate_tri:bool=...,eigenvector:int | Sequence[int] | None=...,eigenmode:"MeshDataEigenModes"=...,history_index:int=...,with_halos:bool=...,operator:"MeshDataCacheOperatorBase | None"=...,discontinuous:bool=...,add_eigen_to_mesh_positions:bool=...,global_mesh:bool=...)->"MeshDataCacheEntry | None": ...
+
     def get_cached_mesh_data(self,mesh:"AnySpatialMesh",nondimensional:bool=False,tesselate_tri:bool=False,eigenvector:int | Sequence[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",history_index:int=0,with_halos:bool=False,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True,global_mesh:bool=False)->"MeshDataCacheEntry | None":
         """The mesh data this outputter writes.
 
@@ -346,7 +354,7 @@ class _TextOutput(_BaseNumpyOutput):
 
 ####################
 
-def save_by_extension(fname:str,data:NPFloatArray,header:list[str],timeinfo:float,params:dict[str,str],discontinuous_elem_indices:NPIntArray | None=None):
+def save_by_extension(fname:str,data:NPFloatArray,header:list[str],timeinfo:float,params:dict[str,str],discontinuous_elem_indices:NPAnyIntArray | None=None):
     _,ext=os.path.splitext(fname)
     if ext in [".mat",".MAT"]:
         mdict={}

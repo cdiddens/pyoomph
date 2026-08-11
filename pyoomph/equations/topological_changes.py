@@ -76,6 +76,7 @@ class BaseAxisymmetricPinchoffAndCoalescence(InterfaceEquations):
         if datacache is None:
             datacache=self._datacache
         data=datacache.get_data(mesh)
+        assert data is not None # only a global-mesh cache returns None (off rank 0), and this one is local
         segments,_=data.get_interface_line_segments()        
         coords=data.get_coordinates()
         both_at_axis=[] # Segments which starts and ends on the axis of symmetry
@@ -433,6 +434,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
         mesh=eqtree.get_mesh()
         assert isinstance(mesh,InterfaceMesh)
         data=self._datacache.get_data(mesh)
+        assert data is not None # see get_segments_and_coords
         segments,_=data.get_interface_line_segments()        
         coords=data.get_coordinates()
         segments=sort_line_segments(coords,segments,sort_along_axis="y+",whom="check_for_coalescence") # Sort lines by ascending y start

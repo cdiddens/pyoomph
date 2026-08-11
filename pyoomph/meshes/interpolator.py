@@ -67,11 +67,11 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
     remaining performance work is (see dev_docs/mesh_point_locator.md phase 4b).
     """
 
-    #: Meshes whose integration points have been mapped, filled by every instance's constructor
-    #: before any of them runs :py:meth:`interpolate`. The projection is a single global solve over
-    #: all of them - solving one mesh at a time would leave the others assembling their physical
-    #: equations, so the "projection" would be fighting the physics everywhere else.
-    _pending:list["AnySpatialMesh"]=[]
+    #: (old,new) mesh pairs whose integration points have been mapped, filled by every instance's
+    #: constructor before any of them runs :py:meth:`interpolate`. The projection is a single global
+    #: solve over all of them - solving one mesh at a time would leave the others assembling their
+    #: physical equations, so the "projection" would be fighting the physics everywhere else.
+    _pending:list[tuple["AnySpatialMesh","AnySpatialMesh"]]=[]
 
     #: Residual below which a history level counts as projected.
     projection_tolerance:float=1e-11
@@ -100,8 +100,11 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
         # During remeshing neither mesh is guaranteed to have its problem pointer set - get_problem()
         # raises rather than returning None - so try the equation trees as well before giving up.
         problem=None
+        # via get_equations(): EquationTree itself has no get_problem, so the tree fallbacks used to
+        # raise AttributeError and be swallowed by the except below, i.e. never fall back at all.
         for getter in (lambda: self.old.get_problem(), lambda: self.new.get_problem(),
-                       lambda: self.old.get_eqtree().get_problem(), lambda: self.new.get_eqtree().get_problem()):
+                       lambda: self.old.get_eqtree().get_equations().get_problem(),
+                       lambda: self.new.get_eqtree().get_equations().get_problem()):
             try:
                 problem=getter()
             except Exception:

@@ -196,7 +196,7 @@ class Remesher2dBoundaryLineCollection:
 
     def split_into_curves(self): #A boundary may contain more than one subcurve
         self.curves = []
-        neighb_connects:dict[_pyoomph.Node,list[_pyoomph.Node]]={} # A dict mapping to a list of node neighbors
+        neighb_connects:dict[RemeshBoundaryPoint,list[RemeshBoundaryPoint]]={} # A dict mapping to a list of point neighbors
         #print("OLDNODES",self.oldnodes)
         for n1,n2 in self.oldnodes.keys():
             neighb_connects.setdefault(n1, []).append(n2)
@@ -205,12 +205,12 @@ class Remesher2dBoundaryLineCollection:
         while len(neighb_connects)>0:
             for n,neighs in neighb_connects.items():
                 if len(neighs)==1:
-                    startnode:_pyoomph.Node=n
+                    startnode:RemeshBoundaryPoint=n
                     break
             else:
-                startnode:_pyoomph.Node=next(iter(neighb_connects.keys())) #type:ignore #Just any node. Seems to be looped
+                startnode:RemeshBoundaryPoint=next(iter(neighb_connects.keys())) #Just any point. Seems to be looped
 
-            currentcurve:list[_pyoomph.Node]=[]
+            currentcurve:list[RemeshBoundaryPoint]=[]
             currentnode=startnode
 
             while len(neighb_connects)>0:
@@ -225,7 +225,7 @@ class Remesher2dBoundaryLineCollection:
                         else:
                             if len(neighb_connects) == 0:
                                 break
-                            startnode = next(iter(neighb_connects.keys())) #type:ignore # Just any node. Seems to be looped
+                            startnode = next(iter(neighb_connects.keys())) # Just any point. Seems to be looped
                         #print("ADD MODE 1",len(currentcurve))
                         self.curves.append(currentcurve)
                         currentcurve = []
@@ -500,7 +500,8 @@ class Remesher2d(RemesherBase):
         # The lowest index within the tolerance represents the cluster. With copies of one node that
         # is unambiguous, and it makes the numbering below independent of how many ranks contributed.
         rep=numpy.arange(len(coords))
-        for i,neighbours in enumerate(tree.query_ball_point(coords,r=tol)):
+        # p=2 (Euclidean) is the runtime default; spelled out because scipy's stub declares it without one.
+        for i,neighbours in enumerate(tree.query_ball_point(coords,r=tol,p=2)):
             rep[i]=min(neighbours)
         order={}
         points:list[RemeshBoundaryPoint]=[]

@@ -28,7 +28,7 @@ from __future__ import annotations
  
 from typing import Union,Any,Optional,TYPE_CHECKING,Type,Set,Literal,List,Dict,overload,Tuple,cast,TypeVar,SupportsFloat,TypeAlias,TypedDict
 from collections import OrderedDict
-from collections.abc import Sequence, Iterable, Callable, Iterator, Generator
+from collections.abc import Sequence, Iterable, Callable, Iterator, Generator, Mapping
 
 import typing as typing_module
 import collections as collections_module
@@ -39,6 +39,9 @@ import numpy.typing
 
 NPFloatArray=numpy.typing.NDArray[numpy.float64]
 NPIntArray=numpy.typing.NDArray[numpy.int32]
+#: An integer array of unspecified width, for arrays whose dtype is not pinned to one (e.g. the
+#: int64 keys and int32 block lengths that the state files and the mesh data merge mix).
+NPAnyIntArray=numpy.typing.NDArray[numpy.integer[Any]]
 NPComplexArray=numpy.typing.NDArray[numpy.complex128]
 NPAnyArray=numpy.typing.NDArray[Any]
 NPUInt64Array= numpy.typing.NDArray[numpy.uint64]
@@ -52,7 +55,7 @@ def assert_type(obj:Any,typ:_AnyPyoomphType)->_AnyPyoomphType:
     else:
         return cast(type[typ],obj) # type: ignore
     
-__all__ = ["Union","Any","Sequence","Iterable","Callable","Iterator","Optional","TYPE_CHECKING","NPFloatArray","NPIntArray","NPComplexArray","NPUInt64Array","NPInt32Array","Type","Set","Literal","List","Dict","overload","Tuple","cast","NPAnyArray","NPBoolArray","TypeVar","Generator","OrderedDict","SupportsFloat","TypeAlias","assert_type","TypedDict"]
+__all__ = ["Union","Any","Sequence","Mapping","Iterable","Callable","Iterator","Optional","TYPE_CHECKING","NPFloatArray","NPIntArray","NPAnyIntArray","NPComplexArray","NPUInt64Array","NPInt32Array","Type","Set","Literal","List","Dict","overload","Tuple","cast","NPAnyArray","NPBoolArray","TypeVar","Generator","OrderedDict","SupportsFloat","TypeAlias","assert_type","TypedDict"]
 
 
 # The names above that are just re-exports of the standard library. Modules all over pyoomph do

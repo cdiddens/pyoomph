@@ -52,13 +52,10 @@ See dev_docs/distributed_state_files.md.
 from ..typings import *
 import numpy
 
-from ..generic.mpi import get_mpi_nproc, get_mpi_rank, get_mpi_world_comm, has_mpi
-
-if has_mpi():
-    from mpi4py import MPI  # type:ignore
+from ..generic.mpi import get_mpi_nproc, get_mpi_rank, get_mpi_world_comm
 
 if TYPE_CHECKING:
-    from .mesh import AnySpatialMesh
+    from .mesh import AnySpatialMesh, BulkTemplateMesh
     from ..output.states import DumpFile
 
 
@@ -70,7 +67,7 @@ def _mesh_is_distributed(mesh: "AnySpatialMesh") -> bool:
     return bool(mesh.is_mesh_distributed()) and get_mpi_nproc() > 1
 
 
-def _row_view(a: NPIntArray) -> NPAnyArray:
+def _row_view(a: NPAnyIntArray) -> NPAnyArray:
     """View a 2D int array as 1D, so that sorting and searching compare rows lexicographically."""
     a = numpy.ascontiguousarray(a)
     return a.view([("f" + str(i), a.dtype) for i in range(a.shape[1])]).ravel()  # type:ignore
@@ -87,7 +84,7 @@ def _gather_blocks(*arrays: NPAnyArray) -> list[NPAnyArray] | None:
     return [numpy.concatenate([g[i] for g in gathered], axis=0) for i in range(len(arrays))]
 
 
-def _block_gather(data: NPFloatArray, lengths: NPIntArray, take: NPIntArray) -> tuple[NPFloatArray, NPIntArray]:
+def _block_gather(data: NPFloatArray, lengths: NPAnyIntArray, take: NPAnyIntArray) -> tuple[NPFloatArray, NPAnyIntArray]:
     """Pick the variable-length blocks `take` out of (data, lengths), keeping their order."""
     offsets = numpy.concatenate(([0], numpy.cumsum(lengths))).astype(numpy.int64)
     lens = numpy.asarray(lengths, dtype=numpy.int64)[take]
@@ -100,7 +97,7 @@ def _block_gather(data: NPFloatArray, lengths: NPIntArray, take: NPIntArray) -> 
     return numpy.asarray(data, dtype=numpy.float64)[idx], lens.astype(numpy.int32)
 
 
-def _node_keys(mesh: "AnySpatialMesh", elem_keys: NPIntArray, elem_nodes: NPIntArray) -> NPIntArray:
+def _node_keys(mesh: "AnySpatialMesh", elem_keys: NPAnyIntArray, elem_nodes: NPAnyIntArray) -> NPAnyIntArray:
     """For every node of the mesh, the smallest (root, path, local index) among its elements."""
     nnode = mesh.nnode()
     nelem, stride = elem_nodes.shape
@@ -119,14 +116,14 @@ def _node_keys(mesh: "AnySpatialMesh", elem_keys: NPIntArray, elem_nodes: NPIntA
     return keys
 
 
-def _lexicographically_smaller(b: NPIntArray, a: NPIntArray) -> NPBoolArray:
+def _lexicographically_smaller(b: NPAnyIntArray, a: NPAnyIntArray) -> NPBoolArray:
     """Row-wise b < a, comparing the columns in order."""
     return ((b[:, 0] < a[:, 0]) |
             ((b[:, 0] == a[:, 0]) & ((b[:, 1] < a[:, 1]) |
                                      ((b[:, 1] == a[:, 1]) & (b[:, 2] < a[:, 2])))))
 
 
-def _reconcile_node_keys(mesh: "AnySpatialMesh", keys: NPIntArray) -> NPIntArray:
+def _reconcile_node_keys(mesh: "AnySpatialMesh", keys: NPAnyIntArray) -> NPAnyIntArray:
     """Reduce every shared node's key to the smallest one any process computed for it.
 
     A node's key is the smallest address among the elements holding it, and a process can only look at
@@ -177,6 +174,7 @@ def _reconcile_node_keys(mesh: "AnySpatialMesh", keys: NPIntArray) -> NPIntArray
                 target = idx[here][better]
                 keys[target] = theirs[better]
                 changed = True
+        from mpi4py import MPI  # type:ignore # only reached on a distributed mesh, so mpi4py is there
         if not comm.allreduce(bool(changed), op=MPI.LOR):
             break
     return keys
@@ -225,8 +223,8 @@ def _local_contribution(mesh: "AnySpatialMesh") -> dict[str, NPAnyArray]:
             "elem_keys": elem_keys[owned], "elem_lens": my_elem_lens, "elem_data": my_elem_data}
 
 
-def _dedup(keys: NPIntArray, lengths: NPIntArray, data: NPFloatArray, what: str,
-           check: bool) -> tuple[NPIntArray, NPIntArray, NPFloatArray]:
+def _dedup(keys: NPAnyIntArray, lengths: NPAnyIntArray, data: NPFloatArray, what: str,
+           check: bool) -> tuple[NPAnyIntArray, NPAnyIntArray, NPFloatArray]:
     """Sort records by key and drop duplicates, checking that duplicates actually agree."""
     if len(keys) == 0:
         return keys, lengths, data
@@ -242,7 +240,7 @@ def _dedup(keys: NPIntArray, lengths: NPIntArray, data: NPFloatArray, what: str,
     return keys[take], lengths, data
 
 
-def _check_duplicates_agree(keys: NPIntArray, lengths: NPIntArray, data: NPFloatArray,
+def _check_duplicates_agree(keys: NPAnyIntArray, lengths: NPAnyIntArray, data: NPFloatArray,
                             unique: NPBoolArray, what: str) -> None:
     """Two processes reporting the same record must report the same values.
 
@@ -278,7 +276,7 @@ def _sorted_records(local: dict[str, NPAnyArray], distributed: bool, check: bool
 
     # Refinement signatures: one per root, and the processes sharing a root must describe the same tree
     roots, sig_lens, sig_data = merged["roots"], merged["sig_lens"], merged["sig_data"]
-    sig_by_root: dict[int, NPIntArray] = {}
+    sig_by_root: dict[int, NPAnyIntArray] = {}
     offs = numpy.concatenate(([0], numpy.cumsum(numpy.asarray(sig_lens, dtype=numpy.int64))))
     for i, r in enumerate(roots):
         sig = sig_data[offs[i]:offs[i + 1]]
@@ -321,7 +319,7 @@ def save_mesh_state(mesh: "AnySpatialMesh", state: "DumpFile", check_consistency
         state.numpy_data(lambda name=name: records[name], lambda v: v)  # type:ignore
 
 
-def _decode_signature(root: int, signature: NPIntArray) -> dict[tuple[int, int], int]:
+def _decode_signature(root: int, signature: NPAnyIntArray) -> dict[tuple[int, int], int]:
     """Preorder son counts -> {(root, path): number of sons}."""
     out: dict[tuple[int, int], int] = {}
     position = 0
@@ -338,7 +336,7 @@ def _decode_signature(root: int, signature: NPIntArray) -> dict[tuple[int, int],
     return out
 
 
-def _replay_refinement(mesh: "AnySpatialMesh", roots: NPIntArray, sig_lens: NPIntArray, sig_data: NPIntArray) -> None:
+def _replay_refinement(mesh: "AnySpatialMesh", roots: NPAnyIntArray, sig_lens: NPAnyIntArray, sig_data: NPAnyIntArray) -> None:
     """Refine the local elements until their trees have the shape the file describes."""
     offs = numpy.concatenate(([0], numpy.cumsum(numpy.asarray(sig_lens, dtype=numpy.int64))))
     nsons: dict[tuple[int, int], int] = {}
@@ -354,7 +352,7 @@ def _replay_refinement(mesh: "AnySpatialMesh", roots: NPIntArray, sig_lens: NPIn
         mesh.refine_selected_elements_by_index(to_refine)
 
 
-def _lookup(file_keys: NPIntArray, my_keys: NPIntArray, what: str) -> NPIntArray:
+def _lookup(file_keys: NPAnyIntArray, my_keys: NPAnyIntArray, what: str) -> NPAnyIntArray:
     if len(my_keys) == 0:
         return numpy.zeros((0,), dtype=numpy.int64)
     if len(file_keys) == 0:
@@ -372,8 +370,11 @@ def _lookup(file_keys: NPIntArray, my_keys: NPIntArray, what: str) -> NPIntArray
     return idx
 
 
-def load_mesh_state(mesh: "AnySpatialMesh", state: "DumpFile") -> None:
-    """Read the mesh part of a state file. Every process reads all of it and picks what it holds."""
+def load_mesh_state(mesh: "BulkTemplateMesh", state: "DumpFile") -> None:
+    """Read the mesh part of a state file. Every process reads all of it and picks what it holds.
+
+    A bulk mesh rather than any spatial one: the replay below rewinds the refinement, which an
+    interface mesh cannot do - it is rebuilt from its bulk instead."""
     read = {}
     for name in ("roots", "sig_lens", "sig_data", "node_keys", "node_lens", "node_data",
                  "elem_keys", "elem_lens", "elem_data"):
@@ -396,11 +397,13 @@ def load_mesh_state(mesh: "AnySpatialMesh", state: "DumpFile") -> None:
 
     idx = _lookup(read["node_keys"], my_node_keys, "node")
     data, lens = _block_gather(read["node_data"], read["node_lens"], idx)
-    mesh.load_nodal_state(data, lens)
+    # cast: the generated stubs say Sequence[float]/Sequence[int], but nanobind's std::vector caster
+    # takes these arrays as they are, and converting them to lists would copy the whole state.
+    mesh.load_nodal_state(cast(Sequence[float], data), cast(Sequence[int], lens))
 
     idx = _lookup(read["elem_keys"], elem_keys, "element")
     data, lens = _block_gather(read["elem_data"], read["elem_lens"], idx)
-    mesh.load_elemental_state(data, lens)
+    mesh.load_elemental_state(cast(Sequence[float], data), cast(Sequence[int], lens))
 
 
 from ..typings import _set_public_api

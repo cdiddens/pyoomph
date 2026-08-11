@@ -1965,6 +1965,7 @@ class GmshTemplate(MeshedMeshTemplate):
             if isinstance(c,Expression):
                 c=c.float_value()
             shift[i] = c
+        assert self._geom is not None # only reachable from within define_geometry(), which sets it
         self._geom.env.synchronize()
         dimtags=[]
         newdim=0
@@ -2048,8 +2049,8 @@ class GmshTemplate(MeshedMeshTemplate):
                             #print("To remove from here",self._named_entities[self._dim_tag_names[dim_tag][0]],orig_curv)
                             # Remove all list entries from self._named_entities[self._dim_tag_names[dim_tag][0]] which ar enot a GmshFakeEntry
                             self._named_entities[self._dim_tag_names[dim_tag][0]] = [
-                                entry for entry in self._named_entities[self._dim_tag_names[dim_tag][0]] 
-                                if isinstance(entry, GmshTemplate.GmshFakeEntry)
+                                named for named in self._named_entities[self._dim_tag_names[dim_tag][0]] 
+                                if isinstance(named, GmshTemplate.GmshFakeEntry)
                             ]
                             
                             #self._named_entities[self._dim_tag_names[dim_tag][0]].remove((orig_curv.dim_tag[0],orig_curv.dim_tag[1]))
@@ -2089,6 +2090,7 @@ class GmshTemplate(MeshedMeshTemplate):
             angle=angle.float_value()
         
         
+        assert self._geom is not None # only reachable from within define_geometry(), which sets it
         self._geom.env.synchronize()
         dimtags=[]
         newdim=0
@@ -2170,8 +2172,8 @@ class GmshTemplate(MeshedMeshTemplate):
                             #print("To remove from here",self._named_entities[self._dim_tag_names[dim_tag][0]],orig_curv)
                             # Remove all list entries from self._named_entities[self._dim_tag_names[dim_tag][0]] which ar enot a GmshFakeEntry
                             self._named_entities[self._dim_tag_names[dim_tag][0]] = [
-                                entry for entry in self._named_entities[self._dim_tag_names[dim_tag][0]] 
-                                if isinstance(entry, GmshTemplate.GmshFakeEntry)
+                                named for named in self._named_entities[self._dim_tag_names[dim_tag][0]] 
+                                if isinstance(named, GmshTemplate.GmshFakeEntry)
                             ]
                             
                             #self._named_entities[self._dim_tag_names[dim_tag][0]].remove((orig_curv.dim_tag[0],orig_curv.dim_tag[1]))

@@ -66,9 +66,12 @@ class MeshDataCacheKey:
     def create(cls,eigenvector:int | Sequence[int] | None=None,**kwargs:Any) -> "MeshDataCacheKey":
         """Builds a key, normalizing the eigenvector selection. Sequences become a sorted tuple: they
         must be hashable to serve as a key, and [1,0] must land in the same slot as [0,1]."""
-        if isinstance(eigenvector,(list,set,tuple)):
-            eigenvector=tuple(sorted(set(eigenvector)))
-        return cls(eigenvector=eigenvector,**kwargs)
+        ev:int | tuple[int,...] | None
+        if eigenvector is None or isinstance(eigenvector,int):
+            ev=eigenvector
+        else:
+            ev=tuple(sorted(set(eigenvector)))
+        return cls(eigenvector=ev,**kwargs)
 
     def as_kwargs(self) -> dict[str,Any]:
         # Not dataclasses.asdict: that deep-copies everything that is not itself a dataclass, i.e. it
@@ -83,6 +86,11 @@ class MeshDataCacheKey:
 
 
 class MeshDataCacheEntry:
+    # Not pinned to int32 like the mesh's own to_numpy output: the globally merged data assembled in
+    # meshdatamerge is indexed across all processes and is built as int64.
+    elem_indices:NPAnyIntArray
+    elem_types:NPAnyIntArray
+
     def __init__(self,msh:AnySpatialMesh,key:MeshDataCacheKey):
         assert isinstance(msh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh))
 
@@ -186,7 +194,7 @@ class MeshDataCacheEntry:
             self.operator.apply(self)
 
     @classmethod
-    def from_arrays(cls,msh:AnySpatialMesh,key:MeshDataCacheKey,nodal_values:NPFloatArray,elem_indices:NPIntArray,elem_types:NPIntArray,nodal_field_inds:dict[str,int],D0_data:NPFloatArray,DL_data:NPFloatArray,elemental_field_inds:dict[str,int],merged_eigendata:dict[int,dict[str,Any]],nodal_local_exprs:dict[str,NPFloatArray],local_expr_indices:dict[str,int],vector_fields:dict[str,list[str]]) -> "MeshDataCacheEntry":
+    def from_arrays(cls,msh:AnySpatialMesh,key:MeshDataCacheKey,nodal_values:NPFloatArray,elem_indices:NPAnyIntArray,elem_types:NPAnyIntArray,nodal_field_inds:dict[str,int],D0_data:NPFloatArray,DL_data:NPFloatArray,elemental_field_inds:dict[str,int],merged_eigendata:dict[int,dict[str,Any]],nodal_local_exprs:dict[str,NPFloatArray],local_expr_indices:dict[str,int],vector_fields:dict[str,list[str]]) -> "MeshDataCacheEntry":
         """Builds an entry from ready-made arrays instead of extracting them from the mesh.
 
         Used for the globally merged data of a distributed mesh (see
@@ -768,7 +776,7 @@ _EXTRUSION_TEMPLATES:dict[str,_ExtrusionTemplate]={
 _EXTRUSION_NNODE:dict[int,int]={0:1, 1:2, 2:3, 3:3, 66:3, 6:4, 8:9, 9:6, 99:7}
 
 
-def _extrusion_template_groups(elem_types:NPIntArray,elem_indices:NPIntArray,*,phi_increm:int,axis_nodes:"NPBoolArray | None",allow_line_c1:bool,collapse_axis_points:bool)->list[tuple[str,NPIntArray]]:
+def _extrusion_template_groups(elem_types:NPAnyIntArray,elem_indices:NPAnyIntArray,*,phi_increm:int,axis_nodes:"NPBoolArray | None",allow_line_c1:bool,collapse_axis_points:bool)->list[tuple[str,NPIntArray]]:
     """Splits the elements into groups that share one template, as (template name, row indices)."""
     groups:list[tuple[str,NPIntArray]]=[]
     for et in numpy.unique(elem_types):
@@ -818,7 +826,7 @@ def _extrusion_template_groups(elem_types:NPIntArray,elem_indices:NPIntArray,*,p
     return groups
 
 
-def _extrude_element_connectivity(elem_types:NPIntArray,elem_indices:NPIntArray,*,stride:int,upper_limit:int,phi_increm:int,phi_row_for_step:Callable[[int],NPFloatArray],modulus:int | None,axis_nodes:"NPBoolArray | None"=None,allow_line_c1:bool=True,collapse_axis_points:bool=False)->tuple[NPIntArray,NPIntArray,NPFloatArray,NPIntArray]:
+def _extrude_element_connectivity(elem_types:NPAnyIntArray,elem_indices:NPAnyIntArray,*,stride:int,upper_limit:int,phi_increm:int,phi_row_for_step:Callable[[int],NPFloatArray],modulus:int | None,axis_nodes:"NPBoolArray | None"=None,allow_line_c1:bool=True,collapse_axis_points:bool=False)->tuple[NPIntArray,NPIntArray,NPFloatArray,NPIntArray]:
     """Extrudes a 0d/1d/2d connectivity into one dimension higher.
 
     Returns ``(new_elem_types, new_elem_indices, elemental_angles, counts)``, where ``counts[i]`` is

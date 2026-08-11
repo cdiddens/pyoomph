@@ -471,12 +471,12 @@ class MatplotlibTriangulationBased(MatplotLibPartWithMeshData):
                                     xinter = x1 * (1.0 - linter) + x2 * linter
                                     if xinter >= xmin and xinter <= xmax:
                                         interpdata.append((p1, p2, linter)) #type:ignore
-                reducedtris:NPIntArray=self.mshcache.elem_indices[trisToRender] #type:ignore
+                reducedtris:NPAnyIntArray=self.mshcache.elem_indices[trisToRender] #type:ignore
                 #print("REUDCED", self.field, len(reducedtris),len(self.mshcache.elem_indices))
                 self.ptsinside=ptsinside
                 self.interpdata=interpdata
         else:
-            reducedtris:NPIntArray = self.mshcache.elem_indices
+            reducedtris:NPAnyIntArray = self.mshcache.elem_indices
             
         
             

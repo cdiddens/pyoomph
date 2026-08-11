@@ -896,7 +896,7 @@ class MeshedMeshTemplate(MeshTemplate):
         """
         return not self.is_first_time()
 
-    def get_boundary_coordinates(self, name: str, sort_along_axis: "SortAlongAxis | None" = None, start_near_point: tuple["ExpressionOrNum", "ExpressionOrNum"] | None = None, nondimensional: bool = False) -> list[list[tuple[float, float]]]:
+    def get_boundary_coordinates(self, name: str, sort_along_axis: "SortAlongAxis | None" = None, start_near_point: tuple["ExpressionOrNum", "ExpressionOrNum"] | None = None, nondimensional: bool = False) -> list[list[tuple["ExpressionOrNum", "ExpressionOrNum"]]]:
         """Returns a list of boundary segments, which are lists of (x,y) coordinates (dimensional or not can be controlled by the nondimensional argument). The segments are sorted and reversed based on the sort_along_axis or start_near_point arguments. If both are None, the order is arbitrary.
 
         On a mesh distributed with ``--distribute`` this is a **collective** call that returns the
@@ -910,7 +910,9 @@ class MeshedMeshTemplate(MeshTemplate):
             nondimensional: Whether to return nondimensional coordinates. Defaults to False.
 
         Returns:
-            A list of boundary segments, which are each a list of (x,y) coordinates.
+            A list of boundary segments, which are each a list of (x,y) coordinates. These are plain
+            floats only for ``nondimensional``; otherwise they carry the spatial scaling and are
+            therefore dimensional expressions.
         """
         self._assert_within_define_geometry("get_boundary_coordinates()")
         self._has_remeshing_path = True # The geometry obviously depends on the mesh we are replacing
@@ -944,6 +946,7 @@ class MeshedMeshTemplate(MeshTemplate):
                 try:
                     segs, pts = self._sorted_boundary_segments(mesh, sort_along_axis, start_near_point,
                                                                global_mesh=True)
+                    assert segs is not None and pts is not None  # rank 0 is the one that gets the merged data
                     payload = [[(float(pts[0, i]), float(pts[1, i])) for i in seg] for seg in segs]
                 except BaseException as e:
                     error = e
@@ -993,6 +996,7 @@ class MeshedMeshTemplate(MeshTemplate):
         # Deferred, like everywhere else that touches the merge: a serial run must not pull in mpi4py
         # through this path.
         from .meshdatamerge import needs_merging
+        assert mesh is not None # get_mesh() returns a mesh or raises, and a raise has been dealt with above
         return mesh, get_mpi_any(needs_merging(mesh))
 
     def _sorted_boundary_segments(self, mesh, sort_along_axis: "SortAlongAxis | None", start_near_point: tuple["ExpressionOrNum", "ExpressionOrNum"] | None, global_mesh: bool = False):
