@@ -331,11 +331,13 @@ class PeriodicDrivingResponse():
         if foundeigen!=1:
             raise RuntimeError("Cannot find a single eigenvalue that corresponds to the driving: Got "+str(foundeigen))
         
-        v0=self.problem.get_last_eigenvectors()[0]
-        print("DRIVE",v0[drivedofind])
-        print("DTDRIVE",v0[dtdrivedofind])
-        self.problem._last_eigenvectors/=v0[drivedofind] 
-        print("INFO",self.omega_param.value,self.problem._last_eigenvectors[0,drivedofind],self.problem._last_eigenvectors[0,dtdrivedofind])        
+        eigenvects=self.problem.get_last_eigenvectors()
+        vfound=eigenvects[0] # not v0, which is the starting guess handed to the eigensolver above
+        print("DRIVE",vfound[drivedofind])
+        print("DTDRIVE",vfound[dtdrivedofind])
+        eigenvects/=vfound[drivedofind]
+        self.problem._last_eigenvectors=eigenvects
+        print("INFO",self.omega_param.value,eigenvects[0,drivedofind],eigenvects[0,dtdrivedofind])        
 
         return self.problem.get_last_eigenvectors()[0]       
         
@@ -360,7 +362,7 @@ class PeriodicDrivingResponse():
             if omega is None:
                 raise RuntimeError("Need to set either omega or frequency")            
             drivemode=self.solve_driving_response(omega=omega)
-            T=2*pi/omega
+            T:ExpressionOrNum=2*pi/omega
         elif omega is None:
             drivemode=self.solve_driving_response(freq=freq)
             T=1/freq
@@ -368,8 +370,7 @@ class PeriodicDrivingResponse():
             raise RuntimeError("Cannot set both omega and frequency")
         
         basesol=self.problem.get_current_dofs()[0]
-        history_dofs=[basesol+numpy.real(numpy.exp(1j*phase)*drivemode) for phase in numpy.linspace(0,2*numpy.pi,NT,endpoint=False)]
-        history_dofs=numpy.array(history_dofs)        
+        history_dofs=numpy.array([basesol+numpy.real(numpy.exp(1j*phase)*drivemode) for phase in numpy.linspace(0,2*numpy.pi,NT,endpoint=False)])
         self.problem.set_current_dofs(history_dofs[0])
         return self.problem.activate_periodic_orbit_handler(T,history_dofs=history_dofs[1:],mode=mode,order=order,GL_order=GL_order,T_constraint=T_constraint)
 

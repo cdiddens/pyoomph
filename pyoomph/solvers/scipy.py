@@ -65,15 +65,6 @@ class SuperLUSerial(GenericLinearSystemSolver):
 		if op_flag==1:
 			A=csc_matrix((values, rowind, colptr), shape=(n, n))
 
-			if False:
-				lu=splu(A)
-				diagL = lu.L.diagonal()
-				diagU = lu.U.diagonal()
-				diagL = diagL.astype(numpy.complex128)
-				diagU = diagU.astype(numpy.complex128)
-				logdet = numpy.log(diagL).sum() + numpy.log(diagU).sum()
-				determ=numpy.exp(logdet)
-				print("MATERIX DET",determ)
 			#arr=A.toarray()
 			#maxzero=0
 			#for l in arr:

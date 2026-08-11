@@ -27,7 +27,7 @@ from __future__ import annotations
 #
 # ========================================================================
  
-from ..meshes.mesh import ODEStorageMesh
+from ..meshes.mesh import AnyMesh, ODEStorageMesh
 from ..typings import *
 import numpy
 import os
@@ -468,7 +468,7 @@ class EigenMatrixManipulatorBase:
 		from ..generic.problem import Problem
 		from .. import _pyoomph_core as _pyoomph
 		splt=name.split("/")
-		root=self.problem
+		root:"Problem | AnyMesh"=self.problem
 		fieldname=None
 		#print("IN ",name)
 		for i,k in enumerate(splt):
@@ -507,11 +507,11 @@ class EigenMatrixManipulatorBase:
 			raise RuntimeError("Cannot find field "+str(fieldname)+" in mesh "+root.get_full_name())
 		res:set[int]=set()
 		if  isinstance(root,ODEStorageMesh):
-			ode = root.get_element()
-			_, inds = ode._ode_elem_to_numpy()
+			odeelem = root.get_element()
+			_, inds = odeelem._ode_elem_to_numpy()
 			if not fieldname in inds.keys():
 				raise RuntimeError("Cannot get the field '"+fieldname+"' on ODE domain "+root.get_full_name())
-			eqn=ode.internal_data_pt(inds[fieldname]).eqn_number(0)
+			eqn=odeelem.internal_data_pt(inds[fieldname]).eqn_number(0)
 			if eqn>=0:
 				res.add(eqn)
 		else:
@@ -656,7 +656,7 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 		return J,M
 
 	def apply_on_J_and_M(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> tuple[DefaultMatrixType, DefaultMatrixType]:
-		self.zeromap:set[int]=self._resolve_zeromap()
+		self.zeromap=self._resolve_zeromap()
 		#print("GOING TO SET TO ZERO",self.zeromap)
 		N=J.shape[0]
 		Adiag=numpy.ones(N)
@@ -673,7 +673,7 @@ class EigenMatrixSetDofsToZero(EigenMatrixManipulatorBase):
 	def apply_on_J_and_M___OLD(self,solver:"GenericEigenSolver",J:DefaultMatrixType,M:DefaultMatrixType) -> tuple[DefaultMatrixType, DefaultMatrixType]:
 		# TODO OLD VERSION: Slow, remove
 		from .. import _pyoomph_core as _pyoomph
-		self.zeromap:set[int]=set()
+		self.zeromap=set()
 		for d in self.doflist:
 			if isinstance(d,str):
 				eqs=self.resolve_equations_by_name(d)

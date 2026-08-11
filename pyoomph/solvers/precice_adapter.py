@@ -34,6 +34,7 @@ from ..typings import *
 from ..generic.codegen import EquationTree, ODEStorageMesh, BaseEquations, Equations, ODEEquations
 from ..generic.problem import Problem
 from ..meshes.mesh import AnyMesh
+from .._pyoomph_core import Node
 
 import gc
 
@@ -42,7 +43,7 @@ import gc
 # typed helpers rather than directly, to avoid it being checked against every member
 # of the AnyMesh union individually.
 def _get_precice_node_to_vertex_id(mesh:"AnyMesh")->dict[Any,int] | None:
-    return mesh._precice_node_to_vertex_id #type:ignore[attr-defined]
+    return mesh._precice_node_to_vertex_id #type:ignore[attr-defined,union-attr] # dynamic on the mesh, see above
 
 def _v2v(mesh:"AnyMesh")->dict[Any,int]:
     d=_get_precice_node_to_vertex_id(mesh)
@@ -50,13 +51,13 @@ def _v2v(mesh:"AnyMesh")->dict[Any,int]:
     return d
 
 def _set_precice_node_to_vertex_id(mesh:"AnyMesh",value:dict[Any,int] | None)->None:
-    mesh._precice_node_to_vertex_id=value #type:ignore[attr-defined]
+    mesh._precice_node_to_vertex_id=value #type:ignore[attr-defined,union-attr] # dynamic on the mesh, see above
 
 def _get_precice_vertex_ids(mesh:"AnyMesh")->Any:
-    return mesh._precice_vertex_ids #type:ignore[attr-defined]
+    return mesh._precice_vertex_ids #type:ignore[attr-defined,union-attr] # dynamic on the mesh, see above
 
 def _set_precice_vertex_ids(mesh:"AnyMesh",value:Any)->None:
-    mesh._precice_vertex_ids=value #type:ignore[attr-defined]
+    mesh._precice_vertex_ids=value #type:ignore[attr-defined,union-attr] # dynamic on the mesh, see above
 
 # This is just a helper class which collects a few methods
 class _PyoomphPreciceAdapater:
@@ -118,40 +119,41 @@ class _PyoomphPreciceAdapater:
         root=ET.Element("precice-configuration")        
         
         data_kwargs_default={"waveform-degree":"1"}       
-        mesh_kwargs_default={}
+        mesh_kwargs_default:dict[str,str]={}
         mapping_kwargs_default={"mode":"nearest-neighbor","constraint":"consistent"}
         
-        mesh_read_data={}
-        mesh_write_data={}
-        precice_read_data={}
-        precice_write_data={}
-        provided_meshes=set()
-        received_meshes=set()
-        pyoomph_mesh_name_to_provide_name={}
+        # by pyoomph domain name, respectively by the preCICE mesh name it is provided as
+        mesh_read_data:dict[str,list[str]]={}
+        mesh_write_data:dict[str,list[str]]={}
+        precice_read_data:dict[str,list[str]]={}
+        precice_write_data:dict[str,list[str]]={}
+        provided_meshes:set[str]=set()
+        received_meshes:set[tuple[str,str,str]]=set() # (preCICE name, participant it comes from, pyoomph domain)
+        pyoomph_mesh_name_to_provide_name:dict[str,str]={}
         def recursive_scan_data(eqtree:EquationTree):
             if eqtree._equations is not None:
                 read_datas=eqtree._equations.get_equation_of_type(PreciceReadData,always_as_list=True)
                 for read_data in read_datas:                                 
                     read_data=cast(PreciceReadData,read_data)
                     meshname=eqtree.get_full_path().lstrip("/")
-                    for n,e in read_data.entries.items():                        
+                    for _pyoomph_name,precice_name in read_data.entries.items():                        
                         data_kwargs=data_kwargs_default.copy()
-                        dataentry=ET.SubElement(root,"data"+":"+("scalar" if read_data.vector_dim is None else "vector"),data_kwargs,name=e)
+                        dataentry=ET.SubElement(root,"data"+":"+("scalar" if read_data.vector_dim is None else "vector"),data_kwargs,name=precice_name)
                         if meshname not in mesh_read_data:
                             mesh_read_data[meshname]=[]                        
-                        mesh_read_data[meshname].append(e)                        
+                        mesh_read_data[meshname].append(precice_name)                        
                         
                 
                 write_datas=eqtree._equations.get_equation_of_type(PreciceWriteData,always_as_list=True)
                 for write_data in write_datas:                                 
                     write_data=cast(PreciceWriteData,write_data)
                     meshname=eqtree.get_full_path().lstrip("/")
-                    for n,e in write_data.entries.items():    
+                    for dataname,_expr in write_data.entries.items():    
                         data_kwargs=data_kwargs_default.copy()                    
-                        dataentry=ET.SubElement(root,"data"+":"+("scalar" if write_data.vector_dim is None else "vector"),data_kwargs,name=n)
+                        dataentry=ET.SubElement(root,"data"+":"+("scalar" if write_data.vector_dim is None else "vector"),data_kwargs,name=dataname)
                         if meshname not in mesh_write_data:
                             mesh_write_data[meshname]=[]
-                        mesh_write_data[meshname].append(n)
+                        mesh_write_data[meshname].append(dataname)
                         
             for path,subeqs in eqtree._children.items():
                 recursive_scan_data(subeqs)    
@@ -166,12 +168,12 @@ class _PyoomphPreciceAdapater:
                         meshdim=2 # Must be 2 for ODEs
                     else:
                         mesh=problem.get_mesh(meshname)
-                        n=next(mesh.nodes())
-                        meshdim=n.ndim()
+                        firstnode=next(mesh.nodes())
+                        meshdim=firstnode.ndim()
                         if meshdim<2:
                             meshdim=2
                     mesh_kwargs=mesh_kwargs_default.copy()
-                    meshentry=ET.SubElement(root,"mesh",name=mesh_provide.name,dimensions=str(meshdim), **mesh_kwargs)
+                    meshentry=ET.SubElement(root,"mesh",mesh_kwargs,name=mesh_provide.name,dimensions=str(meshdim))
                     use_data=[]
                     if meshname in mesh_read_data.keys():                        
                         use_data+=mesh_read_data[meshname]
@@ -182,8 +184,7 @@ class _PyoomphPreciceAdapater:
                     if len(use_data)==0:
                         raise RuntimeError("Provided Mesh "+meshname+" (preCICE name '"+str(mesh_provide.name)+"') has no data to read or write")
                     else:
-                        use_data=set(use_data)
-                        for ud in use_data:
+                        for ud in set(use_data):
                             ET.SubElement(meshentry,"use-data",name=ud)
                     provided_meshes.add(mesh_provide.name)
                     if meshname in pyoomph_mesh_name_to_provide_name.keys():
@@ -198,12 +199,12 @@ class _PyoomphPreciceAdapater:
                         meshdim=2 # Must be 2 for ODEs
                     else:
                         mesh=problem.get_mesh(meshname)
-                        n=next(mesh.nodes())
-                        meshdim=n.ndim()
+                        firstnode=next(mesh.nodes())
+                        meshdim=firstnode.ndim()
                         if meshdim<2:
                             meshdim=2
                     mesh_kwargs=mesh_kwargs_default.copy()
-                    meshentry=ET.SubElement(root,"mesh",name=mesh_receive.name,dimensions=str(meshdim), **mesh_kwargs)
+                    meshentry=ET.SubElement(root,"mesh",mesh_kwargs,name=mesh_receive.name,dimensions=str(meshdim))
                     use_data=[]
                     if meshname in mesh_read_data.keys():                        
                         use_data+=mesh_read_data[meshname]
@@ -212,8 +213,7 @@ class _PyoomphPreciceAdapater:
                     if len(use_data)==0:
                         raise RuntimeError("Received Mesh "+meshname+" (preCICE name '"+str(mesh_receive.name)+"') has no data to read or write")
                     else:
-                        use_data=set(use_data)
-                        for ud in use_data:
+                        for ud in set(use_data):
                             ET.SubElement(meshentry,"use-data",name=ud)
                     received_meshes.add((mesh_receive.name,mesh_receive.from_participant,meshname))
                     
@@ -229,7 +229,7 @@ class _PyoomphPreciceAdapater:
         for meshname in provided_meshes:
             ET.SubElement(participant,"provide-mesh",name=meshname)
         for entry in received_meshes:
-            ET.SubElement(participant,"receive-mesh",name=entry[0],**{"from":entry[1]})
+            ET.SubElement(participant,"receive-mesh",{"from":entry[1]},name=entry[0]) # "from" is a keyword, so it can only go in through the attribute dict
         for meshname in provided_meshes:
             for data in precice_write_data.get(meshname,[]):
                 ET.SubElement(participant,"write-data",name=data,mesh=meshname)
@@ -477,10 +477,10 @@ class PreciceWriteData(BaseEquations):
             raise ValueError("PreciceProvideMesh not set, please add it before PreciceWriteData")
         interface=mesh.get_problem()._precice_interface
         assert interface is not None
-        provider=self.get_combined_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
-        if len(provider)!=1:
+        providers=self.get_combined_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
+        if len(providers)!=1:
             raise ValueError("PreciceProvideMesh not set or set multiple times on this domain, please add a single one")
-        provider=provider[0]
+        provider=providers[0]
         assert isinstance(provider,PreciceProvideMesh)
         vertex_ids=_get_precice_vertex_ids(mesh)
                 
@@ -488,8 +488,9 @@ class PreciceWriteData(BaseEquations):
             for write_name in self.entries.keys():
                 pyoomph_name=self._sanitize_name(write_name)
                 
+                mynodes:"list[Node | None]"
                 if self.get_combined_equations()._is_ode():
-                    mynodes=[None]
+                    mynodes=[None] # an ODE contributes one value, not one per node
                 else:
                     assert not isinstance(mesh,ODEStorageMesh)
                     mynodes=[n for n in mesh.nodes()]
@@ -516,7 +517,7 @@ class PreciceWriteData(BaseEquations):
                                 buffer[_v2v(mesh)[n]]=n.value(index)
                 else:
                     assert not isinstance(mesh,ODEStorageMesh)
-                    buffer=[]
+                    rows:list[NPFloatArray]=[]
                     for vindex in range(self.vector_dim):
                         buffer_row=numpy.zeros([len(mynodes)])
                         component_name=pyoomph_name+"_"+["x","y","z"][vindex]
@@ -530,8 +531,8 @@ class PreciceWriteData(BaseEquations):
                             for i,n in enumerate(mynodes):
                                 assert n is not None
                                 buffer_row[_v2v(mesh)[n]]=n.value(index)
-                        buffer.append(buffer_row)
-                    buffer=numpy.array(buffer).T
+                        rows.append(buffer_row)
+                    buffer=numpy.array(rows).T
                                 
                 interface.write_data(provider.name, write_name, vertex_ids, buffer)                                    
         else:
@@ -551,13 +552,11 @@ class PreciceWriteData(BaseEquations):
                         interface.write_data(provider.name, write_name, vertex_ids[inds], buffer)
                 else:                    
                     directs=["x","y","z"]
-                    buffer=[]
+                    exprrows:list[NPFloatArray]=[]
                     for vindex in range(self.vector_dim):                    
                         expr_index=mesh.list_local_expressions().index("_precice_write_"+write_name+"_"+directs[vindex])
-                        buffer_row=mesh.evaluate_local_expression_at_nodes(expr_index,True,False)                
-                        buffer_row=numpy.array(buffer_row)                                        
-                        buffer.append(buffer_row)
-                    buffer=numpy.array(buffer).T                
+                        exprrows.append(numpy.array(mesh.evaluate_local_expression_at_nodes(expr_index,True,False)))
+                    buffer=numpy.array(exprrows).T                
                     interface.write_data(provider.name, write_name, vertex_ids[inds], buffer)
 
    
@@ -632,10 +631,10 @@ class PreciceReadData(BaseEquations):
             raise ValueError("PreciceProvideMesh not set, please add it before PreciceReadData")
         interface=mesh.get_problem()._precice_interface
         assert interface is not None
-        provider=self.get_combined_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
-        if len(provider)!=1:
+        providers=self.get_combined_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
+        if len(providers)!=1:
             raise ValueError("PreciceProvideMesh not set or set multiple times on this domain, please add a single one")
-        provider=provider[0]
+        provider=providers[0]
         assert isinstance(provider,PreciceProvideMesh)
         vertex_ids=_get_precice_vertex_ids(mesh)        
                 

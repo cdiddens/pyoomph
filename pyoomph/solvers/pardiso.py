@@ -102,6 +102,7 @@ def _try_to_find_lib(nam:str | list[str])->CDLL | None:
     return None
 
 
+MKLlib:"CDLL | None"
 if sys.platform == "linux":
     if "PYOOMPH_PARDISO_LIB" in os.environ.keys():
         MKLlib=CDLL(os.environ["PYOOMPH_PARDISO_LIB"])
@@ -295,6 +296,7 @@ class pardisoSolver(object):
 
         self.n = matA.shape[0]
 
+        self.dtype:"type[np.complexfloating[Any,Any]] | type[np.floating[Any]]"
         if mtype in [4, -4, 6, 13]:
             # Complex matrix
             self.dtype = np.complex128
@@ -759,7 +761,7 @@ class PardisoSolver(GenericLinearSystemSolver):
 
     def __init__(self, problem:"Problem",verbose:bool=False):
         super().__init__(problem)
-        self._current_pardiso = None
+        self._current_pardiso:"pardisoSolver | None" = None
         self.try_to_reuse_solver=False
         self.verbose=verbose
         self.iparm_override:dict[int,int]={}

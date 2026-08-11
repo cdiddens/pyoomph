@@ -55,16 +55,18 @@ class DropletGeometry:
         rivulet_instead: If True, the droplet is assumed to be a rivulet, i.e. it is just a 2d cross section of a 3d droplet. The volume is then the area of this cross section.
     """
     def __init__(self,*,volume:ExpressionNumOrNone=None,base_radius:ExpressionNumOrNone=None,contact_angle:ExpressionNumOrNone=None,apex_height:ExpressionNumOrNone=None,curv_radius:ExpressionNumOrNone=None,ambiguous_low_contact_angle:bool | None=None,evalf:bool=True,rivulet_instead:bool=False):
+        # All five are resolved from the two that were given before the constructor returns, so they
+        # are declared as the non-optional quantities they are from then on.
         #: The contact angle of the droplet
-        self.contact_angle:ExpressionNumOrNone=None #type:ignore
+        self.contact_angle:ExpressionOrNum=None #type:ignore
         #: The volume of the droplet
-        self.volume:ExpressionNumOrNone=None #type:ignore
+        self.volume:ExpressionOrNum=None #type:ignore
         #: The apex height of the droplet
-        self.apex_height:ExpressionNumOrNone=None #type:ignore
+        self.apex_height:ExpressionOrNum=None #type:ignore
         #: The base radius of the droplet
-        self.base_radius:ExpressionNumOrNone=None #type:ignore
+        self.base_radius:ExpressionOrNum=None #type:ignore
         #: The curvature radius of the droplet
-        self.curv_radius:ExpressionNumOrNone=None #type:ignore
+        self.curv_radius:ExpressionOrNum=None #type:ignore
         numgiven=0
         settings:dict[str,ExpressionNumOrNone]= {}
         self._sampled_gravity_shape:tuple[NPFloatArray, ExpressionOrNum] | None=None
@@ -99,6 +101,7 @@ class DropletGeometry:
         r0=self.base_radius
         h0=self.apex_height
         v0=self.volume
+        ca:ExpressionNumOrNone
         if evalf:
             ca=float(self.contact_angle) if self.contact_angle is not None else None
         else:
@@ -197,11 +200,8 @@ class DropletGeometry:
                 self.curv_radius=self.curv_radius.evalf()
 
         #print(self.contact_angle)
-        self.volume:ExpressionOrNum=self.volume
-        self.base_radius:ExpressionOrNum=self.base_radius
-        self.apex_height:ExpressionOrNum=self.apex_height
-        self.contact_angle:ExpressionOrNum=self.contact_angle
-        self.curv_radius:ExpressionOrNum=self.curv_radius
+        assert self.volume is not None and self.base_radius is not None and self.apex_height is not None
+        assert self.contact_angle is not None and self.curv_radius is not None
         self.surface_area:ExpressionOrNum=2*pi*self.curv_radius*self.apex_height
 
     @overload
@@ -364,10 +364,11 @@ class YoungLaplaceDropletShape(Problem):
 
         # Fixations are the two parameters (base_radius, apex_height, volume, (microscopic) contact_angle) that are kept constant
         # if not explicitly set, it will take over the ones you set in the constructor if the DropletGeometry object passed to drop_geom
+        self.fixations:set[str]
         if fixations is None:
             self.fixations=set(k for k,v in drop_geom._settings.items() if v is not None) #type:ignore
         else:
-            self.fixations=fixations
+            self.fixations=set(fixations)
 
         # To find the equilibirum shape, we will blend in the gravitational force by a parameter from 0 to 1
         self.force_factor = self.get_global_parameter("force_factor")
@@ -651,6 +652,7 @@ def get_analytical_popov_evaporation_rate(contact_angle:ExpressionOrNum,base_rad
     if lebedev_factor is not None:
         return se(lebedev_factor/base_radius*(c_sat-c_far)*Dvap)  
     else:
+        evap_by_tau:"_PrecachedPopovEvaporationRateByTau | _PopovEvaporationRateByTau"
         if precached:
             evap_by_tau=_PrecachedPopovEvaporationRateByTau(contact_angle,precache_points,precache_max_tau)
         else:

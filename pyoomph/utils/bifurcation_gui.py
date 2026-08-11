@@ -62,8 +62,8 @@ class BifurcationGUISolutionPoint:
         self.statefile=statefile
         self.outstep=outstep
         self.scoord:float=0
-        self._tangs={}
-        self._branch_switch_tangs=[]
+        self._tangs:dict[str,NPFloatArray]={}
+        self._branch_switch_tangs:list[Any]=[]
         self.tag=-1
         self.bifurcation_info:dict | None=None
 
@@ -223,14 +223,14 @@ class BifurcationGUI:
         self.selected_branch:BifurcationGUISolutionBranch | None=None
         self._last_ds=1
         self._fig:"matplotlib.figure.Figure | None"=None
-        self._tangs={}
+        self._tangs:dict[str,NPFloatArray]={}
         self._paramname=parameter
         self.parameter_range:list[float]=[]
         self._out_demo_video=False
         self._demo_video_step=0
         self._current_observable:str | None=None
         self._avail_observables:list[str]=[]
-        self._observable_funcs=None
+        self._observable_funcs:dict[str,Callable[...,float]] | None=None
         self._mode="al"
         self._move_point=False
         self.interpolated_splines=False
@@ -285,7 +285,7 @@ class BifurcationGUI:
     # By default, we allow to access all integral observables (not beginning with _) and all ODE dofs
     def evaluate_observables(self)->dict[str,float]:
         if self._observable_funcs is None:
-            obs={}
+            obs:dict[str,Callable[...,float]]={}
             def recursive_add_spatial_domains(eqtree:EquationTree):
                 if eqtree._equations is not None and eqtree.get_equations()._is_ode()==False:
                     ifuncs_list=eqtree.get_mesh().list_integral_functions()
@@ -307,9 +307,9 @@ class BifurcationGUI:
                         if not valn.startswith("_"):
                             obs[name+"/"+valn]=lambda domname=name,valn=valn: self.problem.get_ode(domname).get_value(valn,dimensional=True,as_float=True)
             recursive_add_spatial_domains(self.problem._equation_system)
-            self._observable_funcs=obs.copy()
-            if len(self._observable_funcs)==0:
+            if len(obs)==0:
                 raise RuntimeError("Could not identify an observable. Add ODEs or IntegralObservables to find them")
+            self._observable_funcs=obs.copy()
         return {n:func() for n,func in self._observable_funcs.items()}        
     
     def new_branch_from_state(self,statefile):
@@ -983,7 +983,7 @@ class BifurcationGUI:
             xn,yn=float(xn*pscale),float(yn*obsscale)
             # Quite demanding, but lets give it a try: Could be improved of course
             shortest_l=1e50
-            shortest_news=0
+            shortest_news:float=0
             # Add some additional contribution due penalized strong changes in direction
             def tangdot(x,y,index):
                 tdot=(x[index]-x[index-1])*(x[index+1]-x[index])+(y[index]-y[index-1])*(y[index+1]-y[index])
@@ -1020,6 +1020,7 @@ class BifurcationGUI:
 
     def multistep(self):
         fig=self._get_fig()
+        assert self._current_observable is not None
         xlim=fig.gca().get_xlim()
         ylim=fig.gca().get_ylim()
         xscale=fig.gca().get_xscale()

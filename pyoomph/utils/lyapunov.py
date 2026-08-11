@@ -213,7 +213,7 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         self.old_perturbation:list[NPFloatArray | None] | None=None # Storing the perturbation one step before (per-index None until it has been computed once)
         self.outputfile=None # Output file
         self.average_time=average_time
-        self.ringbuffer=deque()
+        self.ringbuffer:"deque[tuple[float,NPFloatArray]]"=deque() # (time, growth rates) of the averaging window
         self.N=N
         if self.N<=0:
             raise ValueError("N must be a positive integer")
@@ -320,7 +320,11 @@ class LyapunovExponentCalculatorBDF2(GenericProblemHooks):
         # this is essentially 1/(t2-t1)*log(norm(t2)/norm(t1)) by accumulating over the buffer and using the logarithmic addition rule
         if len(self.ringbuffer)>=2:       
             # Must skip the first entry in the sum, since for 2 elements, we only have one dt differeces     
-            ljap_estimate=sum(r[1] for i,r in enumerate(self.ringbuffer) if i>0)/(self.ringbuffer[-1][0]-self.ringbuffer[0][0])
+            accumulated=numpy.zeros_like(self.ringbuffer[-1][1])
+            for i,r in enumerate(self.ringbuffer):
+                if i>0:
+                    accumulated=accumulated+r[1]
+            ljap_estimate=accumulated/(self.ringbuffer[-1][0]-self.ringbuffer[0][0])
             if self.average_time is not None:
                 while self.ringbuffer[0][0]<t-self.average_time and len(self.ringbuffer)>1:
                     self.ringbuffer.popleft()

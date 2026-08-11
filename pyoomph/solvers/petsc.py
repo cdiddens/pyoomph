@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
 from .generic import GenericLinearSystemSolver, GenericEigenSolver, EigenSolverWhich,DefaultMatrixType, SolverError
+from ..meshes.mesh import AnyMesh
 import atexit
 import hashlib
 from collections import OrderedDict
@@ -149,10 +150,10 @@ class PETSCSolver(GenericLinearSystemSolver):
     def __init__(self, problem:"Problem"):
         super().__init__(problem)
         self._do_not_set_any_args:bool=False
-        self.petsc_mat=None
-        self.petsc_rhs=None
-        self.ksp=None
-        self.x=None
+        self.petsc_mat:Any=None
+        self.petsc_rhs:Any=None
+        self.ksp:Any=None
+        self.x:Any=None
 
         self._dofs_to_field_info=None
 
@@ -806,7 +807,7 @@ class PETSCSolver(GenericLinearSystemSolver):
         (see dev_docs/structural_assembly.md 7d A5); if a workflow alternates between more distinct
         patterns than the cache holds, raise ``problem._frozen_sparsity_cache_capacity``.
         """
-        res, n, _nzz, nrow_local, values, col_index, row_start=self.problem._assemble_residual_jacobian(which_one)
+        _res, n, _nzz, nrow_local, values, col_index, row_start=self.problem._assemble_residual_jacobian(which_one)
         res=PETSc.Mat().createAIJ(size=((nrow_local, n), (n, n),),csr=(row_start.astype(PETSc.IntType, copy=False), col_index.astype(PETSc.IntType, copy=False), values.astype(PETSc.ScalarType, copy=False)), comm=PETSc.COMM_WORLD) #type:ignore
         res.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False) #type:ignore
         # No shift(0.0) here: it is a no-op in PETSc (verified on every combination of matrix options,
@@ -1104,12 +1105,13 @@ class SlepcEigenSolver(GenericEigenSolver):
             self._require_parallel_capable()
             nrow_local,first_row,parallel=self._eigen_parallel_layout(n)
             rows_are_local=False
-            if not isinstance(Jin,DefaultMatrixType):
+            # the ignores are because DefaultMatrixType is scipy's csr_matrix, and scipy is untyped
+            if not isinstance(Jin,DefaultMatrixType): # type: ignore[misc]
                 Jin=Jin.tocsr()
-                assert isinstance(Jin,DefaultMatrixType)
-            if not isinstance(Min,DefaultMatrixType):
+                assert isinstance(Jin,DefaultMatrixType) # type: ignore[misc]
+            if not isinstance(Min,DefaultMatrixType): # type: ignore[misc]
                 Min=Min.tocsr()
-                assert isinstance(Min,DefaultMatrixType)
+                assert isinstance(Min,DefaultMatrixType) # type: ignore[misc]
 
             M=self._create_petsc_matrix(Min,n,nrow_local,first_row,parallel,rows_are_local)
             J=self._create_petsc_matrix(Jin,n,nrow_local,first_row,parallel,rows_are_local)
@@ -1265,26 +1267,14 @@ class SlepcEigenSolver(GenericEigenSolver):
                 if k.imag != 0.0: #type:ignore
                     #Print("LASTEV "+("None" if lastev is None else "NOTNONE"))
 
-                    if False:
-                        if lastev is not None:
-                            Print("DIFF  "+str(numpy.abs(lastev - numpy.conjugate(k))))
-                            if numpy.abs(lastev - numpy.conjugate(k)) == 0.0:
-                                Print("ADDING VI  "+str(vi.getArray()))
-                                evects.append(0+vi.getArray())
-                            #lastev = None
-                        else:
-                            evects.append(0+_vr)
-                            #lastev = k
-                        
-                    else:
-                        evects.append(0+_vr+self._vector_to_global_array(vi,parallel)*1j) #type:ignore
-                        Print(" %9f%+9f j %12g" % (k.real, k.imag, error))
+                    evects.append(0+_vr+self._vector_to_global_array(vi,parallel)*1j) #type:ignore
+                    Print(" %9f%+9f j %12g" % (k.real, k.imag, error))
                 else:
                     #lastev = None
                     evects.append(0+_vr) #type:ignore
                     Print(" %12f %12g" % (k.real, error)) #type:ignore
 
-        evals = numpy.array(evals) #type:ignore
+        evalarr = numpy.array(evals) #type:ignore
         if sort:
             if sort==True:
                 if target_set:
@@ -1292,16 +1282,16 @@ class SlepcEigenSolver(GenericEigenSolver):
                     # "if target is None: target=shift" block above never touches target in that case,
                     # so target is still guaranteed non-None here.
                     assert target is not None
-                    srt = numpy.argsort(numpy.abs(evals-complex(target)))[0:min(neval, len(evals))]
+                    srt = numpy.argsort(numpy.abs(evalarr-complex(target)))[0:min(neval, len(evalarr))]
                 else:
-                    srt = numpy.argsort(-evals)[0:min(neval, len(evals))] #type:ignore
+                    srt = numpy.argsort(-evalarr)[0:min(neval, len(evalarr))] #type:ignore
             else:
-                srt = numpy.argsort(numpy.array([sort(x) for x in evals]))[0:min(neval, len(evals))] #type:ignore
-            #print("SORTING",evals,srt)
-            evals = evals[srt] #type:ignore
-            evects = numpy.array(evects)[srt] #type:ignore
+                srt = numpy.argsort(numpy.array([sort(x) for x in evalarr]))[0:min(neval, len(evalarr))] #type:ignore
+            #print("SORTING",evalarr,srt)
+            evalarr = evalarr[srt] #type:ignore
+            evectarr = numpy.array(evects)[srt] #type:ignore
         else:
-            evects = numpy.array(evects) #type:ignore
+            evectarr = numpy.array(evects) #type:ignore
             
         if self.store_basis:
             last_basis_list:list[Any]=[]
@@ -1321,7 +1311,7 @@ class SlepcEigenSolver(GenericEigenSolver):
         J.destroy() #type:ignore    
         E.destroy() #type:ignore
         
-        return numpy.array(evals), numpy.array(evects),Jin,Min #type:ignore
+        return evalarr, evectarr,Jin,Min #type:ignore
 
     def get_PETSc(self)->Any:
         """
@@ -1355,7 +1345,7 @@ class FieldSplitPETSCSolver(PETSCSolver):
         self.default_field_split:int | None=None
         self._fieldsplit_names:dict[int,str]={}
         self.preconditioner_matrix_name=None
-        self._nullspaces=[]
+        self._nullspaces:list[Any]=[]
         
     def add_constant_nullspace(self,*dofnames):
         self._nullspaces.append(("constant",dofnames))
@@ -1407,11 +1397,11 @@ class FieldSplitPETSCSolver(PETSCSolver):
 
         
         for k in allkeys.keys():
-            mesh=self.problem.get_mesh(k,return_None_if_not_found=True)
-            if mesh is None:
-                mesh=self.problem.get_ode(k)
+            dofmesh:"AnyMesh | None"=self.problem.get_mesh(k,return_None_if_not_found=True)
+            if dofmesh is None:
+                dofmesh=self.problem.get_ode(k)
                
-            typesI, names = mesh.describe_global_dofs()
+            typesI, names = dofmesh.describe_global_dofs()
             name_look_up={v:i for i,v in enumerate(names)}
             types:NPIntArray = numpy.array(typesI,dtype=numpy.int32) #type:ignore
             if self._fieldsplit_map is None:
@@ -1516,7 +1506,7 @@ class FieldSplitPETSCSolver(PETSCSolver):
         self.define_options()
         super().setup_solver()
         self._fieldsplit_map=None
-        self._nullspaces=[]        
+        self._nullspaces:list[Any]=[]        
         self.define_field_split()
         self._perform_field_split()
         self.define_preconditioner()

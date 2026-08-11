@@ -184,7 +184,7 @@ if arglist.command == "cbrange":
    merged:dict[int,dict[str,list[float]]] = {}
    for d in rest:
       gl = glob(os.path.join(d, "cb_ranges_*.txt"))
-      gldict={}
+      gldict:dict[int,str]={}
       for entry in gl:
          num=int(entry.split("_")[-1].rstrip(".txt"))
          data:dict[str,list[float]]=json.load(open(entry,"r"))
@@ -209,7 +209,7 @@ elif arglist.command=="check":
    elif arglist.check_type not in checkopts:
       raise RuntimeError("Please specify 'check all', 'check solver', 'check eigen' or 'check compiler'")
    else:
-      check_types=[arglist.check_type]
+      check_types={arglist.check_type}
    for check_type in check_types:
       if check_type=="solver":
 
