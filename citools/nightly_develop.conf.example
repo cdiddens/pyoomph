@@ -16,6 +16,13 @@ REPO_DIR="$HOME/code/pyoomph"
 LOG_DIR="$HOME/pyoomph_nightly_logs"
 KEEP_RUNS=30
 
+# TMPDIR for the run, wiped at the start of each one. Defaults to $LOG_DIR/tmp, which keeps the
+# nightly off the machine's shared /tmp: where that is a tmpfs, a day of interactive work can fill
+# it, and the run then fails everywhere at once -- pytest with ENOSPC on tmp_path, mpirun with a
+# SIGBUS from PMIx -- while the report blames the branch. Point it at a disk-backed filesystem with
+# a few GB free; do not point it back at a tmpfs.
+NIGHTLY_TMPDIR=""
+
 # ------------------------------------------------------------------ environment ----
 #
 # cron starts with almost no environment: no conda, no venv, often no /usr/local/bin in

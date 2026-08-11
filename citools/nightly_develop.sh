@@ -48,6 +48,7 @@ trap cleanup EXIT
 REPO_DIR="$HOME/code/pyoomph"
 LOG_DIR="$HOME/pyoomph_nightly_logs"
 KEEP_RUNS=30
+NIGHTLY_TMPDIR=""   # scratch for the run; empty means $LOG_DIR/tmp (resolved after the config)
 ENV_SETUP=""
 PYTHON="python3"
 TIMEOUT_BUILD=7200
@@ -344,6 +345,22 @@ fi
 RUN_DIR="${PYOOMPH_NIGHTLY_RUN_DIR:-$LOG_DIR/$(date '+%Y%m%d-%H%M%S')}"
 mkdir -p "$RUN_DIR" || exit 1
 note "testing origin/$BRANCH ${REMOTE_SHA:0:12} (logs in $RUN_DIR)"
+
+# Scratch of our own, next to the logs, rather than the machine's /tmp. On 2026-08-11 /tmp here was
+# a 7.8 GB tmpfs that interactive work had filled to the last 52 kB before the run started; pytest
+# then reported 395 failures that were all ENOSPC on tmp_path, and every one of the 128 tutorial
+# scripts died in the mpirun pass with a SIGBUS out of pmix_shmem_segment_create -- what mmap does
+# when tmpfs cannot back the page. Nothing about develop was broken and the report said nothing
+# about disks. Cleared per run because pytest keeps its last three tmp_path trees itself, which is
+# how ~1 GB of them had accumulated. Safe to clear here: we hold the lock, so no other run is using
+# it. Only the small PMIx/ORTE session dirs follow TMPDIR -- vader's shared-memory segments live in
+# /dev/shm regardless -- so putting this on disk does not slow the MPI passes down.
+NIGHTLY_TMPDIR="${NIGHTLY_TMPDIR:-$LOG_DIR/tmp}"
+if rm -rf "$NIGHTLY_TMPDIR" && mkdir -p "$NIGHTLY_TMPDIR"; then
+    export TMPDIR="$NIGHTLY_TMPDIR" TMP="$NIGHTLY_TMPDIR" TEMP="$NIGHTLY_TMPDIR"
+else
+    note "cannot use NIGHTLY_TMPDIR=$NIGHTLY_TMPDIR -- falling back to ${TMPDIR:-/tmp}"
+fi
 
 REPORT="$RUN_DIR/report.txt"
 : >"$REPORT"
