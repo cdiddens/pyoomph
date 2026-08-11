@@ -532,13 +532,13 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
 
         res+=""" //Interaction table
             """        
-        for ii,i in enumerate(self._allgroups.keys()):           
-            for jj,j in enumerate(self._allgroups.keys()):
-                res+="const double interact_"+str(ii)+"_"+str(jj)+" = exp(-( ("+str(self._As[i][j])+")/T_in_K "
-                if self._Bs[i][j]!=0:
-                     res+="+ ("+str(self._Bs[i][j])+")"
-                if self._Cs[i][j]!=0:
-                     res+="+ ("+str(self._Cs[i][j])+")*T_in_K"
+        for ii,gi in enumerate(self._allgroups.keys()):           
+            for jj,gj in enumerate(self._allgroups.keys()):
+                res+="const double interact_"+str(ii)+"_"+str(jj)+" = exp(-( ("+str(self._As[gi][gj])+")/T_in_K "
+                if self._Bs[gi][gj]!=0:
+                     res+="+ ("+str(self._Bs[gi][gj])+")"
+                if self._Cs[gi][gj]!=0:
+                     res+="+ ("+str(self._Cs[gi][gj])+")*T_in_K"
                 res+=""" ));                
             """                
 
@@ -597,9 +597,9 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
             arg_list2[-1]=1-sum(arg_list2[:-1])
         else:
             T_in_K=self._constant_temperature_in_K
-            arg_list2=list(arg_list2)
-            arg_list2.append(1-sum(arg_list2))
-            arg_list2=numpy.array(arg_list2)
+            with_passive=list(arg_list2)
+            with_passive.append(1-sum(with_passive))
+            arg_list2=numpy.array(with_passive)
         
         for i,c in enumerate(self.argument_order_with_passive):
             V+=self.rs[i]*arg_list2[i] #type:ignore
@@ -633,8 +633,8 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
                 Xms[sgn] = counts[sgn] / denom #type:ignore
         
         Qs = self._group_Qs
-        Thetas = {n:0 for n in self._allgroups.keys()}
-        Qdenom = 0
+        Thetas:dict[str,ExpressionOrNum] = {n:0 for n in self._allgroups.keys()}
+        Qdenom:ExpressionOrNum = 0
         for sgn in self._allgroups.keys():
             Qdenom += Xms[sgn] * Qs[sgn]
         for sgn in self._allgroups.keys():
@@ -642,19 +642,19 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         
         
         # ln_residual
-        interaction_table = {}
-        for i in self._allgroups.keys():
-            interaction_table[i] = {}
-            for j in self._allgroups.keys():
-                interaction_table[i][j] = numpy.exp(-(self._As[i][j] / T_in_K + self._Bs[i][j] + self._Cs[i][j] * T_in_K))
+        interaction_table:dict[str,dict[str,ExpressionOrNum]] = {}
+        for gi in self._allgroups.keys():
+            interaction_table[gi] = {}
+            for gj in self._allgroups.keys():
+                interaction_table[gi][gj] = numpy.exp(-(self._As[gi][gj] / T_in_K + self._Bs[gi][gj] + self._Cs[gi][gj] * T_in_K))
         
         ln_residual=[]
-        denomM = {}
+        denomM:dict[str,ExpressionOrNum] = {}
         for m in self._allgroups.keys():
             for n in self._allgroups.keys():
                 denomM[m] = denomM.get(m,0)+ Thetas[n] * interaction_table[n][m] #type:ignore
         for i,c in enumerate(self.argument_order_with_passive):                                               
-            denomMpure = {}
+            denomMpure:dict[str,ExpressionOrNum] = {}
             for m in self._allgroups.keys():
                 for n in self._allgroups.keys():                    
                     denomMpure[m] = denomMpure.get(m,0) + self.thetas_pure[c][n] * interaction_table[n][m] #type:ignore            

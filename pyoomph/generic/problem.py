@@ -883,7 +883,7 @@ class Problem(_pyoomph.Problem):
         from ..equations.generic import GlobalLagrangeMultiplier
         from ..generic.codegen import var,testfunction
         from ..equations.generic import Scaling,TestScaling,InitialCondition
-        neweqs=GlobalLagrangeMultiplier(**{name:equation_contribution},only_for_stationary_solve=only_for_stationary_solve,set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve)
+        neweqs:BaseEquations=GlobalLagrangeMultiplier(**{name:equation_contribution},only_for_stationary_solve=only_for_stationary_solve,set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve)
         if scaling is not None:
             neweqs+=Scaling(**{name:scaling})
         if testscaling is not None:
@@ -1435,6 +1435,7 @@ class Problem(_pyoomph.Problem):
         """
         if csys is None:
             raise RuntimeError("Cannot set the problem coordinate system to None")
+        csysd:BaseCoordinateSystem
         if isinstance(csys,str):
             if csys=="axisymmetric":
                 csysd=axisymmetric
@@ -1469,7 +1470,7 @@ class Problem(_pyoomph.Problem):
         Returns:
             Scaling set by :py:meth:`~Problem.set_scaling` or None if ``none_if_not_set==True`` and the scale is not set.
         """
-        scale=s
+        scale:"str | ExpressionOrNum | None"=s
         while isinstance(scale,str):
             scale=self.scaling.get(scale,None if none_if_not_set else 1)
             if scale is None:
@@ -1828,7 +1829,7 @@ class Problem(_pyoomph.Problem):
 
 
     def init_output(self,redefined:bool=False):
-        cinfo=None
+        cinfo:dict[str,Any] | None=None
         if redefined:
             cinfo={"redefined":True}
         if self._runmode=="continue":
@@ -2502,7 +2503,7 @@ class Problem(_pyoomph.Problem):
             assert J.indptr.dtype==numpy.int32 and J.indices.dtype==numpy.int32 and J.data.dtype==numpy.float64 #type:ignore
             info.set_custom_jacobian(J.data,J.indices,J.indptr) #type:ignore
         else:
-            paramname=info.get_parameter_name()
+            paramname:str | None=info.get_parameter_name()
             if paramname=="":
                 paramname=None
             res=self._custom_assembler.get_residuals_and_jacobian(False,paramname)
@@ -3281,7 +3282,7 @@ class Problem(_pyoomph.Problem):
         for name, newmesh in self._meshdict.items():
             if name in old_mesh_dict.keys():
                 omesh=old_mesh_dict[name]
-                if isinstance(newmesh,MeshFromTemplateBase) and isinstance(omesh,MeshFromTemplateBase):
+                if isinstance(newmesh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)) and isinstance(omesh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d)):
                     interpolators[name]=interpolator(omesh,newmesh)
                 elif isinstance(newmesh,ODEStorageMesh) and isinstance(omesh,ODEStorageMesh):
                     interpolators[name]=ODEInterpolator(omesh,newmesh)
@@ -3747,8 +3748,8 @@ class Problem(_pyoomph.Problem):
             if not self.is_quiet():
                 print("BUILDING GLOBAL MESH FROM LIST")
             self.build_global_mesh()
-        for m in self._meshtemplate_list:
-            m._connect_opposite_elements(self._equation_system) 
+        for mt in self._meshtemplate_list:
+            mt._connect_opposite_elements(self._equation_system) 
 
 
 
@@ -4223,15 +4224,15 @@ class Problem(_pyoomph.Problem):
             else:
                 print("   cannot find a description...")
                 for ism in range(self.nsub_mesh()):
-                    mesh=self.mesh_pt(ism)
-                    assert isinstance(mesh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh,ODEStorageMesh))
-                    location, typ = self.search_dof_in_mesh(mesh, dofindex)
+                    submesh=self.mesh_pt(ism)
+                    assert isinstance(submesh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh,ODEStorageMesh))
+                    location, typ = self.search_dof_in_mesh(submesh, dofindex)
                     if location is not None and typ is not None:
-                        print("     but found in mesh "+mesh.get_full_name()+" at " + str(location) + ". Type: " + typ)
+                        print("     but found in mesh "+submesh.get_full_name()+" at " + str(location) + ". Type: " + typ)
                     else:
-                        print(" 		not found in mesh "+mesh.get_full_name())
+                        print(" 		not found in mesh "+submesh.get_full_name())
                     #print("DESCRIBE",self.describe_equation(dofindex))
-                    for e in mesh.elements():
+                    for e in submesh.elements():
                         for d in range(e.ndof()):
                             if e.eqn_number(d)==dofindex:
                                 print("				FOUND IN ELEMENT at "+str(e.get_Eulerian_midpoint())+" nnode "+str(e.nnode())+" ninternal "+str(e.ninternal_data())+" nexternal "+str(e.nexternal_data()))
@@ -4701,7 +4702,7 @@ class Problem(_pyoomph.Problem):
         """
         if not self.is_initialised():
             self.initialise()
-        t = self.time_pt().time()
+        t:ExpressionOrNum = self.time_pt().time()
         if not dimensional:
             return t
         ts = self.get_scaling("temporal")
@@ -5271,7 +5272,7 @@ class Problem(_pyoomph.Problem):
             if before_eigensolving is not None:
                 before_eigensolving(param0)
             if normal_mode_k is not None and not is_zero(normal_mode_k):
-                oldk:float | None=None
+                oldk=None
                 if param_is_normal_mode_k:
                     assert self._normal_mode_param_k is not None
                     oldk=self._normal_mode_param_k.value
@@ -5411,7 +5412,7 @@ class Problem(_pyoomph.Problem):
             return maxres
     
         if desired_initial_residuals is not None:
-            scale0=1
+            scale0=1.0
             res0=set_ic(scale0)
             scale1=scale0 # In case res0 already exactly equals desired_initial_residuals, neither while loop below runs
             if res0>desired_initial_residuals:
@@ -5437,7 +5438,7 @@ class Problem(_pyoomph.Problem):
             if scale0>scale1:
                 scale0,scale1=scale1,scale0
             # Now do a bisection between scale0 and scale1
-            scale=scale0
+            scale:float=scale0
             for _ in range(20):
                 scale=(scale0+scale1)/2
                 res=set_ic(scale)
@@ -5908,7 +5909,7 @@ class Problem(_pyoomph.Problem):
         self.time_stepper_pt().make_steady()
         if len(history_dofs)==0:
             raise ValueError("No history dofs provided")
-        knots=[]
+        knots:list[float]=[]
         # T_constraint_mode is the integer code _start_orbit_tracking expects; T_constraint itself
         # (the "plane"/"phase" string) must stay unmodified below - it is also passed straight
         # through to PeriodicOrbit(...), whose own T_constraint attribute is declared (and used
@@ -6046,7 +6047,7 @@ class Problem(_pyoomph.Problem):
             self.solve(**solve_kwargs)
             if check_collapse_to_stationary:
                 assert ncnt is not None and avg_dists0 is not None
-                avg_dists=0
+                avg_dists=0.0
                 i=0
                 for T in res.iterate_over_samples():
                     dofs=self.get_current_dofs()[0][:orbit_base_ndof]
@@ -6054,7 +6055,7 @@ class Problem(_pyoomph.Problem):
                     #print("adding",add,numpy.amax(numpy.absolute(numpy.array(history_dofs[i])-numpy.array(u0))))
                     avg_dists+=add
                     i+=1
-                avg_dists/=ncnt
+                avg_dists=avg_dists/ncnt
                 print("Average 'radius'^2 of the starting guess orbit:",avg_dists0)
                 print("Average 'radius'^2 of the solved guess orbit:",avg_dists)
                 if avg_dists<1e-10*avg_dists0:
@@ -6313,7 +6314,8 @@ class Problem(_pyoomph.Problem):
 
         if cartesian_k is not None and azimuthal_m is not None:
             raise RuntimeError("TODO: Both simultaneously")
-        elif cartesian_k is not None:
+        vlist:"list[int] | tuple[int] | int | list[float] | tuple[float] | float"
+        if cartesian_k is not None:
             param=self._normal_mode_param_k
             vlist=cartesian_k
         elif azimuthal_m is not None:
@@ -6353,7 +6355,7 @@ class Problem(_pyoomph.Problem):
                 alleigenvects:NPComplexArray = alleigenvects[srt,:] #type:ignore
                 minfo:NPAnyArray=numpy.array(minfoL)[srt] #type:ignore
             else:
-                minfo:NPAnyArray=numpy.array(minfoL)
+                minfo=numpy.array(minfoL)
 
             self._last_eigenvalues, self._last_eigenvectors = alleigenvals,alleigenvects
             if azimuthal_m is not None:
@@ -6449,7 +6451,7 @@ class Problem(_pyoomph.Problem):
                 
         self._bifurcation_reactivation_after_adaptation=None
         if isinstance(timestep,(list,tuple)):
-            lastres=0
+            lastres:ExpressionOrNum=0
             for t in timestep: #type:ignore
                 assert isinstance(t,(float,int,Expression)) or t is None
                 self._in_transient_newton_solve=True
@@ -6755,9 +6757,11 @@ class Problem(_pyoomph.Problem):
                 outstep = timestep
         TS = self.get_scaling("temporal")
         ndouttimes:NPFloatArray | None = None 
+        currentdt:ExpressionOrNum
         if not isinstance(outstep, bool):
             currentdt = min(float(timestep / TS), float(outstep / TS)) * TS
             if outstep_relative_to_zero:
+                dtout:ExpressionOrNum
                 if numouts:
                     dtout = (endtime - starttime) / numouts
                     soffs = math.ceil(float(starttime / dtout)) * dtout
@@ -7052,8 +7056,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         for pv in rang:
             deflator.clear_known_solutions()
             param_obj.value=pv
-            branches_to_remove=[]
-            branches_to_add={}
+            branches_to_remove:list[int]=[]
+            branches_to_add:dict[int,NPFloatArray]={}
             old_branches=active_branches.copy()
             for bi,dofs in active_branches.items():
                 self.set_current_dofs(dofs)
@@ -7370,8 +7374,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             if not self.is_quiet():
                 print("REBUILDING GLOBAL MESH")
             self.rebuild_global_mesh()
-        for m in self._meshtemplate_list:
-            m._connect_opposite_elements(self._equation_system) 
+        for mt in self._meshtemplate_list:
+            mt._connect_opposite_elements(self._equation_system) 
 
         self.rebuild_global_mesh_from_list(rebuild=True)
         self.reapply_boundary_conditions()
@@ -7542,8 +7546,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     if not self.is_quiet():
                         print("REBUILDING GLOBAL MESH")
                     self.rebuild_global_mesh()
-                for m in self._meshtemplate_list:
-                    m._connect_opposite_elements(self._equation_system) 
+                for mt in self._meshtemplate_list:
+                    mt._connect_opposite_elements(self._equation_system) 
 
                 self.rebuild_global_mesh_from_list(rebuild=True)
                 self.reapply_boundary_conditions()
@@ -7672,7 +7676,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             if len(dofderiv)==0:
                 write_conti=0
         else:
-            dofderiv=[]
+            dofderiv=numpy.zeros((0,))
         has_contidata=state.int_data(lambda : write_conti,lambda n : n)
         if has_contidata:
             dofderiv=state.numpy_data(lambda  : numpy.array(dofderiv),lambda e:e)

@@ -180,7 +180,9 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         eqs.calculate_error_overrides()
         eqs._set_current_codegen(oldcg)
 
-    @overload
+    # The C++ base has get_scaling(name, testscale:bool); "from_parent" (and the None it may then
+    # return) is an addition of this class, which no override can be compatible with.
+    @overload # type: ignore[override]
     def get_scaling(self, n:str,testscale:Literal[False]=...)->"Expression": ...
 
     @overload
@@ -189,7 +191,7 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
     @overload
     def get_scaling(self, n:str,testscale:Literal["from_parent"])->"Expression | None": ...
 
-    def get_scaling(self, n:str,testscale:bool | Literal["from_parent"]=False)->"Expression | None": #type:ignore
+    def get_scaling(self, n:str,testscale:bool | Literal["from_parent"]=False)->"Expression | None": # type: ignore[override]
 
         #print("OVERRIDE GET SCALING")
         eqs=self.get_equations()
@@ -1110,11 +1112,11 @@ class BaseEquations(_pyoomph.Equations):
 
         except:
             if master._is_ode(): # ODEs might still be accessible
-                tags=expression.op(1)
+                tagexpr=expression.op(1)
                 print(dir(master))
                 print("CODE",master._code)
                 print("PROBLEM", master._problem)
-                print("TAGS", tags)
+                print("TAGS", tagexpr)
                 raise RuntimeError("TODO: Expand tags, see what ODE is meant by domain tag and resolve the additional test function. You could also have a typo in the name of "+str(name)+", i.e. that this field does not exist in this ODE")
             else:
                 raise RuntimeError("Should not end up here")
@@ -1123,10 +1125,7 @@ class BaseEquations(_pyoomph.Equations):
         if _pyoomph.get_verbosity_flag() != 0:
                 print("Expanding additional field ", name, dimensional,"self/in_domain",cg.get_full_name(),in_domain.get_full_name())
         
-        if dimensional:
-            scale = self.get_scaling(name)
-        else:
-            scale = 1
+        scale:ExpressionOrNum = self.get_scaling(name) if dimensional else 1
 
         only_base_mode=False
         only_perturbation_mode=False
@@ -1242,18 +1241,15 @@ class BaseEquations(_pyoomph.Equations):
             while bulk is not None:
                 bulkeq=bulk.get_equations()
                 if name in bulkeq._additional_fields_also_on_interface.keys():
-                    expr = bulkeq._additional_fields_also_on_interface[name]
-                    expr=evaluate_in_domain(expr,self.get_current_code_generator())
+                    raw = bulkeq._additional_fields_also_on_interface[name]
+                    expr:Expression=evaluate_in_domain(raw if isinstance(raw,Expression) else Expression(raw),self.get_current_code_generator())
                     if only_base_mode:
                         assert isinstance(axibreakcsys,AxisymmetryBreakingCoordinateSystem)
                         expr= axibreakcsys.map_to_zero_epsilon(expr)
                     elif only_perturbation_mode:
                         assert isinstance(axibreakcsys,AxisymmetryBreakingCoordinateSystem)
                         expr= axibreakcsys.map_to_first_order_epsilon(expr,with_epsilon=True)
-                    if dimensional:
-                        scale = bulk.get_scaling(name)
-                    else:
-                        scale = 1
+                    scale = bulk.get_scaling(name) if dimensional else 1
                     return scale * expr
                 bulk=bulk.get_parent_domain()
         if name == "mesh_y" and self.get_nodal_dimension() < 2:
@@ -1276,11 +1272,11 @@ class BaseEquations(_pyoomph.Equations):
             cg = master._assert_codegen()
         except:
             if master._is_ode(): # ODEs might still be accessible
-                tags=expression.op(1)
+                tagexpr=expression.op(1)
                 print(dir(master))
                 print("CODE",master._code)
                 print("PROBLEM", master._problem)
-                print("TAGS", tags)
+                print("TAGS", tagexpr)
                 raise RuntimeError("TODO: Expand tags, see what ODE is meant by domain tag and resolve the additional test function. You could also have a typo in the name of "+str(name)+", i.e. that this field does not exist in this ODE")
             raise RuntimeError("Cannot expand (additional) test function '"+str(name)+"' to expand "+str(expression)+".\n Probably, you want to access a spatial domain, which is not accessible (i.e. neither parent(/parent) domain, nor opposite side of interface or parent of that")
         if name == "mesh":
@@ -1297,20 +1293,16 @@ class BaseEquations(_pyoomph.Equations):
             else:
                 raise RuntimeError("Cannot expand the testfunction " + str(name) + " with dimension " + str(dim))
         elif name in self._additional_testfuncs.keys():
-            res=self._additional_testfuncs[name]
-            if not isinstance(res,Expression):
-                res=Expression(res)
-            return evaluate_in_domain(res,cg)
+            tfres=self._additional_testfuncs[name]
+            return evaluate_in_domain(tfres if isinstance(tfres,Expression) else Expression(tfres),cg)
         elif (not isinstance(self, ODEEquations)) and self.get_parent_domain() is not None:
             bulk = self.get_parent_domain()
             while bulk is not None:
                # print("INPUT",expression)
                 bulkeq=bulk.get_equations()
                 if name in bulkeq._additional_testfuncs_also_on_interface.keys():
-                    tf=bulkeq._additional_testfuncs_also_on_interface[name]
-                    tf=evaluate_in_domain(tf,self.get_current_code_generator())
-                    #print(tf)
-                    return tf
+                    rawtf=bulkeq._additional_testfuncs_also_on_interface[name]
+                    return evaluate_in_domain(rawtf if isinstance(rawtf,Expression) else Expression(rawtf),self.get_current_code_generator())
                 bulk=bulk.get_parent_domain()
             raise RuntimeError("Cannot expand the testfunction "+ str(name))
         else:
@@ -2158,8 +2150,8 @@ class EquationTree:
             res += "--" + pth
         else:
             res += pth
-        for k, v in self._children.items():
-            res = res + "\n" + v.numerical_factors_to_string(indent + (" " * 2 if pth != "/" else "") + "|")
+        for k, child in self._children.items():
+            res = res + "\n" + child.numerical_factors_to_string(indent + (" " * 2 if pth != "/" else "") + "|")
         return res
 
     def _tree_string(self,indent:str="") -> str:
@@ -2281,6 +2273,7 @@ class Equations(BaseEquations):
         Returns:
             The bulk domain at the opposite side.
         """
+        opp_inter:"FiniteElementCodeGenerator | None"
         if raise_error_if_none:
             opp_inter=self.get_opposite_side_of_interface(raise_error_if_none=True)
         else:
@@ -2324,7 +2317,7 @@ class Equations(BaseEquations):
             if coordinate_space not in ["C2TB", "C2", "C1TB", "C1"]:
                 raise ValueError("Can only set the coordinate space to either C2TB, C2, C1TB or C1")
         rcomponent="_x"
-        zcomponent="_y"
+        zcomponent:str | None="_y"
         csys=self.get_coordinate_system()
         if isinstance(csys,AxisymmetricCoordinateSystem):
             if csys.use_x_as_symmetry_axis:
@@ -2437,7 +2430,7 @@ class Equations(BaseEquations):
         # Vector fields are pinned by default for |m|=1 and |m|>=2
         if space!="D0":
             rcomponent="_x"
-            zcomponent="_y"
+            zcomponent:str | None="_y"
             csys=self.get_coordinate_system()
             if isinstance(csys,AxisymmetricCoordinateSystem):
                 if csys.use_x_as_symmetry_axis:
@@ -3131,7 +3124,7 @@ class InterfaceEquations(Equations):
 
         def expand_depvars(depvars:str | list[str] | tuple[str, ...],msh:"AnySpatialMesh | None"):
             depvars=[depvars] if isinstance(depvars,str) else depvars
-            depvars_expanded=[]
+            depvars_expanded:list[str]=[]
             if len(depvars)==0:
                 return depvars_expanded
             assert msh is not None

@@ -185,8 +185,8 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
     def setup_scaling(self, ieqs:InterfaceEquations):
         if self.rates_as_fields:
             comps = self.identify_transfer_components()
-            kwargs = {}
-            tkwargs = {}
+            kwargs:dict[str,"ExpressionOrNum | str"] = {}
+            tkwargs:dict[str,"ExpressionOrNum | str"] = {}
             for ec in comps:
                 kwargs[self.get_mass_transfer_name(ec)] = "mass_transfer_rate"
                 if self.test_scale is not None:
@@ -299,10 +299,11 @@ class DifferenceDrivenMassTransferModel(FluidPropMassTransferModel):
     def __init__(self,props_inside:"MaterialProperties",props_outside:"MaterialProperties"):
         super(DifferenceDrivenMassTransferModel, self).__init__(props_inside,props_outside)
         #: The factor of proportionality between the driving force and the mass transfer rate.
-        self.default_mass_flux_coefficient=100*kilogram/(meter**2*second)
+        self.default_mass_flux_coefficient:ExpressionOrNum=100*kilogram/(meter**2*second)
 
     def get_mass_flux_coeff_for(self,name:str)->Expression:
-        return self.default_mass_flux_coefficient
+        # a plain number may be given as the coefficient
+        return self.default_mass_flux_coefficient if isinstance(self.default_mass_flux_coefficient,Expression) else Expression(self.default_mass_flux_coefficient)
 
     @abstractmethod
     def get_driving_nondimensional_difference_for(self,name:str)->Expression:
@@ -325,8 +326,8 @@ class LagrangeMultiplierMassTransferModel(FluidPropMassTransferModel):
 
     @abstractmethod
     def get_equilibrium_expression(self,name:str)->Expression:
+        # Must be overridden: returns (current - desired)
         raise RuntimeError("IMPLEMENT!")
-        return curr-des #Must be overriden: Returns (current-desired)
 
     def define_residuals(self,ieqs:InterfaceEquations):
         evaps = self.identify_transfer_components()
@@ -340,14 +341,16 @@ class LagrangeMultiplierMassTransferModel(FluidPropMassTransferModel):
         return var("masstrans_"+name)
 
 class LagrangeMultiplierMassTransferModelLiquidGas(LagrangeMultiplierMassTransferModel):
+    # Narrower than the base's plain MaterialProperties, which is what the constructor insists on
+    props_inside:"PureLiquidProperties | MixtureLiquidProperties" # type: ignore[assignment]
+    props_outside:"PureGasProperties | MixtureGasProperties" # type: ignore[assignment]
+
     def __init__(self,props_inside:"PureLiquidProperties | MixtureLiquidProperties",props_outside:"PureGasProperties | MixtureGasProperties"):
         super(LagrangeMultiplierMassTransferModelLiquidGas, self).__init__(props_inside,props_outside)        
         if props_inside.state_of_matter!="liquid":
             raise RuntimeError("This mass transfer model only works for liquids as inner phase")
         if props_outside.state_of_matter!="gas":
             raise RuntimeError("This mass transfer model only works for gases as outer phase")
-        self.props_inside=cast("PureLiquidProperties | MixtureLiquidProperties",self.props_inside)
-        self.props_outside=cast("PureGasProperties | MixtureGasProperties",self.props_outside)
 
 
     def get_mass_transfer_space(self, name:str,ieqs:InterfaceEquations) -> FiniteElementSpaceEnum:
@@ -403,14 +406,16 @@ class DifferenceDrivenMassTransferModelLiquidGas(DifferenceDrivenMassTransferMod
         props_inside: The properties of the liquid phase
         props_outside: The properties of the gas phase        
     """
+    # Narrower than the base's plain MaterialProperties, which is what the constructor insists on
+    props_inside:"PureLiquidProperties | MixtureLiquidProperties" # type: ignore[assignment]
+    props_outside:"PureGasProperties | MixtureGasProperties" # type: ignore[assignment]
+
     def __init__(self,props_inside:"PureLiquidProperties | MixtureLiquidProperties",props_outside:"PureGasProperties | MixtureGasProperties"):
         super(DifferenceDrivenMassTransferModelLiquidGas, self).__init__(props_inside,props_outside)
         if props_inside.state_of_matter!="liquid":
             raise RuntimeError("This mass transfer model only works for liquids as inner phase")
         if props_outside.state_of_matter!="gas":
             raise RuntimeError("This mass transfer model only works for gases as outer phase")
-        self.props_inside=cast("PureLiquidProperties | MixtureLiquidProperties",self.props_inside)
-        self.props_outside=cast("PureGasProperties | MixtureGasProperties",self.props_outside)
 
     def identify_transfer_components(self) -> set[str]:
         possible=super(DifferenceDrivenMassTransferModelLiquidGas, self).identify_transfer_components()
@@ -481,11 +486,13 @@ class HertzKnudsenSchrageMassTransferModel(DifferenceDrivenMassTransferModelLiqu
             raise RuntimeError("sticking_coefficient must be either an expression or a dict mapping component names to expressions")
 
 class LLEMassTransferModel(DifferenceDrivenMassTransferModel):
+    # Narrower than the base's plain MaterialProperties, which is what the constructor insists on
+    props_inside:MixtureLiquidProperties # type: ignore[assignment]
+    props_outside:MixtureLiquidProperties # type: ignore[assignment]
+
     def __init__(self, props_inside: MixtureLiquidProperties, props_outside: MixtureLiquidProperties,*,unifac_model:str | None=None,FD_epsilon:float | None=1e-9,mass_transfer_factor:ExpressionNumOrNone | None=None, use_log_approach: bool = False, reference_molar_mass:ExpressionNumOrNone=None):
         super().__init__(props_inside, props_outside)
         from .activity import UNIFACMultiReturnExpression
-        self.props_inside=cast(MixtureLiquidProperties,self.props_inside)
-        self.props_outside=cast(MixtureLiquidProperties,self.props_outside)
         if self.props_inside.components != self.props_outside.components:
             raise RuntimeError("Only works for the same components inside and outside")
         if unifac_model is None:

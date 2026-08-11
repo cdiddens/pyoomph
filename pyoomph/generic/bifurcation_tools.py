@@ -62,7 +62,7 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
     if isinstance(param,str):
         param=problem.get_global_parameter(param)
 
-    eigensolve_kwargs={}
+    eigensolve_kwargs:dict[str,Any]={}
         
     
     u=problem.get_current_dofs()[0]
@@ -458,11 +458,11 @@ DofAugmentationSpecifications=_pyoomph.DofAugmentations
 
 class MultiAssembleRequest:
     def __init__(self,problem:Problem):
-        self._what=[]
-        self._contributions=[]
-        self._hessian_vectors=[]
-        self._hessian_vector_indices=[]
-        self._parameters=[]
+        self._what:list[str]=[]
+        self._contributions:list[str]=[]
+        self._hessian_vectors:list[Any]=[]
+        self._hessian_vector_indices:list[int]=[]
+        self._parameters:list[str]=[] # by name: the C++ multiassembly takes strings
         self.problem=problem
         
     def _resolve_hessian_vector_index(self,V):
@@ -490,19 +490,19 @@ class MultiAssembleRequest:
     def dRdp(self,parameter:str | GlobalParameter,contribution=""):
         self._what.append("dresiduals_dparameter")
         self._contributions.append(contribution)
-        self._parameters.append(parameter)
+        self._parameters.append(parameter if isinstance(parameter,str) else parameter.get_name())
         return self
     
     def dJdp(self,parameter:str | GlobalParameter,contribution=""):
         self._what.append("djacobian_dparameter")
         self._contributions.append(contribution)
-        self._parameters.append(parameter)
+        self._parameters.append(parameter if isinstance(parameter,str) else parameter.get_name())
         return self
         
     def dMdp(self,parameter:str | GlobalParameter,contribution=""):
         self._what.append("dmass_matrix_dparameter")
         self._contributions.append(contribution)
-        self._parameters.append(parameter)
+        self._parameters.append(parameter if isinstance(parameter,str) else parameter.get_name())
         return self
         
     def dJdU(self,vector:NPFloatArray,contribution="",transposed=False):
@@ -739,7 +739,7 @@ class FoldTracker(CustomBifurcationTracker):
         dofs.add_vector(self.V0*self.eigenscale)
         dofs.add_parameter(self.parameter)
 
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
         V,=self.get_augmented_dofs().split(startindex=1,endindex=2) # Get the eigenvector solution
         # Request the residuals and Jacobian of the non-augmented system
         assembly=self.start_multiassembly()
@@ -811,7 +811,7 @@ class PitchForkTracker(CustomBifurcationTracker):
         dofs.add_parameter(self.parameter)
         dofs.add_scalar(0) # slack variable
         
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
         U,V,p,eps=self.get_augmented_dofs().split(startindex=0) # Get the eigenvector solution and the slack variable
         eps=eps[0] # Get the scalar value of the slack variable (split dofs are all vectors)
         # Request the residuals and Jacobian of the non-augmented system
@@ -887,7 +887,7 @@ class HopfTracker(CustomBifurcationTracker):
         dofs.add_parameter(self.parameter)
         dofs.add_scalar(self.omega)
         
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
         Vr,Vi,p,omega=self.get_augmented_dofs().split(startindex=1) # Get all the augmented dofs
         omega=omega[0] # Get the scalar value of the frequency variable (split dofs are all vectors)        
         assembly=self.start_multiassembly()
@@ -1085,7 +1085,7 @@ class NormalModeBifurcationTracker(_NormalModeBifurcationTrackerBase):
         
 
                 
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # see the other implementations
         nl=self.nonlinear_length_constraint
         if not self.has_imag:
             Vr,p=self.get_augmented_dofs().split(startindex=1)
@@ -1191,7 +1191,7 @@ class RealEigenbranchTracker(CustomBifurcationTracker):
         dofs.add_vector(self.eigenvector*self.eigenscale)
         dofs.add_scalar(self.lambda_Re0)
         
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
         V,lam=self.get_augmented_dofs().split(startindex=1)
         lam=lam[0]
         assembly=self.start_multiassembly()
@@ -1246,7 +1246,7 @@ class ComplexEigenbranchTracker(CustomBifurcationTracker):
         dofs.add_scalar(self.lambda_Re0)
         dofs.add_scalar(self.omega0)
         
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
         Vr,Vi,lam,omega=self.get_augmented_dofs().split(startindex=1)
         lam,omega=lam[0],omega[0]
         assembly=self.start_multiassembly()
@@ -1291,7 +1291,7 @@ class NormalModeEigenbranchTracker(_NormalModeBifurcationTrackerBase):
         super().__init__(problem,eigenvector,azimuthal_m,cartesian_k,eigenscale,nonlinear_length_constraint)
         self.parameter=None # No parameter means essentially take the real part as adjustable parameter
                 
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # see the other implementations
         nl=self.nonlinear_length_constraint
         if not self.has_imag:
             Vr,lamb=self.get_augmented_dofs().split(startindex=1)
@@ -1409,7 +1409,7 @@ class ResidualJacobianParameterDerivativeHandler(AugmentedAssemblyHandler):
     def define_augmented_dofs(self, dofs):
         pass
     
-    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]:               
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # the base's overloads narrow the return by require_jacobian; every implementation here is the general one
         if dparameter is None:
             raise ValueError("No parameter specified")
         assm=self.start_multiassembly()
@@ -1739,7 +1739,7 @@ class NormalFormCalculator:
             print("omega",omega)
             print("a",a)
             print("b",b)
-            res={}
+            res:dict[str,Any]={}
             res["type"]="hopf"
             psign=1 if numpy.real(a)/numpy.real(b)<0 else -1
             res["psign"]=psign
