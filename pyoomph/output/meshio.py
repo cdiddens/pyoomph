@@ -42,7 +42,7 @@ from ..generic.mpi import has_mpi
 if has_mpi():
 	from mpi4py import MPI
 else:
-	MPI = None
+	MPI = None # type: ignore[assignment] # only used behind has_mpi() checks
 
 # Hack, because the meshio version does not have a meshio._mesh.topological_dimension["wedge15"] set!
 class Wedge15Cellblock(meshio.CellBlock):
@@ -78,14 +78,16 @@ def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:int | list[int] 
 		x:NPFloatArray=nodal_data[:,field_names["coordinate_x"]] 
 	else:
 		x:NPFloatArray = numpy.zeros(len(nodal_data)) #type:ignore	
+	y:NPFloatArray
+	z:NPFloatArray
 	if "coordinate_y" in field_names.keys():
-		y:NPFloatArray = nodal_data[:, field_names["coordinate_y"]] #type:ignore
+		y = nodal_data[:, field_names["coordinate_y"]] #type:ignore
 	else:
-		y:NPFloatArray = 0*x
+		y = 0*x
 	if "coordinate_z" in field_names.keys():
-		z:NPFloatArray = nodal_data[:, field_names["coordinate_z"]] #type:ignore
+		z = nodal_data[:, field_names["coordinate_z"]] #type:ignore
 	else:
-		z:NPFloatArray = 0*x
+		z = 0*x
 	field_data={}
 	outfields=cache.get_default_output_fields(rem_lagrangian=hide_lagrangian,rem_underscore=hide_underscore)
 
@@ -357,14 +359,16 @@ class _MeshFileOutput(_BaseNumpyOutput):
 				x:NPFloatArray=nodal_data[:,field_names["coordinate_x"]] 
 			else:
 				x:NPFloatArray = numpy.zeros(len(nodal_data)) #type:ignore	
+			y:NPFloatArray
+			z:NPFloatArray
 			if "coordinate_y" in field_names.keys():
-				y:NPFloatArray = nodal_data[:, field_names["coordinate_y"]] #type:ignore
+				y = nodal_data[:, field_names["coordinate_y"]] #type:ignore
 			else:
-				y:NPFloatArray = 0*x
+				y = 0*x
 			if "coordinate_z" in field_names.keys():
-				z:NPFloatArray = nodal_data[:, field_names["coordinate_z"]] #type:ignore
+				z = nodal_data[:, field_names["coordinate_z"]] #type:ignore
 			else:
-				z:NPFloatArray = 0*x
+				z = 0*x
 			field_data={}
 			outfields=cache.get_default_output_fields(rem_lagrangian=self.hide_lagrangian,rem_underscore=self.hide_underscore)
 
@@ -396,16 +400,19 @@ class _MeshFileOutput(_BaseNumpyOutput):
 							vector_fields_written.add(vector_name)
 						continue
 
-					field_data[n]=cache.get_data(n)
-					#print("MESHIO FIELDADTA",n,field_data[n])
-					if field_data[n] is None:
-						del field_data[n]
+					ndata=cache.get_data(n)
+					#print("MESHIO FIELDADTA",n,ndata)
+					if ndata is not None:
+						field_data[n]=ndata
 					if additional_eigenvectors is not None:
 						for eigenv in additional_eigenvectors:
 							re_name="EIGEN_"+str(eigenv)+"_REAL_"+n
 							im_name = "EIGEN_" + str(eigenv) + "_IMAG_"+n
-							field_data[re_name] = cache.get_data(n,additional_eigenvector=eigenv,eigen_real_imag=0)
-							field_data[im_name] = cache.get_data(n, additional_eigenvector=eigenv, eigen_real_imag=1)
+							re_data=cache.get_data(n,additional_eigenvector=eigenv,eigen_real_imag=0)
+							im_data=cache.get_data(n, additional_eigenvector=eigenv, eigen_real_imag=1)
+							assert re_data is not None and im_data is not None
+							field_data[re_name] = re_data
+							field_data[im_name] = im_data
 			
 			if cache.discontinuous:
 				for k,v in elemental_fields.items():

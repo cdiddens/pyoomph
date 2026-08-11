@@ -294,9 +294,9 @@ class PlotTransformRotate90(PlotTransform):
 
 
 class MatplotLibPart:
-    mode=None
-    zindex=0
-    preprocess_order=0
+    mode:str | None=None # the name the subclass registers under
+    zindex:float=0
+    preprocess_order:float=0
     mode_to_class:dict[str,type["MatplotLibPart"]]={}
     def __init__(self,plotter:"MatplotlibPlotter"):
         self.plotter=plotter
@@ -594,9 +594,11 @@ class MatplotlibTriangulationBased(MatplotLibPartWithMeshData):
     def get_visible_data_range(self,data:NPFloatArray | None=None)->tuple[float | None,float | None]:
         if data is None:
             data=self.data
+        mi:float
+        ma:float
         if self.range_mask_func is not None:
-            mi:float=numpy.nanmax(data) #type:ignore
-            ma:float = numpy.nanmin(data) #type:ignore
+            mi=numpy.nanmax(data) #type:ignore
+            ma=numpy.nanmin(data) #type:ignore
             coordinates = self.mshcache.get_coordinates(lagrangian=self.use_lagrangian_coordinates)
             d = self.mshcache.get_data(self.field)
             assert d is not None
@@ -616,8 +618,6 @@ class MatplotlibTriangulationBased(MatplotLibPartWithMeshData):
             if not numpy.any(self.ptsinside): #type:ignore
                 return None,None #type:ignore
             #print(self.ptsinside)
-            mi:float
-            ma:float
             mi,ma=numpy.nanmin(data[self.ptsinside]),numpy.nanmax(data[self.ptsinside]) #type:ignore
             for idata in self.interpdata:
                 interp:float = data[idata[0]] * (1.0 - idata[2]) + data[idata[1]] * (idata[2]) #type:ignore
@@ -1433,8 +1433,8 @@ class MatplotLibOverlayBase(MatplotLibPart):
     textcolor="black"
     #: Text size
     textsize=12.0
-    horizontalalign=None
-    verticalalign=None
+    horizontalalign:str | None=None
+    verticalalign:str | None=None
     #: Additional shift in x-direction
     xshift=0.0
     #: Additional shift in y-direction
@@ -1757,7 +1757,7 @@ class MatplotlibText(MatplotLibOverlayBase):
     """
     mode="text"
     zindex = 10
-    bbox = None
+    bbox:dict[str,Any] | None = None
     weight = "normal"
     color="black"
 
@@ -2105,7 +2105,7 @@ class MatplotLibAxes(MatplotLibOverlayBase):
         self.invisible = False
         self.xfactor=1.0
         self.yfactor=1.0
-        self._linelist=[]
+        self._linelist:list[Any]=[]
 
     def add_to_plot(self):
         if self.invisible:
@@ -2278,7 +2278,7 @@ class MatplotLibTracers(MatplotLibPart):
         super(MatplotLibTracers, self).__init__(plotter)
         self.tracer_name:str | None = None
         self.transform:PlotTransform | None=None
-        self.mesh=None
+        self.mesh:"AnySpatialMesh | None"=None
 
     def set_tracer_data(self,name:str,mesh:AnySpatialMesh,transform:PlotTransform | None):
         self.tracer_name=name
@@ -2365,7 +2365,7 @@ class MatplotLibTracers(MatplotLibPart):
 class MatplotLibImage(MatplotLibOverlayBase):
     mode="image"
     image:str | None=None
-    pixel_per_spatial_unit=None
+    pixel_per_spatial_unit:float | None=None
     cmap='gray'
     verticalalign="center"
     horizontalalign = "center"
@@ -2739,12 +2739,12 @@ class MatplotlibPlotter(BasePlotter):
         return res
 
     def has_bulk_field(self,field:str,problem_name:str="") -> bool:
-        msh = field.split("/")
-        if len(msh) < 2:
+        parts = field.split("/")
+        if len(parts) < 2:
             return False
         else:
-            field=msh[-1]
-            mshname="/".join(msh[0:-1])
+            field=parts[-1]
+            mshname="/".join(parts[0:-1])
         msh=self.get_problem(problem_name=problem_name).get_mesh(mshname,return_None_if_not_found=True)
         if msh is None:
             return False
@@ -2762,11 +2762,11 @@ class MatplotlibPlotter(BasePlotter):
         return True
 
     def has_field(self,field:str,problem_name:str="")->bool:
-        msh = field.split("/")        
-        if len(msh)<=1:
+        parts = field.split("/")        
+        if len(parts)<=1:
             return False
-        field=msh[-1]
-        mshname="/".join(msh[0:-1])
+        field=parts[-1]
+        mshname="/".join(parts[0:-1])
         msh=self.get_problem(problem_name=problem_name).get_mesh(mshname,return_None_if_not_found=True)
         if msh is None:
             return False
@@ -2815,7 +2815,7 @@ class MatplotlibPlotter(BasePlotter):
         """
    
         
-        allkwargs={"linecolor":linecolor,"linewidths":linewidths,"colorbar":colorbar,"arrowkey":arrowkey,"arrowdensity":arrowdensity,"arrowstyle":arrowstyle,"levels":levels,"datamap":datamap,"arrowlength":arrowlength,"axes":axes,"problem_name":problem_name}
+        allkwargs:dict[str,Any]={"linecolor":linecolor,"linewidths":linewidths,"colorbar":colorbar,"arrowkey":arrowkey,"arrowdensity":arrowdensity,"arrowstyle":arrowstyle,"levels":levels,"datamap":datamap,"arrowlength":arrowlength,"axes":axes,"problem_name":problem_name}
         if isinstance(transform,list) :
             res:list[MatPlotLibAddPlotReturns]=[]
             for t in transform:
@@ -2833,20 +2833,21 @@ class MatplotlibPlotter(BasePlotter):
         if mode=="image":
             pass
         else:
-            msh=infield.split("/")            
-            if len(msh)<2:
-                if len(msh)==1:
+            parts=infield.split("/")            
+            field:"str | list[str] | list[list[str]] | None"
+            if len(parts)<2:
+                if len(parts)==1:
                     # Assuming no data to be plotted on a bulk mesh
                     field=None
-                    mshname="/".join(msh)
+                    mshname="/".join(parts)
                 else:
                     raise ValueError("Cannot plot the field "+str(infield))
             elif self.get_problem(problem_name=problem_name).get_mesh(infield,return_None_if_not_found=True):
                 field=None
                 mshname=infield
             else:
-                field=msh[-1]
-                mshname="/".join(msh[0:-1])
+                field=parts[-1]
+                mshname="/".join(parts[0:-1])
             msh=self.get_problem(problem_name=problem_name).get_mesh(mshname,return_None_if_not_found=True)
             if msh is None:
                 raise ValueError("Cannot find the mesh "+mshname+" in the problem to plot "+str(field))
