@@ -690,6 +690,21 @@ class BaseEquations(_pyoomph.Equations):
     def after_compilation(self,codegen:"FiniteElementCodeGenerator"):
         pass
 
+    def register_refinement_directives(self,codegen:"FiniteElementCodeGenerator"):
+        """Declare persistent refinement criteria (see :py:meth:`pyoomph.meshes.mesh.BaseMesh._add_refinement_directive_to_level`)
+        on ``codegen._mesh``.
+
+        Separate from :py:meth:`after_compilation` because a directive lives on the mesh *object*,
+        not in the compiled code: remeshing (and loading a state file written with a different mesh
+        template) replaces every mesh but reuses the code, so ``after_compilation`` is not called
+        again and the directives of the replaced mesh would simply be gone. Everything stating a
+        directive therefore does so here and lets ``after_compilation`` call it, so the mesh
+        replacement can call it once more on the new mesh.
+
+        Must not cache the mesh on ``self``: one equation instance can be attached to several
+        domains, and is then called once per mesh with a different codegen each time."""
+        pass
+
 
     def setup_remeshing_size(self,remesher:"RemesherBase",preorder:bool):
         pass
@@ -1657,6 +1672,20 @@ class EquationTree:
             self._equations._set_current_codegen(oldcg)
         for _,c in self._children.items():
             c._after_remeshing()
+
+    def _register_refinement_directives(self):
+        """Re-state the refinement criteria of this subtree on the meshes it currently points at.
+
+        Called after a mesh replacement (remeshing, or a state file with a different template) for
+        the subtree of each replaced domain only - the new meshes carry no directives yet, whereas
+        a domain that was not replaced still has its own and would collect a duplicate per remesh."""
+        if (self._mesh is not None) and (self._equations is not None):
+            oldcg = self._equations._get_current_codegen()
+            self._equations._set_current_codegen(self._codegen)
+            self._equations.register_refinement_directives(self._codegen)
+            self._equations._set_current_codegen(oldcg)
+        for _,c in self._children.items():
+            c._register_refinement_directives()
 
     def _before_mesh_to_mesh_interpolation(self,interpolator:"BaseMeshToMeshInterpolator"):
         if (self._mesh is not None) and (self._equations is not None):
@@ -2786,6 +2815,14 @@ class CombinedEquations(Equations):
         for e in self._subelements:
             if isinstance(e,BaseEquations): #type:ignore
                 e.after_compilation(codegen)
+        self._rstr_final_elem(bck)
+
+    def register_refinement_directives(self,codegen:FiniteElementCodeGenerator):
+        bck = self._bckup_final_elem()
+        self._setup_combined_element()
+        for e in self._subelements:
+            if isinstance(e,BaseEquations): #type:ignore
+                e.register_refinement_directives(codegen)
         self._rstr_final_elem(bck)
 
     def after_newton_solve(self):

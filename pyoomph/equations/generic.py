@@ -361,7 +361,7 @@ class RefineToLevel(Equations):
         super(RefineToLevel, self).__init__()
         self.level:Literal["max"] | int = level
 
-    def after_compilation(self,codegen):
+    def register_refinement_directives(self,codegen):
         mesh=codegen._mesh
         assert mesh is not None
         # Registered as a C++ refinement directive rather than evaluated by a Python loop over the
@@ -370,6 +370,11 @@ class RefineToLevel(Equations):
         # instead of being one more rank-local override for the halo exchange to repair afterwards.
         # See pyoomph::Mesh::apply_refinement_directives.
         mesh._add_refinement_directive_to_level(-1 if self.level=="max" else int(self.level))
+
+    def after_compilation(self,codegen):
+        self.register_refinement_directives(codegen)
+        mesh=codegen._mesh
+        assert mesh is not None
         # Only MeshFromTemplate1d/2d/3d actually carry _initial_uniform_refinement_level.
         # The previous "not isinstance(mesh,InterfaceMesh)" check also let ODEStorageMesh
         # through, which does not have this attribute at all and would raise an

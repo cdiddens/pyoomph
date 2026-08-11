@@ -244,3 +244,91 @@ def test_conflicting_settings_within_one_group_are_rejected():
 	with pytest.raises(RuntimeError, match="Conflicting normalization"):
 		with Conflicting() as problem:
 			problem.initialise()
+
+
+# ---------------------------------------------------------------------------------------------
+# Refinement criteria must survive a mesh replacement.
+#
+# RefineToLevel/RefineMaxElementSize state their criterion on the mesh object, from
+# after_compilation. Remeshing builds new meshes but reuses the compiled code, so after_compilation
+# is not called again: without Problem._reregister_refinement_directives() every criterion, bulk and
+# interface alike, was gone from the first force_remesh() on, and the adaption inside the remesh had
+# nothing left to act on - the mesh came back at its base level and stayed there.
+# ---------------------------------------------------------------------------------------------
+
+from pyoomph.equations.additional import RefineMaxElementSize
+
+
+class _RemeshableQuarterCircle(GmshTemplate):
+	def define_geometry(self):
+		self.default_resolution = 0.3
+		p00 = self.point(0, 0)
+		if not self.is_remeshing():
+			p10, p01 = self.point(1, 0), self.point(0, 1)
+			self.circle_arc(p10, p01, center=p00, name="interface")
+		else:
+			# Rebuild the arc from where the nodes of the mesh being replaced actually are
+			coords = self.get_boundary_coordinates("domain/interface", sort_along_axis="x+")
+			pts = [self.point(x, y) for x, y in coords[0]]
+			self.spline(pts, name="interface")
+			p10, p01 = pts[-1], pts[0]
+		self.create_lines(p10, "substrate", p00, "axis", p01)
+		self.plane_surface("substrate", "axis", "interface", name="domain")
+
+
+class _RemeshRefineProblem(Problem):
+	def __init__(self, extra_eqs=None):
+		super().__init__()
+		self.extra_eqs = extra_eqs
+
+	def define_problem(self):
+		self += _RemeshableQuarterCircle()
+		eqs = PoissonEquation(source=1)+DirichletBC(u=0)@"interface"
+		if self.extra_eqs is not None:
+			eqs += self.extra_eqs
+		self += eqs@"domain"
+
+
+def _levels(problem):
+	"""(all bulk refinement levels, levels of the elements touching the interface)"""
+	mesh = problem.get_mesh("domain")
+	bulk = {e.refinement_level() for e in mesh.elements()}
+	at_interface = {e.get_bulk_element().refinement_level() for e in mesh.get_mesh("interface").elements()}
+	return bulk, at_interface
+
+
+def test_refine_to_level_survives_remeshing():
+	"""Both a bulk and an interface RefineToLevel must still act on the mesh a remesh builds."""
+	pytest.importorskip("gmsh", reason="remeshing needs gmsh")
+	eqs = RefineToLevel(1)+RefineToLevel(3)@"interface"
+	with _RemeshRefineProblem(eqs) as problem:
+		problem.max_refinement_level = 5
+		problem.solve()
+		bulk_before, interface_before = _levels(problem)
+		assert min(bulk_before) >= 1 and max(interface_before) == 3, "wrong before remeshing already"
+
+		problem.force_remesh()
+		bulk_after, interface_after = _levels(problem)
+		assert min(bulk_after) >= 1, \
+			"the bulk RefineToLevel(1) did not act on the remeshed mesh: levels %s" % sorted(bulk_after)
+		assert max(interface_after) == 3, \
+			"the interface RefineToLevel(3) did not act on the remeshed mesh: levels %s" % sorted(interface_after)
+
+
+def test_refine_max_element_size_survives_remeshing():
+	"""Same for the size-based criterion, which uses the same registration mechanism."""
+	pytest.importorskip("gmsh", reason="remeshing needs gmsh")
+	# An element SIZE, i.e. the area in 2d: the template's resolution of 0.3 gives ~0.04 per element.
+	with _RemeshRefineProblem(RefineMaxElementSize(0.02)) as problem:
+		problem.max_refinement_level = 5
+		# Explicitly, unlike RefineToLevel: only that one raises _initial_uniform_refinement_level and
+		# so gets an adaption out of initialise() by itself.
+		problem.solve(spatial_adapt=3)
+		bulk_before, _ = _levels(problem)
+		# Meeting the limit takes refinement - element counts alone would not tell the two cases
+		# apart, since the remeshed template reproduces the fine boundary it is handed.
+		assert min(bulk_before) >= 1, "wrong before remeshing already: levels %s" % sorted(bulk_before)
+		problem.force_remesh()
+		bulk_after, _ = _levels(problem)
+		assert min(bulk_after) >= 1, \
+			"RefineMaxElementSize did not act after remeshing: levels %s" % sorted(bulk_after)

@@ -7204,6 +7204,24 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                            "Run without --distribute, or set Problem.experimental_distributed_remeshing=True to "
                            "run it anyway and get whatever it produces. See dev_docs/distributed_remeshing.md.")
 
+    def _reregister_refinement_directives(self,new_meshes:dict[str,"MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d"])->None:
+        """Re-state the declarative refinement criteria on meshes that have just been replaced.
+
+        :py:class:`~pyoomph.equations.generic.RefineToLevel` and
+        :py:class:`~pyoomph.equations.additional.RefineMaxElementSize` register their criterion on the
+        mesh object, whereas a replacement (remeshing, or loading a state file whose mesh template
+        differs) reuses the compiled code and only swaps the mesh - so ``after_compilation`` never runs
+        again and every such criterion, bulk and interface alike, was simply gone from the first remesh
+        on: the adaption that follows found nothing to refine and the mesh came back at its base level.
+
+        Only the domains that were actually replaced: their meshes are new and carry no directives yet,
+        while an untouched domain still holds its own and would collect a duplicate per remesh. Call
+        only after ``rebuild_global_mesh_from_list()``, which is what points every code generator -
+        the interface ones included - at its new mesh; ``register_refinement_directives`` reads
+        ``codegen._mesh``."""
+        for _name,newmesh in new_meshes.items():
+            newmesh.get_eqtree()._register_refinement_directives()
+
     def _redistribute_after_remeshing(self)->None:
         """Partition the rebuilt meshes again, since remeshing replaces them whole and replicated.
 
@@ -7356,6 +7374,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
         self.rebuild_global_mesh_from_list(rebuild=True)
         self.reapply_boundary_conditions()
+        # Before the adaption loop below: that is what the criteria are for.
+        self._reregister_refinement_directives(new_meshes)
 
         interpolators:dict[str,"BaseMeshToMeshInterpolator"]={}
         # Apply the interpolation on each mesh: First on the boundaries and then down to the bulk mesh
@@ -7526,6 +7546,9 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
                 self.rebuild_global_mesh_from_list(rebuild=True)
                 self.reapply_boundary_conditions()
+                # Same reason as in force_remesh(): these meshes were built without recompiling, so
+                # nothing has stated the refinement criteria on them yet.
+                self._reregister_refinement_directives(new_meshes)
 
                 # These meshes are brand new: they were built from the state file's own template,
                 # long after initialise() stripped the macro elements off the meshes it had built

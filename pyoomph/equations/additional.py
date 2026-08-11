@@ -89,12 +89,15 @@ class RefineMaxElementSize(Equations):
         super(RefineMaxElementSize, self).__init__()
         self.max_nondim_size=max_nondim_cartesian_size
 
-    def after_compilation(self,codegen):
+    def register_refinement_directives(self,codegen):
         mesh=codegen._mesh
         assert mesh is not None
         # A C++ refinement directive, for the same reason as RefineToLevel: it is a pure function of the
         # element's own size, so evaluating it in C++ covers halo copies too and needs no synchronisation.
         mesh._add_refinement_directive_max_element_size(float(self.max_nondim_size))
+
+    def after_compilation(self,codegen):
+        self.register_refinement_directives(codegen)
 
 
 
