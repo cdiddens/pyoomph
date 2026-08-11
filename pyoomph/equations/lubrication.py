@@ -74,7 +74,7 @@ class LubricationEquations(Equations):
       self.use_subexpressions=use_subexpressions
 
       if fluid_props is not None:
-         self.fluid_props = fluid_props
+         self.fluid_props:AnyLiquidProperties | None = fluid_props
          sigm=fluid_props.default_surface_tension["gas"]
          assert sigm is not None
          self.sigma =sigm 
@@ -85,7 +85,7 @@ class LubricationEquations(Equations):
 
       
       if isinstance(disjoining_pressure, dict):
-         self.disjoining_pressure = self.build_disjoining_pressure(**disjoining_pressure) #type:ignore
+         self.disjoining_pressure:ExpressionNumOrNone = self.build_disjoining_pressure(**disjoining_pressure) #type:ignore
       else:
          self.disjoining_pressure = disjoining_pressure
 

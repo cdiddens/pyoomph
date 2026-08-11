@@ -323,9 +323,9 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
     def __init__(self,rmin:ExpressionNumOrNone,distmin:ExpressionNumOrNone,arclength_pinchoff_separation_factor:float=4,coalescence_distance_factor:float=1.5,coalescence_overlap_factor:float | None=0.2,check_mesh_motion_direction:bool=True,assign_zeta_coordinates:bool=True) -> None:
         super().__init__()
         self.rmin=rmin # minimum radial distance (dimensional) for pinch-off
-        self._rmin_nd=None # nondimensional radial distance for pinch-off
+        self._rmin_nd:float | None=None # nondimensional radial distance for pinch-off
         self.distmin=distmin # if None, no coalescence
-        self._distmin_nd=None # nondimensional distance for coalescence
+        self._distmin_nd:float | None=None # nondimensional distance for coalescence
         self.arclength_pinchoff_separation_factor=arclength_pinchoff_separation_factor # min distance along the interface between two pinch-off points
         self.coalescence_distance_factor=coalescence_distance_factor # factor to remove points when coalescing
         if coalescence_overlap_factor is not None:

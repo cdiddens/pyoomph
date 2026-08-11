@@ -1209,7 +1209,7 @@ class SymmetricMatrixExponential(CustomMultiReturnExpression):
         AmD2 = (a11 - a22)/2.
         coshMu = math.cosh(mu)
         if mu<=mu_eps:
-            sinchMu=1
+            sinchMu=1.0
         else:
             sinchMu=math.sinh(mu)/mu
         result_list[0] = eApD2 * (coshMu + AmD2*sinchMu)

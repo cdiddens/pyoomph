@@ -323,9 +323,9 @@ class StokesEquations(Equations):
         self.GCL = GCL
         self.boussinesq = boussinesq  # If set, we only solve div(u)=0, else we solve div(u)=-1/rho*(partial_t(rho)+u*grad(rho))
         if fluid_props is not None:
-            self.fluid_props = fluid_props
-            self.dynamic_viscosity = fluid_props.dynamic_viscosity
-            self.mass_density = fluid_props.mass_density
+            self.fluid_props:"AnyFluidProperties | None" = fluid_props
+            self.dynamic_viscosity:ExpressionOrNum = fluid_props.dynamic_viscosity
+            self.mass_density:ExpressionNumOrNone = fluid_props.mass_density
         else:
             self.fluid_props = None
             self.dynamic_viscosity = dynamic_viscosity
@@ -502,11 +502,11 @@ class StokesEquations(Equations):
         Returns:
             The (Navier-)Stokes equations with the pressure integral constraint.
         """
-        eq_additions = self
+        eq_additions:Equations = self
 
         eq_additions += WeakContribution(var(self.pressure_name), testfunction(lagrange_name, domain=ode_domain_name),dimensional_dx=False)
         eq_additions += WeakContribution(var(lagrange_name, domain=ode_domain_name), testfunction(self.pressure_name),dimensional_dx=False)
-        ode_additions = GlobalLagrangeMultiplier(**{lagrange_name:integral_value},set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve) #type:ignore
+        ode_additions:Equations = GlobalLagrangeMultiplier(**{lagrange_name:integral_value},set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve) #type:ignore
         ode_additions +=TestScaling(**{lagrange_name:1/scale_factor(self.pressure_name)})
         ode_additions += Scaling(**{lagrange_name: 1 / test_scale_factor(self.pressure_name)})
         problem.add_equations(ode_additions @ ode_domain_name)
@@ -585,6 +585,7 @@ class NavierStokesEquations(StokesEquations):
     def define_residuals(self):
         super().define_residuals()  # add the Stokes part
         u, u_test = var_and_test(self.velocity_name)
+        assert self.mass_density is not None # unlike the Stokes base, the inertia here needs a density (default 1)
         if self.wrap_params_in_subexpressions:
             rho = subexpression(self.mass_density)
         else:
@@ -783,7 +784,7 @@ class NavierStokesFreeSurface(InterfaceEquations):
         Thereby, the Neumann force is balanced at the specified end points.
         Use this when you neither want to fix the position nor the contact angle at specific end points
         """
-        res=self
+        res:"Equations | EquationTree"=self
         for b in boundaries:
             res+=NavierStokesFreeSurfaceBalancedEnd() @ b
         return res

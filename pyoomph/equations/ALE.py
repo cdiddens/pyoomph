@@ -80,7 +80,7 @@ class BaseMovingMeshEquations(Equations):
         #ode_additions +=TestScaling(**{lagrange_name:1/scale_factor("pressure")})
         #ode_additions += Scaling(**{lagrange_name: 1 / test_scale_factor("pressure")})
 
-        eq_additions = self
+        eq_additions:Equations = self
         for c,v in lagrs.items():
             l=var(lagrange_prefix+c,domain=ode_domain_name)
             eq_additions += WeakContribution(l-v, testfunction(act_on+"_"+c))
@@ -385,6 +385,7 @@ class InterfaceMeshStiffening(InterfaceEquations):
 class PinMeshCoordinates(Equations):
     def __init__(self,*directions:int | Literal["x", "y", "z"]):
         super(PinMeshCoordinates, self).__init__()
+        self.directions:set[int] | None
         if len(directions)>0:
             self.directions=set()        
             for d in directions:

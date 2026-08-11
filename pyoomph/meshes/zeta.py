@@ -506,6 +506,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
             raise RuntimeError("Cannot do it, if the parent mesh is not a bulk mesh")
         bind=bmesh.get_boundary_index(mesh.get_name())
 
+        cache:"MeshDataCacheEntry | None"
         if not self._needs_merged_interface(mesh):
             cache=MeshDataCacheEntry(mesh,MeshDataCacheKey(nondimensional=True,tesselate_tri=True))
             period,zetas=self._compute_zetas(mesh,cache,whole_interface=True)

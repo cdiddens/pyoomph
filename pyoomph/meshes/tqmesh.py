@@ -910,10 +910,10 @@ class TQMeshTemplate(MeshedMeshTemplate):
             color_names[color] = name
             colors.append(color)
         # (size, range) per vertex, where zeros mean "no local refinement here"
-        properties = [(p.size if p.size is not None else 0.0, p.size_range if p.size_range is not None else 0.0)
+        per_vertex = [(p.size if p.size is not None else 0.0, p.size_range if p.size_range is not None else 0.0)
                       for p in loop.points]
-        if not any(s > 0 for s, _ in properties):
-            properties = None
+        # all-zero means "no local refinement anywhere on this loop", which the backend wants as None
+        properties:list[tuple[float,float]] | None = per_vertex if any(s > 0 for s, _ in per_vertex) else None
         if exterior:
             domain.add_exterior_boundary(coords, colors, properties)
         else:

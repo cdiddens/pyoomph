@@ -79,10 +79,7 @@ class AdvectionDiffusionEquations(Equations):
       self.velocity_name_for_scaling=velocity_name_for_scaling
       self.time_scheme:TimeSteppingScheme | None=time_scheme
       self.advection_by_parts=advection_by_parts
-      if isinstance(fieldnames,str):
-         self.fieldnames=[fieldnames]
-      else:
-         self.fieldnames=fieldnames
+      self.fieldnames:list[str]=[fieldnames] if isinstance(fieldnames,str) else list(fieldnames)
       if not isinstance(source,dict):
          self.source={n:source for n in self.fieldnames}
       else:
@@ -91,7 +88,7 @@ class AdvectionDiffusionEquations(Equations):
       self.fluid_props=fluid_props
       self.component_names:dict[str,str]={}
       if self.fluid_props is not None:
-         self.fieldnames:list[str]=[]         
+         self.fieldnames=[]         
          for n in self.fluid_props.required_adv_diff_fields:
             self.component_names["massfrac_"+n]=n
             self.fieldnames.append("massfrac_"+n)
@@ -173,7 +170,7 @@ class AdvectionDiffusionEquations(Equations):
 
    # Use this to either fix the average or the total integral of the field, i.e. add eqs+=AdvectionDiffusionEquations(...).with_integral_constraint(...)
    def with_integral_constraint(self,problem:"Problem",*,average:dict[str, ExpressionOrNum] | ExpressionOrNum | None=None,integral:dict[str, ExpressionOrNum] | ExpressionOrNum | None=None,ode_domain_name:str="globals",lagrange_prefix:str | dict[str, str]="lagr_intconstr_",set_zero_on_normal_mode_eigensolve:bool=True) -> Equations:
-      eq_additions=self
+      eq_additions:Equations=self
       if average is None and integral is None:
          raise ValueError("Please either specify average= or integral=")
       if average is None:

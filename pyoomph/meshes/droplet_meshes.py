@@ -57,10 +57,10 @@ class DropletMesh3d(MeshTemplate):
         self.Nr=Nr
         self.Np=Nphi
         self.tetra=False
-        self._nodes=[]
-        self._tetra_nodes=[]
-        self._hex_nodes=[]
-        self._boundary_nodes={}
+        self._nodes:list[int]=[]
+        self._tetra_nodes:list[set[int]]=[]
+        self._hex_nodes:list[set[int]]=[]
+        self._boundary_nodes:dict[str,set[int]]={}
         #self._node_calls=0
         #self._node_max = 0
 

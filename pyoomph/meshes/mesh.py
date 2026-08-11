@@ -190,23 +190,21 @@ class BaseMesh(abc.ABC):
 
     def boundary_elements(self, b: str, with_directions: bool = False) -> Iterator[_pyoomph.OomphGeneralisedElement] | Iterator[tuple[_pyoomph.OomphGeneralisedElement, int]]:
         assert isinstance(self, _pyoomph.Mesh)
-        bn = self.get_boundary_names()
-        bn = bn.index(b)
-        numelems = self.nboundary_element(bn)
+        bind = self.get_boundary_names().index(b)
+        numelems = self.nboundary_element(bind)
         if with_directions:
             for i in range(numelems):
-                yield self.boundary_element_pt(bn, i), self.face_index_at_boundary(bn, i)
+                yield self.boundary_element_pt(bind, i), self.face_index_at_boundary(bind, i)
         else:
             for i in range(numelems):
-                yield self.boundary_element_pt(bn, i)
+                yield self.boundary_element_pt(bind, i)
 
     def boundary_nodes(self, b: str) -> Iterable[_pyoomph.Node]:
         assert isinstance(self, _pyoomph.Mesh)
-        bn = self.get_boundary_names()
-        bn = bn.index(b)
-        numelems = self.nboundary_node(bn)
+        bind = self.get_boundary_names().index(b)
+        numelems = self.nboundary_node(bind)
         for i in range(numelems):
-            yield self.boundary_node_pt(bn, i)
+            yield self.boundary_node_pt(bind, i)
 
     @overload
     def get_mesh(self, name: str, return_None_if_not_found: Literal[False] = ...) -> "MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d | InterfaceMesh": ...
@@ -285,6 +283,7 @@ class BaseMesh(abc.ABC):
         cmb.update(lst)
         cmb.update(deps.keys())
 
+        res:ExpressionOrNum
         if name in lst:
             res = self._evaluate_integral_function(name)
         elif name in self._codegen._dependent_integral_funcs.keys():
@@ -309,8 +308,8 @@ class BaseMesh(abc.ABC):
         assert self._codegen is not None
         deps = self._codegen._dependent_integral_funcs
         res: dict[str, ExpressionOrNum] = {}
-        for l in lst:
-            res[l] = self._evaluate_integral_function(l)
+        for name in lst:
+            res[name] = self._evaluate_integral_function(name)
         args: dict[str, ExpressionOrNum] = {k: v for k, v in res.items()}
         args["time"] = self.get_problem().get_current_time()
         remaining: set[str] = set(deps.keys())
@@ -394,11 +393,12 @@ class MeshTemplateOppositeInterfaceConnection:
         # kept alive by the Problem's nb::keep_alive of its meshes - a strong back-reference
         # here would form the same kind of uncollectible cycle fixed for meshes/codegens.
         self._problem_wr=weakref.ref(problem)
+        self._match_pos_func: Callable[[Sequence[float], Sequence[float]], float]
         if matchfunc:
             self._match_pos_func = matchfunc
             self._use_kdtree = False
         else:
-            self._match_pos_func: Callable[[Sequence[float], Sequence[float]], float] = lambda a, b: sum([pow(a[j] - b[j], 2) for j in range(len(b))])
+            self._match_pos_func = lambda a, b: sum([pow(a[j] - b[j], 2) for j in range(len(b))])
             self._use_kdtree = True
 
     def __str__(self) -> str:
@@ -483,7 +483,7 @@ class MeshTemplateOppositeInterfaceConnection:
             found = False
             for pB, eB in posBmap.items():
                 if len(pB) == len(pos2find):
-                    dist = 0
+                    dist = 0.0
                     for i in range(len(pos2find)):
                         dist += self._match_pos_func(pos2find[i], pB[i])
                     # print(pB,len(pB),dist)
@@ -738,7 +738,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         for a in args:
             res.append(self.add_node(*a))
         if len(res) == 0:
-            return
+            return None
         elif len(res) == 1:
             return res[0]
         else:
@@ -769,7 +769,7 @@ class MeshTemplate(_pyoomph.MeshTemplate):
             The created curved entity to be used in :py:meth:`add_facet_to_boundary`.
         """
         store_entity: bool = kwargs.get("store_entity", True)
-        res = None
+        res: "_pyoomph.MeshTemplateCurvedEntityBase"
         if typ == "circle_arc":
             if len(args) != 2 or (kwargs.get("center") is None and kwargs.get("through_point") is None):
                 raise RuntimeError(
@@ -921,6 +921,7 @@ class MeshedMeshTemplate(MeshTemplate):
             raise RuntimeError("Cannot get boundary coordinates before the first mesh is generated")
 
         mesh, merge = self._resolve_mesh_for_boundary_coordinates(name)
+        payload:list[list[tuple[float,float]]] | None
         if not merge:
             # Serial, or mpirun without --distribute: this rank holds the whole boundary already.
             segs, pts = self._sorted_boundary_segments(mesh, sort_along_axis, start_near_point)
@@ -1128,6 +1129,14 @@ def _evaluate_extremum_impl(mesh:"AnySpatialMesh",name:str | list[str],sign:int,
 
 
 class MeshFromTemplateBase(BaseMesh):
+    # Restated with the types of the C++ Mesh properties they really are: assigning them in __init__
+    # would otherwise define plain attributes here, which the concrete meshes then inherit twice with
+    # two different types (once from this mixin, once from the C++ base).
+    min_permitted_error:float
+    max_permitted_error:float
+    max_refinement_level:int
+    min_refinement_level:int
+
     def __init__(self, problem: "Problem", templatemesh: MeshTemplate, domainname: str, eqtree: "EquationTree", previous_mesh: "BulkTemplateMesh | None" = None):
         # Not super().__init__(): self is a MeshFromTemplate1d/2d/3d instance, which (due to the
         # nanobind single-inheritance restriction, see _install_mixin) is not a real subclass of
@@ -1193,10 +1202,11 @@ class MeshFromTemplateBase(BaseMesh):
             self._was_remeshed = True
         self._interfacemeshes = {}
         for n, eqtree in self._eqtree.get_children().items():
-            pinter = None
+            pinter:"InterfaceMesh | None" = None
             if previous_mesh is not None:
-                pinter = previous_mesh.get_mesh(n)
-                assert isinstance(pinter, InterfaceMesh)
+                prev = previous_mesh.get_mesh(n)
+                assert isinstance(prev, InterfaceMesh)
+                pinter = prev
             self._interfacemeshes[n] = InterfaceMesh(
                 problem, self, n, eqtree, previous_mesh=pinter)
 
@@ -1596,9 +1606,13 @@ if TYPE_CHECKING:
     # (e.g. boundary_elements, whose auto-generated binding is less precise than the overloads
     # below) still need restating directly on the concrete class: Python's MRO would otherwise
     # let the C++ base's version - first in this bases tuple - win over MeshFromTemplateBase's.
-    class _MeshFromTemplate1dTypingBase(_pyoomph.TemplatedMeshBase1d, MeshFromTemplateBase): pass
-    class _MeshFromTemplate2dTypingBase(_pyoomph.TemplatedMeshBase2d, MeshFromTemplateBase): pass
-    class _MeshFromTemplate3dTypingBase(_pyoomph.TemplatedMeshBase3d, MeshFromTemplateBase): pass
+    # The ignores are for the refinement settings: the C++ base has them as properties and the mixin
+    # restates them as the attributes they are assigned as, which mypy will not accept as the same
+    # member. At runtime there is only one of each - the C++ property - since the mixin is not a base
+    # of these classes at all (see _install_mixin).
+    class _MeshFromTemplate1dTypingBase(_pyoomph.TemplatedMeshBase1d, MeshFromTemplateBase): pass # type: ignore[misc]
+    class _MeshFromTemplate2dTypingBase(_pyoomph.TemplatedMeshBase2d, MeshFromTemplateBase): pass # type: ignore[misc]
+    class _MeshFromTemplate3dTypingBase(_pyoomph.TemplatedMeshBase3d, MeshFromTemplateBase): pass # type: ignore[misc]
 else:
     _MeshFromTemplate1dTypingBase = _pyoomph.TemplatedMeshBase1d
     _MeshFromTemplate2dTypingBase = _pyoomph.TemplatedMeshBase2d
@@ -1775,10 +1789,11 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
             self._tracers = previous_mesh._tracers
 
         for n, eqtree in self._eqtree.get_children().items():
-            pinter = None
+            pinter:"InterfaceMesh | None" = None
             if previous_mesh is not None:
-                pinter = previous_mesh.get_mesh(n)
-                assert isinstance(pinter, InterfaceMesh)
+                prev = previous_mesh.get_mesh(n)
+                assert isinstance(prev, InterfaceMesh)
+                pinter = prev
             self._interfacemeshes[n] = InterfaceMesh(
                 problem, self, n, eqtree, previous_mesh=pinter)
 
@@ -1789,7 +1804,7 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         return pr
 
     def refinement_possible(self) -> bool:
-        p = self
+        p:"AnySpatialMesh" = self
         while isinstance(p, InterfaceMesh):
             p = p._parent
         return p.refinement_possible()
@@ -2024,8 +2039,8 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
                 # print(e.get_opposite_bulk_element())
                 no = e.opposite_node_pt(ni)
                 nodemap[n] = no
-        for ni, no in nodemap.items():
-            yield ni, no
+        for nfrom, nto in nodemap.items():
+            yield nfrom, nto
 
     def _reset_elemental_error_max_override(self):
         for e in self.elements():
@@ -2087,7 +2102,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         self._codegen._do_define_fields(0)  # type:ignore
         self._codegen._index_fields()  # type:ignore
         self._codegen.get_equations()._set_current_codegen(ocg)  # type:ignore
-        self._element = None
+        self._element:"_pyoomph.OomphGeneralisedElement | None" = None
         self.ignore_initial_condition=False
         for _, eqtree in self._eqtree.get_children().items():
             raise RuntimeError("ODE domains may not have children yet")
@@ -2201,10 +2216,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         assert self._eqtree is not None
         ode = self.get_element()
         vals, inds = ode._ode_elem_to_numpy()
-        if isinstance(name, str):
-            names = [name]
-        else:
-            names = name
+        names:Sequence[str] = [name] if isinstance(name, str) else name
         res = []
         for n in names:
             if n not in inds.keys():

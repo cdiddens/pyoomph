@@ -95,7 +95,10 @@ def get_order_of_space(space:FiniteElementSpaceEnum)->int:
 
 def find_dominant_element_space(*spaces:FiniteElementSpaceEnum):
 	res=""
-	for r in spaces:
+	for space in spaces:
+		# str, not the space enum: the discontinuous spaces are compared through their continuous
+		# counterpart below, and "" is the not-yet-set sentinel the callers pass in.
+		r:str=space
 		if res=="":
 			if r=="":
 				continue
@@ -473,11 +476,10 @@ def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Expres
     # Additional flags
     if dimensional_testfunctions:
         flags+=64
-    flags=Expression(flags)
     if not isinstance(F,_pyoomph.Expression):
         F=_pyoomph.Expression(F)
 
-    return _pyoomph.GiNaC_minimize_functional_derivative(F,only_with_respect_to,flags,coordsys_expr)
+    return _pyoomph.GiNaC_minimize_functional_derivative(F,only_with_respect_to,Expression(flags),coordsys_expr)
 
 
 def timestepper_weight(order:int,index:int,scheme:TimeSteppingScheme="BDF1")->Expression:
@@ -834,7 +836,7 @@ def symbolic_diff(expr:ExpressionOrNum,x:Expression | str,hold_until_codegen:boo
 	dummy=_pyoomph.GiNaC_new_symbol("__symdiff_dx_"+str(symbolic_diff.counter)) #type:ignore
 	varis={}
 	nondims={}
-	params={}
+	params:dict[str,Expression]={}
 	iplace_subs={}
 	   
 	if not isinstance(expr,Expression):
@@ -940,7 +942,7 @@ def identity_matrix(dim: int = -1) -> Expression:
 		Expression: The identity matrix.
 
 	"""
-	rs = []
+	rs:list[list[ExpressionOrNum]] = []
 	if dim == -1:
 		dim = _pyoomph.GiNaC_vector_dim()
 	for i in range(dim):
@@ -1049,12 +1051,13 @@ def vector(*args:ExpressionOrNum | Sequence[ExpressionOrNum])->Expression:
 	if len(args)==0:
 		return _pyoomph.Expression(0)
 	a0=args[0]
+	vlist:list[ExpressionOrNum]
 	if isinstance(a0,list):
 		vlist=a0
 		if len(args)!=1:
 			raise RuntimeError("Either call vector(compo1,compo2,...) or vector([compo1,compo2,...])")
 	else:
-		vlist:list[ExpressionOrNum]=[]
+		vlist=[]
 		for a in args:
 			if isinstance(a,Sequence):
 				raise RuntimeError("Either call vector(compo1,compo2,...) or vector([compo1,compo2,...])")
@@ -1067,6 +1070,8 @@ def vector(*args:ExpressionOrNum | Sequence[ExpressionOrNum])->Expression:
 	for a in vlist:
 		if isinstance(a,_pyoomph.Expression):
 			exlist.append(a)
+		elif isinstance(a,_pyoomph.GiNaC_GlobalParam):
+			exlist.append(_pyoomph.Expression(a)) # separate branch only so that the overload is unambiguous
 		else:
 			exlist.append(_pyoomph.Expression(a))
 

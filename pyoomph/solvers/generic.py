@@ -62,7 +62,7 @@ class SolverError(RuntimeError):
 	so a caller can still tell which one gave up.
 	"""
 
-DefaultMatrixType=scipy.sparse.csr_matrix
+DefaultMatrixType:TypeAlias=scipy.sparse.csr_matrix # spelled as an alias: a bare assignment is a variable, which cannot be used in an annotation
 _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=type["GenericLinearSystemSolver"])
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=type["GenericEigenSolver"])
 

@@ -71,9 +71,8 @@ class DeterministicRandomField(CustomMathExpression):
     if len(self.min_x) !=len(self.max_x):
       raise RuntimeError("Non-matching min and max dimensions")
     self.amplitude =amplitude
-    self.Nresolution =Nresolution
-    if not isinstance(self.Nresolution ,(tuple ,list,numpy.ndarray)):
-      self.Nresolution =[self.Nresolution ] *len(self.min_x)
+    # One number means the same resolution in every direction; kept as the per-direction list
+    self.Nresolution:list[int] =[Nresolution] *len(self.min_x) if not isinstance(Nresolution ,(tuple ,list,numpy.ndarray)) else list(Nresolution)
     if len(self.Nresolution ) != len(self.min_x):
       raise RuntimeError("Non-matching Nresolution array")
     if seed is None:
@@ -122,7 +121,7 @@ class MultiSafeDivide(CustomMultiReturnExpression):
     def process_args_to_scalar_list(self, *args: "ExpressionOrNum") -> list["ExpressionOrNum"]:
         nargs=len(args)
         nret=self.get_num_returned_scalars(nargs)
-        res=[]
+        res:list["ExpressionOrNum"]=[]
         for i,arg in enumerate(args):
               if i<nret:
                     res.append(arg/self.Ascale) #A

@@ -431,11 +431,11 @@ class RemeshWhen(Equations):
 
         super(RemeshWhen, self).__init__()
         if isinstance(remeshing_opts,RemeshingOptions):
-            self.max_expansion=remeshing_opts.max_expansion
-            self.min_expansion=remeshing_opts.min_expansion
-            self.min_solves_before_remesh=remeshing_opts.min_solves_before_remesh
-            self.reinit_initial_size_after_one_step=remeshing_opts.reinit_initial_size_after_one_step
-            self.min_quality_decrease=remeshing_opts.min_quality_decrease
+            self.max_expansion:float | None=remeshing_opts.max_expansion
+            self.min_expansion:float | None=remeshing_opts.min_expansion
+            self.min_solves_before_remesh:int | None=remeshing_opts.min_solves_before_remesh
+            self.reinit_initial_size_after_one_step:bool | None=remeshing_opts.reinit_initial_size_after_one_step
+            self.min_quality_decrease:float | None=remeshing_opts.min_quality_decrease
             self.on_invalid_triangulation=remeshing_opts.on_invalid_triangulation
             self.active=remeshing_opts.active
         else:
@@ -919,7 +919,7 @@ class _AverageOrIntegralConstraintBase(Equations):
         add_eqs=None      
         for field,integral_value in self.constraints.items():
             scale_correction=problem.get_scaling(field) if self.scaling_factor is None else self.scaling_factor
-            testscale=1
+            testscale:ExpressionOrNum=1
             if self.dimensional_dx:
                 if elem_dim is None:
                     elem_dim=self.get_element_dimension()
@@ -1038,14 +1038,8 @@ class WeakContribution(BaseEquations):
         self.coordinate_system=coordinate_system
         self.lagrangian=lagrangian
         self.destination=destination
-        if isinstance(b,str):
-            self.b=testfunction(b)
-        else:
-            self.b=b
-        if isinstance(a,str):
-            self.a=var(a)
-        else:
-            self.a=a
+        self.b:Expression=testfunction(b) if isinstance(b,str) else b
+        self.a:ExpressionOrNum=var(a) if isinstance(a,str) else a
 
     def define_residuals(self):
         self.add_residual(weak(self.a,self.b,dimensional_dx=self.dimensional_dx,lagrangian=self.lagrangian,coordinate_system=self.coordinate_system),destination=self.destination)
@@ -1203,8 +1197,7 @@ class GlobalLagrangeMultiplier(ODEEquations):
             else:
                 fullpath = eqtree.get_full_path().lstrip("/")
                 lst=[fullpath + "/" + k for k in self._entries.keys()]
-                res:set[str | int] = set(lst)
-                return res
+                return set(lst)
         # angular_mode is None and normal_k is None is already handled above; this is unreachable
         # but kept so the function has an explicit return on every static code path.
         return set()
@@ -1792,12 +1785,13 @@ class PeriodicBC(InterfaceEquations):
     def __init__(self, other_interface: str, offset: list[ExpressionOrNum] | None = None):
         super(PeriodicBC, self).__init__()
         self.other_interface = other_interface        
+        self.offset:list[ExpressionOrNum]
         if offset is None:
             raise RuntimeError("Please supply an offset")
         elif not isinstance(offset,(list,tuple)):
             self.offset=[offset]
         else:
-            self.offset = offset
+            self.offset = list(offset)
 
     def before_finalization(self, codegen: "FiniteElementCodeGenerator"):
        
@@ -1834,10 +1828,10 @@ class PeriodicBC(InterfaceEquations):
 
         slave_to_master:dict[_pyoomph.Node,_pyoomph.Node]=dict()
         master_to_slave:dict[_pyoomph.Node,_pyoomph.Node]=dict()
-        for ps, nslave in my_nodes_by_pos.items():
-            qres = kdtree.query(ps)  # type:ignore
+        for pos, nslave in my_nodes_by_pos.items():
+            qres = kdtree.query(pos)  # type:ignore
             if qres[0] > 1e-6:  # type:ignore
-                raise RuntimeError("Cannot find a periodic node at the position " + str(ps))
+                raise RuntimeError("Cannot find a periodic node at the position " + str(pos))
             nmaster: Node = master_nodes[qres[1]]  # type:ignore
             if len(nmaster.get_boundary_indices()) >= 2:
                 if not len(nslave.get_boundary_indices()) >= 2:
@@ -1865,10 +1859,10 @@ class PeriodicBC(InterfaceEquations):
             for myelem,direct in pmesh.boundary_elements(my_name,with_directions=True):                
                 my_nodes_on_bind=myelem.boundary_nodes(myind)                            
                 search_for=tuple(slave_to_master[n] for n in my_nodes_on_bind)
-                oppelem=oppnodes_to_oppelem.get(search_for,None)
-                if oppelem is None:            
+                opp=oppnodes_to_oppelem.get(search_for,None)
+                if opp is None:            
                     raise RuntimeError("Cannot identify the corresponding periodic boundary element on the other interface.")
-                myelem._connect_periodic_tree(oppelem[0],direct,oppelem[1])
+                myelem._connect_periodic_tree(opp[0],direct,opp[1])
 
 
 class PythonDirichletBC(Equations):

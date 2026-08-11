@@ -54,7 +54,7 @@ class _VTUInterpolatorBase:
         coord_suffix=["x","y","z"]
         return [(var("coordinate_"+suffix)+self.offset[index])/self.spatial_scale_factor for index,suffix in enumerate(coord_suffix) if index<self._dim]        
     
-    def _auto_strip_component(self,fieldname:str):
+    def _auto_strip_component(self,fieldname:str)->tuple[str,int]:
         if fieldname.endswith("_x"):
             return fieldname[:-2],0
         elif fieldname.endswith("_y"):
@@ -141,8 +141,8 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
         self.use_cache=use_cache
         self._use_cache=True if self.use_cache is True else False
         self._num_interpolators=0
-        self._cache={}
-        self._fields_to_cache=[]
+        self._cache:dict[tuple[float,...],list[list[float]]]={} # point -> the cached fields, each by component
+        self._fields_to_cache:list[str]=[]
         
         
         # Load the VTU
@@ -196,14 +196,17 @@ class VTUInterpolatorByVTK(_VTUInterpolatorBase):
         self.interpolator.SetSourceData(self.vtu.GetOutput())         
 
     def get_field(self, fieldname: str,component_index:int | Literal["auto"]="auto",scale:ExpressionOrNum=1) -> Expression:
+        component:int
         if component_index=="auto":
-            fieldname,component_index=self._auto_strip_component(fieldname)
+            fieldname,component=self._auto_strip_component(fieldname)
+        else:
+            component=component_index
         self._num_interpolators+=1
         if self.use_cache=="auto" and self._num_interpolators>1:
             self._use_cache=True
         if fieldname not in self._fields_to_cache:
             self._fields_to_cache.append(fieldname)            
-        interp=_VTUFieldInterpolatorByVTK(self,fieldname,component_index)
+        interp=_VTUFieldInterpolatorByVTK(self,fieldname,component)
         interp._cache_index=self._fields_to_cache.index(fieldname)
         return interp(*self._get_arg_list())*scale
         

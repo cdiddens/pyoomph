@@ -207,7 +207,7 @@ def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteE
 
 # Connection to a Navier-Stokes multi-component domain (imposing continuity of the composition)
 def CompositionPorousNavierStokesConnection(fluid_props:AnyFluidProperties):
-    psinter=PorousNavierStokesConnection()
+    psinter:Equations=PorousNavierStokesConnection()
     connfields = ["massfrac_" + n for n in fluid_props.required_adv_diff_fields]
     psinter += ConnectFieldsAtInterface(connfields)
     return psinter

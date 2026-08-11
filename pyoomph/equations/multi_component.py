@@ -38,6 +38,9 @@ from ..materials.mass_transfer import MassTransferModelBase
 from .SUPG import ElementSizeForSUPG
 from .generic import get_interface_field_connection_space
 
+if TYPE_CHECKING:
+    from ..generic.codegen import EquationTree
+
 
 
 def CompositionInitialCondition(fluid_props:AnyFluidProperties,isothermal:bool,initial_temperature:ExpressionNumOrNone=None):
@@ -73,7 +76,7 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
     Returns:
         A coupled set of equations for the mass fractions for the diffusive transport of the components in the mixture.
     """
-    res = CompositionAdvectionDiffusionEquations(fluid_props, space=space, dt_factor=dt_factor, wind=0)
+    res:Equations = CompositionAdvectionDiffusionEquations(fluid_props, space=space, dt_factor=dt_factor, wind=0)
     if not isothermal:
         res+=TemperatureConductionEquation(fluid_props,space=space)
     if with_IC:
@@ -786,7 +789,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         Thereby, the Neumann force is balanced at the specified end points.
         Use this when you neither want to fix the position nor the contact angle at specific end points
         """
-        res=self
+        res:"Equations | EquationTree"=self
         for b in boundaries:
             res+=MultiComponentNavierStokesInterfaceBalancedEnd() @ b
         return res

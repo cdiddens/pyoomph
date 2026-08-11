@@ -173,8 +173,7 @@ class GmshSizeCallback:
                         start=o2[:0:-1]
                         old.remove(o2)
                         current_seg.insert(0,start)
-                current_seg=numpy.vstack(current_seg) #type:ignore
-                allpts.append(current_seg)
+                allpts.append(numpy.vstack(current_seg)) #type:ignore
         #exit()
         if (sort is not None) and len(allpts)>0:
             # "x+"/"x-" is how the same direction is spelled everywhere else (pyoomph.meshes.ordering);
@@ -367,7 +366,7 @@ class GmshTemplate(MeshedMeshTemplate):
 
         self._mesh_size_callback=None
 
-        self._curved_entities0d = {}  # TODO Does this make sense at all?
+        self._curved_entities0d:dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {}  # TODO Does this make sense at all?
         self._curved_entities1d:dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {} 
         self._curved_entities2d:dict[int,_pyoomph.MeshTemplateCurvedEntityBase] = {}  # TODO: Set those
 
@@ -483,6 +482,7 @@ class GmshTemplate(MeshedMeshTemplate):
 
     def points(self,*coords:list[ExpressionOrNum],size:float | Sequence[float] | None=None) -> list[Point]:
         res:list[Point]=[]
+        sizeC:Sequence[float] | None
         if size:
             if isinstance(size,(int,float)):
                 sizeC=[size]*len(coords)
@@ -494,7 +494,9 @@ class GmshTemplate(MeshedMeshTemplate):
             s=None
             if sizeC is not None:
                 s=sizeC[i]
-            x,y,z=0,0,0
+            x:ExpressionOrNum=0
+            y:ExpressionOrNum=0
+            z:ExpressionOrNum=0
             if len(c)>0:
                 x=c[0]
                 if len(c)>1:
@@ -502,8 +504,9 @@ class GmshTemplate(MeshedMeshTemplate):
                     if len(c)>2:
                         z=c[2]
                         if len(c)>3:
-                            s=c[3]
-                            assert isinstance(s,float) or s is None
+                            sizec=c[3]
+                            assert sizec is None or isinstance(sizec,float)
+                            s=sizec
             res.append(self.point(x,y,z,size=s))
         return res
 
@@ -675,7 +678,7 @@ class GmshTemplate(MeshedMeshTemplate):
 
                 sstart=self._point_size_hash[line.points[0]]  #type:ignore
                 send=self._point_size_hash[line.points[-1]]  #type:ignore
-                line_numnodes = math.ceil(0.5 * (line_len /sstart + line_len / send) - 1e-12)  #type:ignore
+                line_numnodes = int(math.ceil(0.5 * (line_len /sstart + line_len / send) - 1e-12))  #type:ignore
                 if line_coeff is None:
                     line_coeff = ( send/sstart) ** (1.0 / ((2 if line_numnodes < 2 else line_numnodes) - 1))  #type:ignore
                     #if send < sstart:
@@ -970,7 +973,7 @@ class GmshTemplate(MeshedMeshTemplate):
                 if l not in entlist:
                     entlist[l]=set()
                 entlist[l].add(pt)
-        res:dict[str,dict[tuple[float],float]] = {}
+        res:dict[str,dict[tuple[float,...],float]] = {}
         for l,pts in entlist.items():
             name=self._rev_names.get(l)
             if name is None:

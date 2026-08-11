@@ -198,7 +198,7 @@ class UnpinnedContactLine(GenericContactLineModel):
         return dyncl.apply_cox_voinov_correction(theta_eq)
 
     def equations_for_simple_popov_model(self,theta_act_name:str,rc_name:str)->BaseEquations:
-        eqs=GlobalLagrangeMultiplier(theta_eq=var("theta_eq")-self.get_equilibrium_contact_angle_expression(None))
+        eqs:BaseEquations=GlobalLagrangeMultiplier(theta_eq=var("theta_eq")-self.get_equilibrium_contact_angle_expression(None))
         theta_eq=var("theta_eq")
         theta_act=var(theta_act_name)
         eqs+=InitialCondition(theta_eq=self._ic_for_dyncl["initial_contact_angle"])
@@ -467,9 +467,9 @@ class StickSlipContactLine(UnpinnedContactLine):
             if self._initial_pin_info is not None:
                 dyncl.set_initial_condition(dyncl.unpinned_indicator_name, self._initial_pin_info[0], True)
                 dyncl.set_initial_condition(dyncl.override_dynamics_name, self._initial_pin_info[1], True)
-            return
+            return None
         else:
-            eqs=WeakContribution(up-dynamics,up_test)
+            eqs:BaseEquations=WeakContribution(up-dynamics,up_test)
             if self._initial_pin_info is not None:
                 eqs+=InitialCondition(unpinned_indicator= self._initial_pin_info[0],override_cl_dynamics=self._initial_pin_info[1])
             return eqs
@@ -571,10 +571,7 @@ class YoungDupreContactLine(StickSlipContactLine):
     def get_equilibrium_contact_angle_expression(self,dyncl:"DynamicContactLineEquations | None"):
         assert self._delta_sigma is not None
         assert dyncl is not None
-        if self.line_tension is None:
-            line_tension=0
-        else:
-            line_tension=self.line_tension
+        line_tension:ExpressionOrNum=0 if self.line_tension is None else self.line_tension
         return acos(maximum(-1, (self._delta_sigma+line_tension/var("coordinate_x")) / dyncl.get_surface_tension_at_cl_expression()))
 
     def set_missing_information(self,initial_contact_angle:ExpressionOrNum,initial_surface_tension:ExpressionOrNum,initial_contact_line_position:ExpressionOrNum):

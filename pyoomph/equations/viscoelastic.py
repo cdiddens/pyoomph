@@ -743,7 +743,7 @@ class ViscoelasticEquations(Equations):
         if axisym:
             # The axisymmetric branch already returns a full 3x3 rotation, with R[2,2]=1.
             R = self._se(R2)
-            eigenvalues = [exp(eigPsi[i, i]) for i in range(3)]
+            eigenvalues:list[ExpressionOrNum] = [exp(eigPsi[i, i]) for i in range(3)]
         else:
             # In Cartesian coordinates only the in-plane block is diagonalized. The third
             # eigendirection has to be put back by hand as R[2,2]=1, not the zero that
@@ -751,6 +751,7 @@ class ViscoelasticEquations(Equations):
             R = self._se(matrix([[R2[0, 0], R2[0, 1], 0], [R2[1, 0], R2[1, 1], 0], [0, 0, 1]]))
             eigenvalues = [exp(eigPsi[0, 0]), exp(eigPsi[1, 1]), third]
 
+        decomposition:CustomMultiReturnExpression
         if axisym:
             decomposition = LogConfTensorDecompositionAxisymmetric(epsilon=self.eigen_epsilon, use_FD=self.use_FD,
                                                                    use_subexpression=self.use_subexpression)

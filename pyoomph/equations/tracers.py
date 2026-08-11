@@ -515,8 +515,8 @@ class TracerTransferToInterface(InterfaceEquations):
     def _interface_equations(self) -> TracerParticles:
         """The TracerParticles living on this interface - the receiving side."""
         eqs = self.get_current_code_generator().get_equations()
-        found = eqs.get_equation_of_type(TracerParticles, always_as_list=True)
-        found = [e for e in found if isinstance(e, TracerParticles)]
+        found = [e for e in eqs.get_equation_of_type(TracerParticles, always_as_list=True)
+                 if isinstance(e, TracerParticles)]
         if self.interface_tracer_name is not None:
             found = [e for e in found if e.tracer_name == self.interface_tracer_name]
             if not found:
@@ -636,6 +636,7 @@ class TracerPeriodicBoundaryCondition(InterfaceEquations):
 
     def _nondim_shift(self, mesh: "AnySpatialMesh", dim: int) -> list[float]:
         scal = mesh.get_problem().get_scaling("spatial")
+        comps:list[ExpressionOrNum]
         if isinstance(self.shift, Expression):
             comps = [self.shift[i] for i in range(dim)]
         else:

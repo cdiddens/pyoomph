@@ -156,7 +156,7 @@ def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> str | tuple
     prefix = ""
     factorf=float(factor)
 
-    prefix_factor=1
+    prefix_factor=1.0 # a __prefixes key, i.e. a power of ten
     factor_bound_factor=10
     if estimate_prefix:
         for k in sorted(__prefixes.keys()):
@@ -265,7 +265,7 @@ class ArrayWithUnits:
                 array=numpy.array(ndarr) #type:ignore
             else:
                 raise ValueError("Cannot cast this to an ArrayWithUnits")
-        self.values=array
+        self.values:Sequence[ExpressionOrNum] | NPFloatArray=array
         self.unit:ExpressionOrNum=unit
 
     def __getitem__(self, item:int)->ExpressionOrNum:

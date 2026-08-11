@@ -109,6 +109,8 @@ class MeshDataCacheEntry:
         self.merged_eigendata:dict[int,dict[str,Any]]={}
         if self.eigenmode not in {"abs","real","imag","merge","angle"}:
             raise RuntimeError("Unknown eigenmode "+str(self.eigenmode))
+        backup_dofs:NPFloatArray | None=None
+        backup_pinned:NPFloatArray | None=None
         if isinstance(self.eigenvector,int):
             if self.eigenmode=="merge":
                 self.eigenvector=(self.eigenvector,)
@@ -124,8 +126,6 @@ class MeshDataCacheEntry:
                 raise RuntimeError("Multiple eigenvectors in MeshDataCache only works if eigenmode is set to 'merge'")
 
         if self.eigenmode=="merge" and self.eigenvector is not None:
-            backup_dofs:NPFloatArray | None=None
-            backup_pinned:NPFloatArray | None=None
             for ev in cast(Sequence[int],self.eigenvector):
                 backup = self.mesh.get_problem().set_eigenfunction_as_dofs(ev,mode="real",additive_mesh_positions=self.add_eigen_to_mesh_positions)
                 if backup_dofs is None:
@@ -177,7 +177,8 @@ class MeshDataCacheEntry:
 
 
         if isinstance(self.eigenvector, int) :
-            self.mesh.get_problem().set_all_values_at_current_time(backup_dofs, backup_pinned, not self.add_eigen_to_mesh_positions) #type:ignore
+            assert backup_dofs is not None and backup_pinned is not None # taken together with the eigenfunction above
+            self.mesh.get_problem().set_all_values_at_current_time(backup_dofs, backup_pinned, not self.add_eigen_to_mesh_positions)
 
         self.interface_lines_segs:list[list[int]] | None=None
         self.interface_lines_segs_ninter:int | None=None
@@ -310,6 +311,7 @@ class MeshDataCacheEntry:
                 return [self.get_unit(f,as_string=False,with_brackets=with_brackets) for f in field]
         if self.nondimensional or (field=="normal_x" or field=="normal_y" or field=="normal_z"):
             return "" if as_string else 1
+        s:ExpressionOrNum
         if (field in self.local_expr_indices.keys()) and not (field is self.nodal_field_inds.keys()):
             s=self.mesh.get_code_gen()._get_local_expression_unit_factor(field)
         else:
@@ -318,7 +320,7 @@ class MeshDataCacheEntry:
             s=Expression(s)
         s = self.mesh.get_code_gen().expand_placeholders(s, False)
         _, unit, _, _ = _pyoomph.GiNaC_collect_units(s)
-        res=1
+        res:"str | ExpressionOrNum"=1
         try:
             float(unit)
         except:
@@ -362,9 +364,9 @@ class MeshDataCacheEntry:
                 if nonzero_length==-1:
                     raise RuntimeError("Tensor data "+str(name)+" does not contain anything")
                 zer=numpy.zeros((nonzero_length,))
-                for i,row in enumerate(tensor_mdata):
-                    for j,entry in enumerate(row):
-                        if entry is None:
+                for i,datarow in enumerate(tensor_mdata):
+                    for j,dataentry in enumerate(datarow):
+                        if dataentry is None:
                             tensor_mdata[i][j]=zer
                 return numpy.array(tensor_mdata) #type:ignore
             else:
@@ -383,8 +385,8 @@ class MeshDataCacheEntry:
                 if nonzero_length==-1:
                     raise RuntimeError("Vector data "+str(name)+" does not contain anything")
                 zer=numpy.zeros((nonzero_length,))
-                for i,entry in enumerate(mdata):
-                    if entry is None:
+                for i,dataentry in enumerate(mdata):
+                    if dataentry is None:
                         mdata[i]=zer
                 return numpy.array(mdata) #type:ignore
 
@@ -917,7 +919,7 @@ class MeshDataCacheOperatorBase:
         return MeshDataCacheCombinedOperator(self,other)
 
     def _get_elem_dim(self,base:MeshDataCacheEntry) -> Literal[0, 1, 2, 3]:
-        result=None
+        result:Literal[0, 1, 2, 3] | None=None
         et=set(base.elem_types)
         et3d={14,11,10,100,4}
         et2d={6,8,9,99,3}
@@ -1127,9 +1129,10 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
         
         stride = base.nodal_values.shape[0]
 
-        new_nodal_values=[]
+        new_nodal_values:list[NPFloatArray]=[]
         new_nodal_field_inds=base.nodal_field_inds.copy()
-        field_operators={}
+        # name -> either a plain source field name or [operator, *its argument field names]
+        field_operators:dict[str,Any]={}
 
         vector_fields=base.vector_fields.copy()
 #        vector_fields["coordinate"]=["coordinate_x","coordinate_y"]
@@ -1430,9 +1433,10 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
 
         stride = base.nodal_values.shape[0]
 
-        new_nodal_values=[]
+        new_nodal_values:list[NPFloatArray]=[]
         new_nodal_field_inds=base.nodal_field_inds.copy()
-        field_operators={}
+        # name -> either a plain source field name or [operator, *its argument field names]
+        field_operators:dict[str,Any]={}
 
         field_operators["coordinate_x"] = [lambda cx: numpy.outer(numpy.cos(phis), cx).flatten(), "coordinate_x"] #type:ignore
         field_operators["coordinate_y"] = [lambda cx: numpy.outer(numpy.sin(phis), cx).flatten(), "coordinate_x"] #type:ignore

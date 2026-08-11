@@ -187,7 +187,7 @@ class Remesher2dBoundaryLineCollection:
     def __init__(self,boundname:str,remesher:"Remesher2d",point_size_func:Callable[[float, float], float] | None=None):
         super(Remesher2dBoundaryLineCollection, self).__init__()
         self.name=boundname
-        self.parts=[]
+        self.parts:list[list[RemeshBoundaryPoint]]=[]
         self.oldnodes:dict[tuple[RemeshBoundaryPoint,RemeshBoundaryPoint],list[RemeshBoundaryPoint]]= {} #Dict mapping from a pair of vertex points to the non-vertex points in between
         self.curves:list[list[RemeshBoundaryPoint]]=[]
         self.point_size_func=point_size_func
@@ -362,8 +362,8 @@ class Remesher2d(RemesherBase):
         super(Remesher2d, self).__init__(template)
         self._old_meshes={}
         self._boundary_nodes:dict[str,Remesher2dBoundaryLineCollection]={}
-        self.gmsh=GmshRemesher2d(self)
-        self._meshbounds={}
+        self.gmsh:GmshTemplate=GmshRemesher2d(self)
+        self._meshbounds:dict[str,list[str]]={}
         self._boundary_point_size_funcs:dict[str,Callable[[float,float],float]]={}
         self.use_corner_sizes=True
         self._corner_size_map=None
@@ -381,7 +381,7 @@ class Remesher2d(RemesherBase):
     def actions_after_remeshing(self):
         super(Remesher2d, self).actions_after_remeshing()
         self.gmsh = GmshRemesher2d(self) #Recreate the intenral gmsh remesher
-        self._meshbounds:dict[str,list[str]]={}
+        self._meshbounds={}
         self._unique_pts = []
         # The per-boundary node/element bookkeeping of the mesh just replaced - see the base
         # class for why none of it may outlive the remeshing process. All of it is rebuilt from

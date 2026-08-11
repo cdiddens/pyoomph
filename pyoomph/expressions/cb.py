@@ -369,8 +369,8 @@ class CustomMultiReturnExpression(_pyoomph.CustomMultiReturnExpression):
                 else:
                     eargs.append((pa))
             funcexpr = _pyoomph.GiNaC_python_multi_cb_function(self, eargs, num_ret)
-            res = [_pyoomph.GiNaC_python_multi_cb_indexed_result(funcexpr, i) for i in range(num_ret)]
-            res=self.process_result_list_to_results(res)
+            indexed = [_pyoomph.GiNaC_python_multi_cb_indexed_result(funcexpr, i) for i in range(num_ret)]
+            res=self.process_result_list_to_results(indexed)
             if isinstance(res,(list,tuple)) and len(res)==1 and not self.return_tuple_for_single_return:
                 return res[0]
             else:

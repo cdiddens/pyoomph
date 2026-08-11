@@ -465,7 +465,7 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
             x, y = self.get_coords(ndim, with_scales, lagrangian)
             r= y if self.use_x_as_symmetry_axis else x
             ri = 1 if self.use_x_as_symmetry_axis else 0
-            res:list[list[ExpressionOrNum]] = [[diff(arg[0], x), diff(arg[0], y), 0],
+            res = [[diff(arg[0], x), diff(arg[0], y), 0],
                    [diff(arg[1], x), diff(arg[1], y), 0], [0, 0, arg[ri] / r]]
         return matrix(res)
     
@@ -876,7 +876,7 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
             else:
                 line.append(0)
             res.append(line)
-        line:list[ExpressionOrNum] = []
+        line = []
         if not lagrangian:
             for a in range(ndim):
                 line.append(diff(arg[ndim], dcoords[a]))
@@ -1123,7 +1123,7 @@ class CartesianCoordinateSystemWithAdditionalNormalMode(CartesianCoordinateSyste
             
             if dim==2:
                 if edim==1:
-                    n0=[cg._get_normal_component(0),cg._get_normal_component(1),0]
+                    n0:list[ExpressionOrNum]=[cg._get_normal_component(0),cg._get_normal_component(1),0]
                     Xk,Yk=pcoords[0],pcoords[1]
                     x,y=dcoords[0],dcoords[1]
                     I=self.imaginary_i
@@ -1343,7 +1343,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
                 res[1][0]+=mm*(-diff(Xm, X0)*diff(arg[1], X0))
                 res[1][1]+=mm*(-I*m*Xm*diff(arg[1], X0)/X0 - Xm*arg[0]/X0**2 - Xm*diff(arg[1], phi)/X0**2)
             else:
-                res:list[list[ExpressionOrNum]] = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
+                res = [[diff(arg[0], r), 0, 0], [0, arg[0] / r, 0], [0, 0, 0]]
         else:
             if arg.nops() != 3:
                 raise RuntimeError(
@@ -1357,7 +1357,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             #res:List[List[ExpressionOrNum]]=[[ diff(arg[0],dr),diff(arg[0],dz),diff(arg[0],self.phi)/dr-arg[2]/dr],
              #    [diff(arg[1],dr),diff(arg[1],dz),diff(arg[1],self.phi)/dr],
              #    [diff(arg[2],dr) ,diff(arg[2],dz),diff(arg[2],self.phi)/dr+arg[0]/dr]]
-            res:list[list[ExpressionOrNum]]= [[diff(arg[0], x), diff(arg[0], y), -arg[2]/x + diff(arg[0], phi)/x], 
+            res= [[diff(arg[0], x), diff(arg[0], y), -arg[2]/x + diff(arg[0], phi)/x], 
                                               [diff(arg[1], x), diff(arg[1], y), diff(arg[1], phi)/x], 
                                               [diff(arg[2], x), diff(arg[2], y), arg[0]/x + diff(arg[2], phi)/x]]
             res[0][0]+=mm*(-diff(Xp, x)*diff(arg[0], x) - diff(Yp, x)*diff(arg[0], y))
@@ -1377,7 +1377,6 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
     def vector_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         if lagrangian:
             return super().vector_divergence(arg, ndim, edim, with_scales, lagrangian)
-        res = 0
         coords = self.get_coords(arg.nops(), with_scales, lagrangian)
         dcoords=self.map_to_zero_epsilon(coords)
         pcoords=self.map_to_first_order_epsilon(coords)
@@ -1414,8 +1413,7 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
                 #raise RuntimeError("divergence with ndim=2, edim=1 not implemented")
             else:
                 raise RuntimeError("divergence with ndim=2, edim=0 not implemented")
-            return res
-            
+
         else:
             raise RuntimeError("Cannot use this coordinate system on a 3d mesh")
         
@@ -1755,14 +1753,12 @@ class RadialSymmetricCoordinateSystem(BaseCoordinateSystem):
     def vector_divergence(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         if ndim != 1:
             raise RuntimeError("Vector divergence in radial symmetry does not work for dimension " + str(ndim))
-        res = 0
         coords = self.get_coords(arg.nops(), with_scales, lagrangian)
         if with_scales:
             coords[0] -= self.Rcenter
         else:
             coords[0] -= self.Rcenter / scale_factor("spatial")
-        res += diff(arg[0], coords[0]) + 2 * arg[0] / coords[0]
-        return res
+        return diff(arg[0], coords[0]) + 2 * arg[0] / coords[0]
 
     def scalar_gradient(self, arg:Expression, ndim:int, edim:int, with_scales:bool, lagrangian:bool)->Expression:
         res:list[ExpressionOrNum] = []
@@ -1853,7 +1849,7 @@ class BaseDifferentialGeometryCoordinateSystem(BaseCoordinateSystem):
         from ..expressions import determinant,square_root
         eaug=self.get_augmented_edim(nodal_dim,edim)			
         if eaug==0:
-            J=1        
+            J:ExpressionOrNum=1        
         else:
             g_ab=self.get_covariant_metric_tensor(nodal_dim,edim,lagrangian,False) # Cannot do it with scales here=> Can mess up the sqrt
             g=self.substitute_values_for_additional_local_coordinates(determinant(g_ab))

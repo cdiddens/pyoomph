@@ -78,7 +78,7 @@ class ElementSizeForSUPG(Equations):
         has_moving_nodes=True
         for e in mesh.elements():
             dg_index=e.get_code_instance().get_discontinuous_field_index(self.varname)
-            has_moving_nodes=e.get_code_instance().has_moving_nodes
+            has_moving_nodes=e.get_code_instance().has_moving_nodes() # the call was missing, i.e. the bound method was always truthy
             break
         
         if dg_index is not None:

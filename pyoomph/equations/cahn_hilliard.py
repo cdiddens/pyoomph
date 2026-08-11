@@ -132,7 +132,7 @@ class CahnHilliardWettingInterface(InterfaceEquations):
     """
     TODO: Add description    
     """
-    required_parent_type=CahnHilliardEquation
+    required_parent_type:type[Equations] | None=CahnHilliardEquation
 
     def __init__(self,sigma_fs_plus:ExpressionOrNum | None=None,sigma_fs_minus:ExpressionOrNum | None=None,contact_angle_plus:ExpressionOrNum | None=None,contact_angle_minus:ExpressionOrNum | None=None):
         super(CahnHilliardWettingInterface, self).__init__()
