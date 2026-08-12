@@ -18,5 +18,6 @@ Therefore, the Stokes equations constitute a perfect example to progress from th
    stokes/dimtraction.rst
    stokes/nonormalflow.rst   
    stokes/stokeslaw.rst   
-   stokes/cr.rst   
+   stokes/cr.rst
+   stokes/cr_condensation.rst
    stokes/inverse_problem.rst
