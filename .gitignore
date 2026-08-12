@@ -19,7 +19,8 @@ __pycache__
 *.txt
 !CMakeLists.txt
 !docs/requirements.txt
-!pyoomph/jitbridge/NOTE_FOR_WINDOWS.txt
+# Copied from src/jitbridge.h by CMake at configure time (see CMakeLists.txt)
+pyoomph/jitbridge/jitbridge.h
 *.c
 *.so
 *.o

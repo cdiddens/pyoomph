@@ -344,6 +344,31 @@ endif()
 
 
 # ----------------------------------------------------------------------------
+# jitbridge.h defines the ABI the JIT-compiled element code is built against;
+# pyoomph/__init__.py points the JIT include dir at the pyoomph/jitbridge/
+# package directory, so a copy has to live there. It used to be a checked-in
+# symlink to src/jitbridge.h, which degrades to a 21-byte text file holding the
+# link path on a Windows clone (git needs core.symlinks plus the privilege to
+# create one) - the build still succeeds and only tcc fails, much later, on an
+# include it cannot resolve. Copy at configure time instead; configure_file
+# re-runs configure whenever the source header changes.
+#
+# Both a source-tree copy and an install(FILES ...) are needed, for two
+# different consumers. The source-tree copy serves editable installs, where
+# get_jit_include_dir() derives from pyoomph.__file__ and therefore points at
+# the source tree, not at the CMake install prefix. The install rule serves
+# wheels: scikit-build-core copies wheel.packages = ["pyoomph"] with the
+# repository's .gitignore applied, and this generated header is (rightly)
+# ignored there, so the package copy alone would leave it out of the wheel.
+# The two do not collide - packages_to_file_mapping() skips any source file
+# whose target the CMake install already produced.
+# ----------------------------------------------------------------------------
+configure_file("${CMAKE_SOURCE_DIR}/src/jitbridge.h"
+               "${CMAKE_SOURCE_DIR}/pyoomph/jitbridge/jitbridge.h" COPYONLY)
+install(FILES "${CMAKE_SOURCE_DIR}/src/jitbridge.h" DESTINATION pyoomph/jitbridge)
+
+
+# ----------------------------------------------------------------------------
 # Install: _core lands inside the pyoomph/ package directory, so it is
 # importable as `pyoomph._core` rather than as a top-level module.
 # ----------------------------------------------------------------------------

@@ -1,1 +1,0 @@
-Note: Windows does not support symbolical links. If you want to somehow try to compile it on Windows, make sure to copy the jitbridge*.h files from src/ to here!

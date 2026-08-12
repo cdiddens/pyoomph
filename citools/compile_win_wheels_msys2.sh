@@ -136,7 +136,6 @@ $CURRENT_PYTHON -m wheel unpack ./dist/*.whl --dest ./unpack/
 
 cp -r _*-stubs/ ./unpack/*/
 cp ./build/${PYOOMPH_SHORTPYVERSION}/*.pyd ./unpack/*/
-cp ./src/jitbridge*.h ./unpack/*/pyoomph/jitbridge
 
 $CURRENT_PYTHON -m wheel pack ./unpack/*
 NEWNAME=$(ls *.whl | cut -d - -f 1,2)-cp${PYOOMPH_SHORTPYVERSION}-${TAG}.whl
