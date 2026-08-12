@@ -52,6 +52,11 @@ _pyoomph_run_.txt
 *.mp4
 *.mpg
 *.csv
+# Material data read at runtime by default_materials.py. These are tracked
+# (force-added past the rule above), but scikit-build-core copies the pyoomph
+# package into the wheel with .gitignore applied, so without this exception the
+# blanket *.csv rule silently dropped them from every published wheel and sdist.
+!pyoomph/materials/csv_data/*.csv
 *.rar
 *.exe
 *.avi
