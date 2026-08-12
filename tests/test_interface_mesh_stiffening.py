@@ -65,7 +65,7 @@ class SquashedSquare(Problem):
     def define_problem(self):
         self.amp = self.get_global_parameter("amp")
         self += RectangularQuadMesh(N=4)
-        eqs = LaplaceSmoothedMesh(coordinate_space="C2")
+        eqs = LaplaceSmoothedMesh() + ElementSpace("C2")
         eqs += PinMeshCoordinates() @ ["left", "bottom", "right"]
         # The mesh is built from macro elements, so the Lagrangian coordinates are reset to whatever
         # the initial condition produced. Driving the deformation by a parameter after initialise()

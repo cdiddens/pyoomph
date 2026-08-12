@@ -42,23 +42,30 @@ if TYPE_CHECKING:
 class BaseMovingMeshEquations(Equations):
     """
         Defines the base class for moving mesh equations. This class should be inherited by all moving mesh equations.
-            
+
+        The coordinate space is whatever the highest space of all fields on the domain is. To ask for a
+        higher one than the fields require - a mesh on ``"C2"`` while only ``"C1"`` fields are
+        present, say - add an :py:class:`~pyoomph.equations.generic.ElementSpace` to the domain::
+
+            eqs = LaplaceSmoothedMesh() + ElementSpace("C2")
+
+        The moving-mesh classes used to take a ``coordinate_space`` argument of their own for this.
+        It went through ``activate_coordinates_as_dofs``, which *assigns* the space rather than
+        raising it to at least that order, so the outcome depended on whether the other fields were
+        defined before or after the smoother - and asking for a space below what the fields need was
+        rejected further down anyway. ``ElementSpace`` is order-independent and is the one place that
+        decides this.
+
         Args:
-            coordinate_space(Optional[str]): The coordinate space. Default is None.            
             coordsys(Optional[BaseCoordinateSystem]): The coordinate system. Default is None.
     """
 
-    def __init__(self,coordinate_space:str | None=None,coordsys:BaseCoordinateSystem | None=None):
+    def __init__(self,coordsys:BaseCoordinateSystem | None=None):
         super().__init__()
-        self.coordsys=coordsys                
-        self.coordinate_space=coordinate_space
-        
-        self.min_coordinate_space:str | None=None
-        if self.coordinate_space is not None:
-            self.min_coordinate_space = self.coordinate_space
+        self.coordsys=coordsys
 
     def define_fields(self):
-        self.activate_coordinates_as_dofs(coordinate_space=self.min_coordinate_space)        
+        self.activate_coordinates_as_dofs()
 
     def define_scaling(self):
         self.set_scaling(mesh= scale_factor("spatial"))
@@ -108,16 +115,14 @@ class PseudoElasticMesh(BaseMovingMeshEquations):
             E (ExpressionOrNum): The Young's modulus. Default is 1*scale_factor("spatial")**2.
             nu (ExpressionOrNum): The Poisson's ratio. Default is rational_num(3,10).
             spatial_error_factor (Optional[float]): The spatial error factor. Default is None.
-            coordinate_space (Optional[str]): The coordinate space. Default is None.            
             coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian.
     """
-    def __init__(self, E:ExpressionOrNum=1*scale_factor("spatial")**2, nu:ExpressionOrNum=rational_num(3,10), spatial_error_factor:float | None=None,coordinate_space:str | None=None,coordsys:BaseCoordinateSystem | None=cartesian):
-        super(PseudoElasticMesh, self).__init__(coordinate_space=coordinate_space,coordsys=coordsys)
+    def __init__(self, E:ExpressionOrNum=1*scale_factor("spatial")**2, nu:ExpressionOrNum=rational_num(3,10), spatial_error_factor:float | None=None,coordsys:BaseCoordinateSystem | None=cartesian):
+        super(PseudoElasticMesh, self).__init__(coordsys=coordsys)
         self.E = E
         self.nu = nu
         self.ALE_factor = 1
         self.spatial_error_factor = spatial_error_factor
-        self.min_coordinate_space=coordinate_space
 
     def get_squared_spatial_factor(self)->ExpressionOrNum:
         return self.E
@@ -156,8 +161,8 @@ class LaplaceSmoothedMesh(BaseMovingMeshEquations):
         Args:
             factor (ExpressionOrNum): The factor. Default is scale_factor("spatial")**2.            
     """
-    def __init__(self,factor:ExpressionOrNum=scale_factor("spatial")**2,coordinate_space:str | None=None,coordsys:BaseCoordinateSystem | None=cartesian,symmetrize:bool=False):
-        super(LaplaceSmoothedMesh, self).__init__(coordinate_space=coordinate_space,coordsys=coordsys)
+    def __init__(self,factor:ExpressionOrNum=scale_factor("spatial")**2,coordsys:BaseCoordinateSystem | None=cartesian,symmetrize:bool=False):
+        super(LaplaceSmoothedMesh, self).__init__(coordsys=coordsys)
         self.factor=factor
         self.symmetrize=symmetrize
 
@@ -177,8 +182,8 @@ class LaplaceSmoothedMesh(BaseMovingMeshEquations):
 
 
 class SingleDirectionLaplaceSmoothedMesh(LaplaceSmoothedMesh):
-    def __init__(self, direction:int | Literal["x", "y", "z"], factor: ExpressionOrNum = scale_factor("spatial") ** 2,  coordinate_space: str | None = None, coordsys: BaseCoordinateSystem | None = cartesian):
-        super().__init__(factor, coordinate_space, coordsys, symmetrize=False)
+    def __init__(self, direction:int | Literal["x", "y", "z"], factor: ExpressionOrNum = scale_factor("spatial") ** 2, coordsys: BaseCoordinateSystem | None = cartesian):
+        super().__init__(factor, coordsys, symmetrize=False)
         self.direction:int
         if isinstance(direction,str):
             self.direction={"x":0,"y":1,"z":2}[direction]
@@ -210,11 +215,10 @@ class HyperelasticSmoothedMesh(BaseMovingMeshEquations):
     Args:
         mu (float): The shear modulus. Default is 1.
         kappa (float): The bulk modulus. Default is 1.
-        coordinate_space (Optional[str]): The coordinate space. Default is None.
         coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian.
     """
-    def __init__(self,mu:float=1,kappa:float=1, coordinate_space: str | None = None,  coordsys: BaseCoordinateSystem | None = cartesian,use_subexpressions:bool=False):
-        super().__init__(coordinate_space,  coordsys)
+    def __init__(self,mu:float=1,kappa:float=1, coordsys: BaseCoordinateSystem | None = cartesian,use_subexpressions:bool=False):
+        super().__init__(coordsys)
         self.use_subexpressions=use_subexpressions
         self.mu=mu
         self.kappa=kappa
@@ -245,12 +249,11 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
         C1 (float): The Yeoh constant C1. Default is 1.
         C2 (float): The Yeoh constant C2. Default is 10.
         C3 (float): The Yeoh constant C3. Default is 0.
-        coordinate_space (Optional[str]): The coordinate space. Default is None.        
         coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian
-        
+
     """
-    def __init__(self,kappa:float=1, C1:float=1,C2:float=10,C3:float=0, coordinate_space: str | None = None,  coordsys: BaseCoordinateSystem | None = cartesian,use_subexpressions:bool=False):
-        super().__init__(coordinate_space,  coordsys)
+    def __init__(self,kappa:float=1, C1:float=1,C2:float=10,C3:float=0, coordsys: BaseCoordinateSystem | None = cartesian,use_subexpressions:bool=False):
+        super().__init__(coordsys)
         self.use_subexpressions=use_subexpressions
         self.C1=C1
         self.C2=C2
@@ -443,7 +446,7 @@ class ConnectMeshAtInterface(InterfaceEquations):
                 raise self.add_exception_info(RuntimeError("Cannot connect any fields at the interface if no opposite side is present"))
             inside_space=self.get_parent_domain()._coordinate_space            
             if inside_space=="":
-                raise RuntimeError("Cannot connect field "+f+" at the interface, since it cannot find in the inner domain. You might have to set coordinate_space explicitly in the moving mesh class")
+                raise RuntimeError("Cannot connect field "+f+" at the interface, since it cannot find in the inner domain. You might have to raise the coordinate space of that domain with an ElementSpace")
             outdom=self.get_opposite_side_of_interface().get_parent_domain()
             assert outdom is not None
             outside_space=outdom._coordinate_space #type:ignore
@@ -451,7 +454,7 @@ class ConnectMeshAtInterface(InterfaceEquations):
             outside_space=cast(FiniteElementSpaceEnum,outside_space)
             space = get_interface_field_connection_space(inside_space, outside_space,self.use_highest_space)
             if space=="":
-                raise RuntimeError("Cannot connect field "+f+" at the interface, since it cannot find in the inner domain. You might have to set coordinate_space explicitly in the moving mesh class")
+                raise RuntimeError("Cannot connect field "+f+" at the interface, since it cannot find in the inner domain. You might have to raise the coordinate space of that domain with an ElementSpace")
             self.define_scalar_field(self.lagr_mult_prefix+f,space)
 
     def define_scaling(self):
@@ -747,11 +750,10 @@ class PrescribedMovingMesh(BaseMovingMeshEquations):
     Args:
         umesh: The prescribed mesh velocity.
         lagrangian: If True, the integration is performed in the Lagrangian frame. Default is False.
-        coordinate_space: The coordinate space. Default is None.
         coordsys: The coordinate system. Default is cartesian.
     """
-    def __init__(self, umesh:ExpressionOrNum,lagrangian=False,coordinate_space = None, coordsys = None):
-        super().__init__(coordinate_space,  coordsys)
+    def __init__(self, umesh:ExpressionOrNum,lagrangian=False, coordsys = None):
+        super().__init__(coordsys)
         self.umesh = umesh
         self.lagrangian = lagrangian
         

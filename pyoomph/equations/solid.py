@@ -143,7 +143,12 @@ class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveL
 
 class BaseDeformableSolidEquations(BaseMovingMeshEquations):
     def __init__(self, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,scale_for_FSI:bool=False,modulus_for_scaling:ExpressionNumOrNone=None,isotropic_growth_factor:ExpressionOrNum=1,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,overdamped:bool=False):
-        super().__init__(coordinate_space,  None)
+        super().__init__(None)
+        # Kept here although the moving-mesh base class no longer takes one: a solid usually defines
+        # no other continuous field, so there is nothing for the space to be inferred from, and
+        # first_order_time_derivative needs a space to put "dt_mesh" on. Applied below with the same
+        # "raise to at least this" rule as ElementSpace, not by assignment.
+        self.coordinate_space=coordinate_space
         self.scale_for_FSI=scale_for_FSI
         self.mass_density=mass_density
         self.modulus_for_scaling=modulus_for_scaling
@@ -160,6 +165,11 @@ class BaseDeformableSolidEquations(BaseMovingMeshEquations):
 
 
     def define_fields(self):
+        if self.coordinate_space is not None:
+            if self.coordinate_space not in {"C2TB","C2","C1TB","C1"}:
+                raise ValueError("Can only set the coordinate space to either C2TB, C2, C1TB or C1")
+            cg=self.get_current_code_generator()
+            cg._coordinate_space=find_dominant_element_space(cast("FiniteElementSpaceEnum",cg._coordinate_space),self.coordinate_space)
         super().define_fields()
         if self.is_incompressible():
             self.define_scalar_field(self.pressure_name,self.pressure_space)
