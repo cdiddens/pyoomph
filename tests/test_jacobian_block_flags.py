@@ -56,6 +56,7 @@ from scipy.sparse import csr_matrix
 import pyoomph._pyoomph_core as _core
 from pyoomph import *
 from pyoomph.expressions import *
+from pyoomph.expressions.cb import CustomMathExpression
 from pyoomph.equations.ALE import LaplaceSmoothedMesh
 from pyoomph.equations.navier_stokes import NavierStokesEquations, StokesEquations
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
@@ -191,6 +192,38 @@ class _MovingMeshProblem(Problem):
         eqs = _Eqs() + LaplaceSmoothedMesh()
         for b in ["left", "right", "top", "bottom"]:
             eqs += DirichletBC(u=0, mesh_x=True, mesh_y=True) @ b
+        self.add_equations(eqs @ "domain")
+
+
+class _CallbackProblem(Problem):
+    """A python callback in the diffusivity. Callbacks are required to be deterministic functions of
+    their arguments, so the block's constancy is decided by the arguments alone: a coordinate of a
+    fixed mesh is constant, the unknown and the time are not."""
+
+    def __init__(self, argument="coordinate"):
+        super().__init__()
+        self.argument = argument
+
+    def define_problem(self):
+        self.add_mesh(RectangularQuadMesh(N=4))
+        argument = self.argument
+
+        class _Bump(CustomMathExpression):
+            def eval(self, arg):
+                return 1.0 + 0.5 * numpy.sin(arg[0])
+
+        class _Eqs(Equations):
+            def define_fields(self):
+                self.define_scalar_field("u", "C2")
+
+            def define_residuals(self):
+                u, v = var_and_test("u")
+                arg = {"coordinate": var("coordinate_x"), "unknown": u, "time": var("time")}[argument]
+                self.add_residual(weak(_Bump()(arg) * grad(u), grad(v)) - weak(1, v))
+
+        eqs = _Eqs()
+        for b in ["left", "right", "top", "bottom"]:
+            eqs += DirichletBC(u=0) @ b
         self.add_equations(eqs @ "domain")
 
 
@@ -350,8 +383,12 @@ def _check_soundness(p, meshname="domain", tol=1e-9, amplitude=1.0):
     (lambda: _CavityProblem(navier=False), True),
     (lambda: _CavityProblem(navier=True), True),
     (lambda: _MovingMeshProblem(), True),
+    (lambda: _CallbackProblem("coordinate"), True),
+    (lambda: _CallbackProblem("unknown"), False),
+    (lambda: _CallbackProblem("time"), True),
 ], ids=["poisson", "transient_diffusion", "convdiff_literal", "convdiff_parameter", "convdiff_unknown",
-        "stokes", "navier_stokes", "moving_mesh"])
+        "stokes", "navier_stokes", "moving_mesh", "callback_of_coordinate", "callback_of_unknown",
+        "callback_of_time"])
 def test_every_set_bit_is_true(factory, expect_bits):
     """The one-sided contract: a set bit is a promise about the assembled matrix, so check them all."""
     with factory() as p:
@@ -410,6 +447,23 @@ def test_transient_diffusion_loses_constant_but_not_constant_at_fixed_dt():
         after = _block(_matrices(p)[1], groups[i], groups[i])
         assert numpy.abs(after - before).max() > 1e-6, \
             "dt did not move the block, so CONSTANT_FIXED_DT vs CONSTANT proves nothing here"
+
+
+@pytest.mark.parametrize("argument,constant", [("coordinate", True), ("unknown", False), ("time", False)],
+                         ids=["callback_of_coordinate", "callback_of_unknown", "callback_of_time"])
+def test_a_callback_is_as_constant_as_its_arguments(argument, constant):
+    """A callback is a deterministic function of its arguments, so it must not block constancy by
+    itself - only its arguments may. Treating every callback as variable (as the analysis first did)
+    would make the coordinate case unprovable."""
+    with _CallbackProblem(argument) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        names, _groups = _class_dofs(p)
+        _jac, _mass, jflags, _mflags = _tables(p)
+        i = _index(names, "domain/u")
+        assert bool(jflags[i][i] & CONSTANT) is constant
+        assert bool(jflags[i][i] & CONSTANT_FIXED_DT) is constant
 
 
 @pytest.mark.parametrize("wind,constant", [("literal", True), ("parameter", False), ("unknown", False)],

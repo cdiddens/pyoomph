@@ -8291,6 +8291,19 @@ namespace pyoomph
 			{
 				scan_block_constancy(GiNaC::ex_to<GiNaC::GiNaCSubExpression>(c).get_struct().expr, moving, nonconstant, dt_dependent);
 			}
+			else if (GiNaC::is_a<GiNaC::GiNaCCustomMathExpressionWrapper>(c))
+			{
+				// The function IDENTITY of a scalar callback, not a value: a callback is required to be
+				// a deterministic function of its arguments, so the invocation is constant whenever the
+				// arguments are. python_cb_function(wrapper, args) is an ordinary two-operand GiNaC
+				// function, so this walk visits those arguments by itself.
+			}
+			else if (GiNaC::is_a<GiNaC::GiNaCMultiRetCallback>(c))
+			{
+				// Same for multi-return callbacks (result value or derivative alike), but these are
+				// opaque structures - the arguments have to be visited explicitly.
+				scan_block_constancy(GiNaC::ex_to<GiNaC::GiNaCMultiRetCallback>(c).get_struct().invok.op(1), moving, nonconstant, dt_dependent);
+			}
 			else if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(c) || GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(c) ||
 					 GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(c) || GiNaC::is_a<GiNaC::GiNaCNodalDeltaSymbol>(c))
 			{
@@ -8310,9 +8323,9 @@ namespace pyoomph
 			}
 			else if (c.nops() == 0 && !GiNaC::is_a<GiNaC::numeric>(c) && !GiNaC::is_a<GiNaC::constant>(c))
 			{
-				// Any other leaf: global parameters, custom math and multi-return callbacks, delayed
-				// python expansions, mode expansions, ... - every one of them can change between
-				// assemblies, and an unclassified one must be assumed to.
+				// Any other leaf: global parameters, delayed python expansions, mode expansions, ... -
+				// every one of them can change between assemblies, and an unclassified one must be
+				// assumed to.
 				nonconstant = true;
 			}
 		}
