@@ -1016,6 +1016,8 @@ namespace pyoomph
       std::map<unsigned, unsigned> global_parameter_to_local_indices; // Maps global parameter IDs to their local index within this code's parameter list
       std::vector<std::vector<bool>> local_parameter_has_deriv; // Per residual, per local parameter: whether a derivative w.r.t. that parameter is required
       std::vector<GiNaC::ex> local_parameter_symbols;
+      std::set<unsigned> params_declared_in_current_function; // Local parameter indices hoisted into const double locals of the generated function currently being written (managed by GlobalParameterFunctionScope, read by GiNaCGlobalParameterWrapper::print)
+      void register_global_parameters_in(const GiNaC::ex &e, std::set<unsigned> &used_local_indices); // Print-free registration pre-pass over an expression (descends into subexpressions and multi-ret invocations); fills used_local_indices with the local slots occurring in e
       std::vector<FiniteElementCodeSubExpression> subexpressions; // All CSE'd subexpressions registered for this code, in creation order (indices referenced by GiNaCSubExpression)
       std::vector<GiNaC::ex> multi_return_calls; // All distinct multi-return callback invocations registered for this code, in creation order
       std::map<CustomMultiReturnExpressionBase *, std::pair<unsigned, std::string>, CustomMultiReturnExpressionBasePtrLess> multi_return_ccodes; // Per multi-return callback: its assigned numeric id and generated C function name

@@ -157,28 +157,19 @@ namespace pyoomph
 	// contributions and the pitchfork mass matrix all do (see Problem's stability setup): they exist
 	// to supply Jacobian and mass-matrix entries for the eigenproblem, never a residual.
 	//
-	// The expression is still printed in the ignored case, into a stream that is thrown away, and
-	// that is the point of this function. Printing is not side-effect free:
-	// GiNaCGlobalParameterWrapper::print (src/expressions.cpp) allocates this code's local parameter
-	// slot for a global parameter on first encounter, and the resulting order of
-	// local_parameter_symbols decides both which dResidual<N>dParameter_<i> routines get written
-	// (write_code) and how functable->global_parameters is laid out. Skipping the print outright
-	// would renumber those, and would drop entirely a parameter that occurs only in a
-	// field-independent term of an ignored residual - such a term survives in no Jacobian derivative
-	// either, so nothing else would ever register it. Printing and discarding costs one traversal
-	// and keeps the generated code identical in every respect except the text removed.
-	//
-	// Previously the printed form was kept, wrapped in a /* IGNORED RESIDUAL ... */ comment. In one
-	// production element that comment payload was 66.5% of a 5.8 MB generated file, handed to the C
-	// compiler on every JIT cache miss for no purpose - and stability analysis, which is what
-	// switches residual assembly off, is exactly the workflow where compile time already hurts.
+	// Historically the ignored case still printed the expression into a discarded stream, because
+	// GiNaCGlobalParameterWrapper::print allocated a code's local parameter slot on first encounter
+	// and a parameter occurring only in a field-independent term of an ignored residual would
+	// otherwise never have been registered. Registration now happens print-free and up front
+	// (GlobalParameterFunctionScope below screens the full residual before any of the function body
+	// is printed), so the ignored case emits a bare 0 without any traversal. Even earlier, the
+	// printed form was kept as a /* ... */ comment - in one production element 66.5% of a 5.8 MB
+	// generated file, recompiled on every JIT cache miss for no purpose.
 	static void print_residual_entry(FiniteElementCode *for_code, const GiNaC::ex &res_part,
 									 std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
 	{
 		if (for_code->is_current_residual_assembly_ignored())
 		{
-			std::ostringstream discarded;
-			print_simplest_form(res_part, discarded, csrc_opts);
 			os << "0 /* IGNORED RESIDUAL */";
 		}
 		else
@@ -186,6 +177,76 @@ namespace pyoomph
 			print_simplest_form(res_part, os, csrc_opts);
 		}
 	}
+
+	// Registers every global parameter occurring in e in this code's local slot table (same
+	// first-encounter numbering GiNaCGlobalParameterWrapper::print used to establish as a print side
+	// effect) and collects the local indices into used_local_indices. Descends into CSE subexpression
+	// wrappers and multi-ret invocation arguments, which a plain preorder walk would treat as opaque.
+	void FiniteElementCode::register_global_parameters_in(const GiNaC::ex &e, std::set<unsigned> &used_local_indices)
+	{
+		for (GiNaC::const_preorder_iterator i = e.preorder_begin(); i != e.preorder_end(); ++i)
+		{
+			if (GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(*i))
+			{
+				const auto &p = GiNaC::ex_to<GiNaC::GiNaCGlobalParameterWrapper>(*i).get_struct();
+				unsigned global_index = p.cme->get_global_index();
+				if (!global_parameter_to_local_indices.count(global_index))
+				{
+					unsigned local_index = global_parameter_to_local_indices.size();
+					local_parameter_symbols.push_back(*i);
+					global_parameter_to_local_indices.insert(std::make_pair(global_index, local_index));
+				}
+				used_local_indices.insert(global_parameter_to_local_indices[global_index]);
+			}
+			else if (GiNaC::is_a<GiNaC::GiNaCSubExpression>(*i))
+			{
+				register_global_parameters_in(GiNaC::ex_to<GiNaC::GiNaCSubExpression>(*i).get_struct().expr, used_local_indices);
+			}
+			else if (GiNaC::is_a<GiNaC::GiNaCMultiRetCallback>(*i))
+			{
+				register_global_parameters_in(GiNaC::ex_to<GiNaC::GiNaCMultiRetCallback>(*i).get_struct().invok.op(1), used_local_indices);
+			}
+		}
+	}
+
+	// Screens the symbolic source expression(s) of ONE generated C function for global parameters
+	// before anything of the function body is printed. This replaces the former lazy registration
+	// inside GiNaCGlobalParameterWrapper::print, which made slot numbering depend on print order and
+	// forced print_residual_entry above to print ignored residuals into a discarded stream just for
+	// the side effect. The scope also hoists each parameter into a
+	//   const double pyoomph_gparam_<i> = *(my_func_table->global_parameters[<i>]);
+	// local (write_declarations, to be emitted right after the function's opening lines), which
+	// GiNaCGlobalParameterWrapper::print then references by name instead of repeating the double
+	// indirection at every use. Printing paths not covered by such a scope (multi-ret callback
+	// bodies, the geometric-Jacobian family) keep working through print's fallback: lazy
+	// registration plus the self-contained indirect access.
+	//
+	// Everything printed inside a scoped function must derive from the screened sources (residual
+	// derivatives, CSE bodies, ...), so the declared set is always a superset of what gets printed;
+	// a parameter screened but eliminated from every printed derivative merely leaves an unused
+	// local behind.
+	class GlobalParameterFunctionScope
+	{
+		FiniteElementCode *code;
+		std::set<unsigned> used;
+
+	public:
+		GlobalParameterFunctionScope(FiniteElementCode *code_, const std::vector<GiNaC::ex> &sources) : code(code_)
+		{
+			for (auto &e : sources)
+				code->register_global_parameters_in(e, used);
+			code->params_declared_in_current_function = used;
+		}
+		void write_declarations(std::ostream &os, const std::string &indent)
+		{
+			for (unsigned i : used)
+			{
+				const auto &p = GiNaC::ex_to<GiNaC::GiNaCGlobalParameterWrapper>(code->local_parameter_symbols[i]).get_struct();
+				os << indent << "const double pyoomph_gparam_" << i << " = *(my_func_table->global_parameters[" << i << "]); // " << p.cme->get_name() << std::endl;
+			}
+		}
+		~GlobalParameterFunctionScope() { code->params_declared_in_current_function.clear(); }
+	};
 
 	//////////////
 
@@ -4971,6 +5032,10 @@ namespace pyoomph
 
 		spatial_integral_portion = (*__SE_to_struct_hessian)(spatial_integral_portion);
 
+		// Constructed before the osm expression printing below; the declarations are emitted into the
+		// osh header stream later, which precedes osm in the assembled function text
+		GlobalParameterFunctionScope gp_scope(this, {resi});
+
 		osm << "    //START: Contribution of the spaces" << std::endl;
 		osm << "    double _H_contrib;" << std::endl;
 		for (auto *sp : allspaces)
@@ -4998,6 +5063,7 @@ namespace pyoomph
 		osh << "  double hang_weight,hang_weight2,hang_weight3;" << std::endl;
 		osh << "  const double * t=shapeinfo->t;" << std::endl;
 		osh << "  const double * dt=shapeinfo->dt;" << std::endl;
+		gp_scope.write_declarations(osh, "  ");
 		osh << "  double * hessian_buffer;" << std::endl; // TODO: Potentially with allocate array instead
 		osh << "  double * hessian_M_buffer;" << std::endl;
 		//		if (this->assemble_hessian_by_symmetry)
@@ -5248,6 +5314,11 @@ namespace pyoomph
 		if (stage == 0)
 			index_fields();
 
+		// Everything printed below (residual entries, Jacobian/mass derivatives, CSE bodies) derives
+		// from resi, so screening resi covers the whole function
+		GlobalParameterFunctionScope gp_scope(this, {resi});
+		gp_scope.write_declarations(os, "  ");
+
 		std::set<ShapeExpansion> all_shapeexps = get_all_shape_expansions_in(resi, true);
 
 		std::set<TestFunction> all_testfuncs = get_all_test_functions_in(resi);
@@ -5481,6 +5552,9 @@ namespace pyoomph
 		   << "  const double * dt=shapeinfo->dt;" << std::endl
 		   << std::endl;
 
+		GlobalParameterFunctionScope gp_scope(this, {gathered});
+		gp_scope.write_declarations(os, "  ");
+
 		std::set<ShapeExpansion> all_shapeexps = get_all_shape_expansions_in(gathered);
 		std::set<TestFunction> all_testfuncs = get_all_test_functions_in(gathered);
 		if (!all_testfuncs.empty())
@@ -5643,6 +5717,9 @@ namespace pyoomph
 		os << "  const double * t=shapeinfo->t;" << std::endl
 		   << "  const double * dt=shapeinfo->dt;" << std::endl
 		   << std::endl;
+
+		GlobalParameterFunctionScope gp_scope(this, {gathered});
+		gp_scope.write_declarations(os, "  ");
 
 		std::set<ShapeExpansion> all_shapeexps = get_all_shape_expansions_in(gathered);
 		std::set<TestFunction> all_testfuncs = get_all_test_functions_in(gathered);
@@ -5847,6 +5924,9 @@ namespace pyoomph
 		{
 			gathered += fluxes[i] * GiNaC::wild(cnt++);
 		}
+
+		GlobalParameterFunctionScope gp_scope(this, {gathered});
+		gp_scope.write_declarations(os, "  ");
 
 		std::set<ShapeExpansion> all_shapeexps = get_all_shape_expansions_in(gathered);
 		std::set<TestFunction> all_testfuncs = get_all_test_functions_in(gathered);
@@ -6695,6 +6775,13 @@ namespace pyoomph
 		os << "static double ElementalInitialConditions" << ic_index << "(const JITElementInfo_t * eleminfo, int field_index,double *_x, double *_xlagr,double *_normal,double t,int flag,double default_val)" << std::endl;
 		os << "{" << std::endl;
 		//		os << "  const unsigned " << std::endl;
+		GiNaC::ex gathered_ics;
+		unsigned ic_wild_cnt = 0;
+		for (auto *f : myfields)
+			if (f->initial_condition.count(ic_name))
+				gathered_ics += f->initial_condition[ic_name] * GiNaC::wild(ic_wild_cnt++); // Wild against accidental cancellation of parameters between fields
+		GlobalParameterFunctionScope gp_scope(this, {gathered_ics});
+		gp_scope.write_declarations(os, "  ");
 		GiNaC::lst sublist;
 		std::vector<std::string> dir{"x", "y", "z"};
 		for (unsigned int i = 0; i < this->nodal_dim; i++)
@@ -6803,6 +6890,13 @@ namespace pyoomph
 		os << "static double ElementalDirichletConditions(const JITElementInfo_t * eleminfo, int field_index,double *_x, double *_xlagr,double *_normal,double t,double default_val)" << std::endl;
 		os << "{" << std::endl;
 		os << "  const unsigned flag=0;" << std::endl;
+		GiNaC::ex gathered_dcs;
+		unsigned dc_wild_cnt = 0;
+		for (auto *f : myfields)
+			if (f->Dirichlet_condition_set)
+				gathered_dcs += f->Dirichlet_condition * GiNaC::wild(dc_wild_cnt++); // Wild against accidental cancellation of parameters between fields
+		GlobalParameterFunctionScope gp_scope(this, {gathered_dcs});
+		gp_scope.write_declarations(os, "  ");
 		GiNaC::lst sublist;
 		std::vector<std::string> dir{"x", "y", "z"};
 		for (unsigned int i = 0; i < this->nodal_dim; i++)
@@ -8129,10 +8223,11 @@ namespace pyoomph
 	// write_code_info() below. A SET bit is a proof, an unset bit means "not proven" - so every case
 	// that is not fully understood must fall through to unset.
 	//
-	// NOTHING in here may print a GiNaC expression, not even into a discarded stream:
-	// GiNaCGlobalParameterWrapper::print() allocates this code's local parameter slot on first
-	// encounter (see print_residual_entry() above), so a printing analysis pass would renumber the
-	// generated dResidual<N>dParameter_<i> routines and functable->global_parameters.
+	// NOTHING in here may print a GiNaC expression, not even into a discarded stream: global
+	// parameters are registered up front by GlobalParameterFunctionScope, but
+	// GiNaCGlobalParameterWrapper::print() still lazily registers a slot on unscreened paths, so a
+	// printing analysis pass could still renumber the generated dResidual<N>dParameter_<i> routines
+	// and functable->global_parameters.
 	////////////////////////////////////////////////////////////////////////////////////////////////
 
 	// The contribution CLASS of a field: the domain it is DEFINED on plus its name, with mesh_* and

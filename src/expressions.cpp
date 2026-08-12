@@ -81,9 +81,12 @@ namespace GiNaC
 		c.s << "<" << sp.cme->get_id_name() << " @" << sp.cme << ">";
 	}
 
-	// When generating C code, a global parameter is not inlined as a literal: it is registered (on first encounter for the
-	// current FiniteElementCode) in a per-code local index table, and the generated code accesses its *current* value
-	// indirectly through the function table pointer so that changing the parameter later does not require recompilation.
+	// When generating C code, a global parameter is not inlined as a literal: the generated code accesses its *current*
+	// value through the function table so that changing the parameter later does not require recompilation. The local
+	// slot is normally registered up front by the print-free screening pass (GlobalParameterFunctionScope in
+	// src/codegen.cpp), which also hoists the value into a const double pyoomph_gparam_<i> local that is referenced
+	// here. Printing paths without such a scope (multi-ret callback bodies, geometric Jacobians) fall back to lazy
+	// first-encounter registration and the self-contained indirect access, which needs no declaration.
 	template <>
 	void GiNaCGlobalParameterWrapper::print(const print_context &c, unsigned) const
 	{
@@ -104,7 +107,14 @@ namespace GiNaC
 				pyoomph::__current_code->local_parameter_symbols.push_back(*this);
 				pyoomph::__current_code->global_parameter_to_local_indices.insert(std::pair<unsigned, unsigned>(sp.cme->get_global_index(), local_index));
 			}
-			c.s << "(*(my_func_table->global_parameters[" << local_index << "]))";
+			if (pyoomph::__current_code->params_declared_in_current_function.count(local_index))
+			{
+				c.s << "pyoomph_gparam_" << local_index;
+			}
+			else
+			{
+				c.s << "(*(my_func_table->global_parameters[" << local_index << "]))";
+			}
 		}
 		else
 		{
