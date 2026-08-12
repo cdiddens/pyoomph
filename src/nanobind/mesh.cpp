@@ -356,6 +356,12 @@ void PyDecl_Mesh(nb::module_ &m)
 
 void PyReg_Mesh(nb::module_ &m)
 {
+	// The bit values of GeneralisedElement._get_block_flags(). Kept in sync with the
+	// JACOBIAN_BLOCK_* macros in src/jitbridge.h, which the generated element code uses by name.
+	m.attr("JACOBIAN_BLOCK_SYMMETRIC") = (int)JACOBIAN_BLOCK_SYMMETRIC;
+	m.attr("JACOBIAN_BLOCK_ANTISYMMETRIC") = (int)JACOBIAN_BLOCK_ANTISYMMETRIC;
+	m.attr("JACOBIAN_BLOCK_CONSTANT") = (int)JACOBIAN_BLOCK_CONSTANT;
+	m.attr("JACOBIAN_BLOCK_CONSTANT_FIXED_DT") = (int)JACOBIAN_BLOCK_CONSTANT_FIXED_DT;
 
 	nb::class_<pyoomph::MeshTemplateCurvedEntity>(m, "MeshTemplateCurvedEntityBase")
 		.def_static("load_from_strings", &pyoomph::MeshTemplateCurvedEntity::load_from_strings)
@@ -990,6 +996,38 @@ void PyReg_Mesh(nb::module_ &m)
 			 "``(contribution_names, contributes_to_jacobian, contributes_to_mass_matrix)``. Both tables are "
 			 "``[row_field][column_field]`` and are supersets of whatever entries turn out to be numerically "
 			 "nonzero. Exposed for testing the structural sparsity machinery.")
+		.def("_get_block_flags", [](oomph::GeneralisedElement *self)
+			 {
+			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
+			std::vector<std::vector<int>> jac, mass;
+			if (be)
+			{
+				auto *ft=be->get_code_instance()->get_func_table();
+				int r=ft->current_res_jac;
+				if (r>=0 && ft->jacobian_block_flags && ft->mass_matrix_block_flags && ft->jacobian_block_flags[r] && ft->mass_matrix_block_flags[r])
+				{
+					for (unsigned i=0;i<ft->contribution_entries_size;i++)
+					{
+						std::vector<int> jrow, mrow;
+						for (unsigned j=0;j<ft->contribution_entries_size;j++)
+						{
+							jrow.push_back(ft->jacobian_block_flags[r][i][j]);
+							mrow.push_back(ft->mass_matrix_block_flags[r][i][j]);
+						}
+						jac.push_back(jrow); mass.push_back(mrow);
+					}
+				}
+			}
+			return std::make_tuple(jac,mass); },
+			 "The proven per-block properties of this element's code for the currently active residual: "
+			 "``(jacobian_block_flags, mass_matrix_block_flags)``, both indexed ``[row_field][column_field]`` "
+			 "exactly like ``_get_contribution_tables`` (i.e. ordered like ``_get_contribution_names``). Each "
+			 "entry is an OR of ``JACOBIAN_BLOCK_SYMMETRIC`` (1), ``JACOBIAN_BLOCK_ANTISYMMETRIC`` (2), "
+			 "``JACOBIAN_BLOCK_CONSTANT`` (4) and ``JACOBIAN_BLOCK_CONSTANT_FIXED_DT`` (8), also exported as "
+			 "module attributes. A SET bit means the property was proven from the symbolic block expression at "
+			 "code generation time; an UNSET bit means it was not proven, never that it is false. Blocks that do "
+			 "not contribute at all have no bits set - check ``_get_contribution_tables`` first, since an absent "
+			 "block is identically zero and hence trivially symmetric and constant. Exposed for testing.")
 		.def(
 			"get_father_element", [](oomph::GeneralisedElement *self) -> oomph::GeneralisedElement *
 			{
