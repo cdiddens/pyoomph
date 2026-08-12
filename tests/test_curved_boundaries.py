@@ -428,6 +428,35 @@ class _GmshBall(Problem):
         self += eqs @ "domain"
 
 
+class _OccBallTemplate(GmshTemplate):
+    # The whole ball as a single OpenCASCADE primitive rather than as eight ruled patches glued into
+    # a volume. Its boundary is one exact spherical surface, so nothing has to be guessed about it -
+    # which is why the curved entity is attached by default here and opt-in for a ruled surface.
+    def __init__(self, resolution=0.5, with_curved_entity=True):
+        super().__init__()
+        self.kernel = "occ"  # the kernel is chosen when the geometry object is built, i.e. before
+        self._res = resolution                                        # define_geometry() is called
+        self._curved = with_curved_entity
+
+    def define_geometry(self):
+        self.mesh_mode = "tetras"
+        self.default_resolution = self._res
+        self.sphere(self.point(0, 0, 0), _R, surface_name="shell", name="domain",
+                    with_curved_entity=self._curved)
+
+
+class _OccBall(Problem):
+    def __init__(self, resolution=0.5, with_curved_entity=True):
+        super().__init__()
+        self._res, self._curved = resolution, with_curved_entity
+
+    def define_problem(self):
+        self += _OccBallTemplate(self._res, self._curved)
+        eqs = PoissonEquation(source=1, space="C1") + DirichletBC(u=0) @ "shell"
+        eqs += SpatialErrorEstimator(u=1)
+        self += eqs @ "domain"
+
+
 _SEAM_CENTRE = 160.0  # the reported droplet sat this far up the axis, measured in its own radii
 _SEAM_R = 2.0
 
@@ -763,6 +792,19 @@ def _worker_main(argv):
         print("RESULT", _max_radius_error(mesh, "shell", ndim=3))
         print("NMACRO", nmacro)
         print("NFACE", nface)
+        return
+    elif kind == "occball":
+        res, nref, curved = float(argv[2]), int(argv[3]), argv[4] == "1"
+        problem = _OccBall(resolution=res, with_curved_entity=curved)
+        problem.set_output_directory(outdir)
+        problem.max_refinement_level = 3
+        problem.initialise()
+        for _ in range(nref):
+            problem.refine_uniformly()
+        mesh = problem.get_mesh("domain")
+        print("NELEM", mesh.nelement())
+        print("NNODE", mesh.element_pt(0).nnode())
+        print("RESULT", _max_radius_error(mesh, "shell", ndim=3))
         return
     elif kind in ("wedge", "pyramid"):
         nref = int(argv[3])
@@ -1109,6 +1151,29 @@ def test_gmsh_ball_needs_the_curved_edge_registry(tmp_path):
     assert nface == 45
     assert nmacro == 70, "expected the 45 face-touching elements plus 25 edge-only ones"
     assert float(out["RESULT"]) < _EXACT
+
+
+def test_occ_ball_is_a_meshed_volume_of_the_requested_resolution(tmp_path):
+    # GmshTemplate.sphere() used to be unreachable in practice: it left _maxdim at 2, so Gmsh meshed
+    # the bounding surface and nothing else ("No elements in volume"), it never named the volume, so
+    # the ball could not become a bulk domain, and - a ball being built from coordinates rather than
+    # from Points - it never picked up default_resolution either, so every ball came out at whatever
+    # Gmsh derives from the bounding box (679 tetrahedra here, regardless of what was asked for).
+    coarse = _worker_lines(tmp_path, "occball", 0.5, 0, 1)
+    fine = _worker_lines(tmp_path, "occball", 0.25, 0, 1)
+    assert int(coarse["NNODE"]) == 4, "expected linear tetrahedra"
+    assert int(fine["NELEM"]) > 4 * int(coarse["NELEM"]), "halving the resolution must refine the ball"
+
+
+@pytest.mark.parametrize("curved", [True, False])
+def test_occ_ball_shell_is_curved_by_default(curved, tmp_path):
+    # The boundary of a ball *is* a sphere, so unlike ruled_surface(map_to_sphere=...) there is
+    # nothing to infer and the curved entity is attached unless it is refused.
+    out = _worker_lines(tmp_path, "occball", 0.5, 2, 1 if curved else 0)
+    if curved:
+        assert float(out["RESULT"]) < _EXACT
+    else:
+        assert float(out["RESULT"]) > 1e-2  # the plain polyhedron, i.e. the facet sagitta
 
 
 def test_gmsh_map_to_sphere_is_opt_in(tmp_path):

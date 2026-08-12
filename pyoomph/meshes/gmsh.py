@@ -993,24 +993,72 @@ class GmshTemplate(MeshedMeshTemplate):
                     res[name][tuple(p.x)]=self._point_size_hash[p] #type:ignore
         return res
 
-    def sphere(self, origin:Point, radius:float=1, surface_name:str | None=None, mesh_size:float | None=None)->Any:
+    def sphere(self, origin:Point, radius:ExpressionOrNum=1, surface_name:str | None=None, mesh_size:float | None=None, name:str | None=None, with_curved_entity:bool=True)->Any:
+        """
+        Adds a solid ball, i.e. a volume bounded by a sphere. Unlike :py:meth:`ruled_surface` plus
+        :py:meth:`volume`, the ball is a single entity of the Gmsh kernel, so its boundary is one
+        exact spherical surface instead of a patchwork of ruled surfaces.
+
+        Args:
+            origin: The centre of the ball.
+            radius: The radius of the ball, in the spatial unit - as for :py:meth:`point`, i.e. in
+                meter if the problem has a metric ``set_scaling(spatial=...)``.
+            surface_name: Name of the bounding sphere, to identify it later as a boundary.
+            mesh_size: Element size on the ball, defaulting to :py:attr:`default_resolution`.
+                Negative sizes are relative to it, as for :py:meth:`point`.
+            name: Name of the volume, i.e. the name of the bulk domain it will become.
+            with_curved_entity: Attach a spherical macro element to the bounding surface, so that
+                nodes created by spatial refinement land on the sphere rather than on the facets
+                Gmsh meshed it with. Unlike ``ruled_surface(map_to_sphere=...)`` this is on by
+                default: the surface of a ball really is a sphere, so there is nothing to guess.
+        """
         if self._geom is None:
             raise RuntimeError("Can only add geometry inside the function 'define_geometry'")
+        if self.consider_spatial_scale:
+            radius = radius / self.get_problem().get_scaling("spatial")
+        if isinstance(radius, Expression):
+            radius = radius.float_value()
+        radius = float(radius)
+        # A ball is built from coordinates, not from Points, so it never picks up the resolution the
+        # way the rest of the geometry does (via point()) - it would silently come out at whatever
+        # Gmsh derives from the bounding box. Apply the same defaulting here.
+        if mesh_size is None:
+            mesh_size = self.default_resolution
+        if mesh_size is not None:
+            if mesh_size < 0:
+                if self.default_resolution is None:
+                    raise RuntimeError("A negative mesh_size is given relative to self.default_resolution, but self.default_resolution is not set")
+                mesh_size = -mesh_size * self.default_resolution
+            mesh_size *= self.mesh_size_factor
         ball = self._geom.add_ball([x for x in origin.x], radius, mesh_size=mesh_size) #type:ignore
-        if surface_name is not None:
+        centre = [float(x) for x in origin.x]
+        onsphere = [centre[0] + radius, centre[1], centre[2]]
+        if surface_name is not None or (with_curved_entity and self.use_macro_elements):
             if self.kernel == "occ":
                 # occ's add_ball returns a plain Ball with just a dim_tag (no .surface_loop like
                 # the geo kernel's ellipsoid-based ball) -- fetch its boundary surfaces instead.
                 self._geom.env.synchronize() #type:ignore
-                for dim, tag in gmsh.model.getBoundary([ball.dim_tag], combined=False, oriented=False): #type:ignore
-                    entry = GmshTemplate.GmshFakeEntry(tag, (dim, tag))
-                    self._store_name(surface_name, entry)
+                tags = [tag for dim, tag in gmsh.model.getBoundary([ball.dim_tag], combined=False, oriented=False)] #type:ignore
+                for tag in tags:
+                    entry = GmshTemplate.GmshFakeEntry(tag, (2, tag))
+                    if surface_name is not None:
+                        self._store_name(surface_name, entry)
                     self._entities2d[tag] = entry #type:ignore
             else:
+                tags = []
                 for entry in ball.surface_loop.surfaces: #type:ignore
-                    self._store_name(surface_name, entry) #type:ignore
+                    if surface_name is not None:
+                        self._store_name(surface_name, entry) #type:ignore
                     self._entities2d[entry._id] = entry #type:ignore
-        self._maxdim = max(self._maxdim, 2)  ##TODO 2 or 1
+                    tags.append(entry._id) #type:ignore
+            if with_curved_entity and self.use_macro_elements:
+                for tag in tags:
+                    self._curved_entities2d[tag] = _pyoomph.CurvedEntitySpherePart(centre, onsphere) #type:ignore
+        if name is not None:
+            # add_ball always comes with its volume, but where that volume lives differs per kernel:
+            # occ's Ball *is* the volume, the geo kernel wraps it in an Ellipsoid.
+            self._store_name(name, ball if self.kernel == "occ" else ball.volume) #type:ignore
+        self._maxdim = max(self._maxdim, 3)
         return ball
 
     def _sort_line_loop(self, lst:Sequence[Line | Spline | BSpline | CircleArc], name:str | None=None) -> list[list[Line | Spline | BSpline | CircleArc]]:
