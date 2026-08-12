@@ -8253,7 +8253,11 @@ namespace pyoomph
 		return n;
 	}
 
-	// Identifies one row/column role (or one time-stepper weight) in the canonicalised block.
+	// Identifies one row/column role (or one time-stepper weight) in the canonicalised block. `tags`
+	// carries the remaining attributes that make two otherwise identical shape expansions DIFFERENT
+	// functions (mode expansion, history geometry): two roles sharing a key are treated as the same
+	// function, so anything left out of the key that does change the function could turn into a wrong
+	// symmetry proof.
 	struct BlockRoleKey
 	{
 		int role; // 0 = row (test function), 1 = column (unknown), 2 = time-stepper weight
@@ -8261,9 +8265,10 @@ namespace pyoomph
 		unsigned basis;
 		int dt_order;
 		std::string dt_scheme;
+		std::string tags;
 		bool operator<(const BlockRoleKey &o) const
 		{
-			return std::tie(role, field, basis, dt_order, dt_scheme) < std::tie(o.role, o.field, o.basis, o.dt_order, o.dt_scheme);
+			return std::tie(role, field, basis, dt_order, dt_scheme, tags) < std::tie(o.role, o.field, o.basis, o.dt_order, o.dt_scheme, o.tags);
 		}
 	};
 
@@ -8292,13 +8297,13 @@ namespace pyoomph
 			oss << "__blockrole" << registry->size();
 			return registry->emplace(key, GiNaC::symbol(oss.str())).first->second;
 		}
-		GiNaC::ex role_symbol(int role, pyoomph::FiniteElementField *f, pyoomph::BasisFunction *basis)
+		GiNaC::ex role_symbol(int role, pyoomph::FiniteElementField *f, pyoomph::BasisFunction *basis, const std::string &tags)
 		{
-			return get(BlockRoleKey{transpose ? 1 - role : role, block_contribution_class_name(f), basis->get_creation_index(), 0, ""});
+			return get(BlockRoleKey{transpose ? 1 - role : role, block_contribution_class_name(f), basis->get_creation_index(), 0, "", tags});
 		}
 		GiNaC::ex weight_symbol(unsigned dt_order, const std::string &scheme)
 		{
-			return get(BlockRoleKey{2, "", 0, (int)dt_order, scheme});
+			return get(BlockRoleKey{2, "", 0, (int)dt_order, scheme, ""});
 		}
 
 	public:
@@ -8315,7 +8320,7 @@ namespace pyoomph
 					*unsupported = true;
 					return inp;
 				}
-				return role_symbol(0, tf.field, tf.basis);
+				return role_symbol(0, tf.field, tf.basis, "");
 			}
 			if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
 			{
@@ -8332,7 +8337,18 @@ namespace pyoomph
 					*unsupported = true;
 					return inp;
 				}
-				GiNaC::ex res = role_symbol(1, se.field, se.basis);
+				// Empty for the ordinary case, so that a plain shape expansion and the test function of
+				// the same field share a role symbol - which is the whole point, since the two are the
+				// same function. A mode expansion or a shape derivative taken on the history geometry is
+				// NOT, so it gets its own symbol and simply fails to match, which is the safe direction.
+				// no_jacobian/no_hessian are deliberately left out: they only suppress differentiation
+				// elsewhere and describe the very same function.
+				std::ostringstream tags;
+				if (se.expansion_mode)
+					tags << "M" << se.expansion_mode;
+				if (se.history_geometry)
+					tags << "G";
+				GiNaC::ex res = role_symbol(1, se.field, se.basis, tags.str());
 				if (se.dt_order > 0)
 					res = res * weight_symbol(se.dt_order, se.dt_scheme); // the weight travels with the side carrying d/dt
 				return res;
