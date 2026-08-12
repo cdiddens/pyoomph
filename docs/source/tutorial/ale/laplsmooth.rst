@@ -25,7 +25,7 @@ As an example problem, let us deform a rectangular mesh by prescribing Dirichlet
 .. literalinclude:: laplace_smoothed_mesh.py
    :language: python
    :start-at: class LaplaceSmoothProblem(Problem):
-   :end-at: problem.output_at_increased_time()
+   :end-at: problem.output(increase_time_for_PVD=True)
 
 A few new things occur here. First, we set the property :py:attr:`~pyoomph.generic.problem.Problem.initial_adaption_steps` of the problem class to ``0``. This controls the initial adaption, i.e. the adaption steps taken after the first solve. We deactivate this to get the middle mesh in :numref:`figalelaplacesmooth`. If this is not set, but a :py:class:`~pyoomph.equations.generic.SpatialErrorEstimator` is present, pyoomph will already adapt with respect to the initial condition. Then, the :py:class:`~pyoomph.equations.generic.DirichletBC` terms have values that are set to ``True`` instead to some value. This will fix the value of the variable at the interface, but it will not influence its value. Thereby, we can e.g. fix the :math:`y`-coordinates of the ``"left"`` interface. Finally, note that we use the Lagrangian coordinate to prescribe the deformation in the :py:class:`~pyoomph.equations.generic.DirichletBC` term. We cannot use the Eulerian coordinate (i.e. ``var("mesh")`` or ``var("coordinate")``) here, since these are now unknowns. Dirichlet boundary conditions may only depend on independent variables.
 

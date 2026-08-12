@@ -29,7 +29,7 @@ As a driver code, we use the following with a dimensional ``fish_size``:
 .. literalinclude:: mesh_fish_dimensional_curved.py
    :language: python
    :start-at: class MeshTestProblem(Problem):
-   :end-at: problem.output_at_increased_time()
+   :end-at: problem.output(increase_time_for_PVD=True)
 
 Since the ``fish_size`` is dimensional, we have to use :py:meth:`~pyoomph.generic.problem.Problem.set_scaling` to set a good spatial scale for non-dimensionalization of the coordinates. This also implies, that the coefficient of the Poisson equation has to be dimensional, since the :py:class:`~pyoomph.equations.poisson.PoissonEquation` involves a :math:`\nabla^2`, which has to be compensated for by a ``coefficient`` with the unit :math:`\:\mathrm{m}^2`. The ``coefficient`` :math:`c` enters the :py:class:`~pyoomph.equations.poisson.PoissonEquation` as :math:`-\nabla\cdot(c\nabla u)=g`.
 

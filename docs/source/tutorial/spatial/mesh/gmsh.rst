@@ -28,7 +28,7 @@ The driver code is essentially the same as before:
 .. literalinclude:: mesh_gmsh_fish_mesh_modes.py
    :language: python
    :start-at: class MeshTestProblem(Problem):
-   :end-at: problem.output_at_increased_time()
+   :end-at: problem.output(increase_time_for_PVD=True)
 
 The differences are that we do not allow for spatial adaptivity and introduce new parameters ``resolution`` and ``mesh_mode``, which will be passed to the mesh properties :py:attr:`~pyoomph.meshes.gmsh.GmshTemplate.default_resolution` and :py:attr:`~pyoomph.meshes.gmsh.GmshTemplate.mesh_mode`, respectively. Thereby, we can control the resolution of the mesh (the smaller, the finer) and also whether gmsh should try to create quadrilateral elements (``mesh_mode="quads"``) or should just create triangular elements (``mesh_mode="tris"``). However, there is no guarantee that ``mesh_mode="quads"`` generates only quadrilateral elements. In particular at the sharp corners of the fin, gmsh will likely produce a triangle instead, leading to a mixed mesh. Some representative generated meshes are depicted in :numref:`figspatialfishgmsh`.
 

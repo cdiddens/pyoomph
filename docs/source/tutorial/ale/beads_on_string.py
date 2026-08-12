@@ -148,8 +148,8 @@ class BeadsOnStringProblem(Problem):
     def minimum_radius_and_position(self):
         return self.get_mesh("liquid/interface").evaluate_minimum("min_r", return_x=True)[1]
             
-    def output(self, stage= "", quiet= None):
-        super().output(stage, quiet)
+    def output(self, stage= "", quiet= None, **kwargs):
+        super().output(stage, quiet, **kwargs)
         self.minimum_out.add_row(self.get_current_time(), *self.minimum_radius_and_position())    
 
 

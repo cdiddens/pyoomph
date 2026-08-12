@@ -86,7 +86,7 @@ if __name__ == "__main__":
             line=[problem.param_gamma.value,h_rms,eigvals[0].real,eigvals[0].imag] # line to write
             eigenfile.write("\t".join(map(str,line))+"\n") # write to file
             eigenfile.flush()
-            problem.output_at_increased_time() # and write the output
+            problem.output(increase_time_for_PVD=True) # and write the output
 
         # Arclength continuation
         output_with_eigen()

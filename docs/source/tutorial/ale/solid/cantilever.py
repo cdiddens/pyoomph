@@ -85,7 +85,7 @@ with AiryCantileverProblem() as problem:
      for i in range(nstep): 
         problem.P.value+=p_increment
         problem.solve(spatial_adapt=max_adapt)
-        problem.output_at_increased_time()
+        problem.output(increase_time_for_PVD=True)
         
         
    

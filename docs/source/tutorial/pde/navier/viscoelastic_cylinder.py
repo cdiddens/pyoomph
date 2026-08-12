@@ -156,5 +156,5 @@ if __name__ == "__main__":
                 # S1 and S2 live on their own residual, so they are pinned and cost nothing while the
                 # flow is being solved; But for the output, we want to include it
                 problem.solve_auxiliary_residual("output_projection")
-                problem.output_at_increased_time()
+                problem.output(increase_time_for_PVD=True)
                 

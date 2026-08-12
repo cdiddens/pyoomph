@@ -108,6 +108,6 @@ class MeshTestProblem(Problem):
 if __name__ == "__main__":
     with MeshTestProblem() as problem:
         problem.solve(spatial_adapt=problem.max_refinement_level)
-        problem.output_at_increased_time()
+        problem.output(increase_time_for_PVD=True)
 
 

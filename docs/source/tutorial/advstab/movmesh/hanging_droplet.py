@@ -114,7 +114,7 @@ if __name__=="__main__":
         critical_curve_out=NumericalTextOutputFile(problem.get_output_directory("critical_curve.txt"))
         critical_curve_out.header("V","Bo_c") # header line
         critical_curve_out.add_row(problem.V.value,problem.Bo.value) # V and Bo_c -> file
-        problem.output_at_increased_time() # also Paraview output
+        problem.output(increase_time_for_PVD=True) # also Paraview output
 
         # Increase the volume, still tracking for the critical Bond number:
         dV=0.1*problem.V.value
@@ -122,7 +122,7 @@ if __name__=="__main__":
             dV=problem.arclength_continuation("V",dV,max_ds=0.1*problem.V.value) 
             problem.remesh_handler_during_continuation()
             critical_curve_out.add_row(problem.V.value,problem.Bo.value)
-            problem.output_at_increased_time()
+            problem.output(increase_time_for_PVD=True)
 
 
         

@@ -122,12 +122,12 @@ if __name__=="__main__":
 		problem.solve()
 		problem.output()
 		
-		problem.go_to_param(gravity_factor=1,startstep=0.2,final_adaptive_solve=False,call_after_step=lambda x: problem.output_at_increased_time())
-		problem.output_at_increased_time()
+		problem.go_to_param(gravity_factor=1,startstep=0.2,final_adaptive_solve=False,call_after_step=lambda x: problem.output(increase_time_for_PVD=True))
+		problem.output(increase_time_for_PVD=True)
 
 		problem.go_to_param(contact_angle=150*degree, startstep=5*degree,final_adaptive_solve=False)
-		problem.output_at_increased_time()
+		problem.output(increase_time_for_PVD=True)
 
 		problem.go_to_param(sigma_gradient=0.001, startstep=0.001,final_adaptive_solve=True)
-		problem.output_at_increased_time()
+		problem.output(increase_time_for_PVD=True)
 

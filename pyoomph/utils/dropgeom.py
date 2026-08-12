@@ -527,7 +527,7 @@ class YoungLaplaceDropletShape(Problem):
         self.go_to_param(force_factor=1, final_adaptive_solve=False)
         print("DROPLET SHAPE RELAXED BY GRAVITY","REFERENCE PRESSURE:",self.get_ode("globals").get_value("p0"))        
         if output_text:
-            self.output_at_increased_time()
+            self.output(increase_time_for_PVD=True)
         #self.quiet(False)
 
 

@@ -80,7 +80,7 @@ with CompressedDiscProblem() as problem:
               
     for i in range(nstep):         
         problem.solve()
-        problem.output_at_increased_time()
+        problem.output(increase_time_for_PVD=True)
         rlinear=square_root(problem.Gamma)*(1-problem.P*(1+problem.claw.nu)*(1-2*problem.claw.nu))
         rnumeric=problem.get_mesh("domain/circumference").evaluate_observable("radius")
         outf.add_row(problem.P,rnumeric,rlinear)

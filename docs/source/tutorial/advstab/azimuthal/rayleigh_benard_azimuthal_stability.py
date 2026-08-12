@@ -121,7 +121,7 @@ if __name__=="__main__":
 
             # Find a solution at the cricical Ra and write output
             problem.solve()
-            problem.output_at_increased_time()
+            problem.output(increase_time_for_PVD=True)
             txtout = NumericalTextOutputFile(problem.get_output_directory(f"curve_m_{m}.txt"))
             txtout.header("Gamma", "Ra")
             txtout.add_row(problem.Gamma.value,problem.Ra.value)

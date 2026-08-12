@@ -61,6 +61,6 @@ if __name__=="__main__":
     with FoldProblem() as problem:
         while True:
             problem.solve()
-            problem.output_at_increased_time()
+            problem.output(increase_time_for_PVD=True)
             problem.r.value-=0.02
 

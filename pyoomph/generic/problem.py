@@ -1624,11 +1624,19 @@ class Problem(_pyoomph.Problem):
 
         Returns:
             None
-        """               
-        if dt is None:
-            dt=self.get_scaling("temporal")
-        self.set_current_time(self.get_current_time()+dt)
-        self.output()
+
+        .. deprecated::
+            Use :py:meth:`output` with ``increase_time_for_PVD=True`` instead (or
+            ``increase_time_for_PVD=dt`` for an explicit time step).
+        """
+        warnings.warn(
+            "Problem.output_at_increased_time() is deprecated. Use "
+            "Problem.output(increase_time_for_PVD=True) instead, or pass an explicit time step, "
+            "i.e. Problem.output(increase_time_for_PVD=dt).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.output(increase_time_for_PVD=True if dt is None else dt)
 
     def perform_plot(self):
         if self._plotting_process is not None:
@@ -1744,19 +1752,27 @@ class Problem(_pyoomph.Problem):
                 recu_interf(m)
 
 
-    def output(self, stage: str = "", quiet: bool | None = None) -> None:
+    def output(self, stage: str = "", quiet: bool | None = None, increase_time_for_PVD: bool | ExpressionOrNum = False) -> None:
         """
         Invoke an output of the current solution at the current time by calling all Output objects.
 
         Args:
             stage (str): The stage of the output, at the moment, only "" is meaninfull.
             quiet (bool, optional): Flag to control the verbosity of the output.
+            increase_time_for_PVD (bool | ExpressionOrNum): Advance the current time before writing.
+                A Paraview PVD collection indexes its entries by time, so a sequence of stationary
+                solutions - a parameter scan, a bifurcation diagram - all written at the same time
+                would overlay each other there. ``True`` steps the time by ``scale_factor("temporal")``;
+                pass a time step instead of ``True`` to control the increment.
 
         Returns:
             None
         """
         if not self.is_initialised():
             self.initialise()
+        if increase_time_for_PVD is not False and increase_time_for_PVD is not None:
+            dt = self.get_scaling("temporal") if increase_time_for_PVD is True else increase_time_for_PVD
+            self.set_current_time(self.get_current_time() + dt)
         if quiet is None:
             quiet = self.is_quiet()
         if not quiet:

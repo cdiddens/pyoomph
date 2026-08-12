@@ -55,7 +55,7 @@ if __name__ == "__main__":
             line = [problem.param_gamma.value, problem.param_delta.value,h_rms]  # line to write
             hexfold_file.write("\t".join(map(str, line)) + "\n")  # write to file
             hexfold_file.flush()
-            problem.output_at_increased_time()  # and write the output
+            problem.output(increase_time_for_PVD=True)  # and write the output
 
         output_with_params()
         ds = 0.025

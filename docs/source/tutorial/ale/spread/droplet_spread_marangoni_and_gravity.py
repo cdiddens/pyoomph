@@ -126,13 +126,13 @@ if __name__=="__main__":
 
 		# Ramp up gravity by arclength continuation
 		problem.go_to_param(gravity_factor=1,startstep=0.2,final_adaptive_solve=False)
-		problem.output_at_increased_time()
+		problem.output(increase_time_for_PVD=True)
 
 		# Ramp up the contact angle by arclength continuation
 		problem.go_to_param(contact_angle=110*degree, startstep=5*degree,final_adaptive_solve=False)
-		problem.output_at_increased_time()
+		problem.output(increase_time_for_PVD=True)
 
 		# Ramp up Marangoni flow by arclength continuation
 		problem.go_to_param(sigma_gradient=0.001, startstep=0.001,final_adaptive_solve=True)
-		problem.output_at_increased_time()
+		problem.output(increase_time_for_PVD=True)
 

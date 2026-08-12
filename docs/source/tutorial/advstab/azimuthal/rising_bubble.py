@@ -234,7 +234,7 @@ if __name__=="__main__":
             # Store it to the text file
             outfile.add_row(problem.Bo,numpy.real(lambd),numpy.imag(lambd))                
             # Output the solution with eigenfunction
-            problem.output_at_increased_time()
+            problem.output(increase_time_for_PVD=True)
             # And continue in Bo
             problem.go_to_param(Bo=problem.Bo.value+dBond)
             
