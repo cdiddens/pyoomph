@@ -2708,6 +2708,11 @@ namespace pyoomph
 
 			for_code->add_contributing_field(residual_field);
 			for_code->add_contributing_field(f);
+			// diffpart/mass_part ARE the elemental block expressions: the row role is carried by the
+			// TestFunction of residual_field, the column role by the derived ShapeExpansions of f.
+			// write_code_info() proves the JACOBIAN_BLOCK_* properties from them.
+			if (for_code->record_jacobian_blocks_for_flags)
+				for_code->record_jacobian_block_expr(residual_field, f, diffpart, mass_part);
 			if (!diffpart.is_zero())
 				residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
 			if (hang)
@@ -6343,7 +6348,14 @@ namespace pyoomph
 			__in_pitchfork_symmetry_constraint = (residual_names[resind] == "_simple_mass_matrix_of_defined_fields");
 			if (!residual[resind].is_zero())
 			{
+				// Record the block expressions for the JACOBIAN_BLOCK_* flags, but only here: the steady
+				// and dResidual/dParameter variants below assemble something else entirely. Residual sets
+				// derived by expansion mode (azimuthal/Cartesian normal-mode stability) are skipped too -
+				// their blocks are complex and would need conjugate-transpose semantics, so their flags
+				// stay 0, which the contract reads as "nothing proven".
+				record_jacobian_blocks_for_flags = (get_derive_jacobian_by_expansion_mode() == NULL);
 				write_generic_RJM(os, "ResidualAndJacobian" + std::to_string(resind), residual[resind], true); // Hanging unsteady routine
+				record_jacobian_blocks_for_flags = false;
 				os << std::endl;
 
 				// Check if we need a dedicated steady routine. This happens, if you use e.g. MPT or TPZ time integration, which use history values
@@ -8109,6 +8121,291 @@ namespace pyoomph
 		return res;		
 	}
 
+	////////////////////////////////////////////////////////////////////////////////////////////////
+	// Per-block property analysis: the JACOBIAN_BLOCK_* bits of jitbridge.h.
+	//
+	// Input are the symbolic (row test field, column unknown field) block expressions recorded by
+	// write_generic_RJM_jacobian_contribution(); output are the two flag tables emitted by
+	// write_code_info() below. A SET bit is a proof, an unset bit means "not proven" - so every case
+	// that is not fully understood must fall through to unset.
+	//
+	// NOTHING in here may print a GiNaC expression, not even into a discarded stream:
+	// GiNaCGlobalParameterWrapper::print() allocates this code's local parameter slot on first
+	// encounter (see print_residual_entry() above), so a printing analysis pass would renumber the
+	// generated dResidual<N>dParameter_<i> routines and functable->global_parameters.
+	////////////////////////////////////////////////////////////////////////////////////////////////
+
+	// The contribution CLASS of a field: the domain it is DEFINED on plus its name, with mesh_* and
+	// coordinate_* being the same dof and hence the same class. Used both to index the functable
+	// tables (write_code_info below) and to name the row/column roles in the symmetry comparison; the
+	// two must not drift apart, which is why they share this function.
+	static std::string block_contribution_class_name(pyoomph::FiniteElementField *f)
+	{
+		pyoomph::FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
+		std::string nn = wheredef->get_name();
+		if (nn == "mesh_x")
+			nn = "coordinate_x";
+		else if (nn == "mesh_y")
+			nn = "coordinate_y";
+		else if (nn == "mesh_z")
+			nn = "coordinate_z";
+		return wheredef->get_space()->get_code()->get_full_domain_name() + "/" + nn;
+	}
+
+	static bool is_position_field(pyoomph::FiniteElementField *f)
+	{
+		return dynamic_cast<pyoomph::PositionFiniteElementSpace *>(f->get_space()) != NULL;
+	}
+
+	// Preorder scan setting `nonconstant` as soon as the block can change between two assemblies, and
+	// `dt_dependent` when the only thing it depends on is the time-stepper weights. Descends into
+	// subexpressions by hand: CSE hides shape expansions and parameters behind an atom, so a plain
+	// traversal (or .has()) would report a block as constant that is not.
+	static void scan_block_constancy(const GiNaC::ex &e, bool moving, bool &nonconstant, bool &dt_dependent)
+	{
+		for (GiNaC::const_preorder_iterator i = e.preorder_begin(); i != e.preorder_end(); ++i)
+		{
+			if (nonconstant)
+				return;
+			const GiNaC::ex &c = *i;
+			if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(c))
+			{
+				auto &se = GiNaC::ex_to<GiNaC::GiNaCShapeExpansion>(c).get_struct();
+				if (se.is_derived)
+				{
+					// A bare shape function or one of its spatial derivatives, i.e. pure geometry.
+					if (moving || se.nodal_coord_dir != -1 || se.nodal_coord_dir2 != -1 || se.time_history_index != 0)
+						nonconstant = true;
+					else if (se.dt_order > 0)
+						dt_dependent = true; // carries the BDF/Newmark weight
+				}
+				else if (!is_position_field(se.field) || moving)
+				{
+					// An interpolated unknown. The interpolated POSITION of a fixed mesh is not one -
+					// which matters because an axisymmetric coordinate system puts it into every block.
+					nonconstant = true;
+				}
+			}
+			else if (GiNaC::is_a<GiNaC::GiNaCTestFunction>(c))
+			{
+				auto &tf = GiNaC::ex_to<GiNaC::GiNaCTestFunction>(c).get_struct();
+				if (moving || tf.nodal_coord_dir != -1 || tf.nodal_coord_dir2 != -1)
+					nonconstant = true;
+			}
+			else if (GiNaC::is_a<GiNaC::GiNaCSubExpression>(c))
+			{
+				scan_block_constancy(GiNaC::ex_to<GiNaC::GiNaCSubExpression>(c).get_struct().expr, moving, nonconstant, dt_dependent);
+			}
+			else if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(c) || GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(c) ||
+					 GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(c) || GiNaC::is_a<GiNaC::GiNaCNodalDeltaSymbol>(c))
+			{
+				// dx, the element size, the normal and the nodal delta are functions of the nodal
+				// positions alone, hence constants on a fixed mesh. dx sits in every integrated block,
+				// so without this exemption CONSTANT would never be reachable.
+				if (moving)
+					nonconstant = true;
+			}
+			else if (GiNaC::is_a<GiNaC::symbol>(c))
+			{
+				if (c.is_equal(pyoomph::expressions::_dt_BDF1) || c.is_equal(pyoomph::expressions::_dt_BDF2) ||
+					c.is_equal(pyoomph::expressions::_dt_Newmark2) || c.is_equal(pyoomph::expressions::dt))
+					dt_dependent = true;
+				else
+					nonconstant = true; // the explicit time symbol, and anything unrecognised
+			}
+			else if (c.nops() == 0 && !GiNaC::is_a<GiNaC::numeric>(c) && !GiNaC::is_a<GiNaC::constant>(c))
+			{
+				// Any other leaf: global parameters, custom math and multi-return callbacks, delayed
+				// python expansions, mode expansions, ... - every one of them can change between
+				// assemblies, and an unclassified one must be assumed to.
+				nonconstant = true;
+			}
+		}
+	}
+
+	static unsigned char block_constancy_flags(const GiNaC::ex &e, bool moving)
+	{
+		bool nonconstant = false, dt_dependent = false;
+		scan_block_constancy(e, moving, nonconstant, dt_dependent);
+		if (nonconstant)
+			return 0;
+		if (dt_dependent)
+			return JACOBIAN_BLOCK_CONSTANT_FIXED_DT;
+		return JACOBIAN_BLOCK_CONSTANT | JACOBIAN_BLOCK_CONSTANT_FIXED_DT;
+	}
+
+	// Size guard for the symmetry comparison below, whose expand() is superlinear. Counts subexpression
+	// bodies at every reference, since the comparison inlines them.
+	static size_t count_block_nodes(const GiNaC::ex &e, size_t cap)
+	{
+		size_t n = 0;
+		for (GiNaC::const_preorder_iterator i = e.preorder_begin(); i != e.preorder_end(); ++i)
+		{
+			if (++n > cap)
+				return n;
+			if (GiNaC::is_a<GiNaC::GiNaCSubExpression>(*i))
+			{
+				n += count_block_nodes(GiNaC::ex_to<GiNaC::GiNaCSubExpression>(*i).get_struct().expr, cap - n);
+				if (n > cap)
+					return n;
+			}
+		}
+		return n;
+	}
+
+	// Identifies one row/column role (or one time-stepper weight) in the canonicalised block.
+	struct BlockRoleKey
+	{
+		int role; // 0 = row (test function), 1 = column (unknown), 2 = time-stepper weight
+		std::string field;
+		unsigned basis;
+		int dt_order;
+		std::string dt_scheme;
+		bool operator<(const BlockRoleKey &o) const
+		{
+			return std::tie(role, field, basis, dt_order, dt_scheme) < std::tie(o.role, o.field, o.basis, o.dt_order, o.dt_scheme);
+		}
+	};
+
+	// Replaces the row (test function) and column (derived shape function) roles of a block expression
+	// by plain symbols, so that two blocks can be compared by subtraction. In transpose mode the two
+	// roles are swapped - which is exactly what transposing the block does, since the test and the
+	// trial function of one field are the same function (Galerkin).
+	//
+	// Anything that depends on BOTH loop indices at once - every moving-mesh nodal-coordinate
+	// derivative, where the row test function itself carries a column index - cannot be expressed by a
+	// single role symbol and sets `unsupported`, giving up on the block rather than risking a wrong
+	// proof.
+	class BlockRoleCanonicalizer : public GiNaC::map_function
+	{
+	protected:
+		std::map<BlockRoleKey, GiNaC::symbol> *registry;
+		bool transpose;
+		bool *unsupported;
+
+		GiNaC::ex get(const BlockRoleKey &key)
+		{
+			auto it = registry->find(key);
+			if (it != registry->end())
+				return it->second;
+			std::ostringstream oss;
+			oss << "__blockrole" << registry->size();
+			return registry->emplace(key, GiNaC::symbol(oss.str())).first->second;
+		}
+		GiNaC::ex role_symbol(int role, pyoomph::FiniteElementField *f, pyoomph::BasisFunction *basis)
+		{
+			return get(BlockRoleKey{transpose ? 1 - role : role, block_contribution_class_name(f), basis->get_creation_index(), 0, ""});
+		}
+		GiNaC::ex weight_symbol(unsigned dt_order, const std::string &scheme)
+		{
+			return get(BlockRoleKey{2, "", 0, (int)dt_order, scheme});
+		}
+
+	public:
+		BlockRoleCanonicalizer(std::map<BlockRoleKey, GiNaC::symbol> &reg, bool tr, bool &unsup) : registry(&reg), transpose(tr), unsupported(&unsup) {}
+		GiNaC::ex operator()(const GiNaC::ex &inp) override
+		{
+			if (*unsupported)
+				return inp;
+			if (GiNaC::is_a<GiNaC::GiNaCTestFunction>(inp))
+			{
+				auto &tf = GiNaC::ex_to<GiNaC::GiNaCTestFunction>(inp).get_struct();
+				if (tf.nodal_coord_dir != -1 || tf.nodal_coord_dir2 != -1 || tf.is_derived_other_index || !tf.basis)
+				{
+					*unsupported = true;
+					return inp;
+				}
+				return role_symbol(0, tf.field, tf.basis);
+			}
+			if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(inp))
+			{
+				auto &se = GiNaC::ex_to<GiNaC::GiNaCShapeExpansion>(inp).get_struct();
+				if (se.nodal_coord_dir != -1 || se.nodal_coord_dir2 != -1)
+				{
+					*unsupported = true;
+					return inp;
+				}
+				if (!se.is_derived)
+					return inp; // an interpolated value: the same factor in both blocks, so compare it as it stands
+				if (se.is_derived_other_index || se.time_history_index != 0 || !se.basis)
+				{
+					*unsupported = true;
+					return inp;
+				}
+				GiNaC::ex res = role_symbol(1, se.field, se.basis);
+				if (se.dt_order > 0)
+					res = res * weight_symbol(se.dt_order, se.dt_scheme); // the weight travels with the side carrying d/dt
+				return res;
+			}
+			if (GiNaC::is_a<GiNaC::GiNaCSubExpression>(inp))
+			{
+				// Inlined, not reused via RemoveSubexpressionsByIdentity: that one re-registers
+				// multi-return calls as a side effect, which an analysis pass must not do.
+				return (*this)(GiNaC::ex_to<GiNaC::GiNaCSubExpression>(inp).get_struct().expr);
+			}
+			if (GiNaC::is_a<GiNaC::GiNaCMultiRetCallback>(inp))
+			{
+				// Opaque, but its arguments are ordinary values. If a row/column role does hide in
+				// there, the atom cannot be compared meaningfully, so give up.
+				GiNaC::ex invok = GiNaC::ex_to<GiNaC::GiNaCMultiRetCallback>(inp).get_struct().invok;
+				if (!(*this)(invok).is_equal(invok))
+					*unsupported = true;
+				return inp;
+			}
+			// The derived variants of these carry a nodal-coordinate (i.e. column) index of their own.
+			if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(inp))
+			{
+				if (GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(inp).get_struct().is_derived())
+					*unsupported = true;
+				return inp;
+			}
+			if (GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(inp))
+			{
+				if (GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(inp).get_struct().is_derived())
+					*unsupported = true;
+				return inp;
+			}
+			if (GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(inp))
+			{
+				if (GiNaC::ex_to<GiNaC::GiNaCNormalSymbol>(inp).get_struct().get_derived_direction() != -1)
+					*unsupported = true;
+				return inp;
+			}
+			return inp.map(*this);
+		}
+	};
+
+	// SYMMETRIC/ANTISYMMETRIC for the accumulated block A = block(i,j) against B = block(j,i)
+	// (A and B are the same expression for a diagonal block). Compares the sums rather than term by
+	// term: ANDing per term would be sound but would miss every cancellation.
+	static unsigned char block_symmetry_flags(const GiNaC::ex &A, const GiNaC::ex &B)
+	{
+		const size_t node_cap = 20000; // the expand() below is superlinear; over the cap, prove nothing
+		if (count_block_nodes(A, node_cap) > node_cap || count_block_nodes(B, node_cap) > node_cap)
+			return 0;
+		std::map<BlockRoleKey, GiNaC::symbol> registry;
+		bool unsupported = false;
+		BlockRoleCanonicalizer plain(registry, false, unsupported), transposed(registry, true, unsupported);
+		GiNaC::ex cA = plain(A);
+		GiNaC::ex cBT = transposed(B);
+		if (unsupported)
+			return 0;
+		if (cA.is_equal(cBT))
+			return JACOBIAN_BLOCK_SYMMETRIC;
+		if ((cA - cBT).expand().is_zero())
+			return JACOBIAN_BLOCK_SYMMETRIC;
+		if ((cA + cBT).expand().is_zero())
+			return JACOBIAN_BLOCK_ANTISYMMETRIC;
+		return 0;
+	}
+
+	void FiniteElementCode::record_jacobian_block_expr(FiniteElementField *rowf, FiniteElementField *colf, const GiNaC::ex &jac_part, const GiNaC::ex &mass_part)
+	{
+		auto &entry = jacobian_block_exprs[residual_index][std::make_pair(rowf, colf)];
+		entry.first += jac_part;
+		entry.second += mass_part;
+	}
+
 	// The master "glue" function: emits JIT_ELEMENT_init()/JIT_ELEMENT_finalize(), the two functions
 	// that populate/tear down the runtime JITFuncSpec_Table_FiniteElement_t struct describing this
 	// generated element to the rest of pyoomph (see jitbridge.h/elements.cpp). This is by far the
@@ -8748,16 +9045,9 @@ namespace pyoomph
 	  // name. Deliberately not the code the field is seen from -- an interface or facet element refers
 	  // to bulk fields, and those must land in the same class as in the bulk code, or the two
 	  // descriptions of the same dof would disagree. Used both to register the classes below and to
-	  // resolve field_contribution_index further down; they must not drift apart.
-	  auto contribution_class_name = [](FiniteElementField *f) -> std::string
-	  {
-		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
-		std::string nn=wheredef->get_name();
-		if (nn=="mesh_x") nn="coordinate_x";
-		else if (nn=="mesh_y") nn="coordinate_y";
-		else if (nn=="mesh_z") nn="coordinate_z";
-		return wheredef->get_space()->get_code()->get_full_domain_name()+"/"+nn;
-	  };
+	  // resolve field_contribution_index further down; they must not drift apart, which is also why the
+	  // block-flag analysis above names its row/column roles through the very same function.
+	  auto contribution_class_name = [](FiniteElementField *f) -> std::string { return block_contribution_class_name(f); };
 	  for (auto *f : contributing_fields)
 	  {
 		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
@@ -8798,7 +9088,19 @@ namespace pyoomph
 	  init << " functable->contributes_to_jacobian=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_jacobian));" << std::endl;
 	  init << " functable->contributes_to_mass_matrix=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_mass_matrix));" << std::endl;
 	  init << " functable->contributes_to_hessian=(bool***)calloc(functable->num_res_jacs,sizeof(*functable->contributes_to_hessian));" << std::endl;
+	  init << " functable->jacobian_block_flags=(unsigned char***)calloc(functable->num_res_jacs,sizeof(*functable->jacobian_block_flags));" << std::endl;
+	  init << " functable->mass_matrix_block_flags=(unsigned char***)calloc(functable->num_res_jacs,sizeof(*functable->mass_matrix_block_flags));" << std::endl;
 	  init << " functable->contribution_entries_size=" << contribution_names.size() << ";" << std::endl;
+
+	  // Does anything in reach of this code move its nodes? Then dx, the normal, the element size and
+	  // every shape derivative depend on unknowns, and hardly any block can be constant. Taken over the
+	  // bulk/opposite-interface relatives as well, exactly like the coordinate-shape injection in
+	  // write_generic_RJM_jacobian_contribution().
+	  bool moving_for_flags = false;
+	  for (FiniteElementCode *c = this; c; c = c->get_bulk_element())
+		 if (c->coordinates_as_dofs) moving_for_flags = true;
+	  for (FiniteElementCode *c = this->get_opposite_interface_code(); c; c = c->get_bulk_element())
+		 if (c->coordinates_as_dofs) moving_for_flags = true;
 	  if (contribution_names.size()>0)
 	  {
 	  	init << " functable->contribution_names=(char**)calloc(functable->contribution_entries_size,sizeof(char*));" << std::endl;
@@ -8820,6 +9122,10 @@ namespace pyoomph
 				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_mass_matrix[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;				
 				init << " functable->contributes_to_hessian[" << resiind << "]=(bool**)calloc("<< contribution_names.size() <<",sizeof(**functable->contributes_to_hessian));" << std::endl;
 				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->contributes_to_hessian[" << resiind << "][_i]=(bool*)calloc("<< contribution_names.size() <<",sizeof(bool)); }" << std::endl;
+				init << " functable->jacobian_block_flags[" << resiind << "]=(unsigned char**)calloc("<< contribution_names.size() <<",sizeof(**functable->jacobian_block_flags));" << std::endl;
+				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->jacobian_block_flags[" << resiind << "][_i]=(unsigned char*)calloc("<< contribution_names.size() <<",sizeof(unsigned char)); }" << std::endl;
+				init << " functable->mass_matrix_block_flags[" << resiind << "]=(unsigned char**)calloc("<< contribution_names.size() <<",sizeof(**functable->mass_matrix_block_flags));" << std::endl;
+				init << " for (unsigned int _i=0;_i<"<< contribution_names.size() <<";_i++) { functable->mass_matrix_block_flags[" << resiind << "][_i]=(unsigned char*)calloc("<< contribution_names.size() <<",sizeof(unsigned char)); }" << std::endl;
 
 				std::vector<bool> written_residual_contribution(contribution_names.size(), false);
 				std::vector<std::vector<bool>> written_jacobian_contribution(contribution_names.size(), std::vector<bool>(contribution_names.size(), false));
@@ -8858,6 +9164,99 @@ namespace pyoomph
 						}
 					}
 				}
+
+				// The JACOBIAN_BLOCK_* tables. The recorded per-field blocks are first SUMMED into their
+				// contribution class pair - the expression-level counterpart of the boolean OR above.
+				// Summing is what makes the comparison exact (ANDing the individual terms would be sound
+				// but would lose every cancellation) and makes it immune to the different orderings of
+				// jacobian_fields and present_tests.
+				if (jacobian_block_exprs.count(resiind))
+				{
+					auto class_index_of = [&](FiniteElementField *f) -> int
+					{
+						auto it = contribution_field_to_index.find(f);
+						if (it != contribution_field_to_index.end()) return (int)it->second;
+						auto alias = to_where_it_was_defined.find(f);
+						if (alias != to_where_it_was_defined.end())
+						{
+							auto it2 = contribution_field_to_index.find(alias->second);
+							if (it2 != contribution_field_to_index.end()) return (int)it2->second;
+						}
+						auto it3 = contribution_name_to_index.find(contribution_class_name(f));
+						if (it3 != contribution_name_to_index.end()) return (int)it3->second;
+						return -1;
+					};
+					std::map<std::pair<int, int>, std::pair<GiNaC::ex, GiNaC::ex>> class_blocks;
+					for (auto &entry : jacobian_block_exprs[resiind])
+					{
+						int i1 = class_index_of(entry.first.first), i2 = class_index_of(entry.first.second);
+						if (i1 < 0 || i2 < 0) continue;
+						auto &dst = class_blocks[std::make_pair(i1, i2)];
+						dst.first += entry.second.first;
+						dst.second += entry.second.second;
+					}
+
+					std::vector<std::vector<unsigned char>> jflags(contribution_names.size(), std::vector<unsigned char>(contribution_names.size(), 0));
+					std::vector<std::vector<unsigned char>> mflags = jflags;
+					for (auto &b : class_blocks)
+					{
+						// A block that is identically zero is not present at all: its flags stay 0 and
+						// the consumer is told to check contributes_to_* first.
+						if (!b.second.first.is_zero())
+							jflags[b.first.first][b.first.second] |= block_constancy_flags(b.second.first, moving_for_flags);
+						if (!b.second.second.is_zero())
+							mflags[b.first.first][b.first.second] |= block_constancy_flags(b.second.second, moving_for_flags);
+					}
+					for (auto &b : class_blocks)
+					{
+						int i1 = b.first.first, i2 = b.first.second;
+						if (i2 < i1) continue; // the mirror pair is handled from its lower triangle entry
+						auto mirror = class_blocks.find(std::make_pair(i2, i1));
+						// An off-diagonal block that WAS recorded is not identically zero, so it cannot be
+						// the (anti)transpose of an absent one.
+						if (i1 != i2 && mirror == class_blocks.end()) continue;
+						const std::pair<GiNaC::ex, GiNaC::ex> &other = (i1 == i2 ? b.second : mirror->second);
+						if (!b.second.first.is_zero() && !other.first.is_zero())
+						{
+							unsigned char f = block_symmetry_flags(b.second.first, other.first);
+							jflags[i1][i2] |= f;
+							jflags[i2][i1] |= f;
+						}
+						if (!b.second.second.is_zero() && !other.second.is_zero())
+						{
+							unsigned char f = block_symmetry_flags(b.second.second, other.second);
+							mflags[i1][i2] |= f;
+							mflags[i2][i1] |= f;
+						}
+					}
+
+					auto flag_expr = [](unsigned char f) -> std::string
+					{
+						std::string res;
+						if (f & JACOBIAN_BLOCK_SYMMETRIC) res += (res.empty() ? "" : "|") + std::string("JACOBIAN_BLOCK_SYMMETRIC");
+						if (f & JACOBIAN_BLOCK_ANTISYMMETRIC) res += (res.empty() ? "" : "|") + std::string("JACOBIAN_BLOCK_ANTISYMMETRIC");
+						if (f & JACOBIAN_BLOCK_CONSTANT) res += (res.empty() ? "" : "|") + std::string("JACOBIAN_BLOCK_CONSTANT");
+						if (f & JACOBIAN_BLOCK_CONSTANT_FIXED_DT) res += (res.empty() ? "" : "|") + std::string("JACOBIAN_BLOCK_CONSTANT_FIXED_DT");
+						return res;
+					};
+					for (unsigned int i1 = 0; i1 < contribution_names.size(); i1++)
+					{
+						for (unsigned int i2 = 0; i2 < contribution_names.size(); i2++)
+						{
+							// The comment carries the class NAMES only - printing the block expression
+							// would allocate global parameter slots as a side effect.
+							if (jflags[i1][i2])
+								init << " functable->jacobian_block_flags[" << resiind << "][" << i1 << "][" << i2 << "]=" << flag_expr(jflags[i1][i2]) << "; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
+							if (mflags[i1][i2])
+								init << " functable->mass_matrix_block_flags[" << resiind << "][" << i1 << "][" << i2 << "]=" << flag_expr(mflags[i1][i2]) << "; //" << contribution_names[i1] << " vs " << contribution_names[i2] << std::endl;
+						}
+					}
+				}
+
+				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->jacobian_block_flags[" << resiind << "][_i]); functable->jacobian_block_flags[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
+				cleanup << " pyoomph_tested_free(functable->jacobian_block_flags[" << resiind << "]); functable->jacobian_block_flags[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
+				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->mass_matrix_block_flags[" << resiind << "][_i]); functable->mass_matrix_block_flags[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
+				cleanup << " pyoomph_tested_free(functable->mass_matrix_block_flags[" << resiind << "]); functable->mass_matrix_block_flags[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
 				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_hessian[" << resiind << "][_i]); functable->contributes_to_hessian[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
 				cleanup << " pyoomph_tested_free(functable->contributes_to_hessian[" << resiind << "]); functable->contributes_to_hessian[" << resiind << "]=PYOOMPH_NULL; " << std::endl;
 				cleanup << " for (unsigned int _i=0;_i<functable->contribution_entries_size;_i++) { pyoomph_tested_free(functable->contributes_to_jacobian[" << resiind << "][_i]); functable->contributes_to_jacobian[" << resiind << "][_i]=PYOOMPH_NULL; }" << std::endl;
@@ -8876,6 +9275,9 @@ namespace pyoomph
 	  cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
 	  cleanup << " pyoomph_tested_free(functable->contributes_to_hessian); functable->contributes_to_hessian=PYOOMPH_NULL; " << std::endl;
 	  cleanup << " pyoomph_tested_free(functable->contributes_to_mass_matrix); functable->contributes_to_mass_matrix=PYOOMPH_NULL; " << std::endl;
+	  cleanup << " pyoomph_tested_free(functable->jacobian_block_flags); functable->jacobian_block_flags=PYOOMPH_NULL; " << std::endl;
+	  cleanup << " pyoomph_tested_free(functable->mass_matrix_block_flags); functable->mass_matrix_block_flags=PYOOMPH_NULL; " << std::endl;
+	  jacobian_block_exprs.clear(); // the flag tables are emitted; holding on to the expressions only costs memory
 
 	  // Emit, per space, the map from that space's field slot to the contribution index used by
 	  // contributes_to_jacobian / contributes_to_mass_matrix. The elements need it to translate a LOCAL

@@ -383,6 +383,16 @@ typedef struct JITFuncSpec_Table_FiniteElement_SpaceInfo
 } JITFuncSpec_Table_FiniteElement_SpaceInfo_t;
 
 
+/* Per-block property bits for jacobian_block_flags / mass_matrix_block_flags below.
+   A SET bit means "proven at code generation time from the symbolic block expression"; an UNSET bit
+   means "not proven", never "disproven" -- a consumer may exploit a set bit and must assume nothing
+   from a clear one. Kept in sync with the module attributes exported in src/nanobind/mesh.cpp
+   (_pyoomph_core.JACOBIAN_BLOCK_*). */
+#define JACOBIAN_BLOCK_SYMMETRIC 1u         /* block (i,j) == +transpose of block (j,i); set on BOTH mirror entries (diagonal blocks: self-transpose) */
+#define JACOBIAN_BLOCK_ANTISYMMETRIC 2u     /* block (i,j) == -transpose of block (j,i); set on BOTH mirror entries */
+#define JACOBIAN_BLOCK_CONSTANT 4u          /* entries independent of unknowns, nodal positions, global parameters, time AND time-stepper weights */
+#define JACOBIAN_BLOCK_CONSTANT_FIXED_DT 8u /* as CONSTANT, but may contain time-stepper (BDF/Newmark) weights, i.e. constant as long as dt is; implied by CONSTANT */
+
 typedef struct JITFuncSpec_Table_FiniteElement
 {
   unsigned int nodal_dim, lagr_dim;
@@ -523,6 +533,15 @@ typedef struct JITFuncSpec_Table_FiniteElement
   // identically zero. A Hessian contracted with a vector lives on THIS pattern, which is typically far
   // tighter than the Jacobian's -- every linear term of the residual drops out of it.
   bool ***contributes_to_hessian;
+  // Proven properties of the individual elemental blocks, indexed exactly like contributes_to_jacobian
+  // ([residual index][row class][column class]) with the JACOBIAN_BLOCK_* bits above. Consumers MUST
+  // check contributes_to_jacobian/_mass_matrix first: all bits are 0 for a non-contributing block, not
+  // because nothing was proven, but because the block is identically zero (and hence trivially
+  // symmetric and constant) so there was nothing to record.
+  // For the mass half CONSTANT and CONSTANT_FIXED_DT always coincide: the time-stepper weights sit in
+  // the Jacobian half only, so a constant mass block is constant outright. Both bits are set there.
+  unsigned char ***jacobian_block_flags;
+  unsigned char ***mass_matrix_block_flags;
   // Fields defined on this domain (i.e. without taking over from parent)
   unsigned num_defined_fields_on_this_domain;
   char **defined_field_names_on_this_domain;

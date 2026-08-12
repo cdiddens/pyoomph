@@ -812,6 +812,18 @@ namespace pyoomph
       return a->get_creation_index() < b->get_creation_index();
    }
 
+   // Same, for a (row field, column field) pair key: creation-index order, again so that iteration is
+   // reproducible across separate process runs (see FiniteElementFieldPtrLess).
+   struct FiniteElementFieldPairPtrLess
+   {
+      bool operator()(const std::pair<FiniteElementField *, FiniteElementField *> &a, const std::pair<FiniteElementField *, FiniteElementField *> &b) const
+      {
+         if (a.first->get_creation_index() != b.first->get_creation_index())
+            return a.first->get_creation_index() < b.first->get_creation_index();
+         return a.second->get_creation_index() < b.second->get_creation_index();
+      }
+   };
+
    // Bookkeeping entry for one common-subexpression-eliminated (CSE) piece of a residual/Jacobian
    // expression: the original expression, the C++ variable ("cvar") it gets substituted by, which
    // shape expansions it depends on (req_fields, used to know when it must be recomputed), and the
@@ -1153,6 +1165,19 @@ namespace pyoomph
 
 
       std::set<FiniteElementField *,FiniteElementFieldPtrLess> Hessian_symmetric_fields_completed; // Fields whose Hessian block has already been written for the current residual; used together with assemble_hessian_by_symmetry to avoid deriving symmetric entries twice, reset per residual
+
+      // Only true while the plain ResidualAndJacobian<r> variant is being written. The same code is
+      // emitted several times (steady variant, dResidual/dParameter, Hessian), and only the plain pass
+      // produces the block expressions the JACOBIAN_BLOCK_* flags describe; accumulating the others on
+      // top would mix in blocks that are not the ones the runtime assembles.
+      bool record_jacobian_blocks_for_flags = false;
+      // residual index -> (row test field, column unknown field) -> (Jacobian half, mass-matrix half),
+      // summed over every emitted contribution. Lives on the code rather than on the field (unlike
+      // jacobian_contribution_for_code) because proving block (i,j) = +-transpose(block (j,i)) needs
+      // both halves side by side, and they come from different FiniteElementSpaces. Cleared once
+      // write_code_info() has turned it into the flag tables.
+      std::map<unsigned, std::map<std::pair<FiniteElementField *, FiniteElementField *>, std::pair<GiNaC::ex, GiNaC::ex>, FiniteElementFieldPairPtrLess>> jacobian_block_exprs;
+      void record_jacobian_block_expr(FiniteElementField *rowf, FiniteElementField *colf, const GiNaC::ex &jac_part, const GiNaC::ex &mass_part);
 
    };
 
