@@ -8868,11 +8868,14 @@ namespace pyoomph
 	  
 	  	}
 
-	  	cleanup << " pyoomph_tested_free(functable->contributes_to_residual); functable->contributes_to_residual=PYOOMPH_NULL; " << std::endl;
-	  	cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
-	  	cleanup << " pyoomph_tested_free(functable->contributes_to_hessian); functable->contributes_to_hessian=PYOOMPH_NULL; " << std::endl;
-	  	cleanup << " pyoomph_tested_free(functable->contributes_to_mass_matrix); functable->contributes_to_mass_matrix=PYOOMPH_NULL; " << std::endl;
 	   }
+	  // The outer arrays are calloc'd above regardless of whether any contribution classes exist, so
+	  // their frees must be emitted unconditionally as well - inside the block above they leaked for
+	  // codes with zero contribution classes.
+	  cleanup << " pyoomph_tested_free(functable->contributes_to_residual); functable->contributes_to_residual=PYOOMPH_NULL; " << std::endl;
+	  cleanup << " pyoomph_tested_free(functable->contributes_to_jacobian); functable->contributes_to_jacobian=PYOOMPH_NULL; " << std::endl;
+	  cleanup << " pyoomph_tested_free(functable->contributes_to_hessian); functable->contributes_to_hessian=PYOOMPH_NULL; " << std::endl;
+	  cleanup << " pyoomph_tested_free(functable->contributes_to_mass_matrix); functable->contributes_to_mass_matrix=PYOOMPH_NULL; " << std::endl;
 
 	  // Emit, per space, the map from that space's field slot to the contribution index used by
 	  // contributes_to_jacobian / contributes_to_mass_matrix. The elements need it to translate a LOCAL
