@@ -362,7 +362,7 @@ set_default_eigen_solver_resolver(_autodetect_eigen_solver)
 if _running_under_mpi():
 	from .solvers.generic import get_default_linear_solver as _get_default_linear_solver
 	_chosen=_get_default_linear_solver()
-	if _chosen not in ("petsc_mumps","petsc","mumps"):
+	if _chosen not in ("petsc_mumps","petsc"):
 		from .generic.mpi import get_mpi_rank as _get_mpi_rank #type:ignore
 		if _get_mpi_rank()==0:  # one warning per run, not one per rank
 			_warn_no_mpi_capable_solver(str(_chosen))

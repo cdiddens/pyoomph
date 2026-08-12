@@ -66,7 +66,7 @@ DefaultMatrixType:TypeAlias=scipy.sparse.csr_matrix # spelled as an alias: a bar
 _TypeGenericLASolver=TypeVar("_TypeGenericLASolver",bound=type["GenericLinearSystemSolver"])
 _TypeGenericEigenSolver=TypeVar("_TypeGenericEigenSolver",bound=type["GenericEigenSolver"])
 
-CoreLinearSolverEnum:TypeAlias=Literal["superlu","umfpack","petsc","mumps","pardiso","accelerate","petsc_mumps"]
+CoreLinearSolverEnum:TypeAlias=Literal["superlu","umfpack","petsc","pardiso","accelerate","petsc_mumps"]
 CoreEigenSolverEnum:TypeAlias=Literal["scipy","pardiso","slepc","accelerate","slepc_mumps"]
 EigenSolverWhich:TypeAlias=Literal["LM","SM","LR","SR","SI"]
 _default_la_solver:"GenericLinearSystemSolver | CoreLinearSolverEnum | None"=None
