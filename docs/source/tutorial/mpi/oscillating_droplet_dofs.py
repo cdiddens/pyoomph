@@ -45,6 +45,7 @@ class OscillatingDroplet(Problem):
         self.dynamic_viscosity = 1 * milli * pascal * second
         self.surface_tension = 72 * milli * newton / meter
         self.resolution = 0.22
+        self.resolution = 0.07
 
     def capillary_time(self):
         return square_root(self.mass_density * self.radius**3 / self.surface_tension)
@@ -75,10 +76,12 @@ class OscillatingDroplet(Problem):
             eqs += ConstrainPositionsToC1Space()
 
         if CONDENSE_BUBBLES:
-            # Exact, but serial only: an MPI run is refused rather than silently ignored, so only
-            # ask for it when there is a single process.
-            if get_mpi_nproc() > 1:
-                print("More than one process: leaving static condensation off, it is serial only.")
+            # Exact, and available serially and with --distribute. A REPLICATED mpirun (more than one
+            # process, no --distribute) is the one case it cannot serve - there the mesh is not split
+            # at all, only the element loop is - and it is refused with an error rather than silently
+            # ignored, so leave it off there.
+            if get_mpi_nproc() > 1 and "--distribute" not in sys.argv:
+                print("Replicated MPI run: leaving static condensation off, it needs --distribute.")
             else:
                 eqs += StaticCondensation(velocity="bubble")
 
@@ -107,6 +110,6 @@ if __name__ == "__main__":
         problem.initialise()
         Tc = problem.capillary_time()
         # One step is enough to have the condensation plan built and the solver report its timings.
-        problem.run(0.1 * Tc, startstep=0.02 * Tc, maxstep=0.02 * Tc, outstep=False,
-                    temporal_error=1.0)
+        #problem.run(0.1 * Tc, startstep=0.02 * Tc, maxstep=0.02 * Tc, outstep=True,temporal_error=1.0)
+        problem.run(5 * Tc, startstep=0.1 * Tc, maxstep=0.1 * Tc, outstep=True,temporal_error=1.0)
         report(problem)

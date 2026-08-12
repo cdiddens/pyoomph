@@ -607,3 +607,19 @@ branch instead would have made the hook mean two different things depending on a
 to combine static condensation with the line search, and the doc comment says so.
 Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user of
 the library.
+
+problem.h / linear_solver.cc (Changed on 12th August 2026, prefer_dof_distribution_for_linear_solver):
+New public virtual "bool prefer_dof_distribution_for_linear_solver() const { return false; }"
+(problem.h, next to actions_after_newton_dof_update), consulted in SuperLUSolver::solve(Problem*,
+DoubleVector&) in its distributed branch: when the problem is distributed, the solver uses a
+distributed matrix and the hook returns true, the Jacobian's row distribution is built from
+problem_pt->dof_distribution_pt() instead of the UNIFORM split the branch otherwise makes.
+It exists for pyoomph's distributed static condensation (dev_docs/static_condensation.md section 9):
+that feature rests on "the rank owning a row of the Jacobian is the rank holding that degree of
+freedom", which the uniform split breaks -- the row a rank owns is then generally not one of its own
+dofs, so no rank holds a component's block in full and nobody can write the reconstructed value back.
+Off by default, so nothing else in oomph-lib or pyoomph changes; and where it is on, it only removes
+the dx.redistribute(Dof_distribution_pt) that Problem::newton_solve() performs immediately afterwards.
+The dead code just below it (the commented-out "if (problem_pt->distributed())" block) is an older,
+unconditional version of the same idea and was left as it was.
+Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user.

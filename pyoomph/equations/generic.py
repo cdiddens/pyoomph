@@ -2150,7 +2150,8 @@ class StaticCondensation(Equations):
     Declares which degrees of freedom of this domain static condensation may eliminate from the linear
     system. Contributes no residuals: it only states a selection, on the domain it is added to.
 
-    **Experimental, and serial only.** Element-local unknowns - a Crouzeix-Raviart bubble velocity, the
+    **Experimental.** Serial and distributed (``--distribute``) runs are both supported. Element-local
+    unknowns - a Crouzeix-Raviart bubble velocity, the
     gradient modes of a discontinuous (DL) pressure, a field projected onto a D0/DG space - couple to
     nothing outside their own element and can be eliminated by a small dense Schur complement before the
     Jacobian reaches the solver, and reconstructed from the retained increment afterwards. The

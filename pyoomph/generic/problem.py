@@ -1441,11 +1441,13 @@ class Problem(_pyoomph.Problem):
         states the selection on the domain it belongs to and switches the feature on by itself. This method is
         the problem-level plumbing underneath it, useful when the selection is decided outside the equations.
 
-        **Experimental, and serial only.** Static condensation eliminates element-local unknowns from the Jacobian
+        **Experimental.** Static condensation eliminates element-local unknowns from the Jacobian
         before it reaches the linear solver and reconstructs them after the Newton update. It is exact - the solution
         is the same, iteration by iteration - but only Newton solves benefit: residual evaluations, eigenvalue and
-        Hessian assemblies, and arclength continuation always see the full system, and MPI runs, Jacobian reuse and
-        the globally convergent (line search) Newton method are refused with an error rather than ignored.
+        Hessian assemblies, and arclength continuation always see the full system, while Jacobian reuse and the
+        globally convergent (line search) Newton method are refused with an error rather than ignored. Distributed
+        (``--distribute``) runs are supported; a selection whose coupled block would be split across ranks is
+        refused, collectively, and a replicated MPI run (``mpirun`` without ``--distribute``) is refused too.
 
         This only declares a rule. Unlike :py:class:`~pyoomph.equations.generic.StaticCondensation`, it does not
         switch condensation on: set ``use_static_condensation=True`` for that. Rules are stated in terms of a domain
@@ -1484,7 +1486,7 @@ class Problem(_pyoomph.Problem):
         :py:class:`~pyoomph.equations.generic.StaticCondensation` without arguments, which is restricted to the
         domain it is added to and switches the feature on by itself. This method is the problem-level plumbing.
 
-        **Experimental, and serial only** - see :py:meth:`condense_dofs` for what that means. This is the convenient
+        **Experimental** - see :py:meth:`condense_dofs` for what that means. This is the convenient
         rule for auxiliary fields projected onto a discontinuous space (DL/D0/DG), e.g. a dissipation or a stress
         measure computed for output: they are unknowns of the system but couple to nothing outside their element, so
         condensing them removes them from the matrix the solver factorises without changing anything else.

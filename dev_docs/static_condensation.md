@@ -1,13 +1,15 @@
 # Static condensation: eliminating element-local dofs from the linear system
 
-Status: **implemented, tested and benchmarked — serial only, and experimental.** The API is in place —
-the `StaticCondensation` equation class, with `condense_dofs`, `condense_element_private_dofs` and
-`use_static_condensation` underneath it; a flagged Newton solve takes the same number of steps and lands
-on the same solution as with the switch off, to the accuracy of the linear solves themselves; and the
-factorisation of a Crouzeix–Raviart Navier–Stokes system gets **51–65 % faster**, in 2D and in 3D.
-Distributed runs, Jacobian reuse and the line search are **refused with a message**, not silently
-ignored; eigenvalue problems and arclength continuation quietly keep the full system.
-`tests/test_static_condensation.py` is the gate.
+Status: **implemented, tested and benchmarked — serial and distributed, and experimental.** The API is
+in place — the `StaticCondensation` equation class, with `condense_dofs`, `condense_element_private_dofs`
+and `use_static_condensation` underneath it; a flagged Newton solve takes the same number of steps and
+lands on the same solution as with the switch off, to the accuracy of the linear solves themselves; and
+the factorisation of a Crouzeix–Raviart Navier–Stokes system gets **51–65 % faster**, in 2D and in 3D.
+A `--distribute`d run at 2 and 4 ranks reproduces the serial answer and the serial iteration count (§9).
+Jacobian reuse, the line search, a replicated (undistributed) MPI run and a selection whose block is
+split across ranks are **refused with a message**, not silently ignored — collectively, under MPI;
+eigenvalue problems and arclength continuation quietly keep the full system.
+`tests/test_static_condensation.py` and `tests/test_mpi_static_condensation.py` are the gates.
 
 ---
 
@@ -87,11 +89,13 @@ Everything is driven by a precomputed **`CondensationPlan`**, valid for as long 
 frozen fast path ([structural_assembly.md](structural_assembly.md)): the plan is expressed as positions
 in its value array, so if that path declines, condensation declines with it.
 
-**MPI-readiness was designed in, not deferred.** Components are self-contained objects keyed by global
-equation numbers, replicable on any rank (a halo element resolves identically to its owner); all runtime
-access goes through precomputed slot lists; and the reconstruction is formulated in terms of `dx_E`
-rather than of a global increment vector, so a distributed version can recover it from halo-synchronised
-values, `(u_old − u_new)/Relaxation_factor`, and never needs an exchange of `dx`. See §9.
+**MPI-readiness was designed in, not deferred, and it held.** Components are self-contained objects
+keyed by global equation numbers, replicable on any rank (a halo element resolves identically to its
+owner); all runtime access goes through precomputed slot lists; and the reconstruction is formulated in
+terms of `dx_E` rather than of a global increment vector, so the distributed version recovers it from
+halo-synchronised values, `(u_old − u_new)/Relaxation_factor`, and never exchanges `dx`. §9 is what
+became of that, including the one place the plan did not survive contact (the linear solver's row
+distribution, §9.4).
 
 ---
 
@@ -430,7 +434,8 @@ below).
   without a reassembly in between throws. Each linearisation's operators belong to one Newton step;
   applying them twice would silently double an increment.
 * **One gather function.** Recovering `dx_{E_C}` from `dx` is isolated in a single lambda, because that
-  is the only thing the distributed stage replaces (§9).
+  is the only thing the distributed reconstruction replaces (§9.6). This whole routine is the serial
+  branch; distributed, `actions_after_newton_dof_update` hands over on its fourth line.
 * The equation numbers of the `L_values` are re-checked under `PARANOID` only.
 
 ### Engagement matrix
@@ -450,11 +455,13 @@ in thin `pyoomph::Problem` wrappers around every Newton entry point, which do no
 | eigenproblem, Hessian, multi-assembly, bifurcation tracking | full — non-default assembly handler |
 | an augmented (`n_unaugmented_dofs != 0`) system | full |
 | `use_static_condensation = True` with no rules | full, silently: nothing was selected |
-| **MPI** (`nproc > 1` or distributed) | **throws** |
+| a **distributed** (`--distribute`) run | **condenses**, per §9 |
+| **MPI without `distribute()`** (`nproc > 1`, replicated) | **throws** |
+| a **component split across ranks** (distributed) | **throws**, collectively |
 | **Jacobian reuse** (`jacobian_reuse_is_enabled()`) | **throws** |
 | **globally convergent Newton** (line search) | **throws** |
 
-The three throws are combinations the user explicitly asked for that cannot be served; the "full" rows
+The throws are combinations the user explicitly asked for that cannot be served; the "full" rows
 are routes that legitimately want the full system, so they say nothing. `Use_globally_convergent_newton_method`
 is private in `oomph::Problem` and has no getter, so `pyoomph::Problem` mirrors it in shadowing
 `enable_/disable_globally_convergent_newton_method()`; every route into the flag — the nanobind binding
@@ -722,10 +729,285 @@ was built for.
 
 ---
 
-## 9. Limitations, and what v2 would add
+## 9. Distributed condensation
 
-**Serial only.** MPI throws. The design is ready for it (see below) but nothing is implemented or tested,
-and a plan built per rank without agreement would be a correctness problem, not a performance one.
+Status: **implemented and tested at 2 and 4 ranks** (§9.7), not benchmarked. The design below was
+written before the code and is kept in step with it; the one place where the implementation forced a
+change is called out as such, at the end of §9.4.
+
+The serial design was built so that this stage would be an extension rather than a rewrite, and that
+held: components are keyed by global equation numbers, every runtime access goes through precomputed
+slot lists, and the reconstruction is formulated in terms of `dx_E` rather than of a global increment
+vector. What the distributed stage adds is *who holds what*, one structural exchange to answer that, and
+one value exchange per assembly.
+
+### 9.1 What each rank has, and what follows from it
+
+Two facts about pyoomph's distributed assembly decide the whole design
+([structural_assembly.md](structural_assembly.md) §5):
+
+1. **A rank's OWNED rows are complete.** `parallel_sparse_assemble` — oomph-lib's and pyoomph's frozen
+   replacement alike — ships every row a rank contributed to but does not own to its owner, and the owner
+   merges. So for a row `r` this rank owns, it holds *every* entry of `r`, including contributions from
+   elements that live on other ranks.
+2. **Row ownership is dof ownership.** For a distributed problem oomph numbers each rank's own dofs
+   contiguously (`Dof_distribution_pt->build(comm, my_eqn_num_base, my_n_eqn)`,
+   [problem.cc:17242](../src/thirdparty/oomph-lib/include/problem.cc)), so the row range a rank owns is
+   exactly the set of `Data` values it owns non-halo.
+
+From (2), the L dofs of a component — the internal `Data` of one element, or its cell-interior bubble
+node — are owned by the rank on which that element is non-halo. From (1), that rank holds `A_LL`,
+`A_LE` and `r_L` **complete**, which is everything the Schur complement needs. And a *neighbour* rank
+that owns one of the component's E rows holds that row complete too, including its `A_EL` entries in the
+component's L columns — but it does not hold the L rows and cannot form `X_C` itself.
+
+So the work splits without ambiguity:
+
+| | who | needs |
+|---|---|---|
+| factorise `A_LL`, form `X_C = A_LL⁻¹A_LE` and `y_C = A_LL⁻¹r_L` | the **owner** | nothing from anyone |
+| `r_E −= A_EL·y_C`, `cond[E_a,E_b] −= A_EL·X_C` for an owned row `E_a` | **whoever owns that E row** | `X_C`, `y_C`, and the E ordering |
+| identity rows, `r_L = 0`, and writing the reconstructed `dx_L` back | the **owner** | — |
+
+### 9.2 Mechanism: exchange, not replication
+
+Two mechanisms were on the table.
+
+**(a) Exchange.** The owner factorises and sends `X_C` (`nL×nE` doubles) and `y_C` (`nL`) to each rank
+owning an affected E row, mirroring the value exchange of `assemble_distributed_with_frozen_sparsity`.
+
+**(b) Halo re-assembly.** Every rank holding the component's patch — owner or halo — re-evaluates the
+elemental blocks locally and factorises identically, so nothing is communicated.
+
+**(a) is implemented.** (b) is attractive on paper and its completeness condition is exactly what cannot
+be checked cheaply: it needs *every* element contributing to the component's L rows to be present in the
+rank's halo layer, interface elements that adopt the dof included — and requirement 2 of §2 (an interface
+element writing into a condensed dof's own row) is precisely the case where that is in question. Getting
+it wrong does not throw; it silently factorises a truncated `A_LL` on some ranks and produces a Schur
+complement that is wrong by an amount nobody measures. (a) has a known-good template in the same file,
+its buffers are contiguous, and its cost is small: one `Isend`/`Irecv` per peer per assembly carrying
+`nL·(nE+1)` doubles per shared component — for 2D CR, 4·(nE+1) ≈ 50 doubles for each element whose patch
+straddles the partition boundary, i.e. proportional to the *interface*, not to the mesh.
+
+(b) remains a possible optimisation for selections known to be interior to one element, where the
+completeness condition is trivially satisfied. It is not implemented and would need the condition to be
+verified rather than assumed.
+
+### 9.3 The plan build: three structural exchanges, then a vote
+
+`build_distributed_condensation_plan()` runs once per Jacobian structure id, off the **distributed**
+frozen pattern (`DistributedFrozenSparsity::Mat::final_row_start/final_col`, i.e. the merged owned rows).
+
+0. **Rank-local.** Resolve the selection (already rank-local and deterministic by design, §3) and keep
+   only the values whose equation this rank owns. The selection scan sees halo copies too and therefore
+   also names dofs owned by other ranks; those are that rank's business, not this one's.
+1. **Exchange 1 — whose columns are condensed?** A rank needs to know, for every *foreign* column
+   appearing in its owned rows, whether it is condensed. It could decide that from its own halo copy of
+   the `Data`, and would nearly always be right — but `condense_element_private_dofs()` measures
+   "private" against a *rank-local* reverse external-data scan, which a neighbour may see differently.
+   So the owner is asked: each rank sends its sorted list of foreign columns to their owners and gets one
+   flag back per column. Authoritative, and proportional to the partition boundary.
+2. **Components, and the cross-rank refusal.** Union–find on the owned L rows, exactly as serially. If an
+   owned L row has an L column this rank does *not* own, the component straddles ranks: refuse. That test
+   catches every such component from at least one side (the other rank sees the mirror-image entry from
+   its own L row, or, if the coupling is one-directional, the rank owning the row sees it), and the
+   refusal is collective, so it cannot deadlock. The size and structural-invertibility guards of §4 run
+   unchanged on the owned block; `col_ok` is computable locally precisely *because* a component that
+   reached across a rank boundary has already been refused.
+3. **Exchange 2 — the "by row" half of E.** `E_C` is the union of the retained dofs appearing in the
+   component's rows (owner-visible) and of the retained rows whose own equation contains one of its
+   unknowns. The second half lives wherever those rows live, so every rank scans its owned retained rows
+   for condensed columns and sends the `(row, condensed column)` pairs to the column's owner, which
+   merges them into `E_C`. Without this the Schur complement would miss exactly the couplings that made
+   this a post-assembly elimination in the first place.
+4. **Exchange 3 — the component descriptors.** The owner now has the final `E_C`, sorted. It ships
+   `(L_eqns, E_eqns)` to every rank owning at least one E row. That rank stores the component as a
+   *remote* component: no `L_values`, no `A_LL`, but the full E ordering it needs to index `X_C`, and
+   `my_E`, the indices of the E rows it owns.
+   Note that a rank learns of its participation from this message and not from its own scan: the
+   by-column direction (its row is a column of one of the owner's L rows) is not visible to it at all.
+5. **The local condensed pattern**, built exactly as serially but over the owned rows only: a retained
+   owned row keeps its retained columns and gains the whole `E_C` of every component it takes part in
+   (owned or remote); a condensed owned row keeps its diagonal. Columns are global, so a fill entry in a
+   column this rank never had is unremarkable.
+6. **Slot lists.** `LL_slots`/`LE_slots` on the owner; `EL_slots` and `fill_slots` sized `|my_E|×nL` and
+   `|my_E|×nE` on every participant; pass-through and identity-row slots as before.
+7. **The exchange plan.** Per peer, the list of components whose `X_C`/`y_C` travel, ordered by the
+   component's smallest L equation — a globally unique, deterministic key that both sides can sort by
+   without agreeing on anything further. Sender and receiver therefore lay out the same buffer.
+8. **One collective vote** on success, and one on refusal (below).
+
+**The ordering of the components in the plan array is by smallest L equation**, with remote components
+interleaved among the owned ones. That is what makes the per-peer send and receive lists line up.
+
+### 9.4 Collective refusal
+
+Every guard that throws serially — size, structural singularity, the numeric pivot — becomes a
+**collective vote**: each rank forms a message or the empty string, an `MPI_Allreduce(MAX)` over
+"rank that has a message, else −1" picks one, that message is broadcast, and **every** rank throws it,
+prefixed with the rank it came from. A one-sided throw would leave the others in the next collective for
+ever, which is the lesson [structural_assembly.md](structural_assembly.md) §5 records in its own words:
+half the ranks in one code path and half in another is a deadlock, not a wrong answer.
+
+The same applies to the quiet declines. `static_condensation_engages_now()` returns a globally uniform
+answer because every input to it is globally uniform (the switch, the flagged-solve guard, the assembly
+handler type, `n_unaugmented_dofs`, and `jacobian_structure_id`, which is `MPI_Allreduce`-checked for
+equality under `PARANOID`), and because the plan build itself votes. That is what makes
+`last_jacobian_was_condensed` — and hence whether the reconstruction hook does anything — the same on
+every rank.
+
+Two new refusals are distributed-only:
+
+* **A component straddling ranks** (step 2 above). The message names the dofs and says why: the block to
+  be inverted is not held by any one rank.
+* **The matrix distribution is not the dof distribution** — and this is the one point where the design
+  above did not survive contact, so it is worth stating in full.
+
+  §9.1's second fact is that row ownership *is* dof ownership. That is true of `Dof_distribution_pt`.
+  It is **not** true of the distribution the Jacobian actually arrives in. Two separate places choose it,
+  and by default both choose something else:
+
+  * `Problem::create_new_linear_algebra_distribution()` picks between `Dof_distribution_pt` and a
+    uniform one and switches to uniform as soon as one rank's dof count exceeds the uniform share by
+    10 % ([problem.cc:454](../src/thirdparty/oomph-lib/include/problem.cc));
+  * and a distributed **solve** never reaches that function at all. `SuperLUSolver::solve(Problem*,
+    DoubleVector&)` — which is the route pyoomph's `petsc_mumps` and every other distributed backend
+    take, through `superlu_dist_distributed_matrix()` — builds `LinearAlgebraDistribution(comm, ndof,
+    true)`, i.e. an unconditionally **uniform** split, and hands `get_jacobian()` a matrix already
+    carrying it.
+
+  Under a uniform split the rank owning a row generally does not hold that degree of freedom: it cannot
+  write the reconstructed value back, and a component's L rows are no longer even guaranteed to be on
+  one rank. The whole construction collapses, and it collapses *silently* — which is how it was found,
+  as the refusal below firing on the very first 2-rank run.
+
+  So both places are steered rather than merely checked. The first is resolved in favour of the dof
+  distribution by `align_matrix_distribution_for_condensation()`, called from the Newton-entry guard
+  whenever condensation is on. The second needed a second vendored hook,
+  `Problem::prefer_dof_distribution_for_linear_solver()` (`//FOR PYOOMPH`, and
+  `src/thirdparty/INFO_oomph-lib`): a public virtual returning `false` in oomph-lib, overridden in
+  `pyoomph::Problem` to return `use_static_condensation`, and consulted in `SuperLUSolver::solve`'s
+  distributed branch to build the row distribution from `problem_pt->dof_distribution_pt()` instead.
+  It is opt-in, so no other run changes at all; and where it is on, it only removes the
+  `dx.redistribute(Dof_distribution_pt)` that `newton_solve()` performs immediately afterwards anyway.
+
+  What remains is a genuine check: the plan builder compares the pattern's `first_row`/`nrow_local`
+  against `Dof_distribution_pt` and refuses collectively if they differ, which now means the user chose
+  a uniform distribution explicitly. Overriding *that* behind their back would be the wrong kind of
+  helpful.
+
+### 9.5 The kernel, per assembly
+
+1. Positive engagement check against the distributed frozen pattern: `nrow_local`, `nnz`, then `memcmp`
+   of `row_start` and `column_index` — the same check as serially, on the local block.
+2. Pass-through copy into the condensed local value array.
+3. **Owner:** gather `A_LL`, `A_LE`, `r_L` from owned rows; factorise; keep `X_C`, `y_C`.
+4. **Vote on the pivot guard** before any of the exchange happens, so a breakdown throws on all ranks
+   instead of hanging the rest in `MPI_Waitall`.
+5. Pack `X_C`, `y_C` per peer and post the sends and receives.
+6. **Everyone:** for each owned E row of each component, gather `A_EL` from that row and apply
+   `r_E −= A_EL y` and `cond[E_a,E_b] −= A_EL X`. Owned components are done while the messages fly.
+7. **Owner:** `r_L = 0`, identity diagonal.
+8. Rebuild the local `CRDoubleMatrix` on the condensed pattern with `build_without_copy`, which keeps the
+   distribution.
+
+### 9.6 Reconstruction, and why it needs one extra synchronisation
+
+The hook fires after `*Dof_pt[l] -= Relaxation_factor*dx[l]` and after `synchronise_all_dofs()`.
+
+**`dx_E` is recovered without exchanging `dx`**, as the serial design promised. For an E dof this rank
+owns, `dx` has it directly (exact). For a foreign E dof, the value trick of §2 applies:
+`dx_E = (u_stored − u_now)/Relaxation_factor`, where `u_stored` was captured at *kernel* time from this
+rank's halo copy and `u_now` is read from the same copy after the synchronisation. That is sound because
+oomph's `synchronise_dofs()` copies haloed **node values and haloed elements' internal data**
+([problem.cc:16826](../src/thirdparty/oomph-lib/include/problem.cc)), so the halo copy equals the owner's
+value at both instants, and the difference is therefore exactly `Relaxation_factor·dx_E`. The hybrid —
+`dx` where it is available, the difference only across the boundary — keeps the cancellation error
+(`~ε|u|/Relaxation_factor`, absolute, i.e. ~1e-16 on an O(1) field) off every interior dof, and leaves
+the serial path using `dx` alone, untouched.
+
+Every foreign E dof *is* reachable on the owner: it is a dof of one of the owner's non-halo elements (an
+E dof only arises as a column of an L row or as a row containing an L column, and both come from elements
+that contain the L dof itself), so a halo copy of it exists locally. The plan resolves it to a `double*`
+once, at build time.
+
+**What does need communication is the result.** Only the owner writes the reconstructed `dx_L`, so every
+*halo* copy of a condensed dof is stale the moment the hook returns — and a neighbour's non-halo
+interface or facet element may read exactly that copy in the next residual assembly. The hook therefore
+ends with one `synchronise_all_dofs()` when anything was reconstructed. It is collective and safe
+precisely because `last_jacobian_was_condensed` is globally uniform (§9.4). This is a deliberate
+deviation from "replicate the reconstruction on every rank holding the `Data`": replication would need
+`X_C`/`y_C` shipped to ranks that own no E row at all, and the condition "a rank holding a halo copy of
+the patch owns an E row" is exactly the kind of thing that is nearly always true and occasionally not.
+One extra halo exchange per Newton step is a small, *measurable* price for not having to be right about
+that.
+
+### 9.7 What was verified
+
+The gate is `tests/test_mpi_static_condensation.py` + `tests/mpi_condensation_worker.py`, 11 tests
+(marked `slow`, so `--full` is needed), each launching `mpirun -n {2,4} ... --distribute` under a bounded
+timeout — a timeout being the only way a one-sided refusal shows up at all. The reference is the
+**serial, uncondensed** run of the same problem, computed in-process from the same worker module, so a
+globally consistent but wrong field cannot pass by agreeing with itself.
+
+The comparison is by integral moments (`∫u`, `∫x·u`, `∫|u|²`, `∫|∇u|²`, `∫p²`, `∫x·p`) plus the sum and
+sum-of-squares of every **element-internal** value over the non-halo elements, MPI-reduced. Moments
+rather than a dof-by-dof diff because a distributed dof vector has no partition-independent ordering;
+the element-internal checksums because the DL gradient modes are exactly what is eliminated, and an
+integral observable of the retained velocity field would barely notice a reconstruction that had left
+them at their previous values.
+
+2D CR lid-driven cavity, Re = 100, `RectangularQuadMesh(split_in_tris="left")`, bubble velocities plus
+DL values `[1,2]`, `petsc_mumps`:
+
+| | ndof | components | Newton steps (two solves) | worst relative deviation from serial |
+|---|---|---|---|---|
+| N = 8, 2 ranks | 1 089 | 128 | 6, 2 — identical to serial | 1.9e-14 |
+| N = 8, 4 ranks | 1 089 | 128 | 6, 2 — identical | 4.4e-14 |
+| **N = 20, 2 ranks** | **7 041** | 800 | 6, 2 — identical | **1.0e-13** |
+| **N = 20, 4 ranks** | **7 041** | 800 | 6, 2 — identical | **2.4e-13** |
+
+The worst figure is the *sum* of the 3 200 eliminated internal values in every case — a cancelling sum,
+hence the least favourable of the ten quantities; the integral moments agree to 1e-16…1e-13. Three BDF2
+time steps agree the same way, at the same step counts (4, 4, 4), and the interface case of §7 —
+requirement 2, an interface element writing into the condensed dofs' own rows, now possibly from a
+different rank — agrees at 2 ranks with the serial run to the same tolerance.
+
+**The cross-rank paths are asserted to have engaged**, not assumed — §4.1 of
+[structural_assembly.md](structural_assembly.md) in a new costume, since a "distributed" plan in which
+every component happened to be interior to its rank would pass every equivalence test above while
+exercising nothing. At N = 8 on 4 ranks: 128 components split 33/31/32/32 by owner, **35 of them shared**
+(35 operator sends against 35 receives — checked as a pair, because a mismatch is a rank waiting for a
+message nobody sends), and **136 E dofs recovered from values** rather than from `dx`. At N = 20 on 4
+ranks, 800 components split 200/200/201/199, 91 shared and 364 value-recovered; at 2 ranks, 41 and 176. The plan is built **once** for two solves and
+survives a time step, which is the other thing worth asserting: it costs three communication rounds.
+
+Both refusals are checked at 2 and 4 ranks for *returning at all*, and for every rank reporting the
+identical message with the deciding rank named in it: the structurally singular selection (the whole DL
+pressure) and the component split across ranks (an interior-penalty DG field, with the size guard raised
+out of the way so that it is the cross-rank guard that speaks). A replicated `mpirun` without
+`--distribute` is refused too.
+
+Serially, `tests/test_static_condensation.py` (37) and `tests/test_structural_assembly.py` (42) are
+unchanged, and `tests/test_mpi_structural_assembly.py --full` (17) still passes — the vendored
+`prefer_dof_distribution_for_linear_solver` hook is off for it, which is what that run confirms.
+
+### 9.8 What is not covered
+
+* **Only genuinely distributed problems** (`--distribute`). `nproc > 1` without distribution is a
+  replicated problem whose elements are merely split across ranks; the frozen distributed assembly
+  declines it for its own reasons ([structural_assembly.md](structural_assembly.md) §5) and so does
+  condensation, which needs that assembly's pattern. It is a refusal with a message, not a silent
+  fallback.
+* **Components must be rank-local.** A DG selection whose coupling crosses a partition boundary is
+  refused. Serving it would mean a distributed dense solve per component, which is not what condensation
+  is for.
+* Everything serially refused stays refused (Jacobian reuse, the line search, continuation, eigenvalue
+  problems).
+
+---
+
+## 10. Limitations, and what v3 would add
 
 **Jacobian reuse and the line search are refused**, for the reasons in §6. Both are real restrictions:
 `solve(globally_convergent_newton=True)` on a problem with condensation on is an error, not a fallback.
@@ -748,26 +1030,22 @@ made with it: see §8.
 
 **The stats are only as fresh as the plan.** `_get_static_condensation_stats()` deliberately does not
 build a plan (a diagnostic must not change what it measures), so `has_plan` is False until a solve or an
-explicit `_build_condensation_plan()`.
+explicit `_build_condensation_plan()`. Note that on a distributed problem `_build_condensation_plan()`
+*is* collective, so calling that one on a single rank hangs — which is the price of the diagnostic being
+allowed to force a build at all.
 
-### The distributed design (v2)
+**Distributed: not benchmarked.** §9 establishes that the distributed answer is the serial one at the
+serial iteration count, and nothing more. What condensation buys under MPI — a smaller matrix for the
+distributed factorisation, against one operator exchange and one extra halo synchronisation per Newton
+step — has not been measured, and the tests are deliberately far too small to say anything about it
+(1 089 and 7 041 dofs). The serial measurements of §8 are the reason to expect it to pay; they are not
+evidence that it does.
 
-Everything below is already true of the data structures; what is missing is the code that uses them.
-
-* **Components are replicable.** A component is keyed by global equation numbers and refers to no
-  element, mesh or local ordering, so every rank holding any of its rows can build and factorise it
-  identically. The plan builder would work on the owned row blocks of `DistributedFrozenSparsity`
-  ([src/problem.hpp:377](../src/problem.hpp)) and replicate a component on every rank that holds one of
-  its rows — a component is at most a handful of dofs, so replicating the dense inversion is cheaper than
-  communicating it.
-* **Reconstruction needs no `dx` exchange.** `dx_{E_C}` is recovered inside one lambda; distributed it
-  becomes `(u_old − u_new)/Relaxation_factor` from the values, which `synchronise_all_dofs()` has already
-  made available on the halos by the time the hook fires. That is why the vendored hook takes `dx` and
-  fires *after* the synchronisation.
-* **The refusals must become collective votes.** A structural or pivot failure seen on one rank has to
-  abort the plan on all of them, mirroring what `build_distributed_frozen_sparsity` does. A rank-local
-  throw would deadlock the others.
-* Testing would follow the `tests/mpi_structural_worker.py` pattern, ≤ 4 ranks.
+**Distributed: the extra `synchronise_all_dofs()` is unconditional.** §9.6 argues why it is needed in
+general. It is not needed when no condensed `Data` is ever referenced from another rank — which is the
+common case, since a bulk element's internal `Data` is normally read by nothing but that element. The
+reverse external-data scan already computed for `condense_element_private_dofs()` would answer it, and
+turning that into a plan-time flag would remove one collective per Newton step. Not attempted.
 
 ### The optional escape hatch
 
@@ -779,17 +1057,20 @@ element-private auto-detection) is expressible as a rule.
 
 ---
 
-## 10. Where things are
+## 11. Where things are
 
 | | |
 |---|---|
-| [src/problem.hpp](../src/problem.hpp) | `StaticCondensationRule`, `CondensationComponent`, `CondensationPlan`, the flags, the Newton-entry-point wrappers |
+| [src/problem.hpp](../src/problem.hpp) | `StaticCondensationRule`, `CondensationComponent`, `CondensationPlan`, the flags, the Newton-entry-point wrappers, `align_matrix_distribution_for_condensation`, `prefer_dof_distribution_for_linear_solver` |
 | [src/problem.cpp](../src/problem.cpp) | `update_static_condensation_selection`, `build_condensation_plan`, `apply_static_condensation`, `actions_after_newton_dof_update`, `static_condensation_engages_now` |
+| [src/problem.cpp](../src/problem.cpp), §9 half | `build_distributed_condensation_plan`, `apply_static_condensation_distributed`, `reconstruct_condensed_dofs_distributed`, `condensation_collective_throw` |
 | [src/nanobind/problem.cpp](../src/nanobind/problem.cpp) | the bindings and their docstrings |
 | [pyoomph/equations/generic.py](../pyoomph/equations/generic.py) | `StaticCondensation`, the user-facing interface: spec parsing, the registration hook, the interface/ODE refusals |
 | [pyoomph/generic/problem.py](../pyoomph/generic/problem.py) | `condense_dofs`, `condense_element_private_dofs`, and the rule registry (`_declare_static_condensation_rules`, `_sync_static_condensation_rules`, `_clear_static_condensation_rules`) |
 | [src/thirdparty/oomph-lib/include/problem.h](../src/thirdparty/oomph-lib/include/problem.h) / `problem.cc` | the vendored `actions_after_newton_dof_update` hook (`//FOR PYOOMPH`, and `src/thirdparty/INFO_oomph-lib`) |
+| [src/thirdparty/oomph-lib/include/problem.h](../src/thirdparty/oomph-lib/include/problem.h) / `linear_solver.cc` | the vendored `prefer_dof_distribution_for_linear_solver` hook (§9.4), same two places |
 | [tests/test_static_condensation.py](../tests/test_static_condensation.py) | selection, plan, refusals, the scipy referee, Newton equivalence, non-interference, the equation-tree interface |
+| [tests/test_mpi_static_condensation.py](../tests/test_mpi_static_condensation.py) + [tests/mpi_condensation_worker.py](../tests/mpi_condensation_worker.py) | the distributed gate: equivalence with serial at 2 and 4 ranks, the collective refusals, and the assertions that the cross-rank paths engaged at all |
 
 > Worth knowing when writing scratch scripts for this: several `Problem` objects can live in one
 > interpreter as long as each one is used inside its `with` block, which is what the test file relies on.

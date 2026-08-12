@@ -488,6 +488,22 @@ namespace pyoomph
     bool ops_valid = false;
     unsigned nL() const { return (unsigned)L_eqns.size(); }
     unsigned nE() const { return (unsigned)E_eqns.size(); }
+
+    // --- Distributed only (dev_docs/static_condensation.md section 9) --------------------------------
+    // The rank owning ALL of the L rows, which is therefore the only one that can form X and y: the
+    // owned rows of a distributed assembly are complete, so that rank holds A_LL, A_LE and r_L in full.
+    // -1 in a serial plan, where the arrays above keep their serial meaning.
+    int owner_rank = -1;
+    // Which entries of E_eqns are rows THIS rank owns, ascending. EL_slots and fill_slots are sized
+    // my_E.size() x nL and my_E.size() x nE in a distributed plan (a rank can only touch its own rows),
+    // while E_eqns stays the FULL, globally agreed E set -- the fill-in of an owned row spans all of it.
+    std::vector<int> my_E;
+    // Reconstruction input, owner only, parallel to E_eqns. dx is distributed, so only the E rows this
+    // rank owns are in it; for the others the increment is recovered from the halo-synchronised values,
+    // (u_stored - u_now)/Relaxation_factor, which needs no exchange of dx at all.
+    std::vector<int> E_dx_row;         // local row in dx, or -1 for a foreign E dof
+    std::vector<double *> E_value_pt;  // the local (halo) copy of a foreign E dof, else NULL
+    std::vector<double> E_u_stored;    // its value at the moment the Jacobian was linearised
   };
 
   // Everything static condensation needs that depends on the sparsity pattern alone, derived once per
@@ -511,10 +527,27 @@ namespace pyoomph
     std::vector<int> passthrough_full_slot, passthrough_cond_slot;
     std::vector<int> condensed_eqns;          // the union of all L_eqns, ascending
     std::vector<int> L_diagonal_cond_slots;   // parallel: where the identity 1.0 goes
-    // ndof bitmap. char rather than std::vector<bool>: it is read once per nonzero of the full
-    // pattern while building and once per entry in the kernel, where a bit test is not what is wanted.
+    // ndof bitmap (nrow_local, indexed by LOCAL row, in a distributed plan). char rather than
+    // std::vector<bool>: it is read once per nonzero of the full pattern while building, where a bit
+    // test is not what is wanted. Nothing at runtime reads it.
     std::vector<char> is_condensed;
     unsigned long full_nnz = 0; // of the pattern this was derived from, for the reduction statistics
+
+    // --- Distributed only (dev_docs/static_condensation.md section 9) --------------------------------
+    // With `distributed` set, every array above describes this rank's OWNED row block instead of the
+    // whole matrix: cond_row_start has nrow_local+1 entries, the slot lists index the local value
+    // arrays, and `components` holds both the components this rank owns and the ones it merely holds an
+    // E row of. The column indices stay GLOBAL, as they are in the distributed CSR itself.
+    bool distributed = false;
+    unsigned nproc = 1, my_rank = 0;
+    unsigned first_row = 0, nrow_local = 0;
+    // Which components' X and y travel to which peer, per assembly. Ordered by the component's smallest
+    // L equation on both sides -- a globally unique key both ranks can sort by without further
+    // agreement, which is what makes the sender's and the receiver's buffer layouts identical.
+    std::vector<int> xy_send_start;   // nproc+1, slices into xy_send_comp
+    std::vector<int> xy_send_comp;    // component indices (owned by me) whose operators peer p needs
+    std::vector<int> xy_recv_start;   // nproc+1, slices into xy_recv_comp
+    std::vector<int> xy_recv_comp;    // component indices (owned by p) whose operators arrive from p
     unsigned cond_nnz() const { return cond_row_start.empty() ? 0u : (unsigned)cond_row_start.back(); }
     void clear()
     {
@@ -524,6 +557,8 @@ namespace pyoomph
       passthrough_full_slot.clear(); passthrough_cond_slot.clear();
       condensed_eqns.clear(); L_diagonal_cond_slots.clear();
       is_condensed.clear();
+      distributed = false; nproc = 1; my_rank = 0; first_row = 0; nrow_local = 0;
+      xy_send_start.clear(); xy_send_comp.clear(); xy_recv_start.clear(); xy_recv_comp.clear();
     }
   };
 
@@ -610,6 +645,42 @@ namespace pyoomph
     // the selection itself cannot be condensed -- silently not eliminating what the user asked for
     // would be a performance mystery rather than an error.
     bool build_condensation_plan(CondensationPlan &plan);
+#ifdef OOMPH_HAS_MPI
+    // The distributed plan (dev_docs/static_condensation.md section 9). COLLECTIVE from its first
+    // exchange on, and every refusal it can reach is a collective vote: a rank-local throw would leave
+    // the others in the next collective for ever. Called by build_condensation_plan() when the problem
+    // is distributed; it works on the OWNED row block of DistributedFrozenSparsity.
+    bool build_distributed_condensation_plan(CondensationPlan &plan);
+    void apply_static_condensation_distributed(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian);
+    // The distributed half of actions_after_newton_dof_update(). Reconstructs on the owner only and then
+    // synchronises, because the halo copies of what it just wrote are stale until it does. COLLECTIVE.
+    void reconstruct_condensed_dofs_distributed(const oomph::DoubleVector &dx);
+    // Turns a per-rank refusal into one every rank throws. `msg` empty means "no objection here"; if any
+    // rank objects, the message of the highest-numbered objector is broadcast and thrown everywhere.
+    // COLLECTIVE, and it must therefore be reached by every rank whatever each of them decided.
+    void condensation_collective_throw(const std::string &msg);
+    // Condensation needs the Jacobian's rows distributed exactly as the DOFS are: its whole ownership
+    // argument is that the rank owning a row is the rank holding the Data, so that the rank owning a
+    // component's L rows holds A_LL, A_LE and r_L complete. oomph's DEFAULT heuristic silently switches
+    // to a uniform row distribution as soon as one rank holds more than 110 % of the uniform share
+    // (problem.cc, create_new_linear_algebra_distribution), which would break exactly that. With
+    // condensation on, the default is therefore resolved in favour of the dof distribution here, at
+    // every Newton entry point. An EXPLICIT choice by the user is left alone -- and refused, with a
+    // message, by the plan builder -- rather than overridden behind their back.
+    void align_matrix_distribution_for_condensation()
+    {
+      if (!use_static_condensation || !Problem_has_been_distributed) return;
+      if (this->distributed_problem_matrix_distribution() == oomph::Problem::Default_matrix_distribution)
+        this->distributed_problem_matrix_distribution() = oomph::Problem::Problem_matrix_distribution;
+    }
+    // The other half of the same requirement, and the one that actually bites: a distributed SOLVE does
+    // not go through create_new_linear_algebra_distribution() at all. SuperLUSolver::solve() builds a
+    // UNIFORM row split and hands the Jacobian to get_jacobian() already carrying it, so the setting
+    // above never gets a say. The vendored hook (src/thirdparty/INFO_oomph-lib) lets the problem ask for
+    // its own dof distribution instead, which is what makes row ownership and dof ownership the same
+    // thing. Off unless condensation is on, so no other run changes.
+    bool prefer_dof_distribution_for_linear_solver() const override { return use_static_condensation; }
+#endif
     // Test-only lever, exposed as _debug_force_condensed_assembly: makes get_jacobian() hand back the
     // CONDENSED system without a Newton solve being in progress. It exists so the algebra can be
     // refereed against scipy at a fixed state; the solve path activates condensation on its own.
@@ -630,7 +701,13 @@ namespace pyoomph
       bool saved;
 
     public:
-      FlaggedNewtonSolveGuard(Problem *pr) : p(pr), saved(pr->inside_flagged_newton_solve) { p->inside_flagged_newton_solve = true; }
+      FlaggedNewtonSolveGuard(Problem *pr) : p(pr), saved(pr->inside_flagged_newton_solve)
+      {
+        p->inside_flagged_newton_solve = true;
+#ifdef OOMPH_HAS_MPI
+        p->align_matrix_distribution_for_condensation();
+#endif
+      }
       ~FlaggedNewtonSolveGuard() { p->inside_flagged_newton_solve = saved; }
     };
     // oomph::Problem::Use_globally_convergent_newton_method is PRIVATE and has no getter, so the flag
@@ -651,6 +728,7 @@ namespace pyoomph
     // Kept as members rather than locals so that a solve settles into doing no allocation at all.
     std::vector<double> condensation_scratch_LL, condensation_scratch_rhs, condensation_scratch_EL;
     std::vector<int> condensation_scratch_pivots;
+    std::vector<double> condensation_scratch_dxE; // dx_E of one component, distributed reconstruction only
     // Section 7e: let a bifurcation-tracking assembly handler describe its AUGMENTED elemental block
     // (see AugmentedBlockSpec) so the frozen path can apply to it too -- it otherwise cannot, the block
     // being several times larger than the element's own field description. Only handlers that provide a

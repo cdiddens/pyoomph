@@ -1833,6 +1833,18 @@ namespace oomph
       return Dof_distribution_pt;
     }
 
+    /// FOR PYOOMPH: whether a distributed linear solve should lay the Jacobian's
+    /// rows out exactly as the DOFS are distributed, instead of the uniform split
+    /// SuperLUSolver::solve() builds by default. False everywhere but in pyoomph's
+    /// static condensation, whose whole ownership argument is that the rank owning
+    /// a row is the rank holding that degree of freedom. Consulted only for a
+    /// genuinely distributed problem solved with a distributed matrix; there it
+    /// merely removes the redistribute() newton_solve() does afterwards anyway.
+    virtual bool prefer_dof_distribution_for_linear_solver() const
+    {
+      return false;
+    }
+
     /// Return the number of dofs
     unsigned long ndof() const
     {

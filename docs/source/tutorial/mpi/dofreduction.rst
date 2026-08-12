@@ -152,16 +152,20 @@ MINI's 3x3, reaches that point far sooner and saves closer to half of the factor
 Limitations
 ~~~~~~~~~~~
 
-:py:class:`~pyoomph.equations.generic.StaticCondensation` is experimental and **serial only**. An MPI
-run is refused with an error rather than silently ignored, and so are Jacobian reuse and the globally
-convergent (line search) Newton method. Only Newton solves benefit: residual evaluations, eigenvalue
-and Hessian assemblies and arclength continuation always see the full system. The two halves of this
-chapter are therefore mutually exclusive today - condense, or run in parallel, but not both. The
-example script queries the number of processes and simply leaves condensation off when there is more
-than one::
+:py:class:`~pyoomph.equations.generic.StaticCondensation` is experimental. It works serially and on a
+distributed (``--distribute``) run, where each process eliminates the components it owns and exchanges
+the small dense operators of the ones straddling a partition boundary; the answer and the Newton
+iteration count are the serial ones either way. What it cannot serve is a **replicated** ``mpirun`` -
+more than one process *without* ``--distribute`` - because there the mesh is not split at all and the
+element loop is handed out by measured timings rather than by the equation numbering. That is refused
+with an error rather than silently ignored, and so are Jacobian reuse and the globally convergent
+(line search) Newton method. A selection whose coupled block would be split across processes - a DG
+field coupled across facets, say - is refused too, on every process at once. Only Newton solves
+benefit: residual evaluations, eigenvalue and Hessian assemblies and arclength continuation always see
+the full system. The example script therefore leaves condensation off in the one mode it cannot use::
 
-    if get_mpi_nproc() > 1:
-        print("More than one process: leaving static condensation off, it is serial only.")
+    if get_mpi_nproc() > 1 and "--distribute" not in sys.argv:
+        print("Replicated MPI run: leaving static condensation off, it needs --distribute.")
     else:
         eqs += StaticCondensation(velocity="bubble")
 

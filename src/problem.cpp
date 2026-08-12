@@ -3843,9 +3843,15 @@ namespace pyoomph
 	{
 		plan.clear();
 #ifdef OOMPH_HAS_MPI
-		// Distributed condensation is a later stage: the rows of a component may live on several ranks,
-		// which is a question of ownership and collective refusal votes, not of this code.
-		if (Problem_has_been_distributed) return false;
+		// Distributed runs take an entirely separate builder: the rows of a component live on one rank
+		// but its E rows may not, so the plan is a question of ownership plus three structural exchanges,
+		// and every refusal in it has to be a collective vote (dev_docs/static_condensation.md section 9).
+		if (Problem_has_been_distributed) return build_distributed_condensation_plan(plan);
+		// nproc > 1 without distribute() is a REPLICATED problem whose elements are merely split across
+		// ranks. Its frozen distributed assembly declines for reasons of its own (the element range is
+		// re-tuned from measured timings, so it is not a function of the numbering), and this plan is
+		// expressed as positions in that assembly's value array. The engagement gate refuses it with a
+		// message; here it is simply not planned for.
 		if (Communicator_pt && Communicator_pt->nproc() > 1) return false;
 #endif
 		if (n_unaugmented_dofs != 0) return false; // Augmented (bifurcation/continuation) system: assembled full
@@ -4129,6 +4135,652 @@ namespace pyoomph
 		return true;
 	}
 
+#ifdef OOMPH_HAS_MPI
+	// ==================== Static condensation: the distributed plan ====================
+	// dev_docs/static_condensation.md section 9. Everything below rests on two properties of the
+	// distributed assembly (structural_assembly.md section 5): a rank's OWNED rows are complete, and for
+	// a distributed problem the row distribution IS the dof ownership. Together they say that the rank on
+	// which a component's element is non-halo holds A_LL, A_LE and r_L in full and is the only one that
+	// can form the Schur operators -- while a neighbour owning one of the E rows holds that row complete,
+	// including its A_EL entries, and needs nothing but X and y to apply the update to it.
+
+	// Turns a per-rank refusal into one that every rank throws. An empty message means "no objection
+	// here". COLLECTIVE: it must be reached by every rank whatever each of them decided, which is the
+	// whole point -- a rank throwing on its own would leave the others in the next collective for ever.
+	void Problem::condensation_collective_throw(const std::string &msg)
+	{
+		if (!Communicator_pt || Communicator_pt->nproc() < 2)
+		{
+			if (!msg.empty()) throw_runtime_error(msg);
+			return;
+		}
+		MPI_Comm comm = Communicator_pt->mpi_comm();
+		const int my_rank = (int)Communicator_pt->my_rank();
+		int mine = msg.empty() ? -1 : my_rank, root = -1;
+		MPI_Allreduce(&mine, &root, 1, MPI_INT, MPI_MAX, comm);
+		if (root < 0) return;
+		int len = (root == my_rank ? (int)msg.size() : 0);
+		MPI_Bcast(&len, 1, MPI_INT, root, comm);
+		std::vector<char> buf((size_t)len + 1, 0);
+		if (root == my_rank) std::copy(msg.begin(), msg.end(), buf.begin());
+		if (len) MPI_Bcast(buf.data(), len, MPI_CHAR, root, comm);
+		throw_runtime_error("[rank " + std::to_string(root) + "] " + std::string(buf.data(), (size_t)len));
+	}
+
+	namespace
+	{
+		// One all-to-all exchange of variable-length int payloads: an MPI_Alltoall of the counts so the
+		// receivers can allocate, then one message per peer. What this rank "sends to itself" never
+		// travels; it is copied, so the caller can treat every peer alike.
+		static void condensation_alltoall_ints(MPI_Comm comm, unsigned nproc, unsigned my_rank, int tag,
+											   const std::vector<std::vector<int>> &send,
+											   std::vector<std::vector<int>> &recv)
+		{
+			std::vector<int> sn(nproc, 0), rn(nproc, 0);
+			for (unsigned p = 0; p < nproc; p++) sn[p] = (int)send[p].size();
+			MPI_Alltoall(sn.data(), 1, MPI_INT, rn.data(), 1, MPI_INT, comm);
+			recv.assign(nproc, std::vector<int>());
+			std::vector<MPI_Request> reqs;
+			reqs.reserve(2 * nproc);
+			for (unsigned p = 0; p < nproc; p++)
+			{
+				if (p == my_rank) { recv[p] = send[p]; continue; }
+				if (sn[p])
+				{
+					reqs.push_back(MPI_Request());
+					MPI_Isend(const_cast<int *>(send[p].data()), sn[p], MPI_INT, (int)p, tag, comm, &reqs.back());
+				}
+				if (rn[p])
+				{
+					recv[p].resize(rn[p]);
+					reqs.push_back(MPI_Request());
+					MPI_Irecv(recv[p].data(), rn[p], MPI_INT, (int)p, tag, comm, &reqs.back());
+				}
+			}
+			if (!reqs.empty()) MPI_Waitall((int)reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
+		}
+	}
+
+	bool Problem::build_distributed_condensation_plan(CondensationPlan &plan)
+	{
+		plan.clear();
+		if (!Communicator_pt || !Problem_has_been_distributed) return false;
+		const unsigned nproc = Communicator_pt->nproc();
+		const unsigned my_rank = Communicator_pt->my_rank();
+		MPI_Comm comm = Communicator_pt->mpi_comm();
+
+		// --- 0. Rank-local declines. Every condition here is a globally uniform property of the problem
+		// (the pattern id is MPI_Allreduce-checked for equality in assign_eqn_numbers, and the frozen
+		// distributed plan's generation was itself set behind a collective vote), so a rank returning
+		// early cannot leave the others waiting in a collective.
+		if (n_unaugmented_dofs != 0) return false;
+		const unsigned long gen = this->get_jacobian_structure_id();
+		if (!gen) return false;
+		const unsigned nd = this->ndof();
+		if (!nd) return false;
+		const DistributedFrozenSparsity &sp = distributed_frozen_sparsity;
+		// The plan is a list of positions in the frozen distributed value array, so that assembly is a
+		// precondition. Before the first Jacobian of a structure id there is none yet, and the plan is
+		// simply built on the next call -- which is where the solve path reaches it anyway.
+		if (sp.generation != gen || sp.mats.empty() || sp.nproc != nproc || sp.ndof != nd) return false;
+
+		// --- 1. The matrix distribution has to BE the dof distribution, or the ownership argument fails.
+		// oomph picks between Dof_distribution_pt and a uniform one for the Jacobian's rows, switching to
+		// uniform as soon as one rank exceeds the uniform share by 10 % (problem.cc:454). Under a uniform
+		// distribution the rank owning a row is not the rank holding the Data, so nothing below holds.
+		const oomph::LinearAlgebraDistribution *dofdist = this->dof_distribution_pt();
+		{
+			std::string err;
+			if (!dofdist || dofdist->first_row() != sp.first_row || dofdist->nrow_local() != sp.nrow_local)
+				err = "Static condensation cannot be applied to this distributed run: the Jacobian's row "
+					  "distribution is not the problem's dof distribution, so the rank that owns a row is not "
+					  "the one that holds the degree of freedom, and a component's block is held by nobody in "
+					  "full. oomph-lib chooses a uniform row distribution whenever one rank's dof count "
+					  "exceeds the uniform share by more than 10 %. pyoomph resolves that DEFAULT in favour of "
+					  "the dof distribution by itself whenever condensation is on (see "
+					  "align_matrix_distribution_for_condensation), so reaching this message means the uniform "
+					  "distribution was chosen explicitly. Undo that choice, or switch static condensation off "
+					  "for this run.";
+			condensation_collective_throw(err); // collective; every rank throws or none does
+		}
+
+		const DistributedFrozenSparsity::Mat &mt = sp.mats[0];
+		const std::vector<int> &row_start = mt.final_row_start; // nrow_local+1
+		const std::vector<int> &col_index = mt.final_col;       // GLOBAL columns, ascending within a row
+		const unsigned nrow_local = sp.nrow_local, first_row = sp.first_row;
+		plan.full_nnz = col_index.size();
+		plan.distributed = true;
+		plan.nproc = nproc;
+		plan.my_rank = my_rank;
+		plan.first_row = first_row;
+		plan.nrow_local = nrow_local;
+
+		auto owns = [first_row, nrow_local](int g) { return g >= (int)first_row && g < (int)(first_row + nrow_local); };
+
+		// --- 2. The L dofs THIS rank owns. The selection scan sees halo copies too and therefore also
+		// names dofs owned by other ranks; those are their owner's business. Ordered by equation number
+		// and stable, exactly as serially, so a rebuild of an unchanged pattern is bit-identical.
+		this->ensure_static_condensation_selection();
+		std::vector<std::pair<long, std::pair<oomph::Data *, unsigned>>> sel;
+		for (const auto &kv : static_condensation_selected)
+			for (unsigned v = 0; v < kv.second.size(); v++)
+			{
+				if (!kv.second[v]) continue;
+				const long eq = kv.first->eqn_number(v);
+				if (eq >= 0 && owns((int)eq)) sel.push_back(std::make_pair(eq, std::make_pair(kv.first, v)));
+			}
+		std::stable_sort(sel.begin(), sel.end(), [](const std::pair<long, std::pair<oomph::Data *, unsigned>> &a,
+													const std::pair<long, std::pair<oomph::Data *, unsigned>> &b)
+						 { return a.first < b.first; });
+		std::vector<int> l_index(nrow_local, -1); // local row -> index in the L arrays, -1 for retained
+		std::vector<int> l_eqn;
+		std::vector<std::pair<oomph::Data *, unsigned>> l_value;
+		for (const auto &s : sel)
+		{
+			const int lr = (int)s.first - (int)first_row;
+			if (l_index[lr] >= 0) continue; // two Data values sharing an equation: keep the first
+			l_index[lr] = (int)l_eqn.size();
+			l_eqn.push_back((int)s.first);
+			l_value.push_back(s.second);
+		}
+		const unsigned nL = (unsigned)l_eqn.size();
+
+		// A rank may legitimately own no condensed dof at all (no element of the domain, or the whole
+		// selection sits elsewhere) and still own E rows of somebody else's components, so "nothing
+		// selected" is decided globally, once, rather than per rank.
+		{
+			int mine = (nL ? 1 : 0), any = 0;
+			MPI_Allreduce(&mine, &any, 1, MPI_INT, MPI_MAX, comm);
+			if (!any) { plan.clear(); return false; }
+		}
+
+		// --- 3. Exchange 1: whose columns are condensed?
+		// Deciding this from the local halo copy of the Data would be right almost always -- but
+		// condense_element_private_dofs() measures "private" against a RANK-LOCAL reverse external-data
+		// scan, which a neighbour that does not hold the adopting interface element sees differently.
+		// So the owner is asked. The traffic is proportional to the partition boundary.
+		std::vector<int> foreign_cols;
+		for (size_t k = 0; k < col_index.size(); k++)
+			if (!owns(col_index[k])) foreign_cols.push_back(col_index[k]);
+		std::sort(foreign_cols.begin(), foreign_cols.end());
+		foreign_cols.erase(std::unique(foreign_cols.begin(), foreign_cols.end()), foreign_cols.end());
+		std::vector<std::vector<int>> q_send(nproc), q_recv, a_send(nproc), a_recv;
+		for (size_t i = 0; i < foreign_cols.size(); i++)
+			q_send[dofdist->rank_of_global_row((unsigned)foreign_cols[i])].push_back(foreign_cols[i]);
+		condensation_alltoall_ints(comm, nproc, my_rank, 80, q_send, q_recv);
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			a_send[p].resize(q_recv[p].size());
+			for (size_t i = 0; i < q_recv[p].size(); i++)
+			{
+				const int lr = q_recv[p][i] - (int)first_row;
+				a_send[p][i] = (lr >= 0 && lr < (int)nrow_local && l_index[lr] >= 0) ? 1 : 0;
+			}
+		}
+		condensation_alltoall_ints(comm, nproc, my_rank, 81, a_send, a_recv);
+		std::vector<int> foreign_L; // the condensed ones among foreign_cols, ascending
+		for (unsigned p = 0; p < nproc; p++)
+			for (size_t i = 0; i < a_recv[p].size(); i++)
+				if (a_recv[p][i]) foreign_L.push_back(q_send[p][i]);
+		std::sort(foreign_L.begin(), foreign_L.end());
+		auto is_cond = [&](int g) -> bool
+		{
+			if (owns(g)) return l_index[g - (int)first_row] >= 0;
+			return std::binary_search(foreign_L.begin(), foreign_L.end(), g);
+		};
+
+		// --- 4. Components of the owned L block, and the cross-rank refusal.
+		std::string err;
+		std::vector<int> uf(nL);
+		for (unsigned i = 0; i < nL; i++) uf[i] = (int)i;
+		auto uf_find = [&uf](int a) { while (uf[a] != a) { uf[a] = uf[uf[a]]; a = uf[a]; } return a; };
+		std::vector<char> row_ok(nL, 0), col_ok(nL, 0);
+		std::vector<long> straddling;
+		for (unsigned i = 0; i < nL && err.empty(); i++)
+		{
+			const int lr = l_eqn[i] - (int)first_row;
+			for (int k = row_start[lr]; k < row_start[lr + 1]; k++)
+			{
+				const int c = col_index[k];
+				if (!is_cond(c)) continue;
+				if (!owns(c))
+				{
+					// The block to be inverted reaches across a partition boundary, so no rank holds it in
+					// full. Refusing is the honest answer: serving it would be a distributed dense solve
+					// per component, which is not what condensation is for. Detected from at least one
+					// side whichever way round the coupling runs.
+					// One entry per offending DOF, not per offending column: describe_global_dofs() keys
+					// its lookup on the equation number, so a repeated one comes back as "<unknown dof>".
+					if (straddling.size() < 4 && (straddling.empty() || straddling.back() != l_eqn[i]))
+						straddling.push_back(l_eqn[i]);
+					continue;
+				}
+				const int j = l_index[c - (int)first_row];
+				row_ok[i] = 1;
+				col_ok[j] = 1;
+				const int ra = uf_find((int)i), rb = uf_find(j);
+				if (ra != rb) uf[ra] = rb;
+			}
+		}
+		if (!straddling.empty())
+			err = "Static condensation: a connected block of selected degrees of freedom is split across MPI "
+				  "ranks, so no rank holds it in full and it cannot be eliminated. Sample dofs whose equation "
+				  "couples to a selected unknown owned by another rank: " +
+				  format_dof_samples(*this, straddling, straddling.size()) +
+				  ". Static condensation eliminates ELEMENT-LOCAL dofs; a selection that couples across "
+				  "element (and hence partition) boundaries -- a DG field coupled across facets, say -- is not "
+				  "element-local. Restrict the selection, or switch condensation off for distributed runs.";
+		condensation_collective_throw(err);
+
+		std::vector<int> comp_of_l(nL, -1), comp_of_root(nL, -1);
+		unsigned ncomp = 0;
+		for (unsigned i = 0; i < nL; i++)
+		{
+			const int r = uf_find((int)i);
+			if (comp_of_root[r] < 0) comp_of_root[r] = (int)(ncomp++);
+			comp_of_l[i] = comp_of_root[r];
+		}
+		std::vector<CondensationComponent> owned(ncomp);
+		for (unsigned i = 0; i < nL; i++)
+		{
+			owned[comp_of_l[i]].L_eqns.push_back(l_eqn[i]);
+			owned[comp_of_l[i]].L_values.push_back(l_value[i]);
+			owned[comp_of_l[i]].owner_rank = (int)my_rank;
+		}
+
+		// --- 5. The serial guards, on the owned block, as collective votes.
+		for (unsigned c = 0; c < ncomp && err.empty(); c++)
+		{
+			if (owned[c].nL() <= static_condensation_max_component_size) continue;
+			std::vector<long> sample;
+			for (unsigned i = 0; i < owned[c].nL() && i < 5; i++) sample.push_back(owned[c].L_eqns[i]);
+			err = "Static condensation: the selected degrees of freedom do not decompose into small "
+				  "element-local blocks. One connected component holds " + std::to_string(owned[c].nL()) +
+				  " mutually coupled dofs, above the limit static_condensation_max_component_size = " +
+				  std::to_string(static_condensation_max_component_size) + ". Sample dofs of the component: " +
+				  format_dof_samples(*this, sample, owned[c].nL()) +
+				  ". Either restrict the selection to dofs that really are element-local, or raise "
+				  "problem.static_condensation_max_component_size if the size is genuinely intended.";
+		}
+		if (err.empty())
+		{
+			// col_ok is computable from the owned rows alone precisely BECAUSE a component reaching across
+			// a rank boundary has already been refused above.
+			std::vector<long> bad_rows, bad_cols;
+			unsigned long n_bad_rows = 0, n_bad_cols = 0;
+			for (unsigned i = 0; i < nL; i++)
+			{
+				if (!row_ok[i]) { n_bad_rows++; if (bad_rows.size() < 4) bad_rows.push_back(l_eqn[i]); }
+				if (!col_ok[i]) { n_bad_cols++; if (bad_cols.size() < 4) bad_cols.push_back(l_eqn[i]); }
+			}
+			if (!bad_rows.empty() || !bad_cols.empty())
+			{
+				err = "Static condensation: the selected degrees of freedom cannot be eliminated, because the "
+					  "block to be inverted is structurally singular.";
+				if (!bad_rows.empty())
+					err += " The equations of these selected dofs contain no selected unknown at all (an empty "
+						   "ROW of the block): " + format_dof_samples(*this, bad_rows, n_bad_rows) + ".";
+				if (!bad_cols.empty())
+					err += " These selected dofs appear in no selected equation (an empty COLUMN of the block): " +
+						   format_dof_samples(*this, bad_cols, n_bad_cols) + ".";
+				err += " A dof can only be eliminated together with an equation that determines it. The classic "
+					   "case is selecting a discontinuous (DL) pressure on its own: the continuity equation "
+					   "contains no pressure, so it has to be condensed jointly with the bubble velocities that "
+					   "it does determine -- and the constant pressure mode has to stay in the global system.";
+			}
+		}
+		condensation_collective_throw(err);
+
+		// --- 6. E_C, in two halves. By column (a retained dof appearing in one of the component's own
+		// equations) the owner can see for itself; by row (a retained equation containing one of the
+		// component's unknowns) it cannot, because that row may be owned by anyone. Both directions are
+		// needed and they are genuinely different sets -- that is the reason this design condenses after
+		// assembly rather than per element -- so the second half is exchanged (Exchange 2).
+		std::vector<std::vector<int>> E_lists(ncomp);
+		for (unsigned i = 0; i < nL; i++)
+		{
+			const int lr = l_eqn[i] - (int)first_row;
+			std::vector<int> &lst = E_lists[comp_of_l[i]];
+			for (int k = row_start[lr]; k < row_start[lr + 1]; k++)
+				if (!is_cond(col_index[k])) lst.push_back(col_index[k]);
+		}
+		std::vector<std::vector<int>> pair_send(nproc), pair_recv;
+		for (unsigned lr = 0; lr < nrow_local; lr++)
+		{
+			if (l_index[lr] >= 0) continue; // a condensed row is never an E row
+			const int r = (int)first_row + (int)lr;
+			for (int k = row_start[lr]; k < row_start[lr + 1]; k++)
+			{
+				const int c = col_index[k];
+				if (!is_cond(c)) continue;
+				if (owns(c)) E_lists[comp_of_l[l_index[c - (int)first_row]]].push_back(r);
+				else
+				{
+					std::vector<int> &b = pair_send[dofdist->rank_of_global_row((unsigned)c)];
+					b.push_back(c); b.push_back(r);
+				}
+			}
+		}
+		condensation_alltoall_ints(comm, nproc, my_rank, 82, pair_send, pair_recv);
+		for (unsigned p = 0; p < nproc; p++)
+			for (size_t i = 0; i + 1 < pair_recv[p].size(); i += 2)
+			{
+				const int c = pair_recv[p][i], r = pair_recv[p][i + 1];
+				const int lr = c - (int)first_row;
+				// Cannot miss: the sender only ever names columns this rank itself declared condensed in
+				// Exchange 1.
+				if (lr < 0 || lr >= (int)nrow_local || l_index[lr] < 0)
+				{
+					err = "Internal error while building the distributed static condensation plan: rank " +
+						  std::to_string(p) + " reported a coupling to equation " + std::to_string(c) +
+						  ", which this rank does not hold as a condensed dof.";
+					continue;
+				}
+				E_lists[comp_of_l[l_index[lr]]].push_back(r);
+			}
+		condensation_collective_throw(err);
+		for (unsigned c = 0; c < ncomp; c++)
+		{
+			std::sort(E_lists[c].begin(), E_lists[c].end());
+			E_lists[c].erase(std::unique(E_lists[c].begin(), E_lists[c].end()), E_lists[c].end());
+			owned[c].E_eqns.swap(E_lists[c]);
+		}
+
+		// --- 7. Exchange 3: the component descriptors. A rank learns of its participation from this
+		// message and not from its own scan -- the by-column direction (its row appears as a COLUMN of one
+		// of the owner's L rows) is not visible to it at all. Per component the message carries
+		// [nL, nE, L_eqns..., E_eqns...], components ordered by their smallest L equation so that the
+		// sender's and the receiver's buffers agree without any further negotiation.
+		std::vector<std::vector<int>> desc_send(nproc), desc_recv;
+		std::vector<std::vector<int>> peers_of_owned(ncomp);
+		for (unsigned c = 0; c < ncomp; c++)
+		{
+			std::vector<int> peers;
+			for (size_t j = 0; j < owned[c].E_eqns.size(); j++)
+			{
+				const unsigned p = dofdist->rank_of_global_row((unsigned)owned[c].E_eqns[j]);
+				if (p != my_rank) peers.push_back((int)p);
+			}
+			std::sort(peers.begin(), peers.end());
+			peers.erase(std::unique(peers.begin(), peers.end()), peers.end());
+			peers_of_owned[c] = peers;
+			for (size_t q = 0; q < peers.size(); q++)
+			{
+				std::vector<int> &b = desc_send[peers[q]];
+				b.push_back((int)owned[c].nL());
+				b.push_back((int)owned[c].nE());
+				b.insert(b.end(), owned[c].L_eqns.begin(), owned[c].L_eqns.end());
+				b.insert(b.end(), owned[c].E_eqns.begin(), owned[c].E_eqns.end());
+			}
+		}
+		condensation_alltoall_ints(comm, nproc, my_rank, 83, desc_send, desc_recv);
+
+		// --- 8. Assemble the component array: the ones this rank owns plus the ones it merely holds an E
+		// row of, ordered by smallest L equation.
+		std::vector<CondensationComponent> comps;
+		std::vector<std::vector<int>> comp_peers; // parallel; only meaningful for owned components
+		comps.reserve(ncomp);
+		for (unsigned c = 0; c < ncomp; c++) { comps.push_back(std::move(owned[c])); comp_peers.push_back(peers_of_owned[c]); }
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			if (p == my_rank) continue;
+			const std::vector<int> &b = desc_recv[p];
+			size_t k = 0;
+			while (k + 1 < b.size())
+			{
+				const unsigned nl = (unsigned)b[k], ne = (unsigned)b[k + 1];
+				k += 2;
+				if (k + nl + ne > b.size()) { err = "Internal error: truncated static condensation descriptor from rank " + std::to_string(p); break; }
+				CondensationComponent comp;
+				comp.owner_rank = (int)p;
+				comp.L_eqns.assign(b.begin() + k, b.begin() + k + nl);
+				k += nl;
+				comp.E_eqns.assign(b.begin() + k, b.begin() + k + ne);
+				k += ne;
+				comps.push_back(comp);
+				comp_peers.push_back(std::vector<int>());
+			}
+		}
+		condensation_collective_throw(err);
+		{
+			std::vector<unsigned> order(comps.size());
+			for (unsigned i = 0; i < order.size(); i++) order[i] = i;
+			std::sort(order.begin(), order.end(), [&comps](unsigned a, unsigned b)
+					  { return comps[a].L_eqns[0] < comps[b].L_eqns[0]; });
+			std::vector<CondensationComponent> sorted;
+			std::vector<std::vector<int>> sorted_peers;
+			sorted.reserve(comps.size());
+			for (unsigned i = 0; i < order.size(); i++) { sorted.push_back(std::move(comps[order[i]])); sorted_peers.push_back(comp_peers[order[i]]); }
+			comps.swap(sorted);
+			comp_peers.swap(sorted_peers);
+		}
+		const unsigned nc = (unsigned)comps.size();
+
+		// The operator exchange plan. Both lists come out in ascending smallest-L-equation order because
+		// the component array is sorted that way, which is exactly the order Exchange 3 was packed in.
+		plan.xy_send_start.assign(nproc + 1, 0);
+		plan.xy_recv_start.assign(nproc + 1, 0);
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			for (unsigned i = 0; i < nc; i++)
+				if (comps[i].owner_rank == (int)my_rank &&
+					std::find(comp_peers[i].begin(), comp_peers[i].end(), (int)p) != comp_peers[i].end())
+					plan.xy_send_comp.push_back((int)i);
+			plan.xy_send_start[p + 1] = (int)plan.xy_send_comp.size();
+			for (unsigned i = 0; i < nc; i++)
+				if (comps[i].owner_rank == (int)p && p != my_rank) plan.xy_recv_comp.push_back((int)i);
+			plan.xy_recv_start[p + 1] = (int)plan.xy_recv_comp.size();
+		}
+
+		// --- 9. my_E: which of a component's E rows this rank owns. This is the only thing that decides
+		// what work a rank does for a component, owned or remote.
+		for (unsigned i = 0; i < nc; i++)
+		{
+			CondensationComponent &comp = comps[i];
+			for (unsigned j = 0; j < comp.nE(); j++)
+				if (owns(comp.E_eqns[j])) comp.my_E.push_back((int)j);
+		}
+
+		// --- 10. Reconstruction inputs for the components this rank owns. dx is distributed, so only the
+		// E rows this rank owns are in it; for the rest the increment is recovered from the local (halo)
+		// copy of the VALUE, (u_stored - u_now)/Relaxation_factor, which needs no exchange of dx at all.
+		// Such a copy always exists: an E dof is a dof of an element that contains one of the component's
+		// L dofs, and that element is non-halo on this very rank.
+		{
+			std::vector<int> wanted;
+			for (unsigned i = 0; i < nc; i++)
+			{
+				CondensationComponent &comp = comps[i];
+				if (comp.owner_rank != (int)my_rank) continue;
+				comp.E_dx_row.assign(comp.nE(), -1);
+				comp.E_value_pt.assign(comp.nE(), (double *)NULL);
+				comp.E_u_stored.assign(comp.nE(), 0.0);
+				for (unsigned j = 0; j < comp.nE(); j++)
+				{
+					if (owns(comp.E_eqns[j])) comp.E_dx_row[j] = comp.E_eqns[j] - (int)first_row;
+					else wanted.push_back(comp.E_eqns[j]);
+				}
+			}
+			std::sort(wanted.begin(), wanted.end());
+			wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+			std::vector<double *> found(wanted.size(), NULL);
+			if (!wanted.empty())
+			{
+				auto take = [&](oomph::Data *d)
+				{
+					if (!d) return;
+					for (unsigned v = 0; v < d->nvalue(); v++)
+					{
+						const long eq = d->eqn_number(v);
+						if (eq < 0) continue;
+						const std::vector<int>::iterator f = std::lower_bound(wanted.begin(), wanted.end(), (int)eq);
+						if (f != wanted.end() && *f == (int)eq) found[f - wanted.begin()] = d->value_pt(v);
+					}
+				};
+				const unsigned long n_element = mesh_pt() ? mesh_pt()->nelement() : 0;
+				for (unsigned long e = 0; e < n_element; e++)
+				{
+					oomph::GeneralisedElement *el = mesh_pt()->element_pt(e);
+					if (!el) continue;
+					for (unsigned k = 0; k < el->ninternal_data(); k++) take(el->internal_data_pt(k));
+					for (unsigned k = 0; k < el->nexternal_data(); k++) take(el->external_data_pt(k));
+					oomph::FiniteElement *fe = dynamic_cast<oomph::FiniteElement *>(el);
+					if (!fe) continue;
+					for (unsigned n = 0; n < fe->nnode(); n++)
+					{
+						oomph::Node *nd = fe->node_pt(n);
+						take(nd);
+						oomph::SolidNode *sn = dynamic_cast<oomph::SolidNode *>(nd);
+						if (sn) take(sn->variable_position_pt());
+					}
+				}
+				for (unsigned k = 0; k < this->nglobal_data(); k++) take(this->global_data_pt(k));
+				for (size_t i = 0; i < wanted.size(); i++)
+					if (!found[i])
+					{
+						err = "Internal error while building the distributed static condensation plan: no local "
+							  "copy of the value carrying global equation " + std::to_string(wanted[i]) +
+							  " could be found on this rank, although a condensed component couples to it. The "
+							  "reconstruction of the eliminated dofs reads that copy.";
+						break;
+					}
+			}
+			condensation_collective_throw(err);
+			for (unsigned i = 0; i < nc; i++)
+			{
+				CondensationComponent &comp = comps[i];
+				if (comp.owner_rank != (int)my_rank) continue;
+				for (unsigned j = 0; j < comp.nE(); j++)
+				{
+					if (comp.E_dx_row[j] >= 0) continue;
+					const std::vector<int>::iterator f = std::lower_bound(wanted.begin(), wanted.end(), comp.E_eqns[j]);
+					comp.E_value_pt[j] = found[f - wanted.begin()];
+				}
+			}
+		}
+
+		// --- 11. The condensed LOCAL pattern: this rank's owned rows, global column indices. A retained
+		// row keeps its retained columns and gains the whole E_C of every component it takes part in; a
+		// condensed row keeps its diagonal alone. Identical to the serial construction, restricted to the
+		// owned rows -- a fill entry in a column this rank never had is unremarkable, columns are global.
+		{
+			std::vector<std::vector<int>> cond_cols(nrow_local);
+			for (unsigned lr = 0; lr < nrow_local; lr++)
+			{
+				if (l_index[lr] >= 0) { cond_cols[lr].push_back((int)first_row + (int)lr); continue; }
+				for (int k = row_start[lr]; k < row_start[lr + 1]; k++)
+					if (!is_cond(col_index[k])) cond_cols[lr].push_back(col_index[k]);
+			}
+			for (unsigned i = 0; i < nc; i++)
+			{
+				const CondensationComponent &comp = comps[i];
+				for (size_t q = 0; q < comp.my_E.size(); q++)
+				{
+					const int lr = comp.E_eqns[comp.my_E[q]] - (int)first_row;
+					cond_cols[lr].insert(cond_cols[lr].end(), comp.E_eqns.begin(), comp.E_eqns.end());
+				}
+			}
+			plan.cond_row_start.assign(nrow_local + 1, 0);
+			for (unsigned lr = 0; lr < nrow_local; lr++)
+			{
+				std::vector<int> &cc = cond_cols[lr];
+				std::sort(cc.begin(), cc.end());
+				cc.erase(std::unique(cc.begin(), cc.end()), cc.end());
+				plan.cond_row_start[lr + 1] = plan.cond_row_start[lr] + (int)cc.size();
+			}
+			plan.cond_column_index.resize(plan.cond_row_start[nrow_local]);
+			for (unsigned lr = 0; lr < nrow_local; lr++)
+				std::copy(cond_cols[lr].begin(), cond_cols[lr].end(), plan.cond_column_index.begin() + plan.cond_row_start[lr]);
+		}
+		const std::vector<int> &crs = plan.cond_row_start;
+		const std::vector<int> &cci = plan.cond_column_index;
+		auto full_slot = [&](int grow, int col) -> int
+		{
+			const int lo = row_start[grow - (int)first_row], hi = row_start[grow - (int)first_row + 1];
+			const int *b = col_index.data() + lo, *e = col_index.data() + hi;
+			const int *f = std::lower_bound(b, e, col);
+			if (f == e || *f != col) return -1;
+			return lo + (int)(f - b);
+		};
+		auto cond_slot = [&](int grow, int col) -> int
+		{
+			const int lo = crs[grow - (int)first_row], hi = crs[grow - (int)first_row + 1];
+			const int *b = cci.data() + lo, *e = cci.data() + hi;
+			const int *f = std::lower_bound(b, e, col);
+			if (f == e || *f != col) return -1;
+			return lo + (int)(f - b);
+		};
+
+		// --- 12. The slot lists. LL and LE only on the owner (only it holds the L rows); EL and the fill
+		// slots on every participant, sized by the E rows it owns.
+		for (unsigned i = 0; i < nc; i++)
+		{
+			CondensationComponent &comp = comps[i];
+			const unsigned nl = comp.nL(), ne = comp.nE(), nmy = (unsigned)comp.my_E.size();
+			if (comp.owner_rank == (int)my_rank)
+			{
+				comp.LL_slots.assign((size_t)nl * nl, -1);
+				comp.LE_slots.assign((size_t)nl * ne, -1);
+				for (unsigned a = 0; a < nl; a++)
+				{
+					for (unsigned b = 0; b < nl; b++) comp.LL_slots[(size_t)a * nl + b] = full_slot(comp.L_eqns[a], comp.L_eqns[b]);
+					for (unsigned b = 0; b < ne; b++) comp.LE_slots[(size_t)a * ne + b] = full_slot(comp.L_eqns[a], comp.E_eqns[b]);
+				}
+			}
+			comp.EL_slots.assign((size_t)nmy * nl, -1);
+			comp.fill_slots.assign((size_t)nmy * ne, -1);
+			for (unsigned q = 0; q < nmy; q++)
+			{
+				const int grow = comp.E_eqns[comp.my_E[q]];
+				for (unsigned b = 0; b < nl; b++) comp.EL_slots[(size_t)q * nl + b] = full_slot(grow, comp.L_eqns[b]);
+				for (unsigned b = 0; b < ne; b++)
+				{
+					const int cs = cond_slot(grow, comp.E_eqns[b]);
+					if (cs < 0)
+					{
+						err = "Internal error while building the distributed static condensation plan: the fill-in "
+							  "of a component is not contained in the condensed local pattern.";
+						break;
+					}
+					comp.fill_slots[(size_t)q * ne + b] = cs;
+				}
+			}
+		}
+
+		// Pass-through: every (retained, retained) entry of an owned row, copied verbatim. In full-slot
+		// order, so the copy sweeps forward through both arrays.
+		for (unsigned lr = 0; lr < nrow_local && err.empty(); lr++)
+		{
+			if (l_index[lr] >= 0) continue;
+			for (int k = row_start[lr]; k < row_start[lr + 1]; k++)
+			{
+				const int c = col_index[k];
+				if (is_cond(c)) continue;
+				const int cs = cond_slot((int)first_row + (int)lr, c);
+				if (cs < 0)
+				{
+					err = "Internal error while building the distributed static condensation plan: a retained "
+						  "matrix entry has no slot in the condensed local pattern.";
+					break;
+				}
+				plan.passthrough_full_slot.push_back(k);
+				plan.passthrough_cond_slot.push_back(cs);
+			}
+		}
+		condensation_collective_throw(err);
+
+		plan.components.swap(comps);
+		plan.condensed_eqns = l_eqn;
+		plan.L_diagonal_cond_slots.resize(nL);
+		for (unsigned i = 0; i < nL; i++) plan.L_diagonal_cond_slots[i] = crs[l_eqn[i] - (int)first_row]; // the row's only entry
+		// Local-row bitmap here, not the global one the serial plan carries: nothing at runtime reads it,
+		// and a global one would be ndof bytes per rank for no purpose.
+		plan.is_condensed.assign(nrow_local, 0);
+		for (unsigned lr = 0; lr < nrow_local; lr++) plan.is_condensed[lr] = (l_index[lr] >= 0);
+		return true;
+	}
+#endif
+
 	// The plan for the current pattern id, rebuilt whenever that id has moved on.
 	CondensationPlan *Problem::acquire_condensation_plan()
 	{
@@ -4235,6 +4887,9 @@ namespace pyoomph
 		if (!plan)
 			throw_runtime_error("Internal error: static condensation was applied to an assembly for which no "
 								"elimination plan exists. The activation gate must not let this call through.");
+#ifdef OOMPH_HAS_MPI
+		if (plan->distributed) { apply_static_condensation_distributed(residuals, jacobian); return; }
+#endif
 		const unsigned nd = plan->ndof;
 
 		// --- 1. Positive engagement check. The plan is a list of positions in a particular value array,
@@ -4384,6 +5039,240 @@ namespace pyoomph
 		jacobian.build_without_copy(ncol, cnnz, cond_val.release(), cci, crs);
 	}
 
+#ifdef OOMPH_HAS_MPI
+	// The distributed kernel (dev_docs/static_condensation.md section 9.5). Same algebra as the serial
+	// one, with the work split by ownership: the rank owning a component's L rows forms X and y, ships
+	// them to the ranks owning its E rows, and every participant applies the Schur update to the E rows
+	// it owns. The pivot guard is voted on BEFORE the exchange, so a breakdown throws everywhere instead
+	// of leaving the other ranks in MPI_Waitall.
+	void Problem::apply_static_condensation_distributed(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian)
+	{
+		CondensationPlan *plan = &condensation_plan;
+		const unsigned nproc = plan->nproc, my_rank = plan->my_rank;
+		MPI_Comm comm = Communicator_pt->mpi_comm();
+
+		// --- 1. Positive engagement check, on the local row block. Exactly the serial reasoning: the plan
+		// is a list of positions in a particular value array, and a silent mismatch would not crash, it
+		// would condense the wrong entries.
+		if (jacobian.nrow() != plan->ndof || jacobian.nrow_local() != plan->nrow_local ||
+			jacobian.first_row() != plan->first_row || residuals.nrow_local() != plan->nrow_local)
+			throw_runtime_error("Static condensation: the assembled distributed system does not have the row "
+								"block the elimination plan was built for (" + std::to_string(jacobian.nrow_local()) +
+								" local rows from " + std::to_string(jacobian.first_row()) + ", plan: " +
+								std::to_string(plan->nrow_local) + " from " + std::to_string(plan->first_row) + ").");
+		if ((unsigned long)jacobian.nnz() != plan->full_nnz)
+			throw_runtime_error("Static condensation: the assembled local Jacobian block has " +
+								std::to_string(jacobian.nnz()) + " nonzeros, but the elimination plan was built "
+								"from a pattern with " + std::to_string(plan->full_nnz) + ". The frozen "
+								"distributed assembly must have declined for this call.");
+		{
+			const DistributedFrozenSparsity &sp = distributed_frozen_sparsity;
+			if (sp.generation != plan->generation || sp.mats.empty())
+				throw_runtime_error("Static condensation: the frozen distributed sparsity pattern the elimination "
+									"plan was built from is no longer available.");
+			const DistributedFrozenSparsity::Mat &mt = sp.mats[0];
+			if (std::memcmp(mt.final_row_start.data(), jacobian.row_start(), (size_t)(plan->nrow_local + 1) * sizeof(int)) != 0 ||
+				std::memcmp(mt.final_col.data(), jacobian.column_index(), (size_t)plan->full_nnz * sizeof(int)) != 0)
+				throw_runtime_error("Static condensation: the assembled local Jacobian block does not carry the "
+									"frozen pattern the elimination plan was built from. Refusing to condense a "
+									"matrix whose entries are not where the plan says.");
+		}
+
+		const double *full_val = jacobian.value();
+		double *r = residuals.values_pt();
+		const unsigned first_row = plan->first_row;
+		const unsigned cnnz = plan->cond_nnz();
+
+		// --- 2. The condensed local value array, and the pass-through copy.
+		std::unique_ptr<double[]> cond_val(new double[cnnz ? cnnz : 1]);
+		std::fill(cond_val.get(), cond_val.get() + cnnz, 0.0);
+		for (size_t k = 0; k < plan->passthrough_full_slot.size(); k++)
+			cond_val[plan->passthrough_cond_slot[k]] = full_val[plan->passthrough_full_slot[k]];
+
+		// --- 3. The components this rank owns: gather A_LL, A_LE and r_L (all in owned, hence complete,
+		// rows), factorise once and solve for all nE+1 right-hand sides.
+		std::vector<double> &LL = condensation_scratch_LL;
+		std::vector<double> &RHS = condensation_scratch_rhs;
+		std::vector<int> &pivots = condensation_scratch_pivots;
+		std::string err;
+		for (unsigned c = 0; c < plan->components.size(); c++)
+		{
+			CondensationComponent &comp = plan->components[c];
+			if (comp.owner_rank != (int)my_rank) continue;
+			const unsigned nl = comp.nL(), ne = comp.nE(), nrhs = ne + 1;
+			LL.assign((size_t)nl * nl, 0.0);
+			RHS.assign((size_t)nl * nrhs, 0.0);
+			pivots.resize(nl);
+			for (unsigned i = 0; i < nl; i++)
+			{
+				for (unsigned j = 0; j < nl; j++)
+				{
+					const int s = comp.LL_slots[(size_t)i * nl + j];
+					if (s >= 0) LL[(size_t)i * nl + j] = full_val[s];
+				}
+				for (unsigned j = 0; j < ne; j++)
+				{
+					const int s = comp.LE_slots[(size_t)i * ne + j];
+					if (s >= 0) RHS[(size_t)i * nrhs + j] = full_val[s];
+				}
+				RHS[(size_t)i * nrhs + ne] = r[comp.L_eqns[i] - (int)first_row];
+			}
+			const int bad = dense_lu_factorise(LL.data(), nl, pivots.data(), 1e-12);
+			if (bad >= 0)
+			{
+				if (err.empty())
+				{
+					std::vector<long> sample;
+					for (unsigned i = 0; i < nl && i < 5; i++) sample.push_back(comp.L_eqns[i]);
+					err = "Static condensation: the block of selected dofs is numerically singular and cannot be "
+						  "eliminated. The elimination of a connected component of " + std::to_string(nl) +
+						  " selected dofs broke down at step " + std::to_string(bad) + ": no pivot above 1e-12 "
+						  "times the size of the block was left. The dofs of this component are: " +
+						  format_dof_samples(*this, sample, nl) +
+						  ". The block passed the structural check, so the entries are present but cancel; the "
+						  "selection eliminates a dof that its equations do not determine. The classic case is "
+						  "taking the CONSTANT mode of a discontinuous (DL) pressure along with the bubble "
+						  "velocities -- only the gradient modes may be condensed.";
+				}
+				continue;
+			}
+			dense_lu_solve(LL.data(), nl, pivots.data(), RHS.data(), nrhs);
+			comp.X.resize((size_t)nl * ne);
+			comp.y.resize(nl);
+			for (unsigned i = 0; i < nl; i++)
+			{
+				for (unsigned j = 0; j < ne; j++) comp.X[(size_t)i * ne + j] = RHS[(size_t)i * nrhs + j];
+				comp.y[i] = RHS[(size_t)i * nrhs + ne];
+			}
+			comp.ops_valid = true;
+			// The state this linearisation belongs to, for the E dofs whose rows another rank owns: the
+			// reconstruction recovers their increment as (u_stored - u_now)/Relaxation_factor rather than
+			// from dx, which this rank does not have for them. Captured here because the dofs still carry
+			// the state the Jacobian was formed at.
+			for (unsigned j = 0; j < ne; j++)
+				if (comp.E_value_pt[j]) comp.E_u_stored[j] = *(comp.E_value_pt[j]);
+		}
+		// Collective, and before any point-to-point traffic: a rank throwing on its own here would leave
+		// every other rank in the MPI_Waitall below.
+		condensation_collective_throw(err);
+
+		// --- 4. Ship X and y to the ranks owning this component's E rows. One message per peer, laid out
+		// component by component in the order both sides agreed on when the plan was built.
+		std::vector<std::vector<double>> xy_send(nproc), xy_recv(nproc);
+		std::vector<MPI_Request> reqs;
+		reqs.reserve(2 * nproc);
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			if (p == my_rank) continue;
+			size_t ns = 0;
+			for (int k = plan->xy_send_start[p]; k < plan->xy_send_start[p + 1]; k++)
+			{
+				const CondensationComponent &comp = plan->components[plan->xy_send_comp[k]];
+				ns += (size_t)comp.nL() * comp.nE() + comp.nL();
+			}
+			if (ns)
+			{
+				xy_send[p].reserve(ns);
+				for (int k = plan->xy_send_start[p]; k < plan->xy_send_start[p + 1]; k++)
+				{
+					const CondensationComponent &comp = plan->components[plan->xy_send_comp[k]];
+					xy_send[p].insert(xy_send[p].end(), comp.X.begin(), comp.X.end());
+					xy_send[p].insert(xy_send[p].end(), comp.y.begin(), comp.y.end());
+				}
+				reqs.push_back(MPI_Request());
+				MPI_Isend(xy_send[p].data(), (int)xy_send[p].size(), MPI_DOUBLE, (int)p, 84, comm, &reqs.back());
+			}
+			size_t nr = 0;
+			for (int k = plan->xy_recv_start[p]; k < plan->xy_recv_start[p + 1]; k++)
+			{
+				const CondensationComponent &comp = plan->components[plan->xy_recv_comp[k]];
+				nr += (size_t)comp.nL() * comp.nE() + comp.nL();
+			}
+			if (nr)
+			{
+				xy_recv[p].resize(nr);
+				reqs.push_back(MPI_Request());
+				MPI_Irecv(xy_recv[p].data(), (int)nr, MPI_DOUBLE, (int)p, 84, comm, &reqs.back());
+			}
+		}
+
+		// The Schur update of one component into the E rows THIS rank owns. Accumulating, for the same two
+		// reasons as serially: the fill slots overlap the pass-through entries wherever the full pattern
+		// already had that (E,E) coupling, and two components sharing a retained dof write to the same
+		// slots.
+		std::vector<double> &EL = condensation_scratch_EL;
+		auto apply_component = [&](CondensationComponent &comp)
+		{
+			const unsigned nl = comp.nL(), ne = comp.nE(), nmy = (unsigned)comp.my_E.size();
+			if (!nmy) return;
+			EL.assign((size_t)nmy * nl, 0.0);
+			for (unsigned q = 0; q < nmy; q++)
+				for (unsigned j = 0; j < nl; j++)
+				{
+					const int s = comp.EL_slots[(size_t)q * nl + j];
+					if (s >= 0) EL[(size_t)q * nl + j] = full_val[s];
+				}
+			for (unsigned q = 0; q < nmy; q++)
+			{
+				const double *ELq = &EL[(size_t)q * nl];
+				const int *fs = &comp.fill_slots[(size_t)q * ne];
+				double racc = 0.0;
+				for (unsigned l = 0; l < nl; l++) racc += ELq[l] * comp.y[l];
+				r[comp.E_eqns[comp.my_E[q]] - (int)first_row] -= racc;
+				for (unsigned l = 0; l < nl; l++)
+				{
+					const double f = ELq[l];
+					if (f == 0.0) continue;
+					const double *Xl = &comp.X[(size_t)l * ne];
+					for (unsigned b = 0; b < ne; b++) cond_val[fs[b]] -= f * Xl[b];
+				}
+			}
+		};
+
+		// Our own components need no message; do them while the others are in flight.
+		for (unsigned c = 0; c < plan->components.size(); c++)
+			if (plan->components[c].owner_rank == (int)my_rank) apply_component(plan->components[c]);
+
+		if (!reqs.empty()) MPI_Waitall((int)reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
+
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			if (p == my_rank || xy_recv[p].empty()) continue;
+			const double *buf = xy_recv[p].data();
+			for (int k = plan->xy_recv_start[p]; k < plan->xy_recv_start[p + 1]; k++)
+			{
+				CondensationComponent &comp = plan->components[plan->xy_recv_comp[k]];
+				const size_t nx = (size_t)comp.nL() * comp.nE();
+				comp.X.assign(buf, buf + nx);
+				buf += nx;
+				comp.y.assign(buf, buf + comp.nL());
+				buf += comp.nL();
+				// ops_valid stays false: only the owner reconstructs the eliminated values, and it is the
+				// only rank that holds them non-halo.
+				apply_component(comp);
+			}
+		}
+
+		// --- 5. The eliminated equations become 0 = dx_L, and their rows the identity. Both live entirely
+		// on the owner, whose rows they are.
+		for (unsigned c = 0; c < plan->components.size(); c++)
+		{
+			CondensationComponent &comp = plan->components[c];
+			if (comp.owner_rank != (int)my_rank) continue;
+			for (unsigned i = 0; i < comp.nL(); i++) r[comp.L_eqns[i] - (int)first_row] = 0.0;
+		}
+		for (size_t i = 0; i < plan->L_diagonal_cond_slots.size(); i++) cond_val[plan->L_diagonal_cond_slots[i]] = 1.0;
+
+		// --- 6. Rebuild the local block on the condensed pattern; the distribution is untouched by
+		// build_without_copy(), which keeps nrow_local and first_row.
+		int *crs = new int[plan->nrow_local + 1];
+		std::copy(plan->cond_row_start.begin(), plan->cond_row_start.end(), crs);
+		int *cci = new int[cnnz ? cnnz : 1];
+		std::copy(plan->cond_column_index.begin(), plan->cond_column_index.end(), cci);
+		jacobian.build_without_copy(plan->ndof, cnnz, cond_val.release(), cci, crs);
+	}
+#endif
+
 	// ==================== Static condensation: reconstruction after the Newton update ============
 	// The vendored oomph-lib hook (src/thirdparty/INFO_oomph-lib), called from Problem::newton_solve()
 	// once the dofs have taken the increment and the halos have been synchronised. The condensed system
@@ -4404,6 +5293,9 @@ namespace pyoomph
 			throw_runtime_error("Internal error: the Newton increment has " + std::to_string(dx.nrow()) +
 								" rows but static condensation eliminated from a system of " +
 								std::to_string(plan.ndof) + ".");
+#ifdef OOMPH_HAS_MPI
+		if (plan.distributed) { reconstruct_condensed_dofs_distributed(dx); return; }
+#endif
 
 		// The ONE place that knows how a global equation number turns into an entry of dx, and the only
 		// thing the distributed stage has to replace. Serially dx is not distributed, so the global
@@ -4451,6 +5343,69 @@ namespace pyoomph
 		}
 	}
 
+#ifdef OOMPH_HAS_MPI
+	// The distributed reconstruction (dev_docs/static_condensation.md section 9.6). Only the rank owning
+	// a component reconstructs it -- it is the only one holding those values non-halo -- and the hook
+	// therefore ends with one synchronise_all_dofs(), because the halo copies of the values just written
+	// are stale until then and a neighbour's non-halo interface or facet element may read exactly them.
+	void Problem::reconstruct_condensed_dofs_distributed(const oomph::DoubleVector &dx)
+	{
+		CondensationPlan &plan = condensation_plan;
+		if (dx.nrow_local() != plan.nrow_local || dx.first_row() != plan.first_row)
+			throw_runtime_error("Internal error: the Newton increment's row block (" +
+								std::to_string(dx.nrow_local()) + " rows from " + std::to_string(dx.first_row()) +
+								") is not the one static condensation eliminated from (" +
+								std::to_string(plan.nrow_local) + " from " + std::to_string(plan.first_row) + ").");
+		const double *dx_pt = dx.values_pt();
+		const double relax = Relaxation_factor;
+		// A zero relaxation factor moves no dof at all, so there is nothing to reconstruct -- and the
+		// value-difference recovery below would be 0/0.
+		const bool do_work = (relax != 0.0);
+		for (unsigned c = 0; c < plan.components.size(); c++)
+		{
+			CondensationComponent &comp = plan.components[c];
+			if (comp.owner_rank != (int)plan.my_rank) continue;
+			if (!comp.ops_valid)
+				throw_runtime_error("Internal error: static condensation was asked to reconstruct the eliminated "
+									"degrees of freedom twice from the same Jacobian. The elimination operators of "
+									"a component are consumed by the Newton step they were built for.");
+			comp.ops_valid = false;
+			if (!do_work) continue;
+			const unsigned nl = comp.nL(), ne = comp.nE();
+			// dx_E, without any exchange of dx: taken straight from dx where this rank owns the row
+			// (exact), and recovered from the halo-synchronised VALUE otherwise. synchronise_all_dofs()
+			// ran a few lines above in newton_solve(), and it copies haloed node values AND haloed
+			// elements' internal data, so the local copy equals the owner's at both instants and their
+			// difference is exactly Relaxation_factor times the increment.
+			std::vector<double> &dxE = condensation_scratch_dxE;
+			dxE.resize(ne);
+			for (unsigned j = 0; j < ne; j++)
+				dxE[j] = (comp.E_dx_row[j] >= 0 ? dx_pt[comp.E_dx_row[j]]
+												: (comp.E_u_stored[j] - *(comp.E_value_pt[j])) / relax);
+			for (unsigned k = 0; k < nl; k++)
+			{
+				const double *Xk = &comp.X[(size_t)k * ne];
+				double v = comp.y[k];
+				for (unsigned j = 0; j < ne; j++) v -= Xk[j] * dxE[j];
+				oomph::Data *d = comp.L_values[k].first;
+				const unsigned iv = comp.L_values[k].second;
+#ifdef PARANOID
+				if (d->eqn_number(iv) != comp.L_eqns[k])
+					throw_runtime_error("Internal error: a static condensation plan outlived its equation numbering "
+										"(a condensed value now carries equation " + std::to_string(d->eqn_number(iv)) +
+										" instead of " + std::to_string(comp.L_eqns[k]) + ").");
+#endif
+				*(d->value_pt(iv)) -= relax * v;
+			}
+		}
+		// Collective, and reached by every rank because last_jacobian_was_condensed is globally uniform
+		// (see the engagement gate). Deliberately NOT conditioned on this rank having reconstructed
+		// anything: that is a per-rank quantity, and a rank skipping a collective is exactly the deadlock
+		// this whole design is written to avoid.
+		this->synchronise_all_dofs();
+	}
+#endif
+
 	// Whether this get_jacobian() call must hand back the condensed system. See
 	// dev_docs/static_condensation.md; the refusals throw and the declines are silent on purpose.
 	bool Problem::static_condensation_engages_now()
@@ -4462,11 +5417,22 @@ namespace pyoomph
 		// state, with nothing updating any dof.
 		if (!inside_flagged_newton_solve && !_debug_force_condensed_assembly) return false;
 
-		// Refusals: combinations the user has explicitly asked for that cannot be served.
+		// Refusals: combinations the user has explicitly asked for that cannot be served. Every condition
+		// tested here is globally uniform, so under MPI these throw on all ranks at once rather than
+		// leaving some of them in the next collective (dev_docs/static_condensation.md section 9.4).
 #ifdef OOMPH_HAS_MPI
-		if (Problem_has_been_distributed || (Communicator_pt && Communicator_pt->nproc() > 1))
-			throw_runtime_error("Static condensation is not implemented for MPI runs yet: a component's rows may live "
-								"on several ranks. Set problem.use_static_condensation = False for distributed runs.");
+		if (Communicator_pt && Communicator_pt->nproc() > 1 && !Problem_has_been_distributed)
+			throw_runtime_error("Static condensation under MPI needs a genuinely DISTRIBUTED problem. This run has " +
+								std::to_string(Communicator_pt->nproc()) + " ranks but the problem was never "
+								"distributed, so it is replicated and only its ELEMENTS are split across the ranks -- "
+								"oomph-lib re-tunes that split from measured timings, which is why neither the frozen "
+								"assembly nor an elimination plan built from it can describe it. Run with "
+								"--distribute, or set problem.use_static_condensation = False.");
+		if (Problem_has_been_distributed && !(use_frozen_sparsity && use_frozen_distributed_sparsity && keep_structural_zeros))
+			throw_runtime_error("Static condensation on a distributed problem requires the frozen distributed "
+								"assembly: the elimination plan is a list of positions in its value array. Leave "
+								"problem.use_frozen_sparsity, problem.use_frozen_distributed_sparsity and "
+								"problem.keep_structural_zeros on, or switch static condensation off.");
 #endif
 		if (this->jacobian_reuse_is_enabled())
 			throw_runtime_error("Static condensation cannot be combined with Jacobian reuse: the eliminated dofs are "

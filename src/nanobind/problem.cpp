@@ -922,14 +922,16 @@ void PyReg_Problem(nb::module_ &m)
 			 "which is worth checking before believing any benchmark of it.")
 		.def_prop_rw("use_static_condensation", &pyoomph::Problem::get_use_static_condensation, &pyoomph::Problem::set_use_static_condensation,
 					  "Master switch for static condensation: eliminating the element-local degrees of freedom selected by a ``StaticCondensation`` equation (or by "
-					  "``condense_dofs()``) from the linear system before it is handed to the solver, and reconstructing them afterwards. EXPERIMENTAL, and SERIAL "
-					  "ONLY. Off by default, but adding a ``StaticCondensation`` equation to the equation tree switches it on automatically - assigning it "
+					  "``condense_dofs()``) from the linear system before it is handed to the solver, and reconstructing them afterwards. EXPERIMENTAL. Serial "
+					  "and distributed (``--distribute``) runs are both supported. "
+					  "Off by default, but adding a ``StaticCondensation`` equation to the equation tree switches it on automatically - assigning it "
 					  "explicitly, in either direction, always wins over that, so setting it to False is the kill switch that disables the feature wholesale. "
 					  "The selection rules are declared independently of it, so a selection can be built up and inspected with this left off. "
 					  "The elimination is exact -- the same solution and the same Newton iteration count as with the switch off -- and buys roughly half the "
 					  "factorisation time on a Crouzeix-Raviart system. Only Newton solves are affected: residual evaluations, eigenvalue and Hessian "
-					  "assemblies, arclength continuation and a bare ``assemble_jacobian()`` always see the full system. Three combinations are refused with an "
-					  "error rather than silently ignored: an MPI run, Jacobian reuse, and the globally convergent (line search) Newton method.")
+					  "assemblies, arclength continuation and a bare ``assemble_jacobian()`` always see the full system. Combinations refused with an error rather "
+					  "than silently ignored: Jacobian reuse, the globally convergent (line search) Newton method, an MPI run that was never distributed, and a "
+					  "selection whose coupled block is split across ranks. Under MPI every refusal is collective, so all ranks raise the same error.")
 		.def_prop_rw("static_condensation_max_component_size", &pyoomph::Problem::get_static_condensation_max_component_size, &pyoomph::Problem::set_static_condensation_max_component_size,
 					  "Largest connected component of mutually coupled condensed dofs that will be accepted (default 64). Condensation is only a win while the "
 					  "selected dofs decompose into small per-element patches, each of which is inverted densely; a selection that instead percolates through the "
@@ -995,6 +997,32 @@ void PyReg_Problem(nb::module_ &m)
 					 // Entries the condensed pattern has that neither came from the full pattern nor are one
 					 // of the identity rows: the actual price of the Schur fill-in.
 					 res["n_fill_in_entries"] = (unsigned long)plan->cond_nnz() - (unsigned long)plan->passthrough_full_slot.size() - (unsigned long)plan->condensed_eqns.size();
+					 // Distributed: every number above is THIS RANK's (the pattern sizes describe its owned
+					 // row block, and n_components counts the components it merely holds an E row of as
+					 // well). The four below separate the two kinds and are the positive signal that the
+					 // cross-rank paths are being used at all -- with all of them zero, a "distributed"
+					 // plan is doing nothing a serial one would not.
+					 res["distributed"] = plan->distributed;
+					 if (plan->distributed)
+					 {
+						 unsigned long owned = 0, foreign_E = 0;
+						 for (unsigned i = 0; i < plan->components.size(); i++)
+						 {
+							 const pyoomph::CondensationComponent &comp = plan->components[i];
+							 if (comp.owner_rank != (int)plan->my_rank) continue;
+							 owned++;
+							 for (unsigned j = 0; j < comp.nE(); j++)
+								 if (comp.E_dx_row[j] < 0) foreign_E++;
+						 }
+						 res["n_components_owned"] = owned;
+						 res["n_components_remote"] = (unsigned long)plan->components.size() - owned;
+						 // E dofs whose row another rank owns, so their Newton increment is recovered from the
+						 // halo-synchronised value rather than from dx.
+						 res["n_foreign_E"] = foreign_E;
+						 // Component operators shipped out / taken in per assembly.
+						 res["n_operator_sends"] = (unsigned long)plan->xy_send_comp.size();
+						 res["n_operator_recvs"] = (unsigned long)plan->xy_recv_comp.size();
+					 }
 				 }
 				 return res;
 			 },
@@ -1004,13 +1032,18 @@ void PyReg_Problem(nb::module_ &m)
 			 "If an elimination plan has been built (see ``_build_condensation_plan()``), ``has_plan`` is True and the dictionary additionally reports "
 			 "``n_components`` and the component size ``component_size_min``/``_max``/``_mean``, the matrix sizes ``full_nnz`` and ``condensed_nnz``, and the "
 			 "split of the condensed entries into ``n_passthrough`` (copied verbatim from the full matrix), ``n_fill_slots`` (positions the Schur complements "
-			 "write to, counting overlaps with the pass-through ones) and ``n_fill_in_entries`` (entries that the full pattern did not have at all).")
+			 "write to, counting overlaps with the pass-through ones) and ``n_fill_in_entries`` (entries that the full pattern did not have at all). "
+			 "On a DISTRIBUTED problem all of those describe this rank's own row block, ``distributed`` is True, and the split into local and cross-rank work "
+			 "is reported as ``n_components_owned`` (this rank forms their Schur operators), ``n_components_remote`` (it only holds one of their E rows), "
+			 "``n_foreign_E`` (E dofs whose row another rank owns, whose Newton increment is therefore recovered from the halo-synchronised value rather than "
+			 "from dx) and ``n_operator_sends``/``n_operator_recvs`` (component operators exchanged per assembly).")
 		.def("_build_condensation_plan", [](pyoomph::Problem &self) { return self.acquire_condensation_plan() != NULL; },
 			 "Build (or refresh) the static condensation elimination plan for the current sparsity pattern, and report whether there is one. False means there "
-			 "is nothing to condense or the route does not apply -- no dofs selected, a value-dependent sparsity pattern, an augmented or distributed system. "
-			 "Raises if the selection cannot be eliminated: a coupling component larger than ``static_condensation_max_component_size``, or a block that is "
-			 "structurally singular because a selected dof has no selected equation determining it. Test and diagnostic entry point; the solve path builds the "
-			 "plan by itself.")
+			 "is nothing to condense or the route does not apply -- no dofs selected, a value-dependent sparsity pattern, an augmented system, or (distributed) "
+			 "no frozen distributed pattern to build on yet, which is the case until the first Jacobian of a structure id has been assembled. "
+			 "Raises if the selection cannot be eliminated: a coupling component larger than ``static_condensation_max_component_size``, a block that is "
+			 "structurally singular because a selected dof has no selected equation determining it, or (distributed) a block split across ranks. Test and "
+			 "diagnostic entry point; the solve path builds the plan by itself. COLLECTIVE on a distributed problem -- calling it on one rank alone hangs.")
 		.def("_get_condensation_component_sizes", [](pyoomph::Problem &self) {
 				 std::vector<std::pair<unsigned, unsigned>> res;
 				 const pyoomph::CondensationPlan *plan = self.get_condensation_plan();
