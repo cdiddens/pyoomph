@@ -7131,12 +7131,19 @@ namespace pyoomph
 		jacobian_contributing_fields.resize(residual_names.size());
 		jacobian_contributing_codes.resize(residual_names.size());
 		residual_contributing_codes.resize(residual_names.size());
+		mass_matrix_contributing_fields.resize(residual_names.size());
+		jacobian_block_flags_union.resize(residual_names.size());
+		mass_matrix_block_flags_union.resize(residual_names.size());
 		for (unsigned i=0;i<residual_names.size();i++)
 		{
 			residual_contributing_fields[i].resize(defined_fields.size(),false);
 			jacobian_contributing_fields[i].resize(defined_fields.size(),std::vector<bool>(defined_fields.size(),false));
 			jacobian_contributing_codes[i].resize(defined_fields.size(),std::vector<std::set<DynamicBulkElementCode*>>(defined_fields.size(),std::set<DynamicBulkElementCode*>()));
 			residual_contributing_codes[i].resize(defined_fields.size(),std::set<DynamicBulkElementCode*>());
+			mass_matrix_contributing_fields[i].assign(defined_fields.size(),std::vector<bool>(defined_fields.size(),false));
+			// Start from all-bits-set and AND per contributor; blocks without any contributor are zeroed below
+			jacobian_block_flags_union[i].assign(defined_fields.size(),std::vector<unsigned char>(defined_fields.size(),0xFF));
+			mass_matrix_block_flags_union[i].assign(defined_fields.size(),std::vector<unsigned char>(defined_fields.size(),0xFF));
 			// Go over all bulk codes and check the contributions
 			for (auto * dc : bulk_element_codes)
 			{
@@ -7183,12 +7190,64 @@ namespace pyoomph
 						if (ft->contributes_to_jacobian[my_i][j][k])
 						{
 							jacobian_contributing_codes[i][row_index][col_index].insert(dc);
+							jacobian_block_flags_union[i][row_index][col_index] &= (ft->jacobian_block_flags ? ft->jacobian_block_flags[my_i][j][k] : 0);
+						}
+						if (ft->contributes_to_mass_matrix[my_i][j][k])
+						{
+							mass_matrix_contributing_fields[i][row_index][col_index]=true;
+							mass_matrix_block_flags_union[i][row_index][col_index] &= (ft->mass_matrix_block_flags ? ft->mass_matrix_block_flags[my_i][j][k] : 0);
 						}
 					}
 				}
 				
 			}
 		}
+		// Finalize the block-flags union: blocks nothing contributes to drop from all-bits-set to 0,
+		// and the pairwise symmetry bits must survive the AND on BOTH mirror entries - a code
+		// contributing only to (j,i) breaks the pair relation of the assembled blocks even if every
+		// contributor to (i,j) proves it, and shows up as an unset bit on the (j,i) side only.
+		for (unsigned i=0;i<residual_names.size();i++)
+		{
+			for (unsigned j=0;j<defined_fields.size();j++)
+			{
+				for (unsigned k=0;k<defined_fields.size();k++)
+				{
+					if (!jacobian_contributing_fields[i][j][k]) jacobian_block_flags_union[i][j][k]=0;
+					if (!mass_matrix_contributing_fields[i][j][k]) mass_matrix_block_flags_union[i][j][k]=0;
+				}
+			}
+			const unsigned char pair_bits=JACOBIAN_BLOCK_SYMMETRIC|JACOBIAN_BLOCK_ANTISYMMETRIC;
+			for (unsigned j=0;j<defined_fields.size();j++)
+			{
+				for (unsigned k=j+1;k<defined_fields.size();k++)
+				{
+					if (jacobian_contributing_fields[i][j][k] && jacobian_contributing_fields[i][k][j])
+					{
+						unsigned char common=jacobian_block_flags_union[i][j][k]&jacobian_block_flags_union[i][k][j]&pair_bits;
+						jacobian_block_flags_union[i][j][k]=(jacobian_block_flags_union[i][j][k]&~pair_bits)|common;
+						jacobian_block_flags_union[i][k][j]=(jacobian_block_flags_union[i][k][j]&~pair_bits)|common;
+					}
+					else
+					{
+						// Only one side contributes: a nonzero block cannot be the +-transpose of a zero one
+						jacobian_block_flags_union[i][j][k]&=~pair_bits;
+						jacobian_block_flags_union[i][k][j]&=~pair_bits;
+					}
+					if (mass_matrix_contributing_fields[i][j][k] && mass_matrix_contributing_fields[i][k][j])
+					{
+						unsigned char common=mass_matrix_block_flags_union[i][j][k]&mass_matrix_block_flags_union[i][k][j]&pair_bits;
+						mass_matrix_block_flags_union[i][j][k]=(mass_matrix_block_flags_union[i][j][k]&~pair_bits)|common;
+						mass_matrix_block_flags_union[i][k][j]=(mass_matrix_block_flags_union[i][k][j]&~pair_bits)|common;
+					}
+					else
+					{
+						mass_matrix_block_flags_union[i][j][k]&=~pair_bits;
+						mass_matrix_block_flags_union[i][k][j]&=~pair_bits;
+					}
+				}
+			}
+		}
+
 		// A field must be pinned for a given residual if it has no Jacobian contribution as a row
 		// (nothing derives w.r.t. it, i.e. no equation actually constrains it) or as a column (its own
 		// equation - if any - does not depend on any field, which cannot happen if it has a row contribution,
@@ -7294,88 +7353,93 @@ namespace pyoomph
 			bool ignored_residuals=true; // Happens e.g. for azimuthal contributions
 			if (combi=="") ss << "Jacobian Structure -- Default Residuals" << std::endl;
 			else ss << "Jacobian Structure -- Custom Residuals \"" << combi << "\"" << std::endl;
-			if (defined_fields.size()>999)
+			// Also reused below to head the block-property matrices, which share the column layout
+			auto print_column_header=[&]()
 			{
-				throw_runtime_error("Too many defined fields to print jacobian structure");
-			}
-			else if (defined_fields.size()>99)
-			{
-				ss << "\t    | ";
-				for (unsigned int i=0;i<defined_fields.size();i++)				
+				if (defined_fields.size()>999)
 				{
-					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
-					else if (i/100) ss << i/100 << " ";
-					else ss << "  ";
-					has_any_contributions[i]=true;
+					throw_runtime_error("Too many defined fields to print jacobian structure");
 				}
-				ss << "|" << std::endl;
-				ss << "\t    | ";
-				for (unsigned int i=0;i<defined_fields.size();i++)				
+				else if (defined_fields.size()>99)
 				{
-					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
-					else if ((i%100)/10) ss << (i%100)/10 << " ";
-					else ss << "  ";
+					ss << "\t    | ";
+					for (unsigned int i=0;i<defined_fields.size();i++)				
+					{
+						if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
+						else if (i/100) ss << i/100 << " ";
+						else ss << "  ";
+						has_any_contributions[i]=true;
+					}
+					ss << "|" << std::endl;
+					ss << "\t    | ";
+					for (unsigned int i=0;i<defined_fields.size();i++)				
+					{
+						if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
+						else if ((i%100)/10) ss << (i%100)/10 << " ";
+						else ss << "  ";
+					}
+					ss <<"|" << std::endl;
+					ss << "\t    | ";
+					for (unsigned int i=0;i<defined_fields.size();i++)				
+					{
+						if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
+						else ss << i%10 << " ";
+					}
+					ss << "|" << std::endl;
+					ss << "\t----|";
+					for (unsigned int i=0;i<defined_fields.size();i++)				
+					{
+						if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
+						else ss  << "--";
+					}
+					ss <<"-|" << std::endl;
 				}
-				ss <<"|" << std::endl;
-				ss << "\t    | ";
-				for (unsigned int i=0;i<defined_fields.size();i++)				
+				else if (defined_fields.size()>9)
 				{
-					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
-					else ss << i%10 << " ";
+					ss << "\t    | ";
+					for (unsigned int i=0;i<defined_fields.size();i++)				
+					{
+						if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
+						else if (i/10) ss << i/10 << " ";
+						else ss << "  ";
+						has_any_contributions[i]=true;
+					}
+					ss << "|" << std::endl;
+					ss << "\t    | ";
+					for (unsigned int i=0;i<defined_fields.size();i++)				
+					{
+						if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
+						else ss << i%10 << " ";
+					}
+					ss << "|" << std::endl;
+					ss << "\t----|";
+					for (unsigned int i=0;i<defined_fields.size();i++)				
+					{
+						if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
+						else ss  << "--";
+					}
+					ss << "-|" <<std::endl;
 				}
-				ss << "|" << std::endl;
-				ss << "\t----|";
-				for (unsigned int i=0;i<defined_fields.size();i++)				
+				else
 				{
-					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
-					else ss  << "--";
+					ss << "\t    | ";
+					for (unsigned int i=0;i<defined_fields.size();i++)				
+					{
+						if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
+						else ss << i << " ";
+						has_any_contributions[i]=true;
+					}
+					ss <<"|"<< std::endl;
+					ss << "\t----|";
+					for (unsigned int i=0;i<defined_fields.size();i++)				
+					{
+						if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
+						else ss  << "--";
+					}
+					ss << "-|" << std::endl;
 				}
-				ss <<"-|" << std::endl;
-			}
-			else if (defined_fields.size()>9)
-			{
-				ss << "\t    | ";
-				for (unsigned int i=0;i<defined_fields.size();i++)				
-				{
-					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
-					else if (i/10) ss << i/10 << " ";
-					else ss << "  ";
-					has_any_contributions[i]=true;
-				}
-				ss << "|" << std::endl;
-				ss << "\t    | ";
-				for (unsigned int i=0;i<defined_fields.size();i++)				
-				{
-					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
-					else ss << i%10 << " ";
-				}
-				ss << "|" << std::endl;
-				ss << "\t----|";
-				for (unsigned int i=0;i<defined_fields.size();i++)				
-				{
-					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
-					else ss  << "--";
-				}
-				ss << "-|" <<std::endl;
-			}
-			else
-			{
-				ss << "\t    | ";
-				for (unsigned int i=0;i<defined_fields.size();i++)				
-				{
-					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
-					else ss << i << " ";
-					has_any_contributions[i]=true;
-				}
-				ss <<"|"<< std::endl;
-				ss << "\t----|";
-				for (unsigned int i=0;i<defined_fields.size();i++)				
-				{
-					if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
-					else ss  << "--";
-				}
-				ss << "-|" << std::endl;
-			}
+			};
+			print_column_header();
 			
 			std::vector<std::set<DynamicBulkElementCode*>> listed_domain_contributions;
 			for (unsigned int i=0;i<defined_fields.size();i++)
@@ -7465,6 +7529,48 @@ namespace pyoomph
 				ss << std::endl;
 			}
 			ss << std::endl;
+
+			// Per-block properties proven at code generation (JACOBIAN_BLOCK_* bits), AND-combined over
+			// all contributing codes in assemble_defined_field_list. Purely informative: an unproven
+			// property is shown blank, never claimed to be absent.
+			auto print_flags_matrix=[&](const std::string &title, const std::vector<std::vector<unsigned char>> &flags, const std::vector<std::vector<bool>> &contribs)
+			{
+				ss << "\t" << title << " (S: symmetric pair, A: antisymmetric pair, C: constant, c: constant while the timestep is unchanged, .: contribution without proven properties)" << std::endl;
+				print_column_header();
+				for (unsigned int fi=0;fi<defined_fields.size();fi++)
+				{
+					if (pin_due_to_empty_jacobian_row_or_col[ri][fi]) continue;
+					ss << "  \t" << std::setfill(' ') << std::setw(3) << fi << " | ";
+					for (unsigned int fj=0;fj<defined_fields.size();fj++)
+					{
+						if (pin_due_to_empty_jacobian_row_or_col[ri][fj]) continue;
+						if (!contribs[fi][fj])
+						{
+							ss << "  ";
+							continue;
+						}
+						unsigned char f=flags[fi][fj];
+						char sym=(f&JACOBIAN_BLOCK_SYMMETRIC) ? 'S' : ((f&JACOBIAN_BLOCK_ANTISYMMETRIC) ? 'A' : '.');
+						char con=(f&JACOBIAN_BLOCK_CONSTANT) ? 'C' : ((f&JACOBIAN_BLOCK_CONSTANT_FIXED_DT) ? 'c' : ' ');
+						ss << sym << con;
+					}
+					ss << "|" << std::endl;
+				}
+				ss << "\t----|";
+				for (unsigned int fi=0;fi<defined_fields.size();fi++)
+				{
+					if (pin_due_to_empty_jacobian_row_or_col[ri][fi]) continue;
+					ss << "--";
+				}
+				ss << "-|" << std::endl << std::endl;
+			};
+			print_flags_matrix("Jacobian block properties",jacobian_block_flags_union[ri],jacobian_contributing_fields[ri]);
+			bool any_mass=false;
+			for (auto &row : mass_matrix_contributing_fields[ri])
+				for (auto b : row)
+					any_mass=any_mass||b;
+			if (any_mass)
+				print_flags_matrix("Mass matrix block properties",mass_matrix_block_flags_union[ri],mass_matrix_contributing_fields[ri]);
 
 			if (residual_contributions_with_zero_jacobian_row_or_col.size()>0 && !ignored_residuals)
 			{
