@@ -1708,6 +1708,22 @@ class Problem(_pyoomph.Problem):
         return self._lasolver
 
     def set_num_threads(self,nthread:int | None):
+        """
+        Set how many threads the linear solver may use. Most direct solvers are internally threaded, so
+        this is what decides whether a serial run keeps one core or several busy.
+
+        The count is remembered on the problem, not just handed to the current solver: it is applied
+        again to any backend selected later with :py:meth:`set_linear_solver`. Passing ``None`` leaves
+        the backend at its own default, which is usually whatever ``OMP_NUM_THREADS`` says.
+
+        Under ``mpirun`` this matters mainly for the solvers that are not MPI-parallel: they gather the
+        system onto rank 0 and solve it there, and the other ranks sleep so that rank 0 may use their
+        cores - which it can only do if the launcher did not pin each process to one (``mpirun
+        --bind-to none``).
+
+        Args:
+            nthread (Optional[int]): Number of threads, or ``None`` for the backend's own default.
+        """
         self._num_threads=nthread
         if self._lasolver is not None:
             if isinstance(self._lasolver,str):
