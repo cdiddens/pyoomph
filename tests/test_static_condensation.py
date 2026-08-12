@@ -256,6 +256,22 @@ def test_selection_counts_on_crouzeix_raviart():
         assert p._get_static_condensation_stats()["n_selected"] == 3 * nel - 1
 
 
+def test_DL_gradients_is_the_dimension_of_the_domain():
+    """"DL_gradients" is the same selection as spelling the value indices out, without the script
+    having to know the dimension: 1..dim, i.e. every value of the DL field except the constant. Value 0
+    has to stay global (test_numeric_pivot_guard_catches_the_constant_pressure_mode is why), so this is
+    the form that cannot be got wrong by porting a 2D script to 3D."""
+    with _CRCavity(N=3) as p:
+        p.quiet()
+        p.initialise()
+        p.condense_dofs("domain/pressure", values=[1, 2])
+        explicit = _selected(p)
+
+        p._clear_static_condensation_rules()
+        p.condense_dofs("domain/pressure", part="DL_gradients")
+        assert numpy.array_equal(_selected(p), explicit)
+
+
 def test_data_adopted_by_an_interface_is_not_element_private():
     """The case that rules out a per-element Schur complement, and the one thing condense_element_private
     _dofs() has to get right: internal Data another element reads is not element-local. The explicitly

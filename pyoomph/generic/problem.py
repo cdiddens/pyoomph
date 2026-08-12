@@ -1467,14 +1467,23 @@ class Problem(_pyoomph.Problem):
                 may be given by its base name, e.g. ``"domain/velocity"``, which selects all of its components.
             values (Optional[List[int]], optional): Restrict the selection to these value indices of the elemental data,
                 e.g. ``[1,2]`` for the gradient modes of a DL pressure in 2d. Defaults to all values.
-            part (str, optional): ``"all"``/``"internal"`` for an elemental (DL/D0/DG) field, or ``"bubble"`` for the
-                cell-interior bubble nodes of a nodal C1TB/C2TB field. Defaults to ``"all"``.
+            part (str, optional): ``"all"``/``"internal"`` for an elemental (DL/D0/DG) field, ``"bubble"`` for the
+                cell-interior bubble nodes of a nodal C1TB/C2TB field, or ``"DL_gradients"`` for every value of a
+                ``"DL"`` field except the constant, i.e. ``values=[1,2]`` in 2d and ``[1,2,3]`` in 3d, taken from
+                the dimension of the domain rather than from the script. Defaults to ``"all"``.
         """
         splt=field.split("/")
         if len(splt)<2:
             raise RuntimeError("condense_dofs expects a full field path 'domain/fieldname', but got '"+field+"'")
         domain="/".join(splt[:-1])
-        self.get_mesh(domain)  # resolved here as well, so a wrong domain path is an error at the call site
+        mesh=self.get_mesh(domain)  # resolved here as well, so a wrong domain path is an error at the call site
+        if part=="DL_gradients":
+            # Not a part the C++ side knows: it is a name for "values 1..dim", which needs the mesh.
+            if values is not None:
+                raise RuntimeError("condense_dofs("+field+", part='DL_gradients') already says which values are meant, so it cannot be combined with values="+str(values)+".")
+            from ..meshes.mesh import assert_spatial_mesh
+            values=list(range(1,assert_spatial_mesh(mesh).get_dimension()+1))
+            part="all"
         self._static_condensation_source_counter+=1
         self._declare_static_condensation_rules(("condense_dofs",self._static_condensation_source_counter),
                                                 domain,[(splt[-1],() if values is None else tuple(values),part)])

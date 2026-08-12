@@ -2163,8 +2163,11 @@ class StaticCondensation(Equations):
     stay a global unknown::
 
         eqs = NavierStokesEquations(mode="CR", dynamic_viscosity=1, mass_density=100)
-        eqs += StaticCondensation(velocity="bubble", pressure=[1,2])   # [1,2,3] in 3d
+        eqs += StaticCondensation(velocity="bubble", pressure="DL_gradients")
         self.add_equations(eqs @ "domain")
+
+    ``"DL_gradients"`` is just a name for "every value of that ``"DL"`` field except the constant", so
+    it expands to ``[1,2]`` in 2d and ``[1,2,3]`` in 3d without the script having to know which.
 
     Taking the constant mode along (``pressure=[0,1,2]``) is refused with an explanation, and so is
     condensing the pressure on its own - the continuity equation contains no pressure at all, so that
@@ -2198,8 +2201,10 @@ class StaticCondensation(Equations):
         *fields: Fields to condense entirely, e.g. ``StaticCondensation("my_projection_field")``.
         **field_specs: Fields to condense in part. The value is ``"all"`` or ``True`` for the whole
             field, ``"internal"`` for the element-internal Data of an elemental (DL/D0/DG) field,
-            ``"bubble"`` for the cell-interior bubble nodes of a nodal C1TB/C2TB field, or a list of
-            value indices of the elemental Data, e.g. ``pressure=[1,2]``.
+            ``"bubble"`` for the cell-interior bubble nodes of a nodal C1TB/C2TB field,
+            ``"DL_gradients"`` for the gradient modes of a ``"DL"`` field (i.e. all of its values
+            except the constant, resolved to ``[1,2]`` or ``[1,2,3]`` from the dimension of the
+            domain it is added to), or an explicit list of value indices, e.g. ``pressure=[1,2]``.
     """
 
     def __init__(self,*fields:str,**field_specs:"str | bool | Sequence[int]"):
@@ -2229,9 +2234,12 @@ class StaticCondensation(Equations):
                 return (),"all"
             raise ValueError("StaticCondensation("+field+"=False) is not a way to exclude a field - just leave it out.")
         if isinstance(spec,str):
-            if spec in ("all","internal","bubble"):
+            if spec in ("all","internal","bubble","DL_gradients"):
+                # "DL_gradients" cannot be turned into value indices here: which ones they are depends
+                # on the dimension of the elements, which is not known until the equation is attached
+                # to a domain. It is resolved in on_apply_boundary_conditions() below.
                 return (),spec
-            raise ValueError("Unknown static condensation spec '"+spec+"' for field '"+field+"'. Use 'all', 'internal', 'bubble', True, or a list of value indices.")
+            raise ValueError("Unknown static condensation spec '"+spec+"' for field '"+field+"'. Use 'all', 'internal', 'bubble', 'DL_gradients', True, or a list of value indices.")
         if isinstance(spec,(list,tuple,set)):
             values:list[int]=[]
             for v in spec: #type:ignore
@@ -2242,6 +2250,22 @@ class StaticCondensation(Equations):
                 raise ValueError("StaticCondensation("+field+"=[]) selects nothing. Pass the value indices to condense, or True for the whole field.")
             return tuple(sorted(set(values))),"all"
         raise ValueError("Cannot interpret the static condensation spec "+repr(spec)+" for field '"+field+"'. Use 'all', 'internal', 'bubble', True, or a list of value indices.")
+
+    def _resolve_rules(self,mesh:"AnySpatialMesh")->list[tuple[str,tuple[int,...],str]]:
+        """Turn the dimension-dependent specs into concrete value indices, now that the mesh is known."""
+        dim=mesh.get_dimension()
+        resolved:list[tuple[str,tuple[int,...],str]]=[]
+        for field,values,part in self._rules:
+            if part=="DL_gradients":
+                # A DL field carries one constant plus one gradient mode per spatial direction, so the
+                # gradients are values 1..dim. Value 0, the constant, is deliberately left out: for the
+                # Crouzeix-Raviart elimination it has to remain a global unknown.
+                if dim<1:
+                    raise RuntimeError("StaticCondensation("+field+"='DL_gradients') needs a spatial domain, but '"+mesh.get_full_name()+"' has element dimension "+str(dim)+".")
+                resolved.append((field,tuple(range(1,dim+1)),"all"))
+            else:
+                resolved.append((field,values,part))
+        return resolved
 
     def _is_ode(self):
         # Like PythonDirichletBC: this contributes no equations, so it must not decide whether the
@@ -2285,7 +2309,7 @@ class StaticCondensation(Equations):
         mesh=assert_spatial_mesh(mesh)
         problem=mesh.get_problem()
         domain=mesh.get_full_name()
-        rules=[("",(),"element_private")] if self._element_private else self._rules
+        rules=[("",(),"element_private")] if self._element_private else self._resolve_rules(mesh)
         problem._declare_static_condensation_rules((StaticCondensation,id(self),domain),domain,rules) #type:ignore
         # Adding the class to the tree is the request; the problem-level switch stays available as a
         # kill switch, and an explicit assignment to it - True or False - always wins over this.
