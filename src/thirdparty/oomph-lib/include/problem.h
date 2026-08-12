@@ -1192,6 +1192,23 @@ namespace oomph
     /// to doc the solution during a non-converging iteration, say.
     virtual void actions_after_newton_step() {}
 
+    //FOR PYOOMPH: hook that hands out the raw Newton increment.
+    /// Any actions that are to be performed after the Newton increment has been
+    /// applied to the degrees of freedom (*Dof_pt[l] -= Relaxation_factor*dx[l])
+    /// AND synchronise_all_dofs() has run, but before actions_after_newton_step().
+    /// Unlike actions_after_newton_step() this receives the increment dx itself,
+    /// exactly as the linear solver returned it (i.e. unscaled by
+    /// Relaxation_factor). pyoomph's static condensation needs it: the dofs it
+    /// eliminated from the linear system come back as zeros in dx and have to be
+    /// reconstructed from the retained entries of dx before anything else looks at
+    /// the solution. Only Problem::newton_solve() calls this; the arclength
+    /// continuation solver has its own dof update and deliberately does not.
+    /// Caveat: with the globally convergent (line search) Newton method the
+    /// update is not that formula and dx has been negated and rescaled in place
+    /// by the line search, so dx no longer describes what the dofs did. pyoomph
+    /// refuses to combine static condensation with that method for this reason.
+    virtual void actions_after_newton_dof_update(const DoubleVector& dx) {}
+
     /// Actions that should be performed before each implicit time step.
     /// This is needed when one wants
     /// to solve a steady problem before timestepping and needs to distinguish

@@ -2145,5 +2145,151 @@ class UnpinDofs(PythonDirichletBC):
         self.unpin_instead=True
 
 
+class StaticCondensation(Equations):
+    """
+    Declares which degrees of freedom of this domain static condensation may eliminate from the linear
+    system. Contributes no residuals: it only states a selection, on the domain it is added to.
+
+    **Experimental, and serial only.** Element-local unknowns - a Crouzeix-Raviart bubble velocity, the
+    gradient modes of a discontinuous (DL) pressure, a field projected onto a D0/DG space - couple to
+    nothing outside their own element and can be eliminated by a small dense Schur complement before the
+    Jacobian reaches the solver, and reconstructed from the retained increment afterwards. The
+    elimination is exact: the same solution and the same Newton iteration count as without it. On a
+    Crouzeix-Raviart Navier-Stokes system it saves roughly half of the factorisation time.
+
+    The classical Crouzeix-Raviart elimination needs the bubble velocities and the pressure gradient
+    modes **together** - neither half is invertible on its own - while the constant pressure mode has to
+    stay a global unknown::
+
+        eqs = NavierStokesEquations(mode="CR", dynamic_viscosity=1, mass_density=100)
+        eqs += StaticCondensation(velocity="bubble", pressure=[1,2])   # [1,2,3] in 3d
+        self.add_equations(eqs @ "domain")
+
+    Taking the constant mode along (``pressure=[0,1,2]``) is refused with an explanation, and so is
+    condensing the pressure on its own - the continuity equation contains no pressure at all, so that
+    block is structurally singular.
+
+    Without any argument, every element-private degree of freedom of this domain is selected, i.e. every
+    element-internal Data that no other element reads. That is the convenient form for auxiliary fields
+    projected onto a discontinuous space::
+
+        eqs += StaticCondensation()
+
+    Internal Data that some other element does adopt as external data - an interface element on a free
+    surface, an interior-facet DG coupling - is excluded from that automatic selection, since it is not
+    element-local at all; a field named explicitly is not filtered that way, because the elimination
+    handles those correctly too and the user asked for them.
+
+    **Switching it on and off.** Adding this class anywhere in the equation tree sets
+    ``problem.use_static_condensation`` for you. Assigning that switch explicitly always wins, in either
+    direction, so ``self.use_static_condensation = False`` in ``define_problem()`` is a kill switch that
+    disables the feature wholesale without touching the equations. Several instances on different
+    domains compose - the selections are unioned - and so do rules declared at problem level with
+    :py:meth:`~pyoomph.generic.problem.Problem.condense_dofs`.
+
+    **Limitations.** Only Newton solves benefit: residual evaluations, eigenvalue and Hessian
+    assemblies, and arclength continuation always see the full system. An MPI run, Jacobian reuse and
+    the globally convergent (line search) Newton method are refused with an error rather than silently
+    ignored. Adding it to an interface or ODE domain is an error. See
+    ``dev_docs/static_condensation.md`` for the design and the measurements.
+
+    Args:
+        *fields: Fields to condense entirely, e.g. ``StaticCondensation("my_projection_field")``.
+        **field_specs: Fields to condense in part. The value is ``"all"`` or ``True`` for the whole
+            field, ``"internal"`` for the element-internal Data of an elemental (DL/D0/DG) field,
+            ``"bubble"`` for the cell-interior bubble nodes of a nodal C1TB/C2TB field, or a list of
+            value indices of the elemental Data, e.g. ``pressure=[1,2]``.
+    """
+
+    def __init__(self,*fields:str,**field_specs:"str | bool | Sequence[int]"):
+        super().__init__()
+        self._rules:list[tuple[str,tuple[int,...],str]]=[]
+        for f in fields:
+            if not isinstance(f,str): #type:ignore
+                raise ValueError("StaticCondensation takes field names as positional arguments, but got "+repr(f))
+            self._rules.append((self._check_field_name(f),(),"all"))
+        for f,spec in field_specs.items():
+            values,part=self._parse_spec(f,spec)
+            self._rules.append((self._check_field_name(f),values,part))
+        # No argument at all means "every element-private dof of this domain", which is a rule of its
+        # own rather than a list of fields - it names no field, and the C++ side auto-detects.
+        self._element_private=(len(self._rules)==0)
+
+    @staticmethod
+    def _check_field_name(field:str)->str:
+        if "/" in field:
+            raise ValueError("StaticCondensation names fields of the domain it is added to, so '"+field+"' cannot contain a '/'. Add the class to that domain instead, or use Problem.condense_dofs() for a rule stated at problem level.")
+        return field
+
+    @staticmethod
+    def _parse_spec(field:str,spec:"str | bool | Sequence[int]")->tuple[tuple[int,...],str]:
+        if isinstance(spec,bool):   # before the Sequence/int cases: True is an int as far as Python is concerned
+            if spec:
+                return (),"all"
+            raise ValueError("StaticCondensation("+field+"=False) is not a way to exclude a field - just leave it out.")
+        if isinstance(spec,str):
+            if spec in ("all","internal","bubble"):
+                return (),spec
+            raise ValueError("Unknown static condensation spec '"+spec+"' for field '"+field+"'. Use 'all', 'internal', 'bubble', True, or a list of value indices.")
+        if isinstance(spec,(list,tuple,set)):
+            values:list[int]=[]
+            for v in spec: #type:ignore
+                if isinstance(v,bool) or not isinstance(v,int): #type:ignore
+                    raise ValueError("StaticCondensation("+field+"=...) expects a list of integer value indices, but got "+repr(v))
+                values.append(int(v))
+            if len(values)==0:
+                raise ValueError("StaticCondensation("+field+"=[]) selects nothing. Pass the value indices to condense, or True for the whole field.")
+            return tuple(sorted(set(values))),"all"
+        raise ValueError("Cannot interpret the static condensation spec "+repr(spec)+" for field '"+field+"'. Use 'all', 'internal', 'bubble', True, or a list of value indices.")
+
+    def _is_ode(self):
+        # Like PythonDirichletBC: this contributes no equations, so it must not decide whether the
+        # domain is an ODE domain. It cannot be USED on one, which the checks below say explicitly
+        # rather than leaving it to a confusing "cannot mix ODEs and PDEs".
+        return None
+
+    def get_information_string(self)->str:
+        if self._element_private:
+            return "element-private dofs"
+        return ", ".join([f+"="+(str(list(v)) if v else p) for f,v,p in self._rules])
+
+    def before_finalization(self,codegen:"FiniteElementCodeGenerator"):
+        # Fires once per domain the equation is attached to, at code generation time, i.e. before the
+        # mesh exists and independently of whether that mesh ends up holding any element - so a
+        # misplaced instance is reported even where the registration hook below would never run.
+        if codegen.get_parent_domain() is not None:
+            raise RuntimeError("StaticCondensation cannot be added to an interface domain ('"+codegen.get_full_name()+"'): condensation eliminates element-local dofs of a bulk domain, and an interface element's own internal data belongs to a facet rather than to a cell. Add it to the bulk domain instead.")
+
+    def on_apply_boundary_conditions(self,mesh:"AnyMesh"):
+        # The registration hook, chosen because it (a) fires once the mesh exists, from
+        # Problem.setup_pinning() during initialisation, and (b) fires again from
+        # reapply_boundary_conditions() after adaptation, remeshing and reading a state file, which is
+        # what refreshes the mesh a rule names once remeshing has replaced it. It is the same hook the
+        # rest of the "act on the mesh, contribute no weak form" family (PythonDirichletBC, PinWhere,
+        # UnpinDofs) uses, and it hands the mesh over directly.
+        #
+        # It also fires very often, so the registration below has to be free when nothing changed:
+        # Problem._declare_static_condensation_rules() compares against what has been pushed to the C++
+        # rule list and pushes nothing when the rules and the resolved mesh are the same. That matters -
+        # every edit of that list bumps the rules revision, which is part of the Jacobian structure id,
+        # so a naive re-registration would rebuild the condensation plan and force a fresh symbolic
+        # factorisation on every solve. When the mesh HAS been replaced (remeshing destroys the old one,
+        # and a C++ rule holds the mesh it names), the comparison fails and the rules are restated - so
+        # this call is also what repairs them.
+        from ..meshes.mesh import ODEStorageMesh
+        if isinstance(mesh,InterfaceMesh):
+            raise RuntimeError("StaticCondensation cannot be added to an interface domain ('"+mesh.get_full_name()+"'). Add it to the bulk domain instead.")
+        if isinstance(mesh,ODEStorageMesh):
+            raise RuntimeError("StaticCondensation cannot be added to an ODE domain ('"+mesh.get_full_name()+"'): there are no element-local degrees of freedom to eliminate there.")
+        mesh=assert_spatial_mesh(mesh)
+        problem=mesh.get_problem()
+        domain=mesh.get_full_name()
+        rules=[("",(),"element_private")] if self._element_private else self._rules
+        problem._declare_static_condensation_rules((StaticCondensation,id(self),domain),domain,rules) #type:ignore
+        # Adding the class to the tree is the request; the problem-level switch stays available as a
+        # kill switch, and an explicit assignment to it - True or False - always wins over this.
+        problem._auto_enable_static_condensation() #type:ignore
+
+
 from ..typings import _set_public_api
 _set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

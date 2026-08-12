@@ -564,6 +564,13 @@ class Problem(_pyoomph.Problem):
         self._use_first_order_timestepper:bool=False
         self._domains_to_remesh:set[MeshTemplate]=set()
 
+        # Static condensation: the Python-side, mesh-independent form of the rules. See
+        # _sync_static_condensation_rules() for why the rules are kept here at all.
+        self._static_condensation_sources:dict[Any,tuple[str | None,tuple[tuple[str,tuple[int,...],str],...]]]={}
+        self._static_condensation_applied:tuple[Any,...] | None=None
+        self._static_condensation_applied_meshes:list["AnyMesh"]=[]
+        self._static_condensation_source_counter:int=0
+
         self.max_residuals=1e10
         self.max_newton_iterations=10
         self.newton_solver_tolerance=1e-8
@@ -1189,6 +1196,11 @@ class Problem(_pyoomph.Problem):
         self._meshtemplate_list = []
         self._meshdict:dict[str,"AnyMesh"] = {}
         self._equation_system = None #type:ignore
+        # The static condensation registry keeps the meshes its rules resolved to referenced (so their
+        # id()s cannot be recycled while a signature holds them); drop them with everything else.
+        self._static_condensation_sources={}
+        self._static_condensation_applied=None
+        self._static_condensation_applied_meshes=[]
         # The process-wide solver callback singleton (pyoomph._pyoomph.get_Solver_callback(),
         # see pyoomph/__init__.py's solver_cb) remembers whichever Problem last called solve()
         # via set_Solver_callback()/set_problem(), as a weakref precisely so it cannot keep this
@@ -1295,6 +1307,11 @@ class Problem(_pyoomph.Problem):
         """
         if not self._initialised:
             self.initialise()
+        return self._lookup_mesh(name,return_None_if_not_found)
+
+    def _lookup_mesh(self, name:str,return_None_if_not_found:bool=False)->AnySpatialMesh | None:
+        """:py:meth:`get_mesh` without its initialisation guard, for callers that run *during*
+        initialisation (where a nested initialise() raises) and know the meshes already exist."""
         splt=name.split("/")
         if len(splt)==1:
             if return_None_if_not_found:
@@ -1348,6 +1365,147 @@ class Problem(_pyoomph.Problem):
         if not isinstance(res,ODEStorageMesh):
             raise RuntimeError("You tried to get an ODE with name "+str(name)+", but apparently, this is not an ODE!")
         return res
+
+    # --- Static condensation: the rule registry -----------------------------------------------------
+    #
+    # The usual way to select condensable dofs is the StaticCondensation equation class (see
+    # pyoomph/equations/generic.py), which states the selection where it belongs, namely in the
+    # equation tree of the domain it applies to. It, and the two methods below, all end up here.
+    #
+    # A C++ rule holds a resolved pyoomph::Mesh*, which remeshing invalidates outright (the superseded
+    # mesh is destroyed, see _destroy_superseded_mesh), so the durable form of a rule on this side is
+    # the DOMAIN PATH plus the field spec. The registry holds those, keyed by whoever declared them,
+    # and _sync_static_condensation_rules() pushes the whole set down whenever the resolved meshes or
+    # the specs have changed - and does nothing whatsoever when they have not. Doing nothing is the
+    # point: every add/clear on the C++ side bumps static_condensation_rules_revision, which is part of
+    # the Jacobian structure id, so re-registering an unchanged rule set (which the equation class does
+    # on every reapply_boundary_conditions()) would otherwise force a plan rebuild and a fresh symbolic
+    # factorisation in the solver on every single solve.
+
+    def _declare_static_condensation_rules(self,key:Any,domain:str | None,rules:Sequence[tuple[str,Sequence[int],str]])->None:
+        """Register (or re-register) the condensation rules of one declaring object.
+
+        ``key`` identifies the declarer, e.g. ``(id(equation), domainpath)``; re-declaring under the
+        same key replaces its rules. ``domain`` is the domain path the rules apply to, or None for a
+        problem-wide element-private rule. Re-declaring the same thing does not bump the rules revision:
+        the synchronisation below compares before it acts. It is still called every time rather than
+        skipped when the entry is unchanged, so that a re-registration also repairs a rule whose mesh
+        has since been replaced - which is what the equation class's hook relies on after remeshing.
+        """
+        normalised=tuple((f,tuple(v),p) for f,v,p in rules)
+        self._static_condensation_sources[key]=(domain,normalised)
+        self._sync_static_condensation_rules()
+
+    def _sync_static_condensation_rules(self)->None:
+        """Push the registry into the C++ rule list, if and only if it now resolves to something else.
+
+        Called after every registration and after remeshing (where the meshes a rule names are replaced
+        by new objects, so the rules have to be restated even though nobody edited them)."""
+        if not self._static_condensation_sources and self._static_condensation_applied is None:
+            return  # nothing was ever declared: do not touch the C++ side, i.e. do not bump the revision
+        resolved:list[tuple["AnyMesh | None",tuple[tuple[str,tuple[int,...],str],...]]]=[]
+        for domain,rules in self._static_condensation_sources.values():
+            # _lookup_mesh, not get_mesh: a StaticCondensation equation registers from within
+            # setup_pinning(), i.e. during initialisation, where get_mesh()'s initialise() would raise.
+            resolved.append((None if domain is None else self._lookup_mesh(domain),rules))
+        # id() is enough to notice a mesh replacement because the resolved meshes are kept referenced
+        # below, so their ids cannot be reused while they are part of the signature.
+        signature=tuple((id(mesh),rules) for mesh,rules in resolved)
+        if signature==self._static_condensation_applied:
+            return
+        super()._clear_static_condensation_rules()
+        for mesh,rules in resolved:
+            for field,values,part in rules:
+                self._add_static_condensation_rule(mesh,field,list(values),part)
+        self._static_condensation_applied=signature
+        self._static_condensation_applied_meshes=[mesh for mesh,_ in resolved if mesh is not None]
+
+    def _clear_static_condensation_rules(self)->None:
+        """Drop every static condensation rule, and the registry they are restated from.
+
+        Overrides the C++ binding of the same name so that a cleared rule does not come back at the
+        next synchronisation. A :py:class:`~pyoomph.equations.generic.StaticCondensation` equation in
+        the tree does re-register itself when the boundary conditions are next applied, since the
+        equation tree is the declaration - use ``use_static_condensation = False`` to switch the
+        feature off instead."""
+        self._static_condensation_sources.clear()
+        self._static_condensation_applied=None
+        self._static_condensation_applied_meshes=[]
+        super()._clear_static_condensation_rules()
+
+    def condense_dofs(self,field:str,*,values:list[int] | None=None,part:str="all")->None:
+        """Select degrees of freedom that static condensation may eliminate from the linear system.
+
+        The equation-tree way of saying this is :py:class:`~pyoomph.equations.generic.StaticCondensation`,
+        which is the recommended interface - ``eqs += StaticCondensation(velocity="bubble", pressure=[1,2])``
+        states the selection on the domain it belongs to and switches the feature on by itself. This method is
+        the problem-level plumbing underneath it, useful when the selection is decided outside the equations.
+
+        **Experimental, and serial only.** Static condensation eliminates element-local unknowns from the Jacobian
+        before it reaches the linear solver and reconstructs them after the Newton update. It is exact - the solution
+        is the same, iteration by iteration - but only Newton solves benefit: residual evaluations, eigenvalue and
+        Hessian assemblies, and arclength continuation always see the full system, and MPI runs, Jacobian reuse and
+        the globally convergent (line search) Newton method are refused with an error rather than ignored.
+
+        This only declares a rule. Unlike :py:class:`~pyoomph.equations.generic.StaticCondensation`, it does not
+        switch condensation on: set ``use_static_condensation=True`` for that. Rules are stated in terms of a domain
+        and a field, so they survive mesh adaptation and remeshing, and several rules can be added, their selections
+        being unioned. Pinned values are never selected.
+
+        The classical Crouzeix-Raviart elimination needs two rules, and needs both: the bubble velocities and the
+        gradient modes of the DL pressure are only invertible together, and the constant pressure mode must stay a
+        global unknown (taking it as well is refused, with an explanation)::
+
+            problem.condense_dofs("domain/velocity", part="bubble")
+            problem.condense_dofs("domain/pressure", values=[1,2])   # [1,2,3] in 3d
+            problem.use_static_condensation = True
+
+        Args:
+            field (str): Full path of the field, i.e. ``"domain/fieldname"`` (or ``"domain/subdomain/fieldname"``). A vector field
+                may be given by its base name, e.g. ``"domain/velocity"``, which selects all of its components.
+            values (Optional[List[int]], optional): Restrict the selection to these value indices of the elemental data,
+                e.g. ``[1,2]`` for the gradient modes of a DL pressure in 2d. Defaults to all values.
+            part (str, optional): ``"all"``/``"internal"`` for an elemental (DL/D0/DG) field, or ``"bubble"`` for the
+                cell-interior bubble nodes of a nodal C1TB/C2TB field. Defaults to ``"all"``.
+        """
+        splt=field.split("/")
+        if len(splt)<2:
+            raise RuntimeError("condense_dofs expects a full field path 'domain/fieldname', but got '"+field+"'")
+        domain="/".join(splt[:-1])
+        self.get_mesh(domain)  # resolved here as well, so a wrong domain path is an error at the call site
+        self._static_condensation_source_counter+=1
+        self._declare_static_condensation_rules(("condense_dofs",self._static_condensation_source_counter),
+                                                domain,[(splt[-1],() if values is None else tuple(values),part)])
+
+    def condense_element_private_dofs(self,domain:str | None=None)->None:
+        """Select every elemental (internal) degree of freedom that no other element reads for static condensation.
+
+        The equation-tree way of saying this is ``eqs += StaticCondensation()``, i.e. a
+        :py:class:`~pyoomph.equations.generic.StaticCondensation` without arguments, which is restricted to the
+        domain it is added to and switches the feature on by itself. This method is the problem-level plumbing.
+
+        **Experimental, and serial only** - see :py:meth:`condense_dofs` for what that means. This is the convenient
+        rule for auxiliary fields projected onto a discontinuous space (DL/D0/DG), e.g. a dissipation or a stress
+        measure computed for output: they are unknowns of the system but couple to nothing outside their element, so
+        condensing them removes them from the matrix the solver factorises without changing anything else.
+
+        Internal data adopted as external data elsewhere - by an interface element on a free surface, or by an
+        interior-facet DG coupling - is excluded, since such a dof is not element-local at all. That test is always
+        made against the whole problem, even when ``domain`` restricts which dofs are considered. (A dof named
+        explicitly by :py:meth:`condense_dofs` is *not* excluded this way; the elimination handles those correctly
+        too, this rule simply has no way of knowing whether they were meant.) Like :py:meth:`condense_dofs`, this
+        only declares a rule; ``use_static_condensation`` is a separate switch.
+
+        Args:
+            domain (Optional[str], optional): Restrict the rule to this domain. Defaults to every bulk domain.
+        """
+        if not self._initialised:
+            self.initialise()
+        if domain is not None:
+            self.get_mesh(domain)
+        self._static_condensation_source_counter+=1
+        self._declare_static_condensation_rules(("condense_element_private_dofs",self._static_condensation_source_counter),
+                                                domain,[("",(),"element_private")])
 
     def get_all_values_at_current_time(self,with_pos:bool)->tuple[NPFloatArray,NPBoolArray,NPFloatArray]:
         dofs,positional_dof=self.get_current_dofs()
@@ -2606,11 +2764,9 @@ class Problem(_pyoomph.Problem):
         # be cross-checked by hand in parse_cmd_line() below.
         linear_solver_group = self.cmdlineparser.add_mutually_exclusive_group()
         linear_solver_group.add_argument('--petsc',help="use PETSc solver",action='store_true')
-        linear_solver_group.add_argument('--pastix',help="use PaSTiX solver",action='store_true')
         linear_solver_group.add_argument('--superlu',help="use serial SuperLu solver",action='store_true')
         linear_solver_group.add_argument('--umfpack', help="use UMFPACK solver", action='store_true')
         linear_solver_group.add_argument('--pardiso', help="use Pardiso solver", action='store_true')
-        linear_solver_group.add_argument('--mumps', help="use MUMPS solver", action='store_true')
         linear_solver_group.add_argument('--petsc_mumps',help="use PETSc as linear solver with MUMPS as backend",action="store_true")
         linear_solver_group.add_argument('--accelerate',help="use Apple Accelerate sparse solver (macOS only)",action='store_true')
         # Mutually exclusive for the same reason as linear_solver_group above.
@@ -2664,10 +2820,6 @@ class Problem(_pyoomph.Problem):
             self.set_linear_solver("umfpack")
         elif self.cmdlineargs.pardiso:
             self.set_linear_solver("pardiso")
-        elif self.cmdlineargs.mumps:
-            self.set_linear_solver("mumps")
-        elif self.cmdlineargs.pastix:
-            self.set_linear_solver("pastix")
         elif self.cmdlineargs.petsc_mumps:
             self.set_linear_solver("petsc_mumps")
         elif self.cmdlineargs.accelerate:
@@ -2918,8 +3070,14 @@ class Problem(_pyoomph.Problem):
             hook.actions_after_parameter_increase(parameter_name)
 
     def actions_after_remeshing(self):
-        self._equation_system._after_remeshing() 
+        self._equation_system._after_remeshing()
         self.reapply_boundary_conditions()
+        # Remeshing destroys the superseded meshes, and a static condensation rule holds the mesh it
+        # names, so the rules have to be restated against the new ones. reapply_boundary_conditions()
+        # above has already done that for whatever a StaticCondensation equation declares; this covers
+        # rules declared at problem level (condense_dofs), which nothing else would restate. A no-op
+        # when the meshes are unchanged or nothing is declared at all.
+        self._sync_static_condensation_rules()
         self.invalidate_cached_mesh_data()
         if self._custom_assembler:
             self._custom_assembler.actions_after_remeshing()

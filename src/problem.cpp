@@ -20,6 +20,8 @@ The main author may be contacted at c.diddens@utwente.nl
 ================================================================================*/
 
 #include <limits>
+#include <memory>
+#include <cstring>
 #include "problem.hpp"
 #include "elements.hpp"
 #include "jitbridge.h"
@@ -1668,6 +1670,7 @@ namespace pyoomph
 	void Problem::get_jacobian(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian)
 	{
 		sync_hanging_values_if_parallel(this);
+		last_jacobian_was_condensed = false;
 		if (!use_custom_residual_jacobian)
 		{
 			get_jacobian_by_elemental_assembly(residuals, jacobian);
@@ -1675,6 +1678,21 @@ namespace pyoomph
 			{
 				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the jacobian matrix by matrix manipulation when bifurcation tracking is active, since the user-provided jacobian matrix would still contain contributions from the dirichlet dofs, which would be wrong");
 				this->remove_dirichlets_by_matrix_manipulation(residuals,&jacobian);
+			}
+			// Static condensation comes LAST, after the Dirichlet manipulation, and that order is forced.
+			// Condensation is an exact algebraic elimination of whatever linear system it is given, so it
+			// has to be given the FINAL one; remove_dirichlets_by_matrix_manipulation() replaces a
+			// Dirichlet row by the identity, zeroes that dof's column everywhere and zeroes its residual,
+			// i.e. it is still rewriting the system. Condensing first and manipulating afterwards would
+			// eliminate a Dirichlet-constrained dof through its RAW equation and fold that residual into
+			// the retained ones -- and the manipulation could no longer reach the eliminated row anyway,
+			// since it is gone from the matrix. In this order a Dirichlet dof caught by the selection is
+			// simply decoupled by the time the elimination sees it, and comes back out as dx = 0, which is
+			// what the full system gives too.
+			if (static_condensation_engages_now())
+			{
+				apply_static_condensation(residuals, jacobian);
+				last_jacobian_was_condensed = true;
 			}
 		}
 		else
@@ -2443,7 +2461,8 @@ namespace pyoomph
 		// a cache survive alternation between two assemblies.
 		oomph::AssemblyHandler *ah = this->assembly_handler_pt();
 		JacobianStructureKey key(std::string(ah ? typeid(*ah).name() : "none"),
-								 (unsigned long)this->ndof(), n_unaugmented_dofs, _solved_residual);
+								 (unsigned long)this->ndof(), n_unaugmented_dofs, _solved_residual,
+								 use_static_condensation, static_condensation_rules_revision);
 		auto it = jacobian_structure_ids.find(key);
 		if (it != jacobian_structure_ids.end()) return it->second;
 		const unsigned long id = ++next_jacobian_structure_id;
@@ -3494,6 +3513,977 @@ namespace pyoomph
 		for (const auto &sp : frozen_sparsity_cache)
 			if (sp.generation == gen && sp.matrix_index == matrix_index) return sp.nnz();
 		return 0;
+	}
+
+	// ==================== Static condensation: rule resolution ====================
+	// See dev_docs/static_condensation.md. This stage only RESOLVES a declared selection; nothing here
+	// is read by the assembly, the solver or the Newton loop yet.
+
+	namespace
+	{
+		// Where a field name lives in an element's generated code: the space info describing it and its
+		// index within that space. Nodal fields (the continuous C1..C2TB spaces) sit in the nodes'
+		// value arrays at nodal_offset_basebulk + index; everything else (DL, D0 and the DG spaces)
+		// sits in the element's internal Data at internal_offset_new + index.
+		struct CondensationFieldLocation
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space = nullptr;
+			unsigned index = 0;
+			bool is_nodal = false;
+		};
+
+		static bool locate_condensation_field(const JITFuncSpec_Table_FiniteElement_t *ft, const std::string &name, CondensationFieldLocation &loc)
+		{
+			for (unsigned i = 0; i < ft->info_DL.numfields; i++)
+				if (name == ft->info_DL.fieldnames[i]) { loc.space = &ft->info_DL; loc.index = i; loc.is_nodal = false; return true; }
+			for (unsigned i = 0; i < ft->info_D0.numfields; i++)
+				if (name == ft->info_D0.fieldnames[i]) { loc.space = &ft->info_D0; loc.index = i; loc.is_nodal = false; return true; }
+			for (unsigned si = 0; si < ft->num_present_dg_spaces; si++)
+			{
+				const auto *sp = ft->present_dg_spaces[si];
+				for (unsigned i = 0; i < sp->numfields_basebulk; i++)
+					if (name == sp->fieldnames[i]) { loc.space = sp; loc.index = i; loc.is_nodal = false; return true; }
+			}
+			for (unsigned si = 0; si < ft->num_present_continuous_spaces; si++)
+			{
+				const auto *sp = ft->present_continuous_spaces[si];
+				for (unsigned i = 0; i < sp->numfields_basebulk; i++)
+					if (name == sp->fieldnames[i]) { loc.space = sp; loc.index = i; loc.is_nodal = true; return true; }
+			}
+			return false;
+		}
+
+		// A rule may name a vector field the way the user writes it ("velocity"); the generated code only
+		// knows the components ("velocity_x", ...). Exact match wins, so a scalar field whose name happens
+		// to be a prefix of nothing is unaffected.
+		static std::vector<CondensationFieldLocation> locate_condensation_field_or_components(const JITFuncSpec_Table_FiniteElement_t *ft, const std::string &name)
+		{
+			std::vector<CondensationFieldLocation> res;
+			CondensationFieldLocation loc;
+			if (locate_condensation_field(ft, name, loc)) { res.push_back(loc); return res; }
+			for (const char *suffix : {"_x", "_y", "_z"})
+				if (locate_condensation_field(ft, name + suffix, loc)) res.push_back(loc);
+			return res;
+		}
+	}
+
+	// `part` is "all", "internal", "bubble" or "element_private".
+	void Problem::add_static_condensation_rule(Mesh *mesh, const std::string &field, const std::vector<unsigned> &values, const std::string &part)
+	{
+		StaticCondensationRule::Part p;
+		if (part == "all") p = StaticCondensationRule::Part::All;
+		else if (part == "internal") p = StaticCondensationRule::Part::Internal;
+		else if (part == "bubble") p = StaticCondensationRule::Part::Bubble;
+		else if (part == "element_private") p = StaticCondensationRule::Part::ElementPrivate;
+		else throw_runtime_error("Unknown static condensation part '" + part + "'. Use one of: all, internal, bubble, element_private");
+		if (p != StaticCondensationRule::Part::ElementPrivate && !mesh)
+			throw_runtime_error("A static condensation rule for part '" + part + "' needs a mesh");
+		if (p == StaticCondensationRule::Part::Bubble && !values.empty())
+			throw_runtime_error("A 'bubble' static condensation rule cannot take a value subset: a nodal field has exactly one value per node");
+		static_condensation_rules.push_back(StaticCondensationRule(mesh, field, values, p));
+		static_condensation_selected.clear();
+		static_condensation_n_selected = 0;
+		static_condensation_selection_valid = false;
+		static_condensation_rules_revision++; // see JacobianStructureKey
+		condensation_plan.clear();
+	}
+
+	void Problem::clear_static_condensation_rules()
+	{
+		static_condensation_rules.clear();
+		static_condensation_rule_counts.clear();
+		static_condensation_selected.clear();
+		static_condensation_n_selected = 0;
+		static_condensation_selection_valid = false;
+		static_condensation_rules_revision++;
+		condensation_plan.clear();
+	}
+
+	// Resolves every rule to concrete (Data*, value) pairs. Rules union; overlaps are harmless.
+	//
+	// Deliberately rank-local and communication-free: every decision is taken from data the rank already
+	// holds, and a halo element resolves exactly as it does on its owner (same code, same node
+	// occurrences within the element, same equation numbers), so a distributed stage can build on this
+	// unchanged.
+	void Problem::update_static_condensation_selection()
+	{
+		static_condensation_selected.clear();
+		static_condensation_n_selected = 0;
+		static_condensation_rule_counts.assign(static_condensation_rules.size(), 0);
+		static_condensation_selection_valid = true;
+		if (static_condensation_rules.empty()) return;
+
+		// Pinned and constrained values are never selected. A condensed dof must be a genuine unknown of
+		// the linear system, and dropping them here rather than later means no downstream stage has to
+		// distinguish them. Boundary conditions therefore silently shrink a selection - intended.
+		unsigned long *counter = NULL;
+		auto select = [&](oomph::Data *d, unsigned v)
+		{
+			if (!d || v >= d->nvalue()) return;
+			if (d->eqn_number(v) < 0) return;
+			auto it = static_condensation_selected.find(d);
+			if (it == static_condensation_selected.end())
+				it = static_condensation_selected.emplace(d, std::vector<bool>(d->nvalue(), false)).first;
+			if (!it->second[v]) { it->second[v] = true; static_condensation_n_selected++; }
+			(*counter)++;
+		};
+
+		// All meshes of the problem, interface meshes included.
+		std::vector<oomph::Mesh *> all_meshes;
+		const unsigned nsub = this->nsub_mesh();
+		if (nsub) { for (unsigned i = 0; i < nsub; i++) all_meshes.push_back(this->mesh_pt(i)); }
+		else if (this->mesh_pt()) all_meshes.push_back(this->mesh_pt());
+
+		// The reverse external-data set, built once and only when an element_private rule asks for it:
+		// which Data objects some element other than their owner reads. Interface elements adopt the
+		// bulk's internal Data exactly this way (InterfaceElementBase::add_required_external_data), and
+		// so do interior-facet DG couplings, so this is what "private" has to be measured against.
+		std::unordered_set<oomph::Data *> externally_referenced;
+		bool need_external_scan = false;
+		for (const auto &r : static_condensation_rules)
+			if (r.part == StaticCondensationRule::Part::ElementPrivate) need_external_scan = true;
+		if (need_external_scan)
+		{
+			for (oomph::Mesh *m : all_meshes)
+			{
+				if (!m) continue;
+				const unsigned ne = m->nelement();
+				for (unsigned ie = 0; ie < ne; ie++)
+				{
+					oomph::GeneralisedElement *e = m->element_pt(ie);
+					if (!e) continue;
+					const unsigned nex = e->nexternal_data();
+					for (unsigned k = 0; k < nex; k++) externally_referenced.insert(e->external_data_pt(k));
+				}
+			}
+		}
+
+		for (unsigned ir = 0; ir < static_condensation_rules.size(); ir++)
+		{
+			const StaticCondensationRule &rule = static_condensation_rules[ir];
+			counter = &static_condensation_rule_counts[ir];
+
+			if (rule.part == StaticCondensationRule::Part::ElementPrivate)
+			{
+				for (oomph::Mesh *m : all_meshes)
+				{
+					// Bulk domains only: an interface element's own internal Data belongs to a facet, not
+					// to a cell, and eliminating it is a separate (later) question.
+					if (!m || dynamic_cast<InterfaceMesh *>(m)) continue;
+					// A rule with a mesh is restricted to that domain (StaticCondensation() added to one
+					// domain); one without scans them all. Only the SELECTION is restricted - the
+					// externally_referenced scan above stayed problem-wide, since an interface element of
+					// any domain may adopt this domain's internal Data and would make it non-private.
+					if (rule.mesh && dynamic_cast<Mesh *>(m) != rule.mesh) continue;
+					const unsigned ne = m->nelement();
+					for (unsigned ie = 0; ie < ne; ie++)
+					{
+						auto *el = dynamic_cast<BulkElementBase *>(m->element_pt(ie));
+						if (!el) continue;
+						const unsigned nint = el->ninternal_data();
+						for (unsigned k = 0; k < nint; k++)
+						{
+							oomph::Data *d = el->internal_data_pt(k);
+							if (!d || externally_referenced.count(d)) continue;
+							for (unsigned v = 0; v < d->nvalue(); v++) select(d, v);
+						}
+					}
+				}
+				continue;
+			}
+
+			Mesh *m = rule.mesh;
+			if (!m) continue;
+			const unsigned ne = m->nelement();
+			if (!ne) continue; // A rank may legitimately hold no element of this domain
+
+			// Field lookup is per generated code, not per element: all elements of a domain share one,
+			// and resolving the name once also means the "unknown field" error is raised once.
+			std::map<const JITFuncSpec_Table_FiniteElement_t *, std::vector<CondensationFieldLocation>> located;
+
+			// Bubble nodes are found by how often each node occurs among this mesh's elements: a
+			// cell-interior bubble node belongs to exactly one element and lies on no boundary. That also
+			// excludes the tet-C2TB face bubbles, which two elements share, without having to name them.
+			std::unordered_map<oomph::Node *, unsigned> node_occurrence;
+			if (rule.part == StaticCondensationRule::Part::Bubble)
+			{
+				for (unsigned ie = 0; ie < ne; ie++)
+				{
+					auto *el = dynamic_cast<BulkElementBase *>(m->element_pt(ie));
+					if (!el) continue;
+					const unsigned nn = el->nnode();
+					for (unsigned n = 0; n < nn; n++) node_occurrence[el->node_pt(n)]++;
+				}
+			}
+
+			for (unsigned ie = 0; ie < ne; ie++)
+			{
+				auto *el = dynamic_cast<BulkElementBase *>(m->element_pt(ie));
+				if (!el || !el->get_code_instance()) continue;
+				const JITFuncSpec_Table_FiniteElement_t *ft = el->get_code_instance()->get_func_table();
+				auto found = located.find(ft);
+				if (found == located.end())
+				{
+					std::vector<CondensationFieldLocation> locs = locate_condensation_field_or_components(ft, rule.field);
+					if (locs.empty())
+						throw_runtime_error("Cannot condense field '" + rule.field + "': no such field on this domain");
+					for (const auto &l : locs)
+					{
+						if (rule.part == StaticCondensationRule::Part::Bubble && !l.is_nodal)
+							throw_runtime_error("Field '" + rule.field + "' lives in space '" + std::string(l.space->space_name) + "', which has no nodes - part='bubble' does not apply. Use part='all' to condense the whole elemental field.");
+						if (rule.part != StaticCondensationRule::Part::Bubble && l.is_nodal)
+							throw_runtime_error("Field '" + rule.field + "' is a continuous nodal field in space '" + std::string(l.space->space_name) + "'; its values are shared between elements and cannot be condensed as a whole. Use part='bubble' to select only the cell-interior bubble nodes.");
+					}
+					found = located.emplace(ft, locs).first;
+				}
+
+				for (const CondensationFieldLocation &l : found->second)
+				{
+					if (rule.part == StaticCondensationRule::Part::Bubble)
+					{
+						const std::vector<std::vector<unsigned>> &space_nodes = el->get_nodal_space_index_to_element_index_map();
+						const unsigned si = l.space->space_index;
+						if (si >= space_nodes.size()) continue;
+						for (unsigned i = 0; i < space_nodes[si].size(); i++)
+						{
+							oomph::Node *nd = el->node_pt(space_nodes[si][i]);
+							if (!nd) continue;
+							if (node_occurrence[nd] != 1) continue;
+							if (nd->is_on_boundary()) continue;
+							select(nd, l.space->nodal_offset_basebulk + l.index);
+						}
+					}
+					else
+					{
+						const unsigned di = l.space->internal_offset_new + l.index;
+						if (di >= el->ninternal_data()) continue;
+						oomph::Data *d = el->internal_data_pt(di);
+						if (!d) continue;
+						if (rule.values.empty()) { for (unsigned v = 0; v < d->nvalue(); v++) select(d, v); }
+						else { for (unsigned v : rule.values) select(d, v); }
+					}
+				}
+			}
+		}
+	}
+
+	// The selected dofs as global equation numbers. Sorted, so that the order does not depend on the
+	// hash-map iteration order (and hence not on allocation addresses) - the same reason the hanging-node
+	// masters had to be ordered, see dev_docs/replicated_mpi_correctness.md.
+	std::vector<long> Problem::get_static_condensation_dof_eqns()
+	{
+		ensure_static_condensation_selection();
+		std::vector<long> res;
+		res.reserve(static_condensation_n_selected);
+		for (const auto &kv : static_condensation_selected)
+			for (unsigned v = 0; v < kv.second.size(); v++)
+				if (kv.second[v]) res.push_back(kv.first->eqn_number(v));
+		std::sort(res.begin(), res.end());
+		return res;
+	}
+
+	// Names for a few global equations, for error messages. Nothing maps an equation number back to a
+	// field directly -- the mapping only exists per element, in get_dof_names() -- so this scans the
+	// elements until every requested equation has been found. O(nelement) and it builds an element's
+	// whole name list per hit, which is why it is deliberately not usable in a loop.
+	std::vector<std::string> Problem::describe_global_dofs(const std::vector<long> &eqns)
+	{
+		std::vector<std::string> res(eqns.size(), "<unknown dof>");
+		if (eqns.empty()) return res;
+		std::map<long, unsigned> wanted;
+		for (unsigned i = 0; i < eqns.size(); i++) wanted[eqns[i]] = i;
+		const unsigned long n_element = mesh_pt()->nelement();
+		for (unsigned long e = 0; e < n_element && !wanted.empty(); e++)
+		{
+			BulkElementBase *be = dynamic_cast<BulkElementBase *>(mesh_pt()->element_pt(e));
+			if (!be) continue;
+			const unsigned nvar = be->ndof();
+			std::vector<std::pair<unsigned, unsigned>> hits; // (local dof, index in eqns)
+			for (unsigned i = 0; i < nvar; i++)
+			{
+				auto it = wanted.find(be->eqn_number(i));
+				if (it != wanted.end()) hits.push_back(std::make_pair(i, it->second));
+			}
+			if (hits.empty()) continue;
+			const std::vector<std::string> names = be->get_dof_names();
+			const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
+			const std::string domain = (ft && ft->domain_name ? std::string(ft->domain_name) : std::string("?"));
+			for (const auto &h : hits)
+			{
+				res[h.second] = domain + "/" + (h.first < names.size() ? names[h.first] : std::string("?"));
+				wanted.erase(eqns[h.second]);
+			}
+		}
+		return res;
+	}
+
+	namespace
+	{
+		// A short "field__space__localindex (eqn N)" list for an error message. The dof names are LOCAL
+		// to an element, so a handful of samples taken from different elements otherwise reads as five
+		// copies of "pressure__DL__1"; the equation number is what tells them apart.
+		static std::string format_dof_samples(Problem &prob, const std::vector<long> &eqns, unsigned long total)
+		{
+			const std::vector<std::string> names = prob.describe_global_dofs(eqns);
+			std::string res;
+			for (unsigned i = 0; i < names.size(); i++)
+				res += (i ? ", " : "") + names[i] + " (eqn " + std::to_string(eqns[i]) + ")";
+			if (total > eqns.size()) res += ", ... (" + std::to_string(total) + " in total)";
+			return res;
+		}
+	}
+
+	// ==================== Static condensation: the elimination plan ====================
+	// Stage 2 of dev_docs/static_condensation.md. Derives, from the frozen FULL pattern alone,
+	// everything the numeric kernel will need: the connected components of the selected dofs, the
+	// positions in the assembled value array each of them gathers from, the condensed CSR pattern, and
+	// where every entry of the condensed matrix comes from. Nothing here reads a single matrix value,
+	// and nothing it produces depends on one.
+	bool Problem::build_condensation_plan(CondensationPlan &plan)
+	{
+		plan.clear();
+#ifdef OOMPH_HAS_MPI
+		// Distributed condensation is a later stage: the rows of a component may live on several ranks,
+		// which is a question of ownership and collective refusal votes, not of this code.
+		if (Problem_has_been_distributed) return false;
+		if (Communicator_pt && Communicator_pt->nproc() > 1) return false;
+#endif
+		if (n_unaugmented_dofs != 0) return false; // Augmented (bifurcation/continuation) system: assembled full
+		const unsigned long gen = this->get_jacobian_structure_id();
+		if (!gen) return false; // Value-dependent pattern; nothing may be precomputed from it
+		this->ensure_static_condensation_selection();
+		if (!static_condensation_n_selected) return false; // Nothing selected: not an error, just nothing to do
+		const unsigned nd = this->ndof();
+		if (!nd) return false;
+
+		// The plan is expressed as positions in the frozen pattern's value array, so the frozen assembly
+		// path is a precondition rather than an optimisation. If it declines, condensation declines.
+		const std::vector<int> pinned;
+		const int fslot = this->acquire_frozen_sparsity(0, gen, nd, pinned);
+		if (fslot < 0) return false;
+		const std::vector<int> &row_start = frozen_sparsity_cache[fslot].row_start;
+		const std::vector<int> &col_index = frozen_sparsity_cache[fslot].column_index;
+		plan.full_nnz = frozen_sparsity_cache[fslot].nnz();
+
+		// --- 1. The L set, ordered by global equation number so that everything below is deterministic
+		std::vector<std::pair<long, std::pair<oomph::Data *, unsigned>>> sel;
+		sel.reserve(static_condensation_n_selected);
+		for (const auto &kv : static_condensation_selected)
+			for (unsigned v = 0; v < kv.second.size(); v++)
+				if (kv.second[v]) sel.push_back(std::make_pair(kv.first->eqn_number(v), std::make_pair(kv.first, v)));
+		// By equation number only, and stably: the tie-breaker would otherwise be a Data POINTER, i.e.
+		// the allocation order (see dev_docs/replicated_mpi_correctness.md on why that must never decide anything).
+		std::stable_sort(sel.begin(), sel.end(), [](const std::pair<long, std::pair<oomph::Data *, unsigned>> &a,
+													const std::pair<long, std::pair<oomph::Data *, unsigned>> &b)
+						 { return a.first < b.first; });
+
+		plan.is_condensed.assign(nd, 0);
+		std::vector<int> l_index(nd, -1); // global eqn -> index in the L arrays, -1 for retained dofs
+		std::vector<int> l_eqn;
+		std::vector<std::pair<oomph::Data *, unsigned>> l_value;
+		for (const auto &s : sel)
+		{
+			if (s.first < 0 || (unsigned long)s.first >= nd) continue;
+			const int eq = (int)s.first;
+			if (plan.is_condensed[eq]) continue; // two Data values sharing an equation: keep the first
+			plan.is_condensed[eq] = 1;
+			l_index[eq] = (int)l_eqn.size();
+			l_eqn.push_back(eq);
+			l_value.push_back(s.second);
+		}
+		const unsigned nL = (unsigned)l_eqn.size();
+		if (!nL) return false;
+
+		// --- 2. Connected components of the structural L x L coupling, symmetrised
+		// (an entry (r,c) couples r and c whichever way round the matrix stores it: A_LL has to be
+		// inverted as a block, and reducibility is a property of the undirected graph).
+		std::vector<int> uf(nL);
+		for (unsigned i = 0; i < nL; i++) uf[i] = (int)i;
+		auto uf_find = [&uf](int a) { while (uf[a] != a) { uf[a] = uf[uf[a]]; a = uf[a]; } return a; };
+		// While walking the rows anyway, record whether each L dof has a structurally present L column
+		// (a nonzero row of A_LL) and appears as an L column of some L row (a nonzero column of A_LL).
+		std::vector<char> row_ok(nL, 0), col_ok(nL, 0);
+		for (unsigned i = 0; i < nL; i++)
+		{
+			const int r = l_eqn[i];
+			for (int k = row_start[r]; k < row_start[r + 1]; k++)
+			{
+				const int c = col_index[k];
+				if (c < 0 || (unsigned)c >= nd || !plan.is_condensed[c]) continue;
+				const int j = l_index[c];
+				row_ok[i] = 1;
+				col_ok[j] = 1;
+				const int ra = uf_find((int)i), rb = uf_find(j);
+				if (ra != rb) uf[ra] = rb;
+			}
+		}
+		// Component ids in order of their smallest member, so that a rebuild of an unchanged pattern
+		// produces an identical plan.
+		std::vector<int> comp_of_l(nL, -1), comp_of_root(nL, -1);
+		unsigned ncomp = 0;
+		for (unsigned i = 0; i < nL; i++)
+		{
+			const int r = uf_find((int)i);
+			if (comp_of_root[r] < 0) comp_of_root[r] = (int)(ncomp++);
+			comp_of_l[i] = comp_of_root[r];
+		}
+		plan.components.resize(ncomp);
+		for (unsigned i = 0; i < nL; i++)
+		{
+			CondensationComponent &comp = plan.components[comp_of_l[i]];
+			comp.L_eqns.push_back(l_eqn[i]); // ascending, since i runs in equation order
+			comp.L_values.push_back(l_value[i]);
+		}
+
+		// --- 3. Size guard. Each component is inverted as a DENSE block, so a selection whose coupling
+		// percolates through the mesh (interior-penalty DG velocities, say) is not a condensation but a
+		// second, worse, direct solve. Refuse it with something the user can act on.
+		for (unsigned c = 0; c < ncomp; c++)
+		{
+			const CondensationComponent &comp = plan.components[c];
+			if (comp.nL() <= static_condensation_max_component_size) continue;
+			std::vector<long> sample;
+			for (unsigned i = 0; i < comp.nL() && i < 5; i++) sample.push_back(comp.L_eqns[i]);
+			const std::string list = format_dof_samples(*this, sample, comp.nL());
+			throw_runtime_error("Static condensation: the selected degrees of freedom do not decompose into small "
+								"element-local blocks. One connected component holds " + std::to_string(comp.nL()) +
+								" mutually coupled dofs, above the limit static_condensation_max_component_size = " +
+								std::to_string(static_condensation_max_component_size) +
+								". Each component is inverted as a dense block, so this would cost more than the solve "
+								"it is meant to shorten. Sample dofs of the component: " + list +
+								". Either restrict the selection to dofs that really are element-local (a DG field "
+								"coupled across facets is not), or raise problem.static_condensation_max_component_size "
+								"if the size is genuinely intended.");
+		}
+
+		// --- 4. Structural invertibility. A_LL restricted to a component must have no structurally
+		// empty row and no structurally empty column. This is the check that catches selecting a
+		// Crouzeix-Raviart pressure on its own: the continuity rows are weak(div(u), p_test) and contain
+		// no pressure at all, so those rows of A_LL are identically zero however the values come out.
+		{
+			std::vector<long> bad_rows, bad_cols;
+			unsigned long n_bad_rows = 0, n_bad_cols = 0;
+			for (unsigned i = 0; i < nL; i++)
+			{
+				if (!row_ok[i]) { n_bad_rows++; if (bad_rows.size() < 4) bad_rows.push_back(l_eqn[i]); }
+				if (!col_ok[i]) { n_bad_cols++; if (bad_cols.size() < 4) bad_cols.push_back(l_eqn[i]); }
+			}
+			if (!bad_rows.empty() || !bad_cols.empty())
+			{
+				std::string msg = "Static condensation: the selected degrees of freedom cannot be eliminated, because "
+								  "the block to be inverted is structurally singular.";
+				if (!bad_rows.empty())
+					msg += " The equations of these selected dofs contain no selected unknown at all (an empty ROW of "
+						   "the block): " + format_dof_samples(*this, bad_rows, n_bad_rows) + ".";
+				if (!bad_cols.empty())
+					msg += " These selected dofs appear in no selected equation (an empty COLUMN of the block): " +
+						   format_dof_samples(*this, bad_cols, n_bad_cols) + ".";
+				msg += " A dof can only be eliminated together with an equation that determines it. The classic case is "
+					   "selecting a discontinuous (DL) pressure on its own: the continuity equation contains no "
+					   "pressure, so it has to be condensed jointly with the bubble velocities that it does determine "
+					   "-- and the constant pressure mode has to stay in the global system.";
+				throw_runtime_error(msg);
+			}
+		}
+
+		// --- 5. E_C: every retained dof structurally coupled to the component, by column (it appears in
+		// one of the component's equations) or by row (its own equation contains one of the component's
+		// unknowns). Both directions are needed: the Schur update touches the rows of A_EL and the
+		// columns of A_LE, and interface/facet elements make those two sets genuinely different.
+		{
+			std::vector<std::vector<int>> E_lists(ncomp);
+			for (unsigned i = 0; i < nL; i++) // by column
+			{
+				const int r = l_eqn[i];
+				std::vector<int> &lst = E_lists[comp_of_l[i]];
+				for (int k = row_start[r]; k < row_start[r + 1]; k++)
+				{
+					const int c = col_index[k];
+					if (c >= 0 && (unsigned)c < nd && !plan.is_condensed[c]) lst.push_back(c);
+				}
+			}
+			for (unsigned r = 0; r < nd; r++) // by row
+			{
+				if (plan.is_condensed[r]) continue;
+				for (int k = row_start[r]; k < row_start[r + 1]; k++)
+				{
+					const int c = col_index[k];
+					if (c < 0 || (unsigned)c >= nd || !plan.is_condensed[c]) continue;
+					E_lists[comp_of_l[l_index[c]]].push_back((int)r);
+				}
+			}
+			for (unsigned c = 0; c < ncomp; c++)
+			{
+				std::vector<int> &lst = E_lists[c];
+				std::sort(lst.begin(), lst.end());
+				lst.erase(std::unique(lst.begin(), lst.end()), lst.end());
+				plan.components[c].E_eqns.swap(lst);
+			}
+		}
+
+		// --- 6. Gather slots into the full value array. The columns of a row are ascending, so this is a
+		// binary search per pair -- once, here, and never again during a solve.
+		auto full_slot = [&](int row, int col) -> int
+		{
+			const int lo = row_start[row], hi = row_start[row + 1];
+			const int *b = col_index.data() + lo, *e = col_index.data() + hi;
+			const int *f = std::lower_bound(b, e, col);
+			if (f == e || *f != col) return -1;
+			return lo + (int)(f - b);
+		};
+		for (unsigned c = 0; c < ncomp; c++)
+		{
+			CondensationComponent &comp = plan.components[c];
+			const unsigned nl = comp.nL(), ne = comp.nE();
+			comp.LL_slots.assign((size_t)nl * nl, -1);
+			comp.LE_slots.assign((size_t)nl * ne, -1);
+			comp.EL_slots.assign((size_t)ne * nl, -1);
+			for (unsigned i = 0; i < nl; i++)
+			{
+				for (unsigned j = 0; j < nl; j++) comp.LL_slots[(size_t)i * nl + j] = full_slot(comp.L_eqns[i], comp.L_eqns[j]);
+				for (unsigned j = 0; j < ne; j++) comp.LE_slots[(size_t)i * ne + j] = full_slot(comp.L_eqns[i], comp.E_eqns[j]);
+			}
+			for (unsigned i = 0; i < ne; i++)
+				for (unsigned j = 0; j < nl; j++) comp.EL_slots[(size_t)i * nl + j] = full_slot(comp.E_eqns[i], comp.L_eqns[j]);
+		}
+
+		// --- 7. The condensed pattern: full-size and non-renumbered. A retained row keeps its retained
+		// columns and gains the whole E_C x E_C block of every component it takes part in (the fill-in of
+		// the Schur complement); a condensed row is replaced by its diagonal alone, which the kernel sets
+		// to 1 with a zero right-hand side so the solver returns a zero increment there.
+		{
+			std::vector<std::vector<int>> cond_cols(nd);
+			for (unsigned r = 0; r < nd; r++)
+			{
+				if (plan.is_condensed[r]) { cond_cols[r].push_back((int)r); continue; }
+				for (int k = row_start[r]; k < row_start[r + 1]; k++)
+				{
+					const int c = col_index[k];
+					if (c >= 0 && (unsigned)c < nd && !plan.is_condensed[c]) cond_cols[r].push_back(c);
+				}
+			}
+			for (unsigned c = 0; c < ncomp; c++)
+			{
+				const std::vector<int> &E = plan.components[c].E_eqns;
+				for (size_t i = 0; i < E.size(); i++)
+					cond_cols[E[i]].insert(cond_cols[E[i]].end(), E.begin(), E.end());
+			}
+			plan.cond_row_start.assign(nd + 1, 0);
+			for (unsigned r = 0; r < nd; r++)
+			{
+				std::vector<int> &cc = cond_cols[r];
+				std::sort(cc.begin(), cc.end());
+				cc.erase(std::unique(cc.begin(), cc.end()), cc.end());
+				plan.cond_row_start[r + 1] = plan.cond_row_start[r] + (int)cc.size();
+			}
+			plan.cond_column_index.resize(plan.cond_row_start[nd]);
+			for (unsigned r = 0; r < nd; r++)
+				std::copy(cond_cols[r].begin(), cond_cols[r].end(), plan.cond_column_index.begin() + plan.cond_row_start[r]);
+		}
+		const std::vector<int> &crs = plan.cond_row_start;
+		const std::vector<int> &cci = plan.cond_column_index;
+		auto cond_slot = [&crs, &cci](int row, int col) -> int
+		{
+			const int lo = crs[row], hi = crs[row + 1];
+			const int *b = cci.data() + lo, *e = cci.data() + hi;
+			const int *f = std::lower_bound(b, e, col);
+			if (f == e || *f != col) return -1;
+			return lo + (int)(f - b);
+		};
+
+		// --- 8. Where every entry of the condensed matrix comes from.
+		// Pass-through: the (E,E) entries the full pattern already had, copied verbatim. Emitted in
+		// full-slot order, so the copy sweeps forward through the full value array.
+		for (unsigned r = 0; r < nd; r++)
+		{
+			if (plan.is_condensed[r]) continue;
+			for (int k = row_start[r]; k < row_start[r + 1]; k++)
+			{
+				const int c = col_index[k];
+				if (c < 0 || (unsigned)c >= nd || plan.is_condensed[c]) continue;
+				const int cs = cond_slot((int)r, c);
+				if (cs < 0) throw_runtime_error("Internal error while building the static condensation plan: a retained "
+												"matrix entry has no slot in the condensed pattern");
+				plan.passthrough_full_slot.push_back(k);
+				plan.passthrough_cond_slot.push_back(cs);
+			}
+		}
+		// The fill-in slots, and the identity rows.
+		for (unsigned c = 0; c < ncomp; c++)
+		{
+			CondensationComponent &comp = plan.components[c];
+			const unsigned ne = comp.nE();
+			comp.fill_slots.assign((size_t)ne * ne, -1);
+			for (unsigned i = 0; i < ne; i++)
+				for (unsigned j = 0; j < ne; j++)
+				{
+					const int cs = cond_slot(comp.E_eqns[i], comp.E_eqns[j]);
+					if (cs < 0) throw_runtime_error("Internal error while building the static condensation plan: the "
+													"fill-in of a component is not contained in the condensed pattern");
+					comp.fill_slots[(size_t)i * ne + j] = cs;
+				}
+		}
+		plan.condensed_eqns = l_eqn;
+		plan.L_diagonal_cond_slots.resize(nL);
+		for (unsigned i = 0; i < nL; i++) plan.L_diagonal_cond_slots[i] = plan.cond_row_start[l_eqn[i]]; // the row's only entry
+		return true;
+	}
+
+	// The plan for the current pattern id, rebuilt whenever that id has moved on.
+	CondensationPlan *Problem::acquire_condensation_plan()
+	{
+		const unsigned long gen = this->get_jacobian_structure_id();
+		if (!gen) { condensation_plan.clear(); return NULL; }
+		const unsigned nd = this->ndof();
+		if (condensation_plan.generation == gen && condensation_plan.ndof == nd) return &condensation_plan;
+		if (!build_condensation_plan(condensation_plan)) { condensation_plan.clear(); return NULL; }
+		condensation_plan.generation = gen;
+		condensation_plan.ndof = nd;
+		condensation_plan_rebuilds++;
+		return &condensation_plan;
+	}
+
+	// ==================== Static condensation: the numeric kernel ====================
+	namespace
+	{
+		// Dense LU with partial pivoting on a flat row-major buffer, with a RELATIVE pivot guard.
+		// Returns the step at which the pivot was rejected, or -1 on success. `pivots` records the row
+		// each step exchanged with, so the same interchanges can be replayed on a right-hand side.
+		//
+		// oomph-lib's DenseDoubleMatrix::ludecompose() is deliberately NOT used here. DenseLU::factorise()
+		// (thirdparty/oomph-lib/include/linear_solver.cc:139) throws only when an entire row is exactly
+		// zero and otherwise replaces a vanishing pivot by 1e-20, the Numerical-Recipes trick -- so a
+		// singular A_LL comes back as an increment of order 1e20 instead of as an error, which is exactly
+		// what the classic "condense the DL constant pressure mode as well" mistake produces. Testing the
+		// pivot against the size of the block requires owning the factorisation. Two further reasons:
+		// DenseLU news its LU factors and its pivot array on every single factorise, and it back-
+		// substitutes one right-hand side at a time through a DoubleVector, while a component needs nE+1
+		// of them against the same factors.
+		static int dense_lu_factorise(double *A, unsigned n, int *pivots, double pivot_tol)
+		{
+			double amax = 0.0;
+			for (size_t k = 0; k < (size_t)n * n; k++) amax = std::max(amax, std::fabs(A[k]));
+			// Relative to the whole block, not to the row: a component mixes bubble-velocity and
+			// pressure-gradient equations, whose natural scales differ by orders of magnitude, and a
+			// per-row threshold would then declare a perfectly good pivot too small.
+			const double thresh = pivot_tol * amax;
+			for (unsigned j = 0; j < n; j++)
+			{
+				unsigned piv = j;
+				double best = std::fabs(A[(size_t)j * n + j]);
+				for (unsigned i = j + 1; i < n; i++)
+				{
+					const double v = std::fabs(A[(size_t)i * n + j]);
+					if (v > best) { best = v; piv = i; }
+				}
+				if (best <= thresh) return (int)j;
+				pivots[j] = (int)piv;
+				if (piv != j)
+					for (unsigned k = 0; k < n; k++) std::swap(A[(size_t)j * n + k], A[(size_t)piv * n + k]);
+				const double inv = 1.0 / A[(size_t)j * n + j];
+				for (unsigned i = j + 1; i < n; i++)
+				{
+					const double f = A[(size_t)i * n + j] * inv;
+					A[(size_t)i * n + j] = f;
+					if (f == 0.0) continue;
+					for (unsigned k = j + 1; k < n; k++) A[(size_t)i * n + k] -= f * A[(size_t)j * n + k];
+				}
+			}
+			return -1;
+		}
+
+		// Solves A X = B in place for all nrhs right-hand sides at once; B is row-major n x nrhs.
+		static void dense_lu_solve(const double *LU, unsigned n, const int *pivots, double *B, unsigned nrhs)
+		{
+			for (unsigned j = 0; j < n; j++)
+			{
+				const unsigned p = (unsigned)pivots[j];
+				if (p != j)
+					for (unsigned c = 0; c < nrhs; c++) std::swap(B[(size_t)j * nrhs + c], B[(size_t)p * nrhs + c]);
+			}
+			for (unsigned i = 1; i < n; i++) // forward substitution, L has a unit diagonal
+				for (unsigned k = 0; k < i; k++)
+				{
+					const double f = LU[(size_t)i * n + k];
+					if (f == 0.0) continue;
+					for (unsigned c = 0; c < nrhs; c++) B[(size_t)i * nrhs + c] -= f * B[(size_t)k * nrhs + c];
+				}
+			for (unsigned ii = n; ii-- > 0;) // back substitution
+			{
+				for (unsigned k = ii + 1; k < n; k++)
+				{
+					const double f = LU[(size_t)ii * n + k];
+					if (f == 0.0) continue;
+					for (unsigned c = 0; c < nrhs; c++) B[(size_t)ii * nrhs + c] -= f * B[(size_t)k * nrhs + c];
+				}
+				const double inv = 1.0 / LU[(size_t)ii * n + ii];
+				for (unsigned c = 0; c < nrhs; c++) B[(size_t)ii * nrhs + c] *= inv;
+			}
+		}
+	}
+
+	// Replaces the assembled FULL system by the CONDENSED one, in place: the selected dofs are
+	// eliminated component by component through their dense Schur complement, their rows become identity
+	// rows with a zero right-hand side (so the solver returns a zero increment there, which stage 4
+	// replaces by the reconstructed one), and the matrix is rebuilt on the plan's condensed pattern.
+	//
+	// Everything the loop needs was precomputed by build_condensation_plan(): this routine performs no
+	// column search, allocates nothing per component, and touches the matrix only through slot indices.
+	void Problem::apply_static_condensation(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian)
+	{
+		CondensationPlan *plan = this->acquire_condensation_plan();
+		if (!plan)
+			throw_runtime_error("Internal error: static condensation was applied to an assembly for which no "
+								"elimination plan exists. The activation gate must not let this call through.");
+		const unsigned nd = plan->ndof;
+
+		// --- 1. Positive engagement check. The plan is a list of positions in a particular value array,
+		// so it is only meaningful if the matrix really was assembled on the pattern it was derived from.
+		// A silent mismatch would not crash: it would quietly condense the wrong entries, which is the
+		// failure mode dev_docs/structural_assembly.md warns about, so the pattern is compared outright.
+		if (jacobian.nrow() != nd || residuals.nrow() != nd)
+			throw_runtime_error("Static condensation: the assembled system has " + std::to_string(jacobian.nrow()) +
+								" rows but the elimination plan was built for " + std::to_string(nd) + ".");
+		if ((unsigned long)jacobian.nnz() != plan->full_nnz)
+			throw_runtime_error("Static condensation: the assembled Jacobian has " + std::to_string(jacobian.nnz()) +
+								" nonzeros, but the elimination plan was built from a pattern with " +
+								std::to_string(plan->full_nnz) + ". The frozen-sparsity assembly path must have "
+								"declined for this call, and the plan's slot lists do not describe this matrix.");
+		{
+			const std::vector<int> pinned;
+			const int fslot = this->acquire_frozen_sparsity(0, plan->generation, nd, pinned);
+			if (fslot < 0)
+				throw_runtime_error("Static condensation: the frozen sparsity pattern the elimination plan was built "
+									"from is no longer available.");
+			const FrozenSparsity &sp = frozen_sparsity_cache[fslot];
+			if (std::memcmp(sp.row_start.data(), jacobian.row_start(), (size_t)(nd + 1) * sizeof(int)) != 0 ||
+				std::memcmp(sp.column_index.data(), jacobian.column_index(), (size_t)plan->full_nnz * sizeof(int)) != 0)
+				throw_runtime_error("Static condensation: the assembled Jacobian does not carry the frozen sparsity "
+									"pattern the elimination plan was built from, although it has the same number of "
+									"nonzeros. Refusing to condense a matrix whose entries are not where the plan says.");
+		}
+
+		const double *full_val = jacobian.value();
+		double *r = residuals.values_pt();
+		const unsigned ncol = jacobian.ncol();
+		const unsigned cnnz = plan->cond_nnz();
+
+		// --- 2. The condensed value array. Freshly allocated, because build_without_copy() below takes
+		// ownership of it (and of the pattern arrays) and frees them with the matrix -- the same contract
+		// assemble_with_frozen_sparsity() hands its immutable pattern out under.
+		std::unique_ptr<double[]> cond_val(new double[cnnz ? cnnz : 1]);
+		std::fill(cond_val.get(), cond_val.get() + cnnz, 0.0);
+		const size_t n_pass = plan->passthrough_full_slot.size();
+		for (size_t k = 0; k < n_pass; k++)
+			cond_val[plan->passthrough_cond_slot[k]] = full_val[plan->passthrough_full_slot[k]];
+
+		// --- 3. Eliminate each component. A_LL is block diagonal over the components by construction
+		// (they are the connected components of its coupling graph), so the Schur complements simply add
+		// up and each block can be inverted on its own.
+		std::vector<double> &LL = condensation_scratch_LL;
+		std::vector<double> &RHS = condensation_scratch_rhs;
+		std::vector<double> &EL = condensation_scratch_EL;
+		std::vector<int> &pivots = condensation_scratch_pivots;
+		for (unsigned c = 0; c < plan->components.size(); c++)
+		{
+			CondensationComponent &comp = plan->components[c];
+			const unsigned nl = comp.nL(), ne = comp.nE();
+			const unsigned nrhs = ne + 1; // the nE columns of A_LE, plus r_L as one more right-hand side
+
+			LL.assign((size_t)nl * nl, 0.0);
+			RHS.assign((size_t)nl * nrhs, 0.0);
+			EL.assign((size_t)ne * nl, 0.0);
+			pivots.resize(nl);
+			for (unsigned i = 0; i < nl; i++)
+			{
+				for (unsigned j = 0; j < nl; j++)
+				{
+					const int s = comp.LL_slots[(size_t)i * nl + j];
+					if (s >= 0) LL[(size_t)i * nl + j] = full_val[s];
+				}
+				for (unsigned j = 0; j < ne; j++)
+				{
+					const int s = comp.LE_slots[(size_t)i * ne + j];
+					if (s >= 0) RHS[(size_t)i * nrhs + j] = full_val[s];
+				}
+				RHS[(size_t)i * nrhs + ne] = r[comp.L_eqns[i]];
+			}
+			for (unsigned i = 0; i < ne; i++)
+				for (unsigned j = 0; j < nl; j++)
+				{
+					const int s = comp.EL_slots[(size_t)i * nl + j];
+					if (s >= 0) EL[(size_t)i * nl + j] = full_val[s];
+				}
+
+			const int bad = dense_lu_factorise(LL.data(), nl, pivots.data(), 1e-12);
+			if (bad >= 0)
+			{
+				// Structurally the block was fine (build_condensation_plan checked that), so this is a
+				// selection that eliminates a dof its own equations do not actually determine.
+				std::vector<long> sample;
+				for (unsigned i = 0; i < nl && i < 5; i++) sample.push_back(comp.L_eqns[i]);
+				throw_runtime_error("Static condensation: the block of selected dofs is numerically singular and cannot "
+									"be eliminated. The elimination of a connected component of " + std::to_string(nl) +
+									" selected dofs broke down at step " + std::to_string(bad) + ": no pivot above "
+									"1e-12 times the size of the block was left. The dofs of this component are: " +
+									format_dof_samples(*this, sample, nl) +
+									". The block passed the structural check, so the entries are present but cancel; the "
+									"selection eliminates a dof that its equations do not determine. The classic case is "
+									"taking the CONSTANT mode of a discontinuous (DL) pressure along with the bubble "
+									"velocities: the bubble has no coupling to it (the integral of div(u_bubble) against "
+									"a constant test function vanishes), so value 0 has to stay a global unknown and only "
+									"the gradient modes may be condensed -- values=[1,2] in 2D, [1,2,3] in 3D.");
+			}
+			dense_lu_solve(LL.data(), nl, pivots.data(), RHS.data(), nrhs);
+
+			// X = A_LL^-1 A_LE and y = A_LL^-1 r_L, kept for the reconstruction after the Newton update:
+			// dx_L = y - X dx_E (stage 4).
+			comp.X.resize((size_t)nl * ne);
+			comp.y.resize(nl);
+			for (unsigned i = 0; i < nl; i++)
+			{
+				for (unsigned j = 0; j < ne; j++) comp.X[(size_t)i * ne + j] = RHS[(size_t)i * nrhs + j];
+				comp.y[i] = RHS[(size_t)i * nrhs + ne];
+			}
+			comp.ops_valid = true;
+
+			// The Schur update. ACCUMULATE: the E_C x E_C fill slots overlap the pass-through entries
+			// wherever the full pattern already had that (E,E) coupling, and two components sharing a
+			// retained dof write to the same slots as well.
+			for (unsigned a = 0; a < ne; a++)
+			{
+				const double *ELa = &EL[(size_t)a * nl];
+				const int *fs = &comp.fill_slots[(size_t)a * ne];
+				double racc = 0.0;
+				for (unsigned l = 0; l < nl; l++) racc += ELa[l] * comp.y[l];
+				r[comp.E_eqns[a]] -= racc;
+				for (unsigned l = 0; l < nl; l++)
+				{
+					const double f = ELa[l];
+					if (f == 0.0) continue;
+					const double *Xl = &comp.X[(size_t)l * ne];
+					for (unsigned b = 0; b < ne; b++) cond_val[fs[b]] -= f * Xl[b];
+				}
+			}
+			// The eliminated equations are replaced by 0 = dx_L. Safe to do here rather than at the end:
+			// E sets only ever contain RETAINED dofs, so this can never overwrite another component's r_L.
+			for (unsigned i = 0; i < nl; i++) r[comp.L_eqns[i]] = 0.0;
+		}
+
+		// --- 4. Identity rows for the eliminated dofs (their row holds nothing but the diagonal).
+		for (size_t i = 0; i < plan->L_diagonal_cond_slots.size(); i++) cond_val[plan->L_diagonal_cond_slots[i]] = 1.0;
+
+		// --- 5. Rebuild the matrix on the condensed pattern. The pattern arrays have to be copied out of
+		// the plan for the same reason the frozen path copies its own: build_without_copy() adopts them
+		// and deletes them when the matrix is cleared, while the plan has to survive for the next Newton
+		// step. It also frees the full arrays it currently holds, so nothing may read full_val after this.
+		int *crs = new int[nd + 1];
+		std::copy(plan->cond_row_start.begin(), plan->cond_row_start.end(), crs);
+		int *cci = new int[cnnz ? cnnz : 1];
+		std::copy(plan->cond_column_index.begin(), plan->cond_column_index.end(), cci);
+		jacobian.build_without_copy(ncol, cnnz, cond_val.release(), cci, crs);
+	}
+
+	// ==================== Static condensation: reconstruction after the Newton update ============
+	// The vendored oomph-lib hook (src/thirdparty/INFO_oomph-lib), called from Problem::newton_solve()
+	// once the dofs have taken the increment and the halos have been synchronised. The condensed system
+	// gave the eliminated dofs an identity row with a zero right-hand side, so dx is zero there and the
+	// update loop left them untouched; their real increment is dx_L = y_C - X_C dx_{E_C}, which is what
+	// this applies. Stage 4 of dev_docs/static_condensation.md.
+	void Problem::actions_after_newton_dof_update(const oomph::DoubleVector &dx)
+	{
+		// The overwhelmingly common case, and the reason this is the first line: with condensation off
+		// (or declined for this assembly) the hook costs one bool test per Newton step.
+		if (!last_jacobian_was_condensed) return;
+
+		CondensationPlan &plan = condensation_plan;
+		if (!plan.generation)
+			throw_runtime_error("Internal error: the last Jacobian was condensed but the elimination plan is "
+								"gone, so the eliminated degrees of freedom cannot be reconstructed.");
+		if (dx.nrow() != plan.ndof)
+			throw_runtime_error("Internal error: the Newton increment has " + std::to_string(dx.nrow()) +
+								" rows but static condensation eliminated from a system of " +
+								std::to_string(plan.ndof) + ".");
+
+		// The ONE place that knows how a global equation number turns into an entry of dx, and the only
+		// thing the distributed stage has to replace. Serially dx is not distributed, so the global
+		// equation number is the index. Distributed (stage 7), a component's E set may reach into rows
+		// this rank does not own, and the plan reconstructs dx_E from the halo-synchronised VALUES,
+		// (u_old - u_new)/Relaxation_factor, rather than from dx -- which is why the reconstruction was
+		// formulated this way in the first place: no halo exchange of the increment is ever needed.
+		const double *dx_pt = dx.values_pt();
+		auto dx_of = [dx_pt](int eqn) -> double { return dx_pt[eqn]; };
+
+		// oomph applies Relaxation_factor to the retained increment; the eliminated dofs are part of the
+		// same Newton step and must be damped by exactly the same amount, or the reconstruction would
+		// describe a different linearised state than the one the retained dofs moved to.
+		const double relax = Relaxation_factor;
+		for (unsigned c = 0; c < plan.components.size(); c++)
+		{
+			CondensationComponent &comp = plan.components[c];
+			// The operators belong to one linearisation and are consumed by one Newton step. Reaching
+			// here twice without an assembly in between would silently apply the same increment again.
+			if (!comp.ops_valid)
+				throw_runtime_error("Internal error: static condensation was asked to reconstruct the eliminated "
+									"degrees of freedom twice from the same Jacobian. The elimination operators of "
+									"a component are consumed by the Newton step they were built for.");
+			const unsigned nl = comp.nL(), ne = comp.nE();
+			for (unsigned k = 0; k < nl; k++)
+			{
+				const double *Xk = &comp.X[(size_t)k * ne];
+				double v = comp.y[k];
+				for (unsigned j = 0; j < ne; j++) v -= Xk[j] * dx_of(comp.E_eqns[j]);
+				oomph::Data *d = comp.L_values[k].first;
+				const unsigned iv = comp.L_values[k].second;
+#ifdef PARANOID
+				// The selection only ever takes unpinned values, and pinning one changes the equation
+				// numbering and hence the pattern id, which rebuilds the plan -- so this can only fire if
+				// something pinned a dof without invalidating the structure. Cheap, but not free: it is a
+				// pointer chase per eliminated dof, hence PARANOID only.
+				if (d->eqn_number(iv) != comp.L_eqns[k])
+					throw_runtime_error("Internal error: a static condensation plan outlived its equation numbering "
+										"(a condensed value now carries equation " + std::to_string(d->eqn_number(iv)) +
+										" instead of " + std::to_string(comp.L_eqns[k]) + ").");
+#endif
+				*(d->value_pt(iv)) -= relax * v;
+			}
+			comp.ops_valid = false;
+		}
+	}
+
+	// Whether this get_jacobian() call must hand back the condensed system. See
+	// dev_docs/static_condensation.md; the refusals throw and the declines are silent on purpose.
+	bool Problem::static_condensation_engages_now()
+	{
+		if (!use_static_condensation) return false;
+		// Only inside a Newton solve entered through one of the pyoomph wrappers, because only there does
+		// the reconstruction hook run afterwards. The debug lever is the test-only exception: it hands
+		// back the condensed system from a bare get_jacobian() so the algebra can be refereed at a fixed
+		// state, with nothing updating any dof.
+		if (!inside_flagged_newton_solve && !_debug_force_condensed_assembly) return false;
+
+		// Refusals: combinations the user has explicitly asked for that cannot be served.
+#ifdef OOMPH_HAS_MPI
+		if (Problem_has_been_distributed || (Communicator_pt && Communicator_pt->nproc() > 1))
+			throw_runtime_error("Static condensation is not implemented for MPI runs yet: a component's rows may live "
+								"on several ranks. Set problem.use_static_condensation = False for distributed runs.");
+#endif
+		if (this->jacobian_reuse_is_enabled())
+			throw_runtime_error("Static condensation cannot be combined with Jacobian reuse: the eliminated dofs are "
+								"reconstructed from operators belonging to the linearisation the matrix was built at, "
+								"and a reused Jacobian is by definition an older one. Disable one of the two.");
+		if (this->globally_convergent_newton_method_is_enabled())
+			throw_runtime_error("Static condensation cannot be combined with the globally convergent (line search) "
+								"Newton method: the line search rescales the increment of the retained dofs after the "
+								"solve, while the eliminated ones would be reconstructed from the unscaled one. Disable "
+								"one of the two.");
+
+		// Declines: assemblies that legitimately need the full system. Silent, because nothing was asked
+		// for that cannot be given -- these routes are not the flagged Newton solve at all.
+		oomph::AssemblyHandler *ah = this->assembly_handler_pt();
+		if (!ah || typeid(*ah) != typeid(oomph::AssemblyHandler)) return false; // bifurcation tracking, eigen, ...
+		if (n_unaugmented_dofs != 0) return false;                             // augmented (continuation) system
+		return this->acquire_condensation_plan() != NULL;                      // nothing selected / no usable pattern
 	}
 
 	// Builds the CSR pattern and the elemental scatter map for one matrix of the assembly, from the same

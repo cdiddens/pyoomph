@@ -27,6 +27,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <vector>
 #include <map>
 #include <unordered_set>
+#include <unordered_map>
 #include <memory>
 #include <tuple>
 #include <typeinfo>
@@ -424,6 +425,108 @@ namespace pyoomph
   };
 #endif
 
+  // --- Static condensation: user-declared selection of element-local dofs -------------------------
+  // (see dev_docs/static_condensation.md)
+  //
+  // A rule is the DURABLE object: it names a mesh, a field and which part of that field is meant, so
+  // it stays meaningful across mesh adaptation, remeshing and renumbering. The concrete (Data*, value)
+  // pairs a rule denotes are derived from it (Problem::update_static_condensation_selection) and are
+  // discarded whenever the equation numbering may have changed -- storing them instead of the rules
+  // would leave dangling Data pointers after the first adapt().
+  class StaticCondensationRule
+  {
+  public:
+    enum class Part
+    {
+      All,           // every value of the field's element-internal Data (DL/D0/DG)
+      Internal,      // the same, spelled out where the intent matters
+      Bubble,        // cell-interior bubble nodes of a nodal field (C1TB/C2TB)
+      ElementPrivate // every internal Data that no other element references; `field` is ignored
+    };
+    Mesh *mesh = nullptr;         // the domain the rule applies to; may be null for ElementPrivate, which then scans every bulk domain
+    std::string field;            // may name a vector field ("velocity"), meaning its _x/_y/_z components
+    std::vector<unsigned> values; // empty = all values of the Data; only meaningful for internal Data
+    Part part = Part::All;
+    StaticCondensationRule() {}
+    StaticCondensationRule(Mesh *m, const std::string &f, const std::vector<unsigned> &v, Part p) : mesh(m), field(f), values(v), part(p) {}
+  };
+
+  // One connected block of the structural coupling graph of the SELECTED dofs (L), together with
+  // everything the elimination of that block needs. For Crouzeix-Raviart a component is exactly one
+  // element's worth of dofs -- the two (2D) bubble velocity values plus the two DL pressure gradient
+  // modes -- which is why the classical CR condensation has to take them jointly: neither half is
+  // invertible on its own.
+  //
+  // E_C is the set of RETAINED dofs the component couples to, by row or by column. Eliminating the
+  // component subtracts A_{E,L_C} A_{L_C,L_C}^-1 A_{L_C,E} from the retained system, whose footprint
+  // is contained in E_C x E_C -- that is the fill-in the condensed pattern has to make room for.
+  //
+  // Everything is keyed by GLOBAL equation number and nothing refers to an element, a mesh or a local
+  // ordering, so a component is a self-contained object that any rank holding its rows can process
+  // identically. That is what makes the distributed stage a question of who owns what rather than a
+  // redesign. The slot lists are precomputed positions in the assembled value arrays, so the numeric
+  // kernel performs no column searches at all.
+  class CondensationComponent
+  {
+  public:
+    std::vector<int> L_eqns;                                  // global eqns of this component, ascending
+    std::vector<std::pair<oomph::Data *, unsigned>> L_values;  // parallel to L_eqns: where the reconstructed increment is written back
+    std::vector<int> E_eqns;                                   // retained dofs structurally coupled to it, ascending
+    // Gather maps into the FULL CSR value array, row-major, -1 where the pattern has no such entry.
+    // A_LL is genuinely sparse within a component (the CR block is not dense), hence the -1s.
+    std::vector<int> LL_slots; // nL x nL
+    std::vector<int> LE_slots; // nL x nE
+    std::vector<int> EL_slots; // nE x nL, gathered from the E rows
+    // Scatter map for the Schur fill-in, row-major nE x nE, into the CONDENSED value array. Never -1:
+    // the condensed pattern is built to contain the whole E_C x E_C block. Entries overlap the
+    // pass-through map wherever the full pattern already had that (E,E) entry, which is intended --
+    // the kernel accumulates into the condensed array rather than assigning.
+    std::vector<int> fill_slots;
+    // The numeric operators, filled per Newton step by stage 3 and consumed by the reconstruction in
+    // stage 4: X = A_LL^-1 A_LE (nL x nE, row-major) and y = A_LL^-1 r_L (nL). Empty until then.
+    std::vector<double> X, y;
+    bool ops_valid = false;
+    unsigned nL() const { return (unsigned)L_eqns.size(); }
+    unsigned nE() const { return (unsigned)E_eqns.size(); }
+  };
+
+  // Everything static condensation needs that depends on the sparsity pattern alone, derived once per
+  // Problem::get_jacobian_structure_id(). See dev_docs/static_condensation.md.
+  //
+  // The condensed matrix keeps the FULL row count and the global equation numbering (NGSolve does the
+  // same): a condensed row is replaced by an identity row with a zero right-hand side, so the solver
+  // returns dx_L = 0 there and the real increment is reconstructed afterwards. Nothing downstream --
+  // ndof, dumps, continuation state, eigen assemblies -- has to know that any of this happened.
+  class CondensationPlan
+  {
+  public:
+    unsigned long generation = 0; // pattern id this was built for; 0 means "not built"
+    unsigned ndof = 0;
+    std::vector<CondensationComponent> components;
+    // The condensed CSR pattern, ndof rows, columns ascending within a row.
+    std::vector<int> cond_row_start;
+    std::vector<int> cond_column_index;
+    // Entries copied verbatim from the full value array: every (E,E) entry the full pattern has.
+    // Parallel arrays, sorted by full slot so the copy is a forward sweep through both.
+    std::vector<int> passthrough_full_slot, passthrough_cond_slot;
+    std::vector<int> condensed_eqns;          // the union of all L_eqns, ascending
+    std::vector<int> L_diagonal_cond_slots;   // parallel: where the identity 1.0 goes
+    // ndof bitmap. char rather than std::vector<bool>: it is read once per nonzero of the full
+    // pattern while building and once per entry in the kernel, where a bit test is not what is wanted.
+    std::vector<char> is_condensed;
+    unsigned long full_nnz = 0; // of the pattern this was derived from, for the reduction statistics
+    unsigned cond_nnz() const { return cond_row_start.empty() ? 0u : (unsigned)cond_row_start.back(); }
+    void clear()
+    {
+      generation = 0; ndof = 0; full_nnz = 0;
+      components.clear();
+      cond_row_start.clear(); cond_column_index.clear();
+      passthrough_full_slot.clear(); passthrough_cond_slot.clear();
+      condensed_eqns.clear(); L_diagonal_cond_slots.clear();
+      is_condensed.clear();
+    }
+  };
+
   class Problem : public oomph::Problem
   {
   protected:
@@ -473,6 +576,81 @@ namespace pyoomph
 
     bool verify_frozen_sparsity=true; // Check per element that nothing nonzero fell outside the frozen pattern
     bool use_frozen_sparsity=true; // Assemble straight into a preallocated CSR when the pattern allows it (see assemble_with_frozen_sparsity)
+
+    // --- Static condensation. Selection only so far: nothing in the assembly, solve or Newton path
+    // reads any of this yet, so the flag can be set without changing a single number.
+    bool use_static_condensation = false;
+    // Whether the user has assigned the switch themselves. A StaticCondensation equation in the tree
+    // switches condensation on by itself, and this is what keeps that from overriding an explicit
+    // `use_static_condensation = False` -- the documented kill switch.
+    bool use_static_condensation_is_explicit = false;
+    // Refusal threshold for the connected components of the selected-dof coupling graph (used from the
+    // plan builder on). A selection that percolates through the mesh instead of decomposing into small
+    // element patches is not a condensation but a dense solve, so it gets refused rather than attempted.
+    unsigned static_condensation_max_component_size = 64;
+    std::vector<StaticCondensationRule> static_condensation_rules;
+    // The resolved selection, keyed by Data* and not by equation number: the eliminated values have to
+    // be written back through value_pt() after the solve, which the equation number alone cannot do.
+    std::unordered_map<oomph::Data *, std::vector<bool>> static_condensation_selected;
+    std::vector<unsigned long> static_condensation_rule_counts; // Parallel to the rules; diagnostics only
+    unsigned long static_condensation_n_selected = 0;
+    bool static_condensation_selection_valid = false;
+    // Bumped by every rule change. It sits in the JacobianStructureKey so that editing the selection
+    // yields a new pattern id even though the FULL pattern is unchanged: what a solver caches under
+    // that id is the CONDENSED matrix, whose pattern very much depends on the rules.
+    unsigned long static_condensation_rules_revision = 0;
+    // Exactly ONE cached plan, unlike the eight-slot frozen-sparsity cache. Condensation only ever
+    // engages on the default Newton assembly of the unaugmented problem, so there is a single pattern
+    // in play; the alternation that forced a keyed cache on the frozen sparsity (an eigen assembly, a
+    // preconditioner matrix from another residual) never reaches this path at all.
+    CondensationPlan condensation_plan;
+    unsigned long condensation_plan_rebuilds = 0;
+    // Derives the plan from the frozen full pattern. Returns false, plan cleared, when the route does
+    // not apply (nothing selected, no usable pattern, distributed or augmented system); THROWS when
+    // the selection itself cannot be condensed -- silently not eliminating what the user asked for
+    // would be a performance mystery rather than an error.
+    bool build_condensation_plan(CondensationPlan &plan);
+    // Test-only lever, exposed as _debug_force_condensed_assembly: makes get_jacobian() hand back the
+    // CONDENSED system without a Newton solve being in progress. It exists so the algebra can be
+    // refereed against scipy at a fixed state; the solve path activates condensation on its own.
+    bool _debug_force_condensed_assembly = false;
+    bool last_jacobian_was_condensed = false; // What the last get_jacobian() actually produced
+    // Set for the duration of a Newton solve entered through one of the wrappers further down. This is
+    // what turns a selection into an actual elimination: only inside such a solve is there a
+    // reconstruction step (actions_after_newton_dof_update) to follow the condensed assembly, so every
+    // other assembly -- the residual convergence check, eigen and Hessian matrices, arclength
+    // continuation, a user calling get_jacobian() -- must keep seeing the full system. The guard saves
+    // and restores rather than clearing, so a nested solve (a Python actions_* hook that solves again)
+    // comes back to the outer state, and it restores on the way out of a throw as well: a Newton solve
+    // that fails to converge throws NewtonSolverError straight through here.
+    bool inside_flagged_newton_solve = false;
+    class FlaggedNewtonSolveGuard
+    {
+      Problem *p;
+      bool saved;
+
+    public:
+      FlaggedNewtonSolveGuard(Problem *pr) : p(pr), saved(pr->inside_flagged_newton_solve) { p->inside_flagged_newton_solve = true; }
+      ~FlaggedNewtonSolveGuard() { p->inside_flagged_newton_solve = saved; }
+    };
+    // oomph::Problem::Use_globally_convergent_newton_method is PRIVATE and has no getter, so the flag
+    // is mirrored here. Both switches below shadow the (non-virtual) base ones, and every route into
+    // them -- the nanobind binding included -- goes through a pyoomph::Problem, so the mirror cannot
+    // drift. Condensation refuses the line search: it damps the increment of the RETAINED dofs only,
+    // and the eliminated ones are reconstructed from an increment that was never scaled.
+    bool globally_convergent_newton_mirror = false;
+    // Whether this very get_jacobian() call must condense. Throws for combinations that cannot work
+    // (MPI, Jacobian reuse, line search) and declines quietly for assemblies that legitimately need
+    // the full system (a bifurcation/eigen assembly handler, an augmented system, nothing selected).
+    bool static_condensation_engages_now();
+    // The numeric kernel: turns the freshly assembled FULL (residuals, jacobian) into the condensed
+    // system, in place. Stage 3 of dev_docs/static_condensation.md.
+    void apply_static_condensation(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian);
+    // Scratch of the kernel, reused across components and across Newton steps: A_LL (nL x nL), the
+    // right-hand sides A_LE together with r_L (nL x (nE+1)), A_EL (nE x nL) and the pivot sequence.
+    // Kept as members rather than locals so that a solve settles into doing no allocation at all.
+    std::vector<double> condensation_scratch_LL, condensation_scratch_rhs, condensation_scratch_EL;
+    std::vector<int> condensation_scratch_pivots;
     // Section 7e: let a bifurcation-tracking assembly handler describe its AUGMENTED elemental block
     // (see AugmentedBlockSpec) so the frozen path can apply to it too -- it otherwise cannot, the block
     // being several times larger than the element's own field description. Only handlers that provide a
@@ -573,7 +751,11 @@ namespace pyoomph
     // by a solver from before a renumbering can never accidentally match afterwards.
     // Keyed on the assembly handler's TYPE, not its address: the eigenproblem assembly news and deletes
     // its handler on every call, so the address varies and an address key would miss every time.
-    typedef std::tuple<std::string, unsigned long, unsigned, std::string> JacobianStructureKey; // handler type, ndof, n_unaugmented, active residual
+    // Static condensation is in the key even though it does not change the FULL pattern: what the
+    // solver is handed under this id is the CONDENSED matrix once the switch is on, so reusing a
+    // symbolic factorisation across a toggle -- or across an edit of the rules, hence the revision
+    // counter -- would factorise one pattern and back-substitute on another.
+    typedef std::tuple<std::string, unsigned long, unsigned, std::string, bool, unsigned long> JacobianStructureKey; // handler type, ndof, n_unaugmented, active residual, condensation on, rules revision
     std::map<JacobianStructureKey, unsigned long> jacobian_structure_ids;
     unsigned long next_jacobian_structure_id = 0;
 
@@ -695,6 +877,59 @@ namespace pyoomph
     const std::vector<unsigned long long> &get_frozen_sparsity_zero_by_matrix() const { return frozen_sparsity_zero_by_matrix; }
     const std::map<std::pair<std::string, std::string>, std::pair<unsigned long long, unsigned long long>> &get_frozen_fill_breakdown() const { return frozen_fill_breakdown; }
     unsigned get_frozen_sparsity_cache_capacity() const { return frozen_sparsity_cache_capacity; }
+
+    // --- Static condensation (see dev_docs/static_condensation.md) ---
+    // Master switch. Off by default. On its own it still changes nothing: the assembly only condenses
+    // when a flagged Newton solve (stage 4) or the debug lever below additionally asks for it, so the
+    // rules can be declared and inspected either way. Invalidates the pattern id because everything
+    // derived from the pattern will differ once condensation actually engages.
+    // Every assignment from the user counts as explicit, including one that changes nothing: that is
+    // what turns `use_static_condensation = False` into a kill switch which a StaticCondensation
+    // equation added to the tree afterwards cannot undo.
+    void set_use_static_condensation(bool yesno) { use_static_condensation_is_explicit = true; if (yesno == use_static_condensation) return; use_static_condensation = yesno; invalidate_jacobian_structure(); }
+    bool get_use_static_condensation() const { return use_static_condensation; }
+    bool get_use_static_condensation_is_explicit() const { return use_static_condensation_is_explicit; }
+    // Switch condensation on because the equation tree holds a StaticCondensation instance. Called on
+    // every (re-)registration of its rules, so it has to be idempotent, and it never overrules the
+    // user: an explicit assignment - in either direction - wins.
+    void auto_enable_static_condensation() { if (use_static_condensation_is_explicit || use_static_condensation) return; use_static_condensation = true; invalidate_jacobian_structure(); }
+    void set_static_condensation_max_component_size(unsigned n) { static_condensation_max_component_size = (n < 1 ? 1 : n); invalidate_jacobian_structure(); }
+    unsigned get_static_condensation_max_component_size() const { return static_condensation_max_component_size; }
+    // Declare a selection. `part` is "all"/"internal"/"bubble"/"element_private"; `mesh` may be null
+    // only for "element_private", which then scans every bulk domain of the problem. A non-null mesh
+    // restricts "element_private" to that one domain, which is what a StaticCondensation equation
+    // added to a single domain means; the reverse external-data scan stays problem-wide either way,
+    // since an interface element of any domain may adopt this domain's internal Data.
+    void add_static_condensation_rule(Mesh *mesh, const std::string &field, const std::vector<unsigned> &values, const std::string &part);
+    void clear_static_condensation_rules();
+    // Resolve the rules to concrete (Data*, value) pairs. Rank-local and deterministic: no
+    // communication, and halo elements resolve exactly as they do on their owner.
+    void update_static_condensation_selection();
+    void ensure_static_condensation_selection() { if (!static_condensation_selection_valid) update_static_condensation_selection(); }
+    const std::unordered_map<oomph::Data *, std::vector<bool>> &get_static_condensation_selection() { ensure_static_condensation_selection(); return static_condensation_selected; }
+    std::vector<long> get_static_condensation_dof_eqns(); // Sorted global equation numbers of the selection
+    unsigned long get_static_condensation_n_selected() { ensure_static_condensation_selection(); return static_condensation_n_selected; }
+    unsigned get_static_condensation_n_rules() const { return static_condensation_rules.size(); }
+    // How many values each rule selected, in rule order. Rules may overlap, so these sum to at least
+    // (usually more than) the size of the union reported by get_static_condensation_n_selected().
+    const std::vector<unsigned long> &get_static_condensation_rule_counts() { ensure_static_condensation_selection(); return static_condensation_rule_counts; }
+    // The plan for the current pattern id, built if necessary. NULL when there is nothing to condense
+    // or the route does not apply; throws when the selection is refused (see build_condensation_plan).
+    CondensationPlan *acquire_condensation_plan();
+    // The cached plan without building one -- diagnostics must not change what they measure, the same
+    // reason get_frozen_sparsity_nnz() does not build a pattern either.
+    const CondensationPlan *get_condensation_plan() const { return condensation_plan.generation ? &condensation_plan : NULL; }
+    unsigned long get_condensation_plan_rebuild_count() const { return condensation_plan_rebuilds; }
+    void set_debug_force_condensed_assembly(bool yesno) { _debug_force_condensed_assembly = yesno; }
+    bool get_debug_force_condensed_assembly() const { return _debug_force_condensed_assembly; }
+    bool get_last_jacobian_was_condensed() const { return last_jacobian_was_condensed; }
+    // Shadowing the base class deliberately: see globally_convergent_newton_mirror.
+    void enable_globally_convergent_newton_method() { globally_convergent_newton_mirror = true; oomph::Problem::enable_globally_convergent_newton_method(); }
+    void disable_globally_convergent_newton_method() { globally_convergent_newton_mirror = false; oomph::Problem::disable_globally_convergent_newton_method(); }
+    bool globally_convergent_newton_method_is_enabled() const { return globally_convergent_newton_mirror; }
+    // Human-readable names for a handful of global equation numbers, by scanning the elements for one
+    // that owns them. O(nelement); for error messages, not for loops.
+    std::vector<std::string> describe_global_dofs(const std::vector<long> &eqns);
 #ifdef OOMPH_HAS_MPI
     void set_use_frozen_distributed_sparsity(bool yesno) { use_frozen_distributed_sparsity = yesno; if (!yesno) { distributed_frozen_sparsity.clear(); distributed_residual_plan.clear(); } }
     bool get_use_frozen_distributed_sparsity() const { return use_frozen_distributed_sparsity; }
@@ -721,6 +956,11 @@ namespace pyoomph
 #ifdef OOMPH_HAS_MPI
       distributed_frozen_sparsity.clear(); distributed_residual_plan.clear();
 #endif
+      // Only the RESOLVED condensation selection dies here (its Data pointers and equation numbers are
+      // exactly what a renumbering or an adapt() invalidates); the rules themselves are meant to survive.
+      static_condensation_selected.clear(); static_condensation_n_selected = 0;
+      static_condensation_selection_valid = false;
+      condensation_plan.clear();
     }
 
     // Phase-0 instrumentation: run the elemental part of the assembly (get_all_vectors_and_matrices
@@ -836,6 +1076,30 @@ namespace pyoomph
         return dynamic_cast<pyoomph::Mesh*>(oomph::Problem::mesh_pt());
        }*/
 
+    // --- Newton entry points, wrapped only to mark the solve as one that may condense -------------
+    // These shadow the (non-virtual) oomph-lib functions of the same signature and do nothing but set
+    // inside_flagged_newton_solve for the duration of the call. The nanobind bindings name them as
+    // pyoomph::Problem members, so binding them picks these up automatically; oomph-lib's own internal
+    // calls (steady_newton_solve -> newton_solve(max_adapt) -> newton_solve(), the unsteady variants,
+    // the doubly adaptive helper) resolve to the base versions, which is exactly right -- they are
+    // already running inside the outermost wrapper's guard.
+    //
+    // newton_solve_continuation() / arc_length_step() are deliberately NOT wrapped. Continuation runs
+    // an augmented system with its own dof-update loop, which the vendored reconstruction hook does not
+    // see, so a condensed assembly there would leave the eliminated dofs at their old values. Left
+    // unflagged it simply assembles the full system and stays correct, which is what
+    // static_condensation_engages_now() would do anyway (the augmented system is one of its declines).
+    void newton_solve() { FlaggedNewtonSolveGuard g(this); oomph::Problem::newton_solve(); }
+    void newton_solve(unsigned const &max_adapt) { FlaggedNewtonSolveGuard g(this); oomph::Problem::newton_solve(max_adapt); }
+    void steady_newton_solve(unsigned const &max_adapt = 0) { FlaggedNewtonSolveGuard g(this); oomph::Problem::steady_newton_solve(max_adapt); }
+    void unsteady_newton_solve(const double &dt) { FlaggedNewtonSolveGuard g(this); oomph::Problem::unsteady_newton_solve(dt); }
+    void unsteady_newton_solve(const double &dt, const bool &shift_values) { FlaggedNewtonSolveGuard g(this); oomph::Problem::unsteady_newton_solve(dt, shift_values); }
+    void unsteady_newton_solve(const double &dt, const unsigned &max_adapt, const bool &first, const bool &shift = true) { FlaggedNewtonSolveGuard g(this); oomph::Problem::unsteady_newton_solve(dt, max_adapt, first, shift); }
+    double adaptive_unsteady_newton_solve(const double &dt_desired, const double &epsilon) { FlaggedNewtonSolveGuard g(this); return oomph::Problem::adaptive_unsteady_newton_solve(dt_desired, epsilon); }
+    double adaptive_unsteady_newton_solve(const double &dt_desired, const double &epsilon, const bool &shift_values) { FlaggedNewtonSolveGuard g(this); return oomph::Problem::adaptive_unsteady_newton_solve(dt_desired, epsilon, shift_values); }
+    double doubly_adaptive_unsteady_newton_solve(const double &dt, const double &epsilon, const unsigned &max_adapt, const bool &first, const bool &shift = true) { FlaggedNewtonSolveGuard g(this); return oomph::Problem::doubly_adaptive_unsteady_newton_solve(dt, epsilon, max_adapt, first, shift); }
+    double doubly_adaptive_unsteady_newton_solve(const double &dt, const double &epsilon, const unsigned &max_adapt, const unsigned &suppress_resolve_after_spatial_adapt_flag, const bool &first, const bool &shift = true) { FlaggedNewtonSolveGuard g(this); return oomph::Problem::doubly_adaptive_unsteady_newton_solve(dt, epsilon, max_adapt, suppress_resolve_after_spatial_adapt_flag, first, shift); }
+
     double &newton_relaxation_factor() { return Relaxation_factor; }
     double &DTSF_max_increase_factor() { return DTSF_max_increase; }
     double &DTSF_min_decrease_factor() { return DTSF_min_decrease; }
@@ -866,6 +1130,10 @@ namespace pyoomph
     using oomph::Problem::actions_after_newton_solve;
     using oomph::Problem::actions_before_newton_step;
     using oomph::Problem::actions_after_newton_step;
+    // The vendored oomph-lib hook (src/thirdparty/INFO_oomph-lib): fires inside newton_solve() right
+    // after the dofs took the increment, with that increment. Static condensation reconstructs the
+    // dofs it eliminated here; with condensation off it returns on the first line.
+    void actions_after_newton_dof_update(const oomph::DoubleVector &dx) override;
     #ifdef OOMPH_HAS_MPI
     using oomph::Problem::actions_before_distribute;
     using oomph::Problem::actions_after_distribute;

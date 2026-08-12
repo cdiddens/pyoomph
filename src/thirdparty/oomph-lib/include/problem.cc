@@ -9398,6 +9398,12 @@ namespace oomph
       this->synchronise_all_dofs();
 #endif
 
+      //FOR PYOOMPH: the dofs now carry the update and the halos agree with them, but
+      // nothing has looked at the new state yet. This is the only point at which the raw
+      // increment dx is still available together with the updated dofs, which is what
+      // pyoomph's static condensation needs to reconstruct the dofs it eliminated.
+      actions_after_newton_dof_update(dx);
+
       // Do any updates that are required
       actions_after_newton_step();
       actions_before_newton_convergence_check();

@@ -920,6 +920,115 @@ void PyReg_Problem(nb::module_ &m)
 			 "Number of nonzeros in the frozen sparsity pattern currently held for the given matrix of a multi-matrix assembly, or 0 if none is built. "
 			 "A positive value is the only direct evidence that the preallocated-CSR assembly path actually engaged rather than quietly falling back, "
 			 "which is worth checking before believing any benchmark of it.")
+		.def_prop_rw("use_static_condensation", &pyoomph::Problem::get_use_static_condensation, &pyoomph::Problem::set_use_static_condensation,
+					  "Master switch for static condensation: eliminating the element-local degrees of freedom selected by a ``StaticCondensation`` equation (or by "
+					  "``condense_dofs()``) from the linear system before it is handed to the solver, and reconstructing them afterwards. EXPERIMENTAL, and SERIAL "
+					  "ONLY. Off by default, but adding a ``StaticCondensation`` equation to the equation tree switches it on automatically - assigning it "
+					  "explicitly, in either direction, always wins over that, so setting it to False is the kill switch that disables the feature wholesale. "
+					  "The selection rules are declared independently of it, so a selection can be built up and inspected with this left off. "
+					  "The elimination is exact -- the same solution and the same Newton iteration count as with the switch off -- and buys roughly half the "
+					  "factorisation time on a Crouzeix-Raviart system. Only Newton solves are affected: residual evaluations, eigenvalue and Hessian "
+					  "assemblies, arclength continuation and a bare ``assemble_jacobian()`` always see the full system. Three combinations are refused with an "
+					  "error rather than silently ignored: an MPI run, Jacobian reuse, and the globally convergent (line search) Newton method.")
+		.def_prop_rw("static_condensation_max_component_size", &pyoomph::Problem::get_static_condensation_max_component_size, &pyoomph::Problem::set_static_condensation_max_component_size,
+					  "Largest connected component of mutually coupled condensed dofs that will be accepted (default 64). Condensation is only a win while the "
+					  "selected dofs decompose into small per-element patches, each of which is inverted densely; a selection that instead percolates through the "
+					  "mesh (interior-penalty DG velocities, say) would amount to a dense solve and is refused with a diagnostic naming the offending size.")
+		.def("_auto_enable_static_condensation", &pyoomph::Problem::auto_enable_static_condensation,
+			 "Switch static condensation on because a ``StaticCondensation`` equation is present in the equation tree. Idempotent, and a no-op once "
+			 "``use_static_condensation`` has been assigned explicitly, so an explicit False stays a kill switch. Called from the equation's registration hook, "
+			 "which fires again after every remeshing - do not call it directly.")
+		.def_prop_ro("_use_static_condensation_is_explicit", &pyoomph::Problem::get_use_static_condensation_is_explicit,
+					  "Whether ``use_static_condensation`` has been assigned by the user (in either direction) rather than left to the automatic enabling done by a "
+					  "``StaticCondensation`` equation.")
+		.def("_add_static_condensation_rule", [](pyoomph::Problem &self, MeshHandleBase *mesh_h, const std::string &field, const std::vector<unsigned> &values, const std::string &part)
+			 { self.add_static_condensation_rule(mesh_h ? mesh_h->mesh() : NULL, field, values, part); },
+			 nb::arg("mesh").none(), nb::arg("field"), nb::arg("values"), nb::arg("part"),
+			 "Declare which degrees of freedom static condensation may eliminate. Rules are durable: they name a mesh, a field and a part, so they survive mesh "
+			 "adaptation and renumbering, and are re-resolved to concrete data whenever the equation numbering changes. Several rules may be added and their "
+			 "selections are unioned; overlaps are harmless. ``part`` is one of ``\"all\"``/``\"internal\"`` (every value of the field's element-internal Data, "
+			 "i.e. a DL, D0 or DG field), ``\"bubble\"`` (the cell-interior bubble nodes of a nodal C1TB/C2TB field), or ``\"element_private\"`` (every internal "
+			 "Data no other element reads -- ``field`` is ignored, and ``mesh`` may be None to scan every bulk domain or name one domain to restrict the "
+			 "selection to it). ``values`` restricts an internal-Data selection to those value indices "
+			 "(e.g. the gradient modes of a DL pressure), or selects all of them when empty. Pinned and constrained values are never selected. "
+			 "Use a ``StaticCondensation`` equation, or ``Problem.condense_dofs()``, rather than this directly: those keep the rule set in sync with the meshes, "
+			 "which this does not - a rule holds the mesh it was given, and remeshing replaces that mesh.")
+		.def("_clear_static_condensation_rules", &pyoomph::Problem::clear_static_condensation_rules,
+			 "Drop all static condensation rules, along with anything resolved from them. Does not change ``use_static_condensation``.")
+		.def("_update_static_condensation_selection", &pyoomph::Problem::update_static_condensation_selection,
+			 "Resolve the static condensation rules to concrete degrees of freedom now. Happens by itself when the selection is needed; calling it explicitly is "
+			 "only useful for inspection and tests. Raises if a rule names a field the domain does not have, or asks for a part the field cannot provide.")
+		.def("_get_static_condensation_dofs", [](pyoomph::Problem &self) { return self.get_static_condensation_dof_eqns(); },
+			 "The global equation numbers currently selected for condensation, sorted ascending. Resolves the rules first if necessary. Pinned dofs never appear, "
+			 "so this shrinks when boundary conditions are applied to a selected field.")
+		.def("_get_static_condensation_stats", [](pyoomph::Problem &self) {
+				 nb::dict res;
+				 res["n_rules"] = self.get_static_condensation_n_rules();
+				 res["n_selected"] = self.get_static_condensation_n_selected();
+				 res["n_data"] = (unsigned long)self.get_static_condensation_selection().size();
+				 res["n_valid_eqns"] = (unsigned long)self.get_static_condensation_dof_eqns().size();
+				 res["per_rule"] = self.get_static_condensation_rule_counts();
+				 res["plan_rebuilds"] = self.get_condensation_plan_rebuild_count();
+				 const pyoomph::CondensationPlan *plan = self.get_condensation_plan();
+				 res["has_plan"] = (plan != NULL);
+				 if (plan)
+				 {
+					 unsigned long smin = 0, smax = 0, ssum = 0;
+					 unsigned long long fill_slots = 0;
+					 for (unsigned i = 0; i < plan->components.size(); i++)
+					 {
+						 const unsigned n = plan->components[i].nL();
+						 if (!i || n < smin) smin = n;
+						 if (n > smax) smax = n;
+						 ssum += n;
+						 fill_slots += (unsigned long long)plan->components[i].nE() * plan->components[i].nE();
+					 }
+					 const unsigned long nc = (unsigned long)plan->components.size();
+					 res["n_components"] = nc;
+					 res["component_size_min"] = smin;
+					 res["component_size_max"] = smax;
+					 res["component_size_mean"] = (nc ? (double)ssum / (double)nc : 0.0);
+					 res["full_nnz"] = plan->full_nnz;
+					 res["condensed_nnz"] = (unsigned long)plan->cond_nnz();
+					 res["n_passthrough"] = (unsigned long)plan->passthrough_full_slot.size();
+					 res["n_fill_slots"] = fill_slots;
+					 // Entries the condensed pattern has that neither came from the full pattern nor are one
+					 // of the identity rows: the actual price of the Schur fill-in.
+					 res["n_fill_in_entries"] = (unsigned long)plan->cond_nnz() - (unsigned long)plan->passthrough_full_slot.size() - (unsigned long)plan->condensed_eqns.size();
+				 }
+				 return res;
+			 },
+			 "Introspection on the resolved condensation selection: ``n_rules``, ``n_selected`` (values in the union), ``n_data`` (Data objects holding at least "
+			 "one of them), ``n_valid_eqns`` (of those, how many have a global equation number -- equal to ``n_selected``, since pinned values are not selected in "
+			 "the first place) and ``per_rule`` (how many values each rule selected, in rule order; these sum to more than ``n_selected`` when rules overlap). "
+			 "If an elimination plan has been built (see ``_build_condensation_plan()``), ``has_plan`` is True and the dictionary additionally reports "
+			 "``n_components`` and the component size ``component_size_min``/``_max``/``_mean``, the matrix sizes ``full_nnz`` and ``condensed_nnz``, and the "
+			 "split of the condensed entries into ``n_passthrough`` (copied verbatim from the full matrix), ``n_fill_slots`` (positions the Schur complements "
+			 "write to, counting overlaps with the pass-through ones) and ``n_fill_in_entries`` (entries that the full pattern did not have at all).")
+		.def("_build_condensation_plan", [](pyoomph::Problem &self) { return self.acquire_condensation_plan() != NULL; },
+			 "Build (or refresh) the static condensation elimination plan for the current sparsity pattern, and report whether there is one. False means there "
+			 "is nothing to condense or the route does not apply -- no dofs selected, a value-dependent sparsity pattern, an augmented or distributed system. "
+			 "Raises if the selection cannot be eliminated: a coupling component larger than ``static_condensation_max_component_size``, or a block that is "
+			 "structurally singular because a selected dof has no selected equation determining it. Test and diagnostic entry point; the solve path builds the "
+			 "plan by itself.")
+		.def("_get_condensation_component_sizes", [](pyoomph::Problem &self) {
+				 std::vector<std::pair<unsigned, unsigned>> res;
+				 const pyoomph::CondensationPlan *plan = self.get_condensation_plan();
+				 if (plan)
+					 for (const auto &c : plan->components) res.push_back(std::make_pair(c.nL(), c.nE()));
+				 return res;
+			 },
+			 "For each connected component of the built plan, the pair (number of condensed dofs, number of retained dofs it couples to). Empty when no plan "
+			 "has been built. Components come in ascending order of their smallest equation number, so the list is reproducible.")
+		.def_prop_rw("_debug_force_condensed_assembly", &pyoomph::Problem::get_debug_force_condensed_assembly, &pyoomph::Problem::set_debug_force_condensed_assembly,
+					  "TEST ONLY. Makes every Jacobian assembly apply static condensation, without a Newton solve being in progress, so that the condensed system "
+					  "can be inspected and refereed at a fixed state. Requires ``use_static_condensation`` to be on as well; it does not switch condensation on "
+					  "by itself, and it does not reconstruct the eliminated dofs. Do not use it in a solve.")
+		.def("_last_jacobian_was_condensed", &pyoomph::Problem::get_last_jacobian_was_condensed,
+			 "Whether the most recent Jacobian assembly actually handed back the condensed system. False whenever condensation was not requested or quietly "
+			 "declined (a bifurcation/eigen assembly handler, an augmented system, nothing selected), which is the only direct evidence that the path engaged. "
+			 "Written by ``get_jacobian()`` alone, so an eigenproblem or mass-matrix assembly leaves it reporting on the preceding Newton step; check the size "
+			 "of the matrix those produce instead.")
 		.def_prop_ro("jacobian_structure_id", &pyoomph::Problem::get_jacobian_structure_id,
 					  "Identifier of the current Jacobian sparsity pattern. Anything derived from the pattern stays valid as long as this value is unchanged "
 					  "and non-zero. It is 0 whenever ``keep_structural_zeros`` is off, since the pattern is then value-dependent and cannot be reused.")

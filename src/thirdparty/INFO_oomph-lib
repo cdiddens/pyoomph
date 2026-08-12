@@ -583,3 +583,27 @@ of newres's buffer for every row beyond the first rank's share. newres is now bu
 distribution before the assembly. Only the FD branch is affected; pyoomph registers its global
 parameters as analytically differentiable, so it normally takes the branch above it.
 Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one.
+
+problem.h / problem.cc (Changed on 12th August 2026, actions_after_newton_dof_update hook):
+New protected virtual "void actions_after_newton_dof_update(const DoubleVector& dx) {}" (problem.h,
+next to the other actions_* hooks), called in Problem::newton_solve() between synchronise_all_dofs()
+and actions_after_newton_step(), i.e. after "*Dof_pt[l] -= Relaxation_factor*dx_pt[l]" has been
+applied and before anything looks at the new state. It exists for pyoomph's static condensation
+(dev_docs/static_condensation.md): the eliminated dofs are replaced by identity rows with a zero
+right-hand side, so the solver returns dx = 0 for them, and their real increment is
+dx_L = y_C - X_C*dx_{E_C}, which needs the retained entries of dx. actions_after_newton_step() alone
+cannot serve this -- it exposes no increment at all, and by the time it runs dx is the only place the
+retained increment still exists in unmixed form (the dofs already carry it scaled by
+Relaxation_factor, and one Newton step later it is gone).
+Only Problem::newton_solve() got the call. The other Newton entry points (steady_newton_solve,
+newton_solve(max_adapt), all unsteady_newton_solve overloads, adaptive_ and
+doubly_adaptive_unsteady_newton_solve) have no dof-update loop of their own and funnel into it.
+newton_solve_continuation() does have its own update loop and was deliberately left alone: pyoomph
+never condenses an arclength continuation step (the augmented system assembles full), so a hook there
+would only fire with nothing to reconstruct.
+The hook fires in the globally-convergent (line search) branch too, where dx has been negated and
+rescaled in place and no longer describes what the dofs did; putting the call inside the direct-update
+branch instead would have made the hook mean two different things depending on a flag. pyoomph refuses
+to combine static condensation with the line search, and the doc comment says so.
+Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user of
+the library.
