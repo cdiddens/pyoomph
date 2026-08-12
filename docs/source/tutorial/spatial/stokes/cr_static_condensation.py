@@ -1,24 +1,36 @@
-#  Lid-driven cavity with Crouzeix-Raviart elements, with and without static condensation of the
-#  element-local degrees of freedom. The physics is beside the point here - what the script reports is
-#  how large a system the linear solver is handed, and how long it takes to factorize it.
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#  
+#  @section LICENSE
+# 
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+# 
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+# 
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+# 
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 #
-#      python3 cr_static_condensation.py                  # 2d, plain
-#      python3 cr_static_condensation.py --condense       # 2d, bubbles and pressure gradients removed
-#      python3 cr_static_condensation.py --3d --condense  # the same in 3d
-#      python3 cr_static_condensation.py --quads --condense  # on quadrilaterals instead of triangles
-#      python3 cr_static_condensation.py --N 30           # a finer mesh
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
 
-import sys
 
 from pyoomph import *
 from pyoomph.expressions import *
+# Using the predefined equations for the Navier-Stokes equations here
 from pyoomph.equations.navier_stokes import NavierStokesEquations, NoSlipBC
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh, CuboidBrickMesh
 
-CONDENSE = "--condense" in sys.argv
-THREE_D = "--3d" in sys.argv
-QUADS = "--quads" in sys.argv          # tensor-product elements instead of simplices
-N = int(sys.argv[sys.argv.index("--N") + 1]) if "--N" in sys.argv else (8 if THREE_D else 24)
 
 
 class TetCubeMesh(GmshTemplate):
@@ -50,20 +62,23 @@ class TetCubeMesh(GmshTemplate):
 class DrivenCavity(Problem):
     def __init__(self):
         super().__init__()
-        self.N = N
+        self.N = 8
+        self.three_dim=False
+        self.quads_or_hexs=False
+        self.condense=True  # set to False to see the full system, True to see the condensed system
         self.reynolds = 100  # only used to pick the viscosity, the cavity is driven at unit speed
 
     def define_problem(self):
         # Simplices by default, tensor-product elements with --quads. Both have exactly one
         # element-interior velocity node to condense: the added cubic bubble on a triangle or
         # tetrahedron, the centroid node of the "C2" element on a quadrilateral or brick.
-        if THREE_D:
-            self += CuboidBrickMesh(N=self.N, size=[1, 1, 1]) if QUADS else TetCubeMesh(N=self.N)
+        if self.three_dim:
+            self += CuboidBrickMesh(N=self.N, size=[1, 1, 1]) if self.quads_or_hexs else TetCubeMesh(N=self.N)
             lid, walls = "top", ["bottom", "left", "right", "front", "back"]
             driven = dict(velocity_x=1, velocity_y=0, velocity_z=0)
         else:
             self += RectangularQuadMesh(N=self.N, size=[1, 1],
-                                        split_in_tris=False if QUADS else "crossed")
+                                        split_in_tris=False if self.quads_or_hexs else "crossed")
             lid, walls = "top", ["bottom", "left", "right"]
             driven = dict(velocity_x=1, velocity_y=0)
 
@@ -77,7 +92,7 @@ class DrivenCavity(Problem):
         for w in walls:
             eqs += NoSlipBC() @ w
 
-        if CONDENSE:
+        if self.condense:
             # The classical Crouzeix-Raviart elimination. Both halves are needed: neither the bubble
             # velocities nor the pressure gradients are invertible on their own, and the constant
             # pressure mode has to stay a global unknown - which is exactly what "DL_gradients" means.
@@ -92,7 +107,7 @@ if __name__ == "__main__":
         problem.solve()
         stats = problem._get_static_condensation_stats()
         n = problem.ndof()
-        print(f"{'3d' if THREE_D else '2d'} cavity, N={N}")
+        print(f"{'3d' if problem.three_dim else '2d'} cavity, N={problem.N}")
         print(f"  degrees of freedom     : {n}")
         if stats.get("n_selected", 0):
             print(f"  condensed away         : {stats['n_selected']} in {stats['n_components']} "
