@@ -1,3 +1,5 @@
+.. _secdg:
+
 Discontinuous Galerkin methods
 ==============================
 
@@ -20,5 +22,6 @@ Opposed to the pure elemental discontinuous spaces ``"D0"`` and ``"DL"`` discuss
    dg/advdiffu.rst
    dg/weakdirichlet.rst
    dg/facetfields.rst
+   dg/hdg.rst
 
 

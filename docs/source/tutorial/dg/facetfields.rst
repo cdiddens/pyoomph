@@ -104,15 +104,7 @@ The same transfer is used upon remeshing (cf. :numref:`secaleremeshing`), where 
 Condensing the bulk unknowns away
 '''''''''''''''''''''''''''''''''
 
-An unknown on the facets changes what the *bulk* unknowns are coupled to. Without one, the facet terms of a discontinuous Galerkin method connect each element directly to its neighbours, so the bulk unknowns of the whole mesh form one large coupled system. With one, the elements only ever talk to the facets between them: the bulk unknowns of an element couple to that element and to its own facets, and to nothing else.
-
-That is precisely the condition :py:class:`~pyoomph.equations.generic.StaticCondensation` requires (cf. :numref:`secspatialcrcondensation`). Provided the formulation is genuinely hybridized - i.e. the two sides of a facet interact only through the facet unknown, which in particular requires a stabilization term, since without one the element-local problem is a pure Neumann problem and hence not invertible - the bulk field can be eliminated element by element::
-
-    eqs += StaticCondensation("u")
-
-The linear solver is then handed the facet unknowns alone, which is the defining property of a hybridizable discontinuous Galerkin (HDG) method: the size of the global system is set by the skeleton, not by the bulk. Note that the automatic selection :py:meth:`~pyoomph.generic.problem.Problem.condense_element_private_dofs` will *not* pick the bulk field here, since the facet elements read it as external data; it has to be named explicitly, as above.
-
-If the facet terms couple the two sides directly after all - an interior penalty formulation with a ``jump(u)*jump(v)`` term, for instance - the elimination is refused with an explanation, since the selected unknowns then form one connected block spanning the entire mesh rather than one block per element.
+An unknown on the facets also changes what the *bulk* unknowns are coupled to. Without one, the facet terms of a discontinuous Galerkin method connect each element directly to its neighbours. With one, the elements only ever talk to the facets between them, so the bulk unknowns of an element couple to that element alone - which is precisely the condition under which they can be eliminated from the linear system element by element. That is the subject of the next section, :numref:`secdghdg`.
 
 
 .. only:: html
