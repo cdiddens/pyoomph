@@ -21,6 +21,7 @@ the useful part. Code examples in `examples/` are runnable companions, not snipp
 | [spatial_error_estimators.md](spatial_error_estimators.md) | Z2 in co-dimension, `desired_ndof`, and per-criterion error normalisation. |
 | [mesh_construction.md](mesh_construction.md) | Boundary-layer meshes that survive refinement, Gmsh element winding, and inverted elements. |
 | [mesh_point_locator.md](mesh_point_locator.md) | Point location and mesh-to-mesh transfer: zeta, closest-point projection, and the L2 projection solve. |
+| [internal_facet_fields.md](internal_facet_fields.md) | Unknowns on the interior-facet skeleton (HDG traces, mortar multipliers): per-facet storage, the pinned opposite dummy, 3d enumeration, and how the fields survive adaptation and remeshing. |
 | [mesh_data_cache.md](mesh_data_cache.md) | Typed cache keys, and merging a distributed mesh's data into one global view. |
 
 ## MPI

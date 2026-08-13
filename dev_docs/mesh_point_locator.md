@@ -4,7 +4,8 @@ Status: **in use by default.** `MeshPointLocator` (`src/pointlocator.{hpp,cpp}`)
 `oomph::MeshAsGeomObject` at every real call site; interfaces without a zeta transfer by closest-point
 projection; closed loops have a periodic zeta; and the projection-based interpolator works and
 conserves. Open: automatic zeta assignment (§4.4, now of doubtful value), MPI (§5, gated on
-`--distribute` remeshing), and facet/HDG (§4.5).
+`--distribute` remeshing), and MPI facet ownership (§4.5(b); facet fields themselves are done,
+see [internal_facet_fields.md](internal_facet_fields.md)).
 
 This collects five things that look unrelated and are not: zeta coordinates break on a closed interface
 loop; there is no usable zeta for a 2d surface embedded in 3d; none of it works under `--distribute`;
@@ -242,6 +243,11 @@ geometries get a warning, not a coin flip. **Of doubtful value now that projecti
 
 ### 4.5 Facet data and HDG
 
+**Since implemented** for skeleton `D0`/`DL` fields — (a) via the §7 snapshot/restore, (c) as
+`set_facet_recovery` plus a pull-transfer using exactly the bulk-first topological disambiguation
+described below; (b) MPI remains open. See [internal_facet_fields.md](internal_facet_fields.md).
+The analysis is kept as written because it is the design rationale:
+
 Internal facets *are* real `FaceElement`s in an `InterfaceMesh` named `_internal_facets_`, so the class
 could carry internal data. The obstacle is elsewhere, and splits into three problems worth keeping
 apart:
@@ -452,7 +458,8 @@ constant would sit near 7e-2.
 both the locator and `shape_at_s_DL` size an `oomph::Shape` out of it — this cost a segfault before the
 guard existed.
 
-**Still refused outright:** DG spaces on an adapting interface, and facets (§4.5).
+**Still refused outright:** nodal DG (`Dx`) spaces on an adapting interface. Skeleton facet
+`D0`/`DL` fields adapt and remesh since [internal_facet_fields.md](internal_facet_fields.md).
 
 ---
 

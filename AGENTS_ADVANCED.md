@@ -256,6 +256,64 @@ you see in an existing script before copying it — a `facet_terms = ...` line
 overwrites rather than accumulates previous terms, which is easy to introduce by
 accident when editing a SIP-diffusion formulation like this one.)
 
+### Unknowns on the facet skeleton (HDG traces, mortar multipliers)
+
+The skeleton is a mesh in its own right and can carry its own dofs — attach equations
+to the reserved subdomain `"_internal_facets_"` of a bulk mesh and declare fields in
+them (`docs/source/tutorial/dg/facetfields.rst`, tests in
+`tests/test_internal_facet_fields.py`):
+```python
+class MortarCoupling(Equations):
+    def define_fields(self):
+        self.define_scalar_field("lam", "D0")      # only discontinuous spaces here
+
+    def define_residuals(self):
+        lam, mu = var_and_test("lam")
+        u, v = var("u"), testfunction("u")         # the bulk field, seen from the facet
+        self.add_residual(weak(lam, jump(v)) + weak(jump(u), mu))
+        self.set_facet_recovery("lam", -dot(var("normal"), avg(grad(u))))
+
+eqs += MortarCoupling() @ "_internal_facets_"
+```
+- Declaring a field there implies the skeleton, so `requires_interior_facet_terms`
+  need not be set. Allowed spaces: `"D0"` (one constant per facet), `"DL"` (constant +
+  one gradient mode per facet direction), and the nodal DG spaces
+  `"D1"/"D2"/"D1TB"/"D2TB"`. Continuous spaces raise `NotImplementedError` — the dofs
+  live in the facet element's own internal `Data`, and interior nodes are plain
+  `pyoomph::Node`, not `BoundaryNode`, so a shared per-node facet dof cannot exist. One
+  set of dofs per facet: facets meeting at a vertex share nothing.
+- Inside facet equations, a *bulk* field still needs `jump()`/`avg()`, but the facet
+  field itself is used bare: it is single-valued, so `var("lam", domain="|-")` and
+  `jump/avg(var("lam"), at_facet=True)` are a codegen-time `RuntimeError` (they used to
+  read the never-numbered opposite dummy element and silently return zero).
+  `DirichletBC`, `InitialCondition`, `IntegralObservables` and `MeshFileOutput` work on
+  the skeleton as on any other domain (`p.get_mesh("domain/_internal_facets_")`).
+- Adaptivity: the skeleton is destroyed and rebuilt, and only `D0`/`DL` values are
+  carried across (Eulerian snapshot + least-squares refit, all history levels). Facets
+  born *inside* a refined element have no counterpart in the old skeleton at all: they
+  keep zero plus a one-time warning, unless `Equations.set_facet_recovery(field, expr)`
+  says how to rebuild them from the bulk — the right default for a trace/flux, and
+  written to every time level so no spurious `partial_t` appears.
+  `mesh.get_discontinuous_unrestored_elements()` lists what stayed empty (it describes
+  the last transfer, not the current state). With a nodal `Dx` facet field, adaptivity
+  must be off (`max_refinement_level = 0`); triangle/tet skeletons only survive
+  *uniform* refinement.
+- Remeshing: `InternalInterpolator` pulls each new facet's values from the closest old
+  facet within the same old bulk element (`ProjectionInternalInterpolator` re-applies
+  the same transfer after its projection solve — skeleton fields are not L2-projected).
+  Exact only for an identical remesh, otherwise O(nearest-facet distance × gradient), so
+  `set_facet_recovery` is again the recommended default; `Dx` facet fields refuse a
+  remesh outright.
+- Not supported on distributed (`--distribute`) MPI runs; the setup raises.
+- **Pitfall**: a multiplier on *every* facet enforcing `jump(u) = 0` is rank deficient in
+  2D/3D — facets meeting at a shared vertex/edge re-impose continuity there, so the
+  constraints are linearly dependent and the saddle-point system is singular. That is a
+  property of naive mortar methods, not of the facet fields (1D is fine, which is why the
+  tutorial and the test use `LineMesh`). Use SIP-DG for plain continuity, and facet
+  unknowns for genuine traces, e.g. `weak(p - avg(u), testfunction(p))` with `p` on
+  `"DL"`, which reproduces the trace exactly. SIP-DG on tets needs `DG_alpha ≈ 10–40`
+  for coercivity.
+
 ## 4. ALE / moving-mesh internals and remeshing
 
 ### How `activate_coordinates_as_dofs` actually works

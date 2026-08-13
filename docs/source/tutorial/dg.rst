@@ -17,7 +17,8 @@ Opposed to the pure elemental discontinuous spaces ``"D0"`` and ``"DL"`` discuss
    :maxdepth: 5
    :hidden:
    
-   dg/advdiffu.rst     
-   dg/weakdirichlet.rst     
+   dg/advdiffu.rst
+   dg/weakdirichlet.rst
+   dg/facetfields.rst
 
 
