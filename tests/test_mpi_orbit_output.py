@@ -34,6 +34,13 @@
 #
 # There is no other orbit coverage under MPI, so this also pins the plain "does orbit tracking work
 # on more than one rank" question: the period of the Stuart-Landau limit cycle is 2*pi exactly.
+#
+# And it is the gate for a second, unrelated deadlock, which it is worth knowing this file catches.
+# The problem is ONE element, so on more than one rank the replicated element range leaves some ranks
+# with nothing to assemble. A rank with no elements never asks for a symbolic sparsity mask and so
+# never discovers that the orbit handler's block has none, while the rank holding the element does --
+# and if that discovery returns instead of being voted on, one rank walks back into oomph-lib's
+# assembly while the other enters MPI_Alltoall. See dev_docs/structural_assembly.md.
 
 import json
 import os
@@ -73,12 +80,16 @@ def _run(nproc, tmpdir):
     os.makedirs(ompi_tmp, exist_ok=True)
     env["TMPDIR"] = ompi_tmp
     try:
-        proc = subprocess.run(cmd, cwd=_HERE, capture_output=True, text=True, timeout=900, env=env)
+        # The runs take a few seconds; the bound is generous but not so generous that a
+        # re-introduced deadlock takes a quarter of an hour to report itself.
+        proc = subprocess.run(cmd, cwd=_HERE, capture_output=True, text=True, timeout=300, env=env)
     except subprocess.TimeoutExpired as e:
         # The failure this test exists for presents as a hang, not as a non-zero exit: the ranks
         # that raise leave rank 0 waiting. So a timeout has to be a failure, not an inconclusive run.
         raise AssertionError(
-            "mpirun did not finish within 900 s -- suspect ranks that died while rank 0 waited."
+            "mpirun did not finish within 300 s -- suspect ranks that died while rank 0 waited, or a\n"
+            "rank that left a collective the others were still in (this problem has ONE element, so\n"
+            "some ranks assemble nothing at all)."
             "\n--- stdout tail ---\n%s" % ((e.stdout or "")[-3000:]))
     per_rank = []
     for line in proc.stdout.splitlines():

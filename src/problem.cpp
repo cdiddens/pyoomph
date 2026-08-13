@@ -6438,8 +6438,17 @@ namespace pyoomph
 		const unsigned *eq0 = sp.my_eqns.data();
 
 		// ---- local pattern, per matrix: CSR over my_eqns rows with global column indices ----
+		// A rank that cannot describe its own share RECORDS that and carries on to the vote below; it
+		// must not return from here, because build_distributed_residual_plan() above has already
+		// communicated and everything after the vote does too. That is not hypothetical: a replicated
+		// run hands the elements out by range, so a rank can end up with NO elements at all (one ODE
+		// element over two ranks) and therefore never ask for a mask, while the rank that holds the
+		// element bails on a missing one -- one rank returning to oomph-lib's assembly while the other
+		// enters MPI_Alltoall is a hung job, and that is what a periodic-orbit solve under a plain
+		// mpirun used to do.
+		bool local_ok = true;
 		sp.mats.resize(n_matrix);
-		for (unsigned m = 0; m < n_matrix; m++)
+		for (unsigned m = 0; m < n_matrix && local_ok; m++)
 		{
 			DistributedFrozenSparsity::Mat &mt = sp.mats[m];
 			std::vector<std::vector<int>> cols_of_row(my_n_eqn);
@@ -6450,7 +6459,7 @@ namespace pyoomph
 				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
 				if (!nvar) continue;
 				const char *mask = this->sparsity_mask_for_element(m, elem_pt, nvar);
-				if (!mask) { sp.clear(); return false; } // Value-dependent: cannot be frozen
+				if (!mask) { local_ok = false; break; } // Value-dependent: cannot be frozen
 				for (unsigned i = 0; i < nvar; i++)
 				{
 					const unsigned g = assembly_handler_pt->eqn_number(elem_pt, i);
@@ -6464,6 +6473,7 @@ namespace pyoomph
 					}
 				}
 			}
+			if (!local_ok) break; // nothing below would be consistent, and the vote is about to refuse
 			mt.local_row_start.assign(my_n_eqn + 1, 0);
 			for (unsigned r = 0; r < my_n_eqn; r++)
 			{
@@ -6493,7 +6503,7 @@ namespace pyoomph
 					if (nvar)
 					{
 						const char *mask = this->sparsity_mask_for_element(m, elem_pt, nvar);
-						if (!mask) { sp.clear(); return false; }
+						if (!mask) { local_ok = false; break; }
 						for (unsigned i = 0; i < nvar; i++)
 						{
 							const unsigned g = assembly_handler_pt->eqn_number(elem_pt, i);
@@ -6525,8 +6535,10 @@ namespace pyoomph
 
 		// ---- per-matrix send plan ----
 		// The rows for rank p are one contiguous run of my_eqns (established by the row plan), so each
-		// matrix's values for rank p are one contiguous run of its local value array too.
-		for (unsigned m = 0; m < n_matrix; m++)
+		// matrix's values for rank p are one contiguous run of its local value array too. Skipped when
+		// this rank already knows it cannot describe its share: the arrays it would index are then only
+		// partly built.
+		for (unsigned m = 0; m < n_matrix && local_ok; m++)
 		{
 			DistributedFrozenSparsity::Mat &mt = sp.mats[m];
 			mt.send_nz_start.assign(nproc + 1, 0);
@@ -6537,11 +6549,11 @@ namespace pyoomph
 		}
 
 		// ---- can the local half be described at all? ----
-		// Every bail-out up to this point is per-rank -- a missing symbolic mask, a distribution that is
-		// not contiguous by rank -- and everything after it is collective. So the answer is agreed here,
-		// before the first collective, rather than discovered afterwards by a rank left waiting.
+		// Every bail-out above is per-rank -- a missing symbolic mask, a distribution that is not
+		// contiguous by rank -- and everything below is collective. So the answer is agreed here rather
+		// than discovered afterwards by a rank left waiting.
 		{
-			int ok = 1, all_ok = 0;
+			int ok = local_ok ? 1 : 0, all_ok = 0;
 			MPI_Allreduce(&ok, &all_ok, 1, MPI_INT, MPI_MIN, comm);
 			if (!all_ok) { sp.clear(); return false; }
 		}

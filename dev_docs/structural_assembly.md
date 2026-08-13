@@ -435,6 +435,20 @@ was the safe move but not a necessary one, and it was what kept static condensat
 CSR against oomph-lib's own at 2/3/4 ranks in 2d and 3d, and asserts that the re-tune actually happened in
 the run — otherwise the comparison would pass without ever exercising the staleness it exists to catch.
 
+Serving that mode also surfaced a **latent deadlock** in `build_distributed_frozen_sparsity` that had
+been there since Phase 2b. Its "can the local half be described at all?" vote reads
+`int ok = 1` — it can never fail — because the per-rank bail-outs above it (`sparsity_mask_for_element`
+returning NULL: the pattern is value-dependent, or the assembly handler's augmented block has no
+description) *returned* instead of falling through to it. The comment above the vote already claimed
+they did not. Distributed that never bit, because every rank holds elements and asks the same question
+of the same equations, so all of them bail together. Replicated it does: the elements are handed out by
+range, so a problem with fewer elements than ranks leaves some rank with **nothing to assemble** — it
+never asks for a mask, never bails, and enters `MPI_Alltoall` while the rank holding the element has
+already returned to oomph-lib's assembly. A periodic-orbit solve under a plain `mpirun` is exactly that
+shape (one ODE element, and the orbit handler has no block description unless
+`use_frozen_sparsity_for_bifurcation_tracking` is on), and it hung rather than falling back.
+The bail-outs now record the verdict and reach the vote. `tests/test_mpi_orbit_output.py` is the gate.
+
 **What it does not cover**, each falling back to oomph-lib: augmented systems on a distributed problem,
 and any element the code generator cannot describe.
 
