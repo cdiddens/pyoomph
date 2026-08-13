@@ -229,16 +229,19 @@ All found because skeleton fields exercise paths nothing else did; none is skele
 
 ## 9. Test map
 
-`tests/test_internal_facet_fields.py` (88 tests): trace projection exact on
+`tests/test_internal_facet_fields.py` (110 tests): trace projection exact on
 quad/tri/line/brick/tet/wedge/pyr/mixed × DL/D1/D2 (+D0); ndof accounting vs
 `facet_adjacency_summary()`; 1d hybridised Poisson (exact for linear, 2nd-order for `sin(πx)`);
-opposite-side orientation exactness for the 3d quad symmetries; SIP-DG + skeleton field combined;
+opposite-side orientation exactness for the 3d quad symmetries; SIP-DG over all 11 3d layouts at
+`DG_alpha = 1`, both against the continuous solution and with a linear manufactured one the `D1`
+space reproduces exactly (the sharp form: it is what the tetrahedron winding of
+[mesh_construction.md](mesh_construction.md) §6 broke); SIP-DG + skeleton field combined;
 adapt cycle (survivor exactness without solving, masked-oracle separation of survivors vs new
 facets, history levels, refine→unrefine round trip, 2:1 case, recovery hook, re-pinning/assembly);
 remeshing (identical remesh machine-exact incl. history, distorted/coarsened/refined with measured
 tolerances, recovery hook, unrestored reporting, Dx refusal); all error-message guards.
 
-`tests/test_mpi_facet_fields.py` (32 tests, `--full`) is the distributed gate. Two layers, because a
+`tests/test_mpi_facet_fields.py` (62 tests, `--full`) is the distributed gate. Two layers, because a
 broken skeleton does not crash: the skeleton MEASURE and the integral of its NORMAL certify the
 enumeration and the orientation without reference to the solution (a duplicated facet inflates the
 first, a facet enumerated from the other side flips its contribution to the second), and `ndof` against
@@ -257,3 +260,17 @@ distributed, as serially. 3d uses bricks and stays uniform, since `TemplatedMesh
 refuses non-conforming meshes; there `∫nᵢ·dx = N-1` in each direction. Every distributed case also
 asserts that the run really was partitioned (`is_distributed()`, and that the rank holds halo elements)
 - without that a `--distribute` that quietly did nothing agrees with the serial reference perfectly.
+
+Every 3d element FAMILY is covered as well, not only bricks: all 11 layouts of `tests/box_mesh_3d.py`
+(pure tet/wedge/pyramid and the seven mixed ones) run distributed at 2 and 4 ranks with a SIP bulk and a
+`DL` facet unknown in the same launch. The mixed layouts are not redundant with the pure ones - they are
+where the two sides of one facet belong to DIFFERENT families (a pyramid's quadrilateral base against a
+brick face, a tet's triangle against a pyramid's), a pairing no pure mesh produces. 2d covers both
+triangulations of the quad mesh, `"tri"` (parallel diagonals) and `"tri_crossed"` (a centre node, four
+triangles per cell, diagonals in every direction).
+
+This is what turned up the tetrahedron winding bug: every hand-built tet mesh in `tests/` was wound the
+opposite way from oomph's `TElement<3,N>` convention, so tet face normals pointed inwards and SIP-DG was
+inconsistent on every tet-bearing mesh. `add_tetra_3d_C1/C2` repair it now; the whole story, including
+why only the normals - not volumes or stiffness matrices - could notice, is in
+[mesh_construction.md](mesh_construction.md) §6.

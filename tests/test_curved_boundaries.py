@@ -152,7 +152,12 @@ class _SphericalTetTemplate(MeshTemplate):
     # faces are declared to lie on it. Any two faces of a tet share an edge, so ncurved >= 2 is exactly
     # the configuration the blend needs its inclusion-exclusion term for: without it each of the two
     # faces would add that shared edge's deviation and the edge would overshoot the sphere.
-    _VERTS = [_unit([1, 0, 0]), _unit([0, 1, 0]), _unit([0, 0, 1]), _unit([1, 1, 1])]
+    # Wound right-handed in oomph's sense, det(p0-p3, p1-p3, p2-p3) > 0, so that add_tetra_3d_C1 has
+    # nothing to repair and the local vertex indices the faces are stated in survive into the built
+    # element (see dev_docs/mesh_construction.md 6, and the determinant check in _worker_grid_tet).
+    # Listing +x, +z, +y rather than +x, +y, +z is what makes it so; the four faces are the four
+    # 3-subsets either way, and which of them is curved is immaterial here.
+    _VERTS = [_unit([1, 0, 0]), _unit([0, 0, 1]), _unit([0, 1, 0]), _unit([1, 1, 1])]
     _FACES = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]
 
     def __init__(self, ncurved):
@@ -854,6 +859,19 @@ def _worker_grid_tet(outdir, ncurved):
     problem.max_refinement_level = 0
     problem.initialise()
     element = problem.get_mesh("domain").element_pt(0)
+    # The face classification below is by LOCAL VERTEX INDEX, which is only meaningful because
+    # add_tetra_3d_C1 passed this tetrahedron through unpermuted. It repairs a left-handed one by
+    # swapping two vertices (dev_docs/mesh_construction.md 6), and _SphericalTetTemplate is wound so
+    # that it has nothing to repair. Check that rather than trust it: the orientation is a property
+    # of the element, so a determinant of its own node positions settles it without having to
+    # identify any node.
+    x = [[element.node_pt(i).x(k) for k in range(3)] for i in range(4)]
+    a, b, c = ([x[i][k] - x[3][k] for k in range(3)] for i in range(3))
+    det = (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+           + a[2] * (b[0] * c[1] - b[1] * c[0]))
+    assert det > 0, (
+        "the built tetrahedron is left-handed (det=%.3g), so add_tetra_3d_C1 permuted its vertices "
+        "and the local indices below no longer mean what the template said" % det)
     # lambda = (s0, s1, s2, 1-s0-s1-s2), so face k is the set where lambda_k == 0.
     curved_sets = [set(f) for f in _SphericalTetTemplate._FACES[:ncurved]]
     worst_curved, worst_flat, npts = 0.0, 0.0, 21

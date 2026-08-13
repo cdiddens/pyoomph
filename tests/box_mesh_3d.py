@@ -68,6 +68,9 @@ from pyoomph.meshes.mesh import MeshTemplate
 _T000, _T100, _T010, _T110, _T001, _T101, _T011, _T111 = range(8)
 
 # Kuhn (Freudenthal) split of a cube into 6 tetrahedra sharing the main diagonal 000-111, in tensor indices.
+# These are wound the familiar det(p1-p0, p2-p0, p3-p0) > 0 way, which is the OPPOSITE handedness from the
+# one oomph's TElement<3,N> face-normal table expects (its local frame is based at node 3). add_tetra_3d_C1
+# repairs that on the way in; see dev_docs/mesh_construction.md 6 for what it cost before it did.
 _KUHN = [(0, 1, 3, 7), (0, 3, 2, 7), (0, 2, 6, 7), (0, 6, 4, 7), (0, 4, 5, 7), (0, 5, 1, 7)]
 
 # The cube's 6 faces as CYCLICALLY wound quads in tensor indices, oriented so that (quad, cell centre) is a

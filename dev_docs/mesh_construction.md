@@ -397,3 +397,80 @@ and a rank that saw none must not sail past the escalation point while the other
 * **Scope of the first change.** Whether moving the existing quality-based trigger off the
   inside-the-C++-loop path belongs in the same commit as the new option, or lands separately so the new
   option arrives in isolation.
+
+---
+
+## 6. Tetrahedron winding in 3d — implemented
+
+§4 is the 2d story, and it ends with "normals do not follow the bulk winding". In 3d the opposite is
+true, and that difference cost a real bug.
+
+### 6.1 The convention, and why nothing noticed
+
+oomph-lib's `TElement<3,NNODE_1D>` bases its local frame at **node 3**, with the `s0/s1/s2` axes pointing
+at nodes 0/1/2. The handedness that decides the face-normal direction is therefore
+
+```
+det(p0 - p3,  p1 - p3,  p2 - p3) > 0
+```
+
+and **not** the `det(p1-p0, p2-p0, p3-p0)` that gmsh, VTK and most textbooks use — the two differ by a
+transposition, so a mesh written to the familiar convention is left-handed here. `TElement3d`'s per-face
+`normal_sign()` table (`Telements.cc`, faces 0..3 → −1,+1,−1,+1) assumes the right-handed one.
+
+Get it wrong and almost nothing complains:
+
+* the integration measure uses `|J|`, so volumes, mass matrices and stiffness matrices are all correct;
+* refinement, hanging nodes, error estimation and every Dirichlet problem are blind to it;
+* only `var("normal")` flips — inwards instead of outwards.
+
+So the failure is confined to the terms that use a normal: Neumann and Robin fluxes get the wrong sign,
+and interior-penalty DG becomes **inconsistent** (the exact solution stops satisfying the discrete
+equations). The DG symptom is the deceptive one. The penalty term still pulls the answer towards
+continuity, so the error decays like `1/DG_alpha` rather than staying put — which reads exactly like a
+coercivity problem. It was recorded as one, in `tests/test_internal_facet_fields.py` and in
+`AGENTS_ADVANCED.md`: "tets need `DG_alpha ≈ 10–40`". They do not; `1` is enough, on every family.
+
+The gmsh importer had always known the convention — `pyoomph/meshes/gmsh.py` permutes imported tets by
+`[0,2,1,3]` (and `tetra10` by `[0,2,1,3,6,4,7,5,8,9]`) precisely to convert gmsh's winding to this one.
+Nothing protected a hand-built `MeshTemplate`, and every hand-built tet mesh in `tests/` was wound the
+other way: `box_mesh_3d.MixedBoxMesh3D` (all four tet-bearing layouts), `TetCubeMesh`,
+`_TetBallTemplate`.
+
+### 6.2 The fix
+
+`MeshTemplateElementCollection::add_tetra_3d_C1` and `::add_tetra_3d_C2` (`src/meshtemplate.cpp`) now
+accept either handedness and repair a left-handed one by swapping vertices 1 and 2. For the 10-node
+element the mid-side nodes move with them: `TElementShape<3,3>` places the mid-node of edge `(i,j)` at
+`(0,1)→4 (0,2)→5 (0,3)→6 (1,2)→7 (2,3)→8 (1,3)→9`, so the swap exchanges `4↔5` and `8↔9` and fixes `6`
+and `7`, whose edges are invariant. A degenerate (zero-determinant) tetrahedron has no handedness to
+repair and is left alone, so that it fails later where the real problem — zero volume — is diagnosable.
+
+Repair rather than refusal: an inverted tet runs fine today apart from its normals, so throwing would
+break existing user scripts to fix a bug most of them never hit, while the repair makes them correct.
+The `C1TB`/`C2TB` variants need nothing of their own — they are only ever produced by
+`convert_for_C1TB_space`/`convert_for_C2TB_space` from an already-repaired element.
+
+### 6.3 Verification
+
+The oracle needs no knowledge of the convention at all: over a closed surface `∫ x·n dA = 3·V` if and
+only if `n` points outwards. Before the fix, over `[-0.5,0.5]³`:
+
+```
+hex +3   wedge +3   pyr +3        tet −3   tet_wedge +3(*)   hex_tet −2   all_four −3
+```
+
+(*) `tet_wedge` has no tetrahedra at all at `N=1`, which is why it looked innocent.
+
+- `tests/test_tet_refinement.py` — a single tetrahedron given in both windings must give
+  `∫ x·n dA = 3·V` either way, and `TetCubeMesh` must come out entirely right-handed. Nothing else in
+  that file changes with the winding, which is precisely why it went unnoticed there.
+- `tests/test_internal_facet_fields.py` — SIP-DG over all 11 `box_mesh_3d` layouts plus `CuboidBrickMesh`,
+  at `DG_alpha = 1`, both against the continuous solution and (sharper) with a linear manufactured
+  solution the `D1` space reproduces exactly. The inward normal moved `∫(u-u_exact)²` from `1e-17` to
+  `1e-1` on every tet-bearing layout.
+- `tests/test_mpi_facet_fields.py` — the same layouts under `--distribute` at 2 and 4 ranks.
+
+**What it does change.** Unlike the 2d fix in §4, this one is not a pure relabelling: any result that
+depended on a normal over a hand-built tet mesh was wrong before and is right now. Nothing in `tests/`
+moved, because nothing there integrated a flux over a tet boundary — which is itself the gap this closed.

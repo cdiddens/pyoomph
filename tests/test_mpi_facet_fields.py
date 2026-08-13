@@ -178,14 +178,18 @@ def _assert_same_state(what, ref, got):
 # ---------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("nproc", [2, 4])
-@pytest.mark.parametrize("tris", [0, 1])
-def test_distributed_dg_linear_solution_stays_exact(tmp_path, nproc, tris):
+@pytest.mark.parametrize("kind", ["quad", "tri", "tri_crossed"])
+def test_distributed_dg_linear_solution_stays_exact(tmp_path, nproc, kind):
     """The sharpest available statement: the discrete answer is the exact linear one, distributed.
 
     It is sharp because consistency is not enough on its own -- the flux term survives at the exact
     solution, so it holds only if each facet is assembled exactly once, from the side whose outward
-    normal the terms were written for."""
-    args = ["--size", "8", "--tris", str(tris), "--exact", "linear"]
+    normal the terms were written for.
+
+    Both triangulations of the quad mesh are covered: "tri" cuts every cell the same way, so all the
+    diagonals are parallel, whereas "tri_crossed" adds a centre node and gives four triangles per
+    cell with diagonals in every direction -- a much less regular skeleton to enumerate."""
+    args = ["--size", "8", "--kind", kind, "--exact", "linear"]
     per_rank = _run(nproc, tmp_path, args)
     for r in per_rank:
         assert abs(r["obs_uerr2"]) < 1e-14, \
@@ -193,19 +197,21 @@ def test_distributed_dg_linear_solution_stays_exact(tmp_path, nproc, tris):
                 r["rank"], r["obs_uerr2"])
         assert abs(r["obs_jump2"]) < 1e-12, "rank %d: the solution is not continuous" % r["rank"]
     _assert_ranks_agree(per_rank)
-    _assert_same_state("distributed DG (n=%d, tris=%d) vs serial" % (nproc, tris),
-                       _serial(N=8, tris=bool(tris), exact="linear", outdir=str(tmp_path / "serial")),
+    _assert_same_state("distributed DG (n=%d, kind=%s) vs serial" % (nproc, kind),
+                       _serial(N=8, kind=kind, exact="linear", outdir=str(tmp_path / "serial")),
                        per_rank[0])
 
 
 @pytest.mark.parametrize("nproc", [2, 4])
-def test_distributed_dg_matches_serial_for_a_non_representable_solution(tmp_path, nproc):
+@pytest.mark.parametrize("kind", ["quad", "tri_crossed"])
+def test_distributed_dg_matches_serial_for_a_non_representable_solution(tmp_path, nproc, kind):
     """sin(pi x) sin(pi y): the discrete answer is not the exact one, so this compares the two runs'
     DISCRETISATIONS rather than their distance from a solution both happen to reproduce."""
-    per_rank = _run(nproc, tmp_path, ["--size", "8", "--exact", "sin"])
+    per_rank = _run(nproc, tmp_path, ["--size", "8", "--kind", kind, "--exact", "sin"])
     _assert_ranks_agree(per_rank)
-    _assert_same_state("distributed DG sin (n=%d) vs serial" % nproc,
-                       _serial(N=8, exact="sin", outdir=str(tmp_path / "serial")), per_rank[0])
+    _assert_same_state("distributed DG sin (n=%d, kind=%s) vs serial" % (nproc, kind),
+                       _serial(N=8, kind=kind, exact="sin", outdir=str(tmp_path / "serial")),
+                       per_rank[0])
 
 
 def test_distributed_dg_matches_serial_for_a_higher_order_space(tmp_path):
@@ -235,10 +241,12 @@ def test_distributed_dg_matches_serial_for_a_higher_order_space(tmp_path):
 
 @pytest.mark.parametrize("nproc", [2, 4])
 @pytest.mark.parametrize("facet_space", ["DL", "D0"])
-def test_distributed_facet_unknown_is_numbered_once(tmp_path, nproc, facet_space):
-    args = ["--size", "8", "--facet-space", facet_space, "--exact", "linear"]
+@pytest.mark.parametrize("kind", ["quad", "tri_crossed"])
+def test_distributed_facet_unknown_is_numbered_once(tmp_path, nproc, facet_space, kind):
+    args = ["--size", "8", "--kind", kind, "--facet-space", facet_space, "--exact", "linear"]
     per_rank = _run(nproc, tmp_path, args)
-    ref = _serial(N=8, exact="linear", facet_space=facet_space, outdir=str(tmp_path / "serial"))
+    ref = _serial(N=8, kind=kind, exact="linear", facet_space=facet_space,
+                  outdir=str(tmp_path / "serial"))
     for r in per_rank:
         # The sharp one. Numbered per holder instead of per facet, this is larger than serial by whole
         # facets' worth of dofs, whatever the solution then does.
@@ -252,7 +260,7 @@ def test_distributed_facet_unknown_is_numbered_once(tmp_path, nproc, facet_space
         if facet_space == "DL":
             assert abs(r["obs_perr2"]) < 1e-14, "rank %d: projection error %.3e" % (r["rank"], r["obs_perr2"])
     _assert_ranks_agree(per_rank)
-    _assert_same_state("distributed facet unknown (%s, n=%d) vs serial" % (facet_space, nproc),
+    _assert_same_state("distributed facet unknown (%s, %s, n=%d) vs serial" % (facet_space, kind, nproc),
                        ref, per_rank[0])
 
 
@@ -446,3 +454,62 @@ def test_distributed_3d_dg_matches_serial_for_a_non_representable_solution(tmp_p
     _assert_same_state("distributed 3d DG sin (n=%d) vs serial" % nproc,
                        _serial(dim=3, N=_N3D, exact="sin", facet_space="DL",
                                outdir=str(tmp_path / "serial")), per_rank[0])
+
+
+# ---------------------------------------------------------------------------------------------------
+# 5 -- every 3d element family, and every way box_mesh_3d.py mixes them
+# ---------------------------------------------------------------------------------------------------
+#
+# The tests above are bricks (and, in 2d, quads and triangles). The facet normal is a property of the
+# element FAMILY -- each of BulkElementTetra3d*, BulkElementWedge3d*, BulkElementPyramid3d* builds its
+# face elements through its own route -- so a family that is never partitioned is never checked.
+#
+# That this matters is not hypothetical. Every tetrahedron in tests/ used to be wound the other way
+# round (oomph's TElement<3,N> bases its local frame at node 3, so the criterion is
+# det(p0-p3,p1-p3,p2-p3) > 0), which pointed their face normals INWARDS. Volumes, mass and stiffness
+# matrices were all unaffected -- only the normal -- so nothing failed; the SIP scheme merely became
+# inconsistent and its error decayed like 1/DG_alpha, which had been read as tets needing a larger
+# penalty. add_tetra_3d_C1/C2 repair the winding now; see tests/test_tet_refinement.py for the
+# divergence-theorem test that pins it, and tests/test_internal_facet_fields.py for the serial SIP
+# gate over the same layouts.
+#
+# Mixed layouts matter separately from the pure ones: they are where a facet has DIFFERENT element
+# families on its two sides (a pyramid's quadrilateral base against a brick face, a tet's triangle
+# against a pyramid's), which is a pairing no pure mesh ever produces.
+
+# Everything box_mesh_3d.py can build. Imported rather than listed, so a layout added there is
+# covered here without anyone remembering to.
+sys.path.insert(0, _HERE)
+try:
+    from box_mesh_3d import ALL_LAYOUTS as _LAYOUTS_3D
+finally:
+    sys.path.remove(_HERE)
+
+_N3D_LAYOUT = 3       # 27 cells: 27..162 elements depending on the family, a real partition at 4 ranks
+
+
+@pytest.mark.parametrize("nproc", [2, 4])
+@pytest.mark.parametrize("kind", _LAYOUTS_3D)
+def test_distributed_3d_element_families_match_serial(tmp_path, nproc, kind):
+    """One run per (layout, rank count), carrying both halves at once: the SIP bulk (whose linear
+    solution stays exact only if every facet normal, measure and pairing survives partitioning) and a
+    "DL" facet unknown (whose `ndof` catches a trace numbered once per holder instead of once per
+    facet)."""
+    args = ["--dim", "3", "--kind", kind, "--size", str(_N3D_LAYOUT), "--exact", "linear",
+            "--facet-space", "DL"]
+    per_rank = _run(nproc, tmp_path, args, timeout=900)
+    ref = _serial(dim=3, kind=kind, N=_N3D_LAYOUT, exact="linear", facet_space="DL",
+                  outdir=str(tmp_path / "serial"))
+    assert ref["n_facet_elements"] > 20, \
+        "%s has only %d interior facets -- too few to say anything" % (kind, ref["n_facet_elements"])
+    for r in per_rank:
+        assert r["ndof"] == ref["ndof"], \
+            "%s rank %d: ndof %d vs %d serially -- the facet unknowns are numbered more than once" % (
+                kind, r["rank"], r["ndof"], ref["ndof"])
+        assert abs(r["obs_uerr2"]) < 1e-13, \
+            "%s rank %d: |u - u_exact|^2 = %.3e, so the distributed SIP scheme is inconsistent" % (
+                kind, r["rank"], r["obs_uerr2"])
+        assert abs(r["obs_jump2"]) < 1e-13, \
+            "%s rank %d: the solution is not continuous" % (kind, r["rank"])
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("distributed 3d %s (n=%d) vs serial" % (kind, nproc), ref, per_rank[0])

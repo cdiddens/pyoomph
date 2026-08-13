@@ -557,6 +557,10 @@ from box_mesh_3d import MixedBoxMesh3D
 # Element families of the box mesh, plus one genuinely mixed layout. "hex" is covered by
 # CuboidBrickMesh separately (that is the brick mesh users actually build).
 _LAYOUTS_3D = ["tet", "wedge", "pyr", "all_four"]
+# Every layout box_mesh_3d.py can build, for the SIP tests below: those are the ones that depend on
+# the facet normal, which is a property of each element FAMILY, so a family pairing that only occurs
+# in one mixed layout would otherwise never be assembled anywhere.
+from box_mesh_3d import ALL_LAYOUTS as _LAYOUTS_3D_ALL  # noqa: E402
 _BOUNDS_3D = ["left", "right", "top", "bottom", "front", "back"]
 
 
@@ -714,18 +718,24 @@ class _SIP3d(Problem):
         self.max_refinement_level = 0
 
 
-@pytest.mark.parametrize("kind,alpha", [("brick", 1), ("tet", 20)])
-def test_3d_sip_poisson_reproduces_the_continuous_solution(kind, alpha):
+@pytest.mark.parametrize("kind", ["brick"] + _LAYOUTS_3D_ALL)
+def test_3d_sip_poisson_reproduces_the_continuous_solution(kind):
     """The DG solve must land on the continuous answer, not merely converge to something: an interior
     facet paired with the wrong neighbour still gives a symmetric positive system and a plausible
-    Newton history. (The penalty is family dependent - tets need a larger DG_alpha than bricks to be
-    coercive, which is a property of the SIP formulation, not of the enumeration.)"""
+    Newton history.
+
+    This used to run on bricks and tets only, and the tets needed DG_alpha=20 where bricks needed 1.
+    That was read as a property of the SIP formulation ("tets are not coercive at alpha=1"). It was
+    not: the tetrahedra of every hand-built mesh in tests/ were wound the other way round, so their
+    face normals pointed inwards and the scheme was inconsistent - the penalty was merely papering
+    over it, which is why the error looked like it decayed with alpha. add_tetra_3d_C1 repairs the
+    winding now (see tests/test_tet_refinement.py), and alpha=1 is enough for every family."""
     with _SIP3d(kind, "C2") as p:
         p.quiet()
         p.initialise()
         p.solve()
         ref = _observables(p, "domain")["uint"]
-    with _SIP3d(kind, "D2", alpha=alpha) as p:
+    with _SIP3d(kind, "D2", alpha=1) as p:
         p.quiet()
         p.initialise()
         p.solve()
@@ -733,7 +743,44 @@ def test_3d_sip_poisson_reproduces_the_continuous_solution(kind, alpha):
         uint = _observables(p, "domain")["uint"]
     assert ref > 0
     assert jump2 < 1e-3 * ref, (jump2, ref)
-    assert abs(uint - ref) < 0.25 * ref, (uint, ref)
+    assert abs(uint - ref) < 0.2 * ref, (uint, ref)
+
+
+class _LinearSIP3d(Problem):
+    """SIP Poisson whose exact solution is linear, hence inside the "D1" space and reproduced exactly.
+
+    Sharper than the comparison above, which is limited by the discretisation error of a solution
+    neither space represents. Consistency is what is at stake: the flux term does NOT vanish at the
+    exact solution, so it holds only if every facet normal, measure and pairing is right. The
+    inward-normal bug moved `uerr2` from 1e-17 to 1e-1 on every tet-bearing layout."""
+
+    def __init__(self, kind, N=2):
+        super().__init__()
+        self.kind, self.N = kind, N
+
+    def define_problem(self):
+        self += _mesh_3d(self.kind, self.N)
+        exact = 1 + 2 * var("coordinate_x") + 3 * var("coordinate_y") + 4 * var("coordinate_z")
+        eqs = PoissonEquation(source=0, space="D1", DG_alpha=1)
+        for b in _BOUNDS_3D:
+            eqs += DirichletBC(u=exact) @ b
+        eqs += IntegralObservables(uerr2=(var("u") - exact) ** 2)
+        eqs += _JumpMeasure() @ "_internal_facets_"
+        self += eqs @ "domain"
+        self.max_refinement_level = 0
+
+
+@pytest.mark.parametrize("kind", ["brick"] + _LAYOUTS_3D_ALL)
+def test_3d_sip_poisson_is_exact_for_a_linear_solution(kind):
+    with _LinearSIP3d(kind) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        uerr2 = _observables(p, "domain")["uerr2"]
+        jump2 = _observables(p)["jump2"]
+    assert abs(uerr2) < 1e-13, "%s: |u - u_exact|^2 = %.3e, so the 3d SIP scheme is inconsistent" % (
+        kind, uerr2)
+    assert abs(jump2) < 1e-13, "%s: the solution is not continuous (jump^2 = %.3e)" % (kind, jump2)
 
 
 class _RefinedSIP3d(_SIP3d):

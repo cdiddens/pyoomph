@@ -288,6 +288,14 @@ def test_crouzeix_raviart_tet_cavity_error_adaptivity():
     # Genuine Z2 error-driven adaptivity (the 2:1-balanced meshes adaptivity produces) for 3D CR.
     with _CavityStokes3DCR(N=2, error_adapt=True) as problem:
         problem.max_refinement_level = 2
+        # This system is right at the edge of what Pardiso's static pivoting copes with: the tet-CR
+        # saddle point on an error-adapted mesh. It used to land on the good side by luck, and the
+        # tetrahedron-winding repair in add_tetra_3d_C1 (which renumbers the nodes, and nothing else)
+        # moved it to the other side - Pardiso then reports backward errors of order 1e+2 and the
+        # Newton solver gives up. Nothing is wrong with the Jacobian, which is what this test is
+        # about: umfpack and superlu both reach 6.7e-14 on exactly the same 2911-element mesh, and so
+        # does Pardiso once it is allowed to pivot harder.
+        problem.get_la_solver().repair_bad_solves = True
         problem.solve(spatial_adapt=1)
         assert _max_abs_residual(problem) < 1e-7
         assert problem.get_mesh("domain").nelement() > 384
@@ -495,3 +503,187 @@ def test_tet_node_sharing_ignores_node_positions():
     assert clean == stale, (
         "adapting with stale hanging-node positions changed the mesh topology, so node "
         f"identification still depends on positions: clean={clean} stale={stale}")
+
+
+# ----------------------------------------------------------------------------------------------
+# Tetrahedron handedness
+# ----------------------------------------------------------------------------------------------
+#
+# oomph-lib's TElement<3,NNODE_1D> bases its local frame at node 3, with the s0/s1/s2 axes pointing
+# at nodes 0/1/2 -- so the winding that decides the face-normal direction is
+# det(p0-p3, p1-p3, p2-p3), not the det(p1-p0, p2-p0, p3-p0) that most mesh generators (and the
+# _TETS_LOCAL table above, before this was found) use. Getting it wrong is invisible almost
+# everywhere: the integration measure uses |J|, so volumes and every mass/stiffness matrix stay
+# right, and only the outward normal flips. That silently reverses every Neumann/Robin flux and
+# makes interior-penalty DG inconsistent -- for years the symptom was read as "tets need a bigger
+# DG_alpha to be coercive" (see tests/test_internal_facet_fields.py), which they do not.
+#
+# add_tetra_3d_C1/C2 therefore accept either winding and repair a left-handed one. The oracle here
+# is the divergence theorem, which needs no knowledge of the convention at all: over a closed
+# surface, int(x.n) dA = 3*Volume if and only if n points outwards.
+
+_TET_PTS = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+_TET_FACES = [("f0", (1, 2, 3)), ("f1", (0, 2, 3)), ("f2", (0, 1, 3)), ("f3", (0, 1, 2))]
+
+
+class _OneTet(MeshTemplate):
+    """A single tetrahedron, with all four faces on named boundaries.
+
+    `order` permutes the four vertices before they are handed to add_tetra_3d_C1, which is how the
+    two windings are produced from the same geometry."""
+
+    def __init__(self, order=(0, 1, 2, 3)):
+        super().__init__()
+        self.order = order
+
+    def define_geometry(self):
+        dom = self.new_domain("domain")
+        n = [self.add_node_unique(*_TET_PTS[i]) for i in self.order]
+        dom.add_tetra_3d_C1(*n)
+        for name, f in _TET_FACES:
+            self.add_facet_to_boundary(name, [n[i] for i in f])
+
+
+class _NormalFlux(Equations):
+    def define_residuals(self):
+        x = vector(var("coordinate_x"), var("coordinate_y"), var("coordinate_z"))
+        self.add_integral_function("xn", dot(x, var("normal")) * self.get_dx())
+
+
+class _Volume(Equations):
+    def define_fields(self):
+        self.define_scalar_field("u", "C1")
+
+    def define_residuals(self):
+        u, ut = var_and_test("u")
+        self.add_residual(weak(u - 1, ut))
+        self.add_integral_function("vol", 1 * self.get_dx())
+
+
+class _OneTetProblem(Problem):
+    def __init__(self, order):
+        super().__init__()
+        self.order = order
+
+    def define_problem(self):
+        self += _OneTet(self.order)
+        eqs = _Volume()
+        for name, _f in _TET_FACES:
+            eqs += _NormalFlux() @ name
+        self += eqs @ "domain"
+        self.max_refinement_level = 0
+
+
+def _closed_surface_flux(problem, boundaries):
+    return sum(float(problem.get_mesh("domain/" + b).evaluate_all_observables()["xn"])
+               for b in boundaries)
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2, 3), (0, 2, 1, 3)])
+def test_tetrahedron_face_normals_point_outwards_for_either_winding(tmp_path, monkeypatch, order):
+    monkeypatch.chdir(tmp_path)
+    with _OneTetProblem(order) as p:
+        p.quiet()
+        p.initialise()
+        vol = float(p.get_mesh("domain").evaluate_all_observables()["vol"])
+        flux = _closed_surface_flux(p, [n for n, _f in _TET_FACES])
+    assert vol == pytest.approx(1.0 / 6.0)
+    assert flux == pytest.approx(3 * vol), (
+        "int(x.n) dA = %.6g over the closed surface of a tetrahedron given in vertex order %s, "
+        "but 3*Volume = %.6g -- the face normals point inwards" % (flux, order, 3 * vol))
+
+
+def _tet_handedness(mesh):
+    """(#right-handed, #left-handed) in oomph's sense, over the tetrahedra of a mesh."""
+    right = left = 0
+    for i in range(mesh.nelement()):
+        e = mesh.element_pt(i)
+        if e.nnode() not in (4, 10):
+            continue
+        x = np.array([[e.node_pt(j).x(k) for k in range(3)] for j in range(4)])
+        det = np.linalg.det(np.vstack([x[0] - x[3], x[1] - x[3], x[2] - x[3]]))
+        if det < 0:
+            left += 1
+        else:
+            right += 1
+    return right, left
+
+
+def test_tet_cube_mesh_is_wound_right_handed(tmp_path, monkeypatch):
+    """The mesh helper above states its tets in the other convention; the repair has to catch it.
+
+    Without this, everything in this file still passes -- refinement, hanging nodes and the Poisson
+    solves are all blind to the winding -- which is exactly why it went unnoticed."""
+    monkeypatch.chdir(tmp_path)
+
+    class _P(Problem):
+        def define_problem(self):
+            self += TetCubeMesh(N=2)
+            self += (PoissonEquation(source=1) + DirichletBC(u=0) @ _ALL_BOUNDS) @ "domain"
+            self.max_refinement_level = 0
+
+    with _P() as p:
+        p.quiet()
+        p.initialise()
+        right, left = _tet_handedness(p.get_mesh("domain"))
+    assert right + left == 6 * 8, "expected 48 tetrahedra, got %d" % (right + left)
+    assert left == 0, "%d of %d tetrahedra are left-handed, so their face normals point inwards" % (
+        left, right + left)
+
+
+# The 10-node case has a second thing to get right: the repair swaps two vertices, and the six
+# mid-side nodes have to travel with them. TElementShape<3,3> places the mid-node of edge (i,j) at
+# index (0,1)->4 (0,2)->5 (0,3)->6 (1,2)->7 (2,3)->8 (1,3)->9, so a 1<->2 vertex swap exchanges 4<->5
+# and 8<->9 while 6 and 7 stay put. A wrong entry there puts a mid-node on the wrong edge, which
+# curves the element rather than merely reorienting it - so the volume moves too, and both assertions
+# below are needed to tell the two failures apart.
+_TET_EDGES_C2 = [(0, 1), (0, 2), (0, 3), (1, 2), (2, 3), (1, 3)]
+_TET_FACES_C2 = [("f0", (1, 2, 3), (7, 8, 9)), ("f1", (0, 2, 3), (5, 8, 6)),
+                 ("f2", (0, 1, 3), (4, 9, 6)), ("f3", (0, 1, 2), (4, 7, 5))]
+
+
+class _OneTetC2(MeshTemplate):
+    def __init__(self, order=(0, 1, 2, 3)):
+        super().__init__()
+        self.order = order
+
+    def define_geometry(self):
+        dom = self.new_domain("domain")
+        v = [np.array(_TET_PTS[i], dtype=float) for i in self.order]
+        n = [self.add_node_unique(*p) for p in v]
+        n += [self.add_node_unique(*(0.5 * (v[a] + v[b]))) for a, b in _TET_EDGES_C2]
+        dom.add_tetra_3d_C2(n)
+        for name, verts, mids in _TET_FACES_C2:
+            face = [n[i] for i in verts] + [n[i] for i in mids]
+            self.add_facet_to_boundary(name, face, [n[i] for i in verts])
+
+
+class _OneTetC2Problem(Problem):
+    def __init__(self, order):
+        super().__init__()
+        self.order = order
+
+    def define_problem(self):
+        self += _OneTetC2(self.order)
+        eqs = _Volume()
+        for name, _v, _m in _TET_FACES_C2:
+            eqs += _NormalFlux() @ name
+        self += eqs @ "domain"
+        self.max_refinement_level = 0
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2, 3), (0, 2, 1, 3)])
+def test_quadratic_tetrahedron_face_normals_point_outwards_for_either_winding(tmp_path, monkeypatch,
+                                                                             order):
+    monkeypatch.chdir(tmp_path)
+    with _OneTetC2Problem(order) as p:
+        p.quiet()
+        p.initialise()
+        vol = float(p.get_mesh("domain").evaluate_all_observables()["vol"])
+        flux = _closed_surface_flux(p, [n for n, _v, _m in _TET_FACES_C2])
+    assert vol == pytest.approx(1.0 / 6.0), (
+        "volume %.6g instead of 1/6 for vertex order %s -- a mid-side node landed on the wrong edge"
+        % (vol, order))
+    assert flux == pytest.approx(3 * vol), (
+        "int(x.n) dA = %.6g over the closed surface of a 10-node tetrahedron given in vertex order "
+        "%s, but 3*Volume = %.6g -- the face normals point inwards" % (flux, order, 3 * vol))

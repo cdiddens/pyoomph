@@ -1298,6 +1298,32 @@ Index : Local coordinates (s0,s1,s2)
 		res->link_nodes_with_domain(this);
 	}
 
+	// Is the tetrahedron spanned by these four template nodes right-handed in oomph-lib's sense?
+	//
+	// oomph's TElement<3,NNODE_1D> puts its local coordinate origin at node 3 and the s0/s1/s2 axes
+	// towards nodes 0/1/2, so the handedness that matters is det(p0-p3, p1-p3, p2-p3) - NOT the more
+	// familiar det(p1-p0, p2-p0, p3-p0) of the two conventions used by most mesh generators. Get it
+	// wrong and nothing complains: the integration measure uses |J|, so volumes, mass and stiffness
+	// matrices all stay right, and only the FACE NORMAL comes out pointing inwards. That silently
+	// flips the sign of every Neumann/Robin flux and makes interior-penalty DG inconsistent (the
+	// exact solution stops satisfying the discrete equations; the error then merely decays like
+	// 1/DG_alpha, which reads like a coercivity problem rather than a wrong mesh).
+	//
+	// The gmsh importer has always known this - it permutes gmsh's tets by [0,2,1,3] on the way in
+	// (pyoomph/meshes/gmsh.py) - but a hand-built MeshTemplate had no such protection, and every
+	// hand-built tet mesh in tests/ was wound the other way.
+	static bool tetra_is_right_handed(MeshTemplate *templ, const nodeindex_t &n0, const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3)
+	{
+		std::vector<double> p0 = templ->get_node_position(n0), p1 = templ->get_node_position(n1);
+		std::vector<double> p2 = templ->get_node_position(n2), p3 = templ->get_node_position(n3);
+		double a[3], b[3], c[3];
+		for (unsigned i = 0; i < 3; i++) { a[i] = p0[i] - p3[i]; b[i] = p1[i] - p3[i]; c[i] = p2[i] - p3[i]; }
+		double det = a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+		// A degenerate (det==0) tetrahedron has no handedness to repair; leave it alone and let it
+		// fail later where the actual problem - zero volume - can be diagnosed.
+		return det >= 0.0;
+	}
+
 	void MeshTemplateElementCollection::add_tetra_3d_C1(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4)
 	{
 		if (dim == -1)
@@ -1306,9 +1332,13 @@ Index : Local coordinates (s0,s1,s2)
 		}
 		else if (dim != 3)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
-		MeshTemplateElementTetraC1 *res = new MeshTemplateElementTetraC1(n1, n2, n3, n4);
+		// Either winding is accepted; a left-handed one is repaired by swapping two vertices, which is
+		// the smallest change that fixes the face normals and leaves the element geometrically identical.
+		MeshTemplateElementTetraC1 *res = (tetra_is_right_handed(mesh_template, n1, n2, n3, n4)
+											   ? new MeshTemplateElementTetraC1(n1, n2, n3, n4)
+											   : new MeshTemplateElementTetraC1(n1, n3, n2, n4));
 		elements.push_back(res);
-		res->link_nodes_with_domain(this);		
+		res->link_nodes_with_domain(this);
 	}
 
 	void MeshTemplateElementCollection::add_tetra_3d_C2(const std::vector<nodeindex_t> &inds)
@@ -1319,7 +1349,19 @@ Index : Local coordinates (s0,s1,s2)
 		}
 		else if (dim != 3)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
-		MeshTemplateElementTetraC2 *res = new MeshTemplateElementTetraC2(inds);
+		if (inds.size() < 10)
+			throw_runtime_error("A second-order tetrahedron needs 10 node indices, got " + std::to_string(inds.size()));
+		std::vector<nodeindex_t> use = inds;
+		if (!tetra_is_right_handed(mesh_template, inds[0], inds[1], inds[2], inds[3]))
+		{
+			// The same vertex swap 1<->2 as in the C1 case, carried over to the mid-side nodes. In
+			// TElementShape<3,3> the mid-side node of edge (i,j) sits at index
+			// (0,1)->4 (0,2)->5 (0,3)->6 (1,2)->7 (2,3)->8 (1,3)->9, so swapping vertices 1 and 2
+			// exchanges 4<->5 and 8<->9 and fixes 6 and 7 (whose edges are invariant under the swap).
+			static const unsigned swap[10] = {0, 2, 1, 3, 5, 4, 6, 7, 9, 8};
+			for (unsigned i = 0; i < 10; i++) use[i] = inds[swap[i]];
+		}
+		MeshTemplateElementTetraC2 *res = new MeshTemplateElementTetraC2(use);
 		elements.push_back(res);
 		res->link_nodes_with_domain(this);
 	}

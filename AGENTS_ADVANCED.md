@@ -317,8 +317,11 @@ eqs += MortarCoupling() @ "_internal_facets_"
   property of naive mortar methods, not of the facet fields (1D is fine, which is why the
   tutorial and the test use `LineMesh`). Use SIP-DG for plain continuity, and facet
   unknowns for genuine traces, e.g. `weak(p - avg(u), testfunction(p))` with `p` on
-  `"DL"`, which reproduces the trace exactly. SIP-DG on tets needs `DG_alpha ≈ 10–40`
-  for coercivity.
+  `"DL"`, which reproduces the trace exactly. `DG_alpha = 1` is enough on every element
+  family, tetrahedra included — the belief that tets needed `≈ 10–40` for coercivity came
+  from the tetrahedron winding described in `dev_docs/mesh_construction.md` §6, which
+  pointed their face normals inwards and made the scheme inconsistent, and which
+  `add_tetra_3d_C1/C2` now repair.
 
 ## 4. ALE / moving-mesh internals and remeshing
 

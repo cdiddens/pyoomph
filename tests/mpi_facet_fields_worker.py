@@ -46,6 +46,7 @@
 
 import argparse
 import json
+import os
 import sys
 import traceback
 
@@ -57,10 +58,24 @@ from pyoomph.equations.poisson import PoissonEquation
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh, LineMesh, CuboidBrickMesh
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc, get_mpi_sum
 
-#: Boundaries of the bulk mesh, by dimension, in the order the mesh classes name them.
+# The 3d element-family layouts, shared verbatim with the serial skeleton tests and with the 3d MPI
+# adaptivity harness. Importing it needs this directory on the path when the worker is launched by
+# absolute path under mpirun.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from box_mesh_3d import MixedBoxMesh3D, ALL_LAYOUTS  # noqa: E402
+
+#: Boundaries of the bulk mesh, by dimension, in the order the mesh classes name them. Both 3d mesh
+#: families (CuboidBrickMesh and MixedBoxMesh3D) name the same six walls.
 _BOUNDARIES = {1: ["left", "right"],
                2: ["left", "right", "top", "bottom"],
                3: ["left", "right", "top", "bottom", "front", "back"]}
+
+#: What `--kind` accepts per dimension. "brick" is CuboidBrickMesh (the brick mesh users actually
+#: build); everything else in 3d comes from MixedBoxMesh3D, which spans [-0.5,0.5]^3 rather than the
+#: unit cube -- irrelevant here, since every oracle is the serial run of the same case.
+_KINDS = {1: ["line"],
+          2: ["quad", "tri", "tri_crossed"],
+          3: ["brick"] + list(ALL_LAYOUTS)}
 
 
 class _FacetObservables(Equations):
@@ -116,21 +131,25 @@ class _FacetTrace(Equations):
 
 
 class DGPoisson(Problem):
-    """Interior-penalty DG Poisson on the unit square with weakly imposed Dirichlet data.
+    """Interior-penalty DG Poisson on a box, with weakly imposed Dirichlet data.
 
     `exact="linear"` puts the manufactured solution inside the discrete space, so the discrete answer is
     the exact one and every error below is a defect rather than a discretisation error."""
 
-    def __init__(self, N=8, space="D1", tris=False, exact="linear", facet_space=None, adapt=0,
+    def __init__(self, N=8, space="D1", kind=None, exact="linear", facet_space=None, adapt=0,
                  dim=2):
         super().__init__()
-        self.N, self.space, self.tris, self.exact_kind = N, space, tris, exact
+        self.N, self.space, self.exact_kind = N, space, exact
         # None: skeleton residuals only (the mode that already worked distributed). "DL"/"D0": a facet
         # UNKNOWN, which is what the halo scheme exists for.
         self.facet_space, self.adapt = facet_space, adapt
-        #: 1 (line), 2 (quads, optionally split into triangles) or 3 (bricks). Each dimension has its
-        #: own facet enumerator in src/mesh<d>d.cpp, and only the 2d one was exercised distributed.
+        #: 1 (lines), 2 (quads/triangles) or 3 (every 3d element family). Each dimension has its own
+        #: facet enumerator in src/mesh<d>d.cpp, and only the 2d one was exercised distributed at first.
         self.dim = dim
+        #: One of _KINDS[dim]; defaults to the first, i.e. line/quad/brick.
+        self.kind = kind or _KINDS[dim][0]
+        if self.kind not in _KINDS[dim]:
+            raise ValueError("unknown %dd mesh kind %r; known: %s" % (dim, self.kind, _KINDS[dim]))
 
     def _coords(self):
         return [var("coordinate_" + c) for c in "xyz"[:self.dim]]
@@ -148,15 +167,21 @@ class DGPoisson(Problem):
         if self.dim == 1:
             return LineMesh(name="domain", N=self.N)
         if self.dim == 2:
-            return RectangularQuadMesh(name="domain", N=self.N,
-                                       split_in_tris="left" if self.tris else False)
-        # Bricks, not tets: the 3d facet enumerator refuses non-conforming meshes outright, so this case
-        # must stay uniform (no adaptation) -- which is why `adapt` is only ever used in 2d below.
-        return CuboidBrickMesh(N=self.N, domain_name="domain")
+            split = {"quad": False, "tri": "left", "tri_crossed": "crossed"}[self.kind]
+            return RectangularQuadMesh(name="domain", N=self.N, split_in_tris=split)
+        if self.kind == "brick":
+            return CuboidBrickMesh(N=self.N, domain_name="domain")
+        # Tets, wedges, pyramids and the mixed layouts. The 3d facet enumerator refuses non-conforming
+        # meshes outright, so all of these must stay uniform -- which is why `adapt` is only ever used
+        # in 2d below.
+        return MixedBoxMesh3D(kind=self.kind, N=self.N, name="domain")
 
     def define_problem(self):
         self += self._mesh()
         exact, source = self._exact()
+        # DG_alpha stays at its default of 1 for every element family. It used to have to be raised
+        # on tetrahedra, but that was the inward face normal of dev_docs/mesh_construction.md 6, not a
+        # coercivity property of SIP.
         eqs = PoissonEquation(space=self.space, source=source)
         for b in _BOUNDARIES[self.dim]:
             eqs += DirichletBC(u=exact) @ b
@@ -193,9 +218,9 @@ def _facet_element_count(p):
     return int(get_mpi_sum(n)) if p.is_distributed() else int(n)
 
 
-def solve_case(N=8, space="D1", tris=False, exact="linear", outdir=None, facet_space=None,
+def solve_case(N=8, space="D1", kind=None, exact="linear", outdir=None, facet_space=None,
                adapt=0, state=None, dim=2):
-    with DGPoisson(N=N, space=space, tris=tris, exact=exact, facet_space=facet_space,
+    with DGPoisson(N=N, space=space, kind=kind, exact=exact, facet_space=facet_space,
                    adapt=adapt, dim=dim) as p:
         if outdir is not None:
             p.set_output_directory(outdir)
@@ -251,7 +276,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--size", type=int, default=8)
     ap.add_argument("--space", default="D1")
-    ap.add_argument("--tris", type=int, default=0)
+    ap.add_argument("--kind", default=None,
+                    help="mesh kind, see _KINDS: line / quad,tri,tri_crossed / brick + the 3d layouts")
     ap.add_argument("--exact", default="linear", choices=["linear", "sin"])
     ap.add_argument("--facet-space", default=None)
     ap.add_argument("--adapt", type=int, default=0)
@@ -262,7 +288,7 @@ def main():
 
     payload = {"rank": get_mpi_rank(), "nproc": get_mpi_nproc()}
     try:
-        payload.update(solve_case(N=args.size, space=args.space, tris=bool(args.tris),
+        payload.update(solve_case(N=args.size, space=args.space, kind=args.kind,
                                   exact=args.exact, outdir=args.outdir,
                                   facet_space=args.facet_space, adapt=args.adapt, state=args.state,
                                   dim=args.dim))
