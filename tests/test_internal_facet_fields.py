@@ -50,14 +50,16 @@
 #     discontinuous bulk field together. With a linear manufactured solution the answer is exact, so
 #     the multiplier is genuinely load bearing rather than a passive observer.
 #
-# Spatial adaptivity has its own section at the end of this file (DL/D0 are carried across, the nodal
-# Dx spaces are not). What stays out of scope - continuous facet spaces, MPI, non-conforming 3d and
-# non-uniformly adapted triangles - must fail with an explanatory error rather than a crash, which is
-# what the "rejected configurations" tests keep honest.
+# Spatial adaptivity, remeshing and state files have their own sections at the end of this file. Every
+# discontinuous facet space is carried across all three now, the nodal Dx ones included - they used to
+# be refused on the (mistaken) grounds that there was no sampler for them. What stays out of scope -
+# continuous facet spaces, non-conforming 3d and non-uniformly adapted triangles - must fail with an
+# explanatory error rather than a crash, which is what the "rejected configurations" tests keep honest.
 
 import math
 import os
 
+import numpy
 import pytest
 
 from pyoomph import *
@@ -1443,3 +1445,93 @@ def test_the_projection_interpolator_transfers_the_skeleton_too():
                 for a, b in zip(state_after[k][0], state_before[k][0]))
     assert worst < 1e-10, worst
     assert after["err2"] == pytest.approx(before["err2"], abs=1e-10), (before, after)
+
+
+# ----------------------------------------------------------------------------------------------
+# state files
+# ----------------------------------------------------------------------------------------------
+#
+# A state file has to reproduce exactly the state it was written at. The facet fields live in the
+# interface elements' own internal Data, and no other block of the file covers them - the bulk record
+# holds bulk elements and nodes. Until that block existed, loading a state merely REFITTED whatever
+# the loading process happened to be holding on its facets (clear_before_adapt snapshots the pre-load
+# values, and actions_after_adapt refits them onto the loaded geometry), so a fresh reader got zeros
+# and a continued run got its own stale values.
+#
+# That is invisible to any test which solves after loading, because a single solve repairs a trace
+# whose residual determines it algebraically. Hence: nothing below solves after the load. The reader
+# is a fresh problem that has never been solved, and the oracle is BIT-identity with the writer, per
+# element and per history level.
+#
+# The records are keyed by the interface elements' structural keys - (root element, refinement path,
+# face index), the same key the interior-facet halo scheme pairs facets across ranks with - which is
+# also how they are matched up here, rather than by facet position.
+
+
+def _facet_element_values(p, dom="domain/_internal_facets_"):
+    """{structural key: all internal-Data values at all history levels} of a skeleton mesh."""
+    im = p.get_mesh(dom)
+    keys = numpy.asarray(im.get_interface_element_structural_keys(),
+                         dtype=numpy.int64).reshape(im.nelement(), 3)
+    out = {}
+    for ie, e in enumerate(im.elements()):
+        key = tuple(int(c) for c in keys[ie])
+        assert key not in out, "two facet elements share the structural key %s" % (key,)
+        vals = []
+        for i in range(e.ninternal_data()):
+            d = e.internal_data_pt(i)
+            vals += [d.value_at_t(t, j) for t in range(d.ntstorage()) for j in range(d.nvalue())]
+        out[key] = vals
+    return out
+
+
+@pytest.mark.parametrize("space", ["DL", "D0", "D1", "D2"])
+def test_a_state_file_restores_the_facet_field_without_a_solve(space, tmp_path):
+    """The sharp form of "a state file holds the whole state": load into a problem that is never
+    solved, and require the facet values back bit for bit.
+
+    Without the interface block the reader would sit at its allocated zeros here (its own refit has
+    nothing to refit), so `err2` alone already separates the two - but the exact comparison is what
+    says the file reproduces the state rather than merely something plausible."""
+    fname = str(tmp_path / ("facets_" + space + ".dump"))
+    with _AdaptProblem(kind="quad", N=3, space=space) as writer:
+        writer.quiet()
+        writer.set_output_directory(str(tmp_path / ("w_" + space)))
+        writer.initialise()
+        writer.solve()
+        writer.refine_uniformly()
+        writer.solve()
+        before = _observables(writer)
+        state_before = _facet_element_values(writer)
+        writer.save_state(fname)
+    with _AdaptProblem(kind="quad", N=3, space=space) as reader:
+        reader.quiet()
+        reader.set_output_directory(str(tmp_path / ("r_" + space)))
+        reader.initialise()
+        reader.load_state(fname)          # ... and not a single solve after it
+        after = _observables(reader)
+        state_after = _facet_element_values(reader)
+    # the writer really did hold a non-trivial state, so "identical" is not "identically zero"
+    assert max(abs(v) for vals in state_before.values() for v in vals) > 0.5
+    if space != "D0":       # D0 cannot follow a linear trace; every other space here reproduces it
+        assert abs(before["err2"]) < 1e-12, before
+    assert set(state_before) == set(state_after), (len(state_before), len(state_after))
+    worst = max(abs(a - b) for k in state_before for a, b in zip(state_after[k], state_before[k]))
+    assert worst == 0.0, "%s: facet values differ by up to %.3e after a load with no solve" % (space, worst)
+    for k in ("err2", "err2_old", "meas_old", "meas_new"):
+        assert after[k] == pytest.approx(before[k], abs=1e-14), (k, before, after)
+
+
+def test_a_state_file_without_the_facet_values_would_be_noticed():
+    """The control for the test above.
+
+    A reader that has never solved holds identically zero on every facet - the refit in
+    actions_after_adapt has nothing but zeros to refit - so an interface block that silently did
+    nothing could not pass the bit-identity check above against a writer whose values are O(1)."""
+    with _AdaptProblem(kind="quad", N=3, space="D1") as p:
+        p.quiet()
+        p.initialise()
+        p.refine_uniformly()
+        fresh = _facet_element_values(p)
+    assert fresh
+    assert all(v == 0.0 for vals in fresh.values() for v in vals)

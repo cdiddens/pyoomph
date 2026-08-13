@@ -295,6 +295,28 @@ def test_state_file_saved_serially_loads_distributed(tmp_path, nproc):
     _assert_same_state("state file loaded on %d ranks vs saved serially" % nproc, ref, per_rank[0])
 
 
+@pytest.mark.parametrize("nproc", [2, 4])
+def test_state_file_saved_serially_loads_distributed_without_a_solve(tmp_path, nproc):
+    """The same file as above, but the loaders are forbidden to solve.
+
+    The test above cannot fail on the facet values: its workers solve after loading, and one solve
+    repairs a trace whose residual determines it algebraically - which is exactly how the file came to
+    carry no interface data at all for so long. Here the ranks report the loaded state untouched, so
+    the facet observables are what the FILE holds, and a skeleton left at its allocated zeros (or
+    refitted from whatever the loading process happened to have) misses `obs_psum` and `obs_perr2`
+    by the whole trace rather than by round-off."""
+    ref = _serial(N=6, exact="sin", facet_space="DL", adapt=2, outdir=str(tmp_path), state="save")
+    assert abs(ref["obs_psum"]) > 0.1, "the saved trace is ~0, so a lost one would be invisible"
+    per_rank = _run(nproc, tmp_path, ["--size", "6", "--facet-space", "DL", "--exact", "sin",
+                                      "--adapt", "2", "--state", "load_nosolve"], timeout=900)
+    for r in per_rank:
+        assert r["newton_steps"] == 0, \
+            "rank %d solved after loading (%d Newton steps), which is what this test must not do" % (
+                r["rank"], r["newton_steps"])
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("state file loaded unsolved on %d ranks vs saved serially" % nproc, ref, per_rank[0])
+
+
 def test_nodal_dg_facet_space_is_refused_before_distributing(tmp_path):
     """"D1"/"D2" on the skeleton cannot be carried through a mesh rebuild, and distributing performs
     one. That has to be said up front, by every rank, rather than discovered deep inside the

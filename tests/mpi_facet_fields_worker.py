@@ -227,14 +227,18 @@ def solve_case(N=8, space="D1", kind=None, exact="linear", outdir=None, facet_sp
         p.quiet()
         p.set_linear_solver("petsc_mumps")
         p.initialise()
-        if state == "load":
+        if state in ("load", "load_nosolve"):
             # The whole state comes back from the file, the mesh refinement included, so this rank's
             # share of the skeleton is whatever the loaded mesh implies and the halo scheme has to be
             # rebuilt for it. Nothing is adapted afterwards: the point is to reproduce the SAVED state,
             # which was reached by adapting, on a possibly different partition.
             p.load_state("state.dump", relative_to_output=True)
             adapt = 0
-        p.solve()
+        # "load_nosolve" reports the loaded state UNTOUCHED. Solving after a load hides everything the
+        # file failed to carry whose residual determines it algebraically - a facet trace above all -
+        # so the only way to test what the file actually holds is to look before any solve.
+        if state != "load_nosolve":
+            p.solve()
         if adapt:
             # One error-driven adaptation, then solve again. Distributed, this is where the skeleton is
             # destroyed and rebuilt with a different set of facets on each rank, so the halo scheme (and
@@ -281,7 +285,7 @@ def main():
     ap.add_argument("--exact", default="linear", choices=["linear", "sin"])
     ap.add_argument("--facet-space", default=None)
     ap.add_argument("--adapt", type=int, default=0)
-    ap.add_argument("--state", default=None, choices=["save", "load"])
+    ap.add_argument("--state", default=None, choices=["save", "load", "load_nosolve"])
     ap.add_argument("--dim", type=int, default=2, choices=[1, 2, 3])
     ap.add_argument("--outdir", required=True)
     args, _ = ap.parse_known_args()
