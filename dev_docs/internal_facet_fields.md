@@ -166,7 +166,7 @@ the facet unknowns would be dragged by their own equations).
 | continuous spaces on the skeleton | `_internal_define_scalar_field` + backstop in `add_interface_dofs` | route sketched in §2 |
 | `Dx` under adaptation / remeshing / `--distribute` | `rebuild_after_adapt` / `force_remesh` / `Problem.distribute()` | §5.4, §6.3, §7.1 |
 | non-conforming 3d, non-uniform 2d-triangle enumeration | 3d/2d enumerators | `build_facet_adjacency` is the designated basis for both |
-| 1d-bulk and 3d remeshing of skeleton fields | untested, no guard | no `LineMesh` remesher exists; 3d transfer should work but has no test |
+| 1d-bulk and 3d **remeshing** of skeleton fields | untested, no guard | no `LineMesh` remesher exists; 3d transfer should work but has no test. 1d and 3d under `--distribute` *are* covered (`tests/test_mpi_facet_fields.py`) — it is only the remesh transfer that is not |
 
 ### 7.1 MPI `--distribute`
 
@@ -238,7 +238,7 @@ facets, history levels, refine→unrefine round trip, 2:1 case, recovery hook, r
 remeshing (identical remesh machine-exact incl. history, distorted/coarsened/refined with measured
 tolerances, recovery hook, unrestored reporting, Dx refusal); all error-message guards.
 
-`tests/test_mpi_facet_fields.py` (18 tests, `--full`) is the distributed gate. Two layers, because a
+`tests/test_mpi_facet_fields.py` (32 tests, `--full`) is the distributed gate. Two layers, because a
 broken skeleton does not crash: the skeleton MEASURE and the integral of its NORMAL certify the
 enumeration and the orientation without reference to the solution (a duplicated facet inflates the
 first, a facet enumerated from the other side flips its contribution to the second), and `ndof` against
@@ -247,3 +247,13 @@ manufactured solution stays exact distributed (the flux term does not vanish at 
 mis-enumerated facet moves the answer), `DL`/`D0` facet unknowns at 2 and 4 ranks, the same across an
 adaptation that really refines, a state file written serially loaded on 2 and 4 ranks, the nodal-`Dx`
 refusal, and the replicated (`mpirun` without `--distribute`) mode.
+
+All three enumerators are covered, not only the 2d one they were first written for. 1d is the case to
+watch, because its near-side rule is the inverted one (`src/mesh1d.cpp` keeps the *later* of the two
+elements, 2d/3d the structurally smaller) and because a 1d facet is a point: the measure degenerates to
+the plain count of interior facets and the normal integral to a signed count of which way they face,
+so both are integers and a single mis-enumerated facet moves them by a whole unit. `∫n·dx = -(N-1)`
+distributed, as serially. 3d uses bricks and stays uniform, since `TemplatedMeshBase3d::fill_internal_facet_buffers`
+refuses non-conforming meshes; there `∫nᵢ·dx = N-1` in each direction. Every distributed case also
+asserts that the run really was partitioned (`is_distributed()`, and that the rank holds halo elements)
+- without that a `--distribute` that quietly did nothing agrees with the serial reference perfectly.

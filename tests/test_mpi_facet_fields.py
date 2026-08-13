@@ -120,6 +120,16 @@ def _run(nproc, tmpdir, args, timeout=600, distribute=True):
     for r in per_rank:
         assert "error" not in r, "failed on rank %d: %s\n%s" % (
             r["rank"], r["error"], r.get("traceback", ""))
+        # Everything below compares against a serial reference, so a run in which --distribute quietly
+        # did nothing would agree perfectly and pass without ever entering the code under test.
+        assert r["distributed"] == distribute, \
+            "rank %d reports distributed=%s for a run launched with distribute=%s" % (
+                r["rank"], r["distributed"], distribute)
+        if distribute:
+            assert r["n_bulk_nonhalo"] < r["n_bulk_local"], \
+                "rank %d holds no halo elements at all (%d of %d) -- it has the whole mesh, so no " \
+                "facet is shared across ranks and the halo scheme is untested" % (
+                    r["rank"], r["n_bulk_nonhalo"], r["n_bulk_local"])
     return per_rank
 
 
@@ -135,7 +145,7 @@ def _serial(**kwargs):
 
 # `n_interior_facets_local` is this rank's slice of the mesh (halo layer included) and has no serial
 # counterpart; everything else reported is a global quantity, so a partition-dependent value is a defect.
-_PER_RANK_KEYS = ("rank", "nproc", "n_interior_facets_local")
+_PER_RANK_KEYS = ("rank", "nproc", "n_interior_facets_local", "n_bulk_local", "n_bulk_nonhalo")
 
 
 def _assert_ranks_agree(per_rank):
@@ -311,3 +321,128 @@ def test_replicated_dg_matches_serial(tmp_path, nproc):
     _assert_ranks_agree(per_rank)
     _assert_same_state("replicated DG (n=%d) vs serial" % nproc,
                        _serial(N=8, exact="sin", outdir=str(tmp_path / "serial")), per_rank[0])
+
+
+# ---------------------------------------------------------------------------------------------------
+# 4 -- the other two dimensions
+# ---------------------------------------------------------------------------------------------------
+#
+# Everything above is 2d. There are three independent facet enumerators, one per dimension
+# (`fill_internal_facet_buffers` in src/mesh1d.cpp, src/mesh2d.cpp, src/mesh3d.cpp), and each makes its
+# own near-side choice; only the 2d one had ever been run under --distribute.
+#
+# 1d is the sharp one, for two reasons. Its rule is the INVERTED one -- it keeps the LATER of the two
+# elements as the near side, where 2d and 3d keep the structurally smaller -- so a "fix" that unified
+# the three would flip every 1d facet normal and with it the sign of every jump(). And a 1d facet is a
+# point, so `obs_meas` is the plain count of interior facets and `obs_nx` is a plain signed count of
+# which way they face: both are integers, and a single mis-enumerated facet moves them by a whole unit
+# rather than by something one has to choose a tolerance for.
+#
+# 3d only admits conforming meshes (`TemplatedMeshBase3d::fill_internal_facet_buffers` refuses the rest),
+# so these cases stay uniform: no adaptation, and the check is that a partitioned brick mesh enumerates
+# the same 144 facets that a serial one does.
+
+_N1D = 32          # 31 interior facets over up to 4 ranks
+_N3D = 4           # 64 bricks, 144 interior facets -- large enough that no rank holds the whole mesh
+
+
+@pytest.mark.parametrize("nproc", [2, 4])
+def test_distributed_1d_dg_linear_solution_stays_exact(tmp_path, nproc):
+    """1d DG distributed, with the exact solution inside the discrete space.
+
+    `obs_nx == -(N-1)` is the direct statement of the 1d near-side convention: every facet normal points
+    in -x, unanimously, on every rank. One facet taken from the other side would read -(N-3)."""
+    per_rank = _run(nproc, tmp_path, ["--dim", "1", "--size", str(_N1D), "--exact", "linear"])
+    ref = _serial(dim=1, N=_N1D, exact="linear", outdir=str(tmp_path / "serial"))
+    for r in per_rank:
+        assert abs(r["obs_uerr2"]) < 1e-14, \
+            "rank %d: |u - u_exact|^2 = %.3e in 1d" % (r["rank"], r["obs_uerr2"])
+        assert r["obs_meas"] == pytest.approx(_N1D - 1), \
+            "rank %d counts %.17g interior facets, not %d" % (r["rank"], r["obs_meas"], _N1D - 1)
+        assert r["obs_nx"] == pytest.approx(-(_N1D - 1)), \
+            "rank %d: sum of facet normals %.17g, not %d -- the 1d near-side rule is not unanimous" % (
+                r["rank"], r["obs_nx"], -(_N1D - 1))
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("distributed 1d DG (n=%d) vs serial" % nproc, ref, per_rank[0])
+
+
+@pytest.mark.parametrize("nproc", [2, 4])
+def test_distributed_1d_dg_matches_serial_for_a_non_representable_solution(tmp_path, nproc):
+    """sin(pi x) in 1d: compares the two runs' discretisations rather than their distance from a
+    solution both reproduce exactly."""
+    per_rank = _run(nproc, tmp_path, ["--dim", "1", "--size", str(_N1D), "--exact", "sin"])
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("distributed 1d DG sin (n=%d) vs serial" % nproc,
+                       _serial(dim=1, N=_N1D, exact="sin", outdir=str(tmp_path / "serial")),
+                       per_rank[0])
+
+
+@pytest.mark.parametrize("nproc", [2, 4])
+@pytest.mark.parametrize("facet_space", ["DL", "D0"])
+def test_distributed_1d_facet_unknown_is_numbered_once(tmp_path, nproc, facet_space):
+    """A facet unknown on a point. `ndof` is again the sharp assertion: numbered per holder rather than
+    per facet it comes out larger by exactly the number of facets straddling a partition boundary."""
+    per_rank = _run(nproc, tmp_path, ["--dim", "1", "--size", str(_N1D), "--exact", "linear",
+                                      "--facet-space", facet_space])
+    ref = _serial(dim=1, N=_N1D, exact="linear", facet_space=facet_space,
+                  outdir=str(tmp_path / "serial"))
+    assert ref["ndof"] == 2 * _N1D + (_N1D - 1), \
+        "the serial reference does not have one facet dof per interior facet (%d)" % ref["ndof"]
+    for r in per_rank:
+        assert r["ndof"] == ref["ndof"], \
+            "rank %d: ndof %d vs %d serially -- the 1d facet unknowns are numbered more than once" % (
+                r["rank"], r["ndof"], ref["ndof"])
+        # On a point, "DL" and "D0" are the same one-value space, so both reproduce the trace exactly.
+        assert abs(r["obs_perr2"]) < 1e-14, "rank %d: trace error %.3e" % (r["rank"], r["obs_perr2"])
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("distributed 1d facet unknown (%s, n=%d) vs serial" % (facet_space, nproc),
+                       ref, per_rank[0])
+
+
+@pytest.mark.parametrize("nproc", [2, 4])
+def test_distributed_3d_dg_linear_solution_stays_exact(tmp_path, nproc):
+    """3d bricks distributed. The orientation sums are integers here too: with all N-1 interior planes
+    per direction facing the same way, each of nx, ny, nz is exactly N-1."""
+    per_rank = _run(nproc, tmp_path, ["--dim", "3", "--size", str(_N3D), "--exact", "linear"],
+                    timeout=900)
+    ref = _serial(dim=3, N=_N3D, exact="linear", outdir=str(tmp_path / "serial"))
+    assert ref["n_facet_elements"] == 3 * (_N3D - 1) * _N3D ** 2, \
+        "the serial reference does not see every interior brick facet (%d)" % ref["n_facet_elements"]
+    for r in per_rank:
+        assert abs(r["obs_uerr2"]) < 1e-13, \
+            "rank %d: |u - u_exact|^2 = %.3e in 3d" % (r["rank"], r["obs_uerr2"])
+        for comp in "xyz":
+            assert r["obs_n" + comp] == pytest.approx(_N3D - 1, rel=1e-12), \
+                "rank %d: sum of facet normals along %s is %.17g, not %d" % (
+                    r["rank"], comp, r["obs_n" + comp], _N3D - 1)
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("distributed 3d DG (n=%d) vs serial" % nproc, ref, per_rank[0])
+
+
+@pytest.mark.parametrize("nproc", [2, 4])
+def test_distributed_3d_facet_unknown_is_numbered_once(tmp_path, nproc):
+    """A "DL" unknown on a quadrilateral facet of a partitioned brick mesh: three dofs per facet, so a
+    mis-paired halo list puts a whole triple on the wrong facet rather than a single value."""
+    per_rank = _run(nproc, tmp_path, ["--dim", "3", "--size", str(_N3D), "--exact", "linear",
+                                      "--facet-space", "DL"], timeout=900)
+    ref = _serial(dim=3, N=_N3D, exact="linear", facet_space="DL", outdir=str(tmp_path / "serial"))
+    for r in per_rank:
+        assert r["ndof"] == ref["ndof"], \
+            "rank %d: ndof %d vs %d serially -- the 3d facet unknowns are numbered more than once" % (
+                r["rank"], r["ndof"], ref["ndof"])
+        # A linear bulk trace is bilinear on a brick facet, which "DL" (1, x, y) cannot follow exactly,
+        # so only the SIGNED error vanishes; obs_perr2 is compared against serial instead.
+        assert abs(r["obs_perr1"]) < 1e-11, \
+            "rank %d: signed trace error %.3e" % (r["rank"], r["obs_perr1"])
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("distributed 3d facet unknown (n=%d) vs serial" % nproc, ref, per_rank[0])
+
+
+@pytest.mark.parametrize("nproc", [2, 4])
+def test_distributed_3d_dg_matches_serial_for_a_non_representable_solution(tmp_path, nproc):
+    per_rank = _run(nproc, tmp_path, ["--dim", "3", "--size", str(_N3D), "--exact", "sin",
+                                      "--facet-space", "DL"], timeout=900)
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("distributed 3d DG sin (n=%d) vs serial" % nproc,
+                       _serial(dim=3, N=_N3D, exact="sin", facet_space="DL",
+                               outdir=str(tmp_path / "serial")), per_rank[0])

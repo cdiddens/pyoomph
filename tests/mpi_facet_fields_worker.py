@@ -54,15 +54,22 @@ import numpy
 from pyoomph import *
 from pyoomph.expressions import *
 from pyoomph.equations.poisson import PoissonEquation
-from pyoomph.meshes.simplemeshes import RectangularQuadMesh
+from pyoomph.meshes.simplemeshes import RectangularQuadMesh, LineMesh, CuboidBrickMesh
 from pyoomph.generic.mpi import get_mpi_rank, get_mpi_nproc, get_mpi_sum
+
+#: Boundaries of the bulk mesh, by dimension, in the order the mesh classes name them.
+_BOUNDARIES = {1: ["left", "right"],
+               2: ["left", "right", "top", "bottom"],
+               3: ["left", "right", "top", "bottom", "front", "back"]}
 
 
 class _FacetObservables(Equations):
     """Integral functions on the interior-facet skeleton, with no unknowns of their own.
 
     `meas` is the whole point: it certifies the ENUMERATION of the skeleton independently of anything
-    the solution does, because it does not involve the solution at all."""
+    the solution does, because it does not involve the solution at all. In 1d a facet is a point and
+    `get_dx()` is unit-weighted, so `meas` degenerates to the plain COUNT of interior facets -- which
+    happens to be the sharpest form it takes anywhere."""
 
     def define_residuals(self):
         u = var("u")
@@ -74,8 +81,13 @@ class _FacetObservables(Equations):
         # element, so a facet enumerated from the other side contributes with the opposite sign -- and
         # `jump()`, which is near minus far, flips with it. A rank that picks the other near side
         # therefore moves these by twice that facet's contribution.
-        self.add_integral_function("nx", n[0] * self.get_dx())
-        self.add_integral_function("ny", n[1] * self.get_dx())
+        #
+        # 1d is the one to watch: it is the only dimension whose near-side rule is INVERTED (mesh1d.cpp
+        # keeps the later of the two elements, 2d/3d the structurally smaller one), and on a line every
+        # facet normal is +/-1, so `nx` is an integer -- +N for a uniformly oriented skeleton. Nothing
+        # else in the reported set would notice the whole 1d skeleton being flipped.
+        for i, comp in enumerate("xyz"[:self.get_nodal_dimension()]):
+            self.add_integral_function("n" + comp, n[i] * self.get_dx())
 
 
 class _FacetTrace(Equations):
@@ -109,25 +121,44 @@ class DGPoisson(Problem):
     `exact="linear"` puts the manufactured solution inside the discrete space, so the discrete answer is
     the exact one and every error below is a defect rather than a discretisation error."""
 
-    def __init__(self, N=8, space="D1", tris=False, exact="linear", facet_space=None, adapt=0):
+    def __init__(self, N=8, space="D1", tris=False, exact="linear", facet_space=None, adapt=0,
+                 dim=2):
         super().__init__()
         self.N, self.space, self.tris, self.exact_kind = N, space, tris, exact
         # None: skeleton residuals only (the mode that already worked distributed). "DL"/"D0": a facet
         # UNKNOWN, which is what the halo scheme exists for.
         self.facet_space, self.adapt = facet_space, adapt
+        #: 1 (line), 2 (quads, optionally split into triangles) or 3 (bricks). Each dimension has its
+        #: own facet enumerator in src/mesh<d>d.cpp, and only the 2d one was exercised distributed.
+        self.dim = dim
+
+    def _coords(self):
+        return [var("coordinate_" + c) for c in "xyz"[:self.dim]]
 
     def _exact(self):
-        x, y = var("coordinate_x"), var("coordinate_y")
+        c = self._coords()
         if self.exact_kind == "linear":
-            return 1 + 2 * x + 3 * y, 0
-        return sin(pi * x) * sin(pi * y), 2 * pi ** 2 * sin(pi * x) * sin(pi * y)
+            return 1 + sum((i + 2) * x for i, x in enumerate(c)), 0
+        u = 1
+        for x in c:
+            u = u * sin(pi * x)
+        return u, self.dim * pi ** 2 * u
+
+    def _mesh(self):
+        if self.dim == 1:
+            return LineMesh(name="domain", N=self.N)
+        if self.dim == 2:
+            return RectangularQuadMesh(name="domain", N=self.N,
+                                       split_in_tris="left" if self.tris else False)
+        # Bricks, not tets: the 3d facet enumerator refuses non-conforming meshes outright, so this case
+        # must stay uniform (no adaptation) -- which is why `adapt` is only ever used in 2d below.
+        return CuboidBrickMesh(N=self.N, domain_name="domain")
 
     def define_problem(self):
-        self += RectangularQuadMesh(name="domain", N=self.N,
-                                    split_in_tris="left" if self.tris else False)
+        self += self._mesh()
         exact, source = self._exact()
         eqs = PoissonEquation(space=self.space, source=source)
-        for b in ["left", "right", "top", "bottom"]:
+        for b in _BOUNDARIES[self.dim]:
             eqs += DirichletBC(u=exact) @ b
         feqs = _FacetObservables()
         if self.facet_space is not None:
@@ -139,11 +170,10 @@ class DGPoisson(Problem):
         # Partition-independent bulk quantities. Moments rather than a single integral: a distributed
         # dof vector has no partition-independent ordering and cannot be compared entry by entry, and a
         # single integral is a weak statement about a field.
-        x, y = var("coordinate_x"), var("coordinate_y")
         u = var("u")
+        moments = {"m" + c: x * u for c, x in zip("xyz", self._coords())}
         eqs += IntegralObservables(uerr2=(u - exact) ** 2, u1=u, u2=u ** 2,
-                                   mx=x * u, my=y * u,
-                                   gu=dot(grad(u), grad(u)))
+                                   gu=dot(grad(u), grad(u)), **moments)
         self += eqs @ "domain"
         # A nodal Dx facet space cannot be carried through an adaptation; "DL"/"D0" can.
         self.max_refinement_level = self.adapt
@@ -164,9 +194,9 @@ def _facet_element_count(p):
 
 
 def solve_case(N=8, space="D1", tris=False, exact="linear", outdir=None, facet_space=None,
-               adapt=0, state=None):
+               adapt=0, state=None, dim=2):
     with DGPoisson(N=N, space=space, tris=tris, exact=exact, facet_space=facet_space,
-                   adapt=adapt) as p:
+                   adapt=adapt, dim=dim) as p:
         if outdir is not None:
             p.set_output_directory(outdir)
         p.quiet()
@@ -191,8 +221,16 @@ def solve_case(N=8, space="D1", tris=False, exact="linear", outdir=None, facet_s
             p.solve(spatial_adapt=1)
         if state == "save":
             p.save_state("state.dump", relative_to_output=True)
+        bulk = p.get_mesh("domain")
         res = {
             "ndof": int(p.ndof()),
+            # Whether the mesh really was partitioned, and how far. Without these a run in which
+            # --distribute quietly did nothing agrees with the serial reference perfectly and the test
+            # reports a pass for a code path it never entered.
+            "distributed": bool(p.is_distributed()),
+            "n_bulk_local": int(bulk.nelement()),
+            "n_bulk_nonhalo": int(sum(1 for e in range(bulk.nelement())
+                                      if not bulk.element_pt(e).is_halo())),
             "newton_steps": len(list(p.get_last_residual_convergence())),
             "maxres": float(numpy.max(numpy.abs(numpy.asarray(p.get_residuals())))),
             "n_facet_elements": _facet_element_count(p),
@@ -218,6 +256,7 @@ def main():
     ap.add_argument("--facet-space", default=None)
     ap.add_argument("--adapt", type=int, default=0)
     ap.add_argument("--state", default=None, choices=["save", "load"])
+    ap.add_argument("--dim", type=int, default=2, choices=[1, 2, 3])
     ap.add_argument("--outdir", required=True)
     args, _ = ap.parse_known_args()
 
@@ -225,7 +264,8 @@ def main():
     try:
         payload.update(solve_case(N=args.size, space=args.space, tris=bool(args.tris),
                                   exact=args.exact, outdir=args.outdir,
-                                  facet_space=args.facet_space, adapt=args.adapt, state=args.state))
+                                  facet_space=args.facet_space, adapt=args.adapt, state=args.state,
+                                  dim=args.dim))
     except Exception as e:
         payload["error"] = type(e).__name__ + ": " + str(e)
         payload["traceback"] = traceback.format_exc()[-2000:]
