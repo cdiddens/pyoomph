@@ -6554,6 +6554,54 @@ namespace pyoomph
 		//			std::set<ShapeExpansion*> allshapes=FiniteElementCode::get_all_shape_expansions_in(GiNaC::ex inp)
 	}
 
+	// As classify_space_type(), but reports failure instead of throwing. Callers that only want to
+	// REFINE a decision must use this one: block_contribution_class_name() splits a contribution class
+	// by side, and a split it cannot justify has to fall back to the merged (conservative) class rather
+	// than abort code generation. The throwing wrapper below stays for the code-emission paths, where
+	// an unclassifiable space genuinely means the generated C code could not be written.
+	bool FiniteElementCode::try_classify_space_type(const FiniteElementSpace *s, int &out) const
+	{
+		for (unsigned int i = 0; i < spaces.size(); i++)
+			if (s == spaces[i])
+			{
+				out = 0;
+				return true;
+			}
+		if (bulk_code)
+			for (unsigned int i = 0; i < bulk_code->spaces.size(); i++)
+				if (s == bulk_code->spaces[i])
+				{
+					out = -1;
+					return true;
+				}
+		if (opposite_interface_code)
+		{
+			for (unsigned int i = 0; i < opposite_interface_code->spaces.size(); i++)
+				if (s == opposite_interface_code->spaces[i])
+				{
+					out = -2;
+					return true;
+				}
+			if (opposite_interface_code->bulk_code)
+			{
+				for (unsigned int i = 0; i < opposite_interface_code->bulk_code->spaces.size(); i++)
+					if (s == opposite_interface_code->bulk_code->spaces[i])
+					{
+						out = -3;
+						return true;
+					}
+			}
+		}
+		if (bulk_code && bulk_code->bulk_code)
+			for (unsigned int i = 0; i < bulk_code->bulk_code->spaces.size(); i++)
+				if (s == bulk_code->bulk_code->spaces[i])
+				{
+					out = -4;
+					return true;
+				}
+		return false;
+	}
+
 	// Returns 0 if the space is defined on this element, -1 for bulk element, -2 for other side of interface, >0 for external elements [-1]
 	//  -3 for opposite bulk
 	//  -4 for bulk->bulk
@@ -8252,11 +8300,45 @@ namespace pyoomph
 	// and functable->global_parameters.
 	////////////////////////////////////////////////////////////////////////////////////////////////
 
+	// Suffix marking the contribution class of a field seen on the FAR side of an interior facet. Kept
+	// as a named constant because problem.cpp strips it again when the per-element classes are
+	// aggregated into the problem-wide field list, and elements.cpp appends it when an interface
+	// element adopts the attribution of its opposite neighbour: three places that must agree.
+	const std::string OPPOSITE_CONTRIBUTION_CLASS_SUFFIX = "@opposite";
+
+	// True for a space whose values live in Data owned by ONE element (DG/DL/D0), as opposed to a
+	// continuous space, whose nodal values on a facet are shared by both adjacent elements.
+	//
+	// This is the condition under which the two sides of an interior facet may be split into separate
+	// contribution classes at all. For a continuous field the split would be unsound: a facet dof is
+	// literally the same unknown on both sides, so it is reachable through both class columns, and a
+	// one-sided facet term would then declare a genuinely nonzero entry structurally absent.
+	static bool is_element_private_space(pyoomph::FiniteElementSpace *sp)
+	{
+		if (!sp || sp->is_external())
+			return false;
+		return dynamic_cast<pyoomph::DGFiniteElementSpace *>(sp) != NULL ||
+			   dynamic_cast<pyoomph::DiscontinuousFiniteElementSpace *>(sp) != NULL;
+	}
+
 	// The contribution CLASS of a field: the domain it is DEFINED on plus its name, with mesh_* and
 	// coordinate_* being the same dof and hence the same class. Used both to index the functable
 	// tables (write_code_info below) and to name the row/column roles in the symmetry comparison; the
 	// two must not drift apart, which is why they share this function.
-	static std::string block_contribution_class_name(pyoomph::FiniteElementField *f)
+	//
+	// for_code, when given, additionally splits off the far side of an interior facet as its own class
+	// "<domain>/<field>@opposite". Without that split the two sides of a facet are indistinguishable
+	// here - the opposite side is a dummy FiniteElementCode carrying the same domain path - so the
+	// coupling table cannot state that the near-side and far-side copies of an element-local field do
+	// NOT couple. That statement is what lets static condensation decompose an HDG system into one
+	// block per element instead of one block spanning the whole mesh.
+	//
+	// Only the opposite roles (-2, -3) are split, and only for element-private spaces. Everything else
+	// keeps the merged name, deliberately: roles 0/-1/-4 are the bulk-versus-interface views of the
+	// SAME dof, which get_defined_on_domain_equivalent_field() exists to alias together. Any case that
+	// cannot be classified falls back to the merged name as well - merging only ever over-reports
+	// coupling, which costs a matrix entry, while an unjustified split would drop a real one.
+	static std::string block_contribution_class_name(pyoomph::FiniteElementField *f, pyoomph::FiniteElementCode *for_code = NULL)
 	{
 		pyoomph::FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
 		std::string nn = wheredef->get_name();
@@ -8266,7 +8348,17 @@ namespace pyoomph
 			nn = "coordinate_y";
 		else if (nn == "mesh_z")
 			nn = "coordinate_z";
-		return wheredef->get_space()->get_code()->get_full_domain_name() + "/" + nn;
+		std::string res = wheredef->get_space()->get_code()->get_full_domain_name() + "/" + nn;
+		if (for_code)
+		{
+			int role;
+			if (for_code->try_classify_space_type(wheredef->get_space(), role) && (role == -2 || role == -3) &&
+				is_element_private_space(wheredef->get_space()))
+			{
+				res += OPPOSITE_CONTRIBUTION_CLASS_SUFFIX;
+			}
+		}
+		return res;
 	}
 
 	static bool is_position_field(pyoomph::FiniteElementField *f)
@@ -8417,6 +8509,12 @@ namespace pyoomph
 		std::map<BlockRoleKey, GiNaC::symbol> *registry;
 		bool transpose;
 		bool *unsupported;
+		// The code the blocks are being generated for, so that role symbols are keyed by the same
+		// contribution class the functable tables are indexed by. Without it the near-side and far-side
+		// test functions of an interior facet canonicalise to ONE role symbol, i.e. two different
+		// functions sharing a key - exactly the collision BlockRoleKey warns about, and a source of
+		// symmetry "proofs" that only hold once the two sides are conflated.
+		pyoomph::FiniteElementCode *for_code;
 
 		GiNaC::ex get(const BlockRoleKey &key)
 		{
@@ -8429,7 +8527,7 @@ namespace pyoomph
 		}
 		GiNaC::ex role_symbol(int role, pyoomph::FiniteElementField *f, pyoomph::BasisFunction *basis, const std::string &tags)
 		{
-			return get(BlockRoleKey{transpose ? 1 - role : role, block_contribution_class_name(f), basis->get_creation_index(), 0, "", tags});
+			return get(BlockRoleKey{transpose ? 1 - role : role, block_contribution_class_name(f, for_code), basis->get_creation_index(), 0, "", tags});
 		}
 		GiNaC::ex weight_symbol(unsigned dt_order, const std::string &scheme)
 		{
@@ -8437,7 +8535,7 @@ namespace pyoomph
 		}
 
 	public:
-		BlockRoleCanonicalizer(std::map<BlockRoleKey, GiNaC::symbol> &reg, bool tr, bool &unsup) : registry(&reg), transpose(tr), unsupported(&unsup) {}
+		BlockRoleCanonicalizer(std::map<BlockRoleKey, GiNaC::symbol> &reg, bool tr, bool &unsup, pyoomph::FiniteElementCode *fc) : registry(&reg), transpose(tr), unsupported(&unsup), for_code(fc) {}
 		GiNaC::ex operator()(const GiNaC::ex &inp) override
 		{
 			if (*unsupported)
@@ -8524,14 +8622,14 @@ namespace pyoomph
 	// SYMMETRIC/ANTISYMMETRIC for the accumulated block A = block(i,j) against B = block(j,i)
 	// (A and B are the same expression for a diagonal block). Compares the sums rather than term by
 	// term: ANDing per term would be sound but would miss every cancellation.
-	static unsigned char block_symmetry_flags(const GiNaC::ex &A, const GiNaC::ex &B)
+	static unsigned char block_symmetry_flags(const GiNaC::ex &A, const GiNaC::ex &B, pyoomph::FiniteElementCode *for_code)
 	{
 		const size_t node_cap = 20000; // the expand() below is superlinear; over the cap, prove nothing
 		if (count_block_nodes(A, node_cap) > node_cap || count_block_nodes(B, node_cap) > node_cap)
 			return 0;
 		std::map<BlockRoleKey, GiNaC::symbol> registry;
 		bool unsupported = false;
-		BlockRoleCanonicalizer plain(registry, false, unsupported), transposed(registry, true, unsupported);
+		BlockRoleCanonicalizer plain(registry, false, unsupported, for_code), transposed(registry, true, unsupported, for_code);
 		GiNaC::ex cA = plain(A);
 		GiNaC::ex cBT = transposed(B);
 		if (unsupported)
@@ -9193,7 +9291,11 @@ namespace pyoomph
 	  // descriptions of the same dof would disagree. Used both to register the classes below and to
 	  // resolve field_contribution_index further down; they must not drift apart, which is also why the
 	  // block-flag analysis above names its row/column roles through the very same function.
-	  auto contribution_class_name = [](FiniteElementField *f) -> std::string { return block_contribution_class_name(f); };
+	  // Captures "this" so the class name is resolved relative to the code being generated, which is
+	  // what splits the far side of an interior facet into its own class. Every consumer below (the
+	  // registration loop, class_index_of for the block flags, and the field_contribution_index name
+	  // fallback) goes through this one lambda, so they cannot disagree about the naming.
+	  auto contribution_class_name = [this](FiniteElementField *f) -> std::string { return block_contribution_class_name(f, this); };
 	  for (auto *f : contributing_fields)
 	  {
 		FiniteElementField *wheredef = f->get_defined_on_domain_equivalent_field();
@@ -9364,13 +9466,13 @@ namespace pyoomph
 						const std::pair<GiNaC::ex, GiNaC::ex> &other = (i1 == i2 ? b.second : mirror->second);
 						if (!b.second.first.is_zero() && !other.first.is_zero())
 						{
-							unsigned char f = block_symmetry_flags(b.second.first, other.first);
+							unsigned char f = block_symmetry_flags(b.second.first, other.first, this);
 							jflags[i1][i2] |= f;
 							jflags[i2][i1] |= f;
 						}
 						if (!b.second.second.is_zero() && !other.second.is_zero())
 						{
-							unsigned char f = block_symmetry_flags(b.second.second, other.second);
+							unsigned char f = block_symmetry_flags(b.second.second, other.second, this);
 							mflags[i1][i2] |= f;
 							mflags[i2][i1] |= f;
 						}

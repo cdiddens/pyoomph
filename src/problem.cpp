@@ -3957,9 +3957,12 @@ namespace pyoomph
 								std::to_string(static_condensation_max_component_size) +
 								". Each component is inverted as a dense block, so this would cost more than the solve "
 								"it is meant to shorten. Sample dofs of the component: " + list +
-								". Either restrict the selection to dofs that really are element-local (a DG field "
-								"coupled across facets is not), or raise problem.static_condensation_max_component_size "
-								"if the size is genuinely intended.");
+								". Either restrict the selection to dofs that really are element-local, or raise "
+								"problem.static_condensation_max_component_size if the size is genuinely intended. "
+								"A DG field whose facet terms couple the two sides directly - an interior-penalty "
+								"jump/average formulation - is not element-local and percolates through the whole "
+								"mesh; a hybridized (HDG) formulation, where the sides talk only through an unknown "
+								"on the facet, is, and condenses into one block per element.");
 		}
 
 		// --- 4. Structural invertibility. A_LL restricted to a component must have no structurally
@@ -7090,11 +7093,38 @@ namespace pyoomph
 	// have no Jacobian contribution in either their row or their column
 	// (pin_due_to_empty_jacobian_row_or_col) - such fields would make the Jacobian singular and must be
 	// pinned when that residual is active (see _set_solved_residual()). Must be called whenever the set
+	// Strips the "@opposite" marker a per-element contribution class carries when it refers to the far
+	// side of an interior facet, so that both sides map onto the one global field they are copies of.
+	// Must agree with OPPOSITE_CONTRIBUTION_CLASS_SUFFIX in codegen.cpp and with the adoption in
+	// InterfaceElementBase::fill_local_dof_contribution_indices. Records what it stripped, for the
+	// report at the end of get_jacobian_information_string().
+	static std::string strip_side_split_suffix(const std::string &name, std::set<std::string> &split_classes)
+	{
+		static const std::string suffix = "@opposite";
+		if (name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+		{
+			std::string base = name.substr(0, name.size() - suffix.size());
+			split_classes.insert(base);
+			return base;
+		}
+		return name;
+	}
+
 	// of loaded codes changes (loading new equations) and before equation numbering can rely on the
 	// pinning information being up to date.
+	//
+	// The per-element contribution classes may distinguish the two sides of an interior facet (the
+	// "@opposite" suffix, see codegen.cpp); this level deliberately does not. The question answered
+	// here - "does residual R couple field A to field B anywhere in the problem" - is side-agnostic by
+	// construction, and there is no global unknown a far-side class could stand for. Exposing one
+	// would also be actively harmful: such a class typically has an empty Jacobian ROW, since a
+	// residual is rarely tested against the opposite side alone, and the empty-row analysis below would
+	// then mark a field that does not exist as one that must be pinned. The suffix is therefore
+	// stripped on lookup, and only recorded for the structure-file report.
 	void Problem::assemble_defined_field_list()
 	{
 		defined_fields.clear();
+		side_split_field_classes.clear();
 		defined_fields_to_domain.clear();
 		residual_names.clear();
 		std::set<std::string> field_set;
@@ -7164,7 +7194,7 @@ namespace pyoomph
 				}
 				for (unsigned j=0;j<ft->contribution_entries_size;j++)
 				{
-					std::string fn=ft->contribution_names[j];
+					std::string fn=strip_side_split_suffix(ft->contribution_names[j],side_split_field_classes);
 					if (field_name_to_index.find(fn)==field_name_to_index.end())
 					{
 						throw_runtime_error("Undefined field " + fn + " in contribution entry for residual/jacobian combination " + residual_names[i]);
@@ -7179,7 +7209,7 @@ namespace pyoomph
 
 					for (unsigned k=0;k<ft->contribution_entries_size;k++)
 					{
-						std::string fn2=ft->contribution_names[k];	
+						std::string fn2=strip_side_split_suffix(ft->contribution_names[k],side_split_field_classes);
 						if (field_name_to_index.find(fn2)==field_name_to_index.end())
 						{
 							throw_runtime_error("Undefined field " + fn2 + " in contribution entry for residual/jacobian combination " + residual_names[i]);
@@ -7611,6 +7641,19 @@ namespace pyoomph
 				ss << "\t|WARNING|: Field " << i << " \"" << defined_fields[i] << "\" has an empty row or column in all Jacobians." << std::endl;
 				all_good=false;
 			}
+		}
+
+		// Informational, not a warning: these fields are ONE global unknown, listed once above, but the
+		// elements on an interior facet distinguish the two sides of that facet and can therefore state
+		// that the near-side and far-side copies do not couple. That is what makes an HDG system
+		// decompose into one static-condensation block per element; see dev_docs/static_condensation.md.
+		if (!side_split_field_classes.empty())
+		{
+			ss << std::endl << "\tSplit by facet side within the elements (one global field each, listed once above): ";
+			unsigned int count=side_split_field_classes.size();
+			for (const auto &n : side_split_field_classes)
+				ss << n << (--count ? ", " : "");
+			ss << std::endl;
 		}
 
 		return std::make_tuple(ss.str(), all_good);

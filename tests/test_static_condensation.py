@@ -131,6 +131,68 @@ class _CRCavity(Problem):
         self.condense_dofs("domain/pressure", values=[1, 2])
 
 
+class _HDGPoisson(Problem):
+    """Hybridized DG Poisson: the two sides of a facet interact ONLY through the facet unknown, so the
+    bulk field is element-local after all and must condense into one block per element.
+
+    This is the case the whole side-aware contribution class exists for. It is the same equations as
+    _DGPoisson above except that the coupling goes through `uhat` rather than through jump(u), plus the
+    stabilisation term without which each element-local block would be a pure Neumann problem and hence
+    singular. `with_jump=True` puts an interior-penalty term back and must return the problem to one
+    percolating component -- the check that the coupling table follows the equations rather than having
+    been hardcoded sparse."""
+
+    def __init__(self, N=4, with_jump=False):
+        super().__init__()
+        self.N, self.with_jump = N, with_jump
+
+    def define_problem(self):
+        from pyoomph.meshes.simplemeshes import LineMesh
+        self.add_mesh(LineMesh(N=self.N))
+        x = var("coordinate_x")
+        tau = 10.0 * self.N
+        exact, source = sin(pi * x), pi**2 * sin(pi * x)
+        with_jump = self.with_jump
+
+        class Bulk(Equations):
+            def define_fields(self):
+                self.define_scalar_field("u", "D1")
+
+            def define_residuals(self):
+                u, v = var_and_test("u")
+                self.add_residual(weak(grad(u), grad(v)) - weak(source, v))
+
+        class Facet(Equations):
+            def define_fields(self):
+                self.define_scalar_field("uhat", "D0")
+
+            def define_residuals(self):
+                uh, mu = var_and_test("uhat")
+                u, v = var("u"), testfunction("u")
+                n = var("normal")
+                # One-sided values, built from avg/jump of the bulk quantities.
+                up, um = avg(u) + jump(u) / 2, avg(u) - jump(u) / 2
+                vp, vm = avg(v) + jump(v) / 2, avg(v) - jump(v) / 2
+                gup, gum = avg(grad(u)) + jump(grad(u)) / 2, avg(grad(u)) - jump(grad(u)) / 2
+                gvp, gvm = avg(grad(v)) + jump(grad(v)) / 2, avg(grad(v)) - jump(grad(v)) / 2
+                r = -weak(dot(n, gup), vp - mu) - weak(-dot(n, gum), vm - mu)
+                r += -weak(up - uh, dot(n, gvp)) - weak(um - uh, -dot(n, gvm))
+                r += weak(tau * (up - uh), vp - mu) + weak(tau * (um - uh), vm - mu)
+                if with_jump:
+                    r += weak(jump(u), jump(v))   # couples the two sides DIRECTLY: no longer hybridized
+                self.add_residual(r)
+
+        class Boundary(InterfaceEquations):
+            def define_residuals(self):
+                u, v = var_and_test("u")
+                n = var("normal")
+                self.add_residual(-weak(dot(n, grad(u)), v) - weak(u - exact, dot(n, grad(v)))
+                                  + weak(tau * (u - exact), v))
+
+        eqs = Bulk() + Facet() @ "_internal_facets_" + Boundary() @ ["left", "right"]
+        self.add_equations(eqs @ "domain")
+
+
 class _DGPoisson(Problem):
     """Interior-penalty DG Poisson: a D1 field whose facet terms couple every element to its neighbours,
     so selecting the whole field gives ONE connected component spanning the mesh. The size guard exists
@@ -402,6 +464,127 @@ def test_size_guard_fires_on_a_genuinely_percolating_selection():
         msg = str(excinfo.value)
         assert "do not decompose into small element-local blocks" in msg
         assert "96 mutually coupled dofs" in msg
+
+
+def _facet_tables(p):
+    """(names, jacobian table) of the interior-facet element code."""
+    el = p.get_mesh("domain/_internal_facets_").element_pt(0)
+    names, jac, _mass = el._get_contribution_tables()
+    return list(names), jac
+
+
+def test_hdg_bulk_field_condenses_into_one_block_per_element():
+    """The point of the side-aware contribution class. The two sides of a facet talk only through the
+    facet unknown, so the bulk field really is element-local and the solver must be left with the trace
+    system alone -- which is the definition of an HDG method, not an optimisation of it.
+
+    Before the split, both sides shared the class "domain/u", contributes_to_jacobian[u][u] conflated
+    u+ vs u+ with u+ vs u-, the pruned pattern kept an edge across every facet, and this came out as ONE
+    component spanning the whole mesh."""
+    with _HDGPoisson(N=6) as p:
+        p.quiet()
+        p.initialise()
+        p.condense_dofs("domain/u")
+        p.use_static_condensation = True
+        p._build_condensation_plan()
+        st = p._get_static_condensation_stats()
+        nel = p.get_mesh("domain").nelement()
+        nfacet = p.get_mesh("domain/_internal_facets_").nelement()
+        assert st["n_components"] == nel
+        # D1 in 1d: two values per element, and nothing from a neighbour.
+        assert st["component_size_min"] == st["component_size_max"] == 2
+        assert st["n_selected"] == 2 * nel
+        # What the solver is handed is exactly the skeleton.
+        assert p.ndof() - st["n_selected"] == nfacet
+
+
+def test_hdg_facet_table_states_the_two_sides_do_not_couple():
+    """The table underneath the previous test, asserted directly: the near and far copies of the bulk
+    field are separate classes, they do not couple, and the facet unknown still couples to both."""
+    with _HDGPoisson(N=4) as p:
+        p.quiet()
+        p.initialise()
+        names, jac = _facet_tables(p)
+        assert "domain/u" in names and "domain/u@opposite" in names
+        near, far = names.index("domain/u"), names.index("domain/u@opposite")
+        uhat = names.index("domain/_internal_facets_/uhat")
+        assert jac[near][near] and jac[far][far]
+        assert not jac[near][far] and not jac[far][near]
+        # The trace equation is what carries the coupling, in both directions and to both sides.
+        assert jac[uhat][near] and jac[uhat][far]
+        assert jac[near][uhat] and jac[far][uhat]
+
+
+def test_hdg_dofs_are_attributed_to_the_side_they_belong_to():
+    """The other half of the mechanism: the table would be useless if the element could not say which
+    of its local dofs belongs to which side. The facet element adopts the far side's attribution and
+    translates it into its own @opposite class."""
+    with _HDGPoisson(N=4) as p:
+        p.quiet()
+        p.initialise()
+        names, _ = _facet_tables(p)
+        near, far = names.index("domain/u"), names.index("domain/u@opposite")
+        el = p.get_mesh("domain/_internal_facets_").element_pt(0)
+        cidx = list(el._get_dof_contribution_indices())
+        assert -1 not in cidx, "every dof of a facet element must be attributable"
+        # Two D1 values on each side, plus the single D0 facet value.
+        assert cidx.count(near) == 2 and cidx.count(far) == 2
+        assert cidx.count(names.index("domain/_internal_facets_/uhat")) == 1
+
+
+def test_a_jump_term_makes_the_hdg_problem_percolate_again():
+    """The control that proves the table follows the equations. Adding an interior-penalty jump term
+    couples the two sides directly, so the very same problem must go back to one component -- if this
+    ever passes, the sparsity has been hardcoded rather than derived."""
+    with _HDGPoisson(N=4, with_jump=True) as p:
+        p.quiet()
+        p.initialise()
+        names, jac = _facet_tables(p)
+        near, far = names.index("domain/u"), names.index("domain/u@opposite")
+        assert jac[near][far] and jac[far][near]
+        p.condense_dofs("domain/u")
+        p.use_static_condensation = True
+        p.static_condensation_max_component_size = 100000
+        p._build_condensation_plan()
+        st = p._get_static_condensation_stats()
+        assert st["n_components"] == 1
+        assert st["component_size_max"] == 2 * p.get_mesh("domain").nelement()
+
+
+def test_hdg_condensation_does_not_change_the_solution():
+    """Exactness, on the case whose whole point is the elimination."""
+    ref = None
+    for condense in (False, True):
+        with _HDGPoisson(N=8) as p:
+            p.quiet()
+            p.initialise()
+            _deterministic_solver(p)
+            if condense:
+                p.condense_dofs("domain/u")
+            p.use_static_condensation = condense
+            p.solve()
+            if condense:
+                assert p._last_jacobian_was_condensed()
+            dofs = numpy.array(p.get_current_dofs()[0], dtype=float)
+            if ref is None:
+                ref = dofs
+            else:
+                assert numpy.allclose(dofs, ref, rtol=0, atol=1e-11)
+
+
+def test_the_side_split_is_invisible_at_problem_level():
+    """The per-side classes are an element-local statement. Globally there is one field `u`, and the
+    empty-row analysis must not see a phantom one -- a far-side class typically has no residual tested
+    against it at all."""
+    with _HDGPoisson(N=4) as p:
+        p.quiet()
+        p.initialise()
+        info, _good = p._get_jacobian_information_string()
+        info = str(info)
+        fields = info.split("Jacobian Structure")[0]
+        assert "@opposite" not in fields
+        # ... but the split is reported, so it is discoverable from the file.
+        assert "Split by facet side" in info and "domain/u" in info.split("Split by facet side")[1]
 
 
 def test_numeric_pivot_guard_catches_the_constant_pressure_mode():

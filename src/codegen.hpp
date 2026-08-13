@@ -1120,6 +1120,9 @@ namespace pyoomph
       // Classifies where space s "lives" relative to this code, to decide how to access its data in generated code:
       // 0 if the space is defined on this element, -1 for bulk element, -2 for other side of interface, >0 for external elements [-1]
       virtual int classify_space_type(const FiniteElementSpace *s);
+      // Non-throwing variant, for callers that only refine a decision and must stay conservative when
+      // the space cannot be attributed. See the comment at its definition.
+      bool try_classify_space_type(const FiniteElementSpace *s, int &out) const;
       virtual std::string get_owner_prefix(const FiniteElementSpace *sp); // C++ expression prefix to access data owned by the element that "sp" belongs to (self/bulk/opposite/external), based on classify_space_type()
       virtual std::string get_shape_info_str(const FiniteElementSpace *sp);
       // True only where a history configuration can actually differ from the current one, i.e. on a

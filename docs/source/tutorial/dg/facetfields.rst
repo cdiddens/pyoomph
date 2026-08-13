@@ -101,6 +101,19 @@ In a stationary problem, this is repaired by the next Newton solve, which is why
 
 The same transfer is used upon remeshing (cf. :numref:`secaleremeshing`), where each new facet takes the values of the closest facet of the old skeleton within the same old bulk element. Only for an identical remesh, this is exact, otherwise the error is of the order of the distance to the closest old facet times the gradient of the facet field. For a facet field which is a trace or a flux of the bulk solution, :py:meth:`~pyoomph.generic.codegen.BaseEquations.set_facet_recovery` is therefore the recommended choice also here.
 
+Condensing the bulk unknowns away
+'''''''''''''''''''''''''''''''''
+
+An unknown on the facets changes what the *bulk* unknowns are coupled to. Without one, the facet terms of a discontinuous Galerkin method connect each element directly to its neighbours, so the bulk unknowns of the whole mesh form one large coupled system. With one, the elements only ever talk to the facets between them: the bulk unknowns of an element couple to that element and to its own facets, and to nothing else.
+
+That is precisely the condition :py:class:`~pyoomph.equations.generic.StaticCondensation` requires (cf. :numref:`secspatialcrcondensation`). Provided the formulation is genuinely hybridized - i.e. the two sides of a facet interact only through the facet unknown, which in particular requires a stabilization term, since without one the element-local problem is a pure Neumann problem and hence not invertible - the bulk field can be eliminated element by element::
+
+    eqs += StaticCondensation("u")
+
+The linear solver is then handed the facet unknowns alone, which is the defining property of a hybridizable discontinuous Galerkin (HDG) method: the size of the global system is set by the skeleton, not by the bulk. Note that the automatic selection :py:meth:`~pyoomph.generic.problem.Problem.condense_element_private_dofs` will *not* pick the bulk field here, since the facet elements read it as external data; it has to be named explicitly, as above.
+
+If the facet terms couple the two sides directly after all - an interior penalty formulation with a ``jump(u)*jump(v)`` term, for instance - the elimination is refused with an explanation, since the selected unknowns then form one connected block spanning the entire mesh rather than one block per element.
+
 
 .. only:: html
 

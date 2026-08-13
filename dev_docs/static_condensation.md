@@ -337,6 +337,46 @@ its CSC transpose) and agrees exactly, on both meshes. The referee first checks
 `_get_frozen_sparsity_nnz() == nnz(J)`, since a comparison in which the frozen path silently fell back
 would be worthless ([structural_assembly.md](structural_assembly.md) §4.1).
 
+### HDG: the case condensation is *for*
+
+Hybridizable DG is the one method where condensing is not an optimisation but the definition — the
+global system is meant to be the trace system alone. It did not work until the contribution classes
+learned about facet sides, and the reason is worth keeping.
+
+The element code was always right: in an interior-facet element, the residual of the near-side bulk
+field differentiates w.r.t. the facet unknown and the near side only, never w.r.t. the far side. But
+`block_contribution_class_name()` named a class after the domain the field is *defined* on, and the
+opposite side is a dummy `FiniteElementCode` carrying the same domain path — so both sides landed in one
+class, `contributes_to_jacobian[u][u]` conflated `u⁺`–`u⁺` with `u⁺`–`u⁻`, and the pruned pattern kept
+an edge across every facet. The union-find then chained the whole mesh into one component: measured on a
+τ-stabilised 1D HDG Poisson, `n_components = 1` with a block of `2·N`.
+
+Opposite-side classes now carry an `@opposite` suffix, for roles -2/-3 and **only for element-private
+(DG/DL/D0) spaces**. That restriction is a soundness requirement, not tidiness: a continuous field's
+facet dofs are literally the same unknown on both sides, so they are reachable through both class
+columns, and a one-sided facet term would declare a real entry structurally absent. Element-owned Data
+cannot be shared by two elements, so for DG the two sides' dof sets are provably disjoint.
+
+The same 1D HDG Poisson now gives `n_components = N`, every block of size 2 (the element's two `D1`
+values), and the solver is handed exactly the interior facets — 9 unknowns for 10 elements, 39 for 40 —
+with the L2 error identical to the uncondensed run digit for digit.
+
+Two things follow that are easy to get wrong:
+
+* **Interior-penalty DG still percolates, and must.** Its `jump(u)·jump(v)` really does couple the two
+  sides, so the table says so and the size guard refuses the selection. Adding such a term back to the
+  HDG problem returns `n_components` to 1 — the check that the table follows the equations rather than
+  having been hardcoded sparse. `test_size_guard_fires_on_a_genuinely_percolating_selection` is that
+  guarantee in the suite.
+* **`condense_element_private_dofs()` will not select the bulk field.** The facet elements adopt it as
+  external data, which that rule deliberately excludes (§3). HDG needs the explicit
+  `condense_dofs("domain/u")` / `StaticCondensation("u")`, which is not filtered.
+
+The problem level does not see any of this: `assemble_defined_field_list()` strips the suffix, so
+`defined_fields` and the grids in `_jacobian_structure.txt` are unchanged, and the file merely gains a
+line naming the fields that were split per element. A far-side class typically has an empty Jacobian
+*row*, and exposing it globally would make the empty-row analysis pin a field that does not exist.
+
 ---
 
 ## 5. The numeric kernel

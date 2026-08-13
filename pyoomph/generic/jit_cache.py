@@ -230,8 +230,13 @@ def tier2_shadow_enabled() -> bool:
 
 
 # Bump whenever get_precodegen_fingerprint_text()'s coverage/format changes (keep
-# in sync with the "FMTn" tag inside that C++ function).
-FINGERPRINT_FORMAT_VERSION = 8
+# in sync with the "FMTn" tag inside that C++ function), and also whenever a codegen
+# change deliberately alters the emitted code for unchanged inputs: the shadow records
+# below are keyed by fingerprint and compared against the generated-code hash, so
+# without a bump every affected code reports a Tier-2 MISMATCH once, blaming the
+# fingerprint's coverage for a change that was intended.
+# 9: contribution classes distinguish the two sides of an interior facet (@opposite).
+FINGERPRINT_FORMAT_VERSION = 9
 
 
 class JITCache:

@@ -120,6 +120,20 @@ every contributor to (i,j) proves it — and it shows up as an unset bit on the 
 post-pass ANDs the pair bits across the two mirror cells (and clears them when only one side has any
 contribution at all: a nonzero block cannot be the ±transpose of an absent one).
 
+The AND also collapses the facet-side split: an element on an interior facet may distinguish
+`<domain>/<field>` from `<domain>/<field>@opposite` (see
+[structural_assembly.md](structural_assembly.md) §2), and both map onto the one global field here. That
+is the conservative direction — the global cell keeps only what *both* per-side sub-blocks prove.
+
+The same split matters one level down, in the **role key** the symmetry proof canonicalises with.
+`BlockRoleCanonicalizer::role_symbol` keys on the very same class name, so before the split the
+near-side and far-side test functions of a facet element canonicalised to a single `__blockrole`
+symbol — two different functions sharing a key, which is exactly the collision `BlockRoleKey` is
+documented to avoid, and could report a block as symmetric when it is only symmetric once the two sides
+are conflated. The class name and the role key must therefore always be produced by the same function,
+with the same generating code passed in; that is why `block_symmetry_flags()` takes a
+`FiniteElementCode*`.
+
 `get_jacobian_information_string()` renders the result into `_ccode/_jacobian_structure.txt`, one
 property matrix per residual set (plus one for the mass matrix where present), two characters per
 cell: `S`/`A`/`.` for symmetric pair / antisymmetric pair / contribution without proven symmetry, and

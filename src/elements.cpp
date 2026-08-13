@@ -5934,7 +5934,13 @@ namespace pyoomph
 		for (unsigned c = 0; c < ft->contribution_entries_size; c++)
 			if (ft->contribution_names[c]) my_class[std::string(ft->contribution_names[c])] = (int)c;
 
-		auto adopt = [&](BulkElementBase *src, const std::vector<int> &eqn_map)
+		// A source element never distinguishes sides - its own dofs are, from its point of view, simply
+		// its own - so when we adopt from the FAR side of the facet we must ask for that side's class
+		// ourselves. Our code may have split it off as "<name>@opposite" precisely so that it can state
+		// that the two sides do not couple; if it did not split (a continuous field, or a code that did
+		// not classify), the plain name is the right answer and is conservative.
+		static const std::string opposite_suffix = "@opposite";
+		auto adopt = [&](BulkElementBase *src, const std::vector<int> &eqn_map, bool opposite)
 		{
 			if (!src || eqn_map.empty() || src == this) return;
 			const JITFuncSpec_Table_FiniteElement_t *sft = src->get_code_instance()->get_func_table();
@@ -5951,16 +5957,31 @@ namespace pyoomph
 				if (sc < 0 || (unsigned)sc >= sft->contribution_entries_size) continue;
 				const char *nm = sft->contribution_names[sc];
 				if (!nm) continue;
-				auto it = my_class.find(std::string(nm));
+				std::string name(nm);
+				if (opposite)
+				{
+					// Never compose the marker: the opposite-side dummy shares our jitcode, so its own
+					// class names can already carry it. Leaving such a dof unattributed (-1) makes it
+					// couple to everything, which is the safe direction.
+					if (name.size() > opposite_suffix.size() &&
+						name.compare(name.size() - opposite_suffix.size(), opposite_suffix.size(), opposite_suffix) == 0)
+						continue;
+					auto op = my_class.find(name + opposite_suffix);
+					if (op != my_class.end()) { dest[my_le] = op->second; continue; }
+				}
+				auto it = my_class.find(name);
 				if (it != my_class.end()) dest[my_le] = it->second;
 			}
 		};
 
-		adopt(dynamic_cast<BulkElementBase *>(this->bulk_element_pt()), bulk_eqn_map);
+		adopt(dynamic_cast<BulkElementBase *>(this->bulk_element_pt()), bulk_eqn_map, false);
 		if (opposite_side && !Is_internal_facet_opposite_dummy)
 		{
-			adopt(dynamic_cast<BulkElementBase *>(opposite_side), opp_interf_eqn_map);
-			adopt(dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt()), opp_bulk_eqn_map);
+			// A facet whose two sides are the same element has no far side to speak of, and the
+			// disjointness the split relies on would not hold: adopt it as near-side throughout.
+			const bool self_facet = (opposite_side->bulk_element_pt() == this->bulk_element_pt());
+			adopt(dynamic_cast<BulkElementBase *>(opposite_side), opp_interf_eqn_map, !self_facet);
+			adopt(dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt()), opp_bulk_eqn_map, !self_facet);
 		}
 	}
 

@@ -63,6 +63,17 @@ used to detect fields with empty Jacobian rows/columns. Nobody used it for spars
 `BulkElementBase::get_dof_names()` shows the machinery to map *local dof index → (field, space, node)*
 already exists, which is the missing link to apply the table at element level.
 
+The index of that table is the *contribution class* of a field: the domain it is DEFINED on plus its
+name (`block_contribution_class_name()`), so that a bulk field and the interface's view of it share one
+class — they are one dof. One refinement was added later for hybridized DG: on an interior facet the two
+sides are distinct classes, `<domain>/<field>` and `<domain>/<field>@opposite`, but **only** for
+element-private (DG/DL/D0) spaces, where the two sides' Data provably cannot be the same. That is what
+lets the table state that the near-side and far-side copies do not couple, which in turn is what makes
+static condensation decompose an HDG system per element ([static_condensation.md](static_condensation.md)
+§4). A continuous field keeps one merged class, because its facet dofs really are shared and a split
+would declare a live entry structurally absent. `Problem::assemble_defined_field_list()` strips the
+suffix again, so the problem-global view and `_jacobian_structure.txt` stay side-agnostic.
+
 And a precedent existed one level up: `SparseRank3Tensor::finalize_for_vector_product()` already freezes
 a CSR structure once and afterwards returns **only a value array**, stuffed into a pre-built
 `csr_matrix` whose `indptr`/`indices` never change.

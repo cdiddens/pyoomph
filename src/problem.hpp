@@ -845,6 +845,11 @@ namespace pyoomph
     void sparse_assemble_row_or_column_compressed(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residual,bool compressed_row_flag) override; // Dispatches to the base-problem or periodic-orbit assembly depending on the active assembly handler
     unsigned n_unaugmented_dofs=0; // Number of dofs of the "physical" problem, i.e. excluding any bifurcation-tracking/arclength augmentation dofs
     std::vector<std::string> defined_fields; // All globally known field names (across all domains), used for the empty-Jacobian-row/col analysis
+    // Fields whose per-element contribution class was split by side on an interior facet (see
+    // OPPOSITE_CONTRIBUTION_CLASS_SUFFIX in codegen.cpp). Purely informational: the split is an
+    // element-local statement and is collapsed again here, so it is reported in the structure file
+    // rather than given a row and column of its own.
+    std::set<std::string> side_split_field_classes;
     std::vector<DynamicBulkElementCode*> defined_fields_to_domain; // Parallel to defined_fields: the code (domain) each field was defined in
     std::vector<std::string> residual_names; // Names of all residuals defined in the problem (for multi-residual/multi-assembly problems)
     std::vector<std::vector<bool>> residual_contributing_fields; // [residual][defined_field] -> whether the defined field contributes to the residual (i.e. whether there is a least a test function contributing to it)
