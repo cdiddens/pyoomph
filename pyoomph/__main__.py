@@ -50,7 +50,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "command", help="Use one of the following commands: check, cbrange, cache")
 parser.add_argument("check_type", nargs='?',
-                    help="What to check: solver, eigen or compiler. If command=='cbrange', it is the mode (currently only 'merge'). If command=='cache', it is the action ('usage' or 'clear')", default="")
+                    help="What to check: solver, eigen, compiler or mpi. If command=='cbrange', it is the mode (currently only 'merge'). If command=='cache', it is the action ('usage' or 'clear')", default="")
 parser.add_argument("check_name", nargs='?',
                     help="Which solver/eigensolver/compiler to check. If command=='cbrange', it is the output dir", default="")
 parser.add_argument("cbrange_in", nargs='*',
@@ -202,12 +202,12 @@ if arglist.command == "cbrange":
 
 elif arglist.command=="check":
 
-   checkopts={"solver","eigen","compiler"}
+   checkopts={"solver","eigen","compiler","mpi"}
    if arglist.check_type=="all":
       check_types=checkopts
       arglist.check_name="all"
    elif arglist.check_type not in checkopts:
-      raise RuntimeError("Please specify 'check all', 'check solver', 'check eigen' or 'check compiler'")
+      raise RuntimeError("Please specify 'check all', 'check solver', 'check eigen', 'check compiler' or 'check mpi'")
    else:
       check_types={arglist.check_type}
    for check_type in check_types:
@@ -339,6 +339,44 @@ elif arglist.command=="check":
                else:
                   print("","does not work: "+str(e.with_traceback(None)))
                   print("","For instructions on how to install a compiler, see "+install_doc_url)
+      elif check_type=="mpi":
+         # has_mpi() reflects the pyoomph/NO_MPI marker written by CMake depending on
+         # PYOOMPH_USE_MPI, i.e. how the core was actually compiled. Note that a broken
+         # mpi4py cannot be diagnosed here: in an MPI build, `python -m pyoomph` imports
+         # the package (and thereby mpi4py) before this file even runs.
+         from .generic.mpi import has_mpi, have_pymetis, PYMETIS_MISSING_MESSAGE
+         print("Checking mpi / build")
+         if not has_mpi():
+            print("","pyoomph was compiled WITHOUT MPI support (marker file pyoomph/NO_MPI is present)")
+            print("","","skipping the pymetis check - it is only needed to partition meshes for distributed (MPI) runs")
+         else:
+            print("","pyoomph was compiled WITH MPI support")
+            import mpi4py
+            from mpi4py import MPI
+            print("","","mpi4py "+mpi4py.__version__+" works, MPI library: "+MPI.Get_library_version().splitlines()[0])
+            print("Checking mpi / pymetis")
+            if not have_pymetis():
+               print("","does not work: "+PYMETIS_MISSING_MESSAGE)
+            else:
+               print("","loading seems to work")
+               try:
+                  import pymetis #type:ignore
+                  # Partition a tiny 4-cycle through the same API the partitioning callback
+                  # in pyoomph/__init__.py uses (CSRAdjacency, Options, part_graph): a pymetis
+                  # that merely imports but lacks this newer interface must be caught here,
+                  # not on rank 0 in the middle of a distributed run.
+                  adj=pymetis.CSRAdjacency([0,2,4,6,8],[1,3,0,2,1,3,0,2]) #type:ignore
+                  opts=pymetis.Options() #type:ignore
+                  opts.set_defaults() #type:ignore
+                  opts.objtype=pymetis.ObjType.CUT #type:ignore
+                  edgecut,part=pymetis.part_graph(2,adjacency=adj,vweights=None) #type:ignore
+                  if len(part)!=4:
+                     raise RuntimeError("partitioning a 4-vertex test graph returned "+str(len(part))+" vertex assignments")
+                  print("","","running seems to work")
+               except Exception as e:
+                  print("","","running does not work: "+str(e.with_traceback(None)))
+                  print("","","Hint: pyoomph requires a pymetis providing CSRAdjacency/Options; try 'pip install --upgrade pymetis'")
+
       else:
          raise RuntimeError("TODO: ")
 
