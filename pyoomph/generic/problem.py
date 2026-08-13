@@ -4082,28 +4082,17 @@ class Problem(_pyoomph.Problem):
                     print(msg)
                 return
             ensure_pymetis_available()
-            # Unknowns on the interior-facet skeleton ARE supported here: a facet shared by two ranks is
-            # owned by the one that assembles it, and setup_interior_facet_halo_scheme() makes the other
-            # holder's copy a halo, so it is numbered once and its numbers and values are copied across.
+            # Unknowns on the interior-facet skeleton ARE supported here, in every discontinuous space
+            # including the nodal ones (D1/D2/D1TB/D2TB): a facet shared by two ranks is owned by the
+            # one that assembles it, and setup_interior_facet_halo_scheme() makes the other holder's
+            # copy a halo, so it is numbered once and its numbers and values are copied across. That
+            # scheme marks whole oomph::Data objects, so it does not care how many values each holds.
             #
-            # What is still refused is a NODAL discontinuous facet space. Distributing goes through the
-            # adaptation path (actions_after_distribute calls actions_after_adapt), which rebuilds every
-            # skeleton element from scratch; DL/D0 values are carried across by the sample-and-refit
-            # snapshot, and nodal D1/D2/... ones are not - that is a serial restriction too, and the
-            # rebuild would refuse deep inside the distribution rather than here. Collective: the
-            # equation tree is identical on every rank, so all of them take this branch together.
-            _nodal_dg={"D1","D2","D1TB","D2TB"}
-            for _mn,_msh in self._meshdict.items():
-                if isinstance(_msh,ODEStorageMesh) or _msh._eqtree is None: continue
-                skel=_msh._eqtree.get_children().get("_internal_facets_")
-                if skel is None or skel._codegen is None: continue
-                _bad=sorted(n for n,s in skel._codegen._fields_defined_on_my_domain.items() if s in _nodal_dg)
-                if _bad:
-                    raise RuntimeError("Field(s) "+", ".join(_bad)+" on the interior-facet skeleton '"+str(_mn)+
-                                       "/_internal_facets_' use a nodal discontinuous space (D1/D2/...), which cannot be "
-                                       "carried through the mesh rebuild that distributing performs. Use 'DL' or 'D0' for "
-                                       "the facet field - for an HDG trace, 'DL' is the natural one - or run without "
-                                       "--distribute, where the same restriction only applies if you adapt.")
+            # A nodal facet space used to be refused right here, because distributing reaches the
+            # skeleton through the adaptation path (actions_after_distribute -> actions_after_adapt),
+            # which rebuilds every skeleton element from scratch and could only carry DL/D0 across.
+            # The snapshot/refit carries every discontinuous space now (see
+            # dev_docs/internal_facet_fields.md), so there is nothing left to refuse.
         super().distribute()
 
 

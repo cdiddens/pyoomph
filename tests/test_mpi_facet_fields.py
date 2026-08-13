@@ -265,22 +265,28 @@ def test_distributed_facet_unknown_is_numbered_once(tmp_path, nproc, facet_space
 
 
 @pytest.mark.parametrize("nproc", [2, 4])
-def test_distributed_facet_unknown_survives_adaptation(tmp_path, nproc):
+@pytest.mark.parametrize("facet_space", ["DL", "D1"])
+def test_distributed_facet_unknown_survives_adaptation(tmp_path, nproc, facet_space):
     """The skeleton is not adapted incrementally: it is deleted and rebuilt from the refined bulk mesh,
     so the halo scheme has to be rebuilt with it and the facet values carried across the rebuild.
 
     Refining also puts the 2:1 branch of the facet enumeration to work, where a coarse facet faces
-    several fine ones -- which is where a partition-dependent near-side choice would show up first."""
-    args = ["--size", "6", "--facet-space", "DL", "--exact", "sin", "--adapt", "2"]
+    several fine ones -- which is where a partition-dependent near-side choice would show up first.
+
+    "D1" is here because the nodal spaces take the same route and used to be refused on it: their
+    values sit per facet NODE rather than in DL modes, so they exercise the snapshot's per-space fit
+    while the halo scheme, which marks whole Data objects, cannot tell the difference."""
+    args = ["--size", "6", "--facet-space", facet_space, "--exact", "sin", "--adapt", "2"]
     per_rank = _run(nproc, tmp_path, args, timeout=900)
-    ref = _serial(N=6, exact="sin", facet_space="DL", adapt=2, outdir=str(tmp_path / "serial"))
+    ref = _serial(N=6, exact="sin", facet_space=facet_space, adapt=2, outdir=str(tmp_path / "serial"))
     assert ref["n_facet_elements"] > 100, \
         "the reference run did not actually refine (%d facets) -- this test would prove nothing" % ref["n_facet_elements"]
     for r in per_rank:
         assert abs(r["obs_perr2"]) < 1e-14, \
             "rank %d: the trace was not carried across the adaptation (error %.3e)" % (r["rank"], r["obs_perr2"])
     _assert_ranks_agree(per_rank)
-    _assert_same_state("adapted distributed facet unknown (n=%d) vs serial" % nproc, ref, per_rank[0])
+    _assert_same_state("adapted distributed facet unknown (%s, n=%d) vs serial" % (facet_space, nproc),
+                       ref, per_rank[0])
 
 
 @pytest.mark.parametrize("nproc", [2, 4])
@@ -317,25 +323,34 @@ def test_state_file_saved_serially_loads_distributed_without_a_solve(tmp_path, n
     _assert_same_state("state file loaded unsolved on %d ranks vs saved serially" % nproc, ref, per_rank[0])
 
 
-def test_nodal_dg_facet_space_is_refused_before_distributing(tmp_path):
-    """"D1"/"D2" on the skeleton cannot be carried through a mesh rebuild, and distributing performs
-    one. That has to be said up front, by every rank, rather than discovered deep inside the
-    distribution -- and it must name the way out."""
-    # The bulk space has to carry a D2 trace, or a different (earlier, and unrelated) check fires.
-    proc_args = ["--size", "6", "--space", "D2", "--facet-space", "D2", "--exact", "linear"]
-    cmd_env = dict(os.environ)
-    ompi_tmp = os.path.join(str(tmp_path), "_ompi_session")
-    os.makedirs(ompi_tmp, exist_ok=True)
-    cmd_env["TMPDIR"] = ompi_tmp
-    cmd = ["mpirun", "-n", "2", sys.executable, _WORKER, "--outdir", str(tmp_path)] + proc_args + ["--distribute"]
-    proc = subprocess.run(cmd, cwd=_HERE, capture_output=True, text=True, timeout=420, env=cmd_env)
-    per_rank = [json.loads(l[len("PYOOMPH_MPI_RESULT "):]) for l in proc.stdout.splitlines()
-                if l.startswith("PYOOMPH_MPI_RESULT ")]
-    assert len(per_rank) == 2, "reported from %d of 2 ranks" % len(per_rank)
+@pytest.mark.parametrize("nproc", [2, 4])
+@pytest.mark.parametrize("facet_space", ["D1", "D2"])
+def test_distributed_nodal_dg_facet_unknown_is_numbered_once(tmp_path, nproc, facet_space):
+    """A NODAL discontinuous trace ("D1"/"D2"), which Problem.distribute() used to refuse outright.
+
+    The refusal was about the mesh rebuild that distributing performs (actions_after_distribute ->
+    actions_after_adapt), which could only carry DL/D0 across; the snapshot fits every discontinuous
+    space in its own basis now, so there is nothing left to refuse.
+
+    `ndof` against the serial reference is the sharp assertion here as everywhere in this file: a
+    nodal trace numbered once per HOLDER instead of once per facet comes out inflated by whole
+    facets' worth of dofs -- and inflated by more than a DL one would be, since a "D2" facet carries
+    one value per facet node. The bulk space is raised to match, because a "D2" trace needs a bulk
+    that can carry one (an earlier, unrelated check in codegen.py)."""
+    args = ["--size", "6", "--space", facet_space, "--facet-space", facet_space, "--exact", "linear"]
+    per_rank = _run(nproc, tmp_path, args, timeout=900)
+    ref = _serial(N=6, space=facet_space, facet_space=facet_space, exact="linear",
+                  outdir=str(tmp_path / "serial"))
     for r in per_rank:
-        assert "error" in r, "rank %d accepted a nodal discontinuous facet space" % r["rank"]
-        assert "nodal discontinuous space" in r["error"], r["error"]
-        assert "'DL' or 'D0'" in r["error"], "the refusal does not say what to use instead: %s" % r["error"]
+        assert r["ndof"] == ref["ndof"], \
+            "%s rank %d: ndof %d vs %d serially -- the facet unknowns are numbered more than once" % (
+                facet_space, r["rank"], r["ndof"], ref["ndof"])
+        # A linear bulk trace lies in D1 and in D2, so the projection error is round-off.
+        assert abs(r["obs_perr2"]) < 1e-14, \
+            "%s rank %d: trace error %.3e" % (facet_space, r["rank"], r["obs_perr2"])
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("distributed nodal facet unknown (%s, n=%d) vs serial" % (facet_space, nproc),
+                       ref, per_rank[0])
 
 
 # ---------------------------------------------------------------------------------------------------

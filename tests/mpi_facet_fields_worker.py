@@ -140,8 +140,9 @@ class DGPoisson(Problem):
                  dim=2):
         super().__init__()
         self.N, self.space, self.exact_kind = N, space, exact
-        # None: skeleton residuals only (the mode that already worked distributed). "DL"/"D0": a facet
-        # UNKNOWN, which is what the halo scheme exists for.
+        # None: skeleton residuals only (the mode that already worked distributed). Any discontinuous
+        # space ("DL"/"D0" or a nodal "D1"/"D2"): a facet UNKNOWN, which is what the halo scheme
+        # exists for.
         self.facet_space, self.adapt = facet_space, adapt
         #: 1 (lines), 2 (quads/triangles) or 3 (every 3d element family). Each dimension has its own
         #: facet enumerator in src/mesh<d>d.cpp, and only the 2d one was exercised distributed at first.
@@ -200,7 +201,7 @@ class DGPoisson(Problem):
         eqs += IntegralObservables(uerr2=(u - exact) ** 2, u1=u, u2=u ** 2,
                                    gu=dot(grad(u), grad(u)), **moments)
         self += eqs @ "domain"
-        # A nodal Dx facet space cannot be carried through an adaptation; "DL"/"D0" can.
+        # Every discontinuous facet space is carried through an adaptation, the nodal Dx ones included.
         self.max_refinement_level = self.adapt
         self.initial_adaption_steps = 0
 
