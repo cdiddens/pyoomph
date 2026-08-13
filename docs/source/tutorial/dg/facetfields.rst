@@ -75,13 +75,13 @@ The jump of :math:`u` vanishes up to the tolerance of the Newton solver, i.e. th
 Facet fields under mesh adaptation and remeshing
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The skeleton is never adapted incrementally: it is discarded and generated from scratch on the refined bulk mesh. The element-owned values of the ``"D0"`` and ``"DL"`` facet fields are hence sampled before the adaptation and fitted back onto the new facets afterwards, including all time history levels. Facets which are just split by the refinement thereby keep their values, but the facets which are created entirely new at refined elements are a problematic: there is no previous value available at that position in the old skeleton, so no interpolation can produce a value there.
+The skeleton is never adapted incrementally: it is discarded and generated from scratch on the refined bulk mesh. The element-owned values of the facet fields are hence sampled before the adaptation and fitted back onto the new facets afterwards, including all time history levels. This holds for every discontinuous space, i.e. for the nodal ``"D1"``, ``"D1TB"``, ``"D2"`` and ``"D2TB"`` just as for ``"D0"`` and ``"DL"``; what differs is only the basis each of them is fitted in. Facets which are just split by the refinement thereby keep their values, but the facets which are created entirely new at refined elements are a problematic: there is no previous value available at that position in the old skeleton, so no interpolation can produce a value there.
 
 By default, these values are set to zero, and a warning is issued:
 
 .. code:: text
 
-   WARNING: transferring the discontinuous (DL/D0) fields of interface '_internal_facets_' across an
+   WARNING: transferring the discontinuous fields of interface '_internal_facets_' across an
    adaptation left 10 of 19 new element(s) without a single sample point. [...]
 
 Since a facet unknown is usually determined by the bulk solution anyhow, the better answer is to say how it should be reconstructed there, which is what :py:meth:`~pyoomph.generic.codegen.BaseEquations.set_facet_recovery` in the ``HDGCoupling`` class above does: on facets without any transferred value, ``lam`` is evaluated from the surrounding bulk solution, here just by the flux :math:`-\vec{n}\cdot\operatorname{avg}(\nabla u)`. In the output of the script, the difference is clearly visible. With the recovery expression, we get
@@ -105,10 +105,17 @@ The same transfer is used upon remeshing (cf. :numref:`secaleremeshing`), where 
 
    Facet fields work under MPI, in both modes of :numref:`secmpimodes`. With ``--distribute`` the mesh
    is partitioned and a facet whose two elements land on different processes is *owned* by the one that
-   assembles it, the other holding a halo copy - so it stays one unknown, numbered once. The same
-   ``"DL"``/``"D0"`` restriction as for adaptivity applies, and for the same reason: distributing
-   rebuilds every facet element, and only those two spaces are carried across the rebuild. A nodal
-   ``"D1"``/``"D2"`` facet field is refused by ``distribute()`` with a message saying so.
+   assembles it, the other holding a halo copy - so it stays one unknown, numbered once. Distributing
+   rebuilds every facet element, i.e. it goes through the same transfer as an adaptation, so any
+   discontinuous facet space may be used.
+
+.. note::
+
+   The facet values are part of a state file (:numref:`secpdecontinue`), so a simulation continued
+   from one resumes with exactly the facet field it was saved with. They are stored per facet element,
+   addressed by the bulk element the facet belongs to and its face index there rather than by an
+   element number, which makes the file independent of the number of processes: a state written by a
+   serial run can be loaded by a distributed one and vice versa.
 
 Condensing the bulk unknowns away
 '''''''''''''''''''''''''''''''''

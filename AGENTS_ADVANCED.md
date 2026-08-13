@@ -288,29 +288,32 @@ eqs += MortarCoupling() @ "_internal_facets_"
   read the never-numbered opposite dummy element and silently return zero).
   `DirichletBC`, `InitialCondition`, `IntegralObservables` and `MeshFileOutput` work on
   the skeleton as on any other domain (`p.get_mesh("domain/_internal_facets_")`).
-- Adaptivity: the skeleton is destroyed and rebuilt, and only `D0`/`DL` values are
-  carried across (Eulerian snapshot + least-squares refit, all history levels). Facets
-  born *inside* a refined element have no counterpart in the old skeleton at all: they
-  keep zero plus a one-time warning, unless `Equations.set_facet_recovery(field, expr)`
-  says how to rebuild them from the bulk — the right default for a trace/flux, and
-  written to every time level so no spurious `partial_t` appears.
-  `mesh.get_discontinuous_unrestored_elements()` lists what stayed empty (it describes
-  the last transfer, not the current state). With a nodal `Dx` facet field, adaptivity
-  must be off (`max_refinement_level = 0`); triangle/tet skeletons only survive
-  *uniform* refinement.
+- Adaptivity: the skeleton is destroyed and rebuilt, and the values are carried across by
+  an Eulerian snapshot plus a least-squares refit, all history levels — for *every*
+  discontinuous space, the nodal `Dx` ones included; only the basis each is fitted in
+  differs. Facets born *inside* a refined element have no counterpart in the old skeleton
+  at all: they keep zero plus a one-time warning, unless
+  `Equations.set_facet_recovery(field, expr)` says how to rebuild them from the bulk — the
+  right default for a trace/flux, and written to every time level so no spurious
+  `partial_t` appears. `mesh.get_discontinuous_unrestored_elements()` lists what stayed
+  empty (it describes the last transfer, not the current state). Triangle/tet skeletons
+  still only survive *uniform* refinement.
 - Remeshing: `InternalInterpolator` pulls each new facet's values from the closest old
   facet within the same old bulk element (`ProjectionInternalInterpolator` re-applies
   the same transfer after its projection solve — skeleton fields are not L2-projected).
   Exact only for an identical remesh, otherwise O(nearest-facet distance × gradient), so
-  `set_facet_recovery` is again the recommended default; `Dx` facet fields refuse a
-  remesh outright.
-- MPI: works under `--distribute` for `DL`/`D0` facet spaces. A facet shared by two
-  processes is owned by the one that assembles it, and the other holder's copy is a halo,
-  so it is numbered once and its equation numbers and values are copied across
+  `set_facet_recovery` is again the recommended default.
+- State files: the facet values are in them, per facet element, addressed by the bulk
+  element the facet belongs to plus its face index there. That is partition-independent,
+  so a state written serially loads distributed and vice versa. Before this they were not
+  in the file at all — not even `DL`/`D0` — and a load silently refitted whatever the
+  loading process happened to hold on its facets, which no test that solves after loading
+  can notice.
+- MPI: works under `--distribute` for every discontinuous facet space. A facet shared by
+  two processes is owned by the one that assembles it, and the other holder's copy is a
+  halo, so it is numbered once and its equation numbers and values are copied across
   (`Problem.setup_interior_facet_halo_scheme()`, called for you after distributing,
-  adapting, remeshing, loading a state file and load-balancing). A nodal `Dx` facet space
-  is refused by `distribute()`, for the same reason it is refused by adaptivity:
-  distributing rebuilds every skeleton element and only `DL`/`D0` are carried across.
+  adapting, remeshing, loading a state file and load-balancing).
 - **Pitfall**: a multiplier on *every* facet enforcing `jump(u) = 0` is rank deficient in
   2D/3D — facets meeting at a shared vertex/edge re-impose continuity there, so the
   constraints are linearly dependent and the saddle-point system is singular. That is a

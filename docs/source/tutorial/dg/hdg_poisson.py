@@ -115,9 +115,8 @@ class HDGPoissonProblem(Problem):
         self.source = 2 * pi**2 * self.exact        # ... and the matching source term
 
     def define_problem(self):
-        # A nodal discontinuous ("D1"/"D2") field on the skeleton cannot be carried through a spatial
-        # adaptation yet, so switch it off here. With facet_space="DL" (affine on each facet, which is
-        # the natural trace for a "D1" bulk) that restriction does not apply.
+        # Adaptivity off on purpose: the convergence table below compares a fixed sequence of meshes.
+        # Every discontinuous facet space survives an adaptation, so this is not a restriction.
         self.max_refinement_level = 0
         self.initial_adaption_steps = 0
 

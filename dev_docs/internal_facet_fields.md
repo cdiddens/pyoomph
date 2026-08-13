@@ -2,11 +2,21 @@
 
 Status: **implemented and tested, serial and distributed.** Discontinuous fields (`D0`, `DL`, and the
 nodal DG spaces `D1`/`D2`/`D1TB`/`D2TB`) can be declared on the `_internal_facets_` domain of any bulk
-mesh (1d/2d/3d, all element shapes including mixed), and `D0`/`DL` survive spatial adaptation,
-remeshing and MPI `--distribute` (§7.1). Refused by design: continuous spaces on the skeleton (§2) and
-nodal DG under adapt/remesh/distribute (§5.4, §6.3, §7.1). User docs: `AGENTS_ADVANCED.md`
-("Unknowns on the facet skeleton") and the tutorial `docs/source/tutorial/dg/facetfields.rst`;
-tests: `tests/test_internal_facet_fields.py` and `tests/test_mpi_facet_fields.py`.
+mesh (1d/2d/3d, all element shapes including mixed), and **every one of them** survives spatial
+adaptation (§5), remeshing (§6), MPI `--distribute` (§7.1) and a state file (§8). Refused by design:
+continuous spaces on the skeleton (§2), and the parent-space constraints a `Dx` facet field inherits
+(§5.4). User docs: `AGENTS_ADVANCED.md` ("Unknowns on the facet skeleton") and the tutorial
+`docs/source/tutorial/dg/facetfields.rst`; tests: `tests/test_internal_facet_fields.py` and
+`tests/test_mpi_facet_fields.py`.
+
+**Correcting the record.** Until this was written, three guards, this document and two tests all said
+that a nodal `Dx` facet field could not be carried across a skeleton rebuild because "there is no
+`get_interpolated_fields_Dx()` to sample them with". That was false.
+`BulkElementBase::get_DG_fields_at_s(space_index, t, s, result)` (`src/elements.cpp`) has always
+interpolated exactly those per-node slots — it is what the bulk father→son transfer in
+`further_build()` uses. Only the *name* was missing. Carrying a `Dx` facet field is therefore a
+parameterisation of the existing machinery, not new numerics: "the DL basis" becomes "the basis of
+space *k*" and "the DL block offset" becomes "space *k*'s `internal_offset_new`".
 
 **The idea.** The skeleton mesh existed long before this work: it is a real `InterfaceMesh` over
 all interior element-to-element facets, auto-created when equations set
@@ -90,10 +100,25 @@ Data pinned that sharing is harmless.
 
 Every adaptation destroys and regenerates all interface elements, so facet data has no home
 across it (see [mesh_point_locator.md](mesh_point_locator.md) §4.5, where this design was
-sketched). Skeleton `D0`/`DL` reuse the interface DL/D0 mechanism: `clear_before_adapt` samples
-each element on a local-coordinate lattice (all time levels, Eulerian positions),
-`rebuild_after_adapt` locates the cloud on the new skeleton and refits per element
-(least squares for DL via `ElementModeFit`, mean for D0).
+sketched). Every skeleton-owned discontinuous field reuses the interface DL/D0 mechanism:
+`clear_before_adapt` samples each element on a local-coordinate lattice (all time levels, Eulerian
+positions), `rebuild_after_adapt` locates the cloud on the new skeleton and refits per element.
+
+What is sampled is always one scalar per field per point; what differs is the basis the fit
+reconstructs coefficients in, and which internal `Data` they are written to:
+
+| space | sampler | fit basis (`ElementModeFit::build`) | written to |
+|---|---|---|---|
+| `DL` | `get_interpolated_fields_DL` | `shape_at_s_DL` (selector `-1`) | `info_DL.internal_offset_new + fi` |
+| `D0` | `get_interpolated_fields_D0` | none — the value is the mean | `info_D0.internal_offset_new + fi` |
+| `D1`/`D2`/`D1TB`/`D2TB` | `get_DG_fields_at_s` | `shape_of_space(k)` (selector `k`) | `space_info->internal_offset_new + fi` |
+
+Only the fields the interface declares **itself** are carried (`[numfields - numfields_new,
+numfields)` of each space). The ones inherited from the bulk domain are that bulk element's storage,
+reached here through external data, and they travel by the bulk's own father→son route.
+`DiscontinuousSnapshot` carries a per-space signature (space index, own field count, node count)
+alongside `nDL`/`nD0`, so a snapshot taken against a different set of spaces is recognised as
+unusable instead of being read with the wrong stride.
 
 ### 5.2 Two numbers that are load-bearing, not cosmetic
 
@@ -107,6 +132,15 @@ each element on a local-coordinate lattice (all time levels, Eulerian positions)
   skeleton is a non-manifold facet soup; a generous projection tolerance grabs samples from
   unrelated nearby facets. Boundary interfaces keep 0.5 because a curved macro-element boundary
   genuinely moves under refinement.
+- **The lattice density follows the widest DG basis present**: `NS = 2*nmode_1d + 1` per direction,
+  where `nmode_1d` is 3 for `D2`/`D2TB` and 2 otherwise. It was a fixed 5, chosen so that each SON of
+  a refined element still receives the two points per direction a `DL` fit needs. A `D2` field has
+  three modes per direction, so at `NS = 5` the fit on a son would be underdetermined — and that does
+  not fail loudly, it falls back to a constant and drops the quadratic part of every surviving facet.
+  `NS = 2*nmode_1d + 1` keeps the per-son count at `nmode_1d` and reproduces the historical 5 for
+  `DL`/`D1`. Whole-element counts were never the problem (a triangular facet keeps 15 of 25 lattice
+  points against 7 modes for `D2TB`); it is the per-son count that bites, and `ElementModeFit`'s
+  fallback counter is what says whether it worked.
 
 ### 5.3 New facets: zero, or recovered
 
@@ -117,13 +151,20 @@ and `mesh.get_discontinuous_unrestored_elements()` lists them.
 fits the same way for exactly those elements — the correct HDG answer, since a trace is
 determined by the bulk solution anyhow (one solve restores consistency either way).
 
-### 5.4 What stays rejected under adaptation
+### 5.4 What stays rejected
 
-Nodal DG (`Dx`) skeleton fields: their values live in per-node slots of the internal `Data` and
-there is no `get_interpolated_fields_Dx()` to feed the point cloud from; not a small change
-(rationale comment at the throw in `rebuild_after_adapt`). Triangle skeletons adapt under
-*uniform* refinement (node-based enumeration branch); non-uniform triangle/mixed adaptation still
-throws in the 2d enumerator (pre-existing).
+Nothing about the *transfer* any more; the remaining restrictions are older and unrelated to it.
+
+- Triangle skeletons adapt under *uniform* refinement (node-based enumeration branch); non-uniform
+  triangle/mixed adaptation still throws in the 2d enumerator (pre-existing, §4).
+- The **parent-domain space constraints** of `pyoomph/generic/codegen.py`: `D2TB` needs a `C2TB`
+  bulk, `D2` a `C2TB`/`C2` one, and `D1TB` on a 2d facet of a 3d `C2`/`C1TB` bulk is refused by name,
+  because tetrahedra of those spaces have no face bubble node. These bite more often for a facet
+  field than one would expect, because — unlike `DL`/`D0` — declaring a `Dx` field *raises the
+  skeleton's dominant coordinate space* (`find_dominant_element_space`,
+  `pyoomph/expressions/generic.py`).
+- Worth knowing rather than refused: on a **1d facet** (2d bulk) `D1TB ≡ D1` and `D2TB ≡ D2`, since a
+  line has no bubble node (`nnode_of_space[C1TB] == nnode_of_space[C1] == 2`).
 
 ## 6. Remeshing
 
@@ -149,22 +190,34 @@ recovery expression, else zero + warning + `get_discontinuous_unrestored_element
 identical remesh is exact; anything else is O(nearest-facet-distance × gradient) — for true
 traces, `set_facet_recovery` is the recommended default.
 
-### 6.3 Guards on this path
+### 6.3 What the pull evaluates, and what it checks
 
-`Dx` skeleton fields are refused **at the top of `force_remesh`**: the previous behaviour (throw
-from `rebuild_after_adapt` halfway through the remesh) left the Problem with swapped meshes and
-undestroyed predecessors, which surfaced as a segfault in the *next* Problem of the same process.
+The old values come out of `MeshPointLocator`'s `EvalRequest`, which knows `DL_fields`, `D0_fields`
+and `DG_fields` — the last one interpolating the source element's own internal `Data` over
+`shape_of_space`, i.e. the same thing `get_DG_fields_at_s` does on the push side.
+`LocationSet::evaluate` writes its blocks in one fixed order (continuous, DL, D0, DG) while the fit
+reads a snapshot in the internal-`Data` order `[DG][DL][D0]`, so `interpolate_discontinuous_data_from`
+rotates each time level's block once instead of giving either side a convention flag. The two meshes'
+DG spaces are matched the same way the `DL`/`D0` field names are: same spaces, same own-field counts,
+same node counts, or the transfer is refused rather than read positionally through a different layout.
+
 `ProjectionInternalInterpolator` does not L2-project skeleton fields; it re-applies the same pull
 transfer after its projection solve (during which interface meshes assemble their *physical*
 residuals — only meshes in projection mode assemble the projection ones — so without the re-run
 the facet unknowns would be dragged by their own equations).
+
+Historical note: a `Dx` field used to be refused at the top of `force_remesh`, one level up from the
+`rebuild_after_adapt` throw that came before it — throwing from the middle of a remesh left the
+Problem with swapped meshes and undestroyed predecessors, which surfaced as a segfault in the *next*
+Problem of the same process. Both guards are gone; `InterfaceMesh::get_own_nodal_dg_fields()`, which
+was their predicate, stays as a query and is still bound to Python.
 
 ## 7. Not built, on purpose
 
 | refused / missing | where the guard sits | note |
 |---|---|---|
 | continuous spaces on the skeleton | `_internal_define_scalar_field` + backstop in `add_interface_dofs` | route sketched in §2 |
-| `Dx` under adaptation / remeshing / `--distribute` | `rebuild_after_adapt` / `force_remesh` / `Problem.distribute()` | §5.4, §6.3, §7.1 |
+| `Dx` whose parent domain cannot carry it | `pyoomph/generic/codegen.py` | pre-existing and unrelated to the transfer; §5.4 |
 | non-conforming 3d, non-uniform 2d-triangle enumeration | 3d/2d enumerators | `build_facet_adjacency` is the designated basis for both |
 | 1d-bulk and 3d **remeshing** of skeleton fields | untested, no guard | no `LineMesh` remesher exists; 3d transfer should work but has no test. 1d and 3d under `--distribute` *are* covered (`tests/test_mpi_facet_fields.py`) — it is only the remesh transfer that is not |
 
@@ -203,15 +256,57 @@ loops over exactly those lists.
   `restore_discontinuous_data()` refitted each rank's facet values from its OWN partial sample cloud, so
   a halo facet holds this rank's fit rather than the owner's — which a neighbour's non-halo bulk element,
   and any `output()` taken before the first Newton step, would read.
-* **Nodal `Dx` facet spaces stay refused**, now in `Problem.distribute()` with a message naming `DL`/`D0`
-  as the way out: distributing goes through the adaptation path, which rebuilds every skeleton element,
-  and the sample-and-refit snapshot only carries `DL`/`D0` (§5.4).
+* **Nodal `Dx` facet spaces need nothing of their own.** `Problem.distribute()` used to refuse them,
+  because distributing reaches the skeleton through `actions_after_distribute → actions_after_adapt`
+  and the sample-and-refit snapshot only carried `DL`/`D0`. It carries every space now (§5.1), and the
+  halo scheme marks whole `Data` objects, so it cannot tell how many values each holds.
+* **One offset that is easy to get wrong.** `Mesh::share_interpolation_across_ranks()` pools the
+  values of elements a rank could not place itself during a distributed *remesh*. It indexed
+  `internal_data_pt(d)` for `d < nDL + nD0`, which is only the DL/D0 block while no DG space is
+  present: `allocate_discontinous_fields` lays the element out as `[DG][DL][D0]`. It now covers the
+  whole range, `dg_internal_data_offset(ft) + nDL + nD0`.
 
 Combined with static condensation ([static_condensation.md](static_condensation.md) §9) this is what
 makes HDG work in parallel: the trace lives on the skeleton and the bulk unknowns are eliminated, at 2
 and 4 ranks, reproducing the serial answer.
 
-## 8. Pre-existing bugs fixed along the way
+## 8. State files
+
+A state file has to reproduce exactly the state it was written at. Until recently it did not, and not
+only for `Dx`: **no interface or skeleton element data was written at all.** `Problem.define_state_file`
+looped `self._meshdict` only (asserting `not isinstance(mesh, InterfaceMesh)`), and `InterfaceMesh` has
+no `define_state_file` of its own. What happened on load instead: `_load_state` snapshots the *pre-load*
+interface values (`clear_before_adapt`), loads the bulk mesh, and lets
+`actions_after_adapt → restore_discontinuous_data` refit that pre-load snapshot onto the loaded
+geometry. So the facet values after a load were whatever the in-memory problem happened to hold — for a
+fresh reader, zeros — and not what the file recorded. `DL`/`D0` were no better off than `Dx`.
+
+* **The record.** `save_interface_state`/`read_interface_state`/`apply_interface_state` in
+  `pyoomph/meshes/meshstate.py`, streaming `Mesh::save_elemental_state`/`load_elemental_state` — which
+  are on `pyoomph::Mesh` and therefore already worked on an interface mesh unchanged
+  (`ninternal_data() × nvalue() × ntstorage` per element, so every discontinuous space is in it by
+  construction, history included).
+* **The key** is `InterfaceMesh::get_interface_element_structural_keys()`: three longs per element, the
+  bulk element's `(root global_base_index, packed refinement path)` plus the `face_index` there. A face
+  element has no refinement tree of its own, so it is addressed through the bulk element it hangs off.
+  Same key `Problem::setup_interior_facet_halo_scheme` pairs facets across ranks with, which is what
+  makes the record partition-independent — a file written serially loads on any number of ranks.
+* **Two-phase load.** The interface elements do not exist in their final form until after
+  `actions_after_adapt()`, which is well past the point where the bulk block is read. So the block is
+  read into `Problem._pending_interface_states` during `define_state_file` and applied by
+  `Problem._apply_interface_states()` immediately after `actions_after_adapt()` — deliberately *after*
+  `restore_discontinuous_data` has run, so the file's values overwrite that refit rather than race it.
+  An element whose key is not in the file keeps what the rebuild left it (the refit, or the recovery
+  expression), which is the right answer for a mesh refined since the file was written. Saving stays
+  single-phase. Dump version 0.1.3 → **0.1.4**; older files still load and simply have no such block.
+* **The oracle has to be a load that is never solved.** One solve repairs a trace whose residual
+  determines it algebraically, which is exactly why the pre-existing
+  `test_state_file_saved_serially_loads_distributed` could not have noticed the missing block: its
+  workers solve after loading. The tests added with the block load and stop
+  (`test_a_state_file_restores_the_facet_field_without_a_solve` serially, `--state load_nosolve`
+  distributed).
+
+## 9. Pre-existing bugs fixed along the way
 
 All found because skeleton fields exercise paths nothing else did; none is skeleton-specific:
 
@@ -227,9 +322,9 @@ All found because skeleton fields exercise paths nothing else did; none is skele
 - Snapshot samples on element boundaries contaminating the coarsening refit (§5.2, also affected
   boundary interfaces).
 
-## 9. Test map
+## 10. Test map
 
-`tests/test_internal_facet_fields.py` (110 tests): trace projection exact on
+`tests/test_internal_facet_fields.py` (125 tests): trace projection exact on
 quad/tri/line/brick/tet/wedge/pyr/mixed × DL/D1/D2 (+D0); ndof accounting vs
 `facet_adjacency_summary()`; 1d hybridised Poisson (exact for linear, 2nd-order for `sin(πx)`);
 opposite-side orientation exactness for the 3d quad symmetries; SIP-DG over all 11 3d layouts at
@@ -239,17 +334,21 @@ space reproduces exactly (the sharp form: it is what the tetrahedron winding of
 adapt cycle (survivor exactness without solving, masked-oracle separation of survivors vs new
 facets, history levels, refine→unrefine round trip, 2:1 case, recovery hook, re-pinning/assembly);
 remeshing (identical remesh machine-exact incl. history, distorted/coarsened/refined with measured
-tolerances, recovery hook, unrestored reporting, Dx refusal); all error-message guards.
+tolerances, recovery hook, unrestored reporting), each over `DL`/`D0`/`D1`/`D2`; state files loaded
+without a solve, with the values compared bit for bit and keyed by the elements' structural keys;
+all error-message guards.
 
-`tests/test_mpi_facet_fields.py` (62 tests, `--full`) is the distributed gate. Two layers, because a
+`tests/test_mpi_facet_fields.py` (69 tests, `--full`) is the distributed gate. Two layers, because a
 broken skeleton does not crash: the skeleton MEASURE and the integral of its NORMAL certify the
 enumeration and the orientation without reference to the solution (a duplicated facet inflates the
 first, a facet enumerated from the other side flips its contribution to the second), and `ndof` against
 the serial reference catches a trace numbered once per holder. On top of that: DG with a linear
 manufactured solution stays exact distributed (the flux term does not vanish at the exact solution, so a
-mis-enumerated facet moves the answer), `DL`/`D0` facet unknowns at 2 and 4 ranks, the same across an
-adaptation that really refines, a state file written serially loaded on 2 and 4 ranks, the nodal-`Dx`
-refusal, and the replicated (`mpirun` without `--distribute`) mode.
+mis-enumerated facet moves the answer), `DL`/`D0`/`D1`/`D2` facet unknowns at 2 and 4 ranks, `DL` and
+`D1` across an adaptation that really refines, a state file written serially loaded on 2 and 4 ranks
+(once with a solve afterwards, once without one at all), and the replicated (`mpirun` without
+`--distribute`) mode. `tests/test_mpi_remeshing.py` carries a `DL` and a `D1` facet unknown through a
+distributed remesh.
 
 All three enumerators are covered, not only the 2d one they were first written for. 1d is the case to
 watch, because its near-side rule is the inverted one (`src/mesh1d.cpp` keeps the *later* of the two

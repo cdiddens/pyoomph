@@ -111,17 +111,16 @@ The elimination is exact, so the accuracy is that of the unreduced scheme. Refin
    Two practical points. The automatic selection
    :py:meth:`~pyoomph.generic.problem.Problem.condense_element_private_dofs` does **not** pick up the
    bulk field here, because the facet elements read it as external data; it has to be named
-   explicitly, as above. And a nodal discontinuous facet space (``"D1"``, ``"D2"``) cannot yet be
-   carried through a spatial adaptation, so the example switches adaptivity off. With
-   ``facet_space="DL"`` - affine on each facet, the natural trace for a ``"D1"`` bulk - that
-   restriction does not apply.
+   explicitly, as above. And the example keeps adaptivity off simply to compare a fixed sequence of
+   meshes; every discontinuous facet space, the nodal ``"D1"``/``"D2"`` included, is carried through
+   a spatial adaptation, a remesh, a state file and ``--distribute``.
 
 Under MPI
 ~~~~~~~~~
 
 Both parallel modes of :numref:`secmpimodes` run this example, condensation included.
 
-With ``--distribute`` the mesh is partitioned, and a facet whose two elements land on different processes is *owned* by the one that assembles it while the other holds a halo copy - so the trace :math:`\hat{u}` is one unknown, numbered once, exactly as it is serially. That needs the trace space to survive the mesh rebuild which distributing performs, so use ``facet_space="DL"`` (with ``space="D1"`` for the bulk): a nodal discontinuous facet space cannot be carried across a rebuild, and ``distribute()`` says so rather than failing later.
+With ``--distribute`` the mesh is partitioned, and a facet whose two elements land on different processes is *owned* by the one that assembles it while the other holds a halo copy - so the trace :math:`\hat{u}` is one unknown, numbered once, exactly as it is serially. Distributing rebuilds every facet element, but the trace is carried across that rebuild whatever its space is, so ``facet_space="DL"`` (with ``space="D1"`` for the bulk) is a modelling choice here rather than a restriction.
 
 Without ``--distribute`` the run is *replicated* - every process holds the whole mesh and only the assembly and the linear system are split - and the elimination is served there too. That it is, is a property of *which* dofs are being eliminated. A block can only be condensed on the process that owns all of its rows, and the rows are cut into contiguous ranges; pyoomph moves those cut points off the blocks, which it can do exactly when each element's selected dofs are numbered together. Element-internal values - the bulk field here, and ``"DL"``/``"D0"`` fields generally - are. A selection mixing *nodal* and element-internal dofs is not, because oomph-lib numbers every nodal value before any internal one: the Crouzeix-Raviart selection of :numref:`secspatialcrcondensation`, which pairs the bubble velocity (nodal) with the pressure gradients (internal), therefore has to be run with ``--distribute``, where each process's dofs are renumbered contiguously and the question does not arise. That case is refused with a message saying so, not silently skipped.
 

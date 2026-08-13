@@ -247,8 +247,8 @@ def test_distributed_hdg_condensed_solve_matches_serial(tmp_path, nproc):
     silently declined gives the right one. Hence: the answer against serial, AND the positive signal
     that the elimination ran.
 
-    "D1"/"DL" rather than "D2"/"D2": a nodal discontinuous facet space cannot be carried through the
-    mesh rebuild that distributing performs, which distribute() refuses up front."""
+    "D1"/"DL" rather than "D2"/"D2" only because an affine trace is the natural one for a "D1" bulk;
+    a nodal facet space distributes as well (tests/test_mpi_facet_fields.py)."""
     per_rank = _ok(_run(nproc, tmp_path, ["--size", "8", "--mode", "hdg", "--condense", "1",
                                           "--space", "D1", "--facet-space", "DL"], timeout=600))
     for r in per_rank:

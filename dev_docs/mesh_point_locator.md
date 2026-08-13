@@ -243,9 +243,9 @@ geometries get a warning, not a coin flip. **Of doubtful value now that projecti
 
 ### 4.5 Facet data and HDG
 
-**Since implemented** for skeleton `D0`/`DL` fields — (a) via the §7 snapshot/restore, (c) as
+**Since implemented** for every discontinuous skeleton field — (a) via the §7 snapshot/restore, (c) as
 `set_facet_recovery` plus a pull-transfer using exactly the bulk-first topological disambiguation
-described below; (b) MPI remains open. See [internal_facet_fields.md](internal_facet_fields.md).
+described below; (b) MPI is done too. See [internal_facet_fields.md](internal_facet_fields.md).
 The analysis is kept as written because it is the design rationale:
 
 Internal facets *are* real `FaceElement`s in an `InterfaceMesh` named `_internal_facets_`, so the class
@@ -458,8 +458,9 @@ constant would sit near 7e-2.
 both the locator and `shape_at_s_DL` size an `oomph::Shape` out of it — this cost a segfault before the
 guard existed.
 
-**Still refused outright:** nodal DG (`Dx`) spaces on an adapting interface. Skeleton facet
-`D0`/`DL` fields adapt and remesh since [internal_facet_fields.md](internal_facet_fields.md).
+Skeleton facet fields adapt and remesh since
+[internal_facet_fields.md](internal_facet_fields.md) - `D0`/`DL` and the nodal DG spaces alike, the
+latter fitted in their own nodal basis rather than the DL modal one.
 
 ---
 
