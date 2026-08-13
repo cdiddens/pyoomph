@@ -304,7 +304,13 @@ eqs += MortarCoupling() @ "_internal_facets_"
   Exact only for an identical remesh, otherwise O(nearest-facet distance × gradient), so
   `set_facet_recovery` is again the recommended default; `Dx` facet fields refuse a
   remesh outright.
-- Not supported on distributed (`--distribute`) MPI runs; the setup raises.
+- MPI: works under `--distribute` for `DL`/`D0` facet spaces. A facet shared by two
+  processes is owned by the one that assembles it, and the other holder's copy is a halo,
+  so it is numbered once and its equation numbers and values are copied across
+  (`Problem.setup_interior_facet_halo_scheme()`, called for you after distributing,
+  adapting, remeshing, loading a state file and load-balancing). A nodal `Dx` facet space
+  is refused by `distribute()`, for the same reason it is refused by adaptivity:
+  distributing rebuilds every skeleton element and only `DL`/`D0` are carried across.
 - **Pitfall**: a multiplier on *every* facet enforcing `jump(u) = 0` is rank deficient in
   2D/3D — facets meeting at a shared vertex/edge re-impose continuity there, so the
   constraints are linearly dependent and the saddle-point system is singular. That is a

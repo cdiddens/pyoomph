@@ -3843,16 +3843,12 @@ namespace pyoomph
 	{
 		plan.clear();
 #ifdef OOMPH_HAS_MPI
-		// Distributed runs take an entirely separate builder: the rows of a component live on one rank
-		// but its E rows may not, so the plan is a question of ownership plus three structural exchanges,
-		// and every refusal in it has to be a collective vote (dev_docs/static_condensation.md section 9).
-		if (Problem_has_been_distributed) return build_distributed_condensation_plan(plan);
-		// nproc > 1 without distribute() is a REPLICATED problem whose elements are merely split across
-		// ranks. Its frozen distributed assembly declines for reasons of its own (the element range is
-		// re-tuned from measured timings, so it is not a function of the numbering), and this plan is
-		// expressed as positions in that assembly's value array. The engagement gate refuses it with a
-		// message; here it is simply not planned for.
-		if (Communicator_pt && Communicator_pt->nproc() > 1) return false;
+		// Any MPI run with more than one rank takes an entirely separate builder, whether the problem is
+		// distributed or merely replicated: the Jacobian's ROWS are split across ranks either way, so the
+		// rows of a component live on one rank while its E rows may not, and the plan is a question of
+		// ownership plus three structural exchanges with every refusal a collective vote
+		// (dev_docs/static_condensation.md section 9).
+		if (Communicator_pt && Communicator_pt->nproc() > 1) return build_distributed_condensation_plan(plan);
 #endif
 		if (n_unaugmented_dofs != 0) return false; // Augmented (bifurcation/continuation) system: assembled full
 		const unsigned long gen = this->get_jacobian_structure_id();
@@ -4150,7 +4146,7 @@ namespace pyoomph
 	// Turns a per-rank refusal into one that every rank throws. An empty message means "no objection
 	// here". COLLECTIVE: it must be reached by every rank whatever each of them decided, which is the
 	// whole point -- a rank throwing on its own would leave the others in the next collective for ever.
-	void Problem::condensation_collective_throw(const std::string &msg)
+	void Problem::collective_throw(const std::string &msg)
 	{
 		if (!Communicator_pt || Communicator_pt->nproc() < 2)
 		{
@@ -4202,12 +4198,370 @@ namespace pyoomph
 			}
 			if (!reqs.empty()) MPI_Waitall((int)reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
 		}
+
+		// The same exchange for 64-bit payloads. The interior-facet keys need it: a packed refinement
+		// path is 3 bits per level, which leaves an int32 with about ten levels of headroom.
+		static void facet_alltoall_longs(MPI_Comm comm, unsigned nproc, unsigned my_rank, int tag,
+										 const std::vector<std::vector<long>> &send,
+										 std::vector<std::vector<long>> &recv)
+		{
+			std::vector<int> sn(nproc, 0), rn(nproc, 0);
+			for (unsigned p = 0; p < nproc; p++) sn[p] = (int)send[p].size();
+			MPI_Alltoall(sn.data(), 1, MPI_INT, rn.data(), 1, MPI_INT, comm);
+			recv.assign(nproc, std::vector<long>());
+			std::vector<MPI_Request> reqs;
+			reqs.reserve(2 * nproc);
+			for (unsigned p = 0; p < nproc; p++)
+			{
+				if (p == my_rank) { recv[p] = send[p]; continue; }
+				if (sn[p])
+				{
+					reqs.push_back(MPI_Request());
+					MPI_Isend(const_cast<long *>(send[p].data()), sn[p], MPI_LONG, (int)p, tag, comm, &reqs.back());
+				}
+				if (rn[p])
+				{
+					recv[p].resize(rn[p]);
+					reqs.push_back(MPI_Request());
+					MPI_Irecv(recv[p].data(), rn[p], MPI_LONG, (int)p, tag, comm, &reqs.back());
+				}
+			}
+			if (!reqs.empty()) MPI_Waitall((int)reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
+		}
+	}
+
+	// The halo/haloed scheme of the interior-facet skeletons (dev_docs/internal_facet_fields.md).
+	//
+	// A facet between two bulk elements on different ranks EXISTS on both: the near-side element is
+	// non-halo on one of them and a halo on the other, and the facet element inherits that flag from it
+	// (oomph's build_face_element). Residual assembly is then already right, because every assembly path
+	// skips halo elements. What is missing is the numbering: Mesh::assign_global_eqn_numbers() numbers
+	// every element's internal Data with no halo test, and nothing marks a halo facet's Data as halo --
+	// so a facet unknown gets numbered once per holder, i.e. two independent copies of what is supposed
+	// to be one single-valued trace.
+	//
+	// Marking it fixes both halves at once, because everything downstream is a loop over submeshes and
+	// the skeletons are registered as such: oomph's copy_haloed_eqn_numbers_helper() then sends the
+	// owner's equation numbers to the holders, and synchronise_dofs() keeps the VALUES in step, both via
+	// add_internal_*_to_vector() on the halo/haloed element lists built here.
+	//
+	// COLLECTIVE, and one exchange for every skeleton of the problem together. The pairing is by a key
+	// that both holders can compute alone -- the near-side element's (root index, refinement path) and
+	// the face index, all of which the near-side rule has already made partition-independent -- and both
+	// sides SORT by it, so the two lists are index-matched by construction with no second round.
+	void Problem::setup_interior_facet_halo_scheme()
+	{
+		if (!Communicator_pt || Communicator_pt->nproc() < 2 || !Problem_has_been_distributed) return;
+		const unsigned nproc = Communicator_pt->nproc(), my_rank = Communicator_pt->my_rank();
+		MPI_Comm comm = Communicator_pt->mpi_comm();
+
+		// Collective by construction: the equation tree is replicated, so every rank walks the same
+		// submeshes in the same order and agrees on the skeleton indices used as the first key component.
+		std::vector<InterfaceMesh *> skels;
+		std::string nested;
+		const unsigned nsub = this->nsub_mesh();
+		for (unsigned im = 0; im < nsub; im++)
+		{
+			InterfaceMesh *m = dynamic_cast<InterfaceMesh *>(this->mesh_pt(im));
+			if (!m || m->get_interface_name() != "_internal_facets_") continue;
+			// A skeleton OF A SKELETON ("domain/_internal_facets_/_internal_facets_", which is what
+			// setting requires_interior_facet_terms on the facet equations themselves produces) has no
+			// partition-independent element numbering to key on: its "bulk" elements are face elements
+			// built on the fly, not mesh elements that were numbered before the distribution. Refused
+			// rather than skipped, since skipping it would leave its unknowns numbered once per holder.
+			if (dynamic_cast<InterfaceMesh *>(m->get_bulk_mesh()))
+			{
+				nested = m->get_full_domain_path();
+				continue;
+			}
+			skels.push_back(m);
+		}
+		// Collective: every rank has the same equation tree, so all of them find the same nested
+		// skeleton or none does.
+		if (!nested.empty())
+			throw_runtime_error("The interior-facet skeleton '" + nested + "' is itself attached to an "
+								"interior-facet skeleton, which is not supported on a distributed "
+								"(--distribute) problem: there is no partition-independent numbering of the "
+								"facet elements to identify a facet by. This usually means "
+								"requires_interior_facet_terms was set on the equations attached to "
+								"'_internal_facets_' rather than on the bulk equations.");
+		if (skels.empty()) return;
+		for (size_t s = 0; s < skels.size(); s++) skels[s]->clear_halo_element_scheme();
+
+		// Is there anything to pair at all? Between a remesh and the re-distribution that follows it the
+		// Problem is still flagged as distributed while the meshes are whole again, so no facet is a halo
+		// and there is no scheme to build -- and the base element numbers the keys below need have not
+		// been re-assigned yet either. Voted rather than assumed: a rank may hold no halo facet while
+		// another does, and this decides whether the exchange below happens at all.
+		{
+			int mine_halo = 0;
+			for (size_t s = 0; s < skels.size() && !mine_halo; s++)
+				for (unsigned e = 0; e < skels[s]->nelement(); e++)
+					if (skels[s]->element_pt(e)->is_halo()) { mine_halo = 1; break; }
+			int any_halo = 0;
+			MPI_Allreduce(&mine_halo, &any_halo, 1, MPI_INT, MPI_MAX, comm);
+			if (!any_halo) return;
+		}
+
+		// key = [skeleton index, root element index, packed refinement path, face index]
+		const int KEY = 4;
+		std::string err;
+		std::map<std::vector<long>, oomph::GeneralisedElement *> mine; // the facets this rank owns
+		std::vector<std::vector<long>> to_owner(nproc);
+		std::vector<std::vector<oomph::GeneralisedElement *>> my_halo_facet(nproc);
+		std::vector<std::vector<std::vector<long>>> my_halo_key(nproc);
+		for (size_t s = 0; s < skels.size() && err.empty(); s++)
+		{
+			const unsigned ne = skels[s]->nelement();
+			for (unsigned e = 0; e < ne; e++)
+			{
+				oomph::FaceElement *fe = dynamic_cast<oomph::FaceElement *>(skels[s]->element_pt(e));
+				if (!fe) { err = "Internal error: the interior-facet skeleton holds an element that is not a FaceElement."; break; }
+				BulkElementBase *near_el = dynamic_cast<BulkElementBase *>(fe->bulk_element_pt());
+				std::vector<long> key(KEY, 0);
+				key[0] = (long)s;
+				if (!near_el || !Mesh::element_structural_key(near_el, key[1], key[2]))
+				{
+					err = "Interior-facet fields on a distributed problem need the base element numbers, which are "
+						  "assigned before the distribution (Mesh::assign_global_base_element_indices). The mesh "
+						  "behind '" + skels[s]->get_full_domain_path() + "' has none, so the two holders of a "
+						  "shared facet cannot agree on which facet it is.";
+					break;
+				}
+				key[3] = (long)fe->face_index();
+				if (!fe->is_halo())
+				{
+					if (!mine.insert(std::make_pair(key, skels[s]->element_pt(e))).second)
+					{
+						err = "Internal error: two interior facets of the same mesh carry the same key, so the "
+							  "near-side element and face index do not identify a facet uniquely.";
+						break;
+					}
+				}
+				else
+				{
+					const unsigned owner = (unsigned)fe->non_halo_proc_ID();
+					if (owner >= nproc) { err = "Internal error: a halo interior facet names an owner outside the communicator."; break; }
+					to_owner[owner].insert(to_owner[owner].end(), key.begin(), key.end());
+					my_halo_facet[owner].push_back(skels[s]->element_pt(e));
+					my_halo_key[owner].push_back(key);
+				}
+			}
+		}
+		// Everything above is per-rank; everything below communicates. Agree first.
+		collective_throw(err);
+
+		std::vector<std::vector<long>> recv;
+		facet_alltoall_longs(comm, nproc, my_rank, 90, to_owner, recv);
+
+		// The HALO side: this rank's facets owned by p, ordered by key.
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			if (p == my_rank || my_halo_facet[p].empty()) continue;
+			std::vector<unsigned> order(my_halo_facet[p].size());
+			for (unsigned i = 0; i < order.size(); i++) order[i] = i;
+			std::sort(order.begin(), order.end(), [&](unsigned a, unsigned b)
+					  { return my_halo_key[p][a] < my_halo_key[p][b]; });
+			for (unsigned i = 0; i < order.size(); i++)
+			{
+				oomph::GeneralisedElement *el = my_halo_facet[p][order[i]];
+				const long si = my_halo_key[p][order[i]][0];
+				// add_root_halo_element_pt() also (re)sets the element's halo flag, which is already what
+				// build_face_element gave it; the internal Data is what actually needs marking.
+				skels[(size_t)si]->add_root_halo_element_pt(p, el);
+				for (unsigned k = 0; k < el->ninternal_data(); k++) el->internal_data_pt(k)->set_halo(p);
+			}
+		}
+
+		// The HALOED side: the facets p holds a copy of, in the same key order.
+		for (unsigned p = 0; p < nproc; p++)
+		{
+			if (p == my_rank || recv[p].empty()) continue;
+			std::vector<std::vector<long>> keys;
+			for (size_t i = 0; i + KEY <= recv[p].size(); i += KEY)
+				keys.push_back(std::vector<long>(recv[p].begin() + i, recv[p].begin() + i + KEY));
+			std::sort(keys.begin(), keys.end());
+			for (size_t i = 0; i < keys.size(); i++)
+			{
+				std::map<std::vector<long>, oomph::GeneralisedElement *>::iterator f = mine.find(keys[i]);
+				if (f == mine.end())
+				{
+					// The two ranks disagree about which side of the facet is the near one, or about the
+					// element numbering itself. Either way the lists would be mis-paired and equation
+					// numbers would land on the wrong facet, so refuse rather than proceed.
+					err = "Interior-facet fields: rank " + std::to_string(p) + " reports a facet this rank does "
+						  "not own, so the two do not agree on which element enumerates it. Facet key (skeleton, "
+						  "root element, refinement path, face): " + std::to_string(keys[i][0]) + ", " +
+						  std::to_string(keys[i][1]) + ", " + std::to_string(keys[i][2]) + ", " + std::to_string(keys[i][3]) + ".";
+					break;
+				}
+				skels[(size_t)keys[i][0]]->add_root_haloed_element_pt(p, f->second);
+			}
+			if (!err.empty()) break;
+		}
+		collective_throw(err);
+
+		// The halo copies are stale at this moment and nothing else will refresh them before they are
+		// read. The skeleton was just rebuilt from scratch, and restore_discontinuous_data() refitted
+		// each rank's facet values from its OWN partial sample cloud -- so a halo facet holds this rank's
+		// fit rather than the owner's. A neighbour's non-halo bulk element reads exactly those values,
+		// and so does any output() taken between here and the first Newton step.
+		this->synchronise_all_dofs();
+	}
+
+	// Row cut points that no element-local condensation block straddles; empty for "no preference".
+	//
+	// Only a REPLICATED run needs this. Distributed, oomph renumbers so that each rank's own dofs are
+	// one contiguous global range (synchronise_eqn_numbers), so a block of dofs belonging to one
+	// element is inside one rank's range by construction. Replicated, the numbering is the serial one
+	// and the rows are cut uniformly, which lands a cut inside an element's block essentially always --
+	// one per rank boundary, and the plan builder then refuses every such component.
+	std::vector<unsigned> Problem::condensation_row_cuts()
+	{
+		std::vector<unsigned> cuts;
+		if (!use_static_condensation) return cuts;
+		if (!Communicator_pt || Communicator_pt->nproc() < 2) return cuts;
+		if (Problem_has_been_distributed) return cuts;
+		const unsigned nproc = Communicator_pt->nproc();
+		const unsigned nd = this->ndof();
+		if (nd < nproc) return cuts;
+
+		this->ensure_static_condensation_selection();
+		std::vector<int> sel;
+		for (const auto &kv : static_condensation_selected)
+			for (unsigned v = 0; v < kv.second.size(); v++)
+			{
+				if (!kv.second[v]) continue;
+				const long eq = kv.first->eqn_number(v);
+				if (eq >= 0) sel.push_back((int)eq);
+			}
+		if (sel.empty()) return cuts;
+		std::sort(sel.begin(), sel.end());
+		sel.erase(std::unique(sel.begin(), sel.end()), sel.end());
+
+		// The components, from the SYMBOLIC MASK rather than from mere co-membership of an element. The
+		// difference is decisive here: an HDG facet element holds the unknowns of both neighbouring
+		// bulk elements, but its residual never differentiates the near side with respect to the far one
+		// (that is what "hybridizable" means, and what the @opposite contribution classes express), so
+		// the two are NOT in one component. Reading the element's dof list alone would chain every
+		// element of the mesh into a single block and give up below.
+		oomph::AssemblyHandler *const ah = this->assembly_handler_pt();
+		const unsigned long ne = mesh_pt() ? mesh_pt()->nelement() : 0;
+		const unsigned nsel = (unsigned)sel.size();
+		std::vector<int> uf(nsel);
+		for (unsigned i = 0; i < nsel; i++) uf[i] = (int)i;
+		std::function<int(int)> uf_find = [&uf](int a) { while (uf[a] != a) { uf[a] = uf[uf[a]]; a = uf[a]; } return a; };
+		std::vector<int> local_sel; // index into sel, per elemental dof; -1 for a retained one
+		for (unsigned long e = 0; e < ne; e++)
+		{
+			oomph::GeneralisedElement *el = mesh_pt()->element_pt(e);
+			const unsigned nvar = ah->ndof(el);
+			if (!nvar) continue;
+			local_sel.assign(nvar, -1);
+			bool any = false;
+			for (unsigned i = 0; i < nvar; i++)
+			{
+				const int g = (int)ah->eqn_number(el, i);
+				const std::vector<int>::iterator f = std::lower_bound(sel.begin(), sel.end(), g);
+				if (f != sel.end() && *f == g) { local_sel[i] = (int)(f - sel.begin()); any = true; }
+			}
+			if (!any) continue;
+			const char *mask = this->sparsity_mask_for_element(0, el, nvar);
+			if (!mask) return std::vector<unsigned>(); // value-dependent: no informed preference to state
+			for (unsigned i = 0; i < nvar; i++)
+			{
+				if (local_sel[i] < 0) continue;
+				for (unsigned j = 0; j < nvar; j++)
+				{
+					if (local_sel[j] < 0 || j == i) continue;
+					if (!mask[(size_t)i * nvar + j]) continue;
+					const int ra = uf_find(local_sel[i]), rb = uf_find(local_sel[j]);
+					if (ra != rb) uf[ra] = rb;
+				}
+			}
+		}
+
+		// One span per component, then the merge of the overlapping ones: a row index inside no span is
+		// one no component crosses, which is all a cut has to avoid.
+		std::map<int, std::pair<int, int>> span_of_root;
+		for (unsigned i = 0; i < nsel; i++)
+		{
+			const int r = uf_find((int)i);
+			std::map<int, std::pair<int, int>>::iterator it = span_of_root.find(r);
+			if (it == span_of_root.end()) span_of_root[r] = std::make_pair(sel[i], sel[i]);
+			else { if (sel[i] < it->second.first) it->second.first = sel[i]; if (sel[i] > it->second.second) it->second.second = sel[i]; }
+		}
+		std::vector<std::pair<int, int>> spans;
+		for (const auto &kv : span_of_root) spans.push_back(kv.second);
+		if (spans.empty()) return cuts;
+		std::sort(spans.begin(), spans.end());
+		std::vector<std::pair<int, int>> blocks;
+		for (size_t i = 0; i < spans.size(); i++)
+		{
+			if (!blocks.empty() && spans[i].first <= blocks.back().second)
+			{
+				if (spans[i].second > blocks.back().second) blocks.back().second = spans[i].second;
+			}
+			else blocks.push_back(spans[i]);
+		}
+
+		// A block longer than one rank's share cannot be stepped over by moving a cut, only by handing a
+		// whole rank's worth of rows to somebody else. That is not a corner case: it is what a selection
+		// mixing NODAL and element-internal dofs looks like, because oomph numbers all nodal values
+		// before any internal ones, so a CR bubble velocity and the DL pressure of the same element sit
+		// hundreds of equations apart. Leave the uniform split alone then; the plan builder refuses with
+		// a message that names the dofs, which is far more use than a silently unbalanced partition.
+		const unsigned share = nd / nproc;
+		for (size_t i = 0; i < blocks.size(); i++)
+			if ((unsigned)(blocks[i].second - blocks[i].first + 1) > share) return std::vector<unsigned>();
+
+		cuts.assign(nproc + 1, 0);
+		cuts[nproc] = nd;
+		size_t bi = 0;
+		for (unsigned p = 1; p < nproc; p++)
+		{
+			unsigned c = (unsigned)((unsigned long)nd * p / nproc);
+			if (c < cuts[p - 1]) c = cuts[p - 1];
+			while (bi < blocks.size() && (unsigned)blocks[bi].second < c) bi++;
+			// One step is enough: the blocks are disjoint after the merge, so blocks[bi].second+1 is at
+			// most blocks[bi+1].first, which is not strictly inside blocks[bi+1].
+			if (bi < blocks.size() && (unsigned)blocks[bi].first < c && c <= (unsigned)blocks[bi].second)
+				c = (unsigned)blocks[bi].second + 1;
+			cuts[p] = (c > nd ? nd : c);
+		}
+		return cuts;
+	}
+
+	void Problem::preferred_linear_solver_distribution(oomph::LinearAlgebraDistribution *&dist_pt)
+	{
+		dist_pt = 0;
+		if (!use_static_condensation || !Communicator_pt || Communicator_pt->nproc() < 2) return;
+		if (Problem_has_been_distributed)
+		{
+			// Unconditionally, NOT gated on Dist_problem_matrix_distribution: oomph's own default for that
+			// enum is Uniform_matrix_distribution (problem.cc, the constructor), not the "Default"
+			// heuristic, so consulting it would simply mean never asking for the dof distribution at all.
+			dist_pt = new oomph::LinearAlgebraDistribution(this->dof_distribution_pt());
+			return;
+		}
+		const unsigned nproc = Communicator_pt->nproc(), my_rank = Communicator_pt->my_rank();
+		std::vector<unsigned> cuts = condensation_row_cuts();
+		if (cuts.size() != nproc + 1) return;
+		dist_pt = new oomph::LinearAlgebraDistribution(Communicator_pt, cuts[my_rank],
+													   cuts[my_rank + 1] - cuts[my_rank], cuts[nproc]);
 	}
 
 	bool Problem::build_distributed_condensation_plan(CondensationPlan &plan)
 	{
 		plan.clear();
-		if (!Communicator_pt || !Problem_has_been_distributed) return false;
+		// Serves both MPI modes. Distributed, the mesh is partitioned and the row distribution is the
+		// dof distribution (guard 1 below). REPLICATED, every rank holds the whole mesh and the rows are
+		// split uniformly; the ownership argument still holds, and more easily -- the requirement is
+		// "the rank owning a row holds that dof's Data non-halo", and replicated every rank holds every
+		// Data. What is NOT usable replicated is the problem's dof distribution: oomph builds it
+		// undistributed there (first_row 0, nrow_local ndof on every rank), so it would name rank 0 as
+		// the owner of everything. Row ownership therefore comes from the frozen plan's row_first.
+		if (!Communicator_pt || Communicator_pt->nproc() < 2) return false;
 		const unsigned nproc = Communicator_pt->nproc();
 		const unsigned my_rank = Communicator_pt->my_rank();
 		MPI_Comm comm = Communicator_pt->mpi_comm();
@@ -4225,26 +4579,33 @@ namespace pyoomph
 		// The plan is a list of positions in the frozen distributed value array, so that assembly is a
 		// precondition. Before the first Jacobian of a structure id there is none yet, and the plan is
 		// simply built on the next call -- which is where the solve path reaches it anyway.
-		if (sp.generation != gen || sp.mats.empty() || sp.nproc != nproc || sp.ndof != nd) return false;
+		if (sp.generation != gen || sp.mats.empty() || sp.nproc != nproc || sp.ndof != nd ||
+			sp.row_first.size() != nproc + 1) return false;
 
-		// --- 1. The matrix distribution has to BE the dof distribution, or the ownership argument fails.
-		// oomph picks between Dof_distribution_pt and a uniform one for the Jacobian's rows, switching to
-		// uniform as soon as one rank exceeds the uniform share by 10 % (problem.cc:454). Under a uniform
-		// distribution the rank owning a row is not the rank holding the Data, so nothing below holds.
-		const oomph::LinearAlgebraDistribution *dofdist = this->dof_distribution_pt();
+		// --- 1. On a DISTRIBUTED problem the matrix distribution has to BE the dof distribution, or the
+		// ownership argument fails. oomph picks between Dof_distribution_pt and a uniform one for the
+		// Jacobian's rows, switching to uniform as soon as one rank exceeds the uniform share by 10 %
+		// (problem.cc, create_new_linear_algebra_distribution). Under a uniform distribution the rank
+		// owning a row is not the rank holding the Data, so nothing below holds.
+		//
+		// Replicated the check is vacuous rather than load-bearing, and would in fact always fail: the
+		// dof distribution is undistributed there, so its first_row is 0 on every rank. The property it
+		// stands for -- the row owner holds the Data non-halo -- is automatic when every rank holds
+		// every Data, so the check is skipped rather than relaxed.
 		{
 			std::string err;
-			if (!dofdist || dofdist->first_row() != sp.first_row || dofdist->nrow_local() != sp.nrow_local)
+			const oomph::LinearAlgebraDistribution *dofdist = this->dof_distribution_pt();
+			if (Problem_has_been_distributed &&
+				(!dofdist || dofdist->first_row() != sp.first_row || dofdist->nrow_local() != sp.nrow_local))
 				err = "Static condensation cannot be applied to this distributed run: the Jacobian's row "
 					  "distribution is not the problem's dof distribution, so the rank that owns a row is not "
 					  "the one that holds the degree of freedom, and a component's block is held by nobody in "
-					  "full. oomph-lib chooses a uniform row distribution whenever one rank's dof count "
-					  "exceeds the uniform share by more than 10 %. pyoomph resolves that DEFAULT in favour of "
-					  "the dof distribution by itself whenever condensation is on (see "
-					  "align_matrix_distribution_for_condensation), so reaching this message means the uniform "
-					  "distribution was chosen explicitly. Undo that choice, or switch static condensation off "
-					  "for this run.";
-			condensation_collective_throw(err); // collective; every rank throws or none does
+					  "full. pyoomph asks for the dof distribution by itself whenever condensation is on, in "
+					  "both places one is chosen (see Problem::preferred_linear_solver_distribution), so "
+					  "reaching this message means something overrode that -- a linear solver that lays the "
+					  "rows out itself, or an explicit problem.set_dist_problem_matrix_distribution(\"uniform\"). "
+					  "Undo that, or switch static condensation off for this run.";
+			collective_throw(err); // collective; every rank throws or none does
 		}
 
 		const DistributedFrozenSparsity::Mat &mt = sp.mats[0];
@@ -4309,7 +4670,7 @@ namespace pyoomph
 		foreign_cols.erase(std::unique(foreign_cols.begin(), foreign_cols.end()), foreign_cols.end());
 		std::vector<std::vector<int>> q_send(nproc), q_recv, a_send(nproc), a_recv;
 		for (size_t i = 0; i < foreign_cols.size(); i++)
-			q_send[dofdist->rank_of_global_row((unsigned)foreign_cols[i])].push_back(foreign_cols[i]);
+			q_send[sp.rank_of_row((unsigned)foreign_cols[i])].push_back(foreign_cols[i]);
 		condensation_alltoall_ints(comm, nproc, my_rank, 80, q_send, q_recv);
 		for (unsigned p = 0; p < nproc; p++)
 		{
@@ -4366,14 +4727,30 @@ namespace pyoomph
 			}
 		}
 		if (!straddling.empty())
+		{
 			err = "Static condensation: a connected block of selected degrees of freedom is split across MPI "
 				  "ranks, so no rank holds it in full and it cannot be eliminated. Sample dofs whose equation "
 				  "couples to a selected unknown owned by another rank: " +
-				  format_dof_samples(*this, straddling, straddling.size()) +
-				  ". Static condensation eliminates ELEMENT-LOCAL dofs; a selection that couples across "
-				  "element (and hence partition) boundaries -- a DG field coupled across facets, say -- is not "
-				  "element-local. Restrict the selection, or switch condensation off for distributed runs.";
-		condensation_collective_throw(err);
+				  format_dof_samples(*this, straddling, straddling.size()) + ". ";
+			if (Problem_has_been_distributed)
+				err += "Static condensation eliminates ELEMENT-LOCAL dofs; a selection that couples across "
+					   "element (and hence partition) boundaries -- a DG field coupled across facets, say -- is "
+					   "not element-local. Restrict the selection, or switch condensation off for distributed runs.";
+			else
+				// A replicated run reaches this for a second, quite different reason, and saying "not
+				// element-local" there would send the reader looking for a bug in their equations.
+				err += "This is a REPLICATED MPI run (mpirun without --distribute): the mesh is not partitioned, "
+					   "but the linear system's ROWS still are, and a block can only be eliminated on the rank "
+					   "that owns all of its rows. pyoomph moves the row cut points off the blocks where it can "
+					   "(Problem::condensation_row_cuts), which works when the selected dofs of an element are "
+					   "numbered together -- element-internal values are. It cannot when the selection mixes "
+					   "NODAL and element-internal dofs, because oomph-lib numbers every nodal value before any "
+					   "internal one, so the two halves of the block sit hundreds of equations apart: a "
+					   "Crouzeix-Raviart selection of the bubble VELOCITY (nodal) together with the DL pressure "
+					   "(internal) is exactly that. Run with --distribute, where each rank's dofs are renumbered "
+					   "contiguously and the question does not arise, or switch condensation off for this run.";
+		}
+		collective_throw(err);
 
 		std::vector<int> comp_of_l(nL, -1), comp_of_root(nL, -1);
 		unsigned ncomp = 0;
@@ -4432,7 +4809,7 @@ namespace pyoomph
 					   "it does determine -- and the constant pressure mode has to stay in the global system.";
 			}
 		}
-		condensation_collective_throw(err);
+		collective_throw(err);
 
 		// --- 6. E_C, in two halves. By column (a retained dof appearing in one of the component's own
 		// equations) the owner can see for itself; by row (a retained equation containing one of the
@@ -4459,7 +4836,7 @@ namespace pyoomph
 				if (owns(c)) E_lists[comp_of_l[l_index[c - (int)first_row]]].push_back(r);
 				else
 				{
-					std::vector<int> &b = pair_send[dofdist->rank_of_global_row((unsigned)c)];
+					std::vector<int> &b = pair_send[sp.rank_of_row((unsigned)c)];
 					b.push_back(c); b.push_back(r);
 				}
 			}
@@ -4481,7 +4858,7 @@ namespace pyoomph
 				}
 				E_lists[comp_of_l[l_index[lr]]].push_back(r);
 			}
-		condensation_collective_throw(err);
+		collective_throw(err);
 		for (unsigned c = 0; c < ncomp; c++)
 		{
 			std::sort(E_lists[c].begin(), E_lists[c].end());
@@ -4501,7 +4878,7 @@ namespace pyoomph
 			std::vector<int> peers;
 			for (size_t j = 0; j < owned[c].E_eqns.size(); j++)
 			{
-				const unsigned p = dofdist->rank_of_global_row((unsigned)owned[c].E_eqns[j]);
+				const unsigned p = sp.rank_of_row((unsigned)owned[c].E_eqns[j]);
 				if (p != my_rank) peers.push_back((int)p);
 			}
 			std::sort(peers.begin(), peers.end());
@@ -4544,7 +4921,7 @@ namespace pyoomph
 				comp_peers.push_back(std::vector<int>());
 			}
 		}
-		condensation_collective_throw(err);
+		collective_throw(err);
 		{
 			std::vector<unsigned> order(comps.size());
 			for (unsigned i = 0; i < order.size(); i++) order[i] = i;
@@ -4584,11 +4961,19 @@ namespace pyoomph
 				if (owns(comp.E_eqns[j])) comp.my_E.push_back((int)j);
 		}
 
-		// --- 10. Reconstruction inputs for the components this rank owns. dx is distributed, so only the
-		// E rows this rank owns are in it; for the rest the increment is recovered from the local (halo)
-		// copy of the VALUE, (u_stored - u_now)/Relaxation_factor, which needs no exchange of dx at all.
-		// Such a copy always exists: an E dof is a dof of an element that contains one of the component's
-		// L dofs, and that element is non-halo on this very rank.
+		// --- 10. Reconstruction inputs for the components this rank owns.
+		//
+		// DISTRIBUTED: dx is distributed too, so only the E rows this rank owns are in it; for the rest
+		// the increment is recovered from the local (halo) copy of the VALUE,
+		// (u_stored - u_now)/Relaxation_factor, which needs no exchange of dx at all. Such a copy always
+		// exists: an E dof is a dof of an element that contains one of the component's L dofs, and that
+		// element is non-halo on this very rank.
+		//
+		// REPLICATED: the problem's dof distribution is not distributed, so newton_solve() redistributes
+		// dx to it and every rank gets the whole increment. Every E row can then be read from dx exactly,
+		// and the recovery is not needed at all -- E_dx_row holds GLOBAL rows there.
+		const bool replicated = !Problem_has_been_distributed;
+		plan.dx_is_global = replicated;
 		{
 			std::vector<int> wanted;
 			for (unsigned i = 0; i < nc; i++)
@@ -4600,7 +4985,8 @@ namespace pyoomph
 				comp.E_u_stored.assign(comp.nE(), 0.0);
 				for (unsigned j = 0; j < comp.nE(); j++)
 				{
-					if (owns(comp.E_eqns[j])) comp.E_dx_row[j] = comp.E_eqns[j] - (int)first_row;
+					if (replicated) comp.E_dx_row[j] = comp.E_eqns[j];
+					else if (owns(comp.E_eqns[j])) comp.E_dx_row[j] = comp.E_eqns[j] - (int)first_row;
 					else wanted.push_back(comp.E_eqns[j]);
 				}
 			}
@@ -4648,7 +5034,7 @@ namespace pyoomph
 						break;
 					}
 			}
-			condensation_collective_throw(err);
+			collective_throw(err);
 			for (unsigned i = 0; i < nc; i++)
 			{
 				CondensationComponent &comp = comps[i];
@@ -4659,6 +5045,40 @@ namespace pyoomph
 					const std::vector<int>::iterator f = std::lower_bound(wanted.begin(), wanted.end(), comp.E_eqns[j]);
 					comp.E_value_pt[j] = found[f - wanted.begin()];
 				}
+			}
+		}
+
+		// --- 10b. Replicated only: where to APPLY a reconstructed increment.
+		//
+		// A replicated run has no halo synchronisation to lean on -- each rank is a separate copy of the
+		// whole problem, kept in step only because every rank applies the same dx to the same dofs. The
+		// eliminated dofs are not in dx, and only the owner of a component can reconstruct them, so the
+		// increments are allgathered and applied by every rank through this lookup. Every L dof of every
+		// component in the plan is in it, owned or not; the value pointer is found by the same scan the E
+		// dofs use, which sees every Data on a replicated mesh.
+		if (replicated)
+		{
+			// Built from the whole SELECTION rather than from `comps`: a component owned by another rank
+			// whose E rows are also all over there is entirely invisible in this rank's component array,
+			// yet its increment still arrives in the allgather and still has to be applied here.
+			// Replicated, the selection is identical on every rank and already names the Data, so this is
+			// a sort rather than another scan over the mesh.
+			std::vector<std::pair<int, double *>> tmp;
+			for (const auto &kv : static_condensation_selected)
+				for (unsigned v = 0; v < kv.second.size(); v++)
+				{
+					if (!kv.second[v]) continue;
+					const long eq = kv.first->eqn_number(v);
+					if (eq >= 0) tmp.push_back(std::make_pair((int)eq, kv.first->value_pt(v)));
+				}
+			std::stable_sort(tmp.begin(), tmp.end(), [](const std::pair<int, double *> &a, const std::pair<int, double *> &b)
+							 { return a.first < b.first; });
+			for (size_t i = 0; i < tmp.size(); i++)
+			{
+				// Two Data values sharing an equation: keep the first, exactly as the L selection does.
+				if (!plan.all_L_eqn.empty() && plan.all_L_eqn.back() == tmp[i].first) continue;
+				plan.all_L_eqn.push_back(tmp[i].first);
+				plan.all_L_value_pt.push_back(tmp[i].second);
 			}
 		}
 
@@ -4770,7 +5190,7 @@ namespace pyoomph
 				plan.passthrough_cond_slot.push_back(cs);
 			}
 		}
-		condensation_collective_throw(err);
+		collective_throw(err);
 
 		plan.components.swap(comps);
 		plan.condensed_eqns = l_eqn;
@@ -5157,7 +5577,7 @@ namespace pyoomph
 		}
 		// Collective, and before any point-to-point traffic: a rank throwing on its own here would leave
 		// every other rank in the MPI_Waitall below.
-		condensation_collective_throw(err);
+		collective_throw(err);
 
 		// --- 4. Ship X and y to the ranks owning this component's E rows. One message per peer, laid out
 		// component by component in the order both sides agreed on when the plan was built.
@@ -5354,16 +5774,22 @@ namespace pyoomph
 	void Problem::reconstruct_condensed_dofs_distributed(const oomph::DoubleVector &dx)
 	{
 		CondensationPlan &plan = condensation_plan;
-		if (dx.nrow_local() != plan.nrow_local || dx.first_row() != plan.first_row)
+		// Replicated, newton_solve() redistributes dx to the problem's dof distribution, which is not
+		// distributed there: it comes back whole on every rank, and E_dx_row holds global rows.
+		const unsigned want_nrow = plan.dx_is_global ? plan.ndof : plan.nrow_local;
+		const unsigned want_first = plan.dx_is_global ? 0u : plan.first_row;
+		if (dx.nrow_local() != want_nrow || dx.first_row() != want_first)
 			throw_runtime_error("Internal error: the Newton increment's row block (" +
 								std::to_string(dx.nrow_local()) + " rows from " + std::to_string(dx.first_row()) +
 								") is not the one static condensation eliminated from (" +
-								std::to_string(plan.nrow_local) + " from " + std::to_string(plan.first_row) + ").");
+								std::to_string(want_nrow) + " from " + std::to_string(want_first) + ").");
 		const double *dx_pt = dx.values_pt();
 		const double relax = Relaxation_factor;
 		// A zero relaxation factor moves no dof at all, so there is nothing to reconstruct -- and the
 		// value-difference recovery below would be 0/0.
 		const bool do_work = (relax != 0.0);
+		std::vector<int> pairs_eqn;      // replicated only, see the allgather after the loop
+		std::vector<double> pairs_delta;
 		for (unsigned c = 0; c < plan.components.size(); c++)
 		{
 			CondensationComponent &comp = plan.components[c];
@@ -5398,8 +5824,39 @@ namespace pyoomph
 										"(a condensed value now carries equation " + std::to_string(d->eqn_number(iv)) +
 										" instead of " + std::to_string(comp.L_eqns[k]) + ").");
 #endif
-				*(d->value_pt(iv)) -= relax * v;
+				// Replicated, this is recorded and allgathered instead of applied: every rank must end up
+				// with the identical dof vector, and only this rank can compute this number.
+				if (plan.dx_is_global) { pairs_eqn.push_back(comp.L_eqns[k]); pairs_delta.push_back(relax * v); }
+				else *(d->value_pt(iv)) -= relax * v;
 			}
+		}
+		if (plan.dx_is_global)
+		{
+			// One MPI_Allgatherv of (equation, increment) pairs -- nL doubles in total, not the
+			// nL*(nE+1) that shipping X and y would cost. Then EVERY rank applies EVERY pair, its own
+			// included, so the result is bit-identical everywhere by construction rather than by
+			// everyone happening to compute the same rounding.
+			const unsigned nproc = Communicator_pt->nproc();
+			MPI_Comm comm = Communicator_pt->mpi_comm();
+			int mine = (int)pairs_eqn.size();
+			std::vector<int> counts(nproc, 0), displs(nproc + 1, 0);
+			MPI_Allgather(&mine, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+			for (unsigned p = 0; p < nproc; p++) displs[p + 1] = displs[p] + counts[p];
+			std::vector<int> all_eqn(displs[nproc]);
+			std::vector<double> all_delta(displs[nproc]);
+			MPI_Allgatherv(pairs_eqn.data(), mine, MPI_INT, all_eqn.data(), counts.data(), displs.data(), MPI_INT, comm);
+			MPI_Allgatherv(pairs_delta.data(), mine, MPI_DOUBLE, all_delta.data(), counts.data(), displs.data(), MPI_DOUBLE, comm);
+			for (size_t i = 0; i < all_eqn.size(); i++)
+			{
+				const std::vector<int>::const_iterator f =
+					std::lower_bound(plan.all_L_eqn.begin(), plan.all_L_eqn.end(), all_eqn[i]);
+				if (f == plan.all_L_eqn.end() || *f != all_eqn[i])
+					throw_runtime_error("Internal error: rank " + std::to_string(plan.my_rank) + " received a "
+										"reconstructed increment for equation " + std::to_string(all_eqn[i]) +
+										", which its static condensation plan does not list as condensed.");
+				*(plan.all_L_value_pt[f - plan.all_L_eqn.begin()]) -= all_delta[i];
+			}
+			return; // no halos to synchronise on a replicated run
 		}
 		// Collective, and reached by every rank because last_jacobian_was_condensed is globally uniform
 		// (see the engagement gate). Deliberately NOT conditioned on this rank having reconstructed
@@ -5424,16 +5881,14 @@ namespace pyoomph
 		// tested here is globally uniform, so under MPI these throw on all ranks at once rather than
 		// leaving some of them in the next collective (dev_docs/static_condensation.md section 9.4).
 #ifdef OOMPH_HAS_MPI
-		if (Communicator_pt && Communicator_pt->nproc() > 1 && !Problem_has_been_distributed)
-			throw_runtime_error("Static condensation under MPI needs a genuinely DISTRIBUTED problem. This run has " +
-								std::to_string(Communicator_pt->nproc()) + " ranks but the problem was never "
-								"distributed, so it is replicated and only its ELEMENTS are split across the ranks -- "
-								"oomph-lib re-tunes that split from measured timings, which is why neither the frozen "
-								"assembly nor an elimination plan built from it can describe it. Run with "
-								"--distribute, or set problem.use_static_condensation = False.");
-		if (Problem_has_been_distributed && !(use_frozen_sparsity && use_frozen_distributed_sparsity && keep_structural_zeros))
-			throw_runtime_error("Static condensation on a distributed problem requires the frozen distributed "
-								"assembly: the elimination plan is a list of positions in its value array. Leave "
+		// Both MPI modes are served. What they share is that the Jacobian's rows are split across the
+		// ranks, which is what the whole distributed plan is expressed in terms of -- and that plan is a
+		// list of positions in the frozen distributed assembly's value array, so that assembly is a
+		// prerequisite in either mode.
+		if (Communicator_pt && Communicator_pt->nproc() > 1 &&
+			!(use_frozen_sparsity && use_frozen_distributed_sparsity && keep_structural_zeros))
+			throw_runtime_error("Static condensation under MPI requires the frozen distributed assembly: the "
+								"elimination plan is a list of positions in its value array. Leave "
 								"problem.use_frozen_sparsity, problem.use_frozen_distributed_sparsity and "
 								"problem.keep_structural_zeros on, or switch static condensation off.");
 #endif
@@ -5793,24 +6248,43 @@ namespace pyoomph
 	// Nothing here depends on a matrix, on the symbolic mask or on keep_structural_zeros -- only on the
 	// equation numbering and the mesh partition. That is what lets get_residuals() use it even when the
 	// pattern machinery does not apply at all.
+	// The elements this rank assembles, exactly as oomph::Problem::parallel_sparse_assemble() computes
+	// them. Distributed: all of them, with the halo flag doing the selection. Replicated: the slice
+	// oomph-lib handed this rank, which it may re-tune from measured elemental timings -- which is why
+	// the range is recorded in the plans and compared before one is reused.
+	void Problem::get_assembly_element_range(unsigned long &el_lo, unsigned long &el_hi_plus_one) const
+	{
+		el_lo = 0;
+		el_hi_plus_one = const_cast<Problem *>(this)->mesh_pt()->nelement();
+#ifdef OOMPH_HAS_MPI
+		if (!Problem_has_been_distributed && Communicator_pt)
+		{
+			const unsigned r = Communicator_pt->my_rank();
+			if (r < First_el_for_assembly.size())
+			{
+				el_lo = First_el_for_assembly[r];
+				el_hi_plus_one = Last_el_plus_one_for_assembly[r];
+			}
+		}
+#endif
+	}
+
 	bool Problem::build_distributed_residual_plan(const oomph::LinearAlgebraDistribution* const& dist_pt, unsigned n_vector, DistributedResidualPlan &rp)
 	{
 		rp.clear();
 		if (!Communicator_pt || !dist_pt) return false;
-		// Same restriction as the matrix plan: a replicated problem whose elements are merely split
-		// across ranks has its element range re-tuned from measured timings, so it is not a function of
-		// the equation numbering. Globally consistent, hence safe to return before any collective.
-		if (!Problem_has_been_distributed) return false;
 
 		const unsigned nproc = Communicator_pt->nproc();
 		const unsigned my_rank = Communicator_pt->my_rank();
 		MPI_Comm comm = Communicator_pt->mpi_comm();
 		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
 		const unsigned long n_element = mesh_pt()->nelement();
+		unsigned long el_lo, el_hi_plus_one;
+		this->get_assembly_element_range(el_lo, el_hi_plus_one);
 
 		// Exactly oomph-lib's own set, so the partition below matches what its routine would do.
 		oomph::Vector<unsigned> my_eqns;
-		if (n_element) this->get_my_eqns(assembly_handler_pt, 0, n_element - 1, my_eqns);
+		if (el_hi_plus_one > el_lo) this->get_my_eqns(assembly_handler_pt, el_lo, el_hi_plus_one - 1, my_eqns);
 		const unsigned my_n_eqn = my_eqns.size();
 		rp.my_eqns.assign(my_eqns.begin(), my_eqns.end());
 		const unsigned *eq0 = rp.my_eqns.data();
@@ -5893,7 +6367,10 @@ namespace pyoomph
 		for (unsigned long e = 0; e < n_element; e++)
 		{
 			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
-			const unsigned nvar = elem_pt->is_halo() ? 0 : assembly_handler_pt->ndof(elem_pt);
+			// Outside this rank's range the element is never evaluated, so it needs no slots. Indexed
+			// by the GLOBAL element number all the same, so the assembly can address it directly.
+			const bool mine = (e >= el_lo && e < el_hi_plus_one);
+			const unsigned nvar = (!mine || elem_pt->is_halo()) ? 0 : assembly_handler_pt->ndof(elem_pt);
 			for (unsigned i = 0; i < nvar; i++)
 			{
 				const unsigned g = assembly_handler_pt->eqn_number(elem_pt, i);
@@ -5915,6 +6392,8 @@ namespace pyoomph
 		rp.nproc = nproc;
 		rp.my_rank = my_rank;
 		rp.nelement = n_element;
+		rp.el_lo = el_lo;
+		rp.el_hi_plus_one = el_hi_plus_one;
 		rp.ndof = this->ndof();
 		rp.n_vector = n_vector;
 		return true;
@@ -5931,12 +6410,15 @@ namespace pyoomph
 		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
 		const unsigned long n_element = mesh_pt()->nelement();
 
-		// Only a genuinely distributed problem is frozen here. The other mode oomph-lib's routine serves
-		// -- a replicated problem whose ELEMENTS are split across ranks -- re-tunes First_el_for_assembly
-		// from measured per-element timings as it goes, so the element range is not a function of the
-		// equation numbering and a frozen pattern could silently describe the wrong slice of the mesh.
-		if (!Problem_has_been_distributed) return false;
-		const unsigned long el_lo = 0, el_hi_plus_one = n_element;
+		// Both modes oomph-lib's routine serves are frozen here. A REPLICATED problem (mpirun without
+		// --distribute, every rank holding the whole mesh) differs only in which elements this rank
+		// evaluates: a slice of the element list rather than the non-halo ones. That slice is not a
+		// function of the equation numbering -- oomph-lib re-tunes it from measured elemental timings --
+		// so a plan built for one slice would silently describe the wrong part of the mesh after a
+		// re-tune. Hence it is recorded here and compared before the plan is reused, rather than being a
+		// reason to refuse the mode.
+		unsigned long el_lo, el_hi_plus_one;
+		this->get_assembly_element_range(el_lo, el_hi_plus_one);
 
 		// Which equations this rank contributes to, who owns each of them, and where each incoming one
 		// lands. Shared with the residual-only plan so there is one implementation of it; collective,
@@ -6213,10 +6695,18 @@ namespace pyoomph
 			}
 		}
 
+		// Who owns which rows, taken from the distribution while it is still in hand. Local knowledge:
+		// LinearAlgebraDistribution carries every rank's first_row, so this costs no communication.
+		sp.row_first.resize(nproc + 1);
+		for (unsigned p = 0; p < nproc; p++) sp.row_first[p] = dist_pt->first_row(p);
+		sp.row_first[nproc] = dist_pt->nrow();
+
 		sp.nproc = nproc;
 		sp.my_rank = my_rank;
 		sp.ndof = this->ndof();
 		sp.nelement = n_element;
+		sp.el_lo = el_lo;
+		sp.el_hi_plus_one = el_hi_plus_one;
 		sp.n_matrix = n_matrix;
 		sp.n_vector = n_vector;
 		return true;
@@ -6239,9 +6729,8 @@ namespace pyoomph
 		const unsigned long gen = this->get_jacobian_structure_id();
 		if (!gen) return false;
 
-		// Checked here rather than inside the build so that the collectives below are never reached in a
-		// configuration that can never be frozen; see build_distributed_frozen_sparsity() for why.
-		if (!Problem_has_been_distributed) return false;
+		unsigned long cur_el_lo, cur_el_hi_plus_one;
+		this->get_assembly_element_range(cur_el_lo, cur_el_hi_plus_one);
 
 		DistributedFrozenSparsity &sp = distributed_frozen_sparsity;
 		// Everything from here on is collective, so every branch has to be taken by every rank or the
@@ -6249,9 +6738,16 @@ namespace pyoomph
 		// are put to a vote: whether the plan needs rebuilding (nrow_local, first_row and nelement are
 		// per-rank quantities), and whether the rebuild succeeded.
 		{
+			// el_lo/el_hi_plus_one are in here because on a REPLICATED run they are not a function of
+			// the equation numbering: oomph-lib re-tunes the slice from measured elemental timings
+			// whenever its own routine runs (recompute_load_balanced_assembly). Reusing a plan across
+			// such a re-tune would assemble one slice of the mesh through the scatter map of another --
+			// a wrong Jacobian AND a wrong residual, so Newton would converge to a wrong state rather
+			// than fail. Distributed they are constant and the comparison costs nothing.
 			int need = (sp.generation != gen || sp.n_matrix != n_matrix || sp.n_vector != n_vector ||
 						sp.nrow_local != dist_pt->nrow_local() || sp.first_row != dist_pt->first_row() ||
-						sp.nelement != mesh_pt()->nelement()) ? 1 : 0;
+						sp.nelement != mesh_pt()->nelement() ||
+						sp.el_lo != cur_el_lo || sp.el_hi_plus_one != cur_el_hi_plus_one) ? 1 : 0;
 			int any_need = 0;
 			MPI_Allreduce(&need, &any_need, 1, MPI_INT, MPI_MAX, Communicator_pt->mpi_comm());
 			if (any_need)
@@ -6281,15 +6777,16 @@ namespace pyoomph
 
 		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
 		const unsigned long n_element = mesh_pt()->nelement();
-		// build_distributed_frozen_sparsity() refuses anything but a genuinely distributed problem, so
-		// every non-halo element on this rank belongs to it.
-		const unsigned long el_lo = 0, el_hi_plus_one = n_element;
+		// From the plan, not recomputed: the two agree by the freshness vote above, and taking them from
+		// the plan is what guarantees the scatter map and the element loop describe the same slice.
+		const unsigned long el_lo = sp.el_lo, el_hi_plus_one = sp.el_hi_plus_one;
 		// my_eqns is sorted, so a row index for a global equation is a bisection. Residuals need it;
 		// the matrix entries do not, they go through the scatter map.
 		const unsigned *eq0 = sp.my_eqns.data();
 
 		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
 		oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
+		std::string violation; // empty = this rank has no objection, see the vote after the loop
 		for (unsigned long e = el_lo; e < el_hi_plus_one; e++)
 		{
 			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
@@ -6317,7 +6814,7 @@ namespace pyoomph
 				double *val = local_values[m].data();
 				const double *flat = &el_jacobian[m](0, 0);
 				for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
-				if (verify_frozen_sparsity)
+				if (verify_frozen_sparsity && violation.empty())
 				{
 					// Same guard as the serial path: the compact scatter cannot notice an entry that fell
 					// outside the pattern, so count instead of trusting.
@@ -6327,13 +6824,21 @@ namespace pyoomph
 					for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
 					if (all > taken)
 					{
-						throw_runtime_error("A Jacobian entry appeared outside the symbolic sparsity pattern during "
-											"distributed assembly (matrix " + std::to_string(m) + ", element " +
-											std::to_string(e) + "). Workaround: set problem.use_frozen_sparsity=False.");
+						// RECORDED, not thrown: the value exchange below is collective, so a rank throwing
+						// here on its own would leave every other rank waiting for a message it will never
+						// send - a hung job instead of a failed one. The offending element is this rank's
+						// own, so only it can see the violation.
+						violation = "A Jacobian entry appeared outside the symbolic sparsity pattern during "
+									"distributed assembly (matrix " + std::to_string(m) + ", element " +
+									std::to_string(e) + "). Workaround: set problem.use_frozen_sparsity=False.";
 					}
 				}
 			}
 		}
+
+		// Every rank reaches this, whatever it found, so it is safe to throw from here: the exchange
+		// below is not entered by anybody.
+		if (verify_frozen_sparsity) collective_throw(violation);
 
 		// ---- exchange values ----
 		// One message per peer: [ residuals, vector by vector ] [ values, matrix by matrix ]. The
@@ -6453,10 +6958,11 @@ namespace pyoomph
 	{
 		if (!use_frozen_distributed_sparsity) return false;
 		if (!Communicator_pt || !dist_pt) return false;
-		if (!Problem_has_been_distributed) return false;
 		if (n_unaugmented_dofs != 0) return false;
 		const unsigned n_vector = residuals.size();
 		if (!n_vector) return false;
+		unsigned long cur_el_lo, cur_el_hi_plus_one;
+		this->get_assembly_element_range(cur_el_lo, cur_el_hi_plus_one);
 
 		// Deliberately NOT get_jacobian_structure_id(): that is 0 whenever the pattern is
 		// value-dependent (keep_structural_zeros off), and this plan does not involve a pattern at all.
@@ -6467,7 +6973,8 @@ namespace pyoomph
 		{
 			int need = (rp.generation == 0 || rp.n_vector != n_vector || rp.ndof != this->ndof() ||
 						rp.nrow_local != dist_pt->nrow_local() || rp.first_row != dist_pt->first_row() ||
-						rp.nelement != mesh_pt()->nelement()) ? 1 : 0;
+						rp.nelement != mesh_pt()->nelement() ||
+						rp.el_lo != cur_el_lo || rp.el_hi_plus_one != cur_el_hi_plus_one) ? 1 : 0;
 			int any_need = 0;
 			MPI_Allreduce(&need, &any_need, 1, MPI_INT, MPI_MAX, Communicator_pt->mpi_comm());
 			if (any_need)
@@ -6491,7 +6998,7 @@ namespace pyoomph
 		for (unsigned v = 0; v < n_vector; v++) local_res[v].assign(my_n_eqn, 0.0);
 		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
 		oomph::Vector<oomph::DenseMatrix<double>> no_matrices;
-		for (unsigned long e = 0; e < n_element; e++)
+		for (unsigned long e = rp.el_lo; e < rp.el_hi_plus_one; e++)
 		{
 			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
 			if (elem_pt->is_halo()) continue;

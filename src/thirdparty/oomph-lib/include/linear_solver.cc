@@ -858,16 +858,21 @@ namespace oomph
 
       LinearAlgebraDistribution dist(
         problem_pt->communicator_pt(), n_dof, !Dist_use_global_solver);
-      // FOR PYOOMPH: the UNIFORM split above is not the split the dofs themselves have, so the rank
-      // owning a row of the Jacobian is generally not the rank holding that degree of freedom. Static
-      // condensation needs those two to coincide (dev_docs/static_condensation.md section 9.1), so it
-      // asks for the problem's own dof distribution through this hook. Opt-in and off by default, so
-      // nothing else changes; on a distributed problem it only removes the redistribute() that
-      // newton_solve() does afterwards anyway.
-      if (!Dist_use_global_solver && problem_pt->distributed() &&
-          problem_pt->prefer_dof_distribution_for_linear_solver())
+      // FOR PYOOMPH: the UNIFORM split above is not necessarily the one the problem needs. Static
+      // condensation requires the rank owning a row of the Jacobian to be the rank that can invert the
+      // element-local block that row belongs to (dev_docs/static_condensation.md section 9.1), which
+      // the uniform split breaks; the problem names the distribution it wants through this hook. Null
+      // by default, so nothing else changes; where it is used on a distributed problem it only removes
+      // the redistribute() that newton_solve() does afterwards anyway.
+      if (!Dist_use_global_solver)
       {
-        dist.build(problem_pt->dof_distribution_pt());
+        LinearAlgebraDistribution* preferred_pt = 0;
+        problem_pt->preferred_linear_solver_distribution(preferred_pt);
+        if (preferred_pt != 0)
+        {
+          dist.build(preferred_pt);
+          delete preferred_pt;
+        }
       }
       this->build_distribution(dist);
       // FOR PYOOMPH: We need to handle the distribution differently in pyoomph: Solving is always distributed, however, we must pay attention to the dof blocks when running without --distribute

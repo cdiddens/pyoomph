@@ -1122,32 +1122,51 @@ namespace pyoomph
 					neigh_pt = beq->quadtree_pt()->gteq_edge_neighbour(edges[edge_counter], translate_s, s_lo_neigh, s_hi_neigh, neigh_edge, diff_level, in_neighbouring_tree);
 					if (neigh_pt != nullptr && neigh_pt->is_leaf())
 					{
-					 
+
 					 BulkElementBase * adj=dynamic_cast<BulkElementBase *>(neigh_pt->object_pt());
+
+					 // A leaf whose object has been flushed. Mesh::distribute() and
+					 // prune_halo_elements_and_nodes() call Tree::flush_object() on every element they
+					 // delete but leave the tree standing, so gteq_edge_neighbour() still hands back a
+					 // leaf with a null object. Only elements OUTSIDE the retained halo layer are
+					 // deleted, so the neighbour of a non-halo element is always still here: a null
+					 // neighbour means both sides of this facet belong to another rank, and skipping it
+					 // drops nothing that would be assembled here. A null one next to a NON-halo element
+					 // would mean the halo layer itself is incomplete, which is not something to work
+					 // around silently.
+					 if (!adj)
+					 {
+					   if (!be->is_halo()) throw_runtime_error("Interior facet of a non-halo element has no neighbouring element: the halo layer is incomplete");
+					   continue;
+					 }
 
 					 if (!constructed_facets.count(be)) constructed_facets[be]={-1,-1,-1,-1};
 					 if (!constructed_facets.count(adj)) constructed_facets[adj]={-1,-1,-1,-1};
 					 int neigh_edge_counter=revedges[neigh_edge];
 
-                oomph::Vector<double> mp1=be->get_Eulerian_midpoint_from_local_coordinate();
-				    oomph::Vector<double> mp2=adj->get_Eulerian_midpoint_from_local_coordinate();
-//					 std::cout << "NEIGHT PT " << ie << "  : " << be << "("<<mp1[0] << ", " << mp1[1]<<") , " << edge_counter << "  and  " << adj << "("<<mp2[0] << ", " << mp2[1]<<") ,  " << neigh_edge_counter << "  DL " << diff_level << std::endl;
-					 					 
 					 if (diff_level==0)
 					 {
 					   if (constructed_facets[adj][neigh_edge_counter]<0)
 					   {
-							if (constructed_facets[be][edge_counter]>=0) 
+							if (constructed_facets[be][edge_counter]>=0)
 		               {
 		                  throw_runtime_error("Facet was already constructed before, this should not happen");
 		               }
 		               constructed_facets[be][edge_counter]=opposite_elements.size();
-		               constructed_facets[adj][neigh_edge_counter]=opposite_elements.size();		               
-		               internal_elements.push_back(be);
-		               internal_face_dir.push_back(edge_to_face_dir[edge_counter]);		               
-		               opposite_elements.push_back(adj);
-		               opposite_face_dir.push_back(edge_to_face_dir[neigh_edge_counter]);
-                     opposite_already_at_index.push_back(-1);       		               
+		               constructed_facets[adj][neigh_edge_counter]=opposite_elements.size();
+		               // Same-level facet, so which of the two is the near side is a free choice - and
+		               // therefore one that must come out the same on every rank, see the note in the
+		               // node-based branch below. (Where the levels differ it is not free: the facet
+		               // belongs to the finer side, which is always be, since gteq_edge_neighbour()
+		               // only ever returns a neighbour at the same or a coarser level.)
+		               BulkElementBase *nearel=be, *farel=adj;
+		               int neardir=edge_to_face_dir[edge_counter], fardir=edge_to_face_dir[neigh_edge_counter];
+		               if (Mesh::compare_structural_order(be,adj)>0) { std::swap(nearel,farel); std::swap(neardir,fardir); }
+		               internal_elements.push_back(nearel);
+		               internal_face_dir.push_back(neardir);
+		               opposite_elements.push_back(farel);
+		               opposite_face_dir.push_back(fardir);
+                     opposite_already_at_index.push_back(-1);
 					   }
 					   else if (constructed_facets[be][edge_counter]<0) 
 					   {
@@ -1262,11 +1281,19 @@ namespace pyoomph
      {
        const auto & attached=nodemap.at(f.second);
        if (attached.size()!=2) continue; // Exterior facet
-       if (attached[0].first!=be || attached[0].second!=f.first) continue; // Emitted from the other side
-       internal_elements.push_back(attached[0].first);
-       internal_face_dir.push_back(attached[0].second);
-       opposite_elements.push_back(attached[1].first);
-       opposite_face_dir.push_back(attached[1].second);
+       // Which of the two is the NEAR side (the one the facet element is attached to, and whose
+       // outward normal the facet terms are written for) has to be decided identically on every rank:
+       // distributed, the two elements can live on different ranks and neither asks the other. Local
+       // element order alone would do that only because Mesh::distribute() happens to re-add the
+       // retained elements in their original order; ordering by the structural index says it outright.
+       // While the mesh is whole the two coincide, so this changes nothing serially.
+       unsigned nearside = (Mesh::compare_structural_order(attached[0].first,attached[1].first)>0 ? 1 : 0);
+       const auto & near=attached[nearside]; const auto & far=attached[1-nearside];
+       if (near.first!=be || near.second!=f.first) continue; // Emitted from the other side
+       internal_elements.push_back(near.first);
+       internal_face_dir.push_back(near.second);
+       opposite_elements.push_back(far.first);
+       opposite_face_dir.push_back(far.second);
        opposite_already_at_index.push_back(-1);
      }
     }

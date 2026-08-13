@@ -88,15 +88,22 @@ _OBS_RTOL = 1e-10
 _RES_TOL = 1e-7
 
 
-def _run_distributed(nproc, tmpdir, dim, size, structural, timeout=900, mode="solve"):
-    """Launch the worker under mpirun and return the list of per-rank result dicts."""
+def _run_distributed(nproc, tmpdir, dim, size, structural, timeout=900, mode="solve", distribute=True):
+    """Launch the worker under mpirun and return the list of per-rank result dicts.
+
+    `distribute=False` is the REPLICATED mode: every rank holds the whole mesh and only the element
+    loop is split, by a range oomph-lib hands out (and may re-tune from measured timings). The frozen
+    distributed assembly serves that mode too, which is what the replicated tests below check.
+    """
     cmd = ["mpirun", "-n", str(nproc)]
     if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
         # CI machines routinely have fewer slots than we ask for; without this OpenMPI refuses to start.
         cmd += ["--oversubscribe"]
     cmd += [sys.executable, _WORKER, "--outdir", str(tmpdir),
             "--dim", str(dim), "--size", str(size), "--structural", str(int(structural)),
-            "--mode", mode, "--distribute"]
+            "--mode", mode]
+    if distribute:
+        cmd += ["--distribute"]
     # Importing pyoomph calls MPI_Init, so THIS pytest process is already a (singleton) MPI job and owns
     # an Open MPI session directory under TMPDIR. A nested mpirun collides with it and dies immediately
     # with exit code 1 and no diagnostics at all. Give the child its own TMPDIR.
@@ -254,3 +261,65 @@ def test_frozen_distributed_residuals_match_oomph(tmp_path, nproc, dim, size):
         assert r["conv_maxdiff"] < 1e-14 * scale, \
             "%s: converged residual differs by %.3e (norm %.3e, contributions O(%.1e))" % (
                 where, r["conv_maxdiff"], r["conv_norm"], r["init_norm"])
+
+
+# ---------------------------------------------------------------------------------------------------
+# The REPLICATED mode: mpirun without --distribute
+# ---------------------------------------------------------------------------------------------------
+#
+# Every rank holds the whole mesh and only the element LOOP is split, by a range oomph-lib hands out
+# (First_el_for_assembly). The frozen route serves that mode too, and it is a different thing to get
+# right: the range is not a function of the equation numbering -- oomph-lib re-tunes it from measured
+# elemental timings whenever its own routine runs -- so a plan built for one slice must not survive
+# into another. That is why the range is part of the plan and of its freshness vote; here it is checked
+# that the resulting matrix is nevertheless oomph-lib's own, entry for entry.
+#
+# This mode is also what static condensation needs, since a replicated run cannot be condensed without
+# a frozen distributed plan to build the condensation plan on.
+
+@pytest.mark.parametrize("nproc", [2, 3, 4])
+@pytest.mark.parametrize("dim,size", [(2, 16), (3, 5)], ids=["2d", "3d"])
+def test_frozen_replicated_assembly_matches_oomph(tmp_path, nproc, dim, size):
+    per_rank = _run_distributed(nproc, tmp_path, dim, size, structural=True,
+                                mode="compare-distributed", distribute=False)
+    for r in per_rank:
+        where = "rank %d/%d (dim=%d, replicated)" % (r["rank"], nproc, dim)
+        assert r["plans_built"] > 0, "%s: the frozen route never engaged" % where
+        assert r["missing_nonzero"] == 0, \
+            "%s: %d entries oomph-lib stores are absent from the frozen pattern" % (where, r["missing_nonzero"])
+        assert r["extra_nonzero"] == 0, \
+            "%s: %d entries the frozen route stores are absent from oomph-lib's" % (where, r["extra_nonzero"])
+        assert r["max_value_diff"] < 1e-12, \
+            "%s: worst Jacobian entry differs by %.3e" % (where, r["max_value_diff"])
+        assert r["maxres_diff"] < 1e-12, \
+            "%s: residual differs by %.3e" % (where, r["maxres_diff"])
+        assert r["nnz_frozen"] == r["nnz_oomph"], "%s: nnz %d vs %d" % (where, r["nnz_frozen"], r["nnz_oomph"])
+    # Every rank assembles a different slice of the same replicated mesh, so the local nnz counts must
+    # differ; if they did not, the split would not be happening and the mode would be untested.
+    assert len({r["nnz_frozen"] for r in per_rank}) > 1 or nproc == 1, \
+        "every rank produced the same nnz -- the element range is apparently not being split"
+    # And the interesting half: oomph-lib's own assembly (the reference arm) re-tunes the element
+    # range from the timings it just measured, so the frozen arm ran on a slice DIFFERENT from the one
+    # its plan was built for, and had to notice. If this ever stops happening the comparison above
+    # still passes but no longer covers the staleness that the recorded range exists to catch.
+    assert any(r["range_retuned"] for r in per_rank), \
+        "oomph-lib did not re-tune the element range, so plan staleness went untested here"
+    assert all(r["plans_built"] >= 2 for r in per_rank), \
+        "the frozen plan was not rebuilt after the range moved -- it would describe the wrong slice"
+
+
+@pytest.mark.parametrize("nproc", [2, 4])
+def test_frozen_replicated_residuals_match_oomph(tmp_path, nproc):
+    """The residual-only path replicated. Same plan, same range, one fewer thing in it."""
+    per_rank = _run_distributed(nproc, tmp_path, 2, 16, structural=True,
+                                mode="compare-residuals", distribute=False)
+    for r in per_rank:
+        where = "rank %d/%d (replicated)" % (r["rank"], nproc)
+        assert r["res_plans_built"] > 0, "%s: the frozen residual route never engaged" % where
+        assert r["init_norm"] > 1e-3, \
+            "%s: initial residual is only %.3e -- this test would prove nothing" % (where, r["init_norm"])
+        assert r["init_maxdiff"] < 1e-14 * r["init_norm"], \
+            "%s: unsolved residual differs by %.3e (norm %.3e)" % (where, r["init_maxdiff"], r["init_norm"])
+        scale = max(r["conv_norm"], r["init_norm"])
+        assert r["conv_maxdiff"] < 1e-14 * scale, \
+            "%s: converged residual differs by %.3e (norm %.3e)" % (where, r["conv_maxdiff"], r["conv_norm"])

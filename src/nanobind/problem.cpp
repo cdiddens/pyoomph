@@ -873,6 +873,28 @@ void PyReg_Problem(nb::module_ &m)
 			 "How many distributed assembly plans have been built since the problem was created. A plan costs a round of communication on top of two passes over "
 			 "the mesh, so this should settle: if it keeps rising, the pattern is being invalidated every assembly and the frozen route is a pure loss. Zero after "
 			 "a distributed solve means the route never engaged at all.")
+		.def("setup_interior_facet_halo_scheme", &pyoomph::Problem::setup_interior_facet_halo_scheme,
+			 "Give the interior-facet skeletons ('<domain>/_internal_facets_') their halo/haloed element lists and mark the halo facets' own Data as halo. A facet "
+			 "between two elements that ended up on different processes exists on both, so without this its unknowns would be numbered once per holder -- two "
+			 "independent copies of what is meant to be one single-valued trace. With it, they are numbered on the process that assembles the facet and oomph-lib's "
+			 "own machinery copies the numbers and the values to the others. COLLECTIVE, and a no-op serially, on a replicated (non---distribute) run, and when the "
+			 "problem has no skeleton. Called from actions_after_adapt() (hence also after distribute()), after remeshing and after loading a state file; there is "
+			 "no reason to call it by hand.")
+		.def("_condensation_row_cuts", [](pyoomph::Problem *self)
+			 { return self->condensation_row_cuts(); },
+			 "The row cut points (nproc+1 ascending row indices) that static condensation would like the linear system to be split at on a REPLICATED MPI run, "
+			 "so that no element-local block to be eliminated straddles two ranks. Empty when there is no preference: serially, on a distributed problem (where "
+			 "oomph's own renumbering already makes each rank's dofs contiguous), or when the selected dofs cannot be covered by short enough blocks -- which is "
+			 "what a selection mixing NODAL and element-internal values looks like, since all nodal values are numbered before any internal one.")
+		.def("_get_assembly_element_range", [](pyoomph::Problem *self)
+			 {
+				 unsigned long lo = 0, hi = 0;
+				 self->get_assembly_element_range(lo, hi);
+				 return std::make_pair((unsigned long)lo, (unsigned long)hi); },
+			 "The half-open range of mesh elements this rank evaluates during an assembly, as (first, last+1). On a DISTRIBUTED problem it is the whole element "
+			 "list and the halo flag does the selecting; on a REPLICATED MPI run (mpirun without --distribute) it is the slice oomph-lib handed this rank, which "
+			 "it re-tunes from measured elemental timings whenever its own assembly routine runs. Exposed because that re-tuning is what a frozen assembly plan "
+			 "has to notice: the range is part of the plan and of its freshness check.")
 		.def_prop_rw("_use_frozen_sparsity_for_bifurcation_tracking", &pyoomph::Problem::get_use_frozen_sparsity_for_bifurcation_tracking, &pyoomph::Problem::set_use_frozen_sparsity_for_bifurcation_tracking,
 			 "Off by default. Lets a bifurcation-tracking assembly handler describe its augmented elemental block (see AugmentedBlockSpec) so that the frozen-sparsity "
 			 "assembly can apply to bifurcation tracking as well, which it otherwise cannot: the block is several times larger than the element's own field "

@@ -119,7 +119,9 @@ def _internal_value_checksums(p):
     The integral observables above are dominated by the retained dofs; a reconstruction that silently
     left the eliminated ones at their previous values would barely move them. The DL gradient modes are
     condensed, so these two sums are the direct evidence that the reconstruction ran and ran correctly.
-    Summed over non-halo elements and MPI-reduced, so the answer does not depend on the partition."""
+    Summed over non-halo elements and MPI-reduced, so the answer does not depend on the partition --
+    except on a REPLICATED run, where there are no halo flags at all and every rank already holds the
+    whole mesh, so reducing would report nproc times the answer."""
     from pyoomph.generic.mpi import get_mpi_sum
     mesh = p.get_mesh("domain")
     s1 = 0.0
@@ -134,6 +136,8 @@ def _internal_value_checksums(p):
                 x = d.value(v)
                 s1 += x
                 s2 += x * x
+    if not p.is_distributed():
+        return float(s1), float(s2)
     return float(get_mpi_sum(s1)), float(get_mpi_sum(s2))
 
 
@@ -218,6 +222,82 @@ def straddle_case(N, outdir=None):
         return {"refused": False, "message": "", "ndof": int(p.ndof())}
 
 
+class HDGPoisson(Problem):
+    """Hybridised DG Poisson: the bulk unknowns of an element couple to that element and to the trace on
+    its own facets, never to a neighbour's bulk unknowns.
+
+    This is the selection a REPLICATED run can serve. Its condensed dofs are element-INTERNAL, so
+    oomph-lib numbers each element's nine of them consecutively, and the row cut points can be moved off
+    the blocks (Problem::condensation_row_cuts). A Crouzeix-Raviart selection cannot: it mixes the nodal
+    bubble velocity with the internal pressure modes, and every nodal value is numbered before any
+    internal one, so the two halves of a block sit hundreds of equations apart.
+
+    Reuses the tutorial's equations rather than restating them, so this cannot drift away from the
+    documented formulation."""
+
+    def __init__(self, N=8, condense=True, space="D2", facet_space="D2"):
+        super().__init__()
+        self.N, self.condense = N, condense
+        self.space, self.facet_space = space, facet_space
+
+    def define_problem(self):
+        import os
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "..", "docs", "source", "tutorial", "dg"))
+        try:
+            from hdg_poisson import HDGPoissonEquations, HDGCoupling, HDGDirichletBC
+        finally:
+            sys.path.pop(0)
+        x, y = var("coordinate_x"), var("coordinate_y")
+        exact = sin(pi * x) * sin(pi * y)
+        source = 2 * pi ** 2 * exact
+        tau = 10 * self.N
+        self.max_refinement_level = 0
+        self.initial_adaption_steps = 0
+        self += RectangularQuadMesh(N=self.N)
+        eqs = HDGPoissonEquations(source, self.space)
+        eqs += HDGCoupling(tau, self.facet_space) @ "_internal_facets_"
+        eqs += HDGDirichletBC(exact, tau) @ ["left", "right", "top", "bottom"]
+        eqs += IntegralObservables(err2=(var("u") - exact) ** 2, u1=var("u"), u2=var("u") ** 2,
+                                   mx=x * var("u"), gu=dot(grad(var("u")), grad(var("u"))))
+        if self.condense:
+            eqs += StaticCondensation("u")
+        self += eqs @ "domain"
+
+
+def hdg_case(N, condense, outdir=None, space="D2", facet_space="D2"):
+    prob = HDGPoisson(N=N, condense=condense, space=space, facet_space=facet_space)
+    with prob as p:
+        if outdir is not None:
+            p.set_output_directory(outdir)
+        p.quiet()
+        p.set_linear_solver("petsc_mumps")
+        p.initialise()
+        p.solve()
+        steps = [len(list(p.get_last_residual_convergence()))]
+        p.solve()
+        steps.append(len(list(p.get_last_residual_convergence())))
+        s1, s2 = _internal_value_checksums(p)
+        stats = p._get_static_condensation_stats()
+        res = {
+            "ndof": int(p.ndof()),
+            "newton_steps": steps,
+            "maxres": float(numpy.max(numpy.abs(numpy.asarray(p.get_residuals())))),
+            "condensed": bool(p._last_jacobian_was_condensed()),
+            "plan_rebuilds": int(stats["plan_rebuilds"]),
+            "n_selected": int(stats["n_selected"]),
+            "internal_sum": s1,
+            "internal_sqsum": s2,
+            # Empty serially and on a distributed run; nproc+1 ascending rows on a replicated one, and
+            # then the direct evidence that the cuts were moved off the element blocks.
+            "row_cuts": [int(c) for c in p._condensation_row_cuts()],
+        }
+        for name, val in p.get_mesh("domain").evaluate_all_observables().items():
+            res["obs_" + name] = float(val)
+        return res
+
+
 def refusal_case(N, outdir=None):
     """The structurally singular selection: every rank must throw the SAME refusal, and none may hang.
 
@@ -244,7 +324,9 @@ def main():
     ap.add_argument("--condense", type=int, default=1)
     ap.add_argument("--transient", type=int, default=0)
     ap.add_argument("--interface", type=int, default=0)
-    ap.add_argument("--mode", default="solve", choices=["solve", "refuse", "straddle"])
+    ap.add_argument("--space", default="D2")
+    ap.add_argument("--facet-space", default="D2")
+    ap.add_argument("--mode", default="solve", choices=["solve", "refuse", "straddle", "hdg"])
     ap.add_argument("--outdir", required=True)
     args, _ = ap.parse_known_args()
 
@@ -254,6 +336,9 @@ def main():
             payload.update(refusal_case(args.size, outdir=args.outdir))
         elif args.mode == "straddle":
             payload.update(straddle_case(args.size, outdir=args.outdir))
+        elif args.mode == "hdg":
+            payload.update(hdg_case(args.size, bool(args.condense), outdir=args.outdir,
+                                    space=args.space, facet_space=args.facet_space))
         else:
             payload.update(solve_case(args.size, bool(args.condense), outdir=args.outdir,
                                       transient=args.transient, interface=bool(args.interface)))

@@ -608,18 +608,25 @@ to combine static condensation with the line search, and the doc comment says so
 Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user of
 the library.
 
-problem.h / linear_solver.cc (Changed on 12th August 2026, prefer_dof_distribution_for_linear_solver):
-New public virtual "bool prefer_dof_distribution_for_linear_solver() const { return false; }"
-(problem.h, next to actions_after_newton_dof_update), consulted in SuperLUSolver::solve(Problem*,
-DoubleVector&) in its distributed branch: when the problem is distributed, the solver uses a
-distributed matrix and the hook returns true, the Jacobian's row distribution is built from
-problem_pt->dof_distribution_pt() instead of the UNIFORM split the branch otherwise makes.
-It exists for pyoomph's distributed static condensation (dev_docs/static_condensation.md section 9):
-that feature rests on "the rank owning a row of the Jacobian is the rank holding that degree of
-freedom", which the uniform split breaks -- the row a rank owns is then generally not one of its own
-dofs, so no rank holds a component's block in full and nobody can write the reconstructed value back.
-Off by default, so nothing else in oomph-lib or pyoomph changes; and where it is on, it only removes
-the dx.redistribute(Dof_distribution_pt) that Problem::newton_solve() performs immediately afterwards.
-The dead code just below it (the commented-out "if (problem_pt->distributed())" block) is an older,
-unconditional version of the same idea and was left as it was.
+problem.h / problem.cc / linear_solver.cc (Changed on 12th August 2026, widened on 13th August 2026,
+preferred_linear_solver_distribution):
+New public virtual "void preferred_linear_solver_distribution(LinearAlgebraDistribution*& dist_pt)"
+(problem.h, next to actions_after_newton_dof_update), which leaves dist_pt at 0 by default and whose
+caller takes ownership of anything it assigns. Consulted in two places: at the very top of
+Problem::create_new_linear_algebra_distribution() (which decides the Jacobian's row layout for
+get_jacobian), and in the distributed branch of SuperLUSolver::solve(Problem*, DoubleVector&), where
+it replaces the UNIFORM split that branch otherwise builds.
+It exists for pyoomph's static condensation (dev_docs/static_condensation.md section 9), which rests
+on "the rank owning a row of the Jacobian is the rank that can invert the element-local block that
+row belongs to". On a DISTRIBUTED problem that means the dof distribution: under the uniform split
+the row a rank owns is generally not one of its own dofs, so no rank holds a component's block in
+full and nobody can write the reconstructed value back. On a REPLICATED one (mpirun without
+--distribute, every rank holding the whole mesh) the rows are split uniformly by nobody's choice, and
+the cut points fall inside element-local blocks essentially always -- one per rank boundary -- so
+pyoomph hands back the same split with its cuts moved forward to the next block boundary.
+This replaces the narrower "bool prefer_dof_distribution_for_linear_solver() const" of the first
+version, which could only ask for the dof distribution and was consulted in the solver alone. Null
+(the default) everywhere else, so nothing in oomph-lib or for any other user changes.
+The dead code just below the solver call site (the commented-out "if (problem_pt->distributed())"
+block) is an older, unconditional version of the same idea and was left as it was.
 Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user.

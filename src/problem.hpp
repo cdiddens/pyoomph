@@ -356,6 +356,10 @@ namespace pyoomph
     unsigned nproc = 0, my_rank = 0;
     unsigned nrow_local = 0, first_row = 0;
     unsigned long nelement = 0;
+    // The elements this rank assembles. Distributed that is all of them (halos are skipped by flag);
+    // replicated it is First_el_for_assembly[my_rank] .. Last_el_plus_one_for_assembly[my_rank], which
+    // oomph-lib may re-tune from measured timings, so it is part of what makes a plan stale.
+    unsigned long el_lo = 0, el_hi_plus_one = 0;
     unsigned ndof = 0;
     unsigned n_vector = 0;
     std::vector<unsigned> my_eqns;   // sorted global equations this rank contributes to
@@ -369,7 +373,7 @@ namespace pyoomph
     void clear()
     {
       generation = 0; nproc = my_rank = 0; nrow_local = first_row = 0; nelement = 0; ndof = 0;
-      n_vector = 0;
+      el_lo = el_hi_plus_one = 0; n_vector = 0;
       my_eqns.clear(); send_row_start.clear(); recv_eq_start.clear(); recv_eq_row.clear();
       res_element_offset.clear(); res_slot.clear();
     }
@@ -405,6 +409,7 @@ namespace pyoomph
     unsigned ndof = 0;                  // global
     unsigned nrow_local = 0, first_row = 0;
     unsigned long nelement = 0;
+    unsigned long el_lo = 0, el_hi_plus_one = 0; // see DistributedResidualPlan
     unsigned n_matrix = 0, n_vector = 0;
     std::vector<unsigned> my_eqns;      // sorted global equations this rank contributes to
     // Rows destined for rank p are my_eqns[send_row_start[p] .. send_row_start[p+1]).
@@ -414,13 +419,27 @@ namespace pyoomph
     std::vector<int> recv_eq_start;     // nproc+1
     std::vector<int> recv_eq_row;
     std::vector<Mat> mats;
+    // first_row of every rank, plus ndof as a sentinel: nproc+1 ascending entries. Copied from the
+    // row distribution when the plan is built, so that "who owns global row g" is answerable later
+    // without it. Static condensation needs exactly that, and cannot take it from the problem's dof
+    // distribution: on a REPLICATED run that one is not distributed at all (every rank reports
+    // first_row 0 and nrow_local ndof), so it would name rank 0 as the owner of every row.
+    std::vector<unsigned> row_first;
+
+    // The rank whose local rows contain global row g. Ranks holding no row share their neighbour's
+    // first_row, so the upper bound picks the last of the equal entries -- the one that owns rows there.
+    unsigned rank_of_row(unsigned g) const
+    {
+      if (row_first.size() < 2) return 0;
+      return (unsigned)(std::upper_bound(row_first.begin(), row_first.end() - 1, g) - row_first.begin() - 1);
+    }
 
     void clear()
     {
       generation = 0; nproc = my_rank = 0; ndof = 0; nrow_local = first_row = 0;
-      nelement = 0; n_matrix = n_vector = 0;
+      nelement = 0; el_lo = el_hi_plus_one = 0; n_matrix = n_vector = 0;
       my_eqns.clear(); send_row_start.clear(); recv_eq_start.clear(); recv_eq_row.clear();
-      mats.clear();
+      row_first.clear(); mats.clear();
     }
   };
 #endif
@@ -548,6 +567,19 @@ namespace pyoomph
     std::vector<int> xy_send_comp;    // component indices (owned by me) whose operators peer p needs
     std::vector<int> xy_recv_start;   // nproc+1, slices into xy_recv_comp
     std::vector<int> xy_recv_comp;    // component indices (owned by p) whose operators arrive from p
+
+    // --- REPLICATED runs only (mpirun without --distribute) ------------------------------------------
+    // There the Newton increment comes back full length on every rank, because the problem's dof
+    // distribution is not distributed: E_dx_row then holds GLOBAL rows and every E increment is read
+    // from dx exactly, with no value-difference recovery at all.
+    bool dx_is_global = false;
+    // And there is no halo synchronisation to lean on afterwards: each rank has its own copy of every
+    // Data, and only the owner of a component can reconstruct it. The reconstructed increments are
+    // therefore allgathered and applied by everybody, through this lookup -- every L dof of every
+    // component in the plan, owned or not, ascending by equation number.
+    std::vector<int> all_L_eqn;
+    std::vector<double *> all_L_value_pt;
+
     unsigned cond_nnz() const { return cond_row_start.empty() ? 0u : (unsigned)cond_row_start.back(); }
     void clear()
     {
@@ -559,6 +591,7 @@ namespace pyoomph
       is_condensed.clear();
       distributed = false; nproc = 1; my_rank = 0; first_row = 0; nrow_local = 0;
       xy_send_start.clear(); xy_send_comp.clear(); xy_recv_start.clear(); xy_recv_comp.clear();
+      dx_is_global = false; all_L_eqn.clear(); all_L_value_pt.clear();
     }
   };
 
@@ -658,29 +691,35 @@ namespace pyoomph
     // Turns a per-rank refusal into one every rank throws. `msg` empty means "no objection here"; if any
     // rank objects, the message of the highest-numbered objector is broadcast and thrown everywhere.
     // COLLECTIVE, and it must therefore be reached by every rank whatever each of them decided.
-    void condensation_collective_throw(const std::string &msg);
-    // Condensation needs the Jacobian's rows distributed exactly as the DOFS are: its whole ownership
-    // argument is that the rank owning a row is the rank holding the Data, so that the rank owning a
-    // component's L rows holds A_LL, A_LE and r_L complete. oomph's DEFAULT heuristic silently switches
-    // to a uniform row distribution as soon as one rank holds more than 110 % of the uniform share
-    // (problem.cc, create_new_linear_algebra_distribution), which would break exactly that. With
-    // condensation on, the default is therefore resolved in favour of the dof distribution here, at
-    // every Newton entry point. An EXPLICIT choice by the user is left alone -- and refused, with a
-    // message, by the plan builder -- rather than overridden behind their back.
-    void align_matrix_distribution_for_condensation()
-    {
-      if (!use_static_condensation || !Problem_has_been_distributed) return;
-      if (this->distributed_problem_matrix_distribution() == oomph::Problem::Default_matrix_distribution)
-        this->distributed_problem_matrix_distribution() = oomph::Problem::Problem_matrix_distribution;
-    }
-    // The other half of the same requirement, and the one that actually bites: a distributed SOLVE does
-    // not go through create_new_linear_algebra_distribution() at all. SuperLUSolver::solve() builds a
-    // UNIFORM row split and hands the Jacobian to get_jacobian() already carrying it, so the setting
-    // above never gets a say. The vendored hook (src/thirdparty/INFO_oomph-lib) lets the problem ask for
-    // its own dof distribution instead, which is what makes row ownership and dof ownership the same
-    // thing. Off unless condensation is on, so no other run changes.
-    bool prefer_dof_distribution_for_linear_solver() const override { return use_static_condensation; }
+    void collective_throw(const std::string &msg);
+    // Condensation needs the Jacobian's rows distributed so that the rank owning a row is the rank that
+    // can invert the element-local block that row belongs to -- distributed, that means the rank holding
+    // the Data, so that the owner of a component's L rows holds A_LL, A_LE and r_L complete.
+    //
+    // The vendored hook (src/thirdparty/INFO_oomph-lib) lets the problem name that distribution, and it
+    // is consulted in BOTH places one is chosen: create_new_linear_algebra_distribution(), which decides
+    // the layout for get_jacobian(), and SuperLUSolver::solve(), which builds its own uniform split and
+    // hands the Jacobian to get_jacobian() already carrying it. Null unless condensation is on, so no
+    // other run changes.
+    //
+    // Distributed: the dof distribution, so that row ownership and dof ownership are the same thing.
+    // Replicated: the uniform split with its cut points moved forward off any element-local block, see
+    // condensation_row_cuts(). The caller takes ownership of what is assigned.
+    void preferred_linear_solver_distribution(oomph::LinearAlgebraDistribution *&dist_pt) override;
 #endif
+  public:
+    // Give the interior-facet skeletons their halo/haloed element lists and mark the halo facets' own
+    // Data as halo, so that each facet's unknowns are numbered ONCE (on the rank that assembles the
+    // facet) and the numbers and values are then copied to the other holders by oomph's own machinery.
+    // COLLECTIVE; a no-op serially, on a replicated run, and when there is no skeleton. Must run after
+    // the skeletons have been rebuilt and before the equation numbers are assigned.
+    void setup_interior_facet_halo_scheme()
+#ifdef OOMPH_HAS_MPI
+      ;
+#else
+    {}
+#endif
+  protected:
     // Test-only lever, exposed as _debug_force_condensed_assembly: makes get_jacobian() hand back the
     // CONDENSED system without a Newton solve being in progress. It exists so the algebra can be
     // refereed against scipy at a fixed state; the solve path activates condensation on its own.
@@ -704,9 +743,6 @@ namespace pyoomph
       FlaggedNewtonSolveGuard(Problem *pr) : p(pr), saved(pr->inside_flagged_newton_solve)
       {
         p->inside_flagged_newton_solve = true;
-#ifdef OOMPH_HAS_MPI
-        p->align_matrix_distribution_for_condensation();
-#endif
       }
       ~FlaggedNewtonSolveGuard() { p->inside_flagged_newton_solve = saved; }
     };
@@ -1016,16 +1052,34 @@ namespace pyoomph
     // Human-readable names for a handful of global equation numbers, by scanning the elements for one
     // that owns them. O(nelement); for error messages, not for loops.
     std::vector<std::string> describe_global_dofs(const std::vector<long> &eqns);
+    // The elements this rank assembles, as oomph::Problem::parallel_sparse_assemble() computes them:
+    // all of them on a distributed problem (the halo flag selects), and this rank's slice of the
+    // element list on a replicated one, which oomph-lib re-tunes from measured elemental timings. The
+    // frozen plans record it and compare it before reusing a plan. Not const-correct in oomph
+    // (mesh_pt() is non-const), hence the cast inside.
+    void get_assembly_element_range(unsigned long &el_lo, unsigned long &el_hi_plus_one) const;
 #ifdef OOMPH_HAS_MPI
     void set_use_frozen_distributed_sparsity(bool yesno) { use_frozen_distributed_sparsity = yesno; if (!yesno) { distributed_frozen_sparsity.clear(); distributed_residual_plan.clear(); } }
     bool get_use_frozen_distributed_sparsity() const { return use_frozen_distributed_sparsity; }
     unsigned long get_distributed_frozen_rebuild_count() const { return distributed_frozen_rebuilds; }
     unsigned long get_distributed_residual_rebuild_count() const { return distributed_residual_rebuilds; }
+    // The cut points of a row distribution that no element-local condensation block straddles, as
+    // nproc+1 ascending row indices. Empty if there is no need for one (serially, or on a distributed
+    // problem, where oomph's renumbering already makes each rank's dofs contiguous), or if it cannot be
+    // had without wrecking the balance -- in which case the uniform split stands and the plan builder
+    // refuses with its own message, which says what is wrong far better than a silent imbalance would.
+    //
+    // NO COMMUNICATION, and none is needed: it is only ever asked on a REPLICATED run, where every rank
+    // holds every element and every Data and therefore computes the identical answer. That is
+    // essential -- the row distribution has to be the same on every rank, and it is decided before any
+    // collective could agree on it.
+    std::vector<unsigned> condensation_row_cuts();
 #else
     void set_use_frozen_distributed_sparsity(bool yesno) {}
     bool get_use_frozen_distributed_sparsity() const { return false; }
     unsigned long get_distributed_frozen_rebuild_count() const { return 0; }
     unsigned long get_distributed_residual_rebuild_count() const { return 0; }
+    std::vector<unsigned> condensation_row_cuts() { return std::vector<unsigned>(); }
 #endif
     void set_frozen_sparsity_cache_capacity(unsigned n) { frozen_sparsity_cache_capacity = (n < 1 ? 1 : n); frozen_sparsity_cache.clear(); }
     // Identifies the current Jacobian sparsity pattern. Changes whenever the pattern may have

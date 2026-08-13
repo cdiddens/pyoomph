@@ -116,6 +116,15 @@ The elimination is exact, so the accuracy is that of the unreduced scheme. Refin
    ``facet_space="DL"`` - affine on each facet, the natural trace for a ``"D1"`` bulk - that
    restriction does not apply.
 
+Under MPI
+~~~~~~~~~
+
+Both parallel modes of :numref:`secmpimodes` run this example, condensation included.
+
+With ``--distribute`` the mesh is partitioned, and a facet whose two elements land on different processes is *owned* by the one that assembles it while the other holds a halo copy - so the trace :math:`\hat{u}` is one unknown, numbered once, exactly as it is serially. That needs the trace space to survive the mesh rebuild which distributing performs, so use ``facet_space="DL"`` (with ``space="D1"`` for the bulk): a nodal discontinuous facet space cannot be carried across a rebuild, and ``distribute()`` says so rather than failing later.
+
+Without ``--distribute`` the run is *replicated* - every process holds the whole mesh and only the assembly and the linear system are split - and the elimination is served there too. That it is, is a property of *which* dofs are being eliminated. A block can only be condensed on the process that owns all of its rows, and the rows are cut into contiguous ranges; pyoomph moves those cut points off the blocks, which it can do exactly when each element's selected dofs are numbered together. Element-internal values - the bulk field here, and ``"DL"``/``"D0"`` fields generally - are. A selection mixing *nodal* and element-internal dofs is not, because oomph-lib numbers every nodal value before any internal one: the Crouzeix-Raviart selection of :numref:`secspatialcrcondensation`, which pairs the bubble velocity (nodal) with the pressure gradients (internal), therefore has to be run with ``--distribute``, where each process's dofs are renumbered contiguously and the question does not arise. That case is refused with a message saying so, not silently skipped.
+
 .. warning::
 
    The hybridization is what makes this work, not the discontinuous space. If the facet terms couple

@@ -125,6 +125,14 @@ def _field(proc):
     return None
 
 
+def _skeleton(proc):
+    """The interior-facet skeleton's observables after the remesh, from whichever rank reported."""
+    for line in proc.stdout.splitlines():
+        if line.startswith("PYOOMPH_MPI_SKELETON "):
+            return {k: float(v) for k, v in (f.split("=", 1) for f in line.split()[1:])}
+    return None
+
+
 def _boundaries(proc):
     """What each rank got out of get_boundary_coordinates(), as {rank: line}."""
     out = {}
@@ -322,4 +330,44 @@ The variants are the three transfer mechanisms, which fail in different ways:
         "the merged mesh has %g nodes, the serial one %g" % (got["nnode"], serial["nnode"])
     for key in ("usum", "usqsum", "umin", "umax", "uxsum", "uysum"):
         assert got[key] == pytest.approx(serial[key], rel=1e-6, abs=1e-9), \
+            "%s is %.12g after the distributed remesh, %.12g serially" % (key, got[key], serial[key])
+
+
+@pytest.mark.parametrize("nproc", [2, 4])
+def test_a_facet_field_survives_the_distributed_remesh(tmp_path, nproc):
+    """An unknown on the interior-facet skeleton, through a remesh of a distributed problem.
+
+    A remesh destroys the skeleton entirely and rebuilds it from the new bulk mesh, so which facets
+    exist, which rank holds them and which of the holders OWNS each of them are all different
+    afterwards. `meas` is the assertion that carries the weight: it is the total measure of the
+    skeleton and does not involve the solution at all, so a facet that ended up enumerated on both
+    of its holders inflates it by that facet's length and a dropped one deflates it - neither of which
+    the solution would necessarily reveal.
+    """
+    reference = _run_serially(tmp_path / "serial", ["--facet-field"], timeout=600)
+    assert reference.returncode == 0, \
+        "the serial reference run failed:\n%s" % reference.stdout[-2000:]
+    serial = _skeleton(reference)
+    assert serial is not None and serial["meas"] > 0, \
+        "the serial run did not report the skeleton:\n%s" % reference.stdout[-2000:]
+
+    proc = _run(tmp_path / "mpi", ["--distribute", "--facet-field"], nproc=nproc, timeout=900)
+    assert proc.returncode == 0, \
+        "the run failed:\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s" % (
+            proc.stdout[-2000:], proc.stderr[-2000:])
+    fields = _remesh_fields(proc)
+    assert len(fields) == nproc, "only %d of %d ranks got through the remesh" % (len(fields), nproc)
+    serial_ndof = _remesh_fields(reference)[0]["ndof"]
+    for rank, f in sorted(fields.items()):
+        # Numbered once per holder instead of once per facet, this is larger than serial by whole
+        # facets' worth of dofs.
+        assert f["ndof"] == serial_ndof, \
+            "rank %d has ndof %s after the remesh, %s serially -- the facet unknowns are numbered " \
+            "more than once" % (rank, f["ndof"], serial_ndof)
+    got = _skeleton(proc)
+    assert got is not None, "no rank reported the skeleton:\n%s" % proc.stdout[-2000:]
+    assert got["meas"] == pytest.approx(serial["meas"], rel=1e-9), \
+        "the rebuilt skeleton measures %.12g, the serial one %.12g" % (got["meas"], serial["meas"])
+    for key in ("lamsum", "lamerr2"):
+        assert got[key] == pytest.approx(serial[key], rel=1e-6, abs=1e-12), \
             "%s is %.12g after the distributed remesh, %.12g serially" % (key, got[key], serial[key])

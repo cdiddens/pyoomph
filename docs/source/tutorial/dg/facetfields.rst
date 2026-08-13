@@ -101,6 +101,15 @@ In a stationary problem, this is repaired by the next Newton solve, which is why
 
 The same transfer is used upon remeshing (cf. :numref:`secaleremeshing`), where each new facet takes the values of the closest facet of the old skeleton within the same old bulk element. Only for an identical remesh, this is exact, otherwise the error is of the order of the distance to the closest old facet times the gradient of the facet field. For a facet field which is a trace or a flux of the bulk solution, :py:meth:`~pyoomph.generic.codegen.BaseEquations.set_facet_recovery` is therefore the recommended choice also here.
 
+.. note::
+
+   Facet fields work under MPI, in both modes of :numref:`secmpimodes`. With ``--distribute`` the mesh
+   is partitioned and a facet whose two elements land on different processes is *owned* by the one that
+   assembles it, the other holding a halo copy - so it stays one unknown, numbered once. The same
+   ``"DL"``/``"D0"`` restriction as for adaptivity applies, and for the same reason: distributing
+   rebuilds every facet element, and only those two spaces are carried across the rebuild. A nodal
+   ``"D1"``/``"D2"`` facet field is refused by ``distribute()`` with a message saying so.
+
 Condensing the bulk unknowns away
 '''''''''''''''''''''''''''''''''
 

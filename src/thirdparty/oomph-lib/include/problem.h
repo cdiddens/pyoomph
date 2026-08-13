@@ -1833,16 +1833,21 @@ namespace oomph
       return Dof_distribution_pt;
     }
 
-    /// FOR PYOOMPH: whether a distributed linear solve should lay the Jacobian's
-    /// rows out exactly as the DOFS are distributed, instead of the uniform split
-    /// SuperLUSolver::solve() builds by default. False everywhere but in pyoomph's
-    /// static condensation, whose whole ownership argument is that the rank owning
-    /// a row is the rank holding that degree of freedom. Consulted only for a
-    /// genuinely distributed problem solved with a distributed matrix; there it
-    /// merely removes the redistribute() newton_solve() does afterwards anyway.
-    virtual bool prefer_dof_distribution_for_linear_solver() const
+    /// FOR PYOOMPH: the row distribution the problem would rather have the Jacobian
+    /// and the linear solve laid out in, instead of the uniform split built by
+    /// default. Leave dist_pt at 0 (as here) to accept the default; the CALLER takes
+    /// ownership of anything assigned. Consulted in
+    /// create_new_linear_algebra_distribution() and in the distributed branch of
+    /// SuperLUSolver::solve(Problem*, DoubleVector&).
+    /// It exists for pyoomph's static condensation, whose whole ownership argument
+    /// is that the rank owning a row of the Jacobian is the rank that can invert
+    /// the element-local block that row belongs to: on a distributed problem that
+    /// means the dof distribution, and on a replicated one a split whose cut points
+    /// do not fall inside such a block. Null everywhere else, so nothing changes.
+    virtual void preferred_linear_solver_distribution(
+      LinearAlgebraDistribution*& dist_pt)
     {
-      return false;
+      dist_pt = 0;
     }
 
     /// Return the number of dofs

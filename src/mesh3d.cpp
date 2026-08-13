@@ -806,11 +806,20 @@ namespace pyoomph
 				{
 					throw_runtime_error("Found a facet with " + std::to_string(attached.size()) + " attached element faces. " + nonconforming_msg);
 				}
-				if (attached[0].first != be || attached[0].second != face_id) continue; // Emitted from the other side
-				internal_elements.push_back(attached[0].first);
-				internal_face_dir.push_back(attached[0].second);
-				opposite_elements.push_back(attached[1].first);
-				opposite_face_dir.push_back(attached[1].second);
+				// The NEAR side (the one the facet element is attached to, whose outward normal the facet
+				// terms use) must come out the same on every rank: distributed, the two elements can sit
+				// on different ranks and neither consults the other. Local element order alone would only
+				// agree because Mesh::distribute() happens to re-add the retained elements in their
+				// original order; the structural index says it outright, and coincides with local order
+				// while the mesh is whole.
+				unsigned nearside = (Mesh::compare_structural_order(attached[0].first, attached[1].first) > 0 ? 1 : 0);
+				const auto &near = attached[nearside];
+				const auto &far = attached[1 - nearside];
+				if (near.first != be || near.second != face_id) continue; // Emitted from the other side
+				internal_elements.push_back(near.first);
+				internal_face_dir.push_back(near.second);
+				opposite_elements.push_back(far.first);
+				opposite_face_dir.push_back(far.second);
 				// No 2:1 hanging facets on a conforming mesh, so no opposite element is ever shared.
 				opposite_already_at_index.push_back(-1);
 			}

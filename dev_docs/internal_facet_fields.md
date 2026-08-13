@@ -1,12 +1,12 @@
 # Fields on the interior-facet skeleton (`_internal_facets_`)
 
-Status: **implemented and tested (serial).** Discontinuous fields (`D0`, `DL`, and the nodal DG
-spaces `D1`/`D2`/`D1TB`/`D2TB`) can be declared on the `_internal_facets_` domain of any bulk mesh
-(1d/2d/3d, all element shapes including mixed), and `D0`/`DL` survive both spatial adaptation and
-remeshing. Refused by design: continuous spaces on the skeleton (§2), nodal DG under
-adapt/remesh (§5.4, §6.3), and MPI `--distribute` (§7). User docs: `AGENTS_ADVANCED.md`
+Status: **implemented and tested, serial and distributed.** Discontinuous fields (`D0`, `DL`, and the
+nodal DG spaces `D1`/`D2`/`D1TB`/`D2TB`) can be declared on the `_internal_facets_` domain of any bulk
+mesh (1d/2d/3d, all element shapes including mixed), and `D0`/`DL` survive spatial adaptation,
+remeshing and MPI `--distribute` (§7.1). Refused by design: continuous spaces on the skeleton (§2) and
+nodal DG under adapt/remesh/distribute (§5.4, §6.3, §7.1). User docs: `AGENTS_ADVANCED.md`
 ("Unknowns on the facet skeleton") and the tutorial `docs/source/tutorial/dg/facetfields.rst`;
-tests: `tests/test_internal_facet_fields.py`.
+tests: `tests/test_internal_facet_fields.py` and `tests/test_mpi_facet_fields.py`.
 
 **The idea.** The skeleton mesh existed long before this work: it is a real `InterfaceMesh` over
 all interior element-to-element facets, auto-created when equations set
@@ -164,10 +164,52 @@ the facet unknowns would be dragged by their own equations).
 | refused / missing | where the guard sits | note |
 |---|---|---|
 | continuous spaces on the skeleton | `_internal_define_scalar_field` + backstop in `add_interface_dofs` | route sketched in §2 |
-| MPI `--distribute` with skeleton fields | `Problem.distribute()` | facets exist on both ranks; no ownership/halo design (see [mesh_point_locator.md](mesh_point_locator.md) §4.5(b)) |
-| `Dx` under adaptation / remeshing | `rebuild_after_adapt` / `force_remesh` | §5.4, §6.3 |
+| `Dx` under adaptation / remeshing / `--distribute` | `rebuild_after_adapt` / `force_remesh` / `Problem.distribute()` | §5.4, §6.3, §7.1 |
 | non-conforming 3d, non-uniform 2d-triangle enumeration | 3d/2d enumerators | `build_facet_adjacency` is the designated basis for both |
 | 1d-bulk and 3d remeshing of skeleton fields | untested, no guard | no `LineMesh` remesher exists; 3d transfer should work but has no test |
+
+### 7.1 MPI `--distribute`
+
+A facet whose two bulk elements end up on different ranks EXISTS on both. The near-side element is
+non-halo on one of them and a halo on the other, and `oomph::FiniteElement::build_face_element` stamps
+the facet element with that flag — so residual assembly was already right, since every assembly path
+skips halo elements. What was missing was the numbering: `Mesh::assign_global_eqn_numbers()` numbers
+every element's internal `Data` with no halo test, and nothing marked a halo facet's `Data` as halo. The
+symptom was not a crash but an inflated `ndof` — one independent copy of the trace per holder — and an
+answer that still looked plausible for a facet field that does not feed back into the bulk. For one that
+does (an HDG trace) the far side's coupling was simply never assembled.
+
+`Problem::setup_interior_facet_halo_scheme()` fixes both halves at once. It gives each skeleton its
+`Root_halo_element_pt` / `Root_haloed_element_pt` lists and calls `set_halo(owner)` on the halo side's
+internal `Data`; everything downstream is then free, because the skeletons are registered as submeshes
+and oomph's `copy_haloed_eqn_numbers_helper()` (numbers) and `synchronise_dofs()` (values) are submesh
+loops over exactly those lists.
+
+* **The pairing** is by a key both holders compute alone: the near-side element's
+  `(root global_base_index, packed refinement path)` and the face index, all partition-independent
+  because the near-side rule itself is (`Mesh::compare_structural_order`, used by the three
+  `fill_internal_facet_buffers`). One `MPI_Alltoallv` for every skeleton of the problem together, and
+  **both sides sort by the key**, so the two lists are index-matched by construction with no second
+  round. A key the owner does not recognise means the ranks disagree about which side is the near one,
+  which is refused collectively rather than silently mis-pairing equation numbers.
+* **Lifecycle.** Built in `actions_after_adapt` (which covers `actions_after_distribute`, adaptation and
+  state-file loading) after the whole `rebuild_after_adapt` loop and before `setup_pinning`, and in
+  `load_balance`. Deliberately NOT inside `rebuild_after_adapt`: that is a per-mesh loop that can throw
+  per rank, and a collective inside it would deadlock the ranks that did not throw. The lists are dropped
+  in `InterfaceMesh::clear_before_adapt` before the elements they point at are deleted —
+  `flush_element_and_node_storage()` does not touch them, and a stale entry is a dangling read inside
+  `copy_haloed_eqn_numbers_helper`.
+* **Values.** The build ends with one `synchronise_all_dofs()`. The skeleton has just been rebuilt and
+  `restore_discontinuous_data()` refitted each rank's facet values from its OWN partial sample cloud, so
+  a halo facet holds this rank's fit rather than the owner's — which a neighbour's non-halo bulk element,
+  and any `output()` taken before the first Newton step, would read.
+* **Nodal `Dx` facet spaces stay refused**, now in `Problem.distribute()` with a message naming `DL`/`D0`
+  as the way out: distributing goes through the adaptation path, which rebuilds every skeleton element,
+  and the sample-and-refit snapshot only carries `DL`/`D0` (§5.4).
+
+Combined with static condensation ([static_condensation.md](static_condensation.md) §9) this is what
+makes HDG work in parallel: the trace lives on the skeleton and the bulk unknowns are eliminated, at 2
+and 4 ranks, reproducing the serial answer.
 
 ## 8. Pre-existing bugs fixed along the way
 
@@ -195,3 +237,13 @@ adapt cycle (survivor exactness without solving, masked-oracle separation of sur
 facets, history levels, refine→unrefine round trip, 2:1 case, recovery hook, re-pinning/assembly);
 remeshing (identical remesh machine-exact incl. history, distorted/coarsened/refined with measured
 tolerances, recovery hook, unrestored reporting, Dx refusal); all error-message guards.
+
+`tests/test_mpi_facet_fields.py` (18 tests, `--full`) is the distributed gate. Two layers, because a
+broken skeleton does not crash: the skeleton MEASURE and the integral of its NORMAL certify the
+enumeration and the orientation without reference to the solution (a duplicated facet inflates the
+first, a facet enumerated from the other side flips its contribution to the second), and `ndof` against
+the serial reference catches a trace numbered once per holder. On top of that: DG with a linear
+manufactured solution stays exact distributed (the flux term does not vanish at the exact solution, so a
+mis-enumerated facet moves the answer), `DL`/`D0` facet unknowns at 2 and 4 ranks, the same across an
+adaptation that really refines, a state file written serially loaded on 2 and 4 ranks, the nodal-`Dx`
+refusal, and the replicated (`mpirun` without `--distribute`) mode.

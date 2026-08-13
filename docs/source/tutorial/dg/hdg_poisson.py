@@ -25,11 +25,8 @@
 # ========================================================================
 
 
-import sys
-
 from pyoomph import *
 from pyoomph.expressions import *
-from pyoomph.generic.mpi import get_mpi_nproc
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh
 
 
@@ -133,12 +130,16 @@ class HDGPoissonProblem(Problem):
         eqs += HDGDirichletBC(self.exact, tau) @ ["left", "right", "top", "bottom"]
 
         if self.condense:
-            # Exact, and serial or --distribute only. Note that condense_element_private_dofs() would
-            # NOT select u: the facet elements read it as external data, so it has to be named.
-            if get_mpi_nproc() > 1 and "--distribute" not in sys.argv:
-                print("Replicated MPI run: leaving static condensation off, it needs --distribute.")
-            else:
-                eqs += StaticCondensation("u")
+            # Note that condense_element_private_dofs() would NOT select u: the facet elements read it
+            # as external data, so it has to be named explicitly.
+            #
+            # This works under mpirun in both modes. Replicated (no --distribute), the elimination is
+            # served because u is element-internal: oomph-lib numbers each element's own values
+            # consecutively, so the row split can be cut between the blocks instead of through them.
+            # With --distribute the trace is a shared facet unknown owned by one process, which needs
+            # facet_space="DL" (a nodal one cannot be carried through the mesh rebuild that
+            # distributing performs, and distribute() refuses it with that message).
+            eqs += StaticCondensation("u")
 
         self += eqs @ "domain"
 
@@ -152,8 +153,12 @@ class HDGPoissonProblem(Problem):
         print(f"  interior facets         : {nfacet}")
         print(f"  degrees of freedom      : {self.ndof()}")
         if condensed:
+            # Under MPI the block count is this process's share of them (and includes the ones it only
+            # holds a coupled row of), while the dof count is the whole problem's - so say which.
+            from pyoomph.generic.mpi import get_mpi_nproc
+            where = " on this process" if get_mpi_nproc() > 1 else ""
             print(f"  condensed away          : {condensed} in {stats['n_components']} blocks "
-                  f"of {stats['component_size_max']}")
+                  f"of {stats['component_size_max']}{where}")
             print(f"  seen by the solver      : {self.ndof() - condensed}")
         print(f"  L2 error of u           : {err:.4e}")
 

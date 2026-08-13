@@ -220,6 +220,71 @@ namespace pyoomph
     return res;
   }
 
+  // The refinement path of e, read root -> leaf, as one entry per level (the index of the element
+  // within its father's sons). Empty for an unrefined element. Digit-wise rather than packed, because
+  // the packed form of get_element_structural_keys() does not COMPARE correctly: path*8+(s+1) makes a
+  // deep element numerically larger than a shallow one that precedes it in the tree.
+  static std::vector<int> refinement_path_of(oomph::GeneralisedElement *e)
+  {
+    std::vector<int> steps;
+    oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(e);
+    if (!re || !re->tree_pt())
+      return steps;
+    for (oomph::Tree *t = re->tree_pt(); t->father_pt(); t = t->father_pt())
+    {
+      oomph::Tree *f = t->father_pt();
+      int which = -1;
+      for (unsigned s = 0; s < f->nsons(); s++)
+      {
+        if (f->son_pt(s) == t)
+        {
+          which = (int)s;
+          break;
+        }
+      }
+      if (which < 0)
+        throw_runtime_error("Refinement tree is inconsistent: an element is not among its father's sons");
+      steps.push_back(which);
+    }
+    std::reverse(steps.begin(), steps.end()); // collected leaf -> root
+    return steps;
+  }
+
+  bool Mesh::element_structural_key(oomph::GeneralisedElement *e, long &root_index, long &path)
+  {
+    BulkElementBase *r = root_element_of(e);
+    if (!r || r->global_base_index < 0)
+      return false;
+    root_index = r->global_base_index;
+    path = 1;
+    std::vector<int> steps = refinement_path_of(e);
+    for (size_t i = 0; i < steps.size(); i++)
+      path = path * 8 + (steps[i] + 1);
+    return true;
+  }
+
+  int Mesh::compare_structural_order(oomph::GeneralisedElement *a, oomph::GeneralisedElement *b)
+  {
+    if (a == b)
+      return 0;
+    BulkElementBase *ra = root_element_of(a), *rb = root_element_of(b);
+    if (!ra || !rb || ra->global_base_index < 0 || rb->global_base_index < 0)
+      return 0; // undecidable, see the declaration
+    if (ra->global_base_index != rb->global_base_index)
+      return (ra->global_base_index < rb->global_base_index ? -1 : 1);
+    std::vector<int> pa = refinement_path_of(a), pb = refinement_path_of(b);
+    for (unsigned i = 0; i < std::min(pa.size(), pb.size()); i++)
+    {
+      if (pa[i] != pb[i])
+        return (pa[i] < pb[i] ? -1 : 1);
+    }
+    // One path is a prefix of the other: the father precedes its sons in a preorder walk. Two leaves
+    // of one tree cannot be in that relation, so this only arises if a and b are not both leaves.
+    if (pa.size() != pb.size())
+      return (pa.size() < pb.size() ? -1 : 1);
+    return 0;
+  }
+
   // Refinement tree of every root this mesh holds, as a preorder walk of son counts (0 for a leaf),
   // with the roots ascending by global index. Describing a tree by its shape rather than by oomph's
   // level-wise element numbers keeps it independent of how many elements the other ranks hold, so the
@@ -6064,6 +6129,8 @@ namespace pyoomph
     // Before anything is deleted: the DL/D0 values live in these elements' internal Data and have
     // no other home.
     this->snapshot_discontinuous_data();
+    // And the halo/haloed lists point at the very elements about to go, so they have to go first.
+    this->clear_halo_element_scheme();
     unsigned n_element = this->nelement();
     for (unsigned e = 0; e < n_element; e++)
     {

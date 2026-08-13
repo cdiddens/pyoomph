@@ -35,6 +35,7 @@ import traceback
 import numpy
 
 from pyoomph import Problem, MeshFileOutput, Equations, ElementSpace, var
+from pyoomph.expressions import var_and_test, avg, weak
 from pyoomph.equations.generic import ProjectExpression
 from pyoomph.meshes.gmsh import GmshTemplate
 from pyoomph.meshes.remesher import Remesher2d
@@ -77,6 +78,38 @@ def _field_summary(problem, name):
     return {"nnode": len(u), "usum": float(numpy.sum(u)), "usqsum": float(numpy.sum(u * u)),
             "umin": float(numpy.amin(u)), "umax": float(numpy.amax(u)),
             "uxsum": float(numpy.sum(u * coords[0])), "uysum": float(numpy.sum(u * coords[1]))}
+
+
+class _SkeletonTrace(Equations):
+    """A facet unknown on the interior-facet skeleton, plus the observables that describe it.
+
+    Distributed, a facet whose two elements land on different ranks is owned by one of them and held
+    as a halo by the other, so it is one unknown numbered once; a remesh destroys the whole skeleton
+    and rebuilds it, which means the ownership has to be rebuilt with it. `meas` is what says whether
+    it was: it is the total measure of the skeleton, and does not involve the solution at all, so a
+    facet enumerated twice or dropped moves it by that facet's length."""
+
+    def define_fields(self):
+        self.define_scalar_field("lam", "DL")
+
+    def define_residuals(self):
+        lam, lamtest = var_and_test("lam")
+        u = avg(var("u"))
+        self.add_residual(weak(lam - u, lamtest))
+        self.add_integral_function("meas", 1 * self.get_dx())
+        self.add_integral_function("lamsum", lam * self.get_dx())
+        self.add_integral_function("lamerr2", (lam - u) ** 2 * self.get_dx())
+        # The trace is determined by the bulk solution, so a facet the transfer could not reach can
+        # recover it rather than staying at zero -- the recommended default for a trace field.
+        self.set_facet_recovery("lam", avg(var("u")))
+
+
+class _NeedsSkeleton(Equations):
+    """Only there to make the bulk mesh build its `_internal_facets_` subdomain."""
+
+    def __init__(self):
+        super().__init__()
+        self.requires_interior_facet_terms = True
 
 
 class Disc(GmshTemplate):
@@ -141,6 +174,8 @@ def main():
                         help="pass num_adapt to force_remesh explicitly")
     parser.add_argument("--codim2", action="store_true",
                         help="put equations where two boundaries meet, i.e. on a codimension-2 interface")
+    parser.add_argument("--facet-field", action="store_true",
+                        help="declare an unknown on the interior-facet skeleton as well")
     parser.add_argument("--zeta", action="store_true",
                         help="parameterise the interface by arclength, i.e. transfer through a zeta chart")
     args, rest = parser.parse_known_args()
@@ -167,8 +202,11 @@ def main():
                 # Where the arc meets the axis: an interface of the interface, transferred by the
                 # nearest-node matching that is not pooled across the ranks.
                 interface_eqs = interface_eqs + Equations() @ "axis"
-            p += (MeshFileOutput() + ElementSpace("C2") + ProjectExpression(u=TRANSFERRED_FIELD)
-                  + interface_eqs @ "interface") @ "domain"
+            domain_eqs = (MeshFileOutput() + ElementSpace("C2") + ProjectExpression(u=TRANSFERRED_FIELD)
+                          + interface_eqs @ "interface")
+            if args.facet_field:
+                domain_eqs = domain_eqs + _NeedsSkeleton() + _SkeletonTrace() @ "_internal_facets_"
+            p += domain_eqs @ "domain"
             if args.second_domain:
                 p += Box()
                 p += (MeshFileOutput() + ElementSpace("C2") + ProjectExpression(u=0)) @ "box"
@@ -179,10 +217,19 @@ def main():
             p.force_remesh(num_adapt=args.num_adapt)
             ndof, distributed = p.ndof(), bool(p.get_mesh("domain").is_mesh_distributed())
             transferred = _field_summary(p, "domain")
+            skeleton = None
+            if args.facet_field:
+                # After the remesh AND after a solve on the new mesh, so the trace is the one the new
+                # skeleton determines rather than whatever the transfer happened to place.
+                p.solve()
+                skeleton = {k: float(v) for k, v in
+                            p.get_mesh("domain/_internal_facets_").evaluate_all_observables().items()}
         print("PYOOMPH_MPI_RESULT rank=%d remeshed ndof=%d distributed=%s" % (
             get_mpi_rank(), ndof, distributed))
         if transferred is not None:
             print("PYOOMPH_MPI_FIELD " + " ".join("%s=%.12g" % kv for kv in sorted(transferred.items())))
+        if skeleton is not None:
+            print("PYOOMPH_MPI_SKELETON " + " ".join("%s=%.12g" % kv for kv in sorted(skeleton.items())))
     except BaseException as e:  # noqa: BLE001
         # Flattened: the refusal message is multi-line, and only the first line would carry the
         # prefix the test greps for.

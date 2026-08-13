@@ -422,6 +422,20 @@ namespace oomph
 
 #ifdef OOMPH_HAS_MPI
 
+    // FOR PYOOMPH: let the problem name the row distribution it needs before any
+    // of the heuristics below get a say. See
+    // Problem::preferred_linear_solver_distribution(); null (the default) means
+    // "no preference" and everything continues unchanged.
+    {
+      LinearAlgebraDistribution* preferred_pt = 0;
+      this->preferred_linear_solver_distribution(preferred_pt);
+      if (preferred_pt != 0)
+      {
+        dist_pt = preferred_pt;
+        return;
+      }
+    }
+
     unsigned nproc = Communicator_pt->nproc();
 
     // if problem is only one one processor assemble non-distributed

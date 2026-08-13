@@ -267,6 +267,16 @@ namespace pyoomph
 		// --- Partition-independent addressing, for state files (dev_docs/distributed_state_files.md) ---
 		void assign_global_base_element_indices();            // number the roots; must run before distribute()
 		std::vector<long> get_element_structural_keys();      // (root index, packed tree path) per element
+		// Order two elements the same way on every rank: by root index, then by the refinement path
+		// read root->leaf. <0 if a comes first, >0 if b does, 0 if it cannot be decided (the base
+		// indices have not been assigned yet, i.e. before the initial distribution). Callers then fall
+		// back to local element order, which is the same order while the mesh is still whole.
+		static int compare_structural_order(oomph::GeneralisedElement *a, oomph::GeneralisedElement *b);
+		// (root global_base_index, packed refinement path) of a single element, as
+		// get_element_structural_keys() reports them. False, leaving the outputs untouched, when the base
+		// indices have not been assigned. Packed rather than digit-wise because callers of this one need
+		// EQUALITY across ranks, not the preorder that compare_structural_order() has to reproduce.
+		static bool element_structural_key(oomph::GeneralisedElement *e, long &root_index, long &path);
 		// Refinement trees of all roots held here, ascending: preorder son counts (0 = leaf), concatenated
 		void get_all_refinement_signatures(std::vector<long> &roots, std::vector<int> &lengths, std::vector<int> &data);
 		std::vector<int> get_element_node_indices(unsigned &stride); // nelement x stride, -1 padded
@@ -502,6 +512,15 @@ namespace pyoomph
 		// e.g. after adaptation via rebuild_after_adapt.
 		virtual void set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicBulkElementInstance *jitcode);
 		virtual Mesh *get_bulk_mesh() { return bulkmesh; }
+		const std::string &get_interface_name() const { return interfacename; }
+		// Drop the halo/haloed element lists. They point at elements this mesh is about to delete, and
+		// flush_element_and_node_storage() does not touch them - a stale entry is a dangling read inside
+		// Problem::copy_haloed_eqn_numbers_helper, i.e. a segfault far from here.
+		void clear_halo_element_scheme()
+		{
+			Root_halo_element_pt.clear();
+			Root_haloed_element_pt.clear();
+		}
 		std::string get_full_domain_path() override;
 		unsigned count_nnode(bool discontinuous = false) override; // Interface meshes don't have their own nodes...
 		Node *get_some_node() override { return (this->nelement() ? dynamic_cast<Node *>(dynamic_cast<oomph::FiniteElement *>(this->element_pt(0))->node_pt(0)) : NULL); }

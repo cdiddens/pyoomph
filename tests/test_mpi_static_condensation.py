@@ -136,6 +136,15 @@ def _serial(**kwargs):
         sys.path.remove(_HERE)
 
 
+def _serial_hdg(**kwargs):
+    sys.path.insert(0, _HERE)
+    try:
+        import mpi_condensation_worker
+        return mpi_condensation_worker.hdg_case(**kwargs)
+    finally:
+        sys.path.remove(_HERE)
+
+
 def _assert_ranks_agree(per_rank):
     """Everything reported is a global quantity, so a partition-dependent answer is a defect."""
     ref = per_rank[0]
@@ -227,6 +236,36 @@ def test_distributed_condensed_matches_distributed_uncondensed(tmp_path):
     _assert_same_state("distributed condensed vs distributed uncondensed", off[0], on[0])
 
 
+@pytest.mark.parametrize("nproc", [2, 4])
+def test_distributed_hdg_condensed_solve_matches_serial(tmp_path, nproc):
+    """The end-to-end case this feature and the interior-facet halo scheme exist for together.
+
+    HDG puts its trace unknowns on the skeleton, so it needs facet fields to survive --distribute; and
+    its whole point is that the bulk unknowns can then be eliminated, so it needs condensation as well.
+    Neither half is worth much without the other, and each has a way of being quietly wrong that the
+    other would mask -- a trace numbered twice still gives a plausible answer, and an elimination that
+    silently declined gives the right one. Hence: the answer against serial, AND the positive signal
+    that the elimination ran.
+
+    "D1"/"DL" rather than "D2"/"D2": a nodal discontinuous facet space cannot be carried through the
+    mesh rebuild that distributing performs, which distribute() refuses up front."""
+    per_rank = _ok(_run(nproc, tmp_path, ["--size", "8", "--mode", "hdg", "--condense", "1",
+                                          "--space", "D1", "--facet-space", "DL"], timeout=600))
+    for r in per_rank:
+        assert r["condensed"], "rank %d never condensed a Jacobian" % r["rank"]
+        assert r["maxres"] < _RES_TOL, "rank %d: max|residual| = %.3e" % (r["rank"], r["maxres"])
+        assert r["plan_rebuilds"] == 1, \
+            "rank %d built %d plans for two solves of one pattern" % (r["rank"], r["plan_rebuilds"])
+        # Distributed there is no need to move the row cuts: oomph renumbers each rank's dofs into one
+        # contiguous range, so an element's block is inside one rank's rows by construction.
+        assert r["row_cuts"] == [], "rank %d asked for a snapped row split on a distributed run" % r["rank"]
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("distributed condensed HDG (n=%d) vs serial uncondensed" % nproc,
+                       _serial_hdg(N=8, condense=False, space="D1", facet_space="DL",
+                                   outdir=str(tmp_path / "serial")),
+                       per_rank[0])
+
+
 def test_interface_adopting_condensed_dofs_matches_serial(tmp_path):
     """Requirement 2 of dev_docs/static_condensation.md, distributed.
 
@@ -280,11 +319,60 @@ def test_component_split_across_ranks_is_refused_collectively(tmp_path, nproc):
     assert len(msgs) == 1, "the ranks refused with different messages: %s" % msgs
 
 
-def test_replicated_mpi_run_is_refused(tmp_path):
-    """nproc > 1 WITHOUT distribute() is a replicated problem whose elements are merely split across the
-    ranks by measured timings. Neither the frozen distributed assembly nor a plan built from it can
-    describe that, so it is refused with a message rather than quietly assembling something else."""
-    per_rank = _run(2, tmp_path, ["--size", "6", "--condense", "1"], timeout=420, distribute=False)
+# ---------------------------------------------------------------------------------------------------
+# 3 -- the REPLICATED mode: mpirun without --distribute
+# ---------------------------------------------------------------------------------------------------
+#
+# The mesh is whole on every rank and only the linear system's ROWS are split. The ownership argument
+# still holds, and more easily than distributed -- "the rank owning a row holds that dof's Data
+# non-halo" is automatic when every rank holds every Data -- but one thing is new: a block can only be
+# eliminated on the rank that owns ALL of its rows, and the uniform row split has no idea where the
+# blocks are. pyoomph moves the cut points off them where the numbering allows it, which is what these
+# two tests separate:
+#
+#   * element-INTERNAL selections (an HDG trace formulation) are numbered element by element, so the
+#     cuts can step over each block and the elimination is served;
+#   * a selection mixing NODAL and internal dofs (Crouzeix-Raviart: bubble velocity plus DL pressure)
+#     cannot be, because oomph-lib numbers every nodal value before any internal one. That is refused,
+#     collectively, with a message that says so rather than one about non-element-local selections.
+#
+# And there is no halo synchronisation replicated: each rank is a separate copy of the whole problem,
+# kept in step only because every rank applies the same increment. The eliminated dofs are not in that
+# increment, so their reconstructed values are allgathered -- if they were not, the ranks would drift
+# apart silently from the first Newton step.
+
+@pytest.mark.parametrize("nproc", [2, 4])
+def test_replicated_hdg_condensed_solve_matches_serial(tmp_path, nproc):
+    per_rank = _ok(_run(nproc, tmp_path, ["--size", "8", "--mode", "hdg", "--condense", "1"],
+                        timeout=420, distribute=False))
     for r in per_rank:
-        assert "error" in r, "rank %d accepted condensation on a replicated MPI run" % r["rank"]
-        assert "genuinely DISTRIBUTED problem" in r["error"]
+        assert r["condensed"], "rank %d never condensed a Jacobian" % r["rank"]
+        assert r["maxres"] < _RES_TOL, "rank %d: max|residual| = %.3e" % (r["rank"], r["maxres"])
+        assert r["plan_rebuilds"] == 1, \
+            "rank %d built %d plans for two solves of one pattern" % (r["rank"], r["plan_rebuilds"])
+        # Without this the test would also pass on a run where the cuts were left uniform and every
+        # block happened to sit inside one -- which is not what is being claimed.
+        assert len(r["row_cuts"]) == nproc + 1, \
+            "rank %d: no snapped row distribution was asked for (%r)" % (r["rank"], r["row_cuts"])
+        assert r["row_cuts"] == sorted(r["row_cuts"]) and r["row_cuts"][-1] == r["ndof"]
+    # Every rank must have computed the SAME cuts: the row distribution is decided with no
+    # communication at all, so a rank disagreeing would build a different matrix layout than its peers.
+    assert len({tuple(r["row_cuts"]) for r in per_rank}) == 1, \
+        "the ranks disagree about the row cut points: %s" % [r["row_cuts"] for r in per_rank]
+    _assert_ranks_agree(per_rank)
+    _assert_same_state("replicated condensed HDG (n=%d) vs serial uncondensed" % nproc,
+                       _serial_hdg(N=8, condense=False, outdir=str(tmp_path / "serial")), per_rank[0])
+
+
+def test_replicated_mixed_nodal_and_internal_selection_is_refused(tmp_path):
+    """Crouzeix-Raviart replicated: the bubble velocity is nodal and the DL pressure modes are internal,
+    so the two halves of every element's block are hundreds of equations apart and no contiguous row
+    split keeps one of them on a single rank. Refused on every rank, with the replicated explanation."""
+    per_rank = _run(2, tmp_path, ["--size", "6", "--condense", "1"], timeout=420, distribute=False)
+    msgs = set()
+    for r in per_rank:
+        assert "error" in r, "rank %d accepted an unservable replicated selection" % r["rank"]
+        assert "REPLICATED MPI run" in r["error"], r["error"]
+        assert "NODAL and element-internal" in r["error"], r["error"]
+        msgs.add(r["error"].split("Traceback")[0])
+    assert len(msgs) == 1, "the ranks refused with different messages: %s" % msgs

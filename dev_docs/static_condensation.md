@@ -5,8 +5,9 @@ in place — the `StaticCondensation` equation class, with `condense_dofs`, `con
 and `use_static_condensation` underneath it; a flagged Newton solve takes the same number of steps and
 lands on the same solution as with the switch off, to the accuracy of the linear solves themselves; and
 the factorisation of a Crouzeix–Raviart Navier–Stokes system gets **51–65 % faster**, in 2D and in 3D.
-A `--distribute`d run at 2 and 4 ranks reproduces the serial answer and the serial iteration count (§9).
-Jacobian reuse, the line search, a replicated (undistributed) MPI run and a selection whose block is
+A `--distribute`d run at 2 and 4 ranks reproduces the serial answer and the serial iteration count (§9),
+and so does a REPLICATED one (`mpirun` without `--distribute`) for an element-internal selection (§9.9).
+Jacobian reuse, the line search, and a selection whose block is
 split across ranks are **refused with a message**, not silently ignored — collectively, under MPI;
 eigenvalue problems and arclength continuation quietly keep the full system.
 `tests/test_static_condensation.py` and `tests/test_mpi_static_condensation.py` are the gates.
@@ -496,7 +497,8 @@ in thin `pyoomph::Problem` wrappers around every Newton entry point, which do no
 | an augmented (`n_unaugmented_dofs != 0`) system | full |
 | `use_static_condensation = True` with no rules | full, silently: nothing was selected |
 | a **distributed** (`--distribute`) run | **condenses**, per §9 |
-| **MPI without `distribute()`** (`nproc > 1`, replicated) | **throws** |
+| **MPI without `distribute()`** (`nproc > 1`, replicated), element-internal selection | **condenses**, per §9.9 |
+| the same with a selection mixing **nodal and element-internal** dofs | **throws**, collectively |
 | a **component split across ranks** (distributed) | **throws**, collectively |
 | **Jacobian reuse** (`jacobian_reuse_is_enabled()`) | **throws** |
 | **globally convergent Newton** (line search) | **throws** |
@@ -1025,8 +1027,9 @@ survives a time step, which is the other thing worth asserting: it costs three c
 Both refusals are checked at 2 and 4 ranks for *returning at all*, and for every rank reporting the
 identical message with the deciding rank named in it: the structurally singular selection (the whole DL
 pressure) and the component split across ranks (an interior-penalty DG field, with the size guard raised
-out of the way so that it is the cross-rank guard that speaks). A replicated `mpirun` without
-`--distribute` is refused too.
+out of the way so that it is the cross-rank guard that speaks). Replicated, an HDG Poisson at 2 and 4
+ranks reproduces the serial answer and the snapped row cuts are asserted to exist and to agree across
+ranks, while the Crouzeix–Raviart selection is refused with the replicated explanation (§9.9).
 
 Serially, `tests/test_static_condensation.py` (37) and `tests/test_structural_assembly.py` (42) are
 unchanged, and `tests/test_mpi_structural_assembly.py --full` (17) still passes — the vendored
@@ -1034,16 +1037,51 @@ unchanged, and `tests/test_mpi_structural_assembly.py --full` (17) still passes 
 
 ### 9.8 What is not covered
 
-* **Only genuinely distributed problems** (`--distribute`). `nproc > 1` without distribution is a
-  replicated problem whose elements are merely split across ranks; the frozen distributed assembly
-  declines it for its own reasons ([structural_assembly.md](structural_assembly.md) §5) and so does
-  condensation, which needs that assembly's pattern. It is a refusal with a message, not a silent
-  fallback.
 * **Components must be rank-local.** A DG selection whose coupling crosses a partition boundary is
   refused. Serving it would mean a distributed dense solve per component, which is not what condensation
   is for.
 * Everything serially refused stays refused (Jacobian reuse, the line search, continuation, eigenvalue
   problems).
+
+### 9.9 The replicated mode (`mpirun` without `--distribute`)
+
+Every rank holds the whole mesh; only the element loop and the linear system's rows are split. Three
+things differ from §9, and nothing else does — the plan builder, the operator exchange and the assembly
+are the same code.
+
+**Row ownership does not come from the dof distribution.** Replicated, oomph builds
+`Dof_distribution_pt` *undistributed* (`first_row` 0 and `nrow_local` = ndof on every rank), so asking it
+who owns a row answers "rank 0" for everything. Ownership therefore comes from the frozen plan's
+`row_first`, copied out of the matrix row distribution when the plan is built. The property the
+distributed case has to check — that the row owner holds the dof's `Data` non-halo — is automatic here,
+since every rank holds every `Data`, so that check is skipped rather than relaxed.
+
+**The row cuts have to be moved.** A block can only be eliminated on the rank owning *all* of its rows,
+and the uniform row split knows nothing about where the blocks are: with `nproc` ranks it lands a cut
+inside a block essentially always. `Problem::condensation_row_cuts()` computes the components from the
+symbolic mask (identically on every rank, with no communication — every rank has every element) and moves
+each cut forward to the first row outside a block. The vendored
+`Problem::preferred_linear_solver_distribution()` hook hands that split to both places a distribution is
+chosen. Using the mask rather than mere co-membership of an element is what makes HDG work at all: a
+facet element holds both neighbours' bulk unknowns but never differentiates one with respect to the
+other, so they are not one component — reading the element's dof list alone would chain the whole mesh
+into a single block.
+
+This works when each element's selected dofs are numbered together, which is what element-*internal*
+values are. It cannot work when the selection mixes **nodal** and internal dofs, because oomph-lib
+numbers every nodal value before any internal one: a Crouzeix–Raviart selection pairs a bubble velocity
+(nodal) with the DL pressure modes (internal), so the two halves of each block sit hundreds of equations
+apart and no contiguous split keeps either whole. That is refused, collectively, by the straddling guard,
+whose message says this rather than the (wrong, here) "your selection is not element-local".
+
+**The reconstruction is allgathered.** A replicated run has no halo synchronisation to lean on: the ranks
+are separate copies of the whole problem, kept in step only because each applies the same `dx` to the
+same dofs. The eliminated dofs are not in `dx`, and only a component's owner can reconstruct them, so the
+reconstructed `(equation, increment)` pairs go through one `MPI_Allgatherv` — `nL` doubles, not the
+`nL·(nE+1)` that shipping `X` and `y` would cost — and *every* rank applies *every* pair, its own
+included, so the dof vectors stay bit-identical by construction. `dx` itself arrives full length on every
+rank (it is redistributed to the undistributed dof distribution), which also means every `E` increment is
+read from it exactly and the value-difference recovery of §9.6 is not needed at all.
 
 ---
 

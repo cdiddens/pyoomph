@@ -2595,6 +2595,17 @@ class Problem(_pyoomph.Problem):
                             internal_eqs._additional_residuals[destination]=int_contrib
 
 
+        # Number the base elements before the first interface mesh is built. The interior-facet
+        # skeleton picks one of the two elements sharing a facet as the "near" side, and does so by
+        # comparing these numbers (Mesh::compare_structural_order), so an unnumbered mesh silently
+        # falls back to local element order - which is the same order here, but leaves the rule
+        # untested serially and only engaged after the distribution renumbered nothing.
+        # Idempotent: the roots are fixed from here on (refinement subdivides them, it does not add
+        # any), so the assignment before distribute() below reproduces exactly these numbers.
+        for _,mesh in self._meshdict.items():
+            if not isinstance(mesh,ODEStorageMesh):
+                mesh.assign_global_base_element_indices()
+
         for tree_depth in range(3):
             for _,mesh in self._meshdict.items():
                 # No mesh class stores a Python-level "_problem" attribute any more -
@@ -4071,17 +4082,28 @@ class Problem(_pyoomph.Problem):
                     print(msg)
                 return
             ensure_pymetis_available()
-            # There is no ownership rule for interior facets yet: a facet between two elements that end
-            # up on different ranks exists on both (as a halo), so its element-owned dofs would be
-            # numbered twice and its residual assembled twice. Facet-less DG jump terms are unaffected,
-            # which is why only skeletons that declare fields of their own are rejected. Collective: the
+            # Unknowns on the interior-facet skeleton ARE supported here: a facet shared by two ranks is
+            # owned by the one that assembles it, and setup_interior_facet_halo_scheme() makes the other
+            # holder's copy a halo, so it is numbered once and its numbers and values are copied across.
+            #
+            # What is still refused is a NODAL discontinuous facet space. Distributing goes through the
+            # adaptation path (actions_after_distribute calls actions_after_adapt), which rebuilds every
+            # skeleton element from scratch; DL/D0 values are carried across by the sample-and-refit
+            # snapshot, and nodal D1/D2/... ones are not - that is a serial restriction too, and the
+            # rebuild would refuse deep inside the distribution rather than here. Collective: the
             # equation tree is identical on every rank, so all of them take this branch together.
+            _nodal_dg={"D1","D2","D1TB","D2TB"}
             for _mn,_msh in self._meshdict.items():
                 if isinstance(_msh,ODEStorageMesh) or _msh._eqtree is None: continue
                 skel=_msh._eqtree.get_children().get("_internal_facets_")
                 if skel is None or skel._codegen is None: continue
-                if len(skel._codegen._fields_defined_on_my_domain)>0:
-                    raise RuntimeError("Fields defined on the interior-facet skeleton ('"+str(_mn)+"/_internal_facets_': "+", ".join(sorted(skel._codegen._fields_defined_on_my_domain.keys()))+") are not supported on a distributed (--distribute) problem yet. Run without --distribute.")
+                _bad=sorted(n for n,s in skel._codegen._fields_defined_on_my_domain.items() if s in _nodal_dg)
+                if _bad:
+                    raise RuntimeError("Field(s) "+", ".join(_bad)+" on the interior-facet skeleton '"+str(_mn)+
+                                       "/_internal_facets_' use a nodal discontinuous space (D1/D2/...), which cannot be "
+                                       "carried through the mesh rebuild that distributing performs. Use 'DL' or 'D0' for "
+                                       "the facet field - for an HDG trace, 'DL' is the natural one - or run without "
+                                       "--distribute, where the same restriction only applies if you adapt.")
         super().distribute()
 
 
@@ -4676,6 +4698,11 @@ class Problem(_pyoomph.Problem):
         self.rebuild_global_mesh()
         for m in self._meshtemplate_list:
             m._connect_opposite_elements(self._equation_system)
+        # After the whole loop above, not inside it: this is COLLECTIVE, and rebuild_after_adapt() can
+        # throw per-rank (a non-conforming 3d skeleton, say), which would leave the ranks that did not
+        # throw waiting in it for ever. Before setup_pinning(), because it decides which facet unknowns
+        # exist at all - the ones on a halo facet must be numbered by their owner instead.
+        self.setup_interior_facet_halo_scheme()
         self.setup_pinning()
         self.reapply_boundary_conditions()
         
@@ -8363,8 +8390,11 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             return
         
         super().load_balance()
-        
+
         self.rebuild_global_mesh_from_list(rebuild=True)
+        # Repartitioning moves facets between ranks, so which of them is a halo has changed. This path
+        # does not go through actions_after_adapt(), so the skeletons' halo scheme is rebuilt here.
+        self.setup_interior_facet_halo_scheme()
         self.actions_after_remeshing()
         self.reapply_boundary_conditions()
         print("After load balance, we have",self.nsub_mesh(),"submeshes, and the mesh dict keys are: "+str(self._meshdict.keys()))

@@ -30,6 +30,7 @@
 
 import argparse
 import json
+import sys
 import traceback
 
 import numpy
@@ -122,13 +123,21 @@ def compare_frozen_distributed(dim, N, outdir=None):
         p.initialise()
         p.solve()  # converge first, so both assemblies see identical dof values
 
+        range_before = tuple(p._get_assembly_element_range())
         p.use_frozen_distributed_sparsity = False
         r0, ndof, nnz0, nloc0, v0, c0, s0 = p._assemble_residual_jacobian("")
+        # oomph-lib's own routine re-tunes the element range from the elemental timings it just
+        # measured (recompute_load_balanced_assembly). Replicated that moves the range, so the frozen
+        # assembly below runs on a DIFFERENT slice than the plan the solve above built - which is
+        # exactly the staleness the plan's recorded range exists to catch.
+        range_after = tuple(p._get_assembly_element_range())
         p.use_frozen_distributed_sparsity = True
         r1, ndof, nnz1, nloc1, v1, c1, s1 = p._assemble_residual_jacobian("")
 
         out = {"ndof": int(ndof), "nrow_local": int(nloc1), "nnz_oomph": int(nnz0),
                "nnz_frozen": int(nnz1),
+               "range_before": list(range_before), "range_after": list(range_after),
+               "range_retuned": bool(range_before != range_after),
                # Zero means the frozen route never engaged and this test proved nothing.
                "plans_built": int(p._get_distributed_frozen_rebuild_count()),
                "maxres_diff": float(numpy.max(numpy.abs(r1 - r0))) if len(r0) else 0.0}
@@ -214,7 +223,11 @@ def main():
     except Exception as e:
         payload["error"] = type(e).__name__ + ": " + str(e)
         payload["traceback"] = traceback.format_exc()[-2000:]
-    print("PYOOMPH_MPI_RESULT " + json.dumps(payload), flush=True)
+    # Straight to the real stdout, not through print(): pyoomph's default MPI console mode
+    # ("condensed") wraps sys.stdout and MUTES every rank but 0 on a replicated run, and a test that
+    # only ever sees rank 0 cannot notice a rank disagreeing.
+    sys.__stdout__.write("PYOOMPH_MPI_RESULT " + json.dumps(payload) + "\n")
+    sys.__stdout__.flush()
 
 
 if __name__ == "__main__":

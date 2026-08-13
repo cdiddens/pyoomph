@@ -419,14 +419,24 @@ ranks in the frozen exchange and half in oomph-lib's is a deadlock, not a wrong 
 this is voted on rather than checked afterwards. Two extra `MPI_Allreduce`s of one `int`, costing
 nothing measurable against a 20 ms assembly.
 
-**What it does not cover**, each falling back to oomph-lib:
+**REPLICATED runs** (`--distribute` absent but `nproc > 1`, every rank holding the whole mesh) are covered
+too, and were the subtlest thing here. They differ only in which elements a rank evaluates: a slice of the
+element list rather than the non-halo ones. That slice is *not* a function of the equation numbering —
+oomph-lib re-tunes `First_el_for_assembly` from measured per-element timings whenever its own routine runs
+(`recompute_load_balanced_assembly`, at the tail of `parallel_sparse_assemble`) — so a plan built for one
+slice would assemble a different part of the mesh through the scatter map of another: a wrong Jacobian
+*and* a wrong residual, which Newton then converges to a wrong state from rather than failing on. The
+range is therefore recorded in the plan and compared as part of its collective freshness vote, the same
+way `nrow_local` and `nelement` are. The first version excluded the mode outright instead; the exclusion
+was the safe move but not a necessary one, and it was what kept static condensation out of that mode
+([static_condensation.md](static_condensation.md) §9.9).
 
-* a **replicated problem whose elements are merely split across ranks** (`--distribute` absent but
-  `nproc > 1`). oomph-lib re-tunes `First_el_for_assembly` from measured per-element timings as it goes,
-  so the element range is *not* a function of the equation numbering and a frozen plan could silently
-  describe the wrong slice of the mesh. Deliberately excluded rather than guarded — this is the subtlest
-  hazard in the whole design;
-* augmented systems on a distributed problem, and any element the code generator cannot describe.
+`tests/test_mpi_structural_assembly.py::test_frozen_replicated_assembly_matches_oomph` compares the local
+CSR against oomph-lib's own at 2/3/4 ranks in 2d and 3d, and asserts that the re-tune actually happened in
+the run — otherwise the comparison would pass without ever exercising the staleness it exists to catch.
+
+**What it does not cover**, each falling back to oomph-lib: augmented systems on a distributed problem,
+and any element the code generator cannot describe.
 
 **Residual-only assembly** was also frozen, and the premise for doing so was half wrong. Measured
 serially it is **96–101 % elemental JIT evaluation**, so there is nothing there to win. Under MPI it was
