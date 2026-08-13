@@ -54,6 +54,29 @@ class BaseMeshToMeshInterpolator:
     def interpolate(self)->None:
         raise NotImplementedError()
 
+
+def _transfer_internal_facet_fields(old:"AnySpatialMesh", new:"AnySpatialMesh")->None:
+    """Carry the fields living on the interior-facet skeleton of ``old`` over to ``new``.
+
+    The skeleton (``"_internal_facets_"``) is not a named boundary, so the boundary loops of the
+    interpolators do not visit it, and its fields are discontinuous ones held in the facet elements'
+    own internal data rather than on nodes - the nodal transfer could not carry them either way. On
+    the C++ side each new facet reads the old skeleton at its own sample points and least-squares
+    fits the result, deciding which old facet may answer by locating the new facet in the OLD BULK
+    mesh; see ``InterfaceMesh::interpolate_discontinuous_data_from``.
+    """
+    new_skel = new.get_mesh("_internal_facets_", return_None_if_not_found=True)
+    if new_skel is None:
+        return
+    old_skel = old.get_mesh("_internal_facets_", return_None_if_not_found=True)
+    if old_skel is None:
+        # The skeleton is new (i.e. the equations changed along with the mesh, redefine_problem).
+        # There is nothing to transfer; the new facets keep whatever their recovery expressions - or,
+        # failing those, the allocated zero - gave them.
+        return
+    new_skel.interpolate_discontinuous_data_from(old_skel)
+
+
 class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
     """Transfer by L2 projection rather than by nodal interpolation.
 
@@ -231,6 +254,15 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
             if proj_solver is not None and old_solver is not None:
                 problem.set_linear_solver(old_solver)
 
+        # Again, after the solve. The seeding InternalInterpolator above already transferred the
+        # interior-facet skeleton, but the projection solve is a solve of the whole problem: only the
+        # meshes put into projection mode assemble the projection residual, every interface mesh
+        # assembles its PHYSICAL one, so a facet unknown gets dragged wherever its own equations want
+        # it. The transfer is idempotent and reads the old mesh, which is still alive here, so simply
+        # redoing it is the cheapest way to end up with the transferred values either way.
+        for old_mesh,new_mesh in pairs:
+            _transfer_internal_facet_fields(old_mesh,new_mesh)
+
 
 class InternalInterpolator(BaseMeshToMeshInterpolator):
     # Works distributed since stage 3 of dev_docs/distributed_remeshing.md: nodal_interpolate_from
@@ -311,6 +343,10 @@ class InternalInterpolator(BaseMeshToMeshInterpolator):
             #print(iname,msh,msh.get_boundary_names())
         #print(dir(self.new))
         #exit()
+
+        # Last, because it reads the bulk: the recovery expressions used for facets that get nothing
+        # from the old skeleton evaluate the (by now transferred) bulk solution.
+        _transfer_internal_facet_fields(self.old,self.new)
 
 
 class ODEInterpolator(BaseMeshToMeshInterpolator):

@@ -4855,15 +4855,18 @@ namespace pyoomph
       }      
     }
 
-    const std::vector<std::vector<unsigned>> & space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
-
     for (unsigned int si=0;si<ft->num_present_dg_spaces;si++)
     {
       auto * space_info=ft->present_dg_spaces[si];
       if (!space_info->numfields) continue;
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
       {
-        auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));        
+        auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
+        // Per ELEMENT, not once from element 0: the map is a property of the element's shape, and a
+        // mesh can mix shapes. The 3d interior-facet skeleton of a wedge/pyramid mesh does exactly
+        // that (triangular caps and quadrilateral sides in one InterfaceMesh), and reading a
+        // triangle's map for a quad element indexed past the end of node_pt and segfaulted.
+        const std::vector<std::vector<unsigned>> & space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
         for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[space_info->space_index]; ni++)
         {
           pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[space_info->space_index][ni]));
@@ -5363,8 +5366,6 @@ namespace pyoomph
       }
     }
 
-    const std::vector<std::vector<unsigned int>> space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
-
     // DG field dofs: unlike continuous fields these are owned per-element (each
     // element has its own copy of the nodal data), so the loop is over elements
     // rather than shared mesh nodes.
@@ -5375,6 +5376,10 @@ namespace pyoomph
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
       {
         auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
+        // Per ELEMENT, not once from element 0 -- see the same fix in setup_initial_conditions above:
+        // a mesh can mix element shapes (the 3d interior-facet skeleton of a wedge/pyramid mesh has
+        // triangular and quadrilateral face elements side by side) and the map is shape-specific.
+        const std::vector<std::vector<unsigned>> & space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
         for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[space_info->space_index]; ni++)
         {
             pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[space_info->space_index][ni]));
@@ -5521,6 +5526,11 @@ namespace pyoomph
             double denom = el->s_max() - el->s_min();
             for (unsigned t = 0; t < vmax.size(); t++)
               this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->set_value(t, j + 1, (vmax[t] - vmin[t]) / denom);
+            // Generic_SetDirichletCondition only ever pins value slot 0, so the slopes used to be
+            // written and then left free: a DirichletBC on a DL field constrained its mean but let the
+            // residual pick the slope, i.e. it did not impose the prescribed value at all.
+            if (!only_update_vals)
+              this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->pin(j + 1);
           }
           s[j] = old;
         }
@@ -6101,6 +6111,14 @@ namespace pyoomph
   // just the nodes: after one refinement each son must still receive enough points to determine a
   // linear (DL) field on its own, and a father's nodes sit on its sons' shared edges, where they
   // arbitrate to one son and leave the others empty.
+  //
+  // The lattice is then shrunk towards the element's centre, so that no sample lies ON the element's
+  // boundary. A sample sitting exactly on a shared node/edge belongs to two elements geometrically,
+  // and the fields sampled here are DISCONTINUOUS, so letting it arbitrate to the neighbour feeds
+  // that neighbour's fit a value from a different element. On the interior-facet skeleton this is not
+  // an edge case at all: the facets created inside a refined element END on the surrounding facets,
+  // so on the next unrefinement every one of them dropped a sample onto a surviving facet - a
+  // constant field came back at ~5/6 of its value after a refine/unrefine round trip.
   static void sample_local_coordinates(BulkElementBase *e, std::vector<oomph::Vector<double>> &out)
   {
     out.clear();
@@ -6111,10 +6129,16 @@ namespace pyoomph
       return;
     }
     const unsigned NS = 5;
+    // 0.8 keeps every sample at least a tenth of an element away from its boundary while still
+    // giving each son of a refined element at least two lattice points per direction, which is what
+    // the DL fit needs to stay determined.
+    const double shrink = 0.8;
     const double smin = e->s_min(), smax = e->s_max();
     unsigned total = 1;
     for (unsigned d = 0; d < edim; d++)
       total *= NS;
+    oomph::Vector<double> centre(edim, 0.0);
+    unsigned ncentre = 0;
     for (unsigned k = 0; k < total; k++)
     {
       oomph::Vector<double> s(edim);
@@ -6126,8 +6150,23 @@ namespace pyoomph
       }
       // Discards the ~half of a tensor lattice that falls outside a simplex.
       if (e->local_coord_is_valid(s))
+      {
+        for (unsigned d = 0; d < edim; d++)
+          centre[d] += s[d];
+        ncentre++;
         out.push_back(s);
+      }
     }
+    if (!ncentre)
+      return;
+    for (unsigned d = 0; d < edim; d++)
+      centre[d] /= ncentre;
+    // The reference element is convex and the centre is interior to it, so a point pulled towards
+    // the centre stays inside - this works for simplices (where clamping per coordinate would not,
+    // the hypotenuse being diagonal) just as well as for tensor-product elements.
+    for (auto &s : out)
+      for (unsigned d = 0; d < edim; d++)
+        s[d] = centre[d] + shrink * (s[d] - centre[d]);
   }
 
   void InterfaceMesh::snapshot_discontinuous_data()
@@ -6221,123 +6260,316 @@ namespace pyoomph
     return true;
   }
 
-  void InterfaceMesh::restore_discontinuous_data()
+  // Least-squares fit of scattered values sampled inside ONE element onto that element's DL basis
+  // (or, for D0, just their mean). The geometry-dependent part - the basis at the sample points and
+  // the normal matrix built from it - is shared by every field and every time level, so it is built
+  // once per element and then reused. Three sources of values feed into this: the snapshot taken
+  // before an adaptation, the values pulled from the previous mesh after a remeshing, and the
+  // optional recovery expression evaluated on a facet that neither of those could reach.
+  struct ElementModeFit
   {
-    auto &snap = discontinuous_snapshot;
-    if (snap.empty() || !this->nelement() || !code)
+    unsigned nmode = 0, npts = 0;
+    std::vector<double> psi_at; // npts x nmode
+    std::vector<double> A0;     // nmode x nmode normal matrix
+    unsigned n_fallback = 0;
+
+    void build(BulkElementBase *e, const std::vector<std::vector<double>> &slocs, bool need_DL)
     {
-      snap.clear();
-      return;
+      nmode = e->get_eleminfo()->nnode_DL;
+      npts = slocs.size();
+      psi_at.assign(npts * (nmode ? nmode : 1), 1.0);
+      A0.assign(nmode * nmode, 0.0);
+      if (!need_DL || !nmode)
+        return;
+      for (unsigned p = 0; p < npts; p++)
+      {
+        oomph::Shape psi(nmode);
+        oomph::Vector<double> sv(slocs[p].size());
+        for (unsigned d = 0; d < sv.size(); d++)
+          sv[d] = slocs[p][d];
+        e->shape_at_s_DL(sv, psi);
+        for (unsigned l = 0; l < nmode; l++)
+          psi_at[p * nmode + l] = psi[l];
+      }
+      for (unsigned l = 0; l < nmode; l++)
+        for (unsigned m = 0; m < nmode; m++)
+        {
+          double acc = 0.0;
+          for (unsigned p = 0; p < npts; p++)
+            acc += psi_at[p * nmode + l] * psi_at[p * nmode + m];
+          A0[l * nmode + m] = acc;
+        }
     }
+
+    double mean(const std::vector<double> &vals) const
+    {
+      double m = 0.0;
+      for (unsigned p = 0; p < npts; p++)
+        m += vals[p];
+      return m / npts;
+    }
+
+    // vals holds one value per sample point; coeffs comes back with nmode DL coefficients.
+    void fit_DL(const std::vector<double> &vals, std::vector<double> &coeffs)
+    {
+      std::vector<double> A = A0;
+      coeffs.assign(nmode, 0.0);
+      for (unsigned p = 0; p < npts; p++)
+        for (unsigned l = 0; l < nmode; l++)
+          coeffs[l] += psi_at[p * nmode + l] * vals[p];
+      if (!solve_small_system(A, coeffs, nmode))
+      {
+        // A Lagrange basis is a partition of unity, so every coefficient equal to the mean is
+        // exactly the constant field - the right thing to keep when the fit is underdetermined.
+        coeffs.assign(nmode, mean(vals));
+        n_fallback++;
+      }
+    }
+  };
+
+  // Local expressions can only be evaluated once the element's (and, for anything reading bulk or
+  // opposite-side fields, the neighbouring elements') eleminfo buffers exist. Freshly built facet
+  // elements have none of that yet at restore time.
+  static void ensure_local_expr_evaluable(BulkElementBase *e)
+  {
+    if (!e->get_eleminfo()->alloced)
+      e->fill_element_info(true);
+    InterfaceElementBase *ie = dynamic_cast<InterfaceElementBase *>(e);
+    if (!ie)
+      return;
+    if (BulkElementBase *b = dynamic_cast<BulkElementBase *>(ie->bulk_element_pt()))
+      ensure_local_expr_evaluable(b);
+    if (InterfaceElementBase *o = ie->get_opposite_side())
+      ensure_local_expr_evaluable(dynamic_cast<BulkElementBase *>(o));
+  }
+
+  // Fits sampled values back onto this mesh's own discontinuous (DL/D0) element data.
+  //
+  // `snap` carries the values, `per_elem` the assignment "which sample landed in which of THIS mesh's
+  // elements, at which local coordinate there" - the only thing the two callers disagree about.
+  // restore_discontinuous_data() pushes its OWN pre-adaptation snapshot onto whatever element the
+  // locator puts each sample in; interpolate_discontinuous_data_from() pulls the values of a still
+  // living old mesh at each new element's own lattice points, restricted to the part of the old mesh
+  // that element lies in.
+  //
+  // Elements that end up with no sample are filled from their __facet_recovery_<field> expressions if
+  // every field has one, and otherwise left at zero and listed in discontinuous_unrestored_elements.
+  // Returns how many elements were left at zero.
+  unsigned InterfaceMesh::fit_discontinuous_data(const DiscontinuousSnapshot &snap, const DiscontinuousSampleMap &per_elem)
+  {
+    discontinuous_unrestored_elements.clear();
     auto *ft = code->get_func_table();
-    if (ft->info_DL.numfields != snap.nDL || ft->info_D0.numfields != snap.nD0)
-    {
-      // The interface was rebuilt against a different code instance; nothing sensible to restore.
-      snap.clear();
-      return;
-    }
-    const unsigned nfield = snap.nDL + snap.nD0;
-    const unsigned npoint = snap.coords.size() / snap.space_dim;
-    const unsigned stride = snap.ntstorage * nfield;
+    const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
 
-    // Eulerian, because adaptation does not move nodes: a sample point taken on the old interface
-    // lies on the new one to round-off, and the locator is in Project mode anyway (an interface is
-    // codimension 1 in the space its positions live in).
-    ensure_eleminfo_filled(this);
-    LocatorSetup lsetup;
-    lsetup.space = LocatorSpace::Eulerian;
-    MeshPointLocator locator(this, lsetup);
-    LocationSet located = locator.locate_batch(snap.coords, npoint);
-
-    std::map<BulkElementBase *, std::vector<std::pair<unsigned, std::vector<double>>>> per_elem;
-    unsigned n_unplaced = 0;
-    for (unsigned i = 0; i < npoint; i++)
+    // Opt-in per-field recovery for facets that receive no samples: a local expression named
+    // __facet_recovery_<field> (see Equations.set_facet_recovery) evaluated on the same lattice the
+    // snapshot uses and fitted the same way. This is the HDG answer for a facet created inside a
+    // refined bulk element - its trace is defined by the bulk solution, not by the old skeleton.
+    std::vector<int> recovery_index(nDL + nD0, -1);
+    bool any_recovery = false;
+    for (unsigned i = 0; i < ft->numlocal_expressions; i++)
     {
-      BulkElementBase *e = NULL;
-      std::vector<double> sloc;
-      if (located.resolve_local(i, e, sloc) && e)
-        per_elem[e].push_back(std::make_pair(i, sloc));
-      else
-        n_unplaced++;
+      const std::string nam = ft->local_expressions_names[i];
+      if (nam.compare(0, 17, "__facet_recovery_") != 0)
+        continue;
+      const std::string field = nam.substr(17);
+      for (unsigned fi = 0; fi < nDL; fi++)
+        if (field == ft->info_DL.fieldnames[fi]) { recovery_index[fi] = (int)i; any_recovery = true; }
+      for (unsigned fi = 0; fi < nD0; fi++)
+        if (field == ft->info_D0.fieldnames[fi]) { recovery_index[nDL + fi] = (int)i; any_recovery = true; }
     }
+    bool recovery_for_all = any_recovery;
+    for (unsigned fi = 0; fi < nDL + nD0; fi++)
+      if (recovery_index[fi] < 0) recovery_for_all = false;
+
+    const unsigned nfield = nDL + nD0;
+    // An empty assignment means the snapshot is not usable here at all (none taken, taken against
+    // different fields, or every sample rejected), so nothing below may read from it.
+    const bool use_snapshot = !per_elem.empty();
+    const unsigned stride = use_snapshot ? snap.ntstorage * nfield : 0;
+    unsigned ntstorage = use_snapshot ? snap.ntstorage : 0;
 
     const unsigned dg_off = dg_internal_data_offset(ft);
-    unsigned n_empty = 0, n_fallback = 0;
+    unsigned n_empty = 0, n_recovered = 0, n_fallback = 0;
+    std::vector<std::vector<double>> slocs;
+    std::vector<double> vals, coeffs;
+    std::vector<oomph::Vector<double>> lattice;
     for (unsigned ie = 0; ie < this->nelement(); ie++)
     {
       BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
       if (!e)
         continue;
+      if (!ntstorage)
+        ntstorage = e->internal_data_pt(dg_off)->time_stepper_pt()->ntstorage();
       auto found = per_elem.find(e);
-      if (found == per_elem.end() || found->second.empty())
+      const bool from_snapshot = (found != per_elem.end() && !found->second.empty());
+
+      if (!from_snapshot && !any_recovery)
       {
         n_empty++;
+        discontinuous_unrestored_elements.push_back(ie);
         continue;
       }
-      const auto &pts = found->second;
-      const unsigned nmode = e->get_eleminfo()->nnode_DL;
 
-      // The DL basis at every sample point, and the normal matrix built from it. Both depend only on
-      // the geometry, so they are shared by every field and every time level of this element.
-      std::vector<double> psi_at(pts.size() * (nmode ? nmode : 1), 1.0);
-      std::vector<double> A0(nmode * nmode, 0.0);
-      if (snap.nDL && nmode)
+      // The sample locations: where the snapshot's points landed inside this element, or - for a
+      // recovered element - the element's own lattice.
+      slocs.clear();
+      if (from_snapshot)
       {
-        for (unsigned p = 0; p < pts.size(); p++)
+        for (const auto &pt : found->second)
+          slocs.push_back(pt.second);
+      }
+      else
+      {
+        sample_local_coordinates(e, lattice);
+        for (const auto &s : lattice)
+          slocs.push_back(std::vector<double>(s.begin(), s.end()));
+        ensure_local_expr_evaluable(e);
+        if (!recovery_for_all)
         {
-          oomph::Shape psi(nmode);
-          oomph::Vector<double> sv(pts[p].second.size());
-          for (unsigned d = 0; d < sv.size(); d++)
-            sv[d] = pts[p].second[d];
-          e->shape_at_s_DL(sv, psi);
-          for (unsigned l = 0; l < nmode; l++)
-            psi_at[p * nmode + l] = psi[l];
+          n_empty++;
+          discontinuous_unrestored_elements.push_back(ie);
         }
-        for (unsigned l = 0; l < nmode; l++)
-          for (unsigned m = 0; m < nmode; m++)
-          {
-            double acc = 0.0;
-            for (unsigned p = 0; p < pts.size(); p++)
-              acc += psi_at[p * nmode + l] * psi_at[p * nmode + m];
-            A0[l * nmode + m] = acc;
-          }
+        else
+          n_recovered++;
       }
 
-      for (unsigned t = 0; t < snap.ntstorage; t++)
+      ElementModeFit fit;
+      fit.build(e, slocs, nDL > 0);
+
+      if (from_snapshot)
       {
-        for (unsigned fi = 0; fi < snap.nDL; fi++)
+        const auto &pts = found->second;
+        for (unsigned t = 0; t < ntstorage; t++)
         {
-          std::vector<double> A = A0, b(nmode, 0.0);
-          double mean = 0.0;
-          for (unsigned p = 0; p < pts.size(); p++)
+          for (unsigned fi = 0; fi < nDL; fi++)
           {
-            const double v = snap.values[(size_t)pts[p].first * stride + t * nfield + fi];
-            mean += v;
-            for (unsigned l = 0; l < nmode; l++)
-              b[l] += psi_at[p * nmode + l] * v;
+            vals.assign(pts.size(), 0.0);
+            for (unsigned p = 0; p < pts.size(); p++)
+              vals[p] = snap.values[(size_t)pts[p].first * stride + t * nfield + fi];
+            fit.fit_DL(vals, coeffs);
+            for (unsigned l = 0; l < fit.nmode; l++)
+              e->internal_data_pt(dg_off + fi)->set_value(t, l, coeffs[l]);
           }
-          mean /= pts.size();
-          if (!solve_small_system(A, b, nmode))
+          for (unsigned fi = 0; fi < nD0; fi++)
           {
-            // A Lagrange basis is a partition of unity, so every coefficient equal to the mean is
-            // exactly the constant field - the right thing to keep when the fit is underdetermined.
-            b.assign(nmode, mean);
-            n_fallback++;
+            double m = 0.0;
+            for (unsigned p = 0; p < pts.size(); p++)
+              m += snap.values[(size_t)pts[p].first * stride + t * nfield + nDL + fi];
+            e->internal_data_pt(dg_off + nDL + fi)->set_value(t, 0, m / pts.size());
           }
-          for (unsigned l = 0; l < nmode; l++)
-            e->internal_data_pt(dg_off + fi)->set_value(t, l, b[l]);
         }
-        for (unsigned fi = 0; fi < snap.nD0; fi++)
+      }
+      else
+      {
+        for (unsigned fi = 0; fi < nfield; fi++)
         {
-          double mean = 0.0;
-          for (unsigned p = 0; p < pts.size(); p++)
-            mean += snap.values[(size_t)pts[p].first * stride + t * nfield + snap.nDL + fi];
-          e->internal_data_pt(dg_off + snap.nDL + fi)->set_value(t, 0, mean / pts.size());
+          if (recovery_index[fi] < 0)
+            continue;
+          vals.assign(slocs.size(), 0.0);
+          for (unsigned p = 0; p < slocs.size(); p++)
+          {
+            oomph::Vector<double> sv(slocs[p].size());
+            for (unsigned d = 0; d < sv.size(); d++)
+              sv[d] = slocs[p][d];
+            vals[p] = e->eval_local_expression_at_s((unsigned)recovery_index[fi], sv);
+          }
+          // The recovery expression sees the current state only, so the value it produces is written
+          // to every time level: a facet that pops into existence with a consistent history has no
+          // spurious time derivative at the next step, which zeroed history levels would create.
+          if (fi < nDL)
+          {
+            fit.fit_DL(vals, coeffs);
+            for (unsigned t = 0; t < ntstorage; t++)
+              for (unsigned l = 0; l < fit.nmode; l++)
+                e->internal_data_pt(dg_off + fi)->set_value(t, l, coeffs[l]);
+          }
+          else
+          {
+            const double m = fit.mean(vals);
+            for (unsigned t = 0; t < ntstorage; t++)
+              e->internal_data_pt(dg_off + fi)->set_value(t, 0, m);
+          }
         }
+      }
+      n_fallback += fit.n_fallback;
+    }
+    (void)n_fallback;
+    (void)n_recovered;
+    return n_empty;
+  }
+
+  void InterfaceMesh::restore_discontinuous_data()
+  {
+    auto &snap = discontinuous_snapshot;
+    discontinuous_unrestored_elements.clear();
+    if (!this->nelement() || !code)
+    {
+      snap.clear();
+      return;
+    }
+    auto *ft = code->get_func_table();
+    const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
+    if (!nDL && !nD0)
+    {
+      snap.clear();
+      return;
+    }
+    // A snapshot taken against a different code instance describes different fields; there is nothing
+    // sensible to fit from it, but the recovery pass below can still do its job.
+    const bool have_snapshot = !snap.empty() && snap.nDL == nDL && snap.nD0 == nD0;
+    // No snapshot AT ALL is not an adaptation losing data: it is force_remesh() building this
+    // skeleton from scratch, where the values arrive afterwards through
+    // interpolate_discontinuous_data_from(). Warning here would be both wrong and harmful, since it
+    // would consume the once-per-mesh flag before the transfer that can really fail has run.
+    const bool warn_if_empty = !snap.empty();
+
+    ensure_eleminfo_filled(this);
+
+    const unsigned npoint = have_snapshot ? snap.coords.size() / snap.space_dim : 0;
+    DiscontinuousSampleMap per_elem;
+    unsigned n_unplaced = 0;
+    if (have_snapshot)
+    {
+      // Eulerian, because adaptation does not move nodes: a sample point taken on the old interface
+      // lies on the new one to round-off, and the locator is in Project mode anyway (an interface is
+      // codimension 1 in the space its positions live in).
+      LocatorSetup lsetup;
+      lsetup.space = LocatorSpace::Eulerian;
+      // On the interior-facet skeleton the "interface" is a non-manifold soup of facets, and the
+      // default projection slack of half an element size is far too generous there: when a bulk
+      // element is UNREFINED, the sample points of the facets that lived inside it sit a quarter of
+      // the coarse facet's length away from the surviving facets and were happily projected onto
+      // them, dragging the fitted value towards whatever those vanishing facets held (typically the
+      // zero of a never-recovered facet - a refine/unrefine round trip lost two thirds of a constant
+      // field this way). Adaptation does not move nodes, so a sample that genuinely belongs to a
+      // surviving facet lies on it to round-off; the only legitimate deviation is the curvature of an
+      // interior edge that a macro element repositions on refinement, which is O(h*curvature*h).
+      // Points beyond that are dropped and their facet is reported as unrestored - loud and
+      // recoverable, rather than silently mixed. A REMESH cannot use this criterion at all, which is
+      // what interpolate_discontinuous_data_from() is for.
+      if (std::string(ft->domain_name) == "_internal_facets_")
+        lsetup.max_projection_offset_factor = 0.02;
+      MeshPointLocator locator(this, lsetup);
+      LocationSet located = locator.locate_batch(snap.coords, npoint);
+      for (unsigned i = 0; i < npoint; i++)
+      {
+        BulkElementBase *e = NULL;
+        std::vector<double> sloc;
+        if (located.resolve_local(i, e, sloc) && e)
+          per_elem[e].push_back(std::make_pair(i, sloc));
+        else
+          n_unplaced++;
       }
     }
 
-    if ((n_unplaced || n_empty) && !warned_about_discontinuous_reset)
+    const unsigned n_empty = this->fit_discontinuous_data(snap, per_elem);
+
+    // Only n_empty is worth a warning: those elements really are left at zero. Unplaced sample points
+    // on their own are the normal outcome of a COARSENING (the facets they came from no longer exist,
+    // and deliberately dropping them is what keeps the fit on the surviving facets clean), so warning
+    // about them alone would cry wolf on every unrefinement.
+    if (n_empty && warn_if_empty && !warned_about_discontinuous_reset)
     {
       warned_about_discontinuous_reset = true;
       std::cout << "WARNING: transferring the discontinuous (DL/D0) fields of interface '" << interfacename
@@ -6345,10 +6577,243 @@ namespace pyoomph
                 << " new element(s) without a single sample point";
       if (n_unplaced)
         std::cout << " (" << n_unplaced << " of " << npoint << " old sample points could not be placed)";
-      std::cout << ". Those elements keep the zero they were allocated with." << std::endl;
+      std::cout << ". Those elements keep the zero they were allocated with. Define a recovery expression"
+                << " (Equations.set_facet_recovery) to fill them from the surrounding solution instead." << std::endl;
     }
-    (void)n_fallback;
     snap.clear();
+  }
+
+  // Carries this interface's own discontinuous (DL/D0) fields over from the corresponding interface
+  // mesh of a mesh that has just been REPLACED (Problem.force_remesh), rather than adapted. Driven
+  // from InternalInterpolator.interpolate(), i.e. once the bulk fields of the new mesh are in place -
+  // which is what the recovery expressions below need, since they read the bulk.
+  //
+  // The direction is the opposite of the adaptation path's. There, the old elements are already gone
+  // when the new ones appear, so the only possible transfer is to PUSH a point cloud snapshotted
+  // beforehand onto whatever comes out. Here the old mesh is still alive, so each new facet can PULL
+  // the values it needs at its OWN sample points - which covers the new skeleton by construction,
+  // whereas pushing assigns every old sample to exactly one new facet and therefore leaves a refined
+  // skeleton half empty (measured: 42 of 132 facets with nothing at all on a 2x refining remesh).
+  //
+  // What it cannot inherit from the adaptation path is that path's accept-only-what-lies-on-the-facet
+  // rule (2% of an element), because after a remesh nothing lies on anything. Merely widening the
+  // slack is not a fix either: in a non-manifold facet soup the nearest old facet within half an
+  // element can be one on the far side of a bulk element, carrying an entirely different trace. The
+  // criterion is topological instead - every new facet is located in the OLD BULK mesh, and only old
+  // facets OF the bulk element(s) it runs through may feed it. Those are exactly the traces
+  // surrounding its position. Where that yields nothing the search widens by one ring of face
+  // neighbours, and beyond that the element is left to its recovery expression, since a value from
+  // further away says more about the search radius than about the solution.
+  void InterfaceMesh::interpolate_discontinuous_data_from(InterfaceMesh *old)
+  {
+    if (!old || old == this || !code || !this->nelement())
+      return;
+    auto *ft = code->get_func_table();
+    const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
+    if (!nDL && !nD0)
+      return;
+    if (!old->code)
+      throw_runtime_error("Cannot transfer the discontinuous (DL/D0) fields of interface '" + interfacename + "': the previous mesh has no generated code attached");
+    auto *oft = old->code->get_func_table();
+    // Normally both meshes are driven by the very same code instance, so this can only fire when the
+    // equations were redefined together with the mesh (Problem.redefine_problem).
+    std::string mismatch;
+    if (oft->info_DL.numfields != nDL || oft->info_D0.numfields != nD0)
+      mismatch = "the previous mesh has " + std::to_string(oft->info_DL.numfields) + " DL and " + std::to_string(oft->info_D0.numfields) +
+                 " D0 field(s), the new one " + std::to_string(nDL) + " and " + std::to_string(nD0);
+    for (unsigned i = 0; i < nDL && mismatch.empty(); i++)
+      if (std::string(oft->info_DL.fieldnames[i]) != std::string(ft->info_DL.fieldnames[i]))
+        mismatch = "DL field " + std::to_string(i) + " is '" + std::string(oft->info_DL.fieldnames[i]) + "' on the previous mesh and '" + std::string(ft->info_DL.fieldnames[i]) + "' on the new one";
+    for (unsigned i = 0; i < nD0 && mismatch.empty(); i++)
+      if (std::string(oft->info_D0.fieldnames[i]) != std::string(ft->info_D0.fieldnames[i]))
+        mismatch = "D0 field " + std::to_string(i) + " is '" + std::string(oft->info_D0.fieldnames[i]) + "' on the previous mesh and '" + std::string(ft->info_D0.fieldnames[i]) + "' on the new one";
+    if (!mismatch.empty())
+      throw_runtime_error("Cannot transfer the discontinuous (DL/D0) fields of interface '" + interfacename + "' from the previous mesh: " + mismatch +
+                          ". They are matched by name and space, in order, and must agree on both sides.");
+
+    if (!old->nelement())
+      return; // nothing to take values from; the new facets keep what rebuild_after_adapt left them
+    ensure_eleminfo_filled(this);
+    ensure_eleminfo_filled(old); // its elements are evaluated below, not merely searched
+    BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    BulkElementBase *oe0 = dynamic_cast<BulkElementBase *>(old->element_pt(0));
+    if (!e0 || !oe0 || !oe0->ninternal_data())
+      return;
+    const unsigned sdim = e0->nodal_dimension();
+    const unsigned nfield = nDL + nD0;
+    const unsigned ntstorage = oe0->internal_data_pt(0)->time_stepper_pt()->ntstorage();
+
+    // The query points: every new facet's own sample lattice. The same lattice the adaptation
+    // snapshot uses, and for the same reason - five per direction shrunk towards the centre, so that
+    // no point sits on a facet end where it would ask the wrong side of the skeleton.
+    std::vector<double> probe;
+    std::vector<std::vector<double>> probe_s;
+    std::vector<unsigned> probe_first(this->nelement() + 1, 0);
+    std::vector<oomph::Vector<double>> lattice;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      probe_first[ie] = probe_s.size();
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (!e)
+        continue;
+      sample_local_coordinates(e, lattice);
+      for (const auto &s : lattice)
+      {
+        probe_s.push_back(std::vector<double>(s.begin(), s.end()));
+        for (unsigned d = 0; d < sdim; d++)
+          probe.push_back(e->interpolated_x(s, d));
+      }
+    }
+    probe_first[this->nelement()] = probe_s.size();
+    const unsigned npoint = probe_s.size();
+    if (!npoint)
+      return;
+
+    // Which old BULK element each query point falls in. This is what makes the pull well posed: it
+    // says which part of the old skeleton is entitled to answer.
+    std::vector<BulkElementBase *> in_old_bulk(npoint, (BulkElementBase *)NULL);
+    Mesh *oldbulk = old->get_bulk_mesh();
+    if (oldbulk && oldbulk->nelement())
+    {
+      LocatorSetup bsetup;
+      bsetup.space = LocatorSpace::Eulerian;
+      MeshPointLocator bulkloc(oldbulk, bsetup);
+      LocationSet blocated = bulkloc.locate_batch(probe, npoint);
+      std::vector<double> s;
+      for (unsigned p = 0; p < npoint; p++)
+      {
+        BulkElementBase *b = NULL;
+        if (blocated.resolve_local(p, b, s) && b)
+          in_old_bulk[p] = b;
+      }
+    }
+
+    // The old traces at those points. Project mode with the default slack: a query point lies inside
+    // an old bulk element, not on an old facet, so the offset is genuinely up to half an element.
+    LocatorSetup ssetup;
+    ssetup.space = LocatorSpace::Eulerian;
+    MeshPointLocator skelloc(old, ssetup);
+    LocationSet slocated = skelloc.locate_batch(probe, npoint);
+    EvalRequest req;
+    req.DL_fields = (nDL > 0);
+    req.D0_fields = (nD0 > 0);
+    for (unsigned t = 0; t < ntstorage; t++)
+      req.time_levels.push_back(t);
+    const unsigned vpp = slocated.values_per_point(req);
+    if (vpp != ntstorage * nfield)
+      throw_runtime_error("Internal error transferring the discontinuous fields of interface '" + interfacename + "': the old skeleton evaluates to " +
+                          std::to_string(vpp) + " values per point, expected " + std::to_string(ntstorage * nfield));
+    std::vector<double> pulled = slocated.evaluate(req);
+
+    // Face neighbours in the old bulk mesh, for the widening fallback. An interior facet IS the
+    // shared face of the two elements it separates, so the old skeleton already is that adjacency.
+    std::map<BulkElementBase *, std::set<BulkElementBase *>> old_neighbours;
+    for (unsigned oe = 0; oe < old->nelement(); oe++)
+    {
+      InterfaceElementBase *ie = dynamic_cast<InterfaceElementBase *>(old->element_pt(oe));
+      if (!ie)
+        continue;
+      BulkElementBase *a = dynamic_cast<BulkElementBase *>(ie->bulk_element_pt());
+      InterfaceElementBase *opp = ie->get_opposite_side();
+      BulkElementBase *b = (opp ? dynamic_cast<BulkElementBase *>(opp->bulk_element_pt()) : NULL);
+      if (a && b)
+      {
+        old_neighbours[a].insert(b);
+        old_neighbours[b].insert(a);
+      }
+    }
+
+    // Which old facet answered for each query point, as the pair of old bulk elements it separates.
+    std::vector<std::pair<BulkElementBase *, BulkElementBase *>> facet_owner(npoint);
+    std::vector<double> s_unused;
+    unsigned n_unplaced = 0;
+    for (unsigned p = 0; p < npoint; p++)
+    {
+      BulkElementBase *of = NULL;
+      if (!slocated.resolve_local(p, of, s_unused) || !of)
+      {
+        n_unplaced++;
+        continue;
+      }
+      InterfaceElementBase *ife = dynamic_cast<InterfaceElementBase *>(of);
+      if (!ife)
+        continue;
+      InterfaceElementBase *opp = ife->get_opposite_side();
+      facet_owner[p] = std::make_pair(dynamic_cast<BulkElementBase *>(ife->bulk_element_pt()),
+                                      opp ? dynamic_cast<BulkElementBase *>(opp->bulk_element_pt()) : (BulkElementBase *)NULL);
+    }
+
+    DiscontinuousSampleMap per_elem;
+    unsigned n_rejected = 0;
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (!e)
+        continue;
+      std::set<BulkElementBase *> allowed;
+      for (unsigned p = probe_first[ie]; p < probe_first[ie + 1]; p++)
+        if (in_old_bulk[p])
+          allowed.insert(in_old_bulk[p]);
+      // Two rounds at most: the old element(s) the facet runs through, then one ring of their face
+      // neighbours. An empty `allowed` means the facet is nowhere in the old mesh at all (a remesh
+      // may change the geometry itself), and then there is nothing to restrict with.
+      std::vector<std::pair<unsigned, std::vector<double>>> kept;
+      for (unsigned round = 0; round < 2 && kept.empty(); round++)
+      {
+        if (round == 1)
+        {
+          if (allowed.empty())
+            break;
+          std::set<BulkElementBase *> wider = allowed;
+          for (auto *b : allowed)
+          {
+            auto nb = old_neighbours.find(b);
+            if (nb != old_neighbours.end())
+              wider.insert(nb->second.begin(), nb->second.end());
+          }
+          if (wider.size() == allowed.size())
+            break;
+          allowed.swap(wider);
+        }
+        for (unsigned p = probe_first[ie]; p < probe_first[ie + 1]; p++)
+        {
+          const auto &o = facet_owner[p];
+          if (!o.first && !o.second)
+            continue; // this point found no old facet at all
+          if (allowed.empty() || (o.first && allowed.count(o.first)) || (o.second && allowed.count(o.second)))
+            kept.push_back(std::make_pair(p, probe_s[p]));
+        }
+      }
+      if (kept.empty())
+        n_rejected++;
+      else
+        per_elem[e] = kept;
+    }
+
+    // The pulled values are already laid out the way the fit expects a snapshot to be - time levels
+    // outermost, DL before D0 - and their positions are the new elements' own lattice points, so the
+    // local coordinates handed over are exact rather than projected.
+    DiscontinuousSnapshot pulled_snap;
+    pulled_snap.space_dim = sdim;
+    pulled_snap.nDL = nDL;
+    pulled_snap.nD0 = nD0;
+    pulled_snap.nDL_modes = e0->get_eleminfo()->nnode_DL;
+    pulled_snap.ntstorage = ntstorage;
+    pulled_snap.coords.swap(probe);
+    pulled_snap.values.swap(pulled);
+
+    const unsigned n_empty = this->fit_discontinuous_data(pulled_snap, per_elem);
+    if (n_empty && !warned_about_discontinuous_reset)
+    {
+      warned_about_discontinuous_reset = true;
+      std::cout << "WARNING: transferring the discontinuous (DL/D0) fields of interface '" << interfacename
+                << "' from the previous mesh left " << n_empty << " of " << this->nelement()
+                << " new element(s) without a usable value (" << n_rejected
+                << " found nothing from the part of the old mesh they lie in, " << n_unplaced << " of " << npoint
+                << " sample points found no old facet at all). Those elements keep the zero they were"
+                << " allocated with. Define a recovery expression (Equations.set_facet_recovery) to fill them"
+                << " from the surrounding solution instead." << std::endl;
+    }
   }
 
   // Populates Boundary_element_pt/Face_index_at_boundary for a 1d interface mesh
@@ -6586,26 +7051,45 @@ namespace pyoomph
 
   // Rebuilds this interface mesh from scratch after the bulk mesh has been adapted
   // (interface elements are never incrementally adapted, see clear_before_adapt).
-  // Adaptive meshes with discontinuous (DG) fields defined at the interface are not
-  // yet supported and are rejected with an explanatory error.
+  // Interface-owned DL/D0 fields survive via snapshot_discontinuous_data()/
+  // restore_discontinuous_data(); nodal DG (Dx) fields owned by an interface do not yet.
+  // The nodal discontinuous (D1/D2/...) fields THIS interface level declares itself, as
+  // "name (space)" entries. [numfields_bulk,numfields) is exactly that set: an interface that merely
+  // READS a DG field of the domain it sits on is unaffected and adapts as before, and numfields_bulk
+  // rather than numfields_basebulk keeps a field an intermediate interface owns reported on that
+  // interface only, not again on every interface of it. Empty for anything that can be carried
+  // through an adaptation or a remeshing, so callers use it as the guard below does.
+  std::vector<std::string> InterfaceMesh::get_own_nodal_dg_fields() const
+  {
+    std::vector<std::string> res;
+    if (!code)
+      return res;
+    auto *ft = code->get_func_table();
+    for (unsigned int i = 0; i < ft->num_present_dg_spaces; i++)
+    {
+      auto *space_info = ft->present_dg_spaces[i];
+      for (unsigned int f = space_info->numfields_bulk; f < space_info->numfields; f++)
+        res.push_back(std::string(space_info->fieldnames[f]) + " (" + space_info->space_name + ")");
+    }
+    return res;
+  }
+
   void InterfaceMesh::rebuild_after_adapt()
   {
     if (code)
     {
       auto *ft = code->get_func_table();
-      bool has_dg=false;
-      for (unsigned int i = 0; i < ft->num_present_dg_spaces; i++)
+      std::string dg_fields;
+      for (const auto &f : this->get_own_nodal_dg_fields())
+        dg_fields += (dg_fields.empty() ? "" : ", ") + f;
+      if (!dg_fields.empty())
       {
-        auto * space_info=ft->present_dg_spaces[i];
-        if (space_info->numfields_new>0)
-        {
-          has_dg=true;
-          break;
-        }
-      }
-      if (has_dg)
-      {
-        throw_runtime_error("Cannot adapt yet when having discontinuous fields added at an interface. Make sure to set Problem.max_refinement_level=0 and/or Problem.initial_adaption_steps=0. Will be hopefully implemented soon.");
+        // Unlike DL/D0, a nodal DG field's values sit in per-node slots of the element's internal
+        // Data, and there is no get_interpolated_fields_Dx() to sample them with, so the snapshot
+        // point cloud cannot be filled for them. Everything else about the adaptation works.
+        // A REMESHING is refused before it starts (Problem.force_remesh), because throwing from here
+        // would leave the problem with half its meshes replaced.
+        throw_runtime_error("Cannot carry the nodal discontinuous (D1/D2/...) field(s) " + dg_fields + " defined on '" + std::string(ft->domain_name) + "' through a spatial adaptation yet. Use a DL or D0 facet space instead (those are transferred), or set Problem.max_refinement_level=0 and Problem.initial_adaption_steps=0.");
       }
 
       // Interface-owned DL/D0 fields used only to be reset to zero here - current value AND time
@@ -7827,7 +8311,17 @@ namespace pyoomph
       {
         std::vector<pyoomph::Node *> face_nodes = el->get_vertex_nodes_of_face(face_id);
         if (face_nodes.empty()) continue; // e.g. 0d "point" faces that carry no vertex set
-        std::set<pyoomph::Node *> key(face_nodes.begin(), face_nodes.end());
+        std::set<pyoomph::Node *> key;
+        for (pyoomph::Node *n : face_nodes)
+        {
+          // Periodic boundaries are realised as "copy" nodes aliasing a master (see
+          // ensure_halos_for_periodic_boundaries); keying on the master makes the two sides of the
+          // periodic seam one facet with incidence 2 rather than two unrelated boundary facets. The
+          // 1d/2d interior-facet enumerators resolve copies for exactly this reason. On a
+          // non-periodic mesh is_a_copy() is false everywhere and nothing changes.
+          if (n->is_a_copy()) n = dynamic_cast<pyoomph::Node *>(n->copied_node_pt());
+          key.insert(n);
+        }
         adj[key].push_back(std::make_pair(el, face_id));
       }
     }

@@ -2241,12 +2241,17 @@ class Problem(_pyoomph.Problem):
             # before either acts (see the adapt call below), which is exact; and whatever still slips
             # through is repaired by Problem.enforce_interface_conformity() afterwards.
             #
-            # _internal_facets_ is still rejected -- see the throw in InterfaceMesh::rebuild_after_adapt.
+            # The interior-facet skeleton itself adapts fine (it is torn down and regenerated from the
+            # refined bulk mesh, with its DL/D0 fields carried across by the snapshot/restore in
+            # InterfaceMesh::rebuild_after_adapt). What is rejected here is only the exotic combination
+            # of a skeleton that has ALSO been connected to a second mesh with ConnectMeshAtInterface:
+            # the flag reconciliation below assumes the two sides are ordinary named boundaries with a
+            # 1:1 element correspondence, which a facet soup does not have.
             for name,mesh in self._meshdict.items():
                 if isinstance(mesh,ODEStorageMesh): continue
                 for inam,imesh in mesh._interfacemeshes.items():
                     if imesh._opposite_interface_mesh is not None and inam=="_internal_facets_":
-                        raise RuntimeError("TODO: Adaption with internal facets")
+                        raise RuntimeError("The interior-facet skeleton '"+str(name)+"/_internal_facets_' has been connected to another interface mesh; adapting that combination is not supported.")
 
 
         messed_around_in_history=False
@@ -2575,26 +2580,13 @@ class Problem(_pyoomph.Problem):
                         has_interior_contribs=True
                         break
                 if has_interior_contribs:
-                    # Check if we already have an _interior_facets_ domain there
+                    # The skeleton child is created in EquationTree._fill_dummy_equations, which runs long
+                    # before this point, so it can only be missing if requires_interior_facet_terms was
+                    # switched on afterwards. Auto-creating it here is too late: the code generators of
+                    # this mesh (and its opposite-facet dummies) are already built and compiled, which is
+                    # what the removed attempt below this raise never accounted for.
                     if "_internal_facets_" not in mesh._eqtree.get_children().keys():
-                        raise RuntimeError("TODO: Auto create _interior_facets_ domain. For the time being, you have to add it by hand (just use eqs+=Equations()@'_internal_facets_').\nOr, even better, set self.requires_interior_facet_terms=True in the __init__ of the Equations class you add interior facet contributions.")
-                        facetdom=EquationTree(InterfaceEquations(),parent=mesh._eqtree)                                                
-                        mesh._eqtree._children["_internal_facets_"]=facetdom                        
-                        facetdom._finalize_equations(mesh.get_problem())                        
-                        facetmesh=InterfaceMesh(mesh.get_problem(),mesh,"_internal_facets_",facetdom)                                                
-                        mesh._interfacemeshes["_internal_facets_"]=facetmesh
-                        facetdom._mesh=mesh._interfacemeshes["_internal_facets_"]
-                        facetdom.get_code_gen()._set_bulk_element(mesh._eqtree.get_code_gen())
-                        cg_b=mesh._eqtree.get_code_gen()
-                        nodal_dim=cg_b.get_nodal_dimension()                        
-                        while nodal_dim==0 and cg_b.get_parent_domain() is not None:
-                            cg_b=cg_b.get_parent_domain()                    
-                        nodal_dim=cg_b.get_nodal_dimension()
-                        facetdom.get_code_gen()._set_nodal_dimension(nodal_dim)                        
-                        facetdom.get_code_gen()._do_define_fields(mesh._eqtree.get_code_gen().get_element_dimension()-1)
-                        facetdom._create_dummy_domains_for_DG(mesh.get_problem())
-                        
-                        
+                        raise RuntimeError("Interior facet residuals were added on domain '"+str(mesh.get_name())+"', but it has no '_internal_facets_' subdomain. Set self.requires_interior_facet_terms=True in the __init__ of the Equations class that adds them (before the problem is set up), or add the subdomain by hand with eqs+=Equations()@'_internal_facets_'.")
                     internal_eqs=mesh._eqtree.get_child("_internal_facets_").get_equations()
                     for destination,int_contrib in eqs._interior_facet_residuals.items():
                         if destination in internal_eqs._additional_residuals.keys():
@@ -4079,6 +4071,17 @@ class Problem(_pyoomph.Problem):
                     print(msg)
                 return
             ensure_pymetis_available()
+            # There is no ownership rule for interior facets yet: a facet between two elements that end
+            # up on different ranks exists on both (as a halo), so its element-owned dofs would be
+            # numbered twice and its residual assembled twice. Facet-less DG jump terms are unaffected,
+            # which is why only skeletons that declare fields of their own are rejected. Collective: the
+            # equation tree is identical on every rank, so all of them take this branch together.
+            for _mn,_msh in self._meshdict.items():
+                if isinstance(_msh,ODEStorageMesh) or _msh._eqtree is None: continue
+                skel=_msh._eqtree.get_children().get("_internal_facets_")
+                if skel is None or skel._codegen is None: continue
+                if len(skel._codegen._fields_defined_on_my_domain)>0:
+                    raise RuntimeError("Fields defined on the interior-facet skeleton ('"+str(_mn)+"/_internal_facets_': "+", ".join(sorted(skel._codegen._fields_defined_on_my_domain.keys()))+") are not supported on a distributed (--distribute) problem yet. Run without --distribute.")
         super().distribute()
 
 
@@ -7375,6 +7378,27 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             return 0
         return self.max_refinement_level if num_adapt is None else num_adapt
 
+    def _refuse_remeshing_with_nodal_dg_fields(self)->None:
+        """Stop a remesh that would lose an interface's own nodal discontinuous (D1/D2/...) field.
+
+        Those values sit in per-node slots of the element's internal data and there is no
+        ``get_interpolated_fields_Dx()`` to read them with, so neither the adaptation's snapshot nor
+        the remeshing transfer (``InterfaceMesh::interpolate_discontinuous_data_from``, DL/D0 only)
+        can carry them. The rebuild in the middle of :py:meth:`force_remesh` would notice and throw
+        anyway - but by then half the meshes have been replaced and the problem cannot be used at all
+        any more, so it is refused here, before anything is touched.
+        """
+        offenders:list[str]=[]
+        for m in self._interfacemeshes:
+            fields=m.get_own_nodal_dg_fields()
+            if fields:
+                offenders.append(m.get_full_name()+": "+", ".join(fields))
+        if not offenders:
+            return
+        raise RuntimeError("Cannot remesh: the nodal discontinuous (D1/D2/...) field(s) below are defined on an "
+                           "interface and cannot be transferred to a new mesh yet. Use a DL or D0 facet space "
+                           "instead (those are transferred), or do not remesh.\n  "+"\n  ".join(offenders))
+
     def _refuse_distributed_remeshing(self,remeshers:list["RemesherBase"],interpolator:type["BaseMeshToMeshInterpolator"])->None:
         """Stop a remesh of a distributed problem whose ingredients do not all support one.
 
@@ -7503,6 +7527,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # and both before the first mesh is touched - see _check_distributed_remeshing_scope.
         self._refuse_distributed_remeshing(remeshers,interpolator)
         self._check_distributed_remeshing_scope(remeshers,num_adapt)
+        self._refuse_remeshing_with_nodal_dg_fields()
         self.invalidate_cached_mesh_data()
         print("REMESHING")
         

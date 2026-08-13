@@ -12099,6 +12099,12 @@ namespace pyoomph
 			const std::vector<unsigned> & get_nodal_space_index_to_element_index=this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
 			unsigned nnode=eleminfo.nnode_of_space[space_info->space_index];
 			int hangindex=space_info->hangindex;
+			// Only the values this INTERFACE adds to a node are interpolated here; the base-bulk ones are
+			// already handled by the bulk element's own interpolate_hang_values. Without this early exit the
+			// loop below insists on a BoundaryNode even when it would then copy nothing, which is wrong on
+			// the interior-facet skeleton: its nodes are ordinary interior pyoomph::Nodes, and a hanging one
+			// (2:1 facet after adaptation) tripped the "dest_bn is not a BoundaryNode" throw.
+			if (space_info->numfields<=space_info->numfields_basebulk) continue;
 			for (unsigned int inode=0;inode<nnode;inode++)
 			{
 				pyoomph::Node * node=dynamic_cast<pyoomph::Node*>(this->node_pt(get_nodal_space_index_to_element_index[inode]));
@@ -12570,6 +12576,87 @@ namespace pyoomph
 	}
 	
 	
+  // --- Quad2dFaceOrientation: opposite-side matching for quadrilateral face elements -------------
+  //
+  // The 8 symmetries of the square, written as maps of the face element's own local coordinate
+  // s in [-1,1]^2. Index 0..3 are the identity/mirrors, 4..7 the transposed (orientation-reversing
+  // resp. rotated) ones. Two faces of two different bulk elements share their geometry but not
+  // their local coordinate system, so exactly one of these carries s on one side to the s of the
+  // same physical point on the other.
+  oomph::Vector<double> Quad2dFaceOrientation::map_s(int orientation, const oomph::Vector<double> &s)
+  {
+    oomph::Vector<double> res(2);
+    switch (orientation)
+    {
+      case 0: res[0] =  s[0]; res[1] =  s[1]; break;
+      case 1: res[0] = -s[0]; res[1] =  s[1]; break;
+      case 2: res[0] =  s[0]; res[1] = -s[1]; break;
+      case 3: res[0] = -s[0]; res[1] = -s[1]; break;
+      case 4: res[0] =  s[1]; res[1] =  s[0]; break;
+      case 5: res[0] = -s[1]; res[1] =  s[0]; break;
+      case 6: res[0] =  s[1]; res[1] = -s[0]; break;
+      case 7: res[0] = -s[1]; res[1] = -s[0]; break;
+      default: throw_runtime_error("Invalid quad face orientation " + std::to_string(orientation));
+    }
+    return res;
+  }
+
+  std::vector<int> Quad2dFaceOrientation::node_index_map(int orientation, unsigned nnode_1d)
+  {
+    if (nnode_1d < 2) throw_runtime_error("Quad face elements have at least 2 nodes per direction");
+    const double h = 2.0 / (nnode_1d - 1.0);
+    std::vector<int> res(nnode_1d * nnode_1d, -1);
+    for (unsigned j = 0; j < nnode_1d; j++)
+    {
+      for (unsigned i = 0; i < nnode_1d; i++)
+      {
+        oomph::Vector<double> s(2);
+        s[0] = -1.0 + h * i;
+        s[1] = -1.0 + h * j;
+        oomph::Vector<double> so = map_s(orientation, s);
+        // The symmetries permute the tensor grid exactly, so rounding here is only removing the
+        // representation error of -1+h*i, never a genuine mismatch.
+        int io = static_cast<int>(std::lround((so[0] + 1.0) / h));
+        int jo = static_cast<int>(std::lround((so[1] + 1.0) / h));
+        res[i + nnode_1d * j] = io + nnode_1d * jo;
+      }
+    }
+    return res;
+  }
+
+  void Quad2dFaceOrientation::analyze(const oomph::FiniteElement *self, const oomph::FiniteElement *opposite, const std::vector<double> &offset, unsigned nnode_1d, int &orientation, std::vector<int> &node_index)
+  {
+    if (!opposite) throw_runtime_error("No opposite side set");
+    if (opposite->dim() != 2) throw_runtime_error("Can only connect a 2d InterfaceElement to a 2d InterfaceElement");
+    if (self->nvertex_node() != opposite->nvertex_node()) throw_runtime_error("Can only connect InterfaceElements with same number of vertex nodes");
+    // For nnode_1d==2 the node map IS the vertex permutation (oomph numbers a quad's vertex nodes
+    // in the same tensor order 00,10,01,11), so the candidates are generated instead of tabulated.
+    std::vector<double> pdists(8, 0.0);
+    for (unsigned int i = 0; i < self->nvertex_node(); i++)
+    {
+      pyoomph::Node *nthis = dynamic_cast<pyoomph::Node *>(self->vertex_node_pt(i));
+      for (int p = 0; p < 8; p++)
+      {
+        std::vector<int> perm = node_index_map(p, 2);
+        pyoomph::Node *nopp = dynamic_cast<pyoomph::Node *>(opposite->vertex_node_pt(perm[i]));
+        for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
+          pdists[p] += (nthis->x(k) - nopp->x(k) + offset[k]) * (nthis->x(k) - nopp->x(k) + offset[k]);
+      }
+    }
+    double best_dist = pdists[0];
+    orientation = 0;
+    for (int p = 1; p < 8; p++)
+    {
+      if (pdists[p] < best_dist)
+      {
+        best_dist = pdists[p];
+        orientation = p;
+      }
+    }
+    if (best_dist > 1e-14) throw_runtime_error("Vertex nodes are not matching here");
+    node_index = node_index_map(orientation, nnode_1d);
+  }
+
   // Finds the local coordinate s on this (surface) element whose interpolated position best matches the
   // given global point x, by first prescreening over the integration knots for a good starting guess, then
   // Newton-iterating (with finite-difference Jacobian) on the residual "tangential displacement dot direction",
@@ -12661,21 +12748,54 @@ namespace pyoomph
    return current_s;
   }
 
+	// Marks this face element as the dummy standing in for the opposite side of an interior facet.
+	// Such an element is constructed with the same jitcode as the real facet element (and hence
+	// allocates the same element-owned DG/DL/D0 internal Data in allocate_discontinous_fields), but it
+	// is never add_element_pt'd anywhere, so Problem::assign_eqn_numbers never visits that Data: it
+	// keeps oomph-lib's "unclassified" equation number forever. Pinning it here turns those slots into
+	// honestly pinned values, which is what the local-eqn path in assign_additional_local_eqn_numbers
+	// and every consumer of internal_local_eqn() expect; leaving them unclassified relied on
+	// unclassified and pinned happening to be treated alike. Done here rather than in
+	// generate_interface_elements because this runs exactly once per dummy, right after construction,
+	// and needs nothing but the element itself.
+	void InterfaceElementBase::set_as_internal_facet_opposite_dummy()
+	{
+		Is_internal_facet_opposite_dummy = true;
+		// Only allocate_discontinous_fields() ever adds internal Data to a pyoomph element, so this is
+		// exactly the DG-new/DL/D0 storage of the interface level; the bulk element's dofs are untouched.
+		for (unsigned int i = 0; i < this->ninternal_data(); i++)
+		{
+			oomph::Data *d = this->internal_data_pt(i);
+			for (unsigned int v = 0; v < d->nvalue(); v++)
+				d->pin(v);
+		}
+	}
+
 	// Allocates the "additional values" (interface-only dofs) on this element's boundary nodes for every
 	// interface field of every continuous space present, using oomph-lib's BoundaryNodeBase machinery so
 	// several interface elements sharing a node can share/independently own the corresponding slots. Newly
 	// allocated (not previously present) dofs are optionally seeded via interpolate_newly_constructed_additional_dof.
 	void InterfaceElementBase::add_interface_dofs()
 	{
-		if (false && std::string(this->codeinst->get_code()->get_func_table()->domain_name)!="_internal_facets_")
+		auto *ft = codeinst->get_func_table();
+
+		// Continuous interface-only fields are stored as oomph-lib "additional values" on the element's
+		// nodes, which only BoundaryNodes provide. The interior-facet skeleton is built from ordinary
+		// interior nodes (plain pyoomph::Node), so the dynamic_cast<BoundaryNode*> in the loop below
+		// returns NULL and dereferencing it segfaulted. Equations._internal_define_scalar_field already
+		// refuses such a declaration; this is the backstop in case one reaches the C++ side otherwise.
+		if (std::string(ft->domain_name) == "_internal_facets_")
 		{
-			for (unsigned l = 0; l < eleminfo.nnode; ++l)
-			{			
-				if (!dynamic_cast<BoundaryNode*>(this->node_pt(l))) throw_runtime_error("Interface element has a node which is not a BoundaryNode. This can happen in meshes when you have sharp corners in a boundary. Happened in "+this->codeinst->get_code()->get_file_name());
+			for (unsigned int i = 0; i < ft->num_present_continuous_spaces; i++)
+			{
+				const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info = ft->present_continuous_spaces[i];
+				if (space_info->numfields > space_info->numfields_bulk)
+				{
+					throw_runtime_error("Continuous fields on the interior-facet skeleton '_internal_facets_' are not supported (field '" + std::string(space_info->fieldnames[space_info->numfields_bulk]) + "' on space " + std::string(space_info->space_name) + "). Use a discontinuous facet space instead, i.e. D0, DL, D1, D1TB, D2 or D2TB.");
+				}
 			}
 		}
-		
-		auto *ft = codeinst->get_func_table();
+
 		for (unsigned int i=0;i<ft->num_present_continuous_spaces;i++)
 		{
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[i];
@@ -12871,13 +12991,19 @@ namespace pyoomph
 		for (unsigned int si=0;si<this->get_code_instance()->get_func_table()->num_present_continuous_spaces;si++)
 		{
 			auto * space_info=this->get_code_instance()->get_func_table()->present_continuous_spaces[si];
-			
+			// hangindex, NOT space_index: a hanging scheme is stored per nodal VALUE SLOT, and
+			// Node::is_hanging(i) reads Hanging_pt[i+1] out of an array of size nvalue()+1 without any
+			// bounds check. Asking a node that carries a single value (e.g. a bulk domain with just one
+			// C2 field, whose hangindex is 0) for the C2 SPACE index 1 reads one past the end, and the
+			// garbage there is dereferenced as a HangInfo* below. That segfaulted every rebuild of an
+			// adapted interior-facet skeleton with 2:1 hanging nodes. hangindex==-1 means "hangs with the
+			// dominant space", which is exactly what is_hanging(-1)/hanging_pt(-1) (geometric) answer.
 			for (unsigned int j=0;j<eleminfo.nnode_of_space[space_info->space_index];j++)
 			{
 				auto *nod_pt = dynamic_cast<pyoomph::Node *>(this->node_pt(space_to_elem_index[space_info->space_index][j]));
-				if (nod_pt->is_hanging(space_info->space_index)) // TODO: In principle, it can also hang elsewhere, i.e. on another index!
+				if (nod_pt->is_hanging(space_info->hangindex)) // TODO: In principle, it can also hang elsewhere, i.e. on another index!
 				{
-					oomph::HangInfo *const hang_pt = nod_pt->hanging_pt(space_info->space_index);
+					oomph::HangInfo *const hang_pt = nod_pt->hanging_pt(space_info->hangindex);
 					const unsigned nmaster = hang_pt->nmaster();
 					for (unsigned m = 0; m < nmaster; m++)
 					{
@@ -14201,6 +14327,16 @@ namespace pyoomph
 		{
 			Node *n = dynamic_cast<Node *>(node_pt(l));
 			pyoomph::BoundaryNode *bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
+			// Interface elements on the interior-facet skeleton sit on ordinary interior nodes, which
+			// are not BoundaryNodes: dereferencing bn below segfaulted as soon as the bulk had any
+			// C1/C1TB field. Such a node cannot carry an interface-only dof in the first place, so it
+			// has nothing to constrain.
+			if (!bn)
+			{
+				if (n->get_additional_dof_constraints())
+					throw_runtime_error("An additional interface dof constraint was registered on a node which is not a BoundaryNode. Interface-only dofs cannot be stored there.");
+				continue;
+			}
 			bool hangs_on_C1=has_C1_fields && bn->is_hanging(functable->continuous_spaces[SPACE_INDEX_C1].hangindex) && this->refinement_level()>0	 ;
 			for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; )
 			{
@@ -14240,6 +14376,7 @@ namespace pyoomph
 		for (unsigned int i_space=0;i_space<functable->num_present_continuous_spaces;i_space++)
 		{
 			auto *space_info=functable->present_continuous_spaces[i_space];
+			if (space_info->numfields==space_info->numfields_basebulk) continue; // No interface-only fields on this space, so the loop body would do nothing - and on the interior-facet skeleton the nodes are not BoundaryNodes, which used to make the check below throw
 			for (unsigned ni : space_node_to_element_map[space_info->space_index])
 			{
 				pyoomph::BoundaryNode * bn=dynamic_cast<pyoomph::BoundaryNode *>(this->node_pt(ni));

@@ -2766,7 +2766,9 @@ namespace pyoomph
     void setup_additional_dof_constraints() override;
     void unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info) override;
 
-    void set_as_internal_facet_opposite_dummy() { Is_internal_facet_opposite_dummy = true; }
+    // Flags this element as the never-assembled placeholder on the far side of an interior facet and
+    // pins the element-owned (DG/DL/D0) storage it nevertheless allocated - see elements.cpp.
+    void set_as_internal_facet_opposite_dummy();
     bool is_internal_facet_opposite_dummy() const { return Is_internal_facet_opposite_dummy; }
 
     // Returns the local-to-global (or local-to-local, depending on "which": "bulk"/"opposite_interface"/...)
@@ -3547,9 +3549,26 @@ namespace pyoomph
     }
   };
 
-  // Quadrilateral (2d) interface element on a brick bulk element's C1 face; does not override
-  // analyze_opposite_orientation/local_coordinate_in_opposite_side (2d face-to-face matching for
-  // quad faces is presently not implemented beyond the base class's default).
+  // Opposite-side matching for QUADRILATERAL face elements (a brick's face, a wedge's side, a
+  // pyramid's base). The analogue of the 6 vertex permutations InterfaceElementTri2d* enumerates,
+  // but for the 8 symmetries of the square. Shared by the C1 (2x2 nodes) and C2 (3x3 nodes)
+  // variants, and derived rather than tabulated: a quad face element is a tensor-product element,
+  // so local node i+nnode_1d*j sits at s=(-1+2i/(nnode_1d-1), -1+2j/(nnode_1d-1)) and the node
+  // correspondence follows from the coordinate map alone. That is what keeps the C2 case honest -
+  // the 6-node-triangle counterpart above needed hand-determined special cases.
+  struct Quad2dFaceOrientation
+  {
+    // Local coordinate on the opposite side under symmetry `orientation` (0..7).
+    static oomph::Vector<double> map_s(int orientation, const oomph::Vector<double> &s);
+    // Local node index on the opposite side for each local node of a nnode_1d x nnode_1d face.
+    // For nnode_1d==2 this is exactly the vertex permutation of the symmetry.
+    static std::vector<int> node_index_map(int orientation, unsigned nnode_1d);
+    // Picks the symmetry whose vertex correspondence matches the two faces geometrically (with the
+    // periodic `offset` applied) and fills orientation/node_index accordingly.
+    static void analyze(const oomph::FiniteElement *self, const oomph::FiniteElement *opposite, const std::vector<double> &offset, unsigned nnode_1d, int &orientation, std::vector<int> &node_index);
+  };
+
+  // Quadrilateral (2d) interface element on a brick bulk element's C1 face.
   class InterfaceElementQuad2dC1 : public InterfaceElement<BulkElementQuad2dC1>
   {
   protected:
@@ -3566,8 +3585,17 @@ namespace pyoomph
       if (add_interf_local_hang_eqs_C1TB)
         delete[] add_interf_local_hang_eqs_C1TB;
     }*/
-    
-	
+
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
+    {
+      return Quad2dFaceOrientation::map_s(opposite_orientation, s);
+    }
+
+    void analyze_opposite_orientation(const std::vector<double> & offset) override
+    {
+      Quad2dFaceOrientation::analyze(this, opposite_side, offset, 2, opposite_orientation, opposite_node_index);
+    }
+
   };
 
   // Quadrilateral interface element on a brick bulk element's C2 face.
@@ -3593,7 +3621,17 @@ namespace pyoomph
     }*/
 
     //void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt) ;
-    
+
+    oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
+    {
+      return Quad2dFaceOrientation::map_s(opposite_orientation, s);
+    }
+
+    void analyze_opposite_orientation(const std::vector<double> & offset) override
+    {
+      Quad2dFaceOrientation::analyze(this, opposite_side, offset, 3, opposite_orientation, opposite_node_index);
+    }
+
   };
 
   // Triangular (2d) interface element on a tetrahedral bulk element's C1 face. Unlike the 1d line

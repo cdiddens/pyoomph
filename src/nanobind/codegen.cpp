@@ -330,6 +330,8 @@ void PyReg_CodeGen(nb::module_ &m)
                         "Whether the nodal position coordinates are themselves treated as degrees of freedom (i.e. a moving-mesh/ALE formulation).")
         .def_rw("_coordinate_space", &pyoomph::FiniteElementCode::coordinate_space,
                         "The finite element space (e.g. \"C2\", \"C1\") the nodal position coordinates are interpolated in.")
+        .def_rw("_is_internal_facet_opposite_dummy", &pyoomph::FiniteElementCode::internal_facet_opposite_dummy,
+                        "Whether this code generator is the placeholder for the opposite side of an interior facet. Fields it owns itself are never assembled, so accessing them (via the '|-' domain) raises an error.")
         .def("_set_bulk_element", &pyoomph::FiniteElementCode::set_bulk_element, nb::arg("bulk_code"),
              "Set the bulk-domain FiniteElementCode this (interface/facet) code is attached to.")
         .def("_nullify_bulk_residual", &pyoomph::FiniteElementCode::nullify_bulk_residual, nb::arg("field_or_position_index"),

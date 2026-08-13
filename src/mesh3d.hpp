@@ -489,6 +489,12 @@ namespace pyoomph
     void setup_boundary_element_info_tris(std::ostream &outfile);
     void setup_boundary_element_info(std::ostream &outfile) override;
     void setup_boundary_element_info() override;
+
+    // Interior facets (faces shared by two bulk elements) of a 3d mesh, for DG-type interior-facet
+    // terms and for fields on the "_internal_facets_" skeleton. Conforming meshes only - unlike the
+    // 1d/2d overrides this has no hanging-node branch and throws on a non-conforming (adapted) mesh.
+    // See the .cpp for why it is built on build_facet_adjacency().
+    void fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index) override;
   };
 
 }

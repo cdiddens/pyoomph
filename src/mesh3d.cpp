@@ -734,4 +734,87 @@ namespace pyoomph
 		}
 	}
 
+	// Find all "internal facets" of a 3d mesh, i.e. element faces shared by two bulk elements (as
+	// opposed to faces on an outer mesh boundary), and pair each element/face with its neighbour on
+	// the far side. Used to assemble DG-type interior-facet terms and to carry fields on the
+	// "_internal_facets_" skeleton.
+	//
+	// Unlike the 1d/2d overrides this is built on the generic build_facet_adjacency() primitive
+	// (vertex-node set of a face -> incident (element, face index) pairs), which is shape-neutral and
+	// therefore handles tets, bricks, wedges, pyramids and mixed meshes in one go -- the face indices
+	// it reports ARE the values construct_face_element() expects (see Possible_Face_Indices). That
+	// same primitive is the designated replacement for the 2d version's "Mixed meshes here"
+	// limitation, which is why the 2d hanging-node branch is left alone rather than generalised here.
+	//
+	// CONFORMING meshes only. Under 2:1 refinement a coarse face and the four fine faces facing it
+	// have different vertex sets, so the adjacency map would silently report all five as boundary
+	// facets and the skeleton would come out missing exactly the interesting facets; the explicit
+	// hanging/refinement-level check below turns that into an error instead. The 2d version's
+	// quadtree branch (with opposite_already_at_index and shared coarse opposite elements) is what a
+	// 3d adaptive version would have to mirror.
+	void TemplatedMeshBase3d::fill_internal_facet_buffers(std::vector<BulkElementBase *> &internal_elements, std::vector<int> &internal_face_dir, std::vector<BulkElementBase *> &opposite_elements, std::vector<int> &opposite_face_dir, std::vector<int> &opposite_already_at_index)
+	{
+		internal_elements.clear();
+		internal_face_dir.clear();
+		opposite_elements.clear();
+		opposite_face_dir.clear();
+		opposite_already_at_index.clear();
+
+		const std::string nonconforming_msg = "Interior facets of a 3d mesh can currently only be enumerated on a conforming (non-adapted) mesh. Spatial adaptivity together with interior-facet terms or fields on '_internal_facets_' is not supported in 3d yet.";
+		oomph::TreeBasedRefineableMeshBase *tbself = dynamic_cast<oomph::TreeBasedRefineableMeshBase *>(this);
+		if (tbself && tbself->forest_pt())
+		{
+			unsigned milev = 0, malev = 0;
+			tbself->get_refinement_levels(milev, malev);
+			if (milev < malev) throw_runtime_error(nonconforming_msg);
+		}
+		for (unsigned int in = 0; in < this->nnode(); in++)
+		{
+			if (this->node_pt(in)->is_hanging()) throw_runtime_error(nonconforming_msg);
+		}
+
+		FacetAdjacencyMap adj = this->build_facet_adjacency();
+
+		auto face_key = [](BulkElementBase *el, int face_id)
+		{
+			std::set<pyoomph::Node *> key;
+			for (pyoomph::Node *n : el->get_vertex_nodes_of_face(face_id))
+			{
+				if (n->is_a_copy()) n = dynamic_cast<pyoomph::Node *>(n->copied_node_pt());
+				key.insert(n);
+			}
+			return key;
+		};
+
+		// Emit in element/face order rather than by iterating adj: it keys on node POINTERS, so its
+		// iteration order follows heap addresses and therefore differs from process to process.
+		// oomph-lib splits the element list of a NON-distributed problem by index across ranks and
+		// assumes every rank sees the same list; with a rank-dependent facet order the ranks would
+		// assemble different subsets of the interior facets (the 2d version carries the same note,
+		// where that double-counted some DG contributions and dropped others).
+		for (unsigned int ie = 0; ie < this->nelement(); ie++)
+		{
+			BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+			if (!be) continue;
+			for (int face_id : be->get_possible_face_indices())
+			{
+				std::set<pyoomph::Node *> key = face_key(be, face_id);
+				if (key.empty()) continue;
+				const auto &attached = adj.at(key);
+				if (attached.size() == 1) continue; // Exterior facet
+				if (attached.size() > 2)
+				{
+					throw_runtime_error("Found a facet with " + std::to_string(attached.size()) + " attached element faces. " + nonconforming_msg);
+				}
+				if (attached[0].first != be || attached[0].second != face_id) continue; // Emitted from the other side
+				internal_elements.push_back(attached[0].first);
+				internal_face_dir.push_back(attached[0].second);
+				opposite_elements.push_back(attached[1].first);
+				opposite_face_dir.push_back(attached[1].second);
+				// No 2:1 hanging facets on a conforming mesh, so no opposite element is ever shared.
+				opposite_already_at_index.push_back(-1);
+			}
+		}
+	}
+
 }

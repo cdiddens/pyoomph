@@ -430,7 +430,9 @@ namespace pyoomph
 		std::vector<double> opposite_offset_vector,reversed_opposite_offset_vector; // Constant offset (e.g. for periodic/translated interfaces) to the opposite side and its reverse
 		bool warned_about_discontinuous_reset = false; // So rebuild_after_adapt's DL/D0 warning is printed once per interface, not once per adaptation
 
-		// Interface-owned DL/D0 values, carried across an adaptation. The elements themselves cannot
+		// Interface-owned DL/D0 values as a cloud of sampled values, which is how they are carried
+		// across an adaptation (and, with the values pulled from the old mesh instead, across a
+		// remeshing). The elements themselves cannot
 		// be carried: clear_before_adapt() deletes every one of them and rebuild_after_adapt() makes
 		// new ones from the adapted bulk mesh, so there is no father/son relation to exploit the way
 		// the bulk path does. What survives is the field as a function of position, sampled at
@@ -447,6 +449,18 @@ namespace pyoomph
 			void clear() { coords.clear(); values.clear(); space_dim = nDL = nD0 = nDL_modes = ntstorage = 0; }
 		};
 		DiscontinuousSnapshot discontinuous_snapshot;
+		// Which samples of a value cloud belong to which of this mesh's elements: element -> list of
+		// (sample index, local coordinate inside that element).
+		typedef std::map<BulkElementBase *, std::vector<std::pair<unsigned, std::vector<double>>>> DiscontinuousSampleMap;
+		// Fits the values of `snap` onto this mesh's elements using the assignment in `per_elem`, and
+		// fills the elements that got nothing from their recovery expressions (or leaves them at zero
+		// and reports them). Returns how many were left at zero. Shared by the two transfer paths,
+		// which differ only in where the values and the assignment come from.
+		unsigned fit_discontinuous_data(const DiscontinuousSnapshot &snap, const DiscontinuousSampleMap &per_elem);
+		// Elements the last restore_discontinuous_data() could not fill from the snapshot and could not
+		// recover either, i.e. the ones left at zero. Indices into this mesh's element list, valid until
+		// the next rebuild. Exposed so a test (or a Python-side post-adapt fixup) can find them.
+		std::vector<unsigned> discontinuous_unrestored_elements;
 	public:
 		InterfaceMesh();
 		~InterfaceMesh() override;
@@ -470,8 +484,17 @@ namespace pyoomph
 		// Sample this interface's DL/D0 fields into discontinuous_snapshot before the elements holding
 		// them are destroyed, and fit them back onto the rebuilt elements afterwards. Called by
 		// clear_before_adapt/rebuild_after_adapt; no-ops when the interface has no DL or D0 field.
+		// The nodal discontinuous (D1/D2/...) fields this interface declares itself ("name (space)"),
+		// i.e. the ones neither transfer path can carry. Empty when there are none.
+		std::vector<std::string> get_own_nodal_dg_fields() const;
 		virtual void snapshot_discontinuous_data();
 		virtual void restore_discontinuous_data();
+		// Carry the DL/D0 fields over from the corresponding interface mesh of a mesh that has been
+		// REPLACED (Problem.force_remesh) rather than adapted. Unlike the adaptation path this cannot
+		// assume that anything stayed where it was, so it disambiguates the facet soup topologically -
+		// see the implementation.
+		virtual void interpolate_discontinuous_data_from(InterfaceMesh *old);
+		const std::vector<unsigned> &get_discontinuous_unrestored_elements() const { return discontinuous_unrestored_elements; }
 		// Unpin/null out dofs on this interface that must not be treated as independent (e.g. because they are
 		// algebraically slaved to the bulk mesh across the interface).
 		virtual void nullify_selected_bulk_dofs();

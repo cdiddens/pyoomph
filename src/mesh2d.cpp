@@ -1105,8 +1105,11 @@ namespace pyoomph
           {
             BulkElementBase* be=dynamic_cast<BulkElementBase*>(this->element_pt(ie));
             oomph::RefineableQElement<2>* beq=dynamic_cast<oomph::RefineableQElement<2>*>(be);
-            if (!beq) 
+            if (!beq)
             {
+             // Only the quadtree neighbour walk is quad-specific. The shape-neutral way out is
+             // TemplatedMeshBase::build_facet_adjacency() (what the 3d override is built on), extended
+             // with the 2:1 bookkeeping this branch does via opposite_already_at_index.
              throw_runtime_error("Mixed meshes here");
             }
             for (unsigned edge_counter = 0; edge_counter < 4; edge_counter++)

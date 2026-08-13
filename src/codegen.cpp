@@ -739,6 +739,24 @@ namespace pyoomph
 	unsigned long __rfnd_hits = 0;
 	std::unordered_set<unsigned> __rfnd_distinct;
 
+	// The opposite-side facet placeholder code (see FiniteElementCode::internal_facet_opposite_dummy)
+	// mirrors the skeleton's own field declarations, but its elements are never added to a mesh and
+	// hence never get equation numbers: reading such a field through '|-' silently evaluated to zero.
+	// A field living on the skeleton is single-valued per facet anyway, so there is nothing sensible to
+	// return. Bulk fields reached through the placeholder (the usual jump(...,at_facet=True) pattern)
+	// stay legal, which is why only fields that no code in the bulk chain declares are rejected.
+	static void reject_opposite_facet_field(FiniteElementCode *mycode, const std::string &fieldname)
+	{
+		if (!mycode || !mycode->internal_facet_opposite_dummy || fieldname.empty())
+			return;
+		if (!mycode->get_field_by_name(fieldname))
+			return;
+		for (FiniteElementCode *b = mycode->get_bulk_element(); b; b = b->get_bulk_element())
+			if (b->get_field_by_name(fieldname))
+				return;
+		throw_runtime_error("Field '" + fieldname + "' is defined on the interior-facet skeleton '_internal_facets_' itself, i.e. it is single-valued on each facet. It therefore cannot be evaluated on the opposite side (domain '|-', which also happens inside jump(...,at_facet=True) and avg(...,at_facet=True)). Just use it without any domain specification.");
+	}
+
 	// Memoising wrapper around do_replace(): rewriting a subexpression is a pure function of it and
 	// the mapper's code/where/extra_test_scale, so a DAG node ex::map hands us repeatedly can come
 	// from the table. Two things must survive a hit: repl_count (the fixpoint loop reads it as "did
@@ -860,6 +878,7 @@ namespace pyoomph
 		{
 			FiniteElementFieldTagInfo taginfo;
 			FiniteElementCode *mycode = code->resolve_corresponding_code(inp, &fieldname, &taginfo);
+			reject_opposite_facet_field(mycode, fieldname);
 			GiNaC::ex scale = mycode->get_scaling(fieldname);
 			code->expanded_scales["field(" + mycode->get_domain_name() + "): " + fieldname] = scale;
 			if (pyoomph_verbose)
@@ -934,6 +953,7 @@ namespace pyoomph
 		{
 			FiniteElementFieldTagInfo taginfo;
 			FiniteElementCode *mycode = code->resolve_corresponding_code(inp, &fieldname, &taginfo);
+			reject_opposite_facet_field(mycode, fieldname);
 			if (pyoomph_verbose)
 				std::cout << "Expanding nondim field " << fieldname << std::endl;
 			repl_count++;
@@ -969,6 +989,7 @@ namespace pyoomph
 		else if (is_ex_the_function(inp, expressions::dimtestfunction))
 		{
 			FiniteElementCode *mycode = code->resolve_corresponding_code(inp, &fieldname, NULL);
+			reject_opposite_facet_field(mycode, fieldname);
 			GiNaC::ex scale = mycode->get_scaling(fieldname, true);
 			scale *= this->extra_test_scale;
 			code->expanded_scales["test(" + mycode->get_domain_name() + "): " + fieldname] = scale;
@@ -1007,6 +1028,7 @@ namespace pyoomph
 		else if (is_ex_the_function(inp, expressions::testfunction))
 		{
 			FiniteElementCode *mycode = code->resolve_corresponding_code(inp, &fieldname, NULL);
+			reject_opposite_facet_field(mycode, fieldname);
 			if (pyoomph_verbose)
 				std::cout << "Expanding testfunction " << fieldname << std::endl;
 			repl_count++;

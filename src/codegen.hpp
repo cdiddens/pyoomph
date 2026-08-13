@@ -1009,6 +1009,7 @@ namespace pyoomph
       double debug_jacobian_epsilon; // Step size used when numerically cross-checking the analytical Jacobian against finite differences
       bool with_adaptivity;
       bool coordinates_as_dofs; // If true, the nodal positions are themselves unknowns with residual/Jacobian entries (moving-mesh/ALE elements)
+      bool internal_facet_opposite_dummy = false; // Marks the placeholder code generator standing in for the "other" side of an interior facet (set from _create_dummy_domains_for_DG). Its element instances are never part of any mesh, so fields it owns itself never get equation numbers - reading them via '|-' must be rejected, see ReplaceFieldsToNonDimFields::do_replace
       bool generate_hessian, assemble_hessian_by_symmetry; // Whether to generate Hessian-vector-product code at all, and whether to exploit its symmetry to only derive half of the entries
       std::string coordinate_space;
       bool stop_on_jacobian_difference; // If true, raise an error (rather than just warn) when the analytical and numerical Jacobians disagree beyond tolerance

@@ -1495,6 +1495,41 @@ class BaseEquations(_pyoomph.Equations):
                 master._tensorfields[name].append(row)
         return entries,diminfo
 
+    def set_facet_recovery(self,fieldname:str,expr:"ExpressionOrNum"):
+        """
+        Defines how a discontinuous (``DL`` or ``D0``) field of this domain is filled on elements that
+        are created by a spatial adaptation or a remeshing and therefore receive no values from the old
+        mesh.
+
+        This is meant for fields on the interior-facet skeleton (``"_internal_facets_"``): when the bulk
+        is refined, facets appear *inside* the former elements, and no amount of interpolation from the
+        old skeleton can produce a value there - the old skeleton has nothing at that position. For an
+        HDG-style trace the right answer comes from the bulk instead, e.g.::
+
+            class MyFacetEqs(Equations):
+                def define_fields(self):
+                    self.define_scalar_field("lam","DL")
+                def define_residuals(self):
+                    lam,lamtest=var_and_test("lam")
+                    self.add_residual(weak(lam-avg(var("u")),lamtest))
+                    self.set_facet_recovery("lam",avg(var("u")))
+
+        Without it, such facets keep the zero they were allocated with (and a one-time warning is
+        printed); they are corrected by the next solve, which is why zero remains the default.
+
+        The expression is evaluated on the new element, i.e. on the CURRENT state only, and least-squares
+        fitted onto the field's own space (for ``D0``: averaged). The result is written to every stored
+        time level, so that a facet which just came into existence does not produce a spurious time
+        derivative. Elements that DO get values from the old mesh are untouched by it, and so are fields
+        without a recovery expression - if any field of the domain lacks one, the element still counts as
+        unrestored and shows up in ``mesh.get_discontinuous_unrestored_elements()``.
+
+        Args:
+            fieldname: name of the ``DL``/``D0`` field to recover.
+            expr: expression evaluated on the new element, e.g. ``avg(var("u"))``.
+        """
+        return self.add_local_function("__facet_recovery_"+fieldname,expr)
+
     def add_integral_function(self, name:str, expr:"ExpressionOrNum"):
         master = self._get_combined_element()
         cg=master._assert_codegen()
@@ -1918,6 +1953,10 @@ class EquationTree:
 
                 assert self._parent is not None
                 dummy=generate_dummy_domain(self) # Opposite DG facet
+                # The facet dummy mirrors the skeleton's own fields, but its elements are never added
+                # to any mesh, so those fields never get equation numbers. Flag it so that reading them
+                # through '|-' is rejected at code generation time instead of silently yielding zero.
+                dummy._is_internal_facet_opposite_dummy=True
                 dummy_p=generate_dummy_domain(self._parent) # Opposite bulk facet
 
                 cg_self._set_opposite_interface(dummy)
@@ -2352,12 +2391,19 @@ class Equations(BaseEquations):
                         raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to 3d bulk domain with element space "+str(pdom._coordinate_space)+". This does not work, since 3d tetrahedral elements of "+str(pdom._coordinate_space)+" do not provide the face bubble node for "+str(space)+" on 2d facets. Consider upgrading the 3d space to C2TB using an ElementSpace('C2TB') for the 3d domain or adjust the facet space to "+("C1" if space=="C1TB" else "D1")+"."))
             
             
+        cg = master._assert_codegen()
+        if cg.get_domain_name()=="_internal_facets_" and space not in {"D0","DL","D1","D1TB","D2","D2TB"}:
+            # A continuous field on the interior-facet skeleton would need one shared dof per facet
+            # node, i.e. oomph-lib "additional values" on BoundaryNodes. Interior nodes are plain
+            # pyoomph::Node, so InterfaceElementBase::add_interface_dofs null-derefs on them (it used
+            # to segfault before this check existed; the C++ backstop there now throws as well).
+            raise self.add_exception_info(NotImplementedError("Continuous fields on the interior-facet skeleton '_internal_facets_' are not supported (tried to define '"+str(name)+"' on space "+str(space)+"). Use a discontinuous facet space instead, i.e. D0, DL, D1, D1TB, D2 or D2TB."))
+
         if _pyoomph.get_verbosity_flag() != 0:
             print("REGISTER", name, self, master, self == master, space)
         master._register_field(name, space)
         self._fields_defined_on_my_domain[name]=space
         master._fields_defined_on_my_domain[name]=space
-        cg = master._assert_codegen()
         if discontinuous_refinement_exponent is not None:
             if discontinuous_refinement_exponent!=0:
                 if space!="D0":
