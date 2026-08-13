@@ -3473,6 +3473,10 @@ namespace pyoomph
 #endif
   }
 
+  // Defined with the rest of the discontinuous-transfer helpers further down; needed here to address
+  // the DL/D0 block of an element that also carries nodal DG fields.
+  static unsigned dg_internal_data_offset(const JITFuncSpec_Table_FiniteElement_t *ft);
+
   // See declaration in mesh.hpp.
   unsigned Mesh::share_interpolation_across_ranks(Mesh *from, int boundary_index, bool interface_case,
                                                   const std::vector<bool> &completed_elements,
@@ -3512,12 +3516,22 @@ namespace pyoomph
 
     // The element-centre transfer of the discontinuous fields, which fails and succeeds independently
     // of the nodes around it.
+    //
+    // Every internal Data allocate_discontinous_fields() laid out, in its order [DG spaces][DL][D0]
+    // (src/elements.cpp). Counting DL and D0 alone would still START at internal data 0, i.e. inside
+    // the DG block, as soon as an interface carries a nodal DG field: the DL/D0 values would never be
+    // pooled and the leading DG ones would be pooled in their place.
     std::vector<double> values, elem_weights;
     unsigned ndisc = 0;
     if (this->nelement())
     {
-      auto *ft = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_func_table();
-      ndisc = ft->info_DL.numfields + ft->info_D0.numfields;
+      BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+      auto *ft = e0->get_code_instance()->get_func_table();
+      ndisc = dg_internal_data_offset(ft) + ft->info_DL.numfields + ft->info_D0.numfields;
+      // A DL block is only allocated where the element has DL "nodes" at all, so the static offsets
+      // can overshoot on an element family that has none.
+      if (ndisc > e0->ninternal_data())
+        ndisc = e0->ninternal_data();
     }
     for (unsigned int ie = 0; ie < this->nelement() && ndisc; ie++)
     {
