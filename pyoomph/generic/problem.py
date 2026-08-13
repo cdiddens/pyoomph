@@ -734,7 +734,7 @@ class Problem(_pyoomph.Problem):
         # and lets serial and distributed runs read each other's files. 0.1.1 adds the sharding field
         # to the header. 0.1.2 adds the adaptive time stepper's suggested next dt. 0.1.3 adds the
         # tracers' rolling position history, which the trail plots are drawn from. Older files still load.
-        self._dump_version = "0.1.3"
+        self._dump_version = "0.1.4"
         self._last_bc_setting="init"
 
         self._output_step:int=0
@@ -7872,6 +7872,28 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             mesh = self._meshdict[meshname]
             assert not isinstance(mesh,InterfaceMesh)            
             mesh.define_state_file(state,additional_info={})
+        # Interface and skeleton element data, i.e. everything a facet field owns: DL/D0 and the nodal
+        # DG spaces alike live in the interface element's own internal Data, and no other block of the
+        # file holds them. Without this the file could only reproduce the bulk state and would refit
+        # whatever the LOADING process happened to have on its facets.
+        #
+        # On loading this only READS: the interface elements do not exist in their final form yet -
+        # they are rebuilt from the loaded bulk mesh afterwards, in actions_after_adapt() - so the
+        # values are parked and applied by _apply_interface_states() once they do.
+        if state.version_at_least(0,1,4):
+            from ..meshes.meshstate import save_interface_state, read_interface_state
+            imeshes = sorted(self._interfacemeshes, key=lambda m: m.get_full_name())
+            n_if = len(imeshes)
+            n_if = state.int_data(lambda: n_if, lambda n: n) #type:ignore
+            if state.save:
+                for _m in imeshes:
+                    state.string_data(lambda _m=_m: _m.get_full_name(), lambda s: s)
+                    save_interface_state(_m, state)
+            else:
+                self._pending_interface_states = {}
+                for _ in range(int(n_if)):
+                    _name = state.string_data(lambda: "", lambda s: s)
+                    self._pending_interface_states[_name] = read_interface_state(state)
         # Global params
         gpars = list(sorted(self.get_global_parameter_names()))
         numgpars = len(gpars)
@@ -8033,6 +8055,25 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         mpi_share_any_failure(error,context="loading the state file "+(fname if isinstance(fname,str) else "<stream>"))
         return True
 
+    def _apply_interface_states(self):
+        """Push the interface/skeleton element data read from a state file onto the rebuilt meshes.
+
+        Separate from reading because the elements are rebuilt in between; see define_state_file. An
+        interface named in the file but absent now, or an element whose key is not in the file, is left
+        alone: that is a mesh which has changed since the file was written, and the rebuild's own
+        transfer is a better answer there than nothing."""
+        pending = getattr(self, "_pending_interface_states", None)
+        if not pending:
+            return
+        from ..meshes.meshstate import apply_interface_state
+        try:
+            for m in self._interfacemeshes:
+                rec = pending.get(m.get_full_name())
+                if rec is not None:
+                    apply_interface_state(m, *rec)
+        finally:
+            self._pending_interface_states = None
+
     def _load_state(self, fname:str | IO[bytes],ignore_outstep:bool=False,relative_to_output:bool=False,ignore_eigendata:bool=False,ignore_continuation_data:bool=False,additional_info:dict[Any,Any]={},quiet:bool=False):
         if not self.is_initialised():
             self.initialise()
@@ -8074,6 +8115,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.invalidate_cached_mesh_data()
         self.rebuild_global_mesh_from_list(rebuild=True)
         self.actions_after_adapt()
+        # Now the interface elements exist again, so the file's facet values can go in. AFTER
+        # actions_after_adapt on purpose: rebuild_after_adapt refits whatever this process was holding
+        # onto the loaded geometry, and the file's values must overwrite that approximation, not race it.
+        self._apply_interface_states()
         self.setup_pinning()
         self.reapply_boundary_conditions()
         self.invalidate_cached_mesh_data()

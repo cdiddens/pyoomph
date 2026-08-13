@@ -299,6 +299,91 @@ def _sorted_records(local: dict[str, NPAnyArray], distributed: bool, check: bool
             "elem_keys": elem_keys, "elem_lens": elem_lens, "elem_data": elem_data}
 
 
+def save_interface_state(mesh: "AnySpatialMesh", state: "DumpFile", check_consistency: bool = True) -> None:
+    """Write one interface mesh's element-internal data.
+
+    Interface elements carry all of a facet field's degrees of freedom - DL/D0 and the nodal DG spaces
+    alike - in their own internal Data, and nothing else in the file holds them: the bulk record covers
+    bulk elements and nodes only. Without this block a state file cannot reproduce the state it was
+    written at, it can only reproduce the bulk part and refit whatever the loading process happened to
+    be holding on the facets.
+
+    Addressed by (root element index, packed refinement path, face index) rather than by element
+    number, so the record survives a different partition - the same key the interior-facet halo scheme
+    pairs facets across ranks with. Halo copies are skipped: their owner writes them."""
+    nelem = mesh.nelement()
+    keys = numpy.asarray(mesh.get_interface_element_structural_keys(), dtype=numpy.int64).reshape(nelem, 3)
+    if nelem and numpy.any(keys[:, 0] < 0):
+        raise StateFileInconsistency(
+            "Interface mesh elements without a global base index; assign_global_base_element_indices() "
+            "must run before the problem is distributed")
+    owned = _owned_elements(mesh)
+    data, lens = mesh.save_elemental_state()
+    my_data, my_lens = _block_gather(data, lens, numpy.flatnonzero(owned))
+    my_keys = keys[owned]
+    distributed = _mesh_is_distributed(mesh)
+    if distributed:
+        gathered = _gather_blocks(my_keys, my_lens, my_data)
+        if gathered is None:
+            return
+        my_keys, my_lens, my_data = gathered[0], gathered[1], gathered[2]
+    my_keys, my_lens, my_data = _dedup(my_keys, my_lens, my_data, "interface element", check_consistency)
+    for value in (my_keys, my_lens, my_data):
+        state.numpy_data(lambda value=value: value, lambda v: v)  # type:ignore
+
+
+def read_interface_state(state: "DumpFile") -> "tuple[NPAnyIntArray, NPAnyIntArray, NPFloatArray]":
+    """Read back what save_interface_state wrote, without applying it.
+
+    Applying is a separate step because the interface elements do not exist in their final form at the
+    point the file is read: Problem._load_state rebuilds them from the loaded bulk mesh afterwards, in
+    actions_after_adapt(). See Problem._apply_interface_states."""
+    keys = state.numpy_data(lambda: numpy.zeros((0, 3), dtype=numpy.int64), lambda v: v)  # type:ignore
+    lens = state.numpy_data(lambda: numpy.zeros((0,), dtype=numpy.int32), lambda v: v)  # type:ignore
+    data = state.numpy_data(lambda: numpy.zeros((0,), dtype=numpy.float64), lambda v: v)  # type:ignore
+    return keys, lens, data
+
+
+def apply_interface_state(mesh: "AnySpatialMesh", keys: "NPAnyIntArray", lens: "NPAnyIntArray",
+                          data: "NPFloatArray") -> int:
+    """Push a read interface record onto a rebuilt interface mesh. Returns how many elements it filled.
+
+    Every element this process holds - halo copies included, so that a halo and its owner agree without
+    a synchronisation - is looked up by its own key. An element whose key is not in the file keeps
+    whatever the rebuild left it with (the refit, or the recovery expression), which is the right answer
+    for a mesh that has been refined since the file was written."""
+    nelem = mesh.nelement()
+    if not nelem or not len(keys):
+        return 0
+    mine = numpy.asarray(mesh.get_interface_element_structural_keys(), dtype=numpy.int64).reshape(nelem, 3)
+    index = {tuple(int(c) for c in k): i for i, k in enumerate(numpy.asarray(keys, dtype=numpy.int64))}
+    offsets = numpy.concatenate(([0], numpy.cumsum(numpy.asarray(lens, dtype=numpy.int64))))
+    # Start from what the mesh currently holds and substitute the blocks the file speaks for.
+    # load_elemental_state() consumes one block per element in element order and uses `lengths` only
+    # as a count check, so a "leave this one alone" entry has to be the element's OWN current block,
+    # not an empty one.
+    cur_data, cur_lens = mesh.save_elemental_state()
+    cur_data = numpy.asarray(cur_data, dtype=numpy.float64)
+    cur_lens = numpy.asarray(cur_lens, dtype=numpy.int64)
+    cur_off = numpy.concatenate(([0], numpy.cumsum(cur_lens)))
+    out_data: list[float] = []
+    nfound = 0
+    for ie in range(nelem):
+        rec = index.get(tuple(int(c) for c in mine[ie]))
+        block = (data[offsets[rec]:offsets[rec + 1]] if rec is not None
+                 else cur_data[cur_off[ie]:cur_off[ie + 1]])
+        if rec is not None:
+            if len(block) != int(cur_lens[ie]):
+                raise StateFileInconsistency(
+                    "Interface element " + str(tuple(int(c) for c in mine[ie])) + " has " + str(int(cur_lens[ie])) +
+                    " values but the state file holds " + str(len(block)) + " for it. The facet fields of this "
+                    "interface differ from the ones the file was written with")
+            nfound += 1
+        out_data.extend(float(v) for v in block)
+    mesh.load_elemental_state(out_data, [int(v) for v in cur_lens])
+    return nfound
+
+
 def save_mesh_state(mesh: "AnySpatialMesh", state: "DumpFile", check_consistency: bool = True) -> None:
     """Write the mesh part of a state file.
 

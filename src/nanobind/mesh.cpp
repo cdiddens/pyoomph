@@ -1868,6 +1868,15 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("_connect_interface_elements_by_kdtree",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self, MeshHandleBase *other)
 			 { self->connect_interface_elements_by_kdtree(dynamic_cast<pyoomph::InterfaceMesh *>(other->mesh())); }), nb::arg("other"), "Connects this interface mesh's elements to the spatially closest elements of another interface mesh using a kd-tree search, e.g. to set up two-sided interfaces")
 		.def("rebuild_after_adapt",handle_method<InterfaceMeshHandle>(&pyoomph::InterfaceMesh::rebuild_after_adapt), "Regenerates this interface mesh's elements after the adjacent bulk mesh has been adapted")
+		.def("get_interface_element_structural_keys",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self)
+			 {
+			 auto v=self->get_interface_element_structural_keys();
+			 return vector_to_ndarray(v); }),
+			 "For every element of this interface, in local element order, the triple (root element index in the undistributed "
+			 "base mesh, packed refinement path, face index in the bulk element) as a flat array of 3*nelement entries. A face "
+			 "element has no refinement tree of its own, so this addresses it through the bulk element it is attached to; the "
+			 "result is independent of the partition, which is what lets a state file written on one number of processes be "
+			 "read on another. Entries are -1 when the base element indices have not been assigned yet.")
 		.def("get_discontinuous_unrestored_elements",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self)
 			 { return self->get_discontinuous_unrestored_elements(); }), "Indices of the elements whose own discontinuous (DL/D0) fields the last transfer - after an adaptation or a remeshing - could neither take from the old mesh nor fill from a recovery expression (Equations.set_facet_recovery), i.e. the ones left at zero. Describes that last transfer, not the current values, so it is unchanged by a subsequent solve")
 		.def("get_own_nodal_dg_fields",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self)

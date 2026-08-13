@@ -440,23 +440,54 @@ namespace pyoomph
 		std::vector<double> opposite_offset_vector,reversed_opposite_offset_vector; // Constant offset (e.g. for periodic/translated interfaces) to the opposite side and its reverse
 		bool warned_about_discontinuous_reset = false; // So rebuild_after_adapt's DL/D0 warning is printed once per interface, not once per adaptation
 
-		// Interface-owned DL/D0 values as a cloud of sampled values, which is how they are carried
-		// across an adaptation (and, with the values pulled from the old mesh instead, across a
+		// Interface-owned discontinuous values as a cloud of sampled values, which is how they are
+		// carried across an adaptation (and, with the values pulled from the old mesh instead, across a
 		// remeshing). The elements themselves cannot
 		// be carried: clear_before_adapt() deletes every one of them and rebuild_after_adapt() makes
 		// new ones from the adapted bulk mesh, so there is no father/son relation to exploit the way
 		// the bulk path does. What survives is the field as a function of position, sampled at
 		// scattered points and fitted back onto whatever elements come out the other side.
+		//
+		// Every discontinuous space goes through this, DL/D0 and the NODAL DG spaces (D1/D2/D1TB/D2TB)
+		// alike: what is sampled is always one scalar per field per point, and what differs is only the
+		// basis the fit reconstructs coefficients in (DL's modal one, a nodal Lagrange one, or the
+		// single constant of D0) and which internal Data those coefficients are written to.
 		struct DiscontinuousSnapshot
 		{
 			unsigned space_dim = 0;     // coordinate components per sample
 			unsigned nDL = 0, nD0 = 0;  // field counts at snapshot time, checked again on restore
 			unsigned nDL_modes = 0;     // eleminfo.nnode_DL, i.e. how many coefficients a DL field has
 			unsigned ntstorage = 0;     // time levels stored per sample - history is the whole point
+			// One entry per PRESENT nodal DG space, in the func table's order. Only the fields the
+			// interface declares itself are carried (numfields_new); the ones inherited from the bulk
+			// belong to the bulk element and travel with it. Part of the compatibility check, because a
+			// snapshot taken against a different set of spaces cannot be read back.
+			std::vector<unsigned> dg_space_index, dg_numfields_new, dg_nmodes;
 			std::vector<double> coords; // space_dim per sample
-			std::vector<double> values; // ntstorage*(nDL+nD0) per sample
+			std::vector<double> values; // ntstorage*(sum(dg_numfields_new)+nDL+nD0) per sample
+			// Scalars stored per sample and time level, in the internal-Data order [DG][DL][D0].
+			unsigned nvalues_per_time() const
+			{
+				unsigned n = nDL + nD0;
+				for (unsigned s = 0; s < dg_numfields_new.size(); s++)
+					n += dg_numfields_new[s];
+				return n;
+			}
+			bool same_fields_as(const DiscontinuousSnapshot &o) const
+			{
+				return nDL == o.nDL && nD0 == o.nD0 && dg_space_index == o.dg_space_index &&
+					   dg_numfields_new == o.dg_numfields_new && dg_nmodes == o.dg_nmodes;
+			}
 			bool empty() const { return coords.empty(); }
-			void clear() { coords.clear(); values.clear(); space_dim = nDL = nD0 = nDL_modes = ntstorage = 0; }
+			void clear()
+			{
+				coords.clear();
+				values.clear();
+				dg_space_index.clear();
+				dg_numfields_new.clear();
+				dg_nmodes.clear();
+				space_dim = nDL = nD0 = nDL_modes = ntstorage = 0;
+			}
 		};
 		DiscontinuousSnapshot discontinuous_snapshot;
 		// Which samples of a value cloud belong to which of this mesh's elements: element -> list of
@@ -504,6 +535,15 @@ namespace pyoomph
 		// assume that anything stayed where it was, so it disambiguates the facet soup topologically -
 		// see the implementation.
 		virtual void interpolate_discontinuous_data_from(InterfaceMesh *old);
+		// Partition-independent address of every element of this interface, three longs each:
+		// (root global_base_index, packed refinement path) of the bulk element it is attached to, plus
+		// its face index there. A face element has no refinement tree of its own, so it cannot use
+		// Mesh::get_element_structural_keys(); but the bulk element it hangs off does, and the face
+		// index picks it out uniquely from among that element's faces. Same key the interior-facet halo
+		// scheme pairs facets across ranks with (Problem::setup_interior_facet_halo_scheme), which is
+		// what makes a state file written on one partition readable on another.
+		// -1,-1,-1 for an element whose bulk key is not available (before the base indices are assigned).
+		std::vector<long> get_interface_element_structural_keys();
 		const std::vector<unsigned> &get_discontinuous_unrestored_elements() const { return discontinuous_unrestored_elements; }
 		// Unpin/null out dofs on this interface that must not be treated as independent (e.g. because they are
 		// algebraically slaved to the bulk mesh across the interface).

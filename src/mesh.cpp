@@ -6174,6 +6174,36 @@ namespace pyoomph
     return off;
   }
 
+  // The nodal DG spaces (D1/D2/D1TB/D2TB) this interface declares fields on ITSELF, in func-table
+  // order. Fields inherited from the bulk are excluded: they are the bulk element's storage, read
+  // here through external data, and they travel across an adaptation by the bulk's own father->son
+  // route (BulkElementBase::further_build). A space with no nodes on this element - which is how a
+  // TB space appears when the geometry never got its bubble node - is skipped, since it has no
+  // storage to carry.
+  static std::vector<JITFuncSpec_Table_FiniteElement_SpaceInfo_t *>
+  own_dg_spaces(const JITFuncSpec_Table_FiniteElement_t *ft, BulkElementBase *e)
+  {
+    std::vector<JITFuncSpec_Table_FiniteElement_SpaceInfo_t *> res;
+    for (unsigned i = 0; i < ft->num_present_dg_spaces; i++)
+    {
+      auto *si = ft->present_dg_spaces[i];
+      if (!si->numfields_new)
+        continue;
+      if (!e->get_eleminfo()->nnode_of_space[si->space_index])
+        continue;
+      res.push_back(si);
+    }
+    return res;
+  }
+
+  // Basis functions per direction of a DG space, i.e. its polynomial order plus one: 3 for the
+  // second-order spaces (D2/D2TB), 2 for the first-order ones. Drives the sampling density, since the
+  // fit has to stay determined on each SON of a refined element, not merely on the element.
+  static unsigned dg_space_nmode_1d(unsigned space_index)
+  {
+    return (space_index == SPACE_INDEX_D2TB || space_index == SPACE_INDEX_D2) ? 3 : 2;
+  }
+
   // Samples every element on a lattice in its own local coordinates. Five per direction rather than
   // just the nodes: after one refinement each son must still receive enough points to determine a
   // linear (DL) field on its own, and a father's nodes sit on its sons' shared edges, where they
@@ -6186,7 +6216,8 @@ namespace pyoomph
   // an edge case at all: the facets created inside a refined element END on the surrounding facets,
   // so on the next unrefinement every one of them dropped a sample onto a surviving facet - a
   // constant field came back at ~5/6 of its value after a refine/unrefine round trip.
-  static void sample_local_coordinates(BulkElementBase *e, std::vector<oomph::Vector<double>> &out)
+  static void sample_local_coordinates(BulkElementBase *e, std::vector<oomph::Vector<double>> &out,
+                                       unsigned nmode_1d = 2)
   {
     out.clear();
     const unsigned edim = e->dim();
@@ -6195,10 +6226,16 @@ namespace pyoomph
       out.push_back(oomph::Vector<double>());
       return;
     }
-    const unsigned NS = 5;
+    // Five per direction was chosen for DL, whose fit needs two coefficients per direction: after one
+    // refinement each son still gets at least two of them, so the fit stays determined on a SON and
+    // not merely on the whole element. A nodal DG space needs more - "D2" has three per direction -
+    // and an underdetermined fit does not fail loudly, it falls back to a constant and quietly drops
+    // the quadratic part of every surviving facet. So the lattice grows with the widest basis
+    // present: 2*nmode_1d+1 keeps the son count at nmode_1d and reproduces the historical 5 for DL.
+    const unsigned NS = 2 * (nmode_1d < 2 ? 2 : nmode_1d) + 1;
     // 0.8 keeps every sample at least a tenth of an element away from its boundary while still
-    // giving each son of a refined element at least two lattice points per direction, which is what
-    // the DL fit needs to stay determined.
+    // giving each son of a refined element enough lattice points per direction for the fit to stay
+    // determined.
     const double shrink = 0.8;
     const double smin = e->s_min(), smax = e->s_max();
     unsigned total = 1;
@@ -6243,12 +6280,13 @@ namespace pyoomph
       return;
     auto *ft = code->get_func_table();
     const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
-    if (!nDL && !nD0)
-      return;
 
     ensure_eleminfo_filled(this);
     BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     if (!e0 || !e0->ninternal_data())
+      return;
+    const auto dgspaces = own_dg_spaces(ft, e0);
+    if (!nDL && !nD0 && dgspaces.empty())
       return;
 
     auto &snap = discontinuous_snapshot;
@@ -6257,21 +6295,39 @@ namespace pyoomph
     snap.nD0 = nD0;
     snap.nDL_modes = e0->get_eleminfo()->nnode_DL;
     snap.ntstorage = e0->internal_data_pt(0)->time_stepper_pt()->ntstorage();
+    unsigned nmode_1d = 2; // DL needs two coefficients per direction; a D2 space needs three
+    for (auto *si : dgspaces)
+    {
+      snap.dg_space_index.push_back(si->space_index);
+      snap.dg_numfields_new.push_back(si->numfields_new);
+      snap.dg_nmodes.push_back(e0->get_eleminfo()->nnode_of_space[si->space_index]);
+      nmode_1d = std::max(nmode_1d, dg_space_nmode_1d(si->space_index));
+    }
 
     std::vector<oomph::Vector<double>> slist;
     std::vector<double> vDL, vD0;
+    oomph::Vector<double> vDG;
     for (unsigned ie = 0; ie < this->nelement(); ie++)
     {
       BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
       if (!e)
         continue;
-      sample_local_coordinates(e, slist);
+      sample_local_coordinates(e, slist, nmode_1d);
       for (const auto &sloc : slist)
       {
         for (unsigned d = 0; d < snap.space_dim; d++)
           snap.coords.push_back(e->interpolated_x(sloc, d));
         for (unsigned t = 0; t < snap.ntstorage; t++)
         {
+          // Order matches the internal-Data layout [DG][DL][D0], so the fit can walk both together.
+          for (auto *si : dgspaces)
+          {
+            // get_DG_fields_at_s returns the space's inherited-from-bulk fields first and the ones
+            // declared here last; only the latter are ours to carry.
+            e->get_DG_fields_at_s(si->space_index, t, sloc, vDG);
+            for (unsigned f = si->numfields - si->numfields_new; f < si->numfields; f++)
+              snap.values.push_back(vDG[f]);
+          }
           if (nDL)
           {
             e->get_interpolated_fields_DL(sloc, vDL, t);
@@ -6340,13 +6396,18 @@ namespace pyoomph
     std::vector<double> A0;     // nmode x nmode normal matrix
     unsigned n_fallback = 0;
 
-    void build(BulkElementBase *e, const std::vector<std::vector<double>> &slocs, bool need_DL)
+    // `space_index` selects the basis to fit in: -1 is the DL modal basis, otherwise the nodal basis
+    // of that DG space. Nothing else differs - both are partitions of unity over the element, which
+    // is what makes the constant fallback below correct for either.
+    void build(BulkElementBase *e, const std::vector<std::vector<double>> &slocs, int space_index,
+               bool need_fit)
     {
-      nmode = e->get_eleminfo()->nnode_DL;
+      nmode = (space_index < 0 ? e->get_eleminfo()->nnode_DL
+                               : e->get_eleminfo()->nnode_of_space[(unsigned)space_index]);
       npts = slocs.size();
       psi_at.assign(npts * (nmode ? nmode : 1), 1.0);
       A0.assign(nmode * nmode, 0.0);
-      if (!need_DL || !nmode)
+      if (!need_fit || !nmode)
         return;
       for (unsigned p = 0; p < npts; p++)
       {
@@ -6354,7 +6415,10 @@ namespace pyoomph
         oomph::Vector<double> sv(slocs[p].size());
         for (unsigned d = 0; d < sv.size(); d++)
           sv[d] = slocs[p][d];
-        e->shape_at_s_DL(sv, psi);
+        if (space_index < 0)
+          e->shape_at_s_DL(sv, psi);
+        else
+          e->shape_of_space((unsigned)space_index, sv, psi);
         for (unsigned l = 0; l < nmode; l++)
           psi_at[p * nmode + l] = psi[l];
       }
@@ -6376,8 +6440,9 @@ namespace pyoomph
       return m / npts;
     }
 
-    // vals holds one value per sample point; coeffs comes back with nmode DL coefficients.
-    void fit_DL(const std::vector<double> &vals, std::vector<double> &coeffs)
+    // vals holds one value per sample point; coeffs comes back with nmode coefficients in whichever
+    // basis build() was given.
+    void fit(const std::vector<double> &vals, std::vector<double> &coeffs)
     {
       std::vector<double> A = A0;
       coeffs.assign(nmode, 0.0);
@@ -6427,12 +6492,26 @@ namespace pyoomph
     discontinuous_unrestored_elements.clear();
     auto *ft = code->get_func_table();
     const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
+    if (!this->nelement())
+      return 0;
+
+    // The nodal DG block, ahead of DL/D0 in both the internal Data and the snapshot's value order.
+    BulkElementBase *efirst = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    const auto dgspaces = efirst ? own_dg_spaces(ft, efirst)
+                                 : std::vector<JITFuncSpec_Table_FiniteElement_SpaceInfo_t *>();
+    unsigned nDG = 0, nmode_1d = 2;
+    for (auto *si : dgspaces)
+    {
+      nDG += si->numfields_new;
+      nmode_1d = std::max(nmode_1d, dg_space_nmode_1d(si->space_index));
+    }
 
     // Opt-in per-field recovery for facets that receive no samples: a local expression named
     // __facet_recovery_<field> (see Equations.set_facet_recovery) evaluated on the same lattice the
     // snapshot uses and fitted the same way. This is the HDG answer for a facet created inside a
     // refined bulk element - its trace is defined by the bulk solution, not by the old skeleton.
-    std::vector<int> recovery_index(nDL + nD0, -1);
+    const unsigned nfield = nDG + nDL + nD0;
+    std::vector<int> recovery_index(nfield, -1);
     bool any_recovery = false;
     for (unsigned i = 0; i < ft->numlocal_expressions; i++)
     {
@@ -6440,16 +6519,23 @@ namespace pyoomph
       if (nam.compare(0, 17, "__facet_recovery_") != 0)
         continue;
       const std::string field = nam.substr(17);
+      unsigned base = 0;
+      for (auto *si : dgspaces)
+      {
+        // Only the fields declared at this level are carried, and they are the LAST ones of the space.
+        for (unsigned fi = 0; fi < si->numfields_new; fi++)
+          if (field == si->fieldnames[si->numfields - si->numfields_new + fi])
+          { recovery_index[base + fi] = (int)i; any_recovery = true; }
+        base += si->numfields_new;
+      }
       for (unsigned fi = 0; fi < nDL; fi++)
-        if (field == ft->info_DL.fieldnames[fi]) { recovery_index[fi] = (int)i; any_recovery = true; }
+        if (field == ft->info_DL.fieldnames[fi]) { recovery_index[nDG + fi] = (int)i; any_recovery = true; }
       for (unsigned fi = 0; fi < nD0; fi++)
-        if (field == ft->info_D0.fieldnames[fi]) { recovery_index[nDL + fi] = (int)i; any_recovery = true; }
+        if (field == ft->info_D0.fieldnames[fi]) { recovery_index[nDG + nDL + fi] = (int)i; any_recovery = true; }
     }
     bool recovery_for_all = any_recovery;
-    for (unsigned fi = 0; fi < nDL + nD0; fi++)
+    for (unsigned fi = 0; fi < nfield; fi++)
       if (recovery_index[fi] < 0) recovery_for_all = false;
-
-    const unsigned nfield = nDL + nD0;
     // An empty assignment means the snapshot is not usable here at all (none taken, taken against
     // different fields, or every sample rejected), so nothing below may read from it.
     const bool use_snapshot = !per_elem.empty();
@@ -6488,7 +6574,7 @@ namespace pyoomph
       }
       else
       {
-        sample_local_coordinates(e, lattice);
+        sample_local_coordinates(e, lattice, nmode_1d);
         for (const auto &s : lattice)
           slocs.push_back(std::vector<double>(s.begin(), s.end()));
         ensure_local_expr_evaluable(e);
@@ -6501,29 +6587,58 @@ namespace pyoomph
           n_recovered++;
       }
 
-      ElementModeFit fit;
-      fit.build(e, slocs, nDL > 0);
+      // One fit per basis: the DL modal one, plus the nodal basis of every DG space present. They
+      // share the sample locations but not the shape functions, so the normal matrix is built once
+      // per basis and reused across that basis's fields and all their time levels.
+      ElementModeFit dlfit;
+      dlfit.build(e, slocs, -1, nDL > 0);
+      std::vector<ElementModeFit> dgfit(dgspaces.size());
+      for (unsigned s = 0; s < dgspaces.size(); s++)
+        dgfit[s].build(e, slocs, (int)dgspaces[s]->space_index, true);
+
+      // Where field `fi` of the combined [DG][DL][D0] ordering is stored, and how it is fitted.
+      // A D0 field has no basis at all - its single value is the mean.
+      auto write_field = [&](unsigned fi, const std::vector<double> &v, unsigned t_lo, unsigned t_hi) {
+        unsigned base = 0;
+        for (unsigned s = 0; s < dgspaces.size(); s++)
+        {
+          if (fi < base + dgspaces[s]->numfields_new)
+          {
+            dgfit[s].fit(v, coeffs);
+            oomph::Data *d = e->internal_data_pt(dgspaces[s]->internal_offset_new + (fi - base));
+            for (unsigned t = t_lo; t < t_hi; t++)
+              for (unsigned l = 0; l < dgfit[s].nmode; l++)
+                d->set_value(t, l, coeffs[l]);
+            return;
+          }
+          base += dgspaces[s]->numfields_new;
+        }
+        if (fi < nDG + nDL)
+        {
+          dlfit.fit(v, coeffs);
+          oomph::Data *d = e->internal_data_pt(dg_off + (fi - nDG));
+          for (unsigned t = t_lo; t < t_hi; t++)
+            for (unsigned l = 0; l < dlfit.nmode; l++)
+              d->set_value(t, l, coeffs[l]);
+          return;
+        }
+        const double m = dlfit.mean(v);
+        oomph::Data *d = e->internal_data_pt(dg_off + (fi - nDG));
+        for (unsigned t = t_lo; t < t_hi; t++)
+          d->set_value(t, 0, m);
+      };
 
       if (from_snapshot)
       {
         const auto &pts = found->second;
         for (unsigned t = 0; t < ntstorage; t++)
         {
-          for (unsigned fi = 0; fi < nDL; fi++)
+          for (unsigned fi = 0; fi < nfield; fi++)
           {
             vals.assign(pts.size(), 0.0);
             for (unsigned p = 0; p < pts.size(); p++)
               vals[p] = snap.values[(size_t)pts[p].first * stride + t * nfield + fi];
-            fit.fit_DL(vals, coeffs);
-            for (unsigned l = 0; l < fit.nmode; l++)
-              e->internal_data_pt(dg_off + fi)->set_value(t, l, coeffs[l]);
-          }
-          for (unsigned fi = 0; fi < nD0; fi++)
-          {
-            double m = 0.0;
-            for (unsigned p = 0; p < pts.size(); p++)
-              m += snap.values[(size_t)pts[p].first * stride + t * nfield + nDL + fi];
-            e->internal_data_pt(dg_off + nDL + fi)->set_value(t, 0, m / pts.size());
+            write_field(fi, vals, t, t + 1);
           }
         }
       }
@@ -6544,22 +6659,12 @@ namespace pyoomph
           // The recovery expression sees the current state only, so the value it produces is written
           // to every time level: a facet that pops into existence with a consistent history has no
           // spurious time derivative at the next step, which zeroed history levels would create.
-          if (fi < nDL)
-          {
-            fit.fit_DL(vals, coeffs);
-            for (unsigned t = 0; t < ntstorage; t++)
-              for (unsigned l = 0; l < fit.nmode; l++)
-                e->internal_data_pt(dg_off + fi)->set_value(t, l, coeffs[l]);
-          }
-          else
-          {
-            const double m = fit.mean(vals);
-            for (unsigned t = 0; t < ntstorage; t++)
-              e->internal_data_pt(dg_off + fi)->set_value(t, 0, m);
-          }
+          write_field(fi, vals, 0, ntstorage);
         }
       }
-      n_fallback += fit.n_fallback;
+      n_fallback += dlfit.n_fallback;
+      for (const auto &f : dgfit)
+        n_fallback += f.n_fallback;
     }
     (void)n_fallback;
     (void)n_recovered;
@@ -6577,14 +6682,28 @@ namespace pyoomph
     }
     auto *ft = code->get_func_table();
     const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
-    if (!nDL && !nD0)
+    ensure_eleminfo_filled(this);
+    BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    const auto dgspaces = e0 ? own_dg_spaces(ft, e0)
+                             : std::vector<JITFuncSpec_Table_FiniteElement_SpaceInfo_t *>();
+    if (!nDL && !nD0 && dgspaces.empty())
     {
       snap.clear();
       return;
     }
     // A snapshot taken against a different code instance describes different fields; there is nothing
-    // sensible to fit from it, but the recovery pass below can still do its job.
-    const bool have_snapshot = !snap.empty() && snap.nDL == nDL && snap.nD0 == nD0;
+    // sensible to fit from it, but the recovery pass below can still do its job. The nodal DG spaces
+    // are part of that signature: same field COUNTS but a different space is still a different layout.
+    DiscontinuousSnapshot now;
+    now.nDL = nDL;
+    now.nD0 = nD0;
+    for (auto *si : dgspaces)
+    {
+      now.dg_space_index.push_back(si->space_index);
+      now.dg_numfields_new.push_back(si->numfields_new);
+      now.dg_nmodes.push_back(e0->get_eleminfo()->nnode_of_space[si->space_index]);
+    }
+    const bool have_snapshot = !snap.empty() && snap.same_fields_as(now);
     // No snapshot AT ALL is not an adaptation losing data: it is force_remesh() building this
     // skeleton from scratch, where the values arrive afterwards through
     // interpolate_discontinuous_data_from(). Warning here would be both wrong and harmful, since it
@@ -6671,6 +6790,30 @@ namespace pyoomph
   // surrounding its position. Where that yields nothing the search widens by one ring of face
   // neighbours, and beyond that the element is left to its recovery expression, since a value from
   // further away says more about the search radius than about the solution.
+  std::vector<long> InterfaceMesh::get_interface_element_structural_keys()
+  {
+    std::vector<long> res;
+    res.reserve(3 * this->nelement());
+    for (unsigned ie = 0; ie < this->nelement(); ie++)
+    {
+      long root = -1, path = -1, face = -1;
+      InterfaceElementBase *e = dynamic_cast<InterfaceElementBase *>(this->element_pt(ie));
+      if (e)
+      {
+        if (!Mesh::element_structural_key(e->bulk_element_pt(), root, path))
+        {
+          root = -1;
+          path = -1;
+        }
+        face = e->face_index();
+      }
+      res.push_back(root);
+      res.push_back(path);
+      res.push_back(face);
+    }
+    return res;
+  }
+
   void InterfaceMesh::interpolate_discontinuous_data_from(InterfaceMesh *old)
   {
     if (!old || old == this || !code || !this->nelement())
@@ -6679,6 +6822,18 @@ namespace pyoomph
     const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
     if (!nDL && !nD0)
       return;
+    // The adaptation path carries nodal DG facet fields (they are sampled and refitted like DL), but
+    // this one pulls its values through MeshPointLocator's EvalRequest, which only knows how to
+    // evaluate DL and D0. Refusing here rather than transferring a short value block: the shared
+    // fit_discontinuous_data() below sizes itself from the ELEMENT, so a missing DG block would be
+    // read as a stride error rather than noticed.
+    if (BulkElementBase *e0chk = dynamic_cast<BulkElementBase *>(this->element_pt(0)))
+    {
+      if (!own_dg_spaces(ft, e0chk).empty())
+        throw_runtime_error("Cannot transfer the nodal discontinuous (D1/D2/...) field(s) of interface '" + interfacename +
+                            "' to a remeshed mesh yet: the pull transfer evaluates the old mesh through MeshPointLocator, "
+                            "which handles DL and D0 only. Spatial adaptation of these fields does work.");
+    }
     if (!old->code)
       throw_runtime_error("Cannot transfer the discontinuous (DL/D0) fields of interface '" + interfacename + "': the previous mesh has no generated code attached");
     auto *oft = old->code->get_func_table();
@@ -7145,19 +7300,13 @@ namespace pyoomph
   {
     if (code)
     {
-      auto *ft = code->get_func_table();
-      std::string dg_fields;
-      for (const auto &f : this->get_own_nodal_dg_fields())
-        dg_fields += (dg_fields.empty() ? "" : ", ") + f;
-      if (!dg_fields.empty())
-      {
-        // Unlike DL/D0, a nodal DG field's values sit in per-node slots of the element's internal
-        // Data, and there is no get_interpolated_fields_Dx() to sample them with, so the snapshot
-        // point cloud cannot be filled for them. Everything else about the adaptation works.
-        // A REMESHING is refused before it starts (Problem.force_remesh), because throwing from here
-        // would leave the problem with half its meshes replaced.
-        throw_runtime_error("Cannot carry the nodal discontinuous (D1/D2/...) field(s) " + dg_fields + " defined on '" + std::string(ft->domain_name) + "' through a spatial adaptation yet. Use a DL or D0 facet space instead (those are transferred), or set Problem.max_refinement_level=0 and Problem.initial_adaption_steps=0.");
-      }
+      // Nodal DG (D1/D2/...) facet fields used to be refused here, on the grounds that their values
+      // sit in per-node slots of the element's internal Data and there was "no get_interpolated_fields_Dx()
+      // to sample them with". That was never quite true - BulkElementBase::get_DG_fields_at_s() has
+      // always interpolated exactly those slots, it is what the bulk father->son transfer uses - and
+      // snapshot_discontinuous_data()/fit_discontinuous_data() now carry them alongside DL/D0, fitting
+      // each in its own nodal basis. What is still refused is the REMESH pull transfer, which goes
+      // through MeshPointLocator (see interpolate_discontinuous_data_from).
 
       // Interface-owned DL/D0 fields used only to be reset to zero here - current value AND time
       // history - because clear_before_adapt() destroys the internal Data holding them. A field its

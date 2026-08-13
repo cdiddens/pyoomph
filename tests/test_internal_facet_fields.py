@@ -518,16 +518,38 @@ class _AdaptiveTrace(_TraceProblem):
         self.max_refinement_level = 2
 
 
+def _adapt_and_resolve(space):
+    """Adapt once, then solve, reporting how many facets the transfer could not fill."""
+    with _AdaptiveTrace(kind="quad", space=space) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        p.refine_uniformly()
+        unrestored = len(p.get_mesh("domain/_internal_facets_").get_discontinuous_unrestored_elements())
+        p.solve()
+        return unrestored, _observables(p)
+
+
 @pytest.mark.parametrize("space", ["D1", "D2"])
-def test_nodal_dg_skeleton_field_under_adaptivity_is_rejected_cleanly(space):
-    """DL/D0 are carried across an adaptation (see the section below); the NODAL discontinuous spaces
-    are not - their values sit in per-node slots of the element's internal Data and there is no
-    get_interpolated_fields_Dx() to build the snapshot point cloud from. That has to be an
-    explanatory error rather than a crash."""
-    with pytest.raises(RuntimeError, match="Cannot carry the nodal discontinuous"):
-        with _AdaptiveTrace(kind="quad", space=space) as p:
-            p.quiet()
-            p.initialise()
+def test_nodal_dg_skeleton_field_is_carried_through_an_adaptation(space):
+    """The nodal discontinuous spaces go through the adaptation exactly like DL now.
+
+    They used to be refused, on the grounds that their values sit in per-node slots of the element's
+    internal Data and there was "no get_interpolated_fields_Dx() to build the snapshot point cloud
+    from". The sampler was always there - BulkElementBase::get_DG_fields_at_s(), which the bulk
+    father->son transfer uses - so snapshot/refit now carries every discontinuous space, each fitted in
+    its own basis (see dev_docs/internal_facet_fields.md).
+
+    The oracle is DL, which took this path all along: a nodal space must reach the same facets (same
+    unrestored count on the same mesh) and must be exact again after the solve, since a linear trace
+    lies in every one of these spaces."""
+    ref_unrestored, _ref = _adapt_and_resolve("DL")
+    unrestored, obs = _adapt_and_resolve(space)
+    assert unrestored == ref_unrestored, (
+        "%s left %d facets unfilled where DL leaves %d on the same adaptation" % (
+            space, unrestored, ref_unrestored))
+    assert abs(obs["err2"]) < 1e-12, "%s: trace error %.3e after adapting and solving" % (space, obs["err2"])
+    assert abs(obs["err1"]) < 1e-11, obs
 
 
 # ----------------------------------------------------------------------------------------------
