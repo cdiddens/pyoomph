@@ -7394,27 +7394,6 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             return 0
         return self.max_refinement_level if num_adapt is None else num_adapt
 
-    def _refuse_remeshing_with_nodal_dg_fields(self)->None:
-        """Stop a remesh that would lose an interface's own nodal discontinuous (D1/D2/...) field.
-
-        Those values sit in per-node slots of the element's internal data and there is no
-        ``get_interpolated_fields_Dx()`` to read them with, so neither the adaptation's snapshot nor
-        the remeshing transfer (``InterfaceMesh::interpolate_discontinuous_data_from``, DL/D0 only)
-        can carry them. The rebuild in the middle of :py:meth:`force_remesh` would notice and throw
-        anyway - but by then half the meshes have been replaced and the problem cannot be used at all
-        any more, so it is refused here, before anything is touched.
-        """
-        offenders:list[str]=[]
-        for m in self._interfacemeshes:
-            fields=m.get_own_nodal_dg_fields()
-            if fields:
-                offenders.append(m.get_full_name()+": "+", ".join(fields))
-        if not offenders:
-            return
-        raise RuntimeError("Cannot remesh: the nodal discontinuous (D1/D2/...) field(s) below are defined on an "
-                           "interface and cannot be transferred to a new mesh yet. Use a DL or D0 facet space "
-                           "instead (those are transferred), or do not remesh.\n  "+"\n  ".join(offenders))
-
     def _refuse_distributed_remeshing(self,remeshers:list["RemesherBase"],interpolator:type["BaseMeshToMeshInterpolator"])->None:
         """Stop a remesh of a distributed problem whose ingredients do not all support one.
 
@@ -7543,7 +7522,6 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # and both before the first mesh is touched - see _check_distributed_remeshing_scope.
         self._refuse_distributed_remeshing(remeshers,interpolator)
         self._check_distributed_remeshing_scope(remeshers,num_adapt)
-        self._refuse_remeshing_with_nodal_dg_fields()
         self.invalidate_cached_mesh_data()
         print("REMESHING")
         

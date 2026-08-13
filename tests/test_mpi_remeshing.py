@@ -334,7 +334,8 @@ The variants are the three transfer mechanisms, which fail in different ways:
 
 
 @pytest.mark.parametrize("nproc", [2, 4])
-def test_a_facet_field_survives_the_distributed_remesh(tmp_path, nproc):
+@pytest.mark.parametrize("facet_space", ["DL", "D1"])
+def test_a_facet_field_survives_the_distributed_remesh(tmp_path, nproc, facet_space):
     """An unknown on the interior-facet skeleton, through a remesh of a distributed problem.
 
     A remesh destroys the skeleton entirely and rebuilds it from the new bulk mesh, so which facets
@@ -343,15 +344,20 @@ def test_a_facet_field_survives_the_distributed_remesh(tmp_path, nproc):
     skeleton and does not involve the solution at all, so a facet that ended up enumerated on both
     of its holders inflates it by that facet's length and a dropped one deflates it - neither of which
     the solution would necessarily reveal.
+
+    "D1" is the nodal case, and the one that reaches the DG block of the values pooled across ranks
+    when a rank could not place an element itself (Mesh::share_interpolation_across_ranks): the DL/D0
+    block sits BEHIND that one in the element's internal data.
     """
-    reference = _run_serially(tmp_path / "serial", ["--facet-field"], timeout=600)
+    args = ["--facet-field", "--facet-space", facet_space]
+    reference = _run_serially(tmp_path / "serial", args, timeout=600)
     assert reference.returncode == 0, \
         "the serial reference run failed:\n%s" % reference.stdout[-2000:]
     serial = _skeleton(reference)
     assert serial is not None and serial["meas"] > 0, \
         "the serial run did not report the skeleton:\n%s" % reference.stdout[-2000:]
 
-    proc = _run(tmp_path / "mpi", ["--distribute", "--facet-field"], nproc=nproc, timeout=900)
+    proc = _run(tmp_path / "mpi", ["--distribute"] + args, nproc=nproc, timeout=900)
     assert proc.returncode == 0, \
         "the run failed:\n--- stdout tail ---\n%s\n--- stderr tail ---\n%s" % (
             proc.stdout[-2000:], proc.stderr[-2000:])

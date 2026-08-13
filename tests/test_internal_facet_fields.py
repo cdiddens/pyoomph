@@ -142,9 +142,9 @@ class _TraceProblem(Problem):
                 feqs += self.extra
             eqs += feqs @ "_internal_facets_"
         self += eqs @ "domain"
-        # Nodal Dx facet spaces cannot be snapshotted, so rebuild_after_adapt refuses to carry them
-        # through an adaptation. Nothing in this group needs adaptivity, and the initial adaption
-        # would otherwise trip that guard for the Dx parametrisations.
+        # Nothing in this group needs adaptivity, and an initial adaption would only make the dof
+        # counts below depend on the error estimator. (Adaptivity itself is fine for every space;
+        # that is what the _AdaptProblem group at the end of the file is for.)
         self.max_refinement_level = 0
 
 
@@ -1236,7 +1236,7 @@ def _unrestored(p):
     return list(p.get_mesh("domain/_internal_facets_").get_discontinuous_unrestored_elements())
 
 
-@pytest.mark.parametrize("space", ["DL", "D0"])
+@pytest.mark.parametrize("space", ["DL", "D0", "D1", "D2"])
 def test_an_identical_remesh_reproduces_the_skeleton_exactly(space):
     """The sharp one. Nothing is interpolated here - every sample point of every new facet sits on the
     old facet it came from - so the whole state has to come back to round-off, without a solve."""
@@ -1261,10 +1261,11 @@ def test_an_identical_remesh_reproduces_the_skeleton_exactly(space):
     assert after["err2"] == pytest.approx(before["err2"], abs=1e-12), (before, after)
 
 
-def test_a_coarser_remesh_keeps_the_trace_within_the_interpolation_error():
+@pytest.mark.parametrize("space", ["DL", "D1", "D2"])
+def test_a_coarser_remesh_keeps_the_trace_within_the_interpolation_error(space):
     """Every new facet still finds old traces around it, so nothing is left at zero; the values are
     old traces read off a distance away, which is a first-order error in that distance."""
-    with _RemeshProblem(space="DL", res=0.3, res_after=0.6) as p:
+    with _RemeshProblem(space=space, res=0.3, res_after=0.6) as p:
         p.quiet()
         p.initialise()
         p.solve()
@@ -1284,11 +1285,12 @@ def test_a_coarser_remesh_keeps_the_trace_within_the_interpolation_error():
     assert abs(after["err2"]) < 1e-12, after           # one solve makes it exact again
 
 
-def test_a_finer_remesh_still_reaches_almost_every_new_facet():
+@pytest.mark.parametrize("space", ["DL", "D1", "D2"])
+def test_a_finer_remesh_still_reaches_almost_every_new_facet(space):
     """The direction that a snapshot-and-push transfer cannot do: most new facets lie in the INTERIOR
     of an old bulk element, where the old skeleton has no points to push. Pulling from the old facets
     around them covers all but a handful."""
-    with _RemeshProblem(space="DL", res=0.3, res_after=0.15) as p:
+    with _RemeshProblem(space=space, res=0.3, res_after=0.15) as p:
         p.quiet()
         p.initialise()
         p.solve()
@@ -1305,13 +1307,14 @@ def test_a_finer_remesh_still_reaches_almost_every_new_facet():
     assert abs(after["err2"]) < 1e-12, after
 
 
-def test_the_history_of_a_facet_field_survives_a_remesh():
+@pytest.mark.parametrize("space", ["DL", "D1", "D2"])
+def test_the_history_of_a_facet_field_survives_a_remesh(space):
     """A field its own residual determines algebraically is repaired by the next solve even with no
     transfer at all; its HISTORY is not, and that is what the next time step is computed from."""
 
     class _FacetRate(Equations):
         def define_fields(self):
-            self.define_scalar_field("r", "DL")
+            self.define_scalar_field("r", space)
 
         def define_residuals(self):
             r, rtest = var_and_test("r")
@@ -1342,11 +1345,13 @@ def test_the_history_of_a_facet_field_survives_a_remesh():
             assert after[k][t] == pytest.approx(before[k][t], abs=1e-12), (k, t, before[k], after[k])
 
 
-def test_the_recovery_expression_fills_what_a_finer_remesh_could_not():
+@pytest.mark.parametrize("space", ["DL", "D1"])
+def test_the_recovery_expression_fills_what_a_finer_remesh_could_not(space):
     """Same remesh as above, but with set_facet_recovery: the facets the old skeleton cannot reach are
     filled from the bulk instead of being left at zero, so nothing is reported unrestored and the D0
-    mask comes out at 1 everywhere."""
-    common = dict(space="DL", res=0.3, res_after=0.15)
+    mask comes out at 1 everywhere. A nodal trace is recovered in its own basis, so this is also the
+    only place the recovery expression is fitted onto anything but the DL modes."""
+    common = dict(space=space, res=0.3, res_after=0.15)
     with _RemeshProblem(recovery=False, **common) as p:
         p.quiet()
         p.initialise()
@@ -1368,8 +1373,9 @@ def test_the_recovery_expression_fills_what_a_finer_remesh_could_not():
     assert rec["err2"] < plain["err2"], (rec, plain)
 
 
-def test_facets_a_remesh_could_not_fill_are_reported_and_warned_about(capfd):
-    with _RemeshProblem(space="DL", res=0.3, res_after=0.15) as p:
+@pytest.mark.parametrize("space", ["DL", "D1"])
+def test_facets_a_remesh_could_not_fill_are_reported_and_warned_about(capfd, space):
+    with _RemeshProblem(space=space, res=0.3, res_after=0.15) as p:
         p.quiet()
         p.initialise()
         p.solve()
@@ -1387,19 +1393,24 @@ def test_facets_a_remesh_could_not_fill_are_reported_and_warned_about(capfd):
     assert "from the previous mesh" in out, out[-2000:]   # not the adaptation wording
 
 
-def test_a_nodal_dx_facet_field_is_rejected_on_a_remesh():
-    """Dx values sit in per-node slots with no get_interpolated_fields_Dx() to read them, so neither
-    transfer path can carry them.
-
-    It has to be refused BEFORE the remesh starts, not by the rebuild in the middle of it: throwing
-    from there leaves half the meshes replaced and the problem unusable - which showed up as the NEXT
-    problem in the same process segfaulting, not as a failure here."""
-    with pytest.raises(RuntimeError, match="Cannot remesh"):
-        with _RemeshProblem(space="D1") as p:
-            p.quiet()
-            p.initialise()
-            p.solve()
-            p.force_remesh(interpolator=InternalInterpolator)
+def test_a_nodal_dx_facet_field_is_still_reported_as_one_after_a_remesh():
+    """`get_own_nodal_dg_fields()` used to be the predicate of the guard that refused this remesh
+    outright, on the grounds that Dx values sit in per-node slots with "no get_interpolated_fields_Dx()
+    to read them". They are pulled through MeshPointLocator's DG block now (the parametrised remesh
+    tests above cover what comes across), and the guard is gone - but the query is bound to Python and
+    stays, so this pins down that it still answers, and that the remesh no longer refuses."""
+    with _RemeshProblem(space="D1") as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        im = p.get_mesh("domain/_internal_facets_")
+        reported = list(im.get_own_nodal_dg_fields())
+        p.force_remesh(interpolator=InternalInterpolator)
+        after = list(p.get_mesh("domain/_internal_facets_").get_own_nodal_dg_fields())
+        unrestored = _unrestored(p)
+    assert reported == ["p (D1)"], reported
+    assert after == reported, (reported, after)
+    assert unrestored == [], unrestored
 
 
 def test_a_remesh_followed_by_an_adaptation_composes():

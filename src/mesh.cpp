@@ -6140,7 +6140,7 @@ namespace pyoomph
   // (shared between adjacent elements), so a seen-set avoids double deletion.
   void InterfaceMesh::clear_before_adapt()
   {
-    // Before anything is deleted: the DL/D0 values live in these elements' internal Data and have
+    // Before anything is deleted: the discontinuous values live in these elements' internal Data and have
     // no other home.
     this->snapshot_discontinuous_data();
     // And the halo/haloed lists point at the very elements about to go, so they have to go first.
@@ -6489,7 +6489,7 @@ namespace pyoomph
       ensure_local_expr_evaluable(dynamic_cast<BulkElementBase *>(o));
   }
 
-  // Fits sampled values back onto this mesh's own discontinuous (DL/D0) element data.
+  // Fits sampled values back onto this mesh's own discontinuous element data, of every space.
   //
   // `snap` carries the values, `per_elem` the assignment "which sample landed in which of THIS mesh's
   // elements, at which local coordinate there" - the only thing the two callers disagree about.
@@ -6566,8 +6566,12 @@ namespace pyoomph
       BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
       if (!e)
         continue;
-      if (!ntstorage)
-        ntstorage = e->internal_data_pt(dg_off)->time_stepper_pt()->ntstorage();
+      // Any of the element's discontinuous Data answers this; they share one time stepper. Asking
+      // internal_data_pt(dg_off) - the head of the DL/D0 block - ran off the end of the list on an
+      // interface that declares nodal DG fields and nothing else, which is precisely the case where
+      // there is no DL/D0 block (segfault on the first remesh of a D1-only skeleton).
+      if (!ntstorage && e->ninternal_data())
+        ntstorage = e->internal_data_pt(0)->time_stepper_pt()->ntstorage();
       auto found = per_elem.find(e);
       const bool from_snapshot = (found != per_elem.end() && !found->second.empty());
 
@@ -6772,7 +6776,7 @@ namespace pyoomph
     if (n_empty && warn_if_empty && !warned_about_discontinuous_reset)
     {
       warned_about_discontinuous_reset = true;
-      std::cout << "WARNING: transferring the discontinuous (DL/D0) fields of interface '" << interfacename
+      std::cout << "WARNING: transferring the discontinuous fields of interface '" << interfacename
                 << "' across an adaptation left " << n_empty << " of " << this->nelement()
                 << " new element(s) without a single sample point";
       if (n_unplaced)
@@ -6783,7 +6787,7 @@ namespace pyoomph
     snap.clear();
   }
 
-  // Carries this interface's own discontinuous (DL/D0) fields over from the corresponding interface
+  // Carries this interface's own discontinuous fields - DL/D0 and the nodal DG spaces - over from the corresponding interface
   // mesh of a mesh that has just been REPLACED (Problem.force_remesh), rather than adapted. Driven
   // from InternalInterpolator.interpolate(), i.e. once the bulk fields of the new mesh are in place -
   // which is what the recovery expressions below need, since they read the bulk.
@@ -6834,22 +6838,25 @@ namespace pyoomph
       return;
     auto *ft = code->get_func_table();
     const unsigned nDL = ft->info_DL.numfields, nD0 = ft->info_D0.numfields;
-    if (!nDL && !nD0)
+    if (!nDL && !nD0 && !ft->num_present_dg_spaces)
       return;
-    // The adaptation path carries nodal DG facet fields (they are sampled and refitted like DL), but
-    // this one pulls its values through MeshPointLocator's EvalRequest, which only knows how to
-    // evaluate DL and D0. Refusing here rather than transferring a short value block: the shared
-    // fit_discontinuous_data() below sizes itself from the ELEMENT, so a missing DG block would be
-    // read as a stride error rather than noticed.
-    if (BulkElementBase *e0chk = dynamic_cast<BulkElementBase *>(this->element_pt(0)))
+    // own_dg_spaces() reads the per-space node counts out of eleminfo, and a facet element that has
+    // just been rebuilt has none yet - so this has to come before the spaces are asked for, not with
+    // the rest of the setup below.
+    ensure_eleminfo_filled(this);
+    BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
+    const auto dgspaces = e0 ? own_dg_spaces(ft, e0)
+                             : std::vector<JITFuncSpec_Table_FiniteElement_SpaceInfo_t *>();
+    unsigned nDG = 0, nmode_1d = 2;
+    for (auto *si : dgspaces)
     {
-      if (!own_dg_spaces(ft, e0chk).empty())
-        throw_runtime_error("Cannot transfer the nodal discontinuous (D1/D2/...) field(s) of interface '" + interfacename +
-                            "' to a remeshed mesh yet: the pull transfer evaluates the old mesh through MeshPointLocator, "
-                            "which handles DL and D0 only. Spatial adaptation of these fields does work.");
+      nDG += si->numfields_new;
+      nmode_1d = std::max(nmode_1d, dg_space_nmode_1d(si->space_index));
     }
+    if (!nDL && !nD0 && !nDG)
+      return;
     if (!old->code)
-      throw_runtime_error("Cannot transfer the discontinuous (DL/D0) fields of interface '" + interfacename + "': the previous mesh has no generated code attached");
+      throw_runtime_error("Cannot transfer the discontinuous fields of interface '" + interfacename + "': the previous mesh has no generated code attached");
     auto *oft = old->code->get_func_table();
     // Normally both meshes are driven by the very same code instance, so this can only fire when the
     // equations were redefined together with the mesh (Problem.redefine_problem).
@@ -6864,24 +6871,42 @@ namespace pyoomph
       if (std::string(oft->info_D0.fieldnames[i]) != std::string(ft->info_D0.fieldnames[i]))
         mismatch = "D0 field " + std::to_string(i) + " is '" + std::string(oft->info_D0.fieldnames[i]) + "' on the previous mesh and '" + std::string(ft->info_D0.fieldnames[i]) + "' on the new one";
     if (!mismatch.empty())
-      throw_runtime_error("Cannot transfer the discontinuous (DL/D0) fields of interface '" + interfacename + "' from the previous mesh: " + mismatch +
+      throw_runtime_error("Cannot transfer the discontinuous fields of interface '" + interfacename + "' from the previous mesh: " + mismatch +
                           ". They are matched by name and space, in order, and must agree on both sides.");
 
     if (!old->nelement())
       return; // nothing to take values from; the new facets keep what rebuild_after_adapt left them
-    ensure_eleminfo_filled(this);
     ensure_eleminfo_filled(old); // its elements are evaluated below, not merely searched
-    BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     BulkElementBase *oe0 = dynamic_cast<BulkElementBase *>(old->element_pt(0));
     if (!e0 || !oe0 || !oe0->ninternal_data())
       return;
+    // The nodal DG spaces have to line up as well - same spaces, same own fields, same node counts -
+    // since the pulled block is read positionally, one scalar per own field per space.
+    const auto odgspaces = own_dg_spaces(oft, oe0);
+    if (odgspaces.size() != dgspaces.size())
+      mismatch = "the previous mesh declares " + std::to_string(odgspaces.size()) + " nodal discontinuous space(s) here, the new one " +
+                 std::to_string(dgspaces.size());
+    for (unsigned s = 0; s < dgspaces.size() && mismatch.empty(); s++)
+    {
+      if (odgspaces[s]->space_index != dgspaces[s]->space_index || odgspaces[s]->numfields_new != dgspaces[s]->numfields_new)
+        mismatch = "nodal discontinuous space " + std::to_string(s) + " is '" + std::string(odgspaces[s]->space_name) +
+                   "' with " + std::to_string(odgspaces[s]->numfields_new) + " own field(s) on the previous mesh and '" +
+                   std::string(dgspaces[s]->space_name) + "' with " + std::to_string(dgspaces[s]->numfields_new) + " on the new one";
+      else if (oe0->get_eleminfo()->nnode_of_space[odgspaces[s]->space_index] != e0->get_eleminfo()->nnode_of_space[dgspaces[s]->space_index])
+        mismatch = "the elements of space '" + std::string(dgspaces[s]->space_name) + "' have different node counts on the two meshes";
+    }
+    if (!mismatch.empty())
+      throw_runtime_error("Cannot transfer the discontinuous fields of interface '" + interfacename + "' from the previous mesh: " + mismatch +
+                          ". They are matched by name and space, in order, and must agree on both sides.");
     const unsigned sdim = e0->nodal_dimension();
-    const unsigned nfield = nDL + nD0;
+    const unsigned nfield = nDG + nDL + nD0;
     const unsigned ntstorage = oe0->internal_data_pt(0)->time_stepper_pt()->ntstorage();
 
     // The query points: every new facet's own sample lattice. The same lattice the adaptation
-    // snapshot uses, and for the same reason - five per direction shrunk towards the centre, so that
-    // no point sits on a facet end where it would ask the wrong side of the skeleton.
+    // snapshot uses, and for the same reason - shrunk towards the centre, so that no point sits on a
+    // facet end where it would ask the wrong side of the skeleton. Its density follows the widest DG
+    // basis present, exactly as there, so that a facet whose points are partly rejected by the
+    // topological filter below still has enough left to determine the fit.
     std::vector<double> probe;
     std::vector<std::vector<double>> probe_s;
     std::vector<unsigned> probe_first(this->nelement() + 1, 0);
@@ -6892,7 +6917,7 @@ namespace pyoomph
       BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
       if (!e)
         continue;
-      sample_local_coordinates(e, lattice);
+      sample_local_coordinates(e, lattice, nmode_1d);
       for (const auto &s : lattice)
       {
         probe_s.push_back(std::vector<double>(s.begin(), s.end()));
@@ -6933,6 +6958,7 @@ namespace pyoomph
     EvalRequest req;
     req.DL_fields = (nDL > 0);
     req.D0_fields = (nD0 > 0);
+    req.DG_fields = (nDG > 0);
     for (unsigned t = 0; t < ntstorage; t++)
       req.time_levels.push_back(t);
     const unsigned vpp = slocated.values_per_point(req);
@@ -6940,6 +6966,20 @@ namespace pyoomph
       throw_runtime_error("Internal error transferring the discontinuous fields of interface '" + interfacename + "': the old skeleton evaluates to " +
                           std::to_string(vpp) + " values per point, expected " + std::to_string(ntstorage * nfield));
     std::vector<double> pulled = slocated.evaluate(req);
+
+    // LocationSet::evaluate writes its blocks in one fixed order (continuous, DL, D0, DG), while the
+    // fit reads a snapshot in the internal-Data order [DG][DL][D0]. One rotation per time level here,
+    // rather than a convention flag on either side.
+    if (nDG && (nDL || nD0))
+    {
+      std::vector<double> level(nfield);
+      for (size_t off = 0; off + nfield <= pulled.size(); off += nfield)
+      {
+        std::copy(pulled.begin() + off, pulled.begin() + off + nfield, level.begin());
+        std::copy(level.begin() + (nDL + nD0), level.end(), pulled.begin() + off);
+        std::copy(level.begin(), level.begin() + (nDL + nD0), pulled.begin() + off + nDG);
+      }
+    }
 
     // Face neighbours in the old bulk mesh, for the widening fallback. An interior facet IS the
     // shared face of the two elements it separates, so the old skeleton already is that adjacency.
@@ -7026,14 +7066,20 @@ namespace pyoomph
         per_elem[e] = kept;
     }
 
-    // The pulled values are already laid out the way the fit expects a snapshot to be - time levels
-    // outermost, DL before D0 - and their positions are the new elements' own lattice points, so the
-    // local coordinates handed over are exact rather than projected.
+    // The pulled values are now laid out the way the fit expects a snapshot to be - time levels
+    // outermost, then [DG][DL][D0] - and their positions are the new elements' own lattice points, so
+    // the local coordinates handed over are exact rather than projected.
     DiscontinuousSnapshot pulled_snap;
     pulled_snap.space_dim = sdim;
     pulled_snap.nDL = nDL;
     pulled_snap.nD0 = nD0;
     pulled_snap.nDL_modes = e0->get_eleminfo()->nnode_DL;
+    for (auto *si : dgspaces)
+    {
+      pulled_snap.dg_space_index.push_back(si->space_index);
+      pulled_snap.dg_numfields_new.push_back(si->numfields_new);
+      pulled_snap.dg_nmodes.push_back(e0->get_eleminfo()->nnode_of_space[si->space_index]);
+    }
     pulled_snap.ntstorage = ntstorage;
     pulled_snap.coords.swap(probe);
     pulled_snap.values.swap(pulled);
@@ -7042,7 +7088,7 @@ namespace pyoomph
     if (n_empty && !warned_about_discontinuous_reset)
     {
       warned_about_discontinuous_reset = true;
-      std::cout << "WARNING: transferring the discontinuous (DL/D0) fields of interface '" << interfacename
+      std::cout << "WARNING: transferring the discontinuous fields of interface '" << interfacename
                 << "' from the previous mesh left " << n_empty << " of " << this->nelement()
                 << " new element(s) without a usable value (" << n_rejected
                 << " found nothing from the part of the old mesh they lie in, " << n_unplaced << " of " << npoint
@@ -7285,16 +7331,15 @@ namespace pyoomph
     Lookup_for_elements_next_boundary_is_setup = true;
   }
 
-  // Rebuilds this interface mesh from scratch after the bulk mesh has been adapted
-  // (interface elements are never incrementally adapted, see clear_before_adapt).
-  // Interface-owned DL/D0 fields survive via snapshot_discontinuous_data()/
-  // restore_discontinuous_data(); nodal DG (Dx) fields owned by an interface do not yet.
   // The nodal discontinuous (D1/D2/...) fields THIS interface level declares itself, as
   // "name (space)" entries. [numfields_bulk,numfields) is exactly that set: an interface that merely
-  // READS a DG field of the domain it sits on is unaffected and adapts as before, and numfields_bulk
+  // READS a DG field of the domain it sits on does not own any storage for it, and numfields_bulk
   // rather than numfields_basebulk keeps a field an intermediate interface owns reported on that
-  // interface only, not again on every interface of it. Empty for anything that can be carried
-  // through an adaptation or a remeshing, so callers use it as the guard below does.
+  // interface only, not again on every interface of it.
+  //
+  // A pure query nowadays. It used to be the predicate of three guards (adaptation, remeshing,
+  // distribution), all of which are gone: every discontinuous space is carried across a skeleton
+  // rebuild now.
   std::vector<std::string> InterfaceMesh::get_own_nodal_dg_fields() const
   {
     std::vector<std::string> res;
@@ -7310,6 +7355,9 @@ namespace pyoomph
     return res;
   }
 
+  // Rebuilds this interface mesh from scratch after the bulk mesh has been adapted (interface
+  // elements are never incrementally adapted, see clear_before_adapt). The interface's own
+  // discontinuous values survive via snapshot_discontinuous_data()/restore_discontinuous_data().
   void InterfaceMesh::rebuild_after_adapt()
   {
     if (code)
@@ -7319,10 +7367,9 @@ namespace pyoomph
       // to sample them with". That was never quite true - BulkElementBase::get_DG_fields_at_s() has
       // always interpolated exactly those slots, it is what the bulk father->son transfer uses - and
       // snapshot_discontinuous_data()/fit_discontinuous_data() now carry them alongside DL/D0, fitting
-      // each in its own nodal basis. What is still refused is the REMESH pull transfer, which goes
-      // through MeshPointLocator (see interpolate_discontinuous_data_from).
+      // each in its own nodal basis.
 
-      // Interface-owned DL/D0 fields used only to be reset to zero here - current value AND time
+      // Interface-owned discontinuous fields used only to be reset to zero here - current value AND time
       // history - because clear_before_adapt() destroys the internal Data holding them. A field its
       // own residual determines algebraically recovered at the next solve, which is why this went
       // unnoticed for a long time; anything carrying history across the adaptation was silently

@@ -89,8 +89,12 @@ class _SkeletonTrace(Equations):
     it was: it is the total measure of the skeleton, and does not involve the solution at all, so a
     facet enumerated twice or dropped moves it by that facet's length."""
 
+    def __init__(self, space="DL"):
+        super().__init__()
+        self.space = space
+
     def define_fields(self):
-        self.define_scalar_field("lam", "DL")
+        self.define_scalar_field("lam", self.space)
 
     def define_residuals(self):
         lam, lamtest = var_and_test("lam")
@@ -176,6 +180,8 @@ def main():
                         help="put equations where two boundaries meet, i.e. on a codimension-2 interface")
     parser.add_argument("--facet-field", action="store_true",
                         help="declare an unknown on the interior-facet skeleton as well")
+    parser.add_argument("--facet-space", default="DL",
+                        help="space of that facet unknown: DL/D0, or a nodal D1/D2")
     parser.add_argument("--zeta", action="store_true",
                         help="parameterise the interface by arclength, i.e. transfer through a zeta chart")
     args, rest = parser.parse_known_args()
@@ -205,7 +211,7 @@ def main():
             domain_eqs = (MeshFileOutput() + ElementSpace("C2") + ProjectExpression(u=TRANSFERRED_FIELD)
                           + interface_eqs @ "interface")
             if args.facet_field:
-                domain_eqs = domain_eqs + _NeedsSkeleton() + _SkeletonTrace() @ "_internal_facets_"
+                domain_eqs = domain_eqs + _NeedsSkeleton() + _SkeletonTrace(args.facet_space) @ "_internal_facets_"
             p += domain_eqs @ "domain"
             if args.second_domain:
                 p += Box()

@@ -438,7 +438,7 @@ namespace pyoomph
 		// Same as setup_boundary_information1d but for a 2d interface (attached to a 3d bulk mesh).
 		virtual void setup_boundary_information2d(pyoomph::Mesh *parent, const std::set<unsigned> &possible_bounds);
 		std::vector<double> opposite_offset_vector,reversed_opposite_offset_vector; // Constant offset (e.g. for periodic/translated interfaces) to the opposite side and its reverse
-		bool warned_about_discontinuous_reset = false; // So rebuild_after_adapt's DL/D0 warning is printed once per interface, not once per adaptation
+		bool warned_about_discontinuous_reset = false; // So rebuild_after_adapt's transfer warning is printed once per interface, not once per adaptation
 
 		// Interface-owned discontinuous values as a cloud of sampled values, which is how they are
 		// carried across an adaptation (and, with the values pulled from the old mesh instead, across a
@@ -522,15 +522,16 @@ namespace pyoomph
 		virtual void clear_before_adapt();
 		// Regenerate this interface's elements from the (possibly refined/coarsened) bulk mesh after adaptation.
 		virtual void rebuild_after_adapt();
-		// Sample this interface's DL/D0 fields into discontinuous_snapshot before the elements holding
-		// them are destroyed, and fit them back onto the rebuilt elements afterwards. Called by
-		// clear_before_adapt/rebuild_after_adapt; no-ops when the interface has no DL or D0 field.
-		// The nodal discontinuous (D1/D2/...) fields this interface declares itself ("name (space)"),
-		// i.e. the ones neither transfer path can carry. Empty when there are none.
+		// The nodal discontinuous (D1/D2/...) fields this interface declares itself ("name (space)").
+		// A query, not a guard: all three of them are gone. Empty when there are none.
 		std::vector<std::string> get_own_nodal_dg_fields() const;
+		// Sample this interface's own discontinuous fields - DL, D0 and the nodal DG spaces - into
+		// discontinuous_snapshot before the elements holding them are destroyed, and fit them back onto
+		// the rebuilt elements afterwards. Called by clear_before_adapt/rebuild_after_adapt; no-ops when
+		// the interface owns no discontinuous field at all.
 		virtual void snapshot_discontinuous_data();
 		virtual void restore_discontinuous_data();
-		// Carry the DL/D0 fields over from the corresponding interface mesh of a mesh that has been
+		// Carry those same fields over from the corresponding interface mesh of a mesh that has been
 		// REPLACED (Problem.force_remesh) rather than adapted. Unlike the adaptation path this cannot
 		// assume that anything stayed where it was, so it disambiguates the facet soup topologically -
 		// see the implementation.
