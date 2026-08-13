@@ -35,7 +35,9 @@ process count it reports is ``0`` rather than ``1``, which is how pyoomph tells 
 "built with MPI but started as a single process".
 
 Distributing the mesh (the third mode below) additionally requires `PyMetis <https://pypi.org/project/PyMetis/>`__
-for the graph partitioning::
+for the graph partitioning:
+
+.. code:: bash
 
    python -m pip install pymetis
 
