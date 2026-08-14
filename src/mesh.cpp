@@ -6253,6 +6253,19 @@ namespace pyoomph
   // an edge case at all: the facets created inside a refined element END on the surrounding facets,
   // so on the next unrefinement every one of them dropped a sample onto a surviving facet - a
   // constant field came back at ~5/6 of its value after a refine/unrefine round trip.
+  // Where a sample point of a facet element sits, in Eulerian coordinates.
+  //
+  // A POINT facet is read off its single node rather than interpolated. oomph's
+  // FaceElement::interpolated_x does not interpolate over the face element itself - it maps the local
+  // coordinate into the element the face hangs off and asks that one. For a point interface that
+  // element is the LINE interface element it terminates, which is a face element as well and has no
+  // oomph-level shape() of its own, so the call lands in a pure virtual slot and aborts the process
+  // ("pure virtual method called"). A point has one node and that node is its position anyway.
+  static double sample_position(BulkElementBase *e, const oomph::Vector<double> &s, unsigned d)
+  {
+    return e->dim() ? e->interpolated_x(s, d) : e->node_pt(0)->x(d);
+  }
+
   static void sample_local_coordinates(BulkElementBase *e, std::vector<oomph::Vector<double>> &out,
                                        unsigned nmode_1d = 2)
   {
@@ -6353,7 +6366,7 @@ namespace pyoomph
       for (const auto &sloc : slist)
       {
         for (unsigned d = 0; d < snap.space_dim; d++)
-          snap.coords.push_back(e->interpolated_x(sloc, d));
+          snap.coords.push_back(sample_position(e, sloc, d));
         for (unsigned t = 0; t < snap.ntstorage; t++)
         {
           // Order matches the internal-Data layout [DG][DL][D0], so the fit can walk both together.
@@ -6831,6 +6844,31 @@ namespace pyoomph
   // surrounding its position. Where that yields nothing the search widens by one ring of face
   // neighbours, and beyond that the element is left to its recovery expression, since a value from
   // further away says more about the search radius than about the solution.
+  // The chain of face indices from a bulk element down to one of its (sub)facets, as one long. Given
+  // innermost first, the way the walk below collects them.
+  //
+  // A single index is passed through unchanged: that is the ordinary interface, and its address must
+  // stay the one the interior-facet halo scheme and the already written state files use. Deeper chains
+  // - an interface OF an interface, e.g. the point where a free surface meets a wall - pack one octal
+  // digit per level, outermost first, behind a leading 1 that keeps the depth readable. Face indices
+  // may be negative (oomph numbers the faces of a quad or a brick +-1..+-3), so each is zig-zagged
+  // into a digit first. The leading 1 puts every packed chain at 8 or above, well clear of the plain
+  // face indices, so the two encodings cannot be confused for one another.
+  static long pack_face_chain(const std::vector<int> &faces_inner_to_outer)
+  {
+    if (faces_inner_to_outer.size() == 1)
+      return faces_inner_to_outer[0];
+    long code = 1;
+    for (auto it = faces_inner_to_outer.rbegin(); it != faces_inner_to_outer.rend(); ++it)
+    {
+      long digit = (*it >= 0 ? 2L * (*it) : -2L * (*it) - 1);
+      if (digit > 7)
+        throw_runtime_error("Face index " + std::to_string(*it) + " is too large to be packed into an interface element key");
+      code = code * 8 + digit;
+    }
+    return code;
+  }
+
   std::vector<long> InterfaceMesh::get_interface_element_structural_keys()
   {
     std::vector<long> res;
@@ -6841,12 +6879,26 @@ namespace pyoomph
       InterfaceElementBase *e = dynamic_cast<InterfaceElementBase *>(this->element_pt(ie));
       if (e)
       {
-        if (!Mesh::element_structural_key(e->bulk_element_pt(), root, path))
+        // An interface of an interface hangs off a face element, which has no refinement tree and no
+        // base index of its own, so asking it for a structural key yields nothing and the state file
+        // refused to be written at all. Descend instead until a genuine bulk element is reached,
+        // collecting the face index of every level on the way.
+        std::vector<int> faces;
+        oomph::FiniteElement *cur = e;
+        while (InterfaceElementBase *iel = dynamic_cast<InterfaceElementBase *>(cur))
+        {
+          faces.push_back(iel->face_index());
+          cur = iel->bulk_element_pt();
+        }
+        if (Mesh::element_structural_key(cur, root, path))
+        {
+          face = pack_face_chain(faces);
+        }
+        else
         {
           root = -1;
           path = -1;
         }
-        face = e->face_index();
       }
       res.push_back(root);
       res.push_back(path);
@@ -6945,7 +6997,7 @@ namespace pyoomph
       {
         probe_s.push_back(std::vector<double>(s.begin(), s.end()));
         for (unsigned d = 0; d < sdim; d++)
-          probe.push_back(e->interpolated_x(s, d));
+          probe.push_back(sample_position(e, s, d));
       }
     }
     probe_first[this->nelement()] = probe_s.size();

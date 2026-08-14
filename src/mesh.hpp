@@ -538,11 +538,13 @@ namespace pyoomph
 		virtual void interpolate_discontinuous_data_from(InterfaceMesh *old);
 		// Partition-independent address of every element of this interface, three longs each:
 		// (root global_base_index, packed refinement path) of the bulk element it is attached to, plus
-		// its face index there. A face element has no refinement tree of its own, so it cannot use
-		// Mesh::get_element_structural_keys(); but the bulk element it hangs off does, and the face
-		// index picks it out uniquely from among that element's faces. Same key the interior-facet halo
-		// scheme pairs facets across ranks with (Problem::setup_interior_facet_halo_scheme), which is
-		// what makes a state file written on one partition readable on another.
+		// the packed chain of face indices leading from that element to this one. A face element has no
+		// refinement tree of its own, so it cannot use Mesh::get_element_structural_keys(); but the bulk
+		// element it hangs off does, and the face indices pick it out uniquely from among that element's
+		// faces and their faces. For an ordinary interface the chain is a single face index, i.e. the
+		// same key the interior-facet halo scheme pairs facets across ranks with
+		// (Problem::setup_interior_facet_halo_scheme), which is what makes a state file written on one
+		// partition readable on another.
 		// -1,-1,-1 for an element whose bulk key is not available (before the base indices are assigned).
 		std::vector<long> get_interface_element_structural_keys();
 		const std::vector<unsigned> &get_discontinuous_unrestored_elements() const { return discontinuous_unrestored_elements; }

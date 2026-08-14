@@ -104,6 +104,93 @@ def test_state_of_an_adaptively_refined_1d_mesh(tmp_path):
         assert numpy.array_equal(numpy.asarray(reader.get_history_dofs(0)), reference)
 
 
+class FacetValueEqs(InterfaceEquations):
+    """A D0 field on an interface, pinned to a value that depends on where the interface is.
+
+    D0 lives in the interface element's own internal Data, so it is stored by the state file's
+    interface block and by nothing else - which is what makes it the probe below."""
+
+    def __init__(self, target):
+        super().__init__()
+        self.target = target
+
+    def define_fields(self):
+        self.define_scalar_field("lam", "D0")
+
+    def define_residuals(self):
+        lam, lamtest = var_and_test("lam")
+        self.add_residual(weak(lam - self.target, lamtest))
+
+
+class NestedInterfaceProblem(Problem):
+    """Carries D0 fields on an interface AND on an interface of that interface (a point here)."""
+
+    def define_problem(self):
+        self += RectangularQuadMesh(N=4, size=[1, 1])
+        eqs = DiffusionEqs() + DirichletBC(u=0) @ "bottom"
+        eqs += FacetValueEqs(2 + var("coordinate_x")) @ "top"
+        eqs += FacetValueEqs(7.25) @ "top/left"
+        eqs += FacetValueEqs(-3.5) @ "top/right"
+        self += eqs @ "domain"
+        self.write_states = False
+        # Nothing here needs refining, and the initial adaptation would go through
+        # InterfaceMesh::snapshot_discontinuous_data, which aborts the process on a POINT interface
+        # carrying a discontinuous field (it interpolates a position on an element that has no shape
+        # function). That is a separate defect from the one below and would only mask it.
+        self.initial_adaption_steps = 0
+
+
+def _interface_facet_values(problem):
+    """{interface name: {structural key: internal-Data values}} over every interface mesh."""
+    out = {}
+    for mesh in problem._interfacemeshes:
+        nelem = mesh.nelement()
+        keys = numpy.asarray(mesh.get_interface_element_structural_keys(),
+                             dtype=numpy.int64).reshape(nelem, 3)
+        assert not numpy.any(keys[:, 0] < 0), (mesh.get_full_name(), keys)
+        per_element = {}
+        for ie, e in enumerate(mesh.elements()):
+            key = tuple(int(c) for c in keys[ie])
+            assert key not in per_element, "two elements of %s share the key %s" % (mesh.get_full_name(), key)
+            per_element[key] = [e.internal_data_pt(i).value(j)
+                                for i in range(e.ninternal_data())
+                                for j in range(e.internal_data_pt(i).nvalue())]
+        out[mesh.get_full_name()] = per_element
+    return out
+
+
+def test_state_file_of_an_interface_on_an_interface(tmp_path):
+    """An interface OF an interface must be addressable in a state file, and its values must come back.
+
+    Such an element hangs off a face element, which has no refinement tree and no base element index of
+    its own, so asking it for a structural key produced (-1,-1,-1) and save_state refused to write
+    anything at all - "Interface mesh elements without a global base index". That is every free surface
+    meeting a wall, so it took out the state files of a whole class of problems. The key is the chain of
+    face indices down to the bulk element now (src/mesh.cpp, pack_face_chain).
+
+    The reader never solves: a solve would recompute lam from its own residual and hide a load that
+    restored nothing."""
+    fname = str(tmp_path / "nested.dump")
+    with NestedInterfaceProblem() as writer:
+        writer.set_output_directory(str(tmp_path / "w_nested"))
+        writer.solve()
+        before = _interface_facet_values(writer)
+        writer.save_state(fname)
+
+    assert set(before) >= {"domain/top", "domain/top/left", "domain/top/right"}, sorted(before)
+    # the nested interfaces are what this is about, and they hold what they were pinned to
+    assert [v for vals in before["domain/top/left"].values() for v in vals] == [7.25]
+    assert [v for vals in before["domain/top/right"].values() for v in vals] == [-3.5]
+    # ... and the two of them are told apart, rather than sharing the key of their common parent facet
+    assert set(before["domain/top/left"]) != set(before["domain/top/right"])
+
+    with NestedInterfaceProblem() as reader:
+        reader.set_output_directory(str(tmp_path / "r_nested"))
+        reader.load_state(fname)          # ... and not a single solve after it
+        after = _interface_facet_values(reader)
+    assert after == before
+
+
 class MovingMeshEqs(Equations):
     def define_fields(self):
         self.define_scalar_field("u", "C2")

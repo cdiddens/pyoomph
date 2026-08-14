@@ -106,14 +106,36 @@ function(pyoomph_resolve_ginac_de_version page_url filename_prefix human_name fa
   set(${out_version_var} "${_pyoomph_version}" PARENT_SCOPE)
 endfunction()
 
-# Verifies a tarball URL actually exists (a cheap HEAD-only check - no file
-# argument means file(DOWNLOAD) checks reachability without saving anything,
-# added in CMake 3.19). Sets ${out_ok_var} to TRUE/FALSE in the caller's scope
-# instead of failing outright, so callers can decide what an unreachable URL
-# means for them (a hard error vs. "go auto-detect something else instead").
+# Verifies a tarball URL actually exists. Sets ${out_ok_var} to TRUE/FALSE in
+# the caller's scope instead of failing outright, so callers can decide what an
+# unreachable URL means for them (a hard error vs. "go auto-detect something
+# else instead").
+#
+# Fetches as little of the URL as each tool allows: curl asks for the first
+# byte, wget for the headers only. This used to be a file(DOWNLOAD) with no
+# file argument, believed to be a HEAD request because it saves nothing - it is
+# not, it transfers the whole body and merely discards it. With TIMEOUT 15 that
+# made "reachable" mean "downloadable in 15 seconds": a 4 MB tarball on a slow
+# link came out as missing, and the resulting FATAL_ERROR killed the configure
+# step of a build tree whose CLN and GiNaC had been built long ago and which
+# was not going to download anything at all. (file(DOWNLOAD)'s RANGE_END would
+# say the same in one line, but it needs CMake 3.24 and this project still
+# configures with 3.22.)
 function(pyoomph_url_is_reachable url out_ok_var)
-  file(DOWNLOAD "${url}" STATUS _pyoomph_url_status TIMEOUT 15)
-  list(GET _pyoomph_url_status 0 _pyoomph_url_code)
+  find_program(PYOOMPH_URL_PROBE_EXECUTABLE NAMES curl wget)
+  if(PYOOMPH_URL_PROBE_EXECUTABLE MATCHES "curl(\\.exe)?$")
+    execute_process(COMMAND "${PYOOMPH_URL_PROBE_EXECUTABLE}" -fsS --max-time 15 -r 0-0 -o /dev/null "${url}"
+                    RESULT_VARIABLE _pyoomph_url_code OUTPUT_QUIET ERROR_QUIET)
+  elseif(PYOOMPH_URL_PROBE_EXECUTABLE MATCHES "wget(\\.exe)?$")
+    execute_process(COMMAND "${PYOOMPH_URL_PROBE_EXECUTABLE}" --spider -q -T 15 "${url}"
+                    RESULT_VARIABLE _pyoomph_url_code OUTPUT_QUIET ERROR_QUIET)
+  else()
+    # Neither tool around: back to downloading it, but give up only once the
+    # transfer itself stalls rather than after a fixed time a working link can
+    # legitimately exceed.
+    file(DOWNLOAD "${url}" STATUS _pyoomph_url_status INACTIVITY_TIMEOUT 15)
+    list(GET _pyoomph_url_status 0 _pyoomph_url_code)
+  endif()
   if(_pyoomph_url_code EQUAL 0)
     set(${out_ok_var} TRUE PARENT_SCOPE)
   else()
