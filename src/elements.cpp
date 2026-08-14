@@ -7247,6 +7247,163 @@ namespace pyoomph
 		this->ensure_external_data();
 	}
 
+	// Inverts the (affine) son -> father local map at s_father for a SIMPLEX son of a simplex
+	// father. The son's dim+1 vertices in father coordinates come from get_nodal_s_in_father; the
+	// barycentric weights that reproduce s_father from those vertices are, the map being affine,
+	// the same weights that reproduce the point from the son's own vertex coordinates. Returns
+	// false if the point lies outside this son (a negative weight), which is how the caller picks
+	// the containing son out of the father's offspring.
+	bool BulkElementBase::son_local_from_father_simplex(const oomph::Vector<double> &s_father, oomph::Vector<double> &s_son)
+	{
+		const unsigned dim = this->dim();
+		const unsigned nv = dim + 1; // simplex vertices = local nodes 0..dim
+		std::vector<std::vector<double>> vf(nv, std::vector<double>(dim, 0.0)); // vertices in father coords
+		std::vector<std::vector<double>> vs(nv, std::vector<double>(dim, 0.0)); // ... and in the son's own
+		for (unsigned k = 0; k < nv; k++)
+		{
+			oomph::Vector<double> sf, ss;
+			this->get_nodal_s_in_father(k, sf);
+			this->local_coordinate_of_node(k, ss);
+			for (unsigned i = 0; i < dim; i++) { vf[k][i] = sf[i]; vs[k][i] = ss[i]; }
+		}
+		// sum_k lambda_k*vf[k] = s_father together with sum_k lambda_k = 1: a (dim+1)-square system,
+		// solved by Gauss-Jordan with partial pivoting (nv is 3 or 4, so this is a handful of flops).
+		std::vector<std::vector<double>> a(nv, std::vector<double>(nv + 1, 1.0));
+		for (unsigned i = 0; i < dim; i++)
+		{
+			for (unsigned k = 0; k < nv; k++) a[i][k] = vf[k][i];
+			a[i][nv] = s_father[i];
+		}
+		for (unsigned k = 0; k < nv; k++) a[dim][k] = 1.0;
+		a[dim][nv] = 1.0;
+		for (unsigned c = 0; c < nv; c++)
+		{
+			unsigned piv = c;
+			for (unsigned r = c + 1; r < nv; r++)
+				if (std::abs(a[r][c]) > std::abs(a[piv][c])) piv = r;
+			if (std::abs(a[piv][c]) < 1e-14) return false; // degenerate son
+			std::swap(a[c], a[piv]);
+			for (unsigned r = 0; r < nv; r++)
+			{
+				if (r == c) continue;
+				const double f = a[r][c] / a[c][c];
+				for (unsigned q = c; q <= nv; q++) a[r][q] -= f * a[c][q];
+			}
+		}
+		std::vector<double> lambda(nv, 0.0);
+		for (unsigned k = 0; k < nv; k++)
+		{
+			lambda[k] = a[k][nv] / a[k][k];
+			if (lambda[k] < -1e-9) return false; // outside this son
+		}
+		s_son.resize(dim, 0.0);
+		for (unsigned i = 0; i < dim; i++)
+		{
+			s_son[i] = 0.0;
+			for (unsigned k = 0; k < nv; k++) s_son[i] += lambda[k] * vs[k][i];
+		}
+		return true;
+	}
+
+	// Refinement can leave a father's INTERIOR nodes orphaned. A bubble (centroid) node survives a
+	// split only if some son happens to hold a node at that exact point; when none does, no leaf
+	// references it, so adapt_mesh() deletes it as obsolete and deactivate_element() nulls the
+	// father's pointer to it. Merging the sons back then makes oomph-lib loop over the father's
+	// nodes and dereference that null -- a segfault in adapt_mesh(), one adaptation after the one
+	// that actually caused it. Recreate the missing nodes here instead, restricting the fine
+	// solution: locate the point in the son that contains it and sample position, Lagrangian
+	// coordinates and values there.
+	//
+	// Which enriched elements this bites is pure geometry: a 2d C1TB/C2TB centroid coincides with
+	// the centre son's centroid, and a C2TB tet centroid with a son edge-mid node, so those bubbles
+	// are reused during refinement and never orphaned. The 5-node C1TB tet has no such coincidence,
+	// and is what this repair exists for.
+	void BulkElementBase::restore_orphaned_interior_nodes(oomph::Mesh *&mesh_pt)
+	{
+		const unsigned nnod = this->nnode();
+		bool any_missing = false;
+		for (unsigned n = 0; n < nnod; n++)
+			if (this->node_pt(n) == NULL) { any_missing = true; break; }
+		if (!any_missing) return;
+
+		const unsigned dim = this->dim();
+		// Only a simplex can have an interior node that no son inherits (a quad/brick centre node is
+		// a corner of every son). The vertex-based inverse map above is a simplex map, so refuse
+		// anything else rather than silently placing the node somewhere wrong.
+		if (this->nvertex_node() != dim + 1)
+			throw_runtime_error("Cannot restore an orphaned interior node on a non-simplex element");
+		if (!Tree_pt || Tree_pt->nsons() == 0)
+			throw_runtime_error("Cannot restore an orphaned interior node without the son elements");
+		if (!mesh_pt)
+			throw_runtime_error("Cannot restore an orphaned interior node without a mesh to add it to");
+
+		oomph::TimeStepper *time_stepper_pt = NULL;
+		for (unsigned n = 0; n < nnod && !time_stepper_pt; n++)
+			if (this->node_pt(n)) time_stepper_pt = this->node_pt(n)->time_stepper_pt();
+		if (!time_stepper_pt) throw_runtime_error("All nodes of this element are missing, cannot restore any");
+
+		const unsigned ntstorage = time_stepper_pt->ntstorage();
+		const unsigned ndim_node = this->nodal_dimension();
+		for (unsigned n = 0; n < nnod; n++)
+		{
+			if (this->node_pt(n)) continue;
+			oomph::Vector<double> s;
+			this->local_coordinate_of_node(n, s);
+			BulkElementBase *src_son = NULL;
+			oomph::Vector<double> s_son(dim, 0.0);
+			for (unsigned ison = 0; ison < Tree_pt->nsons() && !src_son; ison++)
+			{
+				BulkElementBase *son = dynamic_cast<BulkElementBase *>(Tree_pt->son_pt(ison)->object_pt());
+				if (son && son->son_local_from_father_simplex(s, s_son)) src_son = son;
+			}
+			if (!src_son)
+				throw_runtime_error("Orphaned interior node " + std::to_string(n) + " lies in none of the sons");
+
+			// A node the sons did not inherit can only be interior to the father, so it is never a
+			// boundary node and construct_node (rather than construct_boundary_node) is right. Check
+			// it rather than assume it: a boundary node rebuilt as a plain one would silently drop
+			// out of the mesh's boundary lookup and its boundary conditions with it. Barycentric
+			// coordinates of a simplex are (s_0..s_dim-1, 1-sum); a zero one means we are on a facet.
+			double bary_last = 1.0;
+			bool on_facet = false;
+			for (unsigned i = 0; i < dim; i++) { bary_last -= s[i]; if (std::abs(s[i]) < 1e-10) on_facet = true; }
+			if (std::abs(bary_last) < 1e-10) on_facet = true;
+			if (on_facet)
+				throw_runtime_error("Orphaned node " + std::to_string(n) + " is on an element facet, not interior");
+
+			oomph::Node *new_node_pt = this->construct_node(n, time_stepper_pt);
+			for (unsigned t = 0; t < ntstorage; t++)
+			{
+				oomph::Vector<double> x(ndim_node, 0.0);
+				src_son->get_x(t, s_son, x);
+				for (unsigned i = 0; i < ndim_node; i++) new_node_pt->x(t, i) = x[i];
+				oomph::Vector<double> prev_values;
+				src_son->get_interpolated_values(t, s_son, prev_values);
+				const unsigned n_var = std::min((unsigned)new_node_pt->nvalue(), (unsigned)prev_values.size());
+				for (unsigned k = 0; k < n_var; k++) new_node_pt->set_value(t, k, prev_values[k]);
+			}
+			// The Lagrangian (reference) coordinates of a moving mesh are not touched by the Eulerian
+			// loop above; leaving them at the construct_node() default of 0 makes an undeformed mesh
+			// look grossly deformed to any solid/mesh residual. Same step as in RefineableTElement<2>::build.
+			if (oomph::SolidNode *solid_node_pt = dynamic_cast<oomph::SolidNode *>(new_node_pt))
+			{
+				const unsigned n_lagr = solid_node_pt->nlagrangian();
+				const unsigned nson_nod = src_son->nnode();
+				oomph::Shape psi(nson_nod);
+				src_son->shape(s_son, psi);
+				for (unsigned i = 0; i < n_lagr; i++)
+				{
+					double xi_i = 0.0;
+					for (unsigned l = 0; l < nson_nod; l++)
+						if (oomph::SolidNode *sn = dynamic_cast<oomph::SolidNode *>(src_son->node_pt(l)))
+							xi_i += psi(l) * sn->xi(i);
+					solid_node_pt->xi(i) = xi_i;
+				}
+			}
+			mesh_pt->add_node_pt(new_node_pt);
+		}
+	}
+
 	// Called by oomph-lib's tree-based mesh refinement when four/two/eight son elements are
 	// merged back into their father during unrefinement: reconstructs the father's non-nodal
 	// field storage (DG, DL, D0) from the sons' data, since oomph-lib's generic node-based
@@ -7257,8 +7414,10 @@ namespace pyoomph
 	// fields are simple averages (optionally re-scaled by discontinuous_refinement_exponents for
 	// fields that should scale differently under mesh coarsening, e.g. densities vs. totals).
 	// TODO: Split this into the particular elements
-	void BulkElementBase::rebuild_from_sons(oomph::Mesh *&)
+	void BulkElementBase::rebuild_from_sons(oomph::Mesh *&mesh_pt)
 	{
+		// Before anything reads node_pt(): put back any interior node that the split orphaned.
+		restore_orphaned_interior_nodes(mesh_pt);
 
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 		// Quad tree
@@ -9722,6 +9881,33 @@ namespace pyoomph
 	void BulkElementTri2dC2::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
 	{
 		tri2d_nodal_s_in_father(Tree_pt->son_type(), this->nnode(), l, sfather);
+	}
+
+	// 3d counterpart of tri2d_nodal_s_in_father. The tet 1->8 split already has its son->father map as
+	// RefineableTElement<3>::son_to_father_local (the very one RefineableTElement<3>::build uses to place
+	// the son's nodes), so this only has to feed the son's own local coordinate through it. It is
+	// barycentric-affine and therefore covers all 8 sons, the 4 inner (octahedron) ones included.
+	static void tet3d_nodal_s_in_father(oomph::RefineableTElement<3> *son, const unsigned int &l, oomph::Vector<double> &sfather)
+	{
+		oomph::Tree *tree = son->tree_pt();
+		if (!tree || !tree->father_pt()) throw_runtime_error("get_nodal_s_in_father on a tet without a father");
+		// A tet can also be a son of a PYRAMID (the mixed red split), and that ancestry is not the 1->8
+		// tet map -- refuse rather than return a plausible-looking wrong coordinate.
+		if (!dynamic_cast<oomph::RefineableTElement<3> *>(tree->father_pt()->object_pt()))
+			throw_runtime_error("get_nodal_s_in_father on a tet whose father is not a tet");
+		oomph::Vector<double> s_son;
+		son->local_coordinate_of_node(l, s_son);
+		oomph::RefineableTElement<3>::son_to_father_local(s_son, tree->son_type(), sfather);
+	}
+
+	void BulkElementTetra3dC1::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
+	{
+		tet3d_nodal_s_in_father(this, l, sfather);
+	}
+
+	void BulkElementTetra3dC2::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
+	{
+		tet3d_nodal_s_in_father(this, l, sfather);
 	}
 
 	// For a C2 (biquadratic, 9-node) node index n that is not itself a C1 corner node (i.e. an

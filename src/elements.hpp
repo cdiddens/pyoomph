@@ -952,6 +952,14 @@ namespace pyoomph
     // node l as seen in its father element (used to interpolate values from father to son node l).
     // Each concrete geometric element type must implement this according to its own son-numbering scheme.
     virtual void get_nodal_s_in_father(const unsigned int &, oomph::Vector<double> &) { throw_runtime_error("Implement"); }
+    // Inverse of the above for a SIMPLEX son of a simplex father: given a father-local coordinate,
+    // returns this son's own local coordinate for the same point, or false if the point lies
+    // outside this son. See the .cpp; used by restore_orphaned_interior_nodes.
+    bool son_local_from_father_simplex(const oomph::Vector<double> &s_father, oomph::Vector<double> &s_son);
+    // Rebuilds any of this (father) element's node slots that h-refinement orphaned and adapt_mesh
+    // then deleted -- i.e. interior bubble nodes that no son inherited. Called at the start of
+    // rebuild_from_sons(), while the sons are still alive to restrict from.
+    void restore_orphaned_interior_nodes(oomph::Mesh *&mesh_pt);
     // Sets up as much of a new element as possible before all of its nodes exist yet (used during
     // mesh refinement/construction, where nodes are shared with adjacent elements and must not be
     // duplicated); new_node_pt accumulates nodes that had to be freshly constructed.
@@ -2003,6 +2011,9 @@ namespace pyoomph
     static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
     static const std::vector<unsigned> Non_Vertex_Node_Indices;
   public:    
+    // See BulkElementTri2dC1::get_nodal_s_in_father, 3d counterpart: the son's own local coordinate
+    // mapped up through the barycentric affine son->father map of the 1->8 tet split.
+    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
@@ -2120,6 +2131,9 @@ namespace pyoomph
     static const std::vector<std::vector<int>> Element_Index_To_Nodal_Space_Index_Map;
     static const std::vector<unsigned> Non_Vertex_Node_Indices;
   public:    
+    // See BulkElementTri2dC1::get_nodal_s_in_father, 3d counterpart: the son's own local coordinate
+    // mapped up through the barycentric affine son->father map of the 1->8 tet split.
+    void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  

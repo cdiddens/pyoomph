@@ -317,6 +317,94 @@ def test_taylor_hood_tet_unrefinement_residual_oracle():
         assert nel > 384
 
 
+class _CavityStokes3DMINI(Problem):
+    # Lid-driven cavity Stokes with MINI (C1TB bubble-enriched velocity + C1 pressure) tets: the
+    # 5-node bubble-enriched LINEAR tet, whose node 4 is the centroid.
+    def __init__(self, N=2, error_adapt=False):
+        super().__init__()
+        self._N = N
+        self._error_adapt = error_adapt
+
+    def define_problem(self):
+        self += TetCubeMesh(N=self._N)
+        stokes = StokesEquations(mode="mini", dynamic_viscosity=1)
+        eqs = stokes
+        eqs += DirichletBC(velocity_x=1, velocity_y=0, velocity_z=0) @ "top"
+        eqs += DirichletBC(velocity_x=0, velocity_y=0, velocity_z=0) @ ["left", "right", "bottom", "front", "back"]
+        eqs += stokes.create_pressure_fixation(value=0)
+        if self._error_adapt:
+            eqs += SpatialErrorEstimator(velocity=1)
+        self += eqs @ "domain"
+
+
+def test_mini_tet_cavity_uniform():
+    # Uniform (conforming) refinement of a 3D MINI mesh: isolates the bubble-node build, with no
+    # hanging in the way.
+    with _CavityStokes3DMINI(N=1) as problem:
+        problem.max_refinement_level = 2
+        problem += RefineToLevel(1) @ "domain"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-7
+        m = problem.get_mesh("domain")
+        assert m.nelement() == 48  # 6 tets x8
+        assert all(m.element_pt(e).nnode() == 5 for e in range(m.nelement()))
+
+
+def test_mini_tet_cavity_single_level():
+    # Single-level (2:1) non-conforming refinement of a MINI tet mesh.
+    with _CavityStokes3DMINI(N=2) as problem:
+        problem.max_refinement_level = 2
+        problem += RefineToLevel(1) @ "domain"
+        problem += RefineToLevel(2) @ "domain/top"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-7
+        m = problem.get_mesh("domain")
+        assert m.nelement() > 384
+        assert all(m.element_pt(e).nnode() == 5 for e in range(m.nelement()))
+
+
+# UNREFINEMENT that genuinely merges sons back. Error-driven adaptivity alone does not coarsen this
+# cavity at all (the lid-driven error only ever grows), which is why this pushes the mesh's own
+# thresholds up afterwards: every element then reads as over-resolved and the sons are merged.
+#
+# What that exercises, and nothing else here does: a father's INTERIOR (bubble) node is orphaned by
+# the split whenever no son happens to hold a node at that point, and is then deleted as obsolete.
+# For the 5-node C1TB tet no son does, so merging the sons back used to segfault in adapt_mesh() on
+# the father's null node pointer; BulkElementBase::restore_orphaned_interior_nodes rebuilds it from
+# the sons. TH (no bubble) and CR (whose volume bubble lands on a son edge-mid node and so survives)
+# are along as controls.
+@pytest.mark.parametrize("cls,tol", [(_CavityStokes3D, 1e-9), (_CavityStokes3DCR, 1e-7),
+                                     (_CavityStokes3DMINI, 1e-7)])
+def test_stokes_tet_forced_unrefinement_residual_oracle(cls, tol):
+    with cls(N=2, error_adapt=True) as problem:
+        problem.max_refinement_level = 2
+        problem.min_refinement_level = 0
+        # See test_crouzeix_raviart_tet_cavity_error_adaptivity: this saddle point is at the edge of
+        # Pardiso's static pivoting and needs to be allowed to pivot harder.
+        problem.get_la_solver().repair_bad_solves = True
+        problem.initialise()
+        mesh = problem.get_mesh("domain")
+        nnode_per_elem = mesh.element_pt(0).nnode()
+        problem.solve(spatial_adapt=2)
+        nel_fine = problem.get_mesh("domain").nelement()
+        # Make every element look over-resolved so the next adaptations merge the sons back. Set on
+        # the mesh, not the problem: the problem-level thresholds are only copied down at setup.
+        mesh = problem.get_mesh("domain")
+        mesh.min_permitted_error = 1e30
+        mesh.max_permitted_error = 1e31
+        problem.solve(spatial_adapt=3)
+        mesh = problem.get_mesh("domain")
+        nel_coarse = mesh.nelement()
+        # Coarsening really happened -- otherwise the merge path below is never entered and this
+        # test silently stops testing anything.
+        assert nel_fine > 384 and nel_coarse < nel_fine / 4
+        # Every element kept its full node set, bubble included.
+        assert all(mesh.element_pt(e).nnode() == nnode_per_elem for e in range(nel_coarse))
+        problem.set_current_dofs(np.zeros(problem.ndof()))
+        problem.solve()
+        assert _max_abs_residual(problem) < tol
+
+
 # CROSS-ROUND node-sharing (tetrahedra): the 3d analogue of the triangle mesh-tear bug. Refining to
 # level 2 takes two rounds; a son built in round 2 that coincides with a node round 1 already built --
 # notably one built by a FINER neighbour's son -- must be REUSED, not duplicated. The per-round
