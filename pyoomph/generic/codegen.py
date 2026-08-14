@@ -26,6 +26,7 @@ from __future__ import annotations
 #
 # ========================================================================
  
+import fnmatch
 import weakref
 from .. import _pyoomph_core as _pyoomph
 
@@ -56,6 +57,58 @@ def _check_for_valid_var_name(name:str,for_domain:bool):
     elif for_domain and name.find("__")>0:
         if not name.startswith("_meshwide_"):
             raise ValueError("Domain names may not have double underscores __, except at the beginning. Happened at the name: '"+str(name)+"'")
+
+
+# Wildcards in an @-restriction, e.g. DirichletBC(u=0)@"*" or @"wall*". A component containing any of
+# these is a glob, everything else stays a literal name checked by _check_for_valid_var_name. Kept
+# separate from that function on purpose: it also validates *variable* names, where a glob must never
+# become legal.
+_DOMAIN_PATTERN_CHARS = "*?["
+
+
+def _is_domain_name_pattern(name:str)->bool:
+    """Whether this component of an @-restriction path is a glob to be expanded against the geometry
+    rather than a literal domain/boundary name. Globs never cross a '/': the restriction string is
+    split on '/' first, so a pattern always matches exactly one path component."""
+    return any(c in name for c in _DOMAIN_PATTERN_CHARS)
+
+
+def _check_domain_name_pattern(name:str):
+    # A pattern is expanded much later (at Problem.initialise), so a typo that can never match would
+    # otherwise only surface there. Reject the cases that are provably dead right where they are written.
+    if name.startswith("!"):
+        raise ValueError("Exclusion patterns such as '"+str(name)+"' are not supported. Use a positive pattern, or list the domain names explicitly.")
+    allowed=set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_*?[]!-")
+    bad=sorted(set(name)-allowed)
+    if bad:
+        raise ValueError("Domain name patterns may only contain [A-Z], [a-z], _, [0-9] and the wildcard characters * ? [ ] ! -. Happened at the pattern: '"+str(name)+"' (offending characters: "+"".join(bad)+")")
+    # fnmatch treats an unbalanced '[' as a literal, which can then never match an identifier - i.e. a
+    # silently dead pattern. Nested '[' is equally meaningless.
+    in_bracket=False
+    for c in name:
+        if c=="[":
+            if in_bracket:
+                raise ValueError("Nested '[' in the domain name pattern: '"+str(name)+"'")
+            in_bracket=True
+        elif c=="]":
+            in_bracket=False
+    if in_bracket:
+        raise ValueError("Unbalanced '[' in the domain name pattern: '"+str(name)+"'")
+    if name.find("__")>0 and not name.startswith("_meshwide_"):
+        raise ValueError("Domain names may not have double underscores __, except at the beginning, so the pattern '"+str(name)+"' can never match anything.")
+
+
+def _check_domain_name_or_pattern(name:str)->bool:
+    """Validates one component of an @-restriction path. Returns whether it is a glob pattern."""
+    if name=="":
+        raise ValueError("Empty domain name")
+    if _is_domain_name_pattern(name):
+        _check_domain_name_pattern(name)
+        return True
+    if name.startswith("!"):
+        raise ValueError("Exclusion patterns such as '"+str(name)+"' are not supported. Use a positive pattern, or list the domain names explicitly.")
+    _check_for_valid_var_name(name,True)
+    return False
 
 
 class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
@@ -1367,6 +1420,24 @@ class BaseEquations(_pyoomph.Equations):
         return self.__class__.__name__ + (": " + addinfo if addinfo != "" else "")
 
     def __matmul__(self, other:str | list[str] | tuple[str, ...] | set[str])->"EquationTree":
+        """Restricts these equations to a domain, boundary or interface, e.g. ``PoissonEquation()@"domain"``
+        or ``DirichletBC(u=0)@"left"``.
+
+        The name may be a path, ``@"domain/left"`` being the same as ``(eqs@"left")@"domain"``, or a
+        list/tuple/set of names, ``@["left","right"]``, which attaches the very same Equations object
+        to each of them.
+
+        A path component may also be an fnmatch-style glob - ``@"*"``, ``@"wall*"``, ``@"[lr]*"``,
+        ``@"domain/*"`` - which is expanded once during :py:meth:`~pyoomph.generic.problem.Problem.initialise`
+        against the names the mesh templates actually provide: bulk domains at the top level, the
+        boundaries of a bulk domain below that, and the intersections of those boundaries (contact
+        lines) one level deeper. A glob never crosses a ``/`` and a glob matching nothing is an error.
+        A leading ``!`` is reserved and rejected. Note that on a multi-domain mesh the interface
+        *between* two bulk domains is a genuine boundary of both, so ``@"*"`` includes it.
+
+        Globs are only interpreted here; path lookups such as
+        :py:meth:`~pyoomph.generic.problem.Problem.get_mesh` stay literal.
+        """
         if isinstance(other, (list,tuple,set,)):
             res=EquationTree(None, None)
             cmb=self if isinstance(self,CombinedEquations) else CombinedEquations(self)
@@ -1384,7 +1455,7 @@ class BaseEquations(_pyoomph.Equations):
                 raise ValueError("Please restrict equations with a non-empty domain name")
             root = EquationTree(None, parent=None)
             mynode = EquationTree(self, parent=root)
-            _check_for_valid_var_name(splt[-1],True)
+            _check_domain_name_or_pattern(splt[-1])
             root._children[splt[-1]] = mynode
             res = root
             for k in reversed(splt[:-1]):
@@ -1884,6 +1955,69 @@ class EquationTree:
                     return True
         return False
 
+    def _wrap_equations_for_sharing(self):
+        """Puts every Equations object in this subtree into a CombinedEquations, unless it already is one.
+
+        The clones an expansion makes share their Equations objects, so one object can end up as the
+        top-level equations of one domain and, once it is merged with an explicitly given sibling, as a
+        subelement of that sibling's CombinedEquations. Those two roles are incompatible: a top-level
+        Equations resets its own _final_element to None in _setup_combined_element(), whereupon the
+        enclosing CombinedEquations backs that None up and _rstr_final_elem() restores it as a pointer to
+        itself - a cycle that makes _get_combined_element() recurse until the stack runs out. Wrapping
+        keeps the shared object away from the top level, which is exactly why the list form
+        (eqs@["left","right"]) builds a CombinedEquations before sharing."""
+        if self._equations is not None and not isinstance(self._equations,CombinedEquations):
+            self._equations=CombinedEquations(self._equations)
+        for child in self._children.values():
+            child._wrap_equations_for_sharing()
+
+    def _expand_domain_name_patterns(self,candidates_getter:Callable[["EquationTree",int],tuple[set[str],str]],depth:int=0):
+        """Replaces every glob child (e.g. "*", "wall*", "[lr]*") by one clone of its subtree per matching
+        name, merging into an explicit sibling of the same name if there already is one. Called once from
+        Problem._link_geometry_and_equations, after the mesh templates have defined their geometry - which
+        is the earliest moment any real domain or boundary name exists - and before anything else looks at
+        the tree, so everything downstream only ever sees literal names."""
+        # Insertion order of _children mirrors the order the user wrote the restrictions in, and that
+        # order decides which of two conditions on the same boundary is applied last and hence wins.
+        # It therefore has to be carried through the expansion, both for the patterns themselves and
+        # for the merge below.
+        order=[k for k in self._children.keys()]
+        patterns=[k for k in order if _is_domain_name_pattern(k)]
+        if patterns:
+            # The candidates come from the mesh templates only, never from self._children. That is what
+            # makes a pattern unable to match a name another pattern just produced, so expansion at one
+            # node is order-independent and cannot loop.
+            candidates,descr=candidates_getter(self,depth)
+            for pat in patterns:
+                node=self._children.pop(pat)
+                node._wrap_equations_for_sharing()
+                matches=sorted(n for n in candidates if fnmatch.fnmatchcase(n,pat))
+                if not matches:
+                    raise RuntimeError("The domain name pattern '"+pat+"' at '"+self.get_full_path()+"' does not match anything, i.e. '"+self.get_full_path().rstrip("/")+"/"+pat+"' does not exist. "+descr+" are "+str(sorted(candidates)))
+                patpos=order.index(pat)
+                fresh:list[str]=[]
+                for name in matches:
+                    # Each match gets its own tree nodes but shares the Equations objects - exactly the
+                    # semantics eqs@["a","b"] already has.
+                    clone=node._clone_structure()
+                    existing=self._children.get(name)
+                    if existing is None:
+                        merged=clone
+                        fresh.append(name)
+                    elif patpos<order.index(name):
+                        merged=clone+existing
+                    else:
+                        merged=existing+clone
+                    merged._parent=self
+                    self._children[name]=merged
+                # The pattern gives up its slot to the names it produced; names that were already there
+                # keep the slot they had.
+                order[patpos:patpos+1]=fresh
+            self._children={k:self._children[k] for k in order}
+        # After the expansion, so that a clone which itself contains a pattern (@"*/*") is descended into
+        for child in list(self._children.values()):
+            child._expand_domain_name_patterns(candidates_getter,depth+1)
+
     def _fill_dummy_equations(self,problem:"Problem",is_bulk_root:bool=True,pathname:str=""):
         if len(self._children)>0 and self._equations is None:
             if self._has_sub_equations_defined() and not is_bulk_root:
@@ -2117,6 +2251,9 @@ class EquationTree:
         return res
 
     def __matmul__(self, other:str | list[str] | tuple[str, ...] | set[str])->"EquationTree":
+        """Restricts an already assembled equation tree to a further domain, e.g.
+        ``(eqs + DirichletBC(u=0)@"left") @ "domain"``. Accepts the same names, paths, lists and glob
+        patterns as :py:meth:`BaseEquations.__matmul__`."""
         if isinstance(other, (list,tuple,set,)):
             # Restricting to several domains at once: each domain gets its own copy of the tree structure,
             # but shares the Equations objects (as it is also the case for BaseEquations@[...])
@@ -2139,7 +2276,7 @@ class EquationTree:
             res = EquationTree(None, parent=None)
             res._children[splt[-1]] = self
             res._name = splt[-1]
-            _check_for_valid_var_name(res._name,True)
+            _check_domain_name_or_pattern(res._name)
             self._parent = res
             for k in reversed(splt[:-1]):
                 res = res @ k

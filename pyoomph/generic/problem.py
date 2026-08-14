@@ -3353,6 +3353,34 @@ class Problem(_pyoomph.Problem):
         elif resolve:
             self.solve(max_newton_iterations=resolve_max_newton_steps,globally_convergent_newton=resolve_globally_convergent_newton)
 
+    def _domain_name_pattern_candidates(self,node:"EquationTree",depth:int)->tuple[set[str],str]:
+        """The names a glob child of `node` may expand to, together with a phrase naming them for the
+        error message. Only called for nodes that actually have a glob child, so the element-walking
+        _find_interface_intersections() below is not paid for by problems that use no patterns."""
+        if depth==0:
+            res:set[str]=set()
+            for m in self._meshtemplate_list:
+                res.update(m.available_domains())
+            return res,"Available domains"
+        path=node.get_full_path().lstrip("/").split("/")
+        templ=None
+        for m in self._meshtemplate_list:
+            if m.has_domain(path[0]):
+                templ=m
+                break
+        if templ is None:
+            raise RuntimeError("Cannot expand a domain name pattern at '"+node.get_full_path()+"': there is no mesh template with a domain named '"+path[0]+"'. ODE domains and domains without a mesh template have no boundaries to match against.")
+        if depth==1:
+            # Exactly the boundaries this domain touches with a whole facet, i.e. the same subset the
+            # generated mesh will end up with.
+            return set(templ.get_domain(path[0]).get_adjacent_boundary_names()),"Boundaries of '"+path[0]+"'"
+        if depth==2:
+            # _find_interface_intersections() inserts every permutation, so "domain/left/top" is present
+            # iff "domain/top/left" is; filtering on the prefix therefore gives the codim-2 children.
+            prefix=path[0]+"/"+path[1]+"/"
+            return {p[len(prefix):] for p in templ._find_interface_intersections() if p.startswith(prefix) and "/" not in p[len(prefix):]},"Boundary intersections of '"+"/".join(path[:2])+"'"
+        raise RuntimeError("Domain name patterns are only supported for bulk domains, their boundaries and the intersections of those boundaries. The pattern at '"+node.get_full_path()+"' is deeper than that, please list the names explicitly instead.")
+
     def _link_geometry_and_equations(self):
         #Go through the templates and create them
         domset:set[str]=set()
@@ -3368,15 +3396,21 @@ class Problem(_pyoomph.Problem):
         if not hasattr(self,"_equation_system") or self._equation_system is None:
             raise RuntimeError("Please add at least one equation to the problem via add_equations()")
 
+        # Resolve any glob domain name (e.g. DirichletBC(u=0)@"*") now: the geometry above is the first
+        # point where real domain and boundary names exist, and everything below - the dummy equations,
+        # the _internal_facets_ child, the opposite-interface nodes, the code generators - must only ever
+        # see literal names.
+        self._equation_system._expand_domain_name_patterns(self._domain_name_pattern_candidates)
+
         self._equation_system._fill_dummy_equations(self)
         self._interinter_connections.clear()
         for m in self._meshtemplate_list:
-            m._ensure_opposite_eq_tree_nodes(self._equation_system) 
+            m._ensure_opposite_eq_tree_nodes(self._equation_system)
             inters=m._find_interface_intersections()
-            for m in inters:
-                dom=m.split("/")[0]
+            for im in inters:
+                dom=im.split("/")[0]
                 if dom in self._equation_system._children and self._equation_system._children[dom]._equations is not None:
-                    self._interinter_connections.add(m)
+                    self._interinter_connections.add(im)
         if len(self._interinter_connections)>0:
             self._equation_system._fill_interinter_connections(self._interinter_connections)
         
