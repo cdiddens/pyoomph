@@ -522,22 +522,29 @@ None of these were attempted. Each is a bigger lever than anything measured abov
 latent correctness bug, the other two are the reason moving-mesh and stability elements generate the
 largest code in the project.
 
-### 9.1 A swallowed `throw_runtime_error` that hides a dropped Jacobian term
+### 9.1 A swallowed `throw_runtime_error` — resolved, and it was not a bug
 
 `GiNaCSubExpression::derivative` builds its result in two stages. First it walks the subexpression's
 `req_fields` and accumulates the cached chain rule, `d_subexpr_N_d_<field> * <derived shape>`, into
 `res`, setting `found`. Then, on a `coordinates_as_dofs` code, if the symbol being differentiated by is
 a nodal coordinate, it takes the escape hatch and computes `deriv = diff(expr, s)` directly.
 
-If that direct derivative is non-zero **and** `found` is already true, the code assembles a detailed
-message — *"subexpression derivative wrto ... is non-zero, but we already have a contribution before"* —
-and then does not throw it (the `throw_runtime_error` is commented out). It `return deriv`, **discarding
-`res`**. So in the one case the author thought impossible, the cached contributions are silently dropped
-from the Jacobian entry rather than added to it.
+If that direct derivative was non-zero **and** `found` was already true, the code assembled a detailed
+message — *"subexpression derivative wrto ... is non-zero, but we already have a contribution before"*,
+printing `deriv` as "should be 0" — and then did not throw it (the `throw_runtime_error` was commented
+out). It returned `deriv`, discarding `res`, which read like a silently dropped Jacobian term.
 
-Nobody knows whether that branch is reachable; if it is not, the throw costs nothing, and if it is, the
-Jacobian is quietly wrong. Either turn it into a real error or, if the combination is legitimate, return
-`res + deriv` and delete the message. Small work, and the highest-value item here.
+It is not one. `deriv = diff(body, s)` is the **complete** derivative: `GiNaCShapeExpansion::derivative`
+already converts every position expansion inside the body to its derived form, so `res` is the same
+contribution re-expressed through the cache. `res + deriv` would double-count; returning `deriv` alone
+was correct all along, and the emitted `d_subexpr_N_d_<coordinate>` variables are then dead, which is
+exactly what §8.2 counts.
+
+The branch is also reachable, so a throw would have been wrong: `SubExpressionsToStructs` erases position
+expansions from `req_fields` for this code, its bulk and its bulk's bulk, but **not** for the opposite
+interface code — which the `is_coordinate` test does cover.
+
+The message and the dead throw are gone; the reasoning is now in the comment.
 
 ### 9.2 Derivatives with respect to the moving-mesh coordinates
 

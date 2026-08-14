@@ -10053,25 +10053,22 @@ namespace GiNaC
 			}
 			if (is_coordinate)
 			{
+				// The direct derivative is the complete one - GiNaCShapeExpansion::derivative already
+				// turns every position expansion inside the body into its derived form - so whatever the
+				// req_fields loop above put into res is the *same* contribution, only re-expressed
+				// through the cached d_subexpr_N_d_<coordinate> scalar. res is therefore dropped rather
+				// than added: returning res+deriv would count the coordinate term twice. That is also why
+				// those cached coordinate derivatives are emitted and never read (see the dead-store
+				// section of dev_docs/code_generation.md).
+				//
+				// This used to assemble an error message claiming a non-zero deriv with found==true was
+				// impossible, print deriv as "should be 0", and then not throw it. found is in fact
+				// reachable: SubExpressionsToStructs erases position expansions from req_fields, but that
+				// erasure does not cover the opposite interface code, which the is_coordinate test above
+				// does cover.
 				GiNaC::ex deriv = GiNaC::diff(get_struct().expr, s);
-				//				std::cout << "DERIV OF " << get_struct().expr << " WRTO " << s << " IS " << deriv << std::endl;
 				if (!deriv.is_zero())
-				{
-					if (found)
-					{
-						std::ostringstream oss;
-						oss << "subexpression derivative wrto " << s << " is non-zero, but we already have a contribution before..." << std::endl;
-						oss << "DERIV IS (should be 0): " << deriv << std::endl;
-						oss << "EXPRESSION IS " << get_struct().expr << std::endl;
-						//throw_runtime_error(oss.str());
-						return deriv;
-					}
-					else
-					{
-						//		    std::cout << "DERIVED SUBEXPRESSIONS "
-					}
 					return deriv;
-				}
 			}
 		}
 
