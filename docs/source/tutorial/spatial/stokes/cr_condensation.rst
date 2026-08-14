@@ -117,6 +117,10 @@ So the performance of the factorization can become more than twice as efficient 
 However, there is of course overhead associated with the condensation in the assembly (Schur complement, inversion of small dense matrices and the reconstruction after the linear solve) associated with it.
 
 
+.. note::
+	Under MPI, this particular selection has to be run with ``--distribute``. A block of selected degrees of freedom can only be eliminated on the process that owns all of its rows, and this selection pairs the bubble velocity (nodal) with the pressure gradients (element-internal), which oomph-lib numbers far apart - every nodal value comes before any internal one. In a *replicated* run (``mpirun`` without ``--distribute``) the two halves of a block therefore end up in different processes' row ranges and pyoomph refuses with a message saying so. With ``--distribute`` each process renumbers its own degrees of freedom contiguously and the question does not arise. A selection of purely element-internal degrees of freedom, e.g. the one of :numref:`secdghdg`, is served in both modes.
+
+
 .. warning::
 	:py:class:`~pyoomph.equations.generic.StaticCondensation` is experimental. Only conventional Newton solves benefit:
 	residual evaluations, eigenvalue and Hessian assemblies and arclength continuation always see the full system. 

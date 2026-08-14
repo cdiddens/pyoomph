@@ -703,8 +703,9 @@ run_tutorial_pass() { # label, tag, timeout, extra arguments for the runner
     skips="$(sed -n '/^SKIPPED FOR MISSING OPTIONAL DEPENDENCIES:/,/^$/p' "$log" \
              2>/dev/null | grep -E '^ +\S+ needs ')"
     # And the ones the runner itself refuses to start under mpirun -- parallel_running.py spawns its
-    # own mpirun, the deflation scripts use a custom assembler that is not MPI-capable yet. Reported
-    # for the same reason: the MPI pass covers slightly less than the serial one.
+    # own mpirun, the deflation scripts use a custom assembler that is not MPI-capable yet, and the
+    # Crouzeix-Raviart condensation needs --distribute, which this pass deliberately does not pass.
+    # Reported for the same reason: the MPI pass covers slightly less than the serial one.
     selfskips="$(grep -E '^ +SKIPPING .* -- ' "$log" 2>/dev/null | sed 's/^ *//' | sort -u)"
 
     # "TIME <seconds> s <folder>/<script>" per script, from the runner's SIMULATION TIMES section:
