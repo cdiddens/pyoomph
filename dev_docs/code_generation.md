@@ -4,11 +4,11 @@ Two investigations on the same pipeline, merged here because they keep pointing 
 
 * **Producing the C** (§1–§4) — branch `codegen`. Ingestion, not emission, was the expensive half,
   and two causes account for essentially all of it. Both fixes landed.
-* **Running the C** (§5–§9) — whether the emitted code can be made faster. The answer is mostly no:
-  pyoomph emits deliberately redundant C and the C compiler is good enough at cleaning it up that
-  three implemented, measured changes were all reverted. What survives is the knowledge of which
-  apparent inefficiencies are real (few), and one piece of advice that beats every code-generation
-  change attempted: use `subexpression()`.
+* **Running the C** (§5–§9) — whether the emitted code can be made faster. Against the *compiler* the
+  answer is mostly no: pyoomph emits deliberately redundant C and the C compiler cleans it up well
+  enough that three implemented, measured changes were all reverted. The one thing a C compiler cannot
+  do is differentiate, so the symbolic derivative cache behind `subexpression()` is where the wins are —
+  hence the advice in §7, and hence §9.3, which extends that cache to the Hessian for −91%.
 
 §4 is the part to read even if none of the performance matters to you — a caching change silently
 emitted a wrong residual, through a GiNaC printing bug that is still upstream.
@@ -388,6 +388,11 @@ Deleting the 90 provably dead assignments and re-measuring: gcc −0.1%, tcc +0.
 computed once per integration point against `nnode² = 729` Jacobian entries per point. So this is worth
 fixing for clarity and for what it reveals (§9.2), not for speed.
 
+The Hessian now has its own instance of the same thing (§9.3): the *original* subexpression's
+`d_subexpr_*` are often unread there, because the outer index goes through a nested copy. Same ratio,
+same verdict — with the caveat that an unreferenced `exp()` is not free to the compiler unless
+`-fno-math-errno` is on (§7).
+
 ### 8.3 Repeated subtrees in the Jacobian entries — the real one, and it still did not pay
 
 Each `BEGIN_JACOBIAN_*` entry is an independent `GiNaC::diff` of the whole residual, printed flat, so a
@@ -485,7 +490,8 @@ compiler cannot differentiate anything.
 | drop the `IGNORED RESIDUAL` comment payload | 0 | 0 | **done** (§8.5) — compile time only, but 66% of one 5.8 MB file |
 | remove the dead `d_subexpr_*` stores | ~0 | ~0 | not attempted; symptom of §9.2 |
 | automatic `subexpression()` injection | unknown | unknown | not attempted; narrower than it looks |
-| **the three open leads of §9** | unmeasured | unmeasured | **the largest remaining levers** |
+| **`subexpression()` reaching the Hessian** | **−91% code, −97% Hessian assembly** | — | **done (§9.3)** |
+| index-aware coordinate derivative cache | unmeasured | unmeasured | still open (§9.2); the largest remaining lever |
 
 On automatic injection: marker injection *before* differentiation is the obvious idea and the riskier
 half — it changes what gets differentiated symbolically, it is blocked from anything containing a test
@@ -516,11 +522,11 @@ same size with its **disassembly differing in exactly two instructions**, both `
 a `__LINE__` value for `__assert_fail`, plus the embedded source path; the element shrinking
 291 086 → 262 853 B and compiling in 4.83 s instead of 5.09 s.
 
-## 9. Open leads in the subexpression machinery
+## 9. The subexpression machinery beyond the Jacobian
 
-None of these were attempted. Each is a bigger lever than anything measured above — the first is a
-latent correctness bug, the other two are the reason moving-mesh and stability elements generate the
-largest code in the project.
+Three leads, recorded here when they were still open. §9.1 and §9.3 are now done — §9.1 turned out not
+to be the bug it looked like, §9.3 was worth −91% on the generated Hessian. §9.2 is still open and is
+the reason moving-mesh elements generate the largest code in the project.
 
 ### 9.1 A swallowed `throw_runtime_error` — resolved, and it was not a bug
 
@@ -572,27 +578,79 @@ Two directions, in increasing order of ambition:
   interaction with `is_derived_other_index`, and the Hessian's second index all have to be thought
   through.
 
-Any change here changes which branch of `GiNaCSubExpression::derivative` fires, so §9.1 should be
-resolved **first**, not discovered afterwards.
+Any change here changes which branch of `GiNaCSubExpression::derivative` fires. §9.1 has been settled,
+so that is no longer a blocker; the Hessian's second index (§9.3) now runs through the same escape
+hatch and has to be kept in view.
 
-### 9.3 Subexpressions in the Hessian
+### 9.3 Subexpressions in the Hessian — done
 
-They are stripped outright. `write_generic_Hessian` runs `RemoveSubexpressionsByIndentity` over the
-residual to unwrap every marker back to its raw argument before differentiating twice, and
-`write_code_subexpressions` throws `"Hessian subexpressions!"` if any survive. So on a problem with
-`generate_hessian` — every azimuthal or Cartesian normal-mode stability analysis with an analytic
-Hessian — the user's `subexpression()` calls buy nothing at all in the Hessian, which is routinely the
-*largest* generated function: in one production element `HessianVectorProduct1` is 455 kB against
-`ResidualAndJacobian1`'s 386 kB.
+They used to be stripped outright: `write_generic_Hessian` ran `RemoveSubexpressionsByIndentity` over
+the residual before differentiating twice, and `write_code_subexpressions` threw
+`"Hessian subexpressions!"` if any survived. So on a problem with `generate_hessian` — every azimuthal
+or Cartesian normal-mode stability analysis with an analytic Hessian — `subexpression()` bought nothing
+at all in what is routinely the *largest* generated function.
 
-The machinery is half-present rather than absent: `__SE_to_struct_hessian` exists to re-wrap markers
-during Hessian generation, `__hessian_subexprs_scanned` tracks what has been folded in, and
-`GiNaCSubExpression::derivative` already has an `__in_hessian` branch that builds a nested subexpression
-for the inner derivative instead of reading the cache. What is missing is the second-derivative cache
-itself — the `d2_subexpr_N_d_f_d_g` equivalent — and the emission of its fill code.
+There is **no** `d2_subexpr_N_d_f_d_g` cache, and none is needed. The `__in_hessian` branch of
+`GiNaCSubExpression::derivative` wraps `d(body)/d(field)` in a **nested** subexpression for the outer
+index; that nested subexpression's own first-derivative cache, filled by `write_code_subexpressions`
+like any other, *is* the second derivative. The list is in dependency order for free, because
+`SubExpressionsToStructs` maps a body before pushing its parent.
 
-The largest of the three and the least explored. It should not be started before §9.2 is settled,
-because on a moving mesh the two share the same escape hatch and the same reason for it.
+Four things had to be fixed to switch it on:
+
+- The nested body was wrapped without `__deriv_subexpression_wrto` and without
+  `DerivedShapeExpansionsToUnity`, so the derived shape expansion stayed *inside* a value hoisted above
+  the shape loop (printing as `psi[l_shape]` where `l_shape` does not exist) and every `req_fields` entry
+  of the same field added the whole sum again. Both now mirror the non-Hessian fill. The saved pointer is
+  restored rather than nulled: the branch re-enters itself through nested subexpressions.
+- The fill's own `diff` ran with `__in_hessian` still set, so it appended new subexpressions *after* the
+  list was snapshotted and the declarations emitted. It is cleared for the fill, which is also what the
+  chain rule wants — read the nested cache, do not re-wrap.
+- The fill used `get_derive_jacobian_by_expansion_mode()`. Every `d_subexpr_*` the Hessian reads is a
+  *second*-index derivative (the outer index never touches the cache), and the second index is
+  differentiated under `get_derive_hessian_by_expansion_mode()`. This is load-bearing, not cosmetic:
+  with the Jacobian mode, the augmented Jacobian of an azimuthal `m=1` tracker came out wrong by 8.7e-5
+  relative — small enough to pass a loose tolerance and still ruin Newton convergence.
+- The shape-expansion harvest that told `write_spatial_interpolation` what to interpolate sat inside the
+  `(f, f2)` loop, where the `assemble_hessian_by_symmetry` `continue` skips it and the last pair's
+  subexpressions are never seen. `write_generic_Hessian` now sweeps the finished list once. A miss here
+  is an undeclared identifier in the emitted C, not a wrong number.
+
+Measured on a three-species transcendental element (`exp`/`log`/rational activity law shared by every
+equation), same script, only the C++ differing:
+
+| | before | after |
+|---|---|---|
+| `HessianVectorProduct0` | 809 029 B | 72 375 B (**−91%**) |
+| `_assemble_hessian_tensor` | 0.1958 s | 0.0054 s (**−97%**) |
+| `ResidualAndJacobian0` | 24 528 B | unchanged |
+
+Correctness was gated on the analytic Hessian tensor and the augmented Jacobian matching a reference
+built from the *identical* residual written without `subexpression()`, which never touches this
+machinery: agreement to 1e-16 relative on a plain nonlinearity, on `partial_t` inside the wrapper (the
+mass-matrix Hessian), on an axisymmetric `m=1` azimuthal tracker, and on a `coordinates_as_dofs` mesh
+with `grad(u)` inside the wrapper.
+
+It is a trade, not a free win, and it goes the wrong way on cheap bodies. Hoisting costs a declaration
+and a fill per (subexpression, field) pair whether or not the inlined text it replaces was large.
+`HessianVectorProduct` sizes against the same residual written without the wrapper:
+
+| wrapped body | before | after |
+|---|---|---|
+| 3-species `exp`/`log` activity law | 809 029 B | 72 375 B |
+| `exp(u)` | 4 497 B | 4 676 B |
+| `exp(u)*u`, azimuthal `m=1` | 5 228 B | 5 683 B |
+| SUPG `tau` on a **linear** residual | 10 045 B | 12 920 B |
+
+The last row is the worst case: a linear residual has an identically zero Hessian, so every hoisted
+scalar there is dead. This is the same trade `subexpression()` already makes in the Jacobian and it is
+the user's explicit choice to wrap — but the Hessian used to be exempt from it, and is not any more.
+
+Still open, and not made worse: on a moving mesh §9.2 still applies inside the Hessian — the coordinate
+index takes the escape hatch and inlines. And the *original* subexpression's `d_subexpr_*` are now
+often dead in the Hessian, since the outer index goes through the nested copy; that is §8.2's ratio
+again (once per integration point against `nnode²` entries), except that an unreferenced `exp()` is not
+free to the compiler without `-fno-math-errno`. Neither was measurable against the numbers above.
 
 ## 10. Things deliberately left alone
 

@@ -453,10 +453,6 @@ namespace pyoomph
 	};
 
 	SubExpressionsToStructs *__SE_to_struct_hessian = NULL;
-	// How many of __SE_to_struct_hessian's subexpressions have already been folded into
-	// __all_Hessian_shapeexps/__all_Hessian_indices_required; see the harvest loop in
-	// FiniteElementSpace::write_generic_Hessian_contribution().
-	size_t __hessian_subexprs_scanned = 0;
 
 	// GiNaC tree-mapper used to isolate the part of a residual expression that belongs to a single
 	// test-function space (and, if `varname` is given, to a single field's test function): any
@@ -2466,25 +2462,11 @@ namespace pyoomph
 					  std::cout << "22 MASSPART BY" << f2->get_symbol()<< " : " << masspart2 << std::endl;
 					}*/
 					for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
-					// Harvest subexpression shape expansions into the Hessian-wide sets. This sits
-					// in the innermost (f, f2) loop, but the list only grows and set insertion is
-					// idempotent, so rescanning seen entries costs a full tree walk each and buys
-					// nothing. __hessian_subexprs_scanned resets with __SE_to_struct_hessian.
-					if (__hessian_subexprs_scanned > for_code->subexpressions.size())
-						__hessian_subexprs_scanned = 0; // never observed, but a shrink must rescan rather than skip
-					for (size_t si = __hessian_subexprs_scanned; si < for_code->subexpressions.size(); si++)
-					{
-						auto se_shapes = for_code->get_all_shape_expansions_in(for_code->subexpressions[si].get_expression());
-						for (auto &se : se_shapes)
-						{
-							if (!se.is_derived && !se.is_derived_other_index)
-							{
-								__all_Hessian_shapeexps.insert(se);
-							}
-							__all_Hessian_indices_required.insert(se.field);
-						}
-					}
-					__hessian_subexprs_scanned = for_code->subexpressions.size();
+					// The subexpression shape expansions used to be harvested into the Hessian-wide sets
+					// here. They are not any more: this point is skipped by the assemble_hessian_by_symmetry
+					// "continue" above, and it runs before the mappings further down, so the last (f,f2)
+					// pair's subexpressions were never seen. write_generic_Hessian() now sweeps the
+					// finished list once instead.
 					__derive_shapes_by_second_index = false;
 					if (diffpart2.is_zero() && masspart2.is_zero()) // &&  masspart2.is_zero()
 						continue;
@@ -4709,8 +4691,6 @@ namespace pyoomph
 				}
 			}
 
-			//  if (hessian) throw_runtime_error("Hessian subexpressions!");
-
 			/*if (!GiNaC::is_zero(GiNaC::imag_part(subexpressions[j].get_expression())))
 			{
 				os << "    double RE_" << subexpressions[j].get_cvar() << " = ";
@@ -4733,7 +4713,7 @@ namespace pyoomph
 		{
 			csrc_opts.in_subexpr_deriv = true;
 			os << "    //Derivatives of subexpressions" << std::endl;
-			std::set<std::string> subexpr_defined_written_in_hessian;
+			std::set<std::string> subexpr_decls_written;
 			for (unsigned int j = 0; j < subexpressions.size(); j++)
 			{
 
@@ -4749,10 +4729,16 @@ namespace pyoomph
 					std::string wrto = f.get_spatial_interpolation_name(this);
 					std::ostringstream derivname;
 					derivname << "d_" << subexpressions[j].get_cvar() << "_d_" << wrto;
-					if (hessian && subexpr_defined_written_in_hessian.count(derivname.str()))
+					// Two req_fields entries of one subexpression can differ only in no_jacobian /
+					// no_hessian / expansion_mode - flags that ShapeExpansion::operator< discriminates on
+					// but get_spatial_interpolation_name does not - and would then declare the same C
+					// variable twice. Sharing one variable is safe because the fill below matches on
+					// (field, dt_order, basis, dt_scheme) only, so every variant produces the same value.
+					// The fill loop applies the identical rule, so declaration and assignment agree.
+					if (subexpr_decls_written.count(derivname.str()))
 						continue;
 					os << "    double " << derivname.str() << ";" << std::endl;
-					subexpr_defined_written_in_hessian.insert(derivname.str());
+					subexpr_decls_written.insert(derivname.str());
 					//	subexpressions[j].derivsyms[f.get_cpp_symbol()]=GiNaC::symbol(derivname.str());
 					//			}
 				}
@@ -4762,7 +4748,7 @@ namespace pyoomph
 				os << "    if (flag)" << std::endl;
 			os << "    {" << std::endl;
 
-			std::set<std::string> subexpr_rhs_written_in_hessian;
+			std::set<std::string> subexpr_fills_written;
 			for (unsigned int j = 0; j < subexpressions.size(); j++)
 			{
 				for (auto &f : subexpressions[j].req_fields)
@@ -4775,14 +4761,34 @@ namespace pyoomph
 					//				if (!dsub.is_zero())
 					//				{
 					std::string wrto = f.get_spatial_interpolation_name(this);
+					std::ostringstream derivname;
+					derivname << "d_" << subexpressions[j].get_cvar() << "_d_" << wrto;
+					// Same collapsing rule as the declaration loop above, and applied before the diff so
+					// the skipped variant costs nothing.
+					if (subexpr_fills_written.count(derivname.str()))
+						continue;
 					__deriv_subexpression_wrto = &f;
 					if (pyoomph::pyoomph_verbose)
 					{
 						std::cout << "DERIVING SUBSEXPRESSION " << subexpressions[j].get_expression() << " BY " << f.field->get_symbol() << ", more specifically by " << (0 + GiNaC::GiNaCShapeExpansion(f)) << std::endl;
 					}
-					if (hessian) throw_runtime_error("Hessian subexpressions!");
-					__derive_only_by_expansion_mode=this->get_derive_jacobian_by_expansion_mode();
+					// Every d_subexpr_N_d_<field> the Hessian actually reads is a *second*-index
+					// derivative: the outer index never touches the cache, it builds a nested
+					// subexpression instead (GiNaCSubExpression::derivative). The second index is
+					// differentiated under the Hessian expansion mode - the base state, mode 0 - not the
+					// Jacobian's perturbation mode 1, so filling with the Jacobian mode would cache the
+					// wrong derivative for azimuthal and Cartesian normal-mode stability.
+					__derive_only_by_expansion_mode = (hessian ? this->get_derive_hessian_by_expansion_mode() : this->get_derive_jacobian_by_expansion_mode());
+					// Clear __in_hessian for the fill itself. Left set, a nested subexpression in the body
+					// would take the outer-index branch and append a *new* entry to
+					// __SE_to_struct_hessian->subexpressions - after this list was snapshotted and after
+					// the declarations above were emitted, so it would have neither a "double subexpr_N ="
+					// line nor a declared derivative, and resolve_subexpression would fail on it. Reading
+					// the nested subexpression's own cache is also what the chain rule wants here.
+					const bool was_in_hessian = pyoomph::__in_hessian;
+					pyoomph::__in_hessian = false;
 					GiNaC::ex dsdf = pyoomph::expressions::diff(subexpressions[j].get_expression(), f.field->get_symbol());
+					pyoomph::__in_hessian = was_in_hessian;
 					__derive_only_by_expansion_mode=NULL;
 					__deriv_subexpression_wrto = NULL;
 					DerivedShapeExpansionsToUnity deriv_se_to_1(f.basis,f.dt_order,f.dt_scheme); // Map all other expanded basis functions to zero to separate between e.g. d/dx or nonderived shapes
@@ -4794,11 +4800,8 @@ namespace pyoomph
 					
 					// if (!dsub.is_zero())
 					{
-						std::ostringstream derivname;
-						derivname << "d_" << subexpressions[j].get_cvar() << "_d_" << wrto;
-						if (hessian && subexpr_rhs_written_in_hessian.count(derivname.str())) continue;
 						os << "     " << derivname.str() << " = ";
-						subexpr_rhs_written_in_hessian.insert(derivname.str());
+						subexpr_fills_written.insert(derivname.str());
 						// dsub.evalf().print(GiNaC::print_csrc_FEM(os,&csrc_opts));
 						// GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(dsub).evalf()))).print(GiNaC::print_csrc_FEM(os,&csrc_opts));
 						print_simplest_form(dsub, os, csrc_opts);
@@ -5007,9 +5010,12 @@ namespace pyoomph
 	// Top-level generator for the exact (analytical) Hessian-vector-product C function `funcname` of
 	// residual `resi`. High-level structure:
 	//   1. Split off the Eulerian/Lagrangian spatially-integrated part of the residual (nodal-delta
-	//      Hessian contributions are not supported and raise an error if present), strip any leftover
-	//      subexpression(...) markers back to plain form, then re-wrap them via a fresh
-	//      SubExpressionsToStructs instance (__SE_to_struct_hessian) dedicated to this Hessian pass.
+	//      Hessian contributions are not supported and raise an error if present) and turn its
+	//      subexpression(...) markers into structs via a fresh SubExpressionsToStructs instance
+	//      (__SE_to_struct_hessian) dedicated to this Hessian pass. The double differentiation in step 2
+	//      then grows that list further, with one nested subexpression per (subexpression, outer field)
+	//      pair - see GiNaCSubExpression::derivative, whose first-derivative cache is the Hessian's
+	//      second derivative.
 	//   2. Call write_generic_RJM_contribution(..., hessian=true) on every FiniteElementSpace, which
 	//      (via write_generic_Hessian_contribution, see above) performs the actual double symbolic
 	//      differentiation and accumulates, as a side effect, the global __all_Hessian_shapeexps/
@@ -5039,7 +5045,6 @@ namespace pyoomph
 		if (__SE_to_struct_hessian)
 			delete __SE_to_struct_hessian;
 		__SE_to_struct_hessian = new SubExpressionsToStructs(this);
-		__hessian_subexprs_scanned = 0;
 
 		GiNaC::ex spatial_integral_portion_Eulerian = extract_spatial_integral_part(resi, true, false);	  // resi.coeff(get_dx(false), 1) * get_dx(false);
 		GiNaC::ex spatial_integral_portion_Lagrangian = extract_spatial_integral_part(resi, false, true); // resi.coeff(get_dx(true), 1) * get_dx(true);
@@ -5048,11 +5053,11 @@ namespace pyoomph
 		// if (!spatial_integral_portion_Lagrangian.is_zero()) this->mark_shapes_required("ResJac["+std::to_string(residual_index)+"]",spaces[0],"psi");
 		GiNaC::ex spatial_integral_portion = spatial_integral_portion_Eulerian + spatial_integral_portion_Lagrangian;
 
-		// REMOVE ALL SUBEXPRESSIONS FOR THE TIME BEING
-		RemoveSubexpressionsByIndentity rem_ses(this);
-		spatial_integral_portion = rem_ses(spatial_integral_portion);
-
 		spatial_integral_portion = (*__SE_to_struct_hessian)(spatial_integral_portion);
+		// Needed before the first differentiation, not merely for tidiness: GiNaCSubExpression::derivative
+		// resolves against this list, and write_generic_Hessian_contribution only refreshes it *after* its
+		// first diff() call.
+		subexpressions = __SE_to_struct_hessian->subexpressions;
 
 		// Constructed before the osm expression printing below; the declarations are emitted into the
 		// osh header stream later, which precedes osm in the assembled function text
@@ -5065,6 +5070,23 @@ namespace pyoomph
 			has_contribs = sp->write_generic_RJM_contribution(this, osm, "    ", spatial_integral_portion, true) || has_contribs;
 		}
 		osm << "    //END: Contribution of the spaces" << std::endl;
+
+		// Authoritative harvest of everything the subexpression bodies read. The incremental sweep in
+		// write_generic_Hessian_contribution() cannot be relied on for this: it sits inside the (f,f2)
+		// loop, so the assemble_hessian_by_symmetry "continue" skips it, and the subexpressions that the
+		// last (f,f2) pair appends are never scanned at all. A field missed here is one that
+		// write_spatial_interpolation is never asked to produce, i.e. an undeclared identifier in the
+		// emitted C rather than a wrong number.
+		subexpressions = __SE_to_struct_hessian->subexpressions;
+		for (auto &se : subexpressions)
+		{
+			for (auto &sh : get_all_shape_expansions_in(se.get_expression()))
+			{
+				if (!sh.is_derived && !sh.is_derived_other_index)
+					__all_Hessian_shapeexps.insert(sh);
+				__all_Hessian_indices_required.insert(sh.field);
+			}
+		}
 
 		if (!has_contribs)
 		{
@@ -9977,10 +9999,30 @@ namespace GiNaC
 					continue; // Only with respect to the actual time
 				if (pyoomph::__in_hessian && !pyoomph::__derive_shapes_by_second_index)
 				{
+					// Outer Hessian index. The cached scalar d_subexpr_N_d_<field> is a plain GiNaC symbol
+					// and cannot be differentiated a second time, so instead of reading it we wrap
+					// d(body)/d(field) in a *nested* subexpression: its own first-derivative cache, filled
+					// by write_code_subexpressions like any other, then is the second derivative. That is
+					// what makes a separate d2_subexpr_N_d_f_d_g cache unnecessary.
+					//
+					// The wrapped body has to come out as a loop-index-independent scalar, exactly as in
+					// the derivative fill of write_code_subexpressions: __deriv_subexpression_wrto restricts
+					// the raw diff to this one (field, basis, dt) combination, and DerivedShapeExpansionsToUnity
+					// divides the derived shape expansion back out - it is re-applied on the outside below.
+					// Without both, the shape function would end up inside a value hoisted above the shape
+					// loop, and every req_fields entry of the same field would add the whole sum again.
+					// Save and restore rather than clearing: diff() re-enters this branch through nested
+					// subexpressions, so a NULL here would corrupt the enclosing differentiation.
+					const pyoomph::ShapeExpansion *outer_wrto = pyoomph::__deriv_subexpression_wrto;
+					pyoomph::__deriv_subexpression_wrto = &shape_exp;
 					GiNaC::ex inner = GiNaC::diff(get_struct().expr, s);
+					pyoomph::__deriv_subexpression_wrto = outer_wrto;
+					pyoomph::DerivedShapeExpansionsToUnity strip_derived(shape_exp.basis, shape_exp.dt_order, shape_exp.dt_scheme);
+					inner = strip_derived(inner);
+					if (inner.is_zero())
+						continue; // nothing to cache, and wrapping it would emit a dead subexpr_N
 					GiNaC::ex newse = (*pyoomph::__SE_to_struct_hessian)(pyoomph::expressions::subexpression(inner));
 					auto sexp = pyoomph::ShapeExpansion(shape_exp.field, shape_exp.dt_order, shape_exp.basis, shape_exp.dt_scheme, true);
-					// if (pyoomph::__derive_shapes_by_second_index) sexp.is_derived_other_index=true;
 					res += newse * GiNaCShapeExpansion(sexp);
 					found = true;
 				}

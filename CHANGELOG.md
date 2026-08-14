@@ -84,6 +84,23 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Changed / Improved
 
+- **`subexpression()` now also works in the analytic Hessian.** Since 2024 the Hessian generator
+  unwrapped every `subexpression()` marker before differentiating the residual twice, so on a problem
+  with `setup_for_stability_analysis(analytic_hessian=True)` -- every bifurcation tracker, azimuthal and
+  Cartesian normal-mode stability analysis -- the wrapping bought nothing at all in what is routinely
+  the *largest* generated function. It is now kept: the outer Hessian index wraps `d(body)/d(field)` in
+  a nested subexpression whose own cached derivative is the second derivative, so the values and both
+  derivative levels are computed once per integration point instead of being inlined into every entry
+  of the `nnode^2` double loop. On a three-species element with a shared transcendental activity law,
+  `HessianVectorProduct0` went from 809 kB to 72 kB and assembling the Hessian tensor from 0.196 s to
+  0.0054 s. Nothing changes for problems that do not call `subexpression()`, and the computed Hessian
+  is unchanged to round-off -- checked against the same residual written without the wrapper, on a
+  plain nonlinearity, with `partial_t` inside the wrapper (the mass-matrix Hessian), on an axisymmetric
+  `m=1` azimuthal tracker, and on a moving mesh. On moving meshes the coordinate index still inlines,
+  as it does in the Jacobian. Note this is the same trade `subexpression()` already made in the
+  Jacobian, and it can go the other way: wrapping something cheap now makes the Hessian function
+  slightly *larger*, because hoisting costs a declaration and a fill regardless of how little inlined
+  text it saves. Wrap the expensive shared terms, as the docs already advise.
 - **Tensor index conventions are now self-consistent -- two of them changed.** `grad` was already the
   Jacobian, `grad(u)[i,j] = d(u_i)/d(x_j)`, and `matproduct`/`double_dot` were already standard, but
   `contract` and the divergence of a rank-2 tensor were not, in ways that cancelled for the idiomatic

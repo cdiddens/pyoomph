@@ -1182,7 +1182,7 @@ unit_matrix=identity_matrix
 def subexpression(what: ExpressionOrNum) -> Expression:
 	"""
 	Wraps the expression in a subexpression. This will be calculated and derived in beforehand during the code generation and can speed up the assembly.
-	Does not work in symbolical Hessians at the moment.
+	Also applies to the symbolical Hessian used for bifurcation tracking and normal-mode stability analysis, where it is typically worth the most.
 
 	Parameters:
 		what (ExpressionOrNum): What to wrap in a subexpression.
