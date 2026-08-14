@@ -133,11 +133,6 @@ class NestedInterfaceProblem(Problem):
         eqs += FacetValueEqs(-3.5) @ "top/right"
         self += eqs @ "domain"
         self.write_states = False
-        # Nothing here needs refining, and the initial adaptation would go through
-        # InterfaceMesh::snapshot_discontinuous_data, which aborts the process on a POINT interface
-        # carrying a discontinuous field (it interpolates a position on an element that has no shape
-        # function). That is a separate defect from the one below and would only mask it.
-        self.initial_adaption_steps = 0
 
 
 def _interface_facet_values(problem):
@@ -168,13 +163,21 @@ def test_state_file_of_an_interface_on_an_interface(tmp_path):
     meeting a wall, so it took out the state files of a whole class of problems. The key is the chain of
     face indices down to the bulk element now (src/mesh.cpp, pack_face_chain).
 
+    Refined once before writing, because the same point interface used to take the process down with
+    "pure virtual method called" on any adaptation that carried its discontinuous fields across
+    (src/mesh.cpp, sample_position and the point branch of restore_discontinuous_data).
+
     The reader never solves: a solve would recompute lam from its own residual and hide a load that
     restored nothing."""
     fname = str(tmp_path / "nested.dump")
     with NestedInterfaceProblem() as writer:
         writer.set_output_directory(str(tmp_path / "w_nested"))
         writer.solve()
+        writer.refine_uniformly()
+        assert writer.get_mesh("domain").nelement() > 16, "the mesh was not refined, so this proves less"
         before = _interface_facet_values(writer)
+        # the adaptation carried the point's value over rather than resetting it to zero
+        assert [v for vals in before["domain/top/left"].values() for v in vals] == [7.25]
         writer.save_state(fname)
 
     assert set(before) >= {"domain/top", "domain/top/left", "domain/top/right"}, sorted(before)

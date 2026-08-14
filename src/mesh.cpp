@@ -6769,7 +6769,42 @@ namespace pyoomph
     const unsigned npoint = have_snapshot ? snap.coords.size() / snap.space_dim : 0;
     DiscontinuousSampleMap per_elem;
     unsigned n_unplaced = 0;
-    if (have_snapshot)
+    if (have_snapshot && e0 && !e0->dim())
+    {
+      // A POINT interface - the end of a free surface, the corner where two boundaries meet - is
+      // matched by position instead of being located. It has no extent to project onto (it is
+      // codimension 2 in the surrounding space, which MeshPointLocator refuses outright), and it needs
+      // none: an adaptation neither moves nodes nor adds or removes such a corner, so the new point
+      // element sits exactly where the old one did and the match is a comparison, not a search.
+      for (unsigned ie = 0; ie < this->nelement(); ie++)
+      {
+        BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+        if (!e || !e->nnode())
+          continue;
+        for (unsigned i = 0; i < npoint; i++)
+        {
+          double dist2 = 0.0, scale = 1.0;
+          for (unsigned d = 0; d < snap.space_dim; d++)
+          {
+            const double x = e->node_pt(0)->x(d), dx = x - snap.coords[i * snap.space_dim + d];
+            dist2 += dx * dx;
+            scale = std::max(scale, std::fabs(x));
+          }
+          // The node does not move, so this is a round-off tolerance rather than a search radius:
+          // it must never reach as far as another corner of the same domain.
+          if (dist2 <= 1e-16 * scale * scale)
+          {
+            per_elem[e].push_back(std::make_pair(i, std::vector<double>()));
+            break;
+          }
+        }
+      }
+      unsigned n_placed = 0;
+      for (const auto &entry : per_elem)
+        n_placed += entry.second.size();
+      n_unplaced = npoint - n_placed;
+    }
+    else if (have_snapshot)
     {
       // Eulerian, because adaptation does not move nodes: a sample point taken on the old interface
       // lies on the new one to round-off, and the locator is in Project mode anyway (an interface is
@@ -6823,27 +6858,6 @@ namespace pyoomph
     snap.clear();
   }
 
-  // Carries this interface's own discontinuous fields - DL/D0 and the nodal DG spaces - over from the corresponding interface
-  // mesh of a mesh that has just been REPLACED (Problem.force_remesh), rather than adapted. Driven
-  // from InternalInterpolator.interpolate(), i.e. once the bulk fields of the new mesh are in place -
-  // which is what the recovery expressions below need, since they read the bulk.
-  //
-  // The direction is the opposite of the adaptation path's. There, the old elements are already gone
-  // when the new ones appear, so the only possible transfer is to PUSH a point cloud snapshotted
-  // beforehand onto whatever comes out. Here the old mesh is still alive, so each new facet can PULL
-  // the values it needs at its OWN sample points - which covers the new skeleton by construction,
-  // whereas pushing assigns every old sample to exactly one new facet and therefore leaves a refined
-  // skeleton half empty (measured: 42 of 132 facets with nothing at all on a 2x refining remesh).
-  //
-  // What it cannot inherit from the adaptation path is that path's accept-only-what-lies-on-the-facet
-  // rule (2% of an element), because after a remesh nothing lies on anything. Merely widening the
-  // slack is not a fix either: in a non-manifold facet soup the nearest old facet within half an
-  // element can be one on the far side of a bulk element, carrying an entirely different trace. The
-  // criterion is topological instead - every new facet is located in the OLD BULK mesh, and only old
-  // facets OF the bulk element(s) it runs through may feed it. Those are exactly the traces
-  // surrounding its position. Where that yields nothing the search widens by one ring of face
-  // neighbours, and beyond that the element is left to its recovery expression, since a value from
-  // further away says more about the search radius than about the solution.
   // The chain of face indices from a bulk element down to one of its (sub)facets, as one long. Given
   // innermost first, the way the walk below collects them.
   //
@@ -6907,6 +6921,27 @@ namespace pyoomph
     return res;
   }
 
+  // Carries this interface's own discontinuous fields - DL/D0 and the nodal DG spaces - over from the corresponding interface
+  // mesh of a mesh that has just been REPLACED (Problem.force_remesh), rather than adapted. Driven
+  // from InternalInterpolator.interpolate(), i.e. once the bulk fields of the new mesh are in place -
+  // which is what the recovery expressions below need, since they read the bulk.
+  //
+  // The direction is the opposite of the adaptation path's. There, the old elements are already gone
+  // when the new ones appear, so the only possible transfer is to PUSH a point cloud snapshotted
+  // beforehand onto whatever comes out. Here the old mesh is still alive, so each new facet can PULL
+  // the values it needs at its OWN sample points - which covers the new skeleton by construction,
+  // whereas pushing assigns every old sample to exactly one new facet and therefore leaves a refined
+  // skeleton half empty (measured: 42 of 132 facets with nothing at all on a 2x refining remesh).
+  //
+  // What it cannot inherit from the adaptation path is that path's accept-only-what-lies-on-the-facet
+  // rule (2% of an element), because after a remesh nothing lies on anything. Merely widening the
+  // slack is not a fix either: in a non-manifold facet soup the nearest old facet within half an
+  // element can be one on the far side of a bulk element, carrying an entirely different trace. The
+  // criterion is topological instead - every new facet is located in the OLD BULK mesh, and only old
+  // facets OF the bulk element(s) it runs through may feed it. Those are exactly the traces
+  // surrounding its position. Where that yields nothing the search widens by one ring of face
+  // neighbours, and beyond that the element is left to its recovery expression, since a value from
+  // further away says more about the search radius than about the solution.
   void InterfaceMesh::interpolate_discontinuous_data_from(InterfaceMesh *old)
   {
     if (!old || old == this || !code || !this->nelement())
