@@ -332,3 +332,81 @@ def test_refine_max_element_size_survives_remeshing():
 		bulk_after, _ = _levels(problem)
 		assert min(bulk_after) >= 1, \
 			"RefineMaxElementSize did not act after remeshing: levels %s" % sorted(bulk_after)
+
+
+# ---------------------------------------------------------------------------------------------
+# An adaptation that decides to refine and unrefine nothing must not touch the problem.
+#
+# Deciding nothing is the normal end state, not an edge case: oomph only leaves its own adaption
+# loop once an adapt() has reported 0/0, so with spatial_adapt>0 the last adaptation of every solve
+# is a no-op by construction, and a mesh sitting at max_refinement_level with errors still above the
+# refinement tolerance never reports anything else. Acting on it anyway tore down and rebuilt every
+# interface mesh and reassigned the equation numbers, and assign_eqn_numbers() invalidates the
+# Jacobian sparsity pattern unconditionally - so the frozen sparsity was thrown away and rebuilt for
+# a numbering that had not changed. Problem._adapt_with_interfacial_errors now decides before it
+# tears anything down (Mesh._adapt_select / _adapt_pending_counts) and abandons the adaptation when
+# the decision is empty.
+# ---------------------------------------------------------------------------------------------
+
+
+class _SaturatingPoissonProblem(Problem):
+	"""Peaked source on a mesh capped at max_refinement_level: once the peak is resolved as far as
+	the cap allows, the errors there stay above the refine tolerance and every further adaptation
+	decides to do nothing."""
+
+	def define_problem(self):
+		x = var("coordinate")
+		xpeak = self.get_global_parameter("xpeak")
+		xpeak.value = 0.5
+		eqs = PoissonEquation(source=100*exp(-100*((x[0]-xpeak)**2+(x[1]-0.5)**2)))
+		eqs += DirichletBC(u=0)@["left", "right", "top", "bottom"]
+		eqs += SpatialErrorEstimator(u=1)
+		self += RectangularQuadMesh(N=8)
+		self += eqs@"domain"
+
+
+def test_a_noop_adaptation_leaves_the_numbering_and_the_frozen_sparsity_alone():
+	with _SaturatingPoissonProblem() as problem:
+		problem.max_refinement_level = 2
+		problem.keep_structural_zeros = True   # otherwise jacobian_structure_id is 0 and says nothing
+		problem.solve(spatial_adapt=2)
+		ndof, structure_id = problem.ndof(), problem.jacobian_structure_id
+		nnz = problem._get_frozen_sparsity_nnz()
+		rebuilds = problem._get_frozen_sparsity_rebuild_count()
+		assert nnz > 0, "the frozen sparsity path did not engage at all, so this proves nothing"
+		# Every one of these solves ends in an adaptation that decides nothing.
+		for _ in range(3):
+			problem.solve(spatial_adapt=2)
+		assert problem.ndof() == ndof
+		assert problem.jacobian_structure_id == structure_id, \
+			"the equations were renumbered although nothing was refined or unrefined"
+		assert problem._get_frozen_sparsity_nnz() == nnz
+		assert problem._get_frozen_sparsity_rebuild_count() == rebuilds, \
+			"the frozen sparsity pattern was rebuilt for an unchanged numbering"
+
+
+def test_an_abandoned_adaptation_reports_no_refinement():
+	"""nrefined()/nunrefined() must report the abandoned adaptation, not the last one that ran."""
+	with _SaturatingPoissonProblem() as problem:
+		problem.max_refinement_level = 2
+		problem.solve(spatial_adapt=2)
+		mesh = problem.get_mesh("domain")
+		assert problem._adapt() == (0, 0)
+		assert (mesh.nrefined(), mesh.nunrefined()) == (0, 0)
+
+
+def test_an_adaptation_that_does_something_still_renumbers():
+	"""The gate must not swallow a real adaptation: moving the peak has to re-adapt and renumber."""
+	with _SaturatingPoissonProblem() as problem:
+		problem.max_refinement_level = 2
+		problem.keep_structural_zeros = True
+		problem.solve(spatial_adapt=2)
+		structure_id = problem.jacobian_structure_id
+		problem.get_global_parameter("xpeak").value = 0.2
+		problem.solve(spatial_adapt=2)
+		mesh = problem.get_mesh("domain")
+		assert problem.jacobian_structure_id != structure_id, \
+			"the mesh followed the moved peak, so the equations must have been renumbered"
+		# The refinement now sits around the new peak position, not the old one.
+		fine = [e for e in mesh.elements() if e.refinement_level() == 2]
+		assert fine and max(numpy.mean([e.node_pt(i).x(0) for i in range(e.nnode())]) for e in fine) < 0.5

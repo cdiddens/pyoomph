@@ -2282,30 +2282,60 @@ class Problem(_pyoomph.Problem):
 
         nref=0
         nuref=0
-        with self.custom_adapt(True):
-            # When domains are coupled across an interface, adapt each mesh in two stages with a
-            # reconciliation in between: decide for all of them, make the two sides of every coupled
-            # interface agree about what they decided, and only then act. This is the one point where
-            # the two sides can be brought into agreement EXACTLY. Reconciling the errors instead --
-            # which is what the block further up does, and all pyoomph could do before -- cannot: oomph
-            # merges a father only if all of its sons agree, so an unrefinement vetoed by a son that
-            # does not touch the interface is invisible to any comparison made at the interface.
-            # See dev_docs/interface_refinement_coupling.md sections 6 and 7.
-            #
-            # Order matters and is deterministic on every process: errs follows _meshdict's insertion
-            # order, and the refinement calls underneath are collective on a distributed mesh.
-            coupled=self._collect_coupled_interfaces()
-            # Negative-testing hatch, same purpose as PYOOMPH_DISABLE_INTERFACE_CONFORMITY: with this
-            # set, the two sides act on their own decisions and the post-adapt repair has to clean up
-            # afterwards -- which is exactly the lossy behaviour the reconciliation exists to avoid, and
-            # the only way to demonstrate that it does.
-            if os.environ.get("PYOOMPH_DISABLE_ADAPT_RECONCILIATION","") not in ("","0","off"):
-                coupled=[]
-            if coupled:
-                adaptable=[(n,e) for n,e in errs.items() if self.get_mesh(n).refinement_possible()]
-                for name,errors in adaptable:
-                    self.get_mesh(name)._adapt_select(errors)
-                _pyoomph._harmonise_adapt_selection(coupled,40) #type:ignore
+        # Adapt in two stages with a gap in between: decide for every mesh, then act. The gap is where
+        # the two sides of a coupled interface are made to agree about what they decided, which is the
+        # one point where they can be brought into agreement EXACTLY -- reconciling the errors instead
+        # (which is what the block further up does, and all pyoomph could do before) cannot: oomph
+        # merges a father only if all of its sons agree, so an unrefinement vetoed by a son that does
+        # not touch the interface is invisible to any comparison made at the interface. See
+        # dev_docs/interface_refinement_coupling.md sections 6 and 7.
+        #
+        # The gap is also where an adaptation that is not going to change anything is abandoned, see
+        # below. Both are the reason the uncoupled case goes through the same two stages rather than
+        # through adapt_by_elemental_errors(): that call is exactly select+execute+finalise, so there
+        # is nothing to lose, and having one path means the abandoning is not tied to being coupled.
+        #
+        # Order matters and is deterministic on every process: errs follows _meshdict's insertion
+        # order, and the refinement calls underneath are collective on a distributed mesh.
+        adaptable=[(n,e) for n,e in errs.items() if self.get_mesh(n).refinement_possible()]
+        coupled=self._collect_coupled_interfaces()
+        # Negative-testing hatch, same purpose as PYOOMPH_DISABLE_INTERFACE_CONFORMITY: with this
+        # set, the two sides act on their own decisions and the post-adapt repair has to clean up
+        # afterwards -- which is exactly the lossy behaviour the reconciliation exists to avoid, and
+        # the only way to demonstrate that it does.
+        if os.environ.get("PYOOMPH_DISABLE_ADAPT_RECONCILIATION","") not in ("","0","off"):
+            coupled=[]
+        for name,errors in adaptable:
+            self.get_mesh(name)._adapt_select(errors)
+        if coupled:
+            _pyoomph._harmonise_adapt_selection(coupled,40) #type:ignore
+
+        # Deciding to do nothing is not a rare case: any mesh sitting at max_refinement_level with
+        # errors still above the refinement tolerance decides it on every solve, and oomph only leaves
+        # its own adaption loop once an adapt() has reported 0/0 - so as long as spatial_adapt>0, the
+        # last adaptation of every step is a no-op by construction. Acting on that decision anyway is
+        # not free: actions_before_adapt() tears down every interface mesh and actions_after_adapt()
+        # rebuilds them, and assign_eqn_numbers() then invalidates the Jacobian sparsity pattern
+        # unconditionally (see Problem::invalidate_jacobian_structure), so the frozen sparsity has to
+        # be rebuilt for a numbering that did not change. Nothing about the mesh, the pinning or the
+        # numbering differs from before, so the whole block is skipped rather than made cheaper.
+        #
+        # Summed over the processes before the decision is taken: assign_eqn_numbers() is collective,
+        # so ranks disagreeing here would deadlock rather than diverge.
+        npending=0
+        for name,_ in adaptable:
+            nr,nu=self.get_mesh(name)._adapt_pending_counts()
+            npending+=nr+nu
+        if get_mpi_nproc()>1:
+            npending=int(get_mpi_sum(npending))
+
+        if npending==0:
+            for name,_ in adaptable:
+                self.get_mesh(name)._adapt_abandon()
+            if not self.is_quiet():
+                print("Nothing to refine or unrefine: leaving the meshes and the equation numbering alone")
+        else:
+            with self.custom_adapt(True):
                 for name,_ in adaptable:
                     self.get_mesh(name)._adapt_execute()
                 for name,_ in adaptable:
@@ -2316,16 +2346,7 @@ class Problem(_pyoomph.Problem):
                         print("IN MESH "+name+" ref=",mesh.nrefined(),"unref=",mesh.nunrefined())
                     nref += mesh.nrefined()
                     nuref += mesh.nunrefined()
-                errs={}  # handled above; skip the single-mesh loop below
-            for name,errors in errs.items():
-                mesh=self.get_mesh(name)
-                if mesh.refinement_possible():
-                    mesh.adapt_by_elemental_errors(errors)
-                    if not self.is_quiet():
-                        print("IN MESH "+name+" ref=",mesh.nrefined(),"unref=",mesh.nunrefined())
-                    nref += mesh.nrefined()
-                    nuref += mesh.nunrefined()
-                    
+
         if has_arclength_data:
             dof_deriv=self.get_history_dofs(5)
             dof_current=self.get_history_dofs(6)

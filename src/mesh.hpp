@@ -974,6 +974,29 @@ namespace pyoomph
 		// exactly what the split above allows.
 		void recount_pending_adaptation();
 
+		// What adapt_select() (and any reconciliation after it) decided, without acting on it. The point
+		// of asking is that an adaptation deciding to do nothing is common -- every mesh sitting at
+		// max_refinement_level with errors still above the refinement tolerance decides it on every
+		// single solve -- and the teardown/rebuild the caller wraps the adaptation in costs the same
+		// whether or not an element moves. See Problem._adapt_with_interfacial_errors.
+		std::pair<unsigned, unsigned> adapt_pending_counts()
+		{
+			if (!this->refinement_possible()) return std::make_pair(0u, 0u);
+			this->recount_pending_adaptation();
+			return std::make_pair(pending_n_refine, pending_n_unrefine);
+		}
+
+		// Drop a selection that is not going to be executed. Only the statistics really need it -- a
+		// selection is abandoned exactly when nothing is flagged -- but nrefined()/nunrefined() would
+		// otherwise keep reporting the numbers of the last adaptation that did run.
+		void adapt_abandon()
+		{
+			pending_n_refine = 0;
+			pending_n_unrefine = 0;
+			this->Nrefined = 0;
+			this->Nunrefined = 0;
+		}
+
 	private:
 		// Carried from adapt_select() to adapt_execute(). oomph's own adapt() keeps these on the stack;
 		// the split needs them to survive the gap.

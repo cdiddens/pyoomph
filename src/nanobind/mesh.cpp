@@ -1642,7 +1642,19 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("_adapt_finalise",mesh_method([](pyoomph::Mesh *self)
 			 {
 	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
-	   if (tm) tm->adapt_finalise(); }), "Restores 2:1 balancing and rebuilds the shape-specific hanging nodes after _adapt_execute");
+	   if (tm) tm->adapt_finalise(); }), "Restores 2:1 balancing and rebuilds the shape-specific hanging nodes after _adapt_execute")
+		.def("_adapt_pending_counts",mesh_method([](pyoomph::Mesh *self)
+			 {
+	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
+	   if (!tm) return std::make_pair(0u,0u);
+	   return tm->adapt_pending_counts(); }),
+			 "(elements to be refined, sons to be unrefined) as decided by _adapt_select, without acting on them -- so that a "
+			 "caller can find out whether the adaptation is going to change anything before paying for the teardown and rebuild around it")
+		.def("_adapt_abandon",mesh_method([](pyoomph::Mesh *self)
+			 {
+	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
+	   if (tm) tm->adapt_abandon(); }),
+			 "Discards a selection made by _adapt_select that will not be executed, so that nrefined()/nunrefined() report 0 rather than the previous adaptation's numbers");
 
 	   /*
 	nb::class_<pyoomph::BulkElementODE0d, oomph::GeneralisedElement>(m, "BulkElementODE0d")

@@ -536,6 +536,25 @@ The old Python heuristic (`# Ensure same refinement at connected interfaces`) is
 the `# TODO: Ensure same refinement at connected interfaces` thirty lines below it that had been the
 honest summary of the situation since the branch began.
 
+**Added later: the gap is also where an empty adaptation is abandoned.** Knowing the decision before
+acting on it answers a second question for free — *is this adaptation going to change anything at all?* —
+and the answer is very often no. oomph only leaves its own adaption loop once an `adapt()` has reported
+0/0, so with `spatial_adapt>0` the last adaptation of every solve is a no-op by construction, and a mesh
+sitting at `max_refinement_level` with errors still above the refinement tolerance never reports anything
+else. Acting on that anyway cost a full `actions_before_adapt`/`actions_after_adapt` cycle — every
+interface mesh torn down and rebuilt, the global mesh reassembled — plus an `assign_eqn_numbers()`, which
+calls `invalidate_jacobian_structure()` unconditionally and so discarded the frozen sparsity pattern for
+a numbering that had not changed. `Problem._adapt_with_interfacial_errors` now runs select (and, when
+there is something to reconcile, `harmonise_adapt_selection`) *before* `custom_adapt.__enter__`, sums
+`Mesh._adapt_pending_counts()` over the meshes and the ranks, and skips the entire block when it comes
+out zero; `Mesh._adapt_abandon()` clears the stale `nrefined()`/`nunrefined()` statistics. The MPI sum is
+not optional: `assign_eqn_numbers()` is collective, so ranks disagreeing about whether to take the branch
+would deadlock rather than diverge. This is also why the uncoupled case now goes through the same three
+stages rather than through `adapt_by_elemental_errors()` — that call is exactly the three back to back,
+so there is nothing to lose, and one path means the gate is not tied to being coupled. Covered by
+`test_a_noop_adaptation_leaves_the_numbering_and_the_frozen_sparsity_alone` and its two neighbours in
+`tests/test_adaptivity.py`.
+
 ### 13.7 Differing `max_refinement_level` (§9), as actually resolved
 
 §9 offered two options and recommended clamping both sides to the minimum. That is the wrong one: it

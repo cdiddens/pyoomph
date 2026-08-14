@@ -84,6 +84,17 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Changed / Improved
 
+- **An adaptation that refines and unrefines nothing no longer touches the problem.** Deciding to do
+  nothing is the normal end state rather than an edge case: oomph-lib only leaves its own adaption loop
+  once an `adapt()` has reported 0/0, so with `spatial_adapt>0` the last adaptation of every solve is a
+  no-op by construction, and a mesh sitting at `max_refinement_level` with errors still above the
+  refinement tolerance never reports anything else. That no-op was not free -- every interface mesh was
+  torn down and rebuilt, the global mesh reassembled, and the equations reassigned, which invalidates
+  the Jacobian sparsity pattern unconditionally, so the frozen sparsity was thrown away and rebuilt for
+  a numbering that had not changed. The refine/unrefine decision is now taken *before* anything is torn
+  down (which the coupled-interface reconciliation above already needed) and the whole block is skipped
+  when it comes out empty. On the FSI tutorial the equation numbering, and with it the sparsity pattern,
+  now survives every step in which the mesh does not move.
 - **`subexpression()` now also works in the analytic Hessian.** Since 2024 the Hessian generator
   unwrapped every `subexpression()` marker before differentiating the residual twice, so on a problem
   with `setup_for_stability_analysis(analytic_hessian=True)` -- every bifurcation tracker, azimuthal and
