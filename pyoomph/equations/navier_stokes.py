@@ -289,7 +289,6 @@ class StokesEquations(Equations):
         pressure_sign_flip (bool, optional): Reverse the pressure sign to get a symmetric matrix. Defaults to False.
         momentum_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the momentum equation. Defaults to "BDF2".
         continuity_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the continuity equation. Defaults to "BDF2".
-        wrong_strain (bool, optional): Use mu*grad(u) instead of 2*mu*sym(grad(u)) for strain. Defaults to False.
         pressure_factor (ExpressionOrNum, optional): Multiplicative factor for the pressure in the momentum equation. Defaults to 1.
         stress_tensor (ExpressionNumOrNone, optional): Custom stress tensor. Defaults to None.
         velocity_name (str, optional): Name of the velocity field. Defaults to "velocity".
@@ -301,7 +300,7 @@ class StokesEquations(Equations):
         GCL (bool, optional): If True, the Geometric Conservation Law is enforced in the ALE formulation of the (Navier-)Stokes equations. Defaults to False.
     """
     def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","C1","C2","D2D1","D1D0","D2TBD1","mini","C2DL"]="TH", bulkforce:ExpressionNumOrNone=None, fluid_props:"AnyFluidProperties | None"=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False, mass_density:ExpressionNumOrNone=None,
-                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False ):
+                 pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",pressure_factor:ExpressionOrNum=1, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False ):
         super().__init__()
         self.gravity = gravity  # Some gravity direction, i.e. g*<unit vector of direction>
         if mode not in {"CR","TH","C1","C2","SV","D2TBD1","D2D1","D1D0","mini","C2DL"}:
@@ -339,7 +338,6 @@ class StokesEquations(Equations):
         self.pressure_sign_flip=pressure_sign_flip
         self.momentum_scheme:TimeSteppingScheme=momentum_scheme        
         self.continuity_scheme:TimeSteppingScheme=continuity_scheme
-        self.wrong_strain=wrong_strain
         self.pressure_factor=pressure_factor
         self.stress_tensor=stress_tensor
         self.velocity_name=velocity_name
@@ -385,11 +383,8 @@ class StokesEquations(Equations):
         visc = self.dynamic_viscosity
         if visc is None:
             raise RuntimeError("viscosity not set")
-        if self.wrong_strain:
-            strain=grad(u)/2
-        else:
-            strain = sym(grad(u))  # 1/2*(grad(u)+grad(u)^t)
-        
+        strain = sym(grad(u))  # 1/2*(grad(u)+grad(u)^t)
+
         # Newtonian fluid
         if self.stress_tensor==None:
             stress_tensor = 2 * visc * strain - identity_matrix() * self.pressure_factor*p*(-1 if self.pressure_sign_flip else 1)
@@ -443,7 +438,7 @@ class StokesEquations(Equations):
         if self.requires_interior_facet_terms:
             n,h=var(["normal","element_length_h"])
             # optionally, at_facet=True can be added to all jumps/averages that don't have grad in their argument
-            Du=grad(u)/2 if self.wrong_strain else sym(grad(u))
+            Du=sym(grad(u))
             Dv=grad(u_test) if not self.symmetric_test_function else sym(grad(u_test))
             dg_alpha=self.DG_alpha
             assert dg_alpha is not None  # guaranteed non-None in __init__ whenever requires_interior_facet_terms is set
@@ -547,7 +542,6 @@ class NavierStokesEquations(StokesEquations):
         pressure_sign_flip (bool, optional): Reverse the pressure sign to get a symmetric matrix. Defaults to False.
         momentum_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the momentum equation. Defaults to "BDF2".
         continuity_scheme (TimeSteppingScheme, optional): Time-stepping scheme for the continuity equation. Defaults to "BDF2".
-        wrong_strain (bool, optional): Use mu*grad(u) instead of 2*mu*sym(grad(u)) for strain. Defaults to False.
         pressure_factor (ExpressionOrNum, optional): Multiplicative factor for the pressure in the momentum equation. Defaults to 1.
         stress_tensor (ExpressionNumOrNone, optional): Custom stress tensor. Defaults to None.
         velocity_name (str, optional): Name of the velocity field. Defaults to "velocity".
@@ -562,9 +556,9 @@ class NavierStokesEquations(StokesEquations):
                  
         
     def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","mini"]="TH", mass_density:ExpressionOrNum=1.0, bulkforce:ExpressionNumOrNone=None, fluid_props:"AnyFluidProperties | None"=None,
-                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionNumOrNone=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False):
+                 dt_factor:ExpressionOrNum=1, nonlinear_factor:ExpressionNumOrNone=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",pressure_factor:ExpressionOrNum=1,wrap_params_in_subexpressions:bool=True, stress_tensor:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False):
         super().__init__(dynamic_viscosity=dynamic_viscosity, mode=mode, bulkforce=bulkforce, fluid_props=fluid_props,
-                         gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,pressure_factor=pressure_factor, stress_tensor=stress_tensor,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
+                         gravity=gravity, boussinesq=boussinesq,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,pressure_factor=pressure_factor, stress_tensor=stress_tensor,velocity_name=velocity_name,pressure_name=pressure_name,symmetric_test_function=symmetric_test_function,pressure_test_scaling_factor=pressure_test_scaling_factor, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
         if self.fluid_props is not None:
             self.mass_density = self.fluid_props.mass_density
         else:

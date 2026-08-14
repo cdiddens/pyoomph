@@ -92,7 +92,7 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
 
 def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteElementSpaceEnum="C1", compo_dt_factor:ExpressionOrNum=1, ns_mode:Literal["TH","CR","mini"]="TH", boussinesq:bool=False,
                              gravity:ExpressionNumOrNone=None, bulkforce:ExpressionNumOrNone=None, ns_dt_factor:ExpressionOrNum=1, ns_nl_factor:ExpressionNumOrNone=None, with_IC:bool=True,
-                             hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:float | None=None, useCompoSUPG:bool=False,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",wrong_strain:bool=False,integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False) -> Equations:
+                             hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:float | None=None, useCompoSUPG:bool=False,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False) -> Equations:
     """
     Assembles a system for multi-component flow with advection-diffusion equations for mass fraction fields of the mixture composition and the Navier-Stokes equations. Potentially, also a temperature field is included.
 
@@ -116,7 +116,6 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         momentum_scheme: Selects the time stepping scheme for the momentum equation.
         continuity_scheme: Selects the time stepping scheme for the continuity equation.
         compo_scheme: Selects the time stepping scheme for the composition equations.
-        wrong_strain: Simplifies the strain by a simple Laplacian. Do not use when you e.g. imposed tractions, e.g. Marangoni forces.
         integrate_advection_by_parts: Integrate the advection terms of the composition equations by parts.
         wrap_params_in_subexpressions: If True, all material properties in the equations are wrapped in subexpressions.
         thermal_dt_factor: Factor for the time derivative of the temperature field.
@@ -132,7 +131,7 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
             integrate_advection_by_parts=True
             print("WARNING: For GCL, the advection term of the composition equations is integrated by parts automatically.")
     ns = NavierStokesEquations(fluid_props=fluid_props, mode=ns_mode, boussinesq=boussinesq, gravity=gravity,
-                               bulkforce=bulkforce, dt_factor=ns_dt_factor, nonlinear_factor=ns_nl_factor,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrong_strain=wrong_strain,wrap_params_in_subexpressions=wrap_params_in_subexpressions, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
+                               bulkforce=bulkforce, dt_factor=ns_dt_factor, nonlinear_factor=ns_nl_factor,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrap_params_in_subexpressions=wrap_params_in_subexpressions, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
     wind=var("velocity")+additional_advection
     
     cp = CompositionAdvectionDiffusionEquations(fluid_props=fluid_props, space=compo_space, dt_factor=compo_dt_factor,
