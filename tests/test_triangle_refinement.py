@@ -363,6 +363,61 @@ def test_crouzeix_raviart_triangle_error_adaptivity(split):
         assert problem.get_mesh("domain").nelement() > 150
 
 
+class _CavityStokesMINI(Problem):
+    # Lid-driven cavity Stokes with MINI (C1TB bubble-enriched velocity + C1 pressure) triangles:
+    # the 4-node bubble-enriched LINEAR triangle, whose node 3 is the centroid and which has no
+    # mid-edge nodes at all. Refinement must build the son bubble node (the centre son reusing the
+    # father's) and keep the sons genuinely C1TB -- plain C1 sons would silently drop the bubble,
+    # turning MINI into unstabilised P1-P1.
+    def __init__(self, split="left", N=4):
+        super().__init__()
+        self._split = split
+        self._N = N
+
+    def define_problem(self):
+        self += RectangularQuadMesh(name="domain", N=self._N, split_in_tris=self._split)
+        stokes = StokesEquations(mode="mini", dynamic_viscosity=1)
+        eqs = stokes
+        eqs += DirichletBC(velocity_x=1, velocity_y=0) @ "top"
+        eqs += DirichletBC(velocity_x=0, velocity_y=0) @ ["left", "right", "bottom"]
+        eqs += stokes.create_pressure_fixation(value=0)
+        eqs += SpatialErrorEstimator(velocity=1)
+        self += eqs @ "domain"
+
+
+def _bubble_node_count(mesh):
+    # Every C1TB element must still have its 4th (centroid) node; a plain C1 son would have 3.
+    return sum(1 for e in range(mesh.nelement()) if mesh.element_pt(e).nnode() == 4)
+
+
+@pytest.mark.parametrize("split", ["left", "right", "crossed"])
+def test_mini_triangle_cavity_single_level(split):
+    # Single-level (2:1) non-conforming refinement of a MINI mesh. Linear Stokes -> the residual
+    # after solve certifies the bubble-enriched velocity hanging Jacobian.
+    with _CavityStokesMINI(split=split) as problem:
+        problem.max_refinement_level = 3
+        problem += RefineToLevel(1) @ "domain"
+        problem += RefineToLevel(2) @ "domain/top"
+        problem.solve()
+        assert _max_abs_residual(problem) < 1e-7
+        m = problem.get_mesh("domain")
+        assert m.nelement() > 150
+        # Sons kept their bubble: every element is still a 4-node C1TB.
+        assert _bubble_node_count(m) == m.nelement()
+
+
+@pytest.mark.parametrize("split", ["left", "crossed"])
+def test_mini_triangle_error_adaptivity(split):
+    # Genuine Z2 error-driven adaptivity on a MINI mesh.
+    with _CavityStokesMINI(split=split) as problem:
+        problem.max_refinement_level = 3
+        problem.solve(spatial_adapt=2)
+        assert _max_abs_residual(problem) < 1e-7
+        m = problem.get_mesh("domain")
+        assert m.nelement() > 150
+        assert _bubble_node_count(m) == m.nelement()
+
+
 def _reset_dofs_to_zero(problem):
     problem.set_current_dofs(np.zeros(problem.ndof()))
 
@@ -373,7 +428,7 @@ def _reset_dofs_to_zero(problem):
 # slot (and former-corner nodes left as stale-pressure edge-mids). The oracle: after the adaptive
 # solve, zero all dofs and solve once more -- a linear problem reaches machine zero in ONE Newton
 # step from any start iff the hanging Jacobian on the (refined+unrefined) mesh is exact.
-@pytest.mark.parametrize("mode,tol", [("TH", 1e-9), ("CR", 1e-6)])
+@pytest.mark.parametrize("mode,tol", [("TH", 1e-9), ("CR", 1e-6), ("mini", 1e-6)])
 def test_stokes_triangle_unrefinement_residual_oracle(mode, tol):
     class _Cav(Problem):
         def define_problem(self):

@@ -181,8 +181,9 @@ namespace oomph
     void further_setup_hanging_nodes() override = 0;
 
   protected:
-    // Static lookup table (keyed by nnode_1d) encoding, for each son type and local node,
-    // which boundary/vertex of the father element that son node coincides with (see .cpp).
+    // Static lookup table (keyed by the element's NODE COUNT -- not by nnode_1d(), which a
+    // bubble-enriched element shares with its plain counterpart) encoding, for each son type and
+    // local node, which boundary/vertex of the father element that son node coincides with (see .cpp).
     static std::map<unsigned, DenseMatrix<int>> Father_bound;
 
     // Populate Father_bound for this element's node count (called lazily on first use).

@@ -226,10 +226,10 @@ namespace oomph
   /// Setup static matrix for coincidence between son nodal points and
   /// father boundaries:
   ///
-  /// Father_boundd[nnode_1d](nnode_son,son_type)={SW/SE/NW/NE/S/E/N/W/OMEGA}
+  /// Father_bound[nnode](nnode_son,son_type)={SW/SE/NW/NE/S/E/N/W/OMEGA}
   ///
   /// so that node nnode_son in element of type son_type lies
-  /// on boundary/vertex Father_boundd[nnode_1d](nnode_son,son_type) in its
+  /// on boundary/vertex Father_bound[nnode](nnode_son,son_type) in its
   /// father element. If the node doesn't lie on a boundary
   /// the value is OMEGA.
   //==================================================================
@@ -238,24 +238,19 @@ namespace oomph
     // Brings SW/SE/NW/NE/S/E/N/W/OMEGA son-type/boundary enum names into scope
     using namespace QuadTreeNames;
 
-    // Find the number of nodes along a 1D edge
-    unsigned n_p = nnode_1d();
-    // Total number of nodes in the element (3 for linear, 6 for quadratic triangles)
+    // Total number of nodes in the element (3/4 for linear, 6/7 for quadratic triangles)
     unsigned nnode = this->nnode();
-    // Allocate space for the boundary information
-    // 3 (C1), 6 (C2) or 7 (C2TB: node 6 is the interior centroid/bubble, never on a father
-    // boundary -- it stays OMEGA and needs no explicit assignment below).
-    if (nnode == 3)
+    // Allocate space for the boundary information.
+    // 3 (C1), 4 (C1TB/MINI: node 3 is the interior centroid/bubble), 6 (C2) or 7 (C2TB: node 6 is
+    // the interior centroid/bubble). A bubble node is never on a father boundary -- it stays OMEGA
+    // and needs no explicit assignment below.
+    // Keyed by the NODE COUNT, not by nnode_1d(): the bubble-enriched variants share nnode_1d()
+    // with their plain counterparts (C1/C1TB both 2, C2/C2TB both 3), so keying by nnode_1d() made
+    // whichever variant was set up first define the table for both, and the enriched one then read
+    // its bubble row past the end of a too-small matrix.
+    if (nnode == 3 || nnode == 4 || nnode == 6 || nnode == 7)
     {
-      Father_bound[n_p].resize(3, 4);
-    }
-    else if (nnode == 6)
-    {
-      Father_bound[n_p].resize(6, 4);
-    }
-    else if (nnode == 7)
-    {
-      Father_bound[n_p].resize(7, 4);
+      Father_bound[nnode].resize(nnode, 4);
     }
     else
     {
@@ -267,51 +262,52 @@ namespace oomph
     {
       for (unsigned ison = 0; ison < 4; ison++)
       {
-        Father_bound[n_p](n, ison) = Tree::OMEGA;
+        Father_bound[nnode](n, ison) = Tree::OMEGA;
       }
     }
 
     // A triangle is refined into 4 son triangles (reusing the QuadTree SW/SE/NW/NE
     // son-type names even though the underlying tree is a QuadTree of triangles).
-    // Nodes 0-2 are the corner vertices, nodes 3-5 (if present) are the mid-edge
-    // nodes of a quadratic (6-node) triangle, opposite to vertices 0,1,2 respectively.
+    // Nodes 0-2 are the corner vertices; on a quadratic (6/7-node) triangle nodes 3-5 are the
+    // mid-edge nodes opposite to vertices 0,1,2 respectively. A 4-node C1TB has no mid-edge
+    // nodes at all -- its node 3 is the centroid -- hence the >= 6 guards below.
 
     // Southwest son
-    Father_bound[n_p](0, SW) = S;
-    Father_bound[n_p](1, SW) = W;
-    Father_bound[n_p](2, SW) = SW;
-    if (nnode > 3)
+    Father_bound[nnode](0, SW) = S;
+    Father_bound[nnode](1, SW) = W;
+    Father_bound[nnode](2, SW) = SW;
+    if (nnode >= 6)
     {
-      Father_bound[n_p](4, SW) = W;
-      Father_bound[n_p](5, SW) = S;
+      Father_bound[nnode](4, SW) = W;
+      Father_bound[nnode](5, SW) = S;
     }
 
     // Northwest son
     //--------------
-    Father_bound[n_p](0, NW) = E;
-    Father_bound[n_p](1, NW) = NW;
-    Father_bound[n_p](2, NW) = W;
-    if (nnode > 3)
+    Father_bound[nnode](0, NW) = E;
+    Father_bound[nnode](1, NW) = NW;
+    Father_bound[nnode](2, NW) = W;
+    if (nnode >= 6)
     {
-      Father_bound[n_p](3, NW) = E;
-      Father_bound[n_p](4, NW) = W;
+      Father_bound[nnode](3, NW) = E;
+      Father_bound[nnode](4, NW) = W;
     }
 
     // Northeast son (actually the center)
     //--------------
-    Father_bound[n_p](0, NE) = S;
-    Father_bound[n_p](1, NE) = E;
-    Father_bound[n_p](2, NE) = W;
+    Father_bound[nnode](0, NE) = S;
+    Father_bound[nnode](1, NE) = E;
+    Father_bound[nnode](2, NE) = W;
 
     // Southeast son
     //--------------
-    Father_bound[n_p](0, SE) = SE;
-    Father_bound[n_p](1, SE) = E;
-    Father_bound[n_p](2, SE) = S;
-    if (nnode > 3)
+    Father_bound[nnode](0, SE) = SE;
+    Father_bound[nnode](1, SE) = E;
+    Father_bound[nnode](2, SE) = S;
+    if (nnode >= 6)
     {
-      Father_bound[n_p](3, SE) = E;
-      Father_bound[n_p](5, SE) = S;
+      Father_bound[nnode](3, SE) = E;
+      Father_bound[nnode](5, SE) = S;
     }
   }
 
@@ -482,12 +478,14 @@ namespace oomph
     this->shape(s, psi);
     // Nodes lying on this triangle edge (corners, plus the mid-edge node for a
     // 6-node quadratic triangle): E=v0-v1(+mid 3), W=v1-v2(+mid 4), S=v2-v0(+mid 5).
+    // A 4-node C1TB has no mid-edge nodes -- node 3 is its interior centroid, and nodes 4/5 do
+    // not exist -- so only a 6/7-node triangle contributes a third node here.
     std::vector<unsigned> edge_nodes;
     switch (edge)
     {
-    case E: edge_nodes = {0, 1}; if (n_node > 3) edge_nodes.push_back(3); break;
-    case W: edge_nodes = {1, 2}; if (n_node > 3) edge_nodes.push_back(4); break;
-    case S: edge_nodes = {2, 0}; if (n_node > 3) edge_nodes.push_back(5); break;
+    case E: edge_nodes = {0, 1}; if (n_node >= 6) edge_nodes.push_back(3); break;
+    case W: edge_nodes = {1, 2}; if (n_node >= 6) edge_nodes.push_back(4); break;
+    case S: edge_nodes = {2, 0}; if (n_node >= 6) edge_nodes.push_back(5); break;
     default: zeta[0] = 0.0; return;
     }
     double inter_zeta = 0.0;
@@ -554,12 +552,11 @@ namespace oomph
   {
     // Brings SW/SE/NW/NE/S/E/N/W/OMEGA son-type/boundary enum names into scope
     using namespace QuadTreeNames;
-    unsigned n_p = nnode_1d();
     unsigned n_node = this->nnode();
 
     // Lazily (re-)build the Father_bound lookup table for this node count if
     // it hasn't been set up yet
-    if (Father_bound[n_p].nrow() == 0)
+    if (Father_bound[n_node].nrow() == 0)
     {
       setup_father_bounds();
     }
@@ -602,8 +599,9 @@ namespace oomph
       Vector<Vector<double>> s_in_parent(n_node, Vector<double>(2));
       Vector<Vector<double>> s_in_son(n_node, Vector<double>(2));
 
-      // 3-node (C1), 6-node (C2) and 7-node (C2TB, bubble-enriched: node 6 is the centroid) tris.
-      if (n_node != 3 && n_node != 6 && n_node != 7)
+      // 3-node (C1), 4-node (C1TB/MINI: node 3 is the centroid), 6-node (C2) and 7-node (C2TB,
+      // bubble-enriched: node 6 is the centroid) tris.
+      if (n_node != 3 && n_node != 4 && n_node != 6 && n_node != 7)
       {
         throw_runtime_error("Implement");
       }
@@ -615,8 +613,15 @@ namespace oomph
       s_in_son[1][1] = 1.0;
       s_in_son[2][0] = 0.0;
       s_in_son[2][1] = 0.0;
+      // Bubble-enriched linear (C1TB/MINI): node 3 is the centroid and there are no mid-edge
+      // nodes at all -- do not fall into the quadratic branch below, which would index 4 and 5.
+      if (n_node == 4)
+      {
+        s_in_son[3][0] = 1.0 / 3.0;
+        s_in_son[3][1] = 1.0 / 3.0;
+      }
       // Mid-edge nodes of the son element (quadratic, 6-node triangle only)
-      if (n_node > 3)
+      else if (n_node > 3)
       {
         s_in_son[3][0] = 0.5;
         s_in_son[3][1] = 0.5;
@@ -711,10 +716,18 @@ namespace oomph
         break;
       }
 
+      // Bubble node (C1TB/MINI): the son centroid in father coordinates. For the NE ("centre") son
+      // this is the father's own centroid, so the loop below reuses the father's bubble node --
+      // which is what keeps it alive; the other three sons get fresh interior nodes.
+      if (n_node == 4)
+      {
+        for (unsigned int i = 0; i < 2; i++)
+          s_in_parent[3][i] = (s_in_parent[0][i] + s_in_parent[1][i] + s_in_parent[2][i]) / 3.0;
+      }
       // Mid-edge nodes (3-5) of the son, in father coordinates, are simply
       // the midpoints of the son's corner vertices (which are themselves
       // already expressed in father coordinates above)
-      if (n_node > 3)
+      else if (n_node > 3)
       {
         for (unsigned int i = 0; i < 2; i++)
         {
@@ -846,7 +859,7 @@ namespace oomph
                   Node *neighbour_node_pt = created_node_pt;
 
                   // Determine the edge on which the new node will live
-                  int father_bound = Father_bound[n_p](i, son_type);
+                  int father_bound = Father_bound[n_node](i, son_type);
 
                   // Storage for the set of Mesh boundaries on which the
                   // appropriate father edge lives.
@@ -968,7 +981,7 @@ namespace oomph
                     Node *neighbour_node_pt = created_node_pt;
 
                     // Determine the edge on which the new node will live
-                    int father_bound = Father_bound[n_p](i, son_type);
+                    int father_bound = Father_bound[n_node](i, son_type);
 
                     // Storage for the set of Mesh boundaries on which the
                     // appropriate father edge lives.
@@ -1085,7 +1098,7 @@ namespace oomph
               // lives on an edge that is shared with an edge of its
               // father element; i.e. it is not created inside the father element
               // Determine the edge on which the new node will live
-              int father_bound = Father_bound[n_p](i, son_type);
+              int father_bound = Father_bound[n_node](i, son_type);
 
               // Storage for the set of Mesh boundaries on which the
               // appropriate father edge lives.

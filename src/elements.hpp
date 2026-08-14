@@ -1723,6 +1723,21 @@ namespace pyoomph
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
 
+    // A C1TB (MINI) father must spawn genuine C1TB sons. Without this override it inherits
+    // BulkElementTri2dC1's factory, which makes plain 3-node C1 sons: the bubble silently
+    // disappears from every refined element (MINI degenerates to unstabilised P1-P1), and the
+    // father's centroid node, no longer used by any leaf, is deleted as obsolete -- leaving the
+    // father with a null node pointer that segfaults as soon as the sons are merged back.
+    // Same failure mode as the C2TB case, see BulkElementTri2dC2::create_son_instance.
+    BulkElementBase *create_son_instance() const override
+    {
+      BulkElementBase::__CurrentCodeInstance = codeinst;
+      auto res = new BulkElementTri2dC1TB();
+      res->codeinst = codeinst;
+      BulkElementBase::__CurrentCodeInstance = NULL;
+      return res;
+    }
+
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order, true)); }
   };
 
