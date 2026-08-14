@@ -6241,10 +6241,11 @@ namespace pyoomph
     return (space_index == SPACE_INDEX_D2TB || space_index == SPACE_INDEX_D2) ? 3 : 2;
   }
 
-  // Samples every element on a lattice in its own local coordinates. Five per direction rather than
-  // just the nodes: after one refinement each son must still receive enough points to determine a
-  // linear (DL) field on its own, and a father's nodes sit on its sons' shared edges, where they
-  // arbitrate to one son and leave the others empty.
+  // Samples every element on a lattice in its own local coordinates, on the CELL CENTRES of an even
+  // subdivision rather than on nodes: after one refinement each son must still receive enough points
+  // to determine a linear (DL) field on its own, and any lattice point shared by several sons - a
+  // father's own nodes, and the midpoint of an odd lattice - arbitrates to one of them and leaves the
+  // others empty or, worse, feeds a stranger (see below).
   //
   // The lattice is then shrunk towards the element's centre, so that no sample lies ON the element's
   // boundary. A sample sitting exactly on a shared node/edge belongs to two elements geometrically,
@@ -6276,16 +6277,23 @@ namespace pyoomph
       out.push_back(oomph::Vector<double>());
       return;
     }
-    // Five per direction was chosen for DL, whose fit needs two coefficients per direction: after one
-    // refinement each son still gets at least two of them, so the fit stays determined on a SON and
-    // not merely on the whole element. A nodal DG space needs more - "D2" has three per direction -
-    // and an underdetermined fit does not fail loudly, it falls back to a constant and quietly drops
-    // the quadratic part of every surviving facet. So the lattice grows with the widest basis
-    // present: 2*nmode_1d+1 keeps the son count at nmode_1d and reproduces the historical 5 for DL.
-    const unsigned NS = 2 * (nmode_1d < 2 ? 2 : nmode_1d) + 1;
-    // 0.8 keeps every sample at least a tenth of an element away from its boundary while still
-    // giving each son of a refined element enough lattice points per direction for the fit to stay
-    // determined.
+    // The fit needs nmode_1d coefficients per direction, and it must stay determined on a SON of this
+    // element and not merely on the element itself - a nodal DG space needs more than DL ("D2" has
+    // three per direction), and an underdetermined fit does not fail loudly, it falls back to a
+    // constant and quietly drops the linear part of every surviving facet. So the lattice grows with
+    // the widest basis present, at nmode_1d+1 points per son.
+    //
+    // CELL CENTRES of an EVEN lattice, not its nodes: an odd node lattice puts a sample exactly on
+    // the midpoint of the element, and on the skeleton that midpoint becomes a NODE of the refined
+    // mesh, shared not only by the two sons of this facet but by the brand-new facets that a refined
+    // triangle grows inside itself (its midlines end there). The locator is free to hand such a point
+    // to any of them, and the new facet it lands on then counts as restored, fits its single foreign
+    // sample to a constant, and is neither reported nor recovered - a wrong value that looks
+    // transferred. Off the midpoint the ambiguity does not arise: every sample lies strictly inside
+    // exactly one son.
+    const unsigned NS = 2 * (nmode_1d < 2 ? 2 : nmode_1d) + 2;
+    // 0.8 keeps every sample well away from the element boundary. Cell centres already do that in a
+    // tensor direction, but not on the hypotenuse of a simplex, which the tensor lattice hits exactly.
     const double shrink = 0.8;
     const double smin = e->s_min(), smax = e->s_max();
     unsigned total = 1;
@@ -6299,7 +6307,7 @@ namespace pyoomph
       unsigned rem = k;
       for (unsigned d = 0; d < edim; d++)
       {
-        s[d] = smin + (smax - smin) * (rem % NS) / (NS - 1.0);
+        s[d] = smin + (smax - smin) * (rem % NS + 0.5) / NS;
         rem /= NS;
       }
       // Discards the ~half of a tensor lattice that falls outside a simplex.

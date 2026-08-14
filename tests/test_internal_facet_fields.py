@@ -963,6 +963,35 @@ def test_linear_trace_survives_a_uniform_refinement():
     assert abs(after["err2"]) < 1e-12, after                  # one solve repairs them
 
 
+@pytest.mark.parametrize("space", ["DL", "D1", "D2"])
+def test_a_uniform_refinement_of_triangles_leaves_no_facet_half_transferred(space):
+    """Triangles, where the facets a refined element grows INSIDE itself end on the surviving ones:
+    each midline of a son ends at the midpoint of a father's edge, i.e. on a facet that was there
+    before. A sample sitting on that midpoint is claimed by such a newcomer as readily as by the two
+    sons of the facet it actually came from, and the newcomer then counted as restored, fitted its one
+    foreign value to a constant, and was neither exact nor reported - which is why the sample lattice
+    avoids the midpoint. Every facet is one or the other here, never in between."""
+    with _AdaptProblem(kind="tri", N=3, space=space) as p:
+        p.quiet()
+        p.initialise()
+        p.solve()
+        assert abs(_observables(p)["err2"]) < 1e-12
+        p.refine_uniformly()
+        obs = _observables(p)
+        im = p.get_mesh("domain/_internal_facets_")
+        unrestored = set(im.get_discontinuous_unrestored_elements())
+        # the D0 mask is the last internal Data; a reported facet is exactly an unmasked one
+        unmasked = {i for i, e in enumerate(im.elements())
+                    if e.internal_data_pt(e.ninternal_data() - 1).value(0) == 0.0}
+        p.solve()
+        after = _observables(p)
+    assert obs["meas_old"] > 0 and obs["meas_new"] > 0, obs
+    assert unrestored == unmasked, (sorted(unrestored), sorted(unmasked))
+    assert abs(obs["err2_old"]) < 1e-14, obs      # every surviving facet is machine-exact
+    assert obs["err2"] > 1e-2, obs                # ... and the reported ones really are at 0
+    assert abs(after["err2"]) < 1e-12, after
+
+
 def test_new_facets_are_reported_and_warned_about(capfd):
     with _AdaptProblem(kind="quad", N=3, space="DL") as p:
         p.quiet()
