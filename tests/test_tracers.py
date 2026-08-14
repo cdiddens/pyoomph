@@ -37,6 +37,9 @@ from pyoomph.equations.tracers import (TracerParticles, TracerSeedPoints, Tracer
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh, CuboidBrickMesh, LineMesh
 
 
+# The ~70 relative "_tracer_*" output directories below land under pytest's tmp_path, not in the
+# repository: see the _output_below_tmp_path fixture in conftest.py.
+
 # ----------------------------------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------------------------------

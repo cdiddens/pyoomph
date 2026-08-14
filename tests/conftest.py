@@ -98,3 +98,27 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "slow" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _output_below_tmp_path(tmp_path, monkeypatch):
+    """Runs every test in its own temporary directory, so that no test writes into the repository.
+
+    A Problem that is never given an output directory falls back to the basename of __main__.__file__
+    (pyoomph/generic/problem.py), which under "python -m pytest" is pytest's own entry module: the 26
+    modules that set no output directory all wrote into one "__main__" directory beside whatever the
+    CWD happened to be. Modules that DO name a directory mostly name a relative one, which lands in
+    the same place. None of it shows up in "git status", because pyoomph drops a .gitignore into each
+    output directory it creates -- so this accumulated in the repository root unnoticed until someone
+    looked with ls.
+
+    Redirecting the CWD rather than passing tmp_path into every Problem keeps the descriptive
+    directory names each module chose (they are what makes a failed run's output findable under
+    pytest's basetemp) and needs no cooperation from modules added later. It is safe because nothing
+    under tests/ resolves a relative path itself: the mesh templates generate their .geo in code
+    rather than loading a file, the state-file dumps are all absolute, and every subprocess launch
+    passes an explicit cwd= (the MPI launchers use the directory of their worker script). It also
+    costs no compile time, because the JIT cache is keyed on the generated code text and lives under
+    ~/.cache, not in the output directory (pyoomph/generic/jit_cache.py).
+    """
+    monkeypatch.chdir(tmp_path)
