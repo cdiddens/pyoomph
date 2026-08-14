@@ -3999,6 +3999,15 @@ class Problem(_pyoomph.Problem):
             self.reapply_boundary_conditions()
             
         if self._runmode != "continue":
+            if not self._resetting_first_step:
+                # Node construction leaves arbitrary content in the deeper position-history rows
+                # (second history row, Newmark2 velocity/acceleration and the adaptive predictor
+                # slots). The IC application below repairs only part of that - and nothing when dt
+                # is still unset - so a freely floating solid with inertia (second-order partial_t
+                # on the mesh coordinates) started with spurious momentum and translated at
+                # constant velocity. Start impulsively from the current state; explicit initial
+                # conditions below overwrite this where they are defined.
+                self.assign_initial_values_impulsive()
             for _, m in self._meshdict.items():
                 m.setup_initial_conditions_with_interfaces(self._resetting_first_step, ic_name)
                 if isinstance(m, ODEStorageMesh):

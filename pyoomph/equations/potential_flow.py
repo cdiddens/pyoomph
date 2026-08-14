@@ -75,7 +75,9 @@ class PotentialFlow(Equations):
         elif self.velo_projection:            
             self.add_local_function(self.velocity_name,grad(phi))
         if self.rho is not None and self.pressure_projection:
-            pdef=-self.rho*(partial_t(phi)+dot(grad(phi),grad(phi)))+self.bulk_force_potential
+            # Unsteady Bernoulli: p=-rho*(dphi/dt+|grad(phi)|^2/2). The 1/2 was missing here,
+            # while get_dynamic_boundary_condition of the free interfaces had it correctly.
+            pdef=-self.rho*(partial_t(phi)+dot(grad(phi),grad(phi))/2)+self.bulk_force_potential
             if not isinstance(self.pressure_projection,bool):
                 p,ptest=var_and_test(self.pressure_name)
                 self.add_weak(p-pdef,ptest)

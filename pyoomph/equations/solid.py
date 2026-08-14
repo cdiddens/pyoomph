@@ -11,10 +11,12 @@ class BaseSolidConstitutiveLaw:
         Args:
             use_subexpressions: Use subexpressions for the tensor entries. Defaults to True.
             use_inverse_routine: Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bifurcation tracking. Defaults to True.
+            active_deformation: Optional active deformation gradient F_a (multiplicative Kroener-Lee/growth split). The rest metric becomes F_a^T*g*F_a, i.e. strains are measured relative to an intrinsically deformed state - muscle-like actuation, anisotropic growth, swelling. May depend on the Lagrangian coordinates, time or other fields. Only F_a^T*F_a enters, so rotational parts of F_a are irrelevant. Since it only modifies the constitutive law, it exerts no net force or torque on a free body. See also active_fiber_deformation. Defaults to None.
     """
-    def __init__(self,use_subexpressions=True,use_inverse_routine:bool=True):        
+    def __init__(self,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
         self.use_subexpressions=use_subexpressions
         self.use_inverse_routine=use_inverse_routine
+        self.active_deformation=active_deformation
         
     def _subexpression(self,expr):
         if self.use_subexpressions:
@@ -49,11 +51,18 @@ class BaseSolidConstitutiveLaw:
     
     def get_gij(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1):
         """
-        Returns the covariant metric tensor of the undeformed configuration. This is the identity matrix in Cartesian coordinates.
+        Returns the covariant metric tensor of the undeformed configuration. Without growth and active deformation, this is the identity matrix in Cartesian coordinates. An active deformation gradient F_a turns it into the pulled-back rest metric F_a^T*g*F_a.
         """
         X=var("lagrangian")
         grf=pow(isotropic_growth_factor,rational_num(2,dim))
-        return self._subexpression(grf*matproduct(transpose(grad(X,lagrangian=True)),grad(X,lagrangian=True)))
+        g=grf*matproduct(transpose(grad(X,lagrangian=True)),grad(X,lagrangian=True))
+        if self.active_deformation is not None:
+            # Entries of F_a beyond the element dimension cannot enter: the corresponding rows
+            # and columns of g are zero, so a 2d problem may use e.g. active_fiber_deformation
+            # (which fills the full 3x3) without contaminating the metric.
+            Fa=self.active_deformation
+            g=matproduct(transpose(Fa),matproduct(g,Fa))
+        return self._subexpression(g)
         
     
     def get_gammaij(self,dim:int,isotropic_growth_factor:ExpressionOrNum=1):
@@ -74,6 +83,25 @@ class BaseSolidConstitutiveLaw:
         """
         raise RuntimeError("get_sigma must be implemented in the derived class")
     
+def active_fiber_deformation(direction:Expression,stretch:ExpressionOrNum,isochoric_dim:int | None=None)->Expression:
+    """Active deformation gradient for a single fiber family: F_a = stretch*(d⊗d) + t*(1-d⊗d) with the normalized fiber direction d, i.e. an intrinsic stretch along the (possibly spatially varying) direction. With isochoric_dim set to the problem dimension, the transverse factor t=stretch^(-1/(dim-1)) compensates the volume (muscle-like, det F_a=1 within the element dimension); otherwise t=1 and det F_a=stretch (growth along the fiber).
+
+    Args:
+        direction: Fiber direction (any nonzero vector expression, normalized internally). May vary in space, e.g. follow a midline.
+        stretch: Intrinsic stretch factor along the fiber, e.g. 1+kappa*Y for a bending actuation.
+        isochoric_dim: If set, compensate transversally so the activation is volume-preserving in this dimension. Defaults to None.
+    """
+    d=direction/square_root(dot(direction,direction))
+    P=dyadic(d,d)
+    if isochoric_dim is None:
+        transverse=1
+    else:
+        if isochoric_dim<2:
+            raise ValueError("isochoric_dim must be at least 2, since a one-dimensional fiber stretch cannot be volume-compensated")
+        transverse=pow(stretch,rational_num(-1,isochoric_dim-1))
+    return transverse*(identity_matrix()-P)+stretch*P
+
+
 class IncompressibleSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
     """
     Base class for incompressible solid constitutive laws. The method get_sigma must be implemented in derived classes.     
@@ -93,10 +121,11 @@ class GeneralizedHookeanSolidConstitutiveLaw(BaseSolidConstitutiveLaw):
             nu: Poisson's ratio
             use_subexpressions (bool, optional): Use subexpressions for the tensor entries. Defaults to True.
             use_inverse_routine (bool, optional): Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bifurcation tracking. Defaults to True.
+            active_deformation (Optional[Expression], optional): Active deformation gradient F_a, see BaseSolidConstitutiveLaw. Defaults to None.
     """
-    def __init__(self, E:ExpressionOrNum=1, nu:ExpressionOrNum=0.4,use_subexpressions=True,use_inverse_routine:bool=True):
-        
-        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine)
+    def __init__(self, E:ExpressionOrNum=1, nu:ExpressionOrNum=0.4,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+
+        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
         self.E=E
         self.nu=nu
         
@@ -122,10 +151,11 @@ class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveL
         Args:
             E: Young's modulus
             use_subexpressions (bool, optional): Use subexpressions for the tensor entries. Defaults to True.
-            use_inverse_routine (bool, optional): Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bif
+            use_inverse_routine (bool, optional): Use a specific routine for the inversion of the metric tensor. It cannot be used when requiring Hessians, e.g. for bifurcation tracking. Defaults to True.
+            active_deformation (Optional[Expression], optional): Active deformation gradient F_a, see BaseSolidConstitutiveLaw. Note that the incompressibility constraint det G = det g then enforces the actual volume to follow det F_a - use a volume-preserving F_a (e.g. active_fiber_deformation with isochoric_dim) for pure actuation. Defaults to None.
     """
-    def __init__(self,E:ExpressionOrNum=1,use_subexpressions=True,use_inverse_routine:bool=True):
-        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine)
+    def __init__(self,E:ExpressionOrNum=1,use_subexpressions=True,use_inverse_routine:bool=True,active_deformation:Expression | None=None):
+        super().__init__(use_subexpressions=use_subexpressions,use_inverse_routine=use_inverse_routine,active_deformation=active_deformation)
         self.E=E
 
     def get_sigma(self,dim:int,isotropic_growth_factor:ExpressionNumOrNone=1,pressure_var:Expression | None=None):
@@ -357,8 +387,15 @@ class FSIConnection(InterfaceEquations):
         self.velocity_offset=velocity_offset
         
     def define_fields(self):
-        self.define_vector_field("_mesh_connection","C2",testscale=1/scale_factor("spatial"),scale=scale_factor("spatial")**2)
-        self.define_vector_field("_velo_connection","C2",testscale=scale_factor("temporal")/scale_factor("spatial"),scale=scale_factor("pressure"))
+        pdom=self.get_parent_domain()
+        coordspace=cast(FiniteElementSpaceEnum, pdom._coordinate_space)
+        assert coordspace is not None and coordspace!="", "FSIConnection requires the parent domain to have a coordinate space"        
+        if coordspace=="C1TB":
+            coordspace="C1"
+        elif coordspace=="C2TB":
+            coordspace="C2"
+        self.define_vector_field("_mesh_connection",coordspace,testscale=1/scale_factor("spatial"),scale=scale_factor("spatial")**2)
+        self.define_vector_field("_velo_connection",coordspace,testscale=scale_factor("temporal")/scale_factor("spatial"),scale=scale_factor("pressure"))
         
     def define_residuals(self):
         from .navier_stokes import StokesEquations
