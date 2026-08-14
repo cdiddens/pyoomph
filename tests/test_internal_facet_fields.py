@@ -298,7 +298,12 @@ def test_mortar_poisson_is_exact_for_a_linear_solution(N):
     x = var("coordinate_x")
     facet_obs, bulk_obs = _solve_mortar(N, 0, 1 + 2 * x)
     assert abs(facet_obs["jump2"]) < 1e-14, facet_obs
-    assert abs(bulk_obs["uerr2"]) < 1e-16, bulk_obs
+    # uerr2 is assembled as the expanded square, so what an exactly reproduced u leaves behind is the
+    # cancellation of terms of order int(exact^2)=4.33 - eps*4.33 ~ 1e-15, and it comes out NEGATIVE
+    # for some N. Anything the facet field could get wrong here is O(1), so 1e-12 separates the two
+    # just as sharply as a threshold pushed below the round-off floor (1e-16) did, and this one does
+    # not depend on the order the assembly happens to sum in.
+    assert abs(bulk_obs["uerr2"]) < 1e-12, bulk_obs
 
 
 def test_mortar_poisson_converges_at_second_order():
