@@ -260,11 +260,28 @@ loops over exactly those lists.
   because distributing reaches the skeleton through `actions_after_distribute → actions_after_adapt`
   and the sample-and-refit snapshot only carried `DL`/`D0`. It carries every space now (§5.1), and the
   halo scheme marks whole `Data` objects, so it cannot tell how many values each holds.
-* **One offset that is easy to get wrong.** `Mesh::share_interpolation_across_ranks()` pools the
-  values of elements a rank could not place itself during a distributed *remesh*. It indexed
-  `internal_data_pt(d)` for `d < nDL + nD0`, which is only the DL/D0 block while no DG space is
-  present: `allocate_discontinous_fields` lays the element out as `[DG][DL][D0]`. It now covers the
-  whole range, `dg_internal_data_offset(ft) + nDL + nD0`.
+* **One offset that is easy to get wrong — and is currently dead.**
+  `Mesh::share_interpolation_across_ranks()` pools the values of elements a rank could not place
+  itself during a distributed *remesh*. It indexed `internal_data_pt(d)` for `d < nDL + nD0`, which
+  is only the DL/D0 block while no DG space is present: `allocate_discontinous_fields` lays the
+  element out as `[DG][DL][D0]`. It now covers the whole range,
+  `dg_internal_data_offset(ft) + nDL + nD0`.
+
+  That loop cannot run today, and the claim that a `Dx` facet field reaches it is wrong.
+  `Mesh::nodal_interpolate_from()` throws *"Cannot interpolate DG fields at interfaces yet"* for any
+  mesh carrying a DG, DL **or** D0 field before it ever calls the pooling, so `ndisc` is 0 in every
+  run — instrumenting a distributed `D1`-skeleton remesh showed only the bulk mesh and the boundary
+  interfaces arriving there, none of them with internal data, and the skeleton never taking that
+  route at all (it is rebuilt and refilled by `_transfer_internal_facet_fields`,
+  `pyoomph/meshes/interpolator.py`). Two consequences worth knowing:
+  * the DL/D0 write-back inside `nodal_interpolate_from` had the *same* off-by-`dg_off` indexing and
+    has been corrected to match, so that the two agree the day the gate is lifted;
+  * the gate is a *narrowing*. Until `41b438f2` it tested the nodal DG spaces alone, so a DL or D0
+    field did survive a remesh; widening it to DL/D0 made that a hard error, and nothing noticed
+    because no test covered it. `tests/test_mesh_point_locator.py::test_remeshing_refuses_a_
+    discontinuous_field` now pins the refusal for `DL`/`D0`/`D1`/`D2`, so restoring it has to be
+    deliberate. (Note also that the refusal leaves the `Problem` half-remeshed: tearing it down
+    afterwards aborts the interpreter, which is why that test runs in a subprocess.)
 
 Combined with static condensation ([static_condensation.md](static_condensation.md) §9) this is what
 makes HDG work in parallel: the trace lives on the skeleton and the bulk unknowns are eliminated, at 2

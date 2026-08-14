@@ -20,6 +20,8 @@
 #     coordinate space.
 
 import math
+import subprocess
+import sys
 
 import pytest
 
@@ -590,6 +592,67 @@ def test_remeshing_a_closed_boundary_keeps_it_ordered():
                 worst = max(worst, abs(((b - a + math.pi) % (2 * math.pi)) - math.pi))
     # one element spans ~0.25 rad here; an antipodal node shows up as ~pi
     assert worst < 0.5, worst
+
+
+_REFUSAL_SCRIPT = '''
+import sys
+from pyoomph import *
+from pyoomph.expressions import *
+from pyoomph.meshes.remesher import Remesher2d
+from pyoomph.meshes.simplemeshes import RectangularQuadMesh
+
+space = sys.argv[1]
+
+class Eqs(Equations):
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+        self.define_scalar_field("d", space)
+
+    def define_residuals(self):
+        u, ut = var_and_test("u")
+        d, dt = var_and_test("d")
+        self.add_residual(weak(u - var("coordinate_x"), ut))
+        self.add_residual(weak(d - var("coordinate_y"), dt))
+
+class P(Problem):
+    def define_problem(self):
+        m = RectangularQuadMesh(N=4)
+        m.remesher = Remesher2d(m)
+        self.add_mesh(m)
+        self.add_equations(Eqs() @ "domain")
+
+p = P()
+p.quiet()
+p.solve()
+try:
+    p.force_remesh()
+except RuntimeError as e:
+    print("REFUSED: " + str(e))
+else:
+    print("ACCEPTED")
+'''
+
+
+@pytest.mark.parametrize("space", ["DL", "D0", "D1", "D2"])
+def test_remeshing_refuses_a_discontinuous_field(tmp_path, space):
+    # The limit of the transfer, pinned so that raising it is deliberate. nodal_interpolate_from()
+    # rejects any mesh carrying a discontinuous field; the DL/D0 transfer inside it and the
+    # discontinuous pooling in share_interpolation_across_ranks() are therefore both dead code today.
+    # That is a narrowing: until 41b438f2 the check was on the nodal DG spaces alone and DL/D0 fields
+    # did survive a remesh. Whoever lifts it has to revisit both of those places, since each has to
+    # address the internal data as [DG spaces][DL][D0] rather than from index 0.
+    #
+    # In a subprocess because the refusal leaves the Problem half-remeshed and tearing that down
+    # aborts the interpreter - the test would take the rest of the file with it.
+    script = tmp_path / "refusal.py"
+    script.write_text(_REFUSAL_SCRIPT)
+    proc = subprocess.run([sys.executable, str(script), space], cwd=str(tmp_path),
+                          capture_output=True, text=True, timeout=300)
+    assert "REFUSED: " in proc.stdout, \
+        "a %s field was remeshed rather than refused -- if that is intended, the DL/D0 indexing in " \
+        "nodal_interpolate_from and share_interpolation_across_ranks needs checking first:\n%s\n%s" % (
+            space, proc.stdout[-2000:], proc.stderr[-2000:])
+    assert "Cannot interpolate DG fields" in proc.stdout, proc.stdout[-2000:]
 
 
 # ----------------------------------------------------------------------------------------------

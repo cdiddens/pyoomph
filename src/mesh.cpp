@@ -3521,6 +3521,15 @@ namespace pyoomph
     // (src/elements.cpp). Counting DL and D0 alone would still START at internal data 0, i.e. inside
     // the DG block, as soon as an interface carries a nodal DG field: the DL/D0 values would never be
     // pooled and the leading DG ones would be pooled in their place.
+    //
+    // ndisc is 0 in every run today, and this loop is therefore dead: nodal_interpolate_from() below
+    // refuses ANY mesh that carries a DG, DL or D0 field ("Cannot interpolate DG fields at
+    // interfaces yet"), so it never gets as far as calling this. Instrumenting a distributed
+    // D1-skeleton remesh confirmed it - the only meshes that reach here are the bulk and the
+    // boundary interfaces, all with no internal data at all, and the skeleton itself never comes
+    // through this route (it is rebuilt and refilled by _transfer_internal_facet_fields, see
+    // pyoomph/meshes/interpolator.py). The indexing is kept correct for the day that gate is
+    // narrowed again; it cannot be tested before then.
     std::vector<double> values, elem_weights;
     unsigned ndisc = 0;
     if (this->nelement())
@@ -3636,6 +3645,13 @@ namespace pyoomph
       }
     }
 
+    // This refuses every discontinuous field, DL and D0 included, so the DL/D0 transfer further down
+    // and the discontinuous pooling in share_interpolation_across_ranks() are both unreachable. That
+    // was not always so: until 41b438f2 ("Completed refactoring of the DG fields") the test was on
+    // the nodal DG spaces alone, and a DL or D0 field did travel through a remesh. Widening it here
+    // turned that into a hard error, which is where it stands - tests/test_mesh_point_locator.py
+    // pins the refusal so that lifting it is a deliberate act, and the code below is kept correct
+    // for that day rather than deleted.
     if (has_dg || my_ft->info_DL.numfields || my_ft->info_D0.numfields)
     {
       throw_runtime_error("Cannot interpolate DG fields at interfaces yet");
@@ -4058,6 +4074,12 @@ namespace pyoomph
           throw_runtime_error("TODO: Field mapping if DL spaces are different"); // TODO: Field mapping
         }
 
+        // Same offset as in share_interpolation_across_ranks(): allocate_discontinous_fields() lays
+        // the internal data out as [DG spaces][DL][D0], so addressing the DL block from index 0
+        // would write into the leading DG data instead. Unreachable while the gate at the top of
+        // this function refuses DL/D0 outright, and so untested - fixed anyway, because the two
+        // places have to agree the day it is lifted.
+        const unsigned my_dg_off = dg_internal_data_offset(my_ft);
         for (unsigned int time_ind = 0; time_ind < ts->ntstorage(); time_ind++)
         {
           if (my_ft->info_D0.numfields)
@@ -4066,7 +4088,7 @@ namespace pyoomph
             srcelem->get_interpolated_fields_D0(s, vals, time_ind);
             for (unsigned int vi = 0; vi < vals.size(); vi++)
             {
-              deste->internal_data_pt(my_ft->info_DL.numfields + vi)->set_value(time_ind, 0, vals[vi]); // TODO: Field mapping
+              deste->internal_data_pt(my_dg_off + my_ft->info_DL.numfields + vi)->set_value(time_ind, 0, vals[vi]); // TODO: Field mapping
             }
           }
           if (my_ft->info_DL.numfields)
@@ -4075,10 +4097,11 @@ namespace pyoomph
             srcelem->get_interpolated_fields_DL(s, vals, time_ind);
             for (unsigned int vi = 0; vi < vals.size(); vi++)
             {
-              deste->internal_data_pt(vi)->set_value(time_ind, 0, vals[vi]); // TODO: Field mapping
-              for (unsigned int j = 1; j < deste->internal_data_pt(vi)->nvalue(); j++)
+              oomph::Data *dl = deste->internal_data_pt(my_dg_off + vi);
+              dl->set_value(time_ind, 0, vals[vi]); // TODO: Field mapping
+              for (unsigned int j = 1; j < dl->nvalue(); j++)
               {
-                deste->internal_data_pt(vi)->set_value(time_ind, j, 0); // TODO: Field mapping, slopes!
+                dl->set_value(time_ind, j, 0); // TODO: Field mapping, slopes!
               }
             }
           }
