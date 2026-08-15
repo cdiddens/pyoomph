@@ -630,3 +630,15 @@ version, which could only ask for the dof distribution and was consulted in the 
 The dead code just below the solver call site (the commented-out "if (problem_pt->distributed())"
 block) is an older, unconditional version of the same idea and was left as it was.
 Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user.
+
+Telements.h (Changed on 15th August 2026, TBubbleEnrichedElementShape<3,3>::d2shape_local):
+d2psids(9, 2) added the quartic-bubble term as "32.0 * d2_quartic_bubble_ds3" instead of "..._ds2",
+i.e. it used the mixed d^2/(ds0 ds1) derivative where the pure d^2/ds2^2 one belongs. Every other
+line of that block pairs the slot index with the matching bubble index, so this is a plain
+copy-paste typo. Found by finite-differencing d2shape_local against dshape_local: node 9, slot 2 was
+the only one of the 90 entries that disagreed (analytic 5.798 vs. FD 2.877 at s=(0.23,0.31,0.19));
+after the fix all 90 agree to 1e-11.
+It surfaced now because pyoomph's second spatial derivatives (grad(grad(...)), div(grad(...)),
+partial_x(...,2)) are the first thing in the tree to call d2shape_local at all - the whole
+d2shape_* family is dead code in the vendored subset otherwise.
+Upstream equivalent: none yet; this is a genuine bug in oomph-lib and should be reported upstream.

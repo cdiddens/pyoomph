@@ -2967,7 +2967,7 @@ namespace oomph
                       32.0 * d2_quartic_bubble_ds1;
       d2psids(9, 2) = 0.0 -
                       12.0 * (d2_cubic_bubble013_ds2 + d2_cubic_bubble123_ds2) +
-                      32.0 * d2_quartic_bubble_ds3;
+                      32.0 * d2_quartic_bubble_ds2; // FOR PYOOMPH: was _ds3 (copy-paste typo)
       d2psids(9, 3) = -4.0 -
                       12.0 * (d2_cubic_bubble013_ds3 + d2_cubic_bubble123_ds3) +
                       32.0 * d2_quartic_bubble_ds3;
