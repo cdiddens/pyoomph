@@ -251,6 +251,20 @@ class JITCache:
         # written to (see try_restore() below).
         self.hits = 0
         self.misses = 0
+        # Housekeeping throttle. Both prunes used to run after *every* store, and each one stat()s the
+        # whole shard tree: with ~21k fingerprint entries that was 105k stat() calls per Problem
+        # initialisation (0.33 s), a fixed tax paid by every script no matter how small. One run adds a
+        # handful of entries, so pruning that often cannot change the outcome. Prune on the first store
+        # of the process and then only every _PRUNE_EVERY-th, which still bounds the overshoot to a
+        # negligible fraction of the caps.
+        self._stores_since_prune = 0
+        self._fp_stores_since_prune = 0
+
+    _PRUNE_EVERY = 64
+
+    @staticmethod
+    def _due(counter: int) -> bool:
+        return counter == 0 or counter >= JITCache._PRUNE_EVERY
 
     def _path_for_key(self, key: str) -> str:
         return os.path.join(self._objects_dir, key[:2], key[2:])
@@ -382,9 +396,30 @@ class JITCache:
                 entries.append((st.st_mtime, st.st_size, p))
         return entries
 
+    def _count_shard_entries(self, base_dir: str) -> int:
+        # Count only - no stat() per entry. Used as the cheap trigger test for the
+        # count-capped fingerprint prune; the full (mtime, size) listing is only built once
+        # the count says something actually has to be evicted.
+        total = 0
+        try:
+            shards = os.listdir(base_dir)
+        except OSError:
+            return 0
+        for shard in shards:
+            try:
+                total += sum(1 for n in os.listdir(os.path.join(base_dir, shard)) if not n.startswith(".tmp_"))
+            except OSError:
+                continue
+        return total
+
     def _prune_if_needed(self) -> None:
         # Housekeeping only, run right after a successful store() - never allowed to
         # raise and take the actual compile down with it if the filesystem misbehaves.
+        due = self._due(self._stores_since_prune)
+        self._stores_since_prune += 1
+        if not due:
+            return
+        self._stores_since_prune = 1
         try:
             entries = self._list_shard_entries(self._objects_dir)
             total = sum(size for _mtime, size, _p in entries)
@@ -410,7 +445,17 @@ class JITCache:
         # entries are tiny (a hex hash each), so a byte-size budget would let the
         # file/inode count grow far too large before ever tripping - see
         # get_max_fingerprint_entries().
+        due = self._due(self._fp_stores_since_prune)
+        self._fp_stores_since_prune += 1
+        if not due:
+            return
+        self._fp_stores_since_prune = 1
         try:
+            # Cheap trigger first: the cap is on the entry COUNT, which listdir alone gives.
+            # Only build the (mtime, size) listing - one stat() per entry, tens of thousands of
+            # them - once something genuinely has to be evicted.
+            if self._count_shard_entries(self._fingerprints_dir) <= self.max_fingerprint_entries:
+                return
             entries = self._list_shard_entries(self._fingerprints_dir)
             if len(entries) <= self.max_fingerprint_entries:
                 return

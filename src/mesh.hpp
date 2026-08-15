@@ -417,6 +417,7 @@ namespace pyoomph
 		virtual std::map<std::string, std::string> get_field_information(); // first: names, second: list of spaces (C2,C1,DL,D0), but also (../C2 etc for elements defined on bulk domains)
 		~Mesh() override;
 		virtual void check_integrity();
+		void map_nodes_on_macro_elements(); // Re-derive nodal positions from the macro element of every element that has one
 	};
 
 	class DummyErrorEstimator : public oomph::Z2ErrorEstimator // Only be used to make sure that the error_estimator_pt is not NULL, which causes problems if PARANOID

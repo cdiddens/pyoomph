@@ -2709,22 +2709,26 @@ namespace pyoomph
 	// e.g. before a full re-pinning pass so pinning state is rebuilt consistently from scratch.
 	void BulkElementBase::unpin_dummy_values() // C1 fields on C2 elements have dummy values on only C2 nodes, which needs to be pinned
 	{
+		// One pass, one cast. This used to be two passes over the same nodes with a dynamic_cast per
+		// (node, coordinate direction); the routine runs once per element per Problem::setup_pinning(),
+		// so on a 1M-dof mesh that was several million redundant casts and a second sweep through the
+		// same (scattered, cache-cold) Node objects. The two passes were independent - unpinning
+		// positions and unpinning values touch disjoint storage - so merging them changes nothing.
+		const unsigned ndim_nodal = this->nodal_dimension();
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
-			for (unsigned int i = 0; i < this->nodal_dimension(); i++)
+			oomph::Node *const on = node_pt(l);
+			Node *const pn = dynamic_cast<Node *>(on);
+			for (unsigned int i = 0; i < ndim_nodal; i++)
 			{
-				dynamic_cast<Node *>(node_pt(l))->unpin_position(i);
+				pn->unpin_position(i);
 			}
-			this->node_pt(l)->unconstrain_positions();
-		}
-		
-		for (unsigned int l = 0; l < nnode(); l++)
-		{
-
-			for (unsigned int i = 0; i < node_pt(l)->nvalue(); i++)
+			on->unconstrain_positions();
+			const unsigned nval = on->nvalue();
+			for (unsigned int i = 0; i < nval; i++)
 			{
-				node_pt(l)->unpin(i); 
-			}			
+				on->unpin(i);
+			}
 		}
 
 		for (unsigned int d = 0; d < this->ninternal_data(); d++)
@@ -2752,11 +2756,13 @@ namespace pyoomph
 
 		if (!functable->moving_nodes)
 		{
+			const unsigned ndim_nodal = this->nodal_dimension();
 			for (unsigned int l = 0; l < nnode(); l++)
 			{
-				for (unsigned int i = 0; i < this->nodal_dimension(); i++)
+				Node *const pn = dynamic_cast<Node *>(node_pt(l)); // hoisted out of the direction loop
+				for (unsigned int i = 0; i < ndim_nodal; i++)
 				{
-					dynamic_cast<Node *>(node_pt(l))->pin_position(i);
+					pn->pin_position(i);
 				}
 			}
 		}
@@ -2804,6 +2810,19 @@ namespace pyoomph
 	// User-added additional dof constraints (see NodeWithFieldIndicesBase::add_additional_dof_constraint):
 	void BulkElementBase::setup_additional_dof_constraints()
 	{
+		// Nothing below does anything unless some node of this element actually carries a constraint:
+		// both loops test get_additional_dof_constraints() before acting. The c1_corner_lookup map,
+		// however, was built unconditionally - one std::map with its heap allocations per element, i.e.
+		// 0.85 s over the 250k elements of a 1M-dof problem that has no additional constraints at all.
+		{
+			bool any = false;
+			for (unsigned int l = 0; l < nnode(); l++)
+			{
+				Node *n = dynamic_cast<Node *>(node_pt(l));
+				if (n && n->get_additional_dof_constraints()) { any = true; break; }
+			}
+			if (!any) return;
+		}
 		auto * functable = codeinst->get_func_table();
 		const std::vector<int> & elem_to_C1_map = this->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1];
 		bool has_C1_fields=functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0;

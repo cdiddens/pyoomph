@@ -3791,8 +3791,11 @@ class Problem(_pyoomph.Problem):
         infofile.close()
 
         self._set_solved_residual("",False,True)
-        self.setup_pinning()
-        self.before_assigning_equation_numbers(self._dof_selector)
+        # reapply_boundary_conditions() opens with exactly setup_pinning() +
+        # before_assigning_equation_numbers(), so doing them here as well was one whole extra pinning
+        # sweep over every element - and it was the *stale* one: reapply first flushes the additional
+        # dof constraints, so the pinning state this used to compute was thrown away and rebuilt a few
+        # lines later anyway.
         self.reapply_boundary_conditions()
 
 
@@ -4072,7 +4075,9 @@ class Problem(_pyoomph.Problem):
                 #     TODO Recursive
                 #     print(sm)
                 # print("ICMESH", m)
-        self.setup_pinning()
+        # The initial condition may well have overwritten a Dirichlet value, so the boundary
+        # conditions have to be reapplied - but reapply_boundary_conditions() starts with
+        # setup_pinning() itself, so calling it here first only doubled the sweep (see initialise()).
         self.reapply_boundary_conditions()
         self.invalidate_cached_mesh_data()
         if self._custom_assembler:
@@ -4187,12 +4192,9 @@ class Problem(_pyoomph.Problem):
         for _,m in self._meshdict.items():
             if isinstance(m,ODEStorageMesh):
                 continue
-            for ei in range(m.nelement()):
-                elem=m.element_pt(ei)
-                macro=elem.get_macro_element()
-                if macro:
-                    elem.map_nodes_on_macro_element()
-        self._equation_system._after_mapping_on_macro_elements() 
+            # One call instead of three nanobind crossings per element (see Mesh::map_nodes_on_macro_elements)
+            m.map_nodes_on_macro_elements()
+        self._equation_system._after_mapping_on_macro_elements()
 
 
     def remove_macro_elements(self,mode:bool | Literal["auto"]="auto"):        

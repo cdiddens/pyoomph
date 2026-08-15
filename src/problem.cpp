@@ -995,26 +995,28 @@ namespace pyoomph
 	// dummy-ness is a per-Data-object property that may be shared between elements.
 	void Problem::ensure_dummy_values_to_be_dummy()
 	{
+		// The dynamic_cast is done once, in the first pass, and the survivors are kept for the second:
+		// this runs over every element of every submesh several times per initialisation (and again
+		// after every adapt), so the second pass's casts were pure repetition.
+		std::vector<BulkElementBase *> bulk_elements;
 		for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
 		{
-			unsigned nelem = mesh_pt(nmi)->nelement();
-			//		std::cout << "ENSURE PINNING NEL " << nelem << std::endl;
+			oomph::Mesh *const msh = mesh_pt(nmi);
+			unsigned nelem = msh->nelement();
+			bulk_elements.reserve(bulk_elements.size() + nelem);
 			for (unsigned n = 0; n < nelem; n++)
 			{
-				auto el = dynamic_cast<BulkElementBase *>(mesh_pt(nmi)->element_pt(n));
+				auto el = dynamic_cast<BulkElementBase *>(msh->element_pt(n));
 				if (el)
+				{
 					el->unpin_dummy_values();
+					bulk_elements.push_back(el);
+				}
 			}
 		}
-		for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
+		for (BulkElementBase *el : bulk_elements)
 		{
-			unsigned nelem = mesh_pt(nmi)->nelement();
-			for (unsigned n = 0; n < nelem; n++)
-			{
-				auto el = dynamic_cast<BulkElementBase *>(mesh_pt(nmi)->element_pt(n));
-				if (el)
-					el->pin_dummy_values();
-			}
+			el->pin_dummy_values();
 		}
 	}
 
@@ -1052,6 +1054,17 @@ namespace pyoomph
 	// rebuilds the set of globally pinned equation numbers (which depends on the numbering just assigned).
 	unsigned long Problem::assign_eqn_numbers(const bool& assign_local_eqn_numbers)
 	{
+      // Tempting and wrong: this cannot skip the elemental pass when the global numbering comes out
+      // unchanged. Mesh::assign_local_eqn_numbers() reaches BulkElementBase::
+      // assign_additional_local_eqn_numbers(), which also runs fill_element_info() - the rebuild of the
+      // eleminfo struct that the generated code reads (value/coordinate pointers, hang info with its
+      // equation numbers). That is not a function of the numbering alone: the interface equation
+      // remapping below is computed AFTER it, which is exactly why several call sites here call
+      // reapply_boundary_conditions() twice in a row. A fingerprint-guarded skip (equation numbers +
+      // Data/element addresses + topology generation, all identical on the second call) therefore left
+      // the element info stale and adaptively refined interface problems diverged with an infinite
+      // residual. Measured first: the elemental pass is ~96% of an assign_eqn_numbers(). See
+      // dev_docs/initialisation_cost.md.
       unsigned long res=oomph::Problem::assign_eqn_numbers(assign_local_eqn_numbers);
 	  for (unsigned nmi = 0; nmi < this->nsub_mesh(); nmi++)
 	  {

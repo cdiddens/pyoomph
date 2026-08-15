@@ -1222,6 +1222,7 @@ void PyReg_Mesh(nb::module_ &m)
 		// pyoomph's own mesh-level functionality, adding boundary/interface handling, adaptive
 		// refinement control, (de)serialization of the mesh state and various evaluation helpers.
 		.def("check_integrity",mesh_method(&pyoomph::Mesh::check_integrity), "Runs internal consistency checks on this mesh, raising an error if a problem is found")
+		.def("map_nodes_on_macro_elements",mesh_method(&pyoomph::Mesh::map_nodes_on_macro_elements), "Updates the nodal positions of every element that has a macro element from that macro element's mapping")
 		.def("prepare_zeta_interpolation",mesh_method([](pyoomph::Mesh *self, MeshHandleBase *old_mesh){self->prepare_zeta_interpolation(old_mesh->mesh());}), nb::arg("old_mesh"), "Prepares the internal data structures required to interpolate field values from an old mesh onto this (typically newly adapted) mesh")
 		.def("remove_boundary_nodes",mesh_method([](pyoomph::Mesh *self) {self->remove_boundary_nodes();}), "Removes all nodes from all mesh boundaries (i.e. clears the boundary node lookup, without deleting the nodes themselves)")
 		.def("remove_boundary_nodes_of_bound",mesh_method([](pyoomph::Mesh *self,unsigned b) {self->remove_boundary_nodes(b);}), nb::arg("boundary_index"), "Removes all nodes from the given mesh boundary (without deleting the nodes themselves)")

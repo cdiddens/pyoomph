@@ -499,6 +499,21 @@ namespace pyoomph
     
   }
 
+  // Re-derive the nodal positions of every element that carries a macro element from that macro
+  // element's mapping. The Python side used to loop the elements itself, crossing the nanobind
+  // boundary three times per element (element_pt, get_macro_element, map_nodes_on_macro_element);
+  // on a 250k-element mesh that alone was most of Problem.map_nodes_on_macro_elements().
+  void Mesh::map_nodes_on_macro_elements()
+  {
+    const unsigned nel = this->nelement();
+    for (unsigned ie = 0; ie < nel; ie++)
+    {
+      auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      if (el && el->macro_elem_pt())
+        el->map_nodes_on_macro_element();
+    }
+  }
+
   // Number of nodes; if discontinuous is set, counts per-element node copies (sum of each element's
   // own nnode()) rather than the mesh's shared/unique node count - used for DG-style (discontinuous)
   // field output where every element has its own private copy of each node.
@@ -2611,6 +2626,23 @@ namespace pyoomph
 
   void Mesh::apply_additional_dof_constraints()
   {
+    // A mesh that owns its nodes can answer "is anything constrained at all?" from the node list -
+    // one pass over nnode() instead of one per element over all its nodes, i.e. ~2.25x fewer visits
+    // on a quad C2 mesh, and no per-element setup at all in the (overwhelmingly common) case where
+    // no ConstrainFieldsToC1Space/ConstrainPositionsToC1Space is in play. Interface meshes have an
+    // empty Node_pt, so they keep taking the element route, where BulkElementBase::
+    // setup_additional_dof_constraints() does the same test per element.
+    unsigned long n_node = nnode();
+    if (n_node)
+    {
+      bool any = false;
+      for (unsigned n = 0; n < n_node; n++)
+      {
+        if (static_cast<Node *>(Node_pt[n])->get_additional_dof_constraints()) { any = true; break; }
+      }
+      if (!any)
+        return;
+    }
     unsigned long n_elem = nelement();
     for (unsigned n = 0; n < n_elem; n++)
     {
@@ -4850,6 +4882,23 @@ namespace pyoomph
     auto *ft = el->get_code_instance()->get_func_table();
     unsigned nodal_dim = el->nodal_dimension();
     unsigned eldim = el->dim();
+
+    // Resolve the IC name FIRST. This test used to sit below the normal precomputation, so a mesh
+    // that defines no initial condition under this name - the usual case for all but one domain when
+    // several named ICs are in play - still paid a full per-element normal evaluation and built the
+    // nodal_normals map before bailing out.
+    int ic_index = -1;
+    for (unsigned int i = 0; i < ft->num_ICs; i++)
+    {
+      if (std::string(ft->IC_names[i]) == ic_name)
+      {
+        ic_index = i;
+        break;
+      }
+    }
+    if (ic_index < 0)
+      return;
+
     // Precalculate the normals, they might be relevant
     std::map<pyoomph::Node *, oomph::Vector<double>> nodal_normals;
     if (this->nnode() && nodal_dim == eldim + 1)
@@ -4886,17 +4935,6 @@ namespace pyoomph
       }
     }
 
-    int ic_index = -1;
-    for (unsigned int i = 0; i < ft->num_ICs; i++)
-    {
-      if (std::string(ft->IC_names[i]) == ic_name)
-      {
-        ic_index = i;
-        break;
-      }
-    }
-    if (ic_index < 0)
-      return;
     // std::cout << "IC SETTING " << el->get_code_instance()->get_func_table()->numfields_C2 << "  " << el->get_code_instance()->get_func_table()->numfields_C1 << "  NNODE " << this->nnode() << std::endl;
     // First set the coordinates
     for (unsigned int ni = 0; ni < this->nnode(); ni++)
@@ -5425,8 +5463,52 @@ namespace pyoomph
     auto *ft = el->get_code_instance()->get_func_table();
     int Doffset = 3;
 
+    // Every loop below fills the x/xi buffers - and, for the elemental dofs, evaluates two element
+    // midpoints - BEFORE testing dirichlet_active, so a mesh with no active condition of a given kind
+    // still paid a full per-node/per-element sweep. On a bulk mesh whose Dirichlet conditions all live
+    // on its boundary (interface) meshes, which is the common case, that was the entire cost: 2.3 s of
+    // the 25 s it took to initialise a 1M-dof Poisson problem, producing nothing. Hence these guards.
+    // Nothing outside an "if (dirichlet_active[...])" branch has a side effect, so skipping a kind
+    // whose flags are all false is exactly equivalent to running it. Unpinning a condition that was
+    // switched off is not this function's job - ensure_dummy_values_to_be_dummy() unpins everything
+    // before setup_pinning() gets here.
+    bool any_dirichlet_active = false;
+    for (unsigned int i = 0; i < dirichlet_active.size(); i++)
+      if (dirichlet_active[i]) { any_dirichlet_active = true; break; }
+    if (!any_dirichlet_active)
+      return;
+
+    bool any_position_active = false;
+    for (int d = 0; d < Doffset; d++)
+      if (dirichlet_active[Doffset - 1 - d]) { any_position_active = true; break; }
+
+    // Continuous fields: the nodal loop below indexes dirichlet_active by a running offset over the
+    // present spaces, the interface-mesh branch by space_info->buffer_offset_basebulk. They agree for
+    // the basebulk part, but keep each guard on the indices its own loop uses.
+    bool any_continuous_active = false, any_interface_only_active = false;
+    {
+      unsigned offset = 0;
+      for (unsigned int si = 0; si < ft->num_present_continuous_spaces; si++)
+      {
+        auto *space_info = ft->present_continuous_spaces[si];
+        for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
+          if (dirichlet_active[fieldindex + offset + Doffset]) any_continuous_active = true;
+        for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
+          if (dirichlet_active[fieldindex + space_info->buffer_offset_basebulk + Doffset]) any_continuous_active = true;
+        for (unsigned int fieldindex = 0; fieldindex < space_info->numfields - space_info->numfields_basebulk; fieldindex++)
+          if (dirichlet_active[fieldindex + space_info->buffer_offset_interf + Doffset]) any_interface_only_active = true;
+        offset += space_info->numfields_basebulk;
+      }
+    }
+
+    bool any_elemental_active = false;
+    for (unsigned int fieldindex = 0; fieldindex < ft->info_DL.numfields; fieldindex++)
+      if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset]) any_elemental_active = true;
+    for (unsigned int fieldindex = 0; fieldindex < ft->info_D0.numfields; fieldindex++)
+      if (dirichlet_active[fieldindex + ft->info_D0.buffer_offset_basebulk + Doffset]) any_elemental_active = true;
+
     // Nodal position dofs (Dirichlet conditions on mesh coordinates, e.g. for ALE)
-    for (unsigned int ni = 0; ni < this->nnode(); ni++)
+    for (unsigned int ni = 0; any_position_active && ni < this->nnode(); ni++)
     {
       pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
       for (unsigned int i = 0; i < nodept->ndim(); i++)
@@ -5445,7 +5527,7 @@ namespace pyoomph
     }
 
     // Nodally-interpolated continuous field dofs (basebulk part only)
-    for (unsigned int ni = 0; ni < this->nnode(); ni++)
+    for (unsigned int ni = 0; any_continuous_active && ni < this->nnode(); ni++)
     {
       pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
       for (unsigned int i = 0; i < nodept->ndim(); i++)
@@ -5503,11 +5585,13 @@ namespace pyoomph
     
 
 
-    if (!this->nnode()) // This happens for interface meshes. Here, we also can access the normal, since we do it on an elemental basis
+    if (!this->nnode() && (any_position_active || any_continuous_active || any_interface_only_active)) // This happens for interface meshes. Here, we also can access the normal, since we do it on an elemental basis
     {
       // Interface meshes have no nodes of their own (Node_pt is empty), so we
       // instead iterate over the elements' nodes directly, which also lets us
       // compute the outward normal at each node for use in Dirichlet expressions.
+      // The normal evaluation is the expensive part, hence the guard above: an interface mesh
+      // carrying only elemental (DL/D0) conditions must not pay for it.
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
       {
         auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
@@ -5575,7 +5659,9 @@ namespace pyoomph
     // carry a linear slope in each local direction j (stored at internal value index
     // j+1), obtained here by finite-differencing the field value at s_min and s_max
     // of that direction and dividing by the local coordinate range.
-    for (unsigned int ei = 0; ei < this->nelement(); ei++)
+    // The two midpoint evaluations are unconditional within the loop body, so without the guard a
+    // mesh with no DL/D0 fields at all still evaluated them once per element.
+    for (unsigned int ei = 0; any_elemental_active && ei < this->nelement(); ei++)
     {
       auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
       oomph::Vector<double> xcenter = el->get_Eulerian_midpoint_from_local_coordinate();
