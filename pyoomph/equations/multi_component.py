@@ -715,10 +715,19 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             else:
                 self.add_residual(weak(self.surface_tension_factor*surf_tens_proj, div(u_test)))
         else:
-            if self.surface_tension_theta != 1:
-                surf_tens = evaluate_in_past(surf_tens, 1 - self.surface_tension_theta)            
             if self.surface_tension_gradient_directly:
                 raise RuntimeError("Can only use surface_tension_gradient_directly if surface_tension_projection_space is set")
+            if self.surface_tension_theta != 1:
+                # theta states outright which time level the surface tension is taken at, so it
+                # *replaces* the momentum scheme's own treatment of this term instead of composing
+                # with it. Wrapping the already lagged sigma in time_scheme() again made theta=0
+                # collapse back onto theta=1 exactly -- identical trajectories over 218 steps of an
+                # intense-Marangoni instability, right down to the divergence time -- while theta=0.5
+                # survived, i.e. only the full one-step lag was absorbed. The projected branch above
+                # has never had the extra wrapper and theta has always worked there.
+                self.add_residual(weak(self.surface_tension_factor
+                                       * evaluate_in_past(surf_tens, 1 - self.surface_tension_theta),
+                                       div(u_test)))
             else:
                 self.add_residual(weak(time_scheme(ns_inner.momentum_scheme,self.surface_tension_factor*surf_tens), div(u_test)))
 
@@ -905,8 +914,13 @@ class MultiComponentNavierStokesInterfaceBalancedEnd(InterfaceEquations):
             if sigma is None:
                 raise RuntimeError("No surface tension set in the interface properties " + str(inter_eqs.interface_props))
             if inter_eqs.surface_tension_theta!=1:
-                sigma=evaluate_in_past(sigma,1-inter_eqs.surface_tension_theta)
-            self.add_weak(-time_scheme(ns.momentum_scheme,inter_eqs.surface_tension_factor*sigma),dot(n,u_test))
+                # Same split as the parent: with theta != 1 the lag replaces the momentum scheme's
+                # treatment rather than being wrapped in it. It has to stay the very same expression
+                # here or the end-point Neumann term no longer cancels.
+                self.add_weak(-inter_eqs.surface_tension_factor
+                              * evaluate_in_past(sigma,1-inter_eqs.surface_tension_theta),dot(n,u_test))
+            else:
+                self.add_weak(-time_scheme(ns.momentum_scheme,inter_eqs.surface_tension_factor*sigma),dot(n,u_test))
 
 
 class CompositionDiffusionInfinityEquations(InterfaceEquations):
