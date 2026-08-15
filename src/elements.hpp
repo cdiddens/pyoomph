@@ -265,6 +265,22 @@ namespace pyoomph
     // derivatives (D2X2_dshape, a RankSixTensor), which are required for ALE-moving-mesh Jacobian
     // and Hessian contributions.
     virtual void fill_shape_info_at_s_dNodalPos_helper(JITShapeInfo_t *shape_info, const unsigned &index, const oomph::DenseMatrix<double> &interpolated_t, const oomph::DShape &dpsids_Element, const double det_Eulerian, const oomph::DenseMatrix<double> &aup, bool require_hessian, oomph::RankFourTensor<double> &DXdshape_il_jb, RankSixTensor *D2X2_dshape) const;
+
+    // Nodal-coordinate sensitivities of the ingredients of the second spatial derivative, i.e. of
+    // M_i^(b) = g^{ab} t_{a,i} and of Q[i][b][c] = dM_i^(b)/ds_c (see fill_shape_info_at_s). Both are
+    // explicit algebraic functions of the nodal positions, and everything they are built from
+    // (Psi_{m,a}, Psi_{m,ac}, t, X_{i,ab}, g^{ab}) is already available at that point. Written for
+    // the general metric form, so it is valid with a codimension as well.
+    //
+    // Outputs are flat arrays with the index helpers documented at the definition:
+    //   dM_dX  [i_dim][b_eldim][m_node][p_dim]
+    //   dQ_dX  [i_dim][b_eldim][c_eldim][m_node][p_dim]
+    void fill_d2x_dNodalPos_helper(unsigned n_node, unsigned n_dim, unsigned el_dim,
+                                   const oomph::DenseMatrix<double> &interpolated_t,
+                                   const oomph::DShape &dpsids_Element, const oomph::DShape &d2psids_Element,
+                                   const oomph::DenseMatrix<double> &aup, const double (*Xkab)[MAX_N2DERIV],
+                                   const double (*dgab_ds)[3][3],
+                                   std::vector<double> &dM_dX, std::vector<double> &dQ_dX) const;
     // Finite-difference fallback for the Jacobian contribution from the Lagrangian (undeformed
     // solid) position degrees of freedom, used where an analytic derivative is not available.
     virtual void fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
@@ -889,9 +905,68 @@ namespace pyoomph
       default:
         throw_runtime_error("Invalid space index " + std::to_string(space_index));
       }
-    
+
     }
-    
+
+    // Local-coordinate SECOND derivatives d2psi/(ds_a ds_b) of the shape functions, indexed as
+    // d2psi(l, PYOOMPH_D2_SLOT(a,b)) - i.e. the full square 3x3 slot layout defined in jitbridge.h,
+    // NOT oomph-lib's dimension-dependent N2deriv packing. d2psi must therefore be sized
+    // (nnode, MAX_N2DERIV), and both the (a,b) and the (b,a) slot are written.
+    //
+    // The defaults throw. supports_second_spatial_derivatives() reports the same information without
+    // raising, so an unsupported element/space combination can be rejected at problem setup rather
+    // than mid-assembly.
+    virtual void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const;
+    virtual void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const;
+    virtual void d2shape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const;
+    virtual void d2shape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const;
+    virtual void d2shape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const;
+
+    // Mirrors dshape_local_of_space.
+    inline void d2shape_local_of_space(const unsigned &space_index, const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const
+    {
+      switch (space_index)
+      {
+      case 0:
+        this->d2shape_local_at_s_C2TB(s, psi, dpsi, d2psi); break;
+      case 1:
+        this->d2shape_local_at_s_C2(s, psi, dpsi, d2psi); break;
+      case 2:
+        this->d2shape_local_at_s_C1TB(s, psi, dpsi, d2psi); break;
+      case 3:
+        this->d2shape_local_at_s_C1(s, psi, dpsi, d2psi); break;
+      default:
+        throw_runtime_error("Invalid space index " + std::to_string(space_index));
+      }
+    }
+
+    // Second derivatives of the element's OWN (geometry/Pos) shape functions. Needed for the
+    // X_{k,ab} = sum_l X^l_k d2Psi_l/(ds_a ds_b) term that converts local into spatial second
+    // derivatives, so it is required whenever any second derivative is requested at all.
+    //
+    // The default is an adapter around oomph::FiniteElement::d2shape_local performing the
+    // N2deriv -> PYOOMPH_D2_SLOT remap; keeping that remap here, in exactly one place, is what stops
+    // the 2D packing ({00,11,01}) and the 3D packing ({00,11,22,01,02,12}) from being confused.
+    virtual void d2shape_local_pyoomph(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const;
+
+    // Helper for the above: remaps a d2psids filled by oomph-lib in N2deriv packing for element
+    // dimension el_dim into the pyoomph slot layout, writing both (a,b) and (b,a).
+    static void remap_oomph_d2shape_packing(unsigned el_dim, unsigned nnode, const oomph::DShape &d2psids_oomph, oomph::DShape &d2psi);
+
+    // Clears all MAX_N2DERIV slots of the first nnode entries. Used by the spaces whose local second
+    // derivatives vanish identically (linear simplex bases, DL).
+    static inline void zero_d2shape(oomph::DShape &d2psi, unsigned nnode)
+    {
+      for (unsigned l = 0; l < nnode; l++)
+        for (unsigned k = 0; k < MAX_N2DERIV; k++) d2psi(l, k) = 0.0;
+    }
+
+    // Whether this element can produce second spatial derivatives at all, i.e. whether it has a real
+    // d2shape_local for its geometry AND for each of its interpolation spaces. Defaults to false and
+    // is overridden by the concrete element classes that implement them, so that a newly added
+    // element type is rejected loudly rather than silently returning garbage.
+    virtual bool supports_second_spatial_derivatives(std::string &why) const;
+
 
     
 

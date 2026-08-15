@@ -103,6 +103,26 @@ float __mzerosf=-0.0;
 #define SPACE_INDEX_D1TB 2
 #define SPACE_INDEX_D1 3
 
+// Second spatial derivatives of the shape functions.
+//
+// Storage is the full square [i][j], not the symmetry-packed form oomph-lib uses in N2deriv. That is
+// deliberate: the second derivative is only symmetric when the element has no codimension. pyoomph
+// builds spatial derivatives from the metric (dpsi/dx_i = g^{ab} t_{a,i} dpsi/ds_b), which on a
+// surface gives the tangential derivative of the surface gradient,
+//    D_ij psi = M_i^b M_j^c psi_,bc + M_j^c [ (d g^{ab}/d s_c) t_{a,i} + g^{ab} x_{i,ac} ] psi_,b ,
+// and that is genuinely asymmetric - on a unit circle it comes out as t_i t_j psi'' - n_i t_j psi'.
+// (Its trace is still exactly the Laplace-Beltrami operator, since the asymmetric part is
+// trace-free, so div(grad(u)) on an interface is correct.) Packing would silently alias the two
+// orders. The symmetry is exploited one level up instead: the code generator canonicalises
+// d/dx_i d/dx_j to i<=j only on domains where element_dim == nodal_dimension, so codimension-free
+// problems still emit only 6 of the 9 interpolation loops.
+//
+// The first index is the INNER derivative direction, the second the OUTER differentiation
+// direction, i.e. slot(i,j) addresses d/dx_j ( d psi / d x_i ).
+#define PYOOMPH_MAX_NODAL_DIM 3
+#define MAX_N2DERIV (PYOOMPH_MAX_NODAL_DIM * PYOOMPH_MAX_NODAL_DIM)
+#define PYOOMPH_D2_SLOT(i, j) (PYOOMPH_MAX_NODAL_DIM * (i) + (j))
+
 typedef struct JITElementInfo
 {
 
@@ -160,7 +180,9 @@ typedef struct JITElementInfo
 #define ARRAY_DECL_NHANG(what) what[MAX_HANG]
 #define ARRAY_DECL_NFIELDS(what) what[MAX_FIELDS]
 #define ARRAY_DECL_RESIDUAL_DESTINATION(what) what[MAX_RESIDUAL_DESTINATIONS]
+#define ARRAY_DECL_N2DERIV(what) what[MAX_N2DERIV]
 #define DX_SHAPE_FUNCTION_DECL(what) const double(*what)[MAX_NODAL_DIM]
+#define D2X_SHAPE_FUNCTION_DECL(what) const double(*what)[MAX_N2DERIV]
 
 #else
 
@@ -171,7 +193,9 @@ typedef struct JITElementInfo
 #define ARRAY_DECL_NHANG(what) *PYOOMPH_RESTRICT what
 #define ARRAY_DECL_NFIELDS(what) * PYOOMPH_RESTRICT what
 #define ARRAY_DECL_RESIDUAL_DESTINATION(what) * PYOOMPH_RESTRICT what
+#define ARRAY_DECL_N2DERIV(what) * PYOOMPH_RESTRICT what
 #define DX_SHAPE_FUNCTION_DECL(what) double * const * const  PYOOMPH_RESTRICT what
+#define D2X_SHAPE_FUNCTION_DECL(what) double * const * const  PYOOMPH_RESTRICT what
 #endif
 
 
@@ -216,34 +240,49 @@ typedef struct JITShapeInfo
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shapes))[3][NUM_CONTINUOUS_SPACES]; // Derived shapes (history, space, node index, coord index)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shapes))[NUM_CONTINUOUS_SPACES]; // Corresponding Lagrangian version
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shapes))[NUM_CONTINUOUS_SPACES]; // Corresponding local coordinate version
+  // Second spatial derivatives, slot index built with PYOOMPH_D2_SLOT(inner dir, outer dir).
+  // d2x_shapes carries the history level like dx_shapes above, for evaluate_in_past(...,apply_on_others=True).
+  double ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d2x_shapes))[3][NUM_CONTINUOUS_SPACES]; // (history, space, node index, slot)
+  double ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d2S_shapes))[NUM_CONTINUOUS_SPACES];    // Corresponding local coordinate version (space, node index, slot)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord))))[NUM_CONTINUOUS_SPACES]; // derivative of dx_shape w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index)
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord[NUM_CONTINUOUS_SPACES]; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d_d2x_shape_dcoord))))[NUM_CONTINUOUS_SPACES]; // derivative of d2x_shape w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index)
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_d2x2_shape_dcoord[NUM_CONTINUOUS_SPACES]; // second derivative of d2x_shape w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index, deriv. coord node index2, deriv coord dir index2)
   double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shapes))[NUM_CONTINUOUS_SPACES]; // shapes (node index, node index). In principle just delta_{i,j}
 
   double ARRAY_DECL_NNODE(shape_DL);                // DL shapes (node index)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_DL))[3];         // DL shapes (history, node index, coord index)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dX_shape_DL));            // Corresponding Lagrangian derivatives
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dS_shape_DL));            // Corresponding local coordinate version
+  double ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d2x_shape_DL))[3];     // DL second spatial derivatives (history, node index, slot)
+  double ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d2S_shape_DL));        // Corresponding local coordinate version
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(d_dx_shape_dcoord_DL)))); // derivative of dx_shape_DL w/r to nodal coords (intpt,node index, coord index, deriv. coord node index, deriv coord dir index)
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_DL; // second derivative of dx_shape_DL w/r to nodal coords (intpt,node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d_d2x_shape_dcoord_DL)))); // derivative of d2x_shape_DL w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index)
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_d2x2_shape_dcoord_DL; // second derivative of d2x_shape_DL w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index, deriv. coord node index2, deriv coord dir index2)
   double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_DL)); // DL shapes (node index, node index). In principle just delta_{i,j}
-  
-  double ARRAY_DECL_NDIM(ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_NDIM(d_dshape_dx_tensor))));
-  
+
   #ifdef FIXED_SIZE_SHAPE_BUFFER
   double *shape_Pos; // Pos space shapes. These will be mapped to the dominant element space
   double (*dx_shape_Pos[3])[MAX_NODAL_DIM];
   double (*dX_shape_Pos)[MAX_NODAL_DIM];
   double (*dS_shape_Pos)[MAX_NODAL_DIM];
+  double (*d2x_shape_Pos[3])[MAX_N2DERIV];
+  double (*d2S_shape_Pos)[MAX_N2DERIV];
   double (*d_dx_shape_dcoord_Pos)[MAX_NODAL_DIM][MAX_NODES][MAX_NODAL_DIM];
+  double (*d_d2x_shape_dcoord_Pos)[MAX_N2DERIV][MAX_NODES][MAX_NODAL_DIM];
   #else
   double * PYOOMPH_RESTRICT shape_Pos; // Pos space shapes. These will be mapped to the dominant element space
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dx_shape_Pos[3];
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dX_shape_Pos;
   double * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT dS_shape_Pos;
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d_dx_shape_dcoord_Pos;  
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2x_shape_Pos[3];
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2S_shape_Pos;
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d_dx_shape_dcoord_Pos;
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d_d2x_shape_dcoord_Pos;
   #endif
    double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_Pos; // second derivative of dx_shape_DL w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
+   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_d2x2_shape_dcoord_Pos; // second derivative of d2x_shape w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index, deriv. coord node index2, deriv coord dir index2)
 
   // double ** shape_D0; //DL shapes (intpt, "node" index) -> Actually always 1 //TODO: Simplify this
   // double *** dx_shape_D0; //DL shapes (intpt, "node" index,coord index) -> Actually always zero //TODO: Simplify this
@@ -297,9 +336,13 @@ typedef double (*JITFuncSpec_GeometricJacobian)(const JITElementInfo_t *, const 
 
 typedef void (*JITFuncSpec_GeometricJacobianSpatialDerivative)(const JITElementInfo_t *, const double *, double *);
 
+// d2X_psi (Lagrangian second derivatives) is reserved but not implemented - the code generator
+// refuses to set it. It is declared now so that adding it later is not a second ABI break.
+// There is deliberately no d2S_psi: local-coordinate derivatives have no flag of their own either
+// (dS_shapes rides on the psi||dx_psi gate), and d2S_shapes likewise rides on d2x_psi.
 typedef struct JITFuncSpec_RequiredShapes_For_Space
 {
-  bool psi,dx_psi,dX_psi;  
+  bool psi,dx_psi,dX_psi,d2x_psi,d2X_psi;
 } JITFuncSpec_RequiredShapes_For_Space_t;
 
 typedef struct JITFuncSpec_RequiredShapes_FiniteElement

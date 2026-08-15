@@ -11,6 +11,93 @@ namespace pyoomph
 namespace oomph
 {
 
+// ---------------------------------------------------------------------------------------------
+// Minimal forward-mode second-order dual number over the three local coordinates, used only to
+// build the d2shape_local implementations further down.
+//
+// The wedge bases are tensor products and could be differentiated by hand, but the 14-node pyramid
+// is *rational* - each shape function is a product of up to four linear/quadratic factors divided
+// by (s2-1) or (s2-1)^2 - and its second derivatives written out by hand would be neither readable
+// nor checkable by inspection. Assembling the same expressions the shape() functions already use,
+// but in D2Jet arithmetic, makes the derivatives exact by construction: there is only one place
+// (the operators below) where a differentiation rule can be wrong, and that place is trivial.
+//
+// This is straight-line arithmetic evaluated per integration point, and only when second spatial
+// derivatives were actually requested, so the cost is irrelevant next to the rest of the fill.
+// ---------------------------------------------------------------------------------------------
+struct D2Jet
+{
+  double v;
+  double g[3];
+  double h[3][3];
+
+  D2Jet() : v(0.0)
+  {
+    for (unsigned a = 0; a < 3; a++) { g[a] = 0.0; for (unsigned b = 0; b < 3; b++) h[a][b] = 0.0; }
+  }
+  D2Jet(double c) : D2Jet() { v = c; }
+  // The independent variable s_index
+  static D2Jet var(unsigned index, double value)
+  {
+    D2Jet r; r.v = value; r.g[index] = 1.0; return r;
+  }
+};
+
+inline D2Jet operator+(const D2Jet &a, const D2Jet &b)
+{
+  D2Jet r; r.v = a.v + b.v;
+  for (unsigned i = 0; i < 3; i++) { r.g[i] = a.g[i] + b.g[i]; for (unsigned j = 0; j < 3; j++) r.h[i][j] = a.h[i][j] + b.h[i][j]; }
+  return r;
+}
+inline D2Jet operator-(const D2Jet &a, const D2Jet &b)
+{
+  D2Jet r; r.v = a.v - b.v;
+  for (unsigned i = 0; i < 3; i++) { r.g[i] = a.g[i] - b.g[i]; for (unsigned j = 0; j < 3; j++) r.h[i][j] = a.h[i][j] - b.h[i][j]; }
+  return r;
+}
+inline D2Jet operator*(const D2Jet &a, const D2Jet &b)
+{
+  D2Jet r; r.v = a.v * b.v;
+  for (unsigned i = 0; i < 3; i++) r.g[i] = a.g[i] * b.v + a.v * b.g[i];
+  for (unsigned i = 0; i < 3; i++)
+    for (unsigned j = 0; j < 3; j++)
+      r.h[i][j] = a.h[i][j] * b.v + a.g[i] * b.g[j] + a.g[j] * b.g[i] + a.v * b.h[i][j];
+  return r;
+}
+inline D2Jet operator*(double c, const D2Jet &a)
+{
+  D2Jet r; r.v = c * a.v;
+  for (unsigned i = 0; i < 3; i++) { r.g[i] = c * a.g[i]; for (unsigned j = 0; j < 3; j++) r.h[i][j] = c * a.h[i][j]; }
+  return r;
+}
+// 1/a, from d(1/a) = -a_i/a^2 and d2(1/a) = 2 a_i a_j/a^3 - a_ij/a^2
+inline D2Jet inv(const D2Jet &a)
+{
+  D2Jet r;
+  const double ia = 1.0 / a.v, ia2 = ia * ia, ia3 = ia2 * ia;
+  r.v = ia;
+  for (unsigned i = 0; i < 3; i++) r.g[i] = -a.g[i] * ia2;
+  for (unsigned i = 0; i < 3; i++)
+    for (unsigned j = 0; j < 3; j++)
+      r.h[i][j] = 2.0 * a.g[i] * a.g[j] * ia3 - a.h[i][j] * ia2;
+  return r;
+}
+inline D2Jet operator/(const D2Jet &a, const D2Jet &b) { return a * inv(b); }
+
+// Writes one D2Jet into oomph-lib's Shape/DShape triple for a 3d element, i.e. with the second
+// derivatives in the N2deriv packing {00,11,22,01,02,12}.
+inline void store_d2jet_3d(unsigned l, const D2Jet &f, Shape &psi, DShape &dpsids, DShape &d2psids)
+{
+  psi[l] = f.v;
+  for (unsigned a = 0; a < 3; a++) dpsids(l, a) = f.g[a];
+  d2psids(l, 0) = f.h[0][0];
+  d2psids(l, 1) = f.h[1][1];
+  d2psids(l, 2) = f.h[2][2];
+  d2psids(l, 3) = f.h[0][1];
+  d2psids(l, 4) = f.h[0][2];
+  d2psids(l, 5) = f.h[1][2];
+}
+
 // Gauss-Legendre quadrature for the C1 wedge element, with 6 points (2 in each direction)
 class WedgeGaussC1 : public Integral
   {
@@ -137,6 +224,25 @@ class WedgeElementShapeC1
         dpsids(4,2) =  s0;
         dpsids(5,2) =  s1;
     }
+
+    // Second local derivatives, in oomph-lib's N2deriv packing {00,11,22,01,02,12}. Built with
+    // D2Jet so the product rule is applied by the arithmetic rather than by hand.
+    static void d2shape_local(const Vector<double>& s, Shape& psi, DShape& dpsids, DShape& d2psids)
+    {
+        const D2Jet s0 = D2Jet::var(0, s[0]);
+        const D2Jet s1 = D2Jet::var(1, s[1]);
+        const D2Jet s2 = D2Jet::var(2, s[2]);
+        const D2Jet l1 = D2Jet(1.0) - s0 - s1;
+        const D2Jet w0 = D2Jet(1.0) - s2;   // lower layer
+        const D2Jet w1 = s2;                // upper layer
+
+        const D2Jet T[3] = {l1, s0, s1};
+        const D2Jet L[2] = {w0, w1};
+        for (unsigned m = 0; m < 2; m++)
+            for (unsigned k = 0; k < 3; k++)
+                store_d2jet_3d(3*m + k, T[k] * L[m], psi, dpsids, d2psids);
+    }
+
 };
 
 
@@ -214,6 +320,27 @@ class PyramidElementShapeC1
         dpsids(3,2) = - s0s1 * iw2;
         dpsids(4,2) = 1.0;
     }
+
+    // Second local derivatives, in oomph-lib's N2deriv packing {00,11,22,01,02,12}. The 1/(1-s2)
+    // factor makes this element rational, so the derivatives are built with D2Jet rather than
+    // written out (see the D2Jet comment at the top of this file).
+    static void d2shape_local(const Vector<double>& s, Shape& psi, DShape& dpsids, DShape& d2psids)
+    {
+        const D2Jet s0 = D2Jet::var(0, s[0]);
+        const D2Jet s1 = D2Jet::var(1, s[1]);
+        const D2Jet s2 = D2Jet::var(2, s[2]);
+        const D2Jet w  = D2Jet(1.0) - s2;
+        const D2Jet iw = inv(w);
+        const D2Jet w_s0 = w - s0;
+        const D2Jet w_s1 = w - s1;
+
+        store_d2jet_3d(0, w_s0 * w_s1 * iw, psi, dpsids, d2psids);
+        store_d2jet_3d(1, s0   * w_s1 * iw, psi, dpsids, d2psids);
+        store_d2jet_3d(2, s0   * s1   * iw, psi, dpsids, d2psids);
+        store_d2jet_3d(3, w_s0 * s1   * iw, psi, dpsids, d2psids);
+        store_d2jet_3d(4, s2,               psi, dpsids, d2psids);
+    }
+
 };
 
 class WedgeElementShapeC2
@@ -405,6 +532,30 @@ class WedgeElementShapeC2
         dpsids(14,2) = T2*dL2ds2;  dpsids(15,2) = T3*dL2ds2;
         dpsids(16,2) = T4*dL2ds2;  dpsids(17,2) = T5*dL2ds2;
     } 
+
+    // Second local derivatives, in oomph-lib's N2deriv packing {00,11,22,01,02,12}. Same basis as
+    // shape()/dshape_local() above, assembled with D2Jet.
+    static void d2shape_local(const Vector<double>& s, Shape& psi, DShape& dpsids, DShape& d2psids)
+    {
+        const D2Jet s0 = D2Jet::var(0, s[0]);
+        const D2Jet s1 = D2Jet::var(1, s[1]);
+        const D2Jet s2 = D2Jet::var(2, s[2]);
+        const D2Jet l  = D2Jet(1.0) - s0 - s1;
+
+        const D2Jet T[6] = { l  * (2.0*l  - D2Jet(1.0)),
+                             s0 * (2.0*s0 - D2Jet(1.0)),
+                             s1 * (2.0*s1 - D2Jet(1.0)),
+                             4.0 * (s0 * l),
+                             4.0 * (s1 * l),
+                             4.0 * (s0 * s1) };
+        const D2Jet L[3] = { (D2Jet(1.0) - s2) * (D2Jet(1.0) - 2.0*s2),
+                             4.0 * (s2 * (D2Jet(1.0) - s2)),
+                             s2 * (2.0*s2 - D2Jet(1.0)) };
+        for (unsigned m = 0; m < 3; m++)
+            for (unsigned k = 0; k < 6; k++)
+                store_d2jet_3d(6*m + k, T[k] * L[m], psi, dpsids, d2psids);
+    }
+
 };
 
 class PyramidElementShapeC2
@@ -744,6 +895,49 @@ class PyramidElementShapeC2
             dpsids(13, 2) = (dN13d2 * den1 - 2.0 * N13) / den1c;
         }
     }
+
+    // Second local derivatives, in oomph-lib's N2deriv packing {00,11,22,01,02,12}. This element is
+    // rational (see the shape() comment above): each basis function is a product of up to four
+    // factors over (s2-1) or (s2-1)^2. Differentiating that twice by hand would be unreadable and
+    // unverifiable, so the very same expressions as in shape() are re-evaluated in D2Jet arithmetic.
+    static void d2shape_local(const Vector<double>& s, Shape& psi, DShape& dpsids, DShape& d2psids)
+    {
+        const D2Jet s0 = D2Jet::var(0, s[0]);
+        const D2Jet s1 = D2Jet::var(1, s[1]);
+        const D2Jet s2 = D2Jet::var(2, s[2]);
+
+        const D2Jet px = s0 + s2 - D2Jet(1.0);
+        const D2Jet py = s1 + s2 - D2Jet(1.0);
+        const D2Jet qx = 2.0*s0 + s2 - D2Jet(1.0);
+        const D2Jet qy = 2.0*s1 + s2 - D2Jet(1.0);
+
+        const D2Jet C0 = 4.0*(s0*s1) + 2.0*(s0*s2) - 2.0*s0 + 2.0*(s1*s2)
+                        - 2.0*s1 + 2.0*(s2*s2) - 3.0*s2 + D2Jet(1.0);
+        const D2Jet C1 = 4.0*(s0*s1) + 2.0*(s0*s2) - 2.0*s0 + 2.0*(s1*s2)
+                        - 2.0*s1 - s2 + D2Jet(1.0);
+
+        const D2Jet iden1 = inv(s2 - D2Jet(1.0));
+        const D2Jet iden2 = iden1 * iden1;
+
+        store_d2jet_3d(0,  px * py * C0 * iden2, psi, dpsids, d2psids);
+        store_d2jet_3d(1,  s0 * py * C1 * iden2, psi, dpsids, d2psids);
+        store_d2jet_3d(2,  s0 * s1 * C0 * iden2, psi, dpsids, d2psids);
+        store_d2jet_3d(3,  s1 * px * C1 * iden2, psi, dpsids, d2psids);
+        store_d2jet_3d(4,  s2 * (2.0*s2 - D2Jet(1.0)), psi, dpsids, d2psids);
+
+        store_d2jet_3d(5,  -4.0 * (s0 * px * py * qy * iden2), psi, dpsids, d2psids);
+        store_d2jet_3d(6,  -4.0 * (s0 * s1 * qx * py * iden2), psi, dpsids, d2psids);
+        store_d2jet_3d(7,  -4.0 * (s0 * s1 * px * qy * iden2), psi, dpsids, d2psids);
+        store_d2jet_3d(8,  -4.0 * (s1 * px * qx * py * iden2), psi, dpsids, d2psids);
+
+        store_d2jet_3d(9,  -4.0 * (s2 * px * py * iden1), psi, dpsids, d2psids);
+        store_d2jet_3d(10,  4.0 * (s0 * s2 * py * iden1), psi, dpsids, d2psids);
+        store_d2jet_3d(11, -4.0 * (s0 * s1 * s2 * iden1), psi, dpsids, d2psids);
+        store_d2jet_3d(12,  4.0 * (s1 * s2 * px * iden1), psi, dpsids, d2psids);
+
+        store_d2jet_3d(13, 16.0 * (s0 * s1 * px * py * iden2), psi, dpsids, d2psids);
+    }
+
 };
 
 // Common (non-refineable) interface shared by all wedge elements: facet/vertex
@@ -1142,6 +1336,11 @@ class WedgeElementC1 :  public virtual RefineableWedgeElement
         WedgeElementShapeC1::dshape_local(s, psi, dpsids);
     }
 
+    void d2shape_local(const Vector<double>& s,Shape& psi,DShape& dpsids,DShape& d2psids) const override
+    {
+        WedgeElementShapeC1::d2shape_local(s, psi, dpsids, d2psids);
+    }
+
     inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const override
     {
       s.resize(3); // oomph's get_node_at_local_coordinate passes an empty Vector to be sized here
@@ -1223,6 +1422,11 @@ Index : Local coordinates (s0,s1,s2)
     void dshape_local(const Vector<double>& s,Shape& psi,DShape& dpsids) const override
     {
         PyramidElementShapeC1::dshape_local(s, psi, dpsids);
+    }
+
+    void d2shape_local(const Vector<double>& s,Shape& psi,DShape& dpsids,DShape& d2psids) const override
+    {
+        PyramidElementShapeC1::d2shape_local(s, psi, dpsids, d2psids);
     }
 
     inline void local_coordinate_of_node(const unsigned& j,Vector<double>& s) const override
@@ -1428,6 +1632,11 @@ class WedgeElementC2 : public virtual RefineableWedgeElement
     {
         WedgeElementShapeC2::dshape_local(s, psi, dpsids);
     }
+
+    void d2shape_local(const Vector<double>& s,Shape& psi,DShape& dpsids,DShape& d2psids) const override
+    {
+        WedgeElementShapeC2::d2shape_local(s, psi, dpsids, d2psids);
+    }
     
 
     // ---------------------------------------------------------------
@@ -1615,6 +1824,11 @@ class PyramidElementC2 : public virtual RefineablePyramidElement
     void dshape_local(const Vector<double>& s,Shape& psi,DShape& dpsids) const override
     {
         PyramidElementShapeC2::dshape_local(s, psi, dpsids);
+    }
+
+    void d2shape_local(const Vector<double>& s,Shape& psi,DShape& dpsids,DShape& d2psids) const override
+    {
+        PyramidElementShapeC2::d2shape_local(s, psi, dpsids, d2psids);
     }
     
 

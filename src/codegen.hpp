@@ -521,6 +521,7 @@ namespace pyoomph
    protected:
       FiniteElementSpace *space;
       std::vector<BasisFunction *> basis_deriv_x, lagr_deriv_x, local_coord_deriv_x; // Cached derivative BasisFunctions, indexed by spatial direction: Eulerian (x), Lagrangian (X), local/reference (S)
+      std::vector<BasisFunction *> basis_deriv2_x, local_coord_deriv2_x;             // Cached second derivatives, indexed by PYOOMPH_D2_SLOT(inner, outer)
       static unsigned next_creation_index;
       unsigned creation_index;
 
@@ -537,6 +538,21 @@ namespace pyoomph
       virtual BasisFunction *get_diff_x(unsigned direction); // Eulerian spatial derivative d(phi)/dx_direction
       virtual BasisFunction *get_diff_X(unsigned direction); // Lagrangian spatial derivative d(phi)/dX_direction
       virtual BasisFunction *get_diff_S(unsigned direction); // Local/reference-coordinate derivative d(phi)/dS_direction
+      // Second derivatives. The cache lives on the space's ROOT BasisFunction (not on the
+      // once-differentiated objects), because get_diff_x(i)->get_diff_x(j) and
+      // get_diff_x(j)->get_diff_x(i) must return the *identical* pointer wherever d/dx_i d/dx_j is
+      // symmetric: ShapeExpansion/TestFunction are ordered by get_creation_index(), so two objects
+      // for the same derivative would put duplicate entries into std::set<ShapeExpansion>, emit two
+      // identical C interpolation variables, and stop GiNaC from collecting the terms.
+      virtual BasisFunction *get_second_diff_x(unsigned dir_inner, unsigned dir_outer);
+      virtual BasisFunction *get_second_diff_S(unsigned dir_inner, unsigned dir_outer);
+      // Classification predicates. These replace the "dynamic_cast<D1XBasisFunction*> &&
+      // !dynamic_cast<D1XBasisFunctionLagr*>" idiom, which silently misclassifies the second
+      // derivatives: D2XBasisFunctionLocalCoord derives from D2XBasisFunction (hence from
+      // D1XBasisFunction) but not from D1XBasisFunctionLagr, so the old test would have called it a
+      // first Eulerian derivative.
+      virtual unsigned deriv_order() const { return 0; }        // 0 = plain phi, 1 = d/d?, 2 = d2/d?d?
+      virtual bool is_eulerian_deriv() const { return false; }  // true only for derivatives w.r.t. x
       virtual std::string to_string();
       virtual const FiniteElementSpace *get_space() const { return space; }
       virtual std::string get_dx_str() const { return "d0x"; } // Suffix identifying which (if any) derivative table this basis function reads from in the generated code
@@ -555,6 +571,8 @@ namespace pyoomph
       BasisFunction *get_diff_x(unsigned direction) override;
       BasisFunction *get_diff_X(unsigned direction) override;
       BasisFunction *get_diff_S(unsigned direction) override;
+      unsigned deriv_order() const override { return 1; }
+      bool is_eulerian_deriv() const override { return true; }
       std::string to_string() override;
       std::string get_dx_str() const override { return "d1x" + std::to_string(direction); }
       std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
@@ -567,6 +585,12 @@ namespace pyoomph
    {
    public:
       D1XBasisFunctionLagr(FiniteElementSpace *_space, unsigned _direction) : D1XBasisFunction(_space, _direction) {}
+      // Must be re-overridden: without these, D1XBasisFunction's would be inherited and would
+      // silently build a *Eulerian* second derivative on a Lagrangian basis.
+      BasisFunction *get_diff_x(unsigned direction) override;
+      BasisFunction *get_diff_X(unsigned direction) override;
+      BasisFunction *get_diff_S(unsigned direction) override;
+      bool is_eulerian_deriv() const override { return false; }
       std::string to_string() override;
       std::string get_dx_str() const override { return "d1X" + std::to_string(direction); }
       std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
@@ -578,8 +602,47 @@ namespace pyoomph
    {
    public:
       D1XBasisFunctionLocalCoord(FiniteElementSpace *_space, unsigned _direction) : D1XBasisFunctionLagr(_space, _direction) {}
+      BasisFunction *get_diff_S(unsigned direction) override;
       std::string to_string() override;
       std::string get_dx_str() const override { return "d1S" + std::to_string(direction); }
+      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
+      std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+   };
+
+   // Second Eulerian spatial derivative of a basis function, d2(phi)/(dx_direction dx_direction2).
+   // "direction" (inherited) is the INNER derivative and direction2 the OUTER differentiation, i.e.
+   // this object represents d/dx_{direction2} ( d phi / dx_{direction} ) - the same convention as
+   // PYOOMPH_D2_SLOT and the d2x_shapes buffer. The distinction only matters on domains with a
+   // codimension, where the second derivative is genuinely asymmetric (see jitbridge.h).
+   class D2XBasisFunction : public D1XBasisFunction
+   {
+   protected:
+      unsigned direction2;
+
+   public:
+      D2XBasisFunction(FiniteElementSpace *_space, unsigned _dir_inner, unsigned _dir_outer) : D1XBasisFunction(_space, _dir_inner), direction2(_dir_outer) {}
+      // Third and higher derivatives are not supported
+      BasisFunction *get_diff_x(unsigned direction) override;
+      BasisFunction *get_diff_X(unsigned direction) override;
+      BasisFunction *get_diff_S(unsigned direction) override;
+      unsigned deriv_order() const override { return 2; }
+      unsigned get_direction2() const { return direction2; }
+      unsigned get_slot() const { return PYOOMPH_D2_SLOT(direction, direction2); }
+      std::string to_string() override;
+      std::string get_dx_str() const override { return "d2x" + std::to_string(direction) + std::to_string(direction2); }
+      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
+      std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+   };
+
+   // Second local/reference-element-coordinate derivative, d2(phi)/(dS_direction dS_direction2).
+   // Nearly free: d2S_shapes is the element's local d2psids verbatim.
+   class D2XBasisFunctionLocalCoord : public D2XBasisFunction
+   {
+   public:
+      D2XBasisFunctionLocalCoord(FiniteElementSpace *_space, unsigned _dir_inner, unsigned _dir_outer) : D2XBasisFunction(_space, _dir_inner, _dir_outer) {}
+      bool is_eulerian_deriv() const override { return false; }
+      std::string to_string() override;
+      std::string get_dx_str() const override { return "d2S" + std::to_string(direction) + std::to_string(direction2); }
       std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
    };

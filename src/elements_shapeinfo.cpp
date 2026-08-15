@@ -590,6 +590,117 @@ namespace pyoomph
 	// corresponding shape_info->shape_XXX / dx_shape_XXX / dX_shape_XXX / dS_shape_XXX /
 	// d_dx_shape_dcoord_XXX / d2_dx2_shape_dcoord_XXX arrays -- but only if that space is
 	// actually required (per `required`) to avoid needless work.
+	// Sensitivities of M_i^(b) = g^{ab} t_{a,i} and of Q[i][b][c] = dM_i^(b)/ds_c with respect to the
+	// nodal coordinates X^m_p. Written out from
+	//    dg_{ed}/dX^m_p    = Psi_{m,e} t_{d,p} + t_{e,p} Psi_{m,d}
+	//    dg^{ab}/dX^m_p    = -g^{ae} (dg_{ed}/dX^m_p) g^{db}
+	//    d2g_{ed}/(ds_c dX^m_p) = Psi_{m,e} X_{p,dc} + t_{e,p} Psi_{m,dc} + Psi_{m,d} X_{p,ec} + t_{d,p} Psi_{m,ec}
+	// and the product rule; the s-derivative dg^{ab}/ds_c is passed in because the caller needs it too.
+	void BulkElementBase::fill_d2x_dNodalPos_helper(unsigned n_node, unsigned n_dim, unsigned el_dim,
+													const oomph::DenseMatrix<double> &interpolated_t,
+													const oomph::DShape &dpsids_Element, const oomph::DShape &d2psids_Element,
+													const oomph::DenseMatrix<double> &aup, const double (*Xkab)[MAX_N2DERIV],
+													const double (*dgab_ds)[3][3],
+													std::vector<double> &dM_dX, std::vector<double> &dQ_dX) const
+	{
+		// Flat index helpers. el_dim, n_dim <= 3; n_node is the element's node count.
+		const unsigned ND = n_dim, ED = el_dim, NN = n_node;
+		auto iM = [&](unsigned i, unsigned b, unsigned m, unsigned p) { return ((i * ED + b) * NN + m) * ND + p; };
+		auto iQ = [&](unsigned i, unsigned b, unsigned c, unsigned m, unsigned p) { return (((i * ED + b) * ED + c) * NN + m) * ND + p; };
+		auto iG = [&](unsigned a, unsigned b, unsigned m, unsigned p) { return ((a * ED + b) * NN + m) * ND + p; };
+		auto iGs = [&](unsigned a, unsigned b, unsigned c, unsigned m, unsigned p) { return (((a * ED + b) * ED + c) * NN + m) * ND + p; };
+
+		dM_dX.assign(ND * ED * NN * ND, 0.0);
+		dQ_dX.assign(ND * ED * ED * NN * ND, 0.0);
+
+		// dg_{ed}/dX^m_p  and  dg^{ab}/dX^m_p
+		std::vector<double> dgcov_dX(ED * ED * NN * ND, 0.0), dgab_dX(ED * ED * NN * ND, 0.0);
+		for (unsigned e = 0; e < ED; e++)
+			for (unsigned d = 0; d < ED; d++)
+				for (unsigned m = 0; m < NN; m++)
+					for (unsigned p = 0; p < ND; p++)
+						dgcov_dX[iG(e, d, m, p)] = dpsids_Element(m, e) * interpolated_t(d, p) + interpolated_t(e, p) * dpsids_Element(m, d);
+		for (unsigned a = 0; a < ED; a++)
+			for (unsigned b = 0; b < ED; b++)
+				for (unsigned m = 0; m < NN; m++)
+					for (unsigned p = 0; p < ND; p++)
+					{
+						double sum = 0.0;
+						for (unsigned e = 0; e < ED; e++)
+							for (unsigned d = 0; d < ED; d++)
+								sum -= aup(a, e) * dgcov_dX[iG(e, d, m, p)] * aup(d, b);
+						dgab_dX[iG(a, b, m, p)] = sum;
+					}
+
+		// dg_{ed}/ds_c, needed for the mixed second derivative below
+		double dgcov_ds[3][3][3];
+		for (unsigned e = 0; e < ED; e++)
+			for (unsigned d = 0; d < ED; d++)
+				for (unsigned c = 0; c < ED; c++)
+				{
+					double sum = 0.0;
+					for (unsigned int i = 0; i < ND; i++)
+						sum += interpolated_t(e, i) * Xkab[i][PYOOMPH_D2_SLOT(d, c)] + interpolated_t(d, i) * Xkab[i][PYOOMPH_D2_SLOT(e, c)];
+					dgcov_ds[e][d][c] = sum;
+				}
+
+		// d2g^{ab}/(ds_c dX^m_p)
+		std::vector<double> d2gab_dsdX(ED * ED * ED * NN * ND, 0.0);
+		for (unsigned a = 0; a < ED; a++)
+			for (unsigned b = 0; b < ED; b++)
+				for (unsigned c = 0; c < ED; c++)
+					for (unsigned m = 0; m < NN; m++)
+						for (unsigned p = 0; p < ND; p++)
+						{
+							double sum = 0.0;
+							for (unsigned e = 0; e < ED; e++)
+								for (unsigned d = 0; d < ED; d++)
+								{
+									const double d2gcov = dpsids_Element(m, e) * Xkab[p][PYOOMPH_D2_SLOT(d, c)] + interpolated_t(e, p) * d2psids_Element(m, PYOOMPH_D2_SLOT(d, c)) + dpsids_Element(m, d) * Xkab[p][PYOOMPH_D2_SLOT(e, c)] + interpolated_t(d, p) * d2psids_Element(m, PYOOMPH_D2_SLOT(e, c));
+									sum -= dgab_dX[iG(a, e, m, p)] * dgcov_ds[e][d][c] * aup(d, b);
+									sum -= aup(a, e) * d2gcov * aup(d, b);
+									sum -= aup(a, e) * dgcov_ds[e][d][c] * dgab_dX[iG(d, b, m, p)];
+								}
+							d2gab_dsdX[iGs(a, b, c, m, p)] = sum;
+						}
+
+		// dM_i^(b)/dX^m_p = (dg^{ab}/dX^m_p) t_{a,i} + g^{ab} delta_{ip} Psi_{m,a}
+		for (unsigned int i = 0; i < ND; i++)
+			for (unsigned b = 0; b < ED; b++)
+				for (unsigned m = 0; m < NN; m++)
+					for (unsigned p = 0; p < ND; p++)
+					{
+						double sum = 0.0;
+						for (unsigned a = 0; a < ED; a++)
+						{
+							sum += dgab_dX[iG(a, b, m, p)] * interpolated_t(a, i);
+							if (i == p) sum += aup(a, b) * dpsids_Element(m, a);
+						}
+						dM_dX[iM(i, b, m, p)] = sum;
+					}
+
+		// dQ[i][b][c]/dX^m_p
+		for (unsigned int i = 0; i < ND; i++)
+			for (unsigned b = 0; b < ED; b++)
+				for (unsigned c = 0; c < ED; c++)
+					for (unsigned m = 0; m < NN; m++)
+						for (unsigned p = 0; p < ND; p++)
+						{
+							double sum = 0.0;
+							for (unsigned a = 0; a < ED; a++)
+							{
+								sum += d2gab_dsdX[iGs(a, b, c, m, p)] * interpolated_t(a, i);
+								sum += dgab_dX[iG(a, b, m, p)] * Xkab[i][PYOOMPH_D2_SLOT(a, c)];
+								if (i == p)
+								{
+									sum += dgab_ds[a][b][c] * dpsids_Element(m, a);
+									sum += aup(a, b) * d2psids_Element(m, PYOOMPH_D2_SLOT(a, c));
+								}
+							}
+							dQ_dX[iQ(i, b, c, m, p)] = sum;
+						}
+	}
+
 	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
 		bool require_hessian = flag > 2;
@@ -601,11 +712,44 @@ namespace pyoomph
 
 		double det_Eulerian;
 
+		// Whether any space wants second spatial derivatives of its shape functions. Everything the
+		// second-derivative blocks below need beyond the first-derivative machinery is guarded by this.
+		bool require_d2x = required.Pos.d2x_psi || required.DL.d2x_psi;
+		for (unsigned int isp = 0; isp < NUM_CONTINUOUS_SPACES; isp++)
+			require_d2x |= required.continuous_spaces[isp].d2x_psi;
+
 		oomph::DenseMatrix<double> interpolated_t(el_dim, n_dim, 0.0); // Tangents
 		oomph::DenseMatrix<double> interpolated_T(el_dim, n_lagr, 0.0);
 		oomph::Shape psi_Element(n_node);
 		oomph::DShape dpsids_Element(n_node, std::max((unsigned int)1, el_dim));
 		this->dshape_local(s, psi_Element, dpsids_Element);
+
+		// Second local derivatives of the GEOMETRY shape functions and the resulting
+		// X_{k,ab} = d^2 x_k / (ds_a ds_b) = sum_l X^l_k Psi_{l,ab}. Needed by every second-derivative
+		// formula below, so it is built once here rather than per space.
+		oomph::DShape d2psids_Element(std::max((unsigned int)1, n_node), MAX_N2DERIV);
+		double Xkab[3][MAX_N2DERIV];
+		if (require_d2x && el_dim)
+		{
+			std::string why;
+			if (!this->supports_second_spatial_derivatives(why))
+				throw_runtime_error("Second spatial derivatives of the shape functions were requested, but " + why);
+			this->d2shape_local_pyoomph(s, psi_Element, dpsids_Element, d2psids_Element);
+			for (unsigned int k = 0; k < n_dim; k++)
+			{
+				for (unsigned a = 0; a < el_dim; a++)
+				{
+					for (unsigned b = 0; b < el_dim; b++)
+					{
+						double sum = 0.0;
+						for (unsigned l = 0; l < n_node; l++)
+							sum += this->nodal_position(history_index, l, k) * d2psids_Element(l, PYOOMPH_D2_SLOT(a, b));
+						Xkab[k][PYOOMPH_D2_SLOT(a, b)] = sum;
+					}
+				}
+			}
+		}
+
 		for (unsigned l = 0; l < n_node; l++)
 		{
 			for (unsigned i = 0; i < n_dim; i++)
@@ -637,6 +781,11 @@ namespace pyoomph
 		// TODO: Add a flag, whether we have a dx contribution in the residuals. If so, we always need it for moving nodes. If not (e.g. pure Lagrangian dX), we can skip it	
  
 		
+		// The Eulerian inverse metric g^{ab}. The 2d/3d branches below reuse their local `aup` for the
+		// Lagrangian metric afterwards, so the Eulerian one is kept separately for the second-derivative
+		// blocks, which need it after the branches.
+		oomph::DenseMatrix<double> aup_Euler(std::max((unsigned int)1, el_dim), std::max((unsigned int)1, el_dim), 0.0);
+
 		oomph::RankFourTensor<double> DXdshape_il_jb; //[n_dim][n_node][n_dim][el_dim]; //this is d(g^{ab}g_{a,j})/d(x_i^l) //TODO: This could lead to stack problems due to size
       RankSixTensor * D2X2_dshape=NULL;
       if (require_hessian && require_dxdshape)
@@ -651,6 +800,7 @@ namespace pyoomph
 			for (unsigned int i = 0; i < n_dim; i++)
 				gab_gai[0][i] = interpolated_t(0, i) / a11;
 			det_Eulerian = sqrt(a11);
+			aup_Euler(0, 0) = 1.0 / a11;
 
 			// TODO: Only calc d(dx)/dcoords if necessary
 			if (require_dxdshape)
@@ -696,6 +846,7 @@ namespace pyoomph
 				}
 			}
 			det_Eulerian = sqrt(det_a);
+			aup_Euler = aup;
 
 			// TODO: Only calc d(dx)/dcoords if necessary
 			if (require_dxdshape)
@@ -746,6 +897,13 @@ namespace pyoomph
 						shape_info->dX_shapes[ispace][l][i] = 0.0;
 					for (unsigned int i = 0; i < el_dim; i++)
 						shape_info->dS_shapes[ispace][l][i] = 0.0;
+					// A point element has no local coordinates, so every spatial derivative vanishes.
+					if (require_d2x)
+						for (unsigned int k = 0; k < MAX_N2DERIV; k++)
+						{
+							shape_info->d2x_shapes[history_index][ispace][l][k] = 0.0;
+							shape_info->d2S_shapes[ispace][l][k] = 0.0;
+						}
 				}
 			}			
 			for (unsigned l = 0; l < eleminfo.nnode_DL; l++)
@@ -757,6 +915,12 @@ namespace pyoomph
 					shape_info->dX_shape_DL[l][i] = 0.0;
 				for (unsigned int i = 0; i < el_dim; i++)
 					shape_info->dS_shape_DL[l][i] = 0.0;
+				if (require_d2x)
+					for (unsigned int k = 0; k < MAX_N2DERIV; k++)
+					{
+						shape_info->d2x_shape_DL[history_index][l][k] = 0.0;
+						shape_info->d2S_shape_DL[l][k] = 0.0;
+					}
 			}
 			for (unsigned l = 0; l < n_node; l++)
 			{
@@ -802,6 +966,7 @@ namespace pyoomph
 				}
 			}
 			det_Eulerian = sqrt(det_a);
+			aup_Euler = aup;
 
 			// TODO: Only calc d(dx)/dcoords if necessary
 			if (require_dxdshape)
@@ -847,21 +1012,85 @@ namespace pyoomph
 			throw_runtime_error("Implement for this dimension");
 		}
 
-		// Now to the parts for the spaces				
+		// ------------------------------------------------------------------------------------------
+		// Second spatial derivatives.
+		//
+		// With M_i^(b) := gab_gai[b][i] = g^{ab} t_{a,i} (which is the inverse Jacobian ds_b/dx_i when
+		// the element has no codimension, and the pseudo-inverse giving the surface gradient
+		// otherwise), the first derivative is dpsi/dx_i = M_i^(b) psi_,b and hence
+		//
+		//    D_ij psi := d/dx_j ( dpsi/dx_i ) = M_i^(b) M_j^(c) psi_,bc + M_j^(c) Q[i][b][c] psi_,b
+		//
+		// with Q[i][b][c] := dM_i^(b)/ds_c = (dg^{ab}/ds_c) t_{a,i} + g^{ab} X_{i,ac}.
+		//
+		// For el_dim == n_dim this collapses to the familiar
+		// K_{ia}K_{jb} psi_,ab - (dpsi/dx_k) K_{ia}K_{jb} X_{k,ab} and is symmetric in i,j. For a
+		// surface it does not, and it is NOT symmetric: on a unit circle it evaluates to
+		// t_i t_j psi'' - n_i t_j psi'. That is the honest tangential derivative of the surface
+		// gradient; its trace is exactly the Laplace-Beltrami operator (the asymmetric part is
+		// trace-free), so div(grad(u)) on an interface comes out right. Only the general form is
+		// implemented, so that there is a single code path to validate.
+		// ------------------------------------------------------------------------------------------
+		double Qibc[3][3][3];   // [i_dim][b_eldim][c_eldim]
+		double dgab_ds[3][3][3]; // dg^{ab}/ds_c
+		std::vector<double> dM_dX, dQ_dX; // nodal-coordinate sensitivities, see fill_d2x_dNodalPos_helper
+		if (require_d2x && el_dim)
+		{
+			// dg_{ed}/ds_c = t_{e,i} X_{i,dc} + t_{d,i} X_{i,ec}, then
+			// dg^{ab}/ds_c = -g^{ae} (dg_{ed}/ds_c) g^{db}.
+			for (unsigned a = 0; a < el_dim; a++)
+				for (unsigned b = 0; b < el_dim; b++)
+					for (unsigned c = 0; c < el_dim; c++)
+					{
+						double sum = 0.0;
+						for (unsigned e = 0; e < el_dim; e++)
+							for (unsigned d = 0; d < el_dim; d++)
+							{
+								double dged = 0.0;
+								for (unsigned int i = 0; i < n_dim; i++)
+									dged += interpolated_t(e, i) * Xkab[i][PYOOMPH_D2_SLOT(d, c)] + interpolated_t(d, i) * Xkab[i][PYOOMPH_D2_SLOT(e, c)];
+								sum -= aup_Euler(a, e) * dged * aup_Euler(d, b);
+							}
+						dgab_ds[a][b][c] = sum;
+					}
+
+			for (unsigned int i = 0; i < n_dim; i++)
+				for (unsigned b = 0; b < el_dim; b++)
+					for (unsigned c = 0; c < el_dim; c++)
+					{
+						double sum = 0.0;
+						for (unsigned a = 0; a < el_dim; a++)
+							sum += dgab_ds[a][b][c] * interpolated_t(a, i) + aup_Euler(a, b) * Xkab[i][PYOOMPH_D2_SLOT(a, c)];
+						Qibc[i][b][c] = sum;
+					}
+
+			if (require_dxdshape)
+			{
+				this->fill_d2x_dNodalPos_helper(n_node, n_dim, el_dim, interpolated_t, dpsids_Element, d2psids_Element,
+												aup_Euler, Xkab, dgab_ds, dM_dX, dQ_dX);
+			}
+		}
+
+		// Now to the parts for the spaces
 		// A space's shapes are needed either because fields living in that space were explicitly
 		// requested, or because it is the "dominant" (i.e. geometry-defining, Pos) space of this
-		// element and Pos-shapes were requested.		
+		// element and Pos-shapes were requested.
 
 		for (unsigned int ispace=0;ispace<NUM_CONTINUOUS_SPACES;ispace++)
 		{
-			bool req = required.continuous_spaces[ispace].dx_psi || required.continuous_spaces[ispace].psi;
-			req |= eleminfo.nnode_of_space[ispace] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[ispace].dX_psi) && ((!strcmp(functable->dominant_space, functable->continuous_spaces[ispace].space_name)) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[ispace]));
+			bool req = required.continuous_spaces[ispace].dx_psi || required.continuous_spaces[ispace].psi || required.continuous_spaces[ispace].d2x_psi;
+			req |= eleminfo.nnode_of_space[ispace] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.Pos.d2x_psi || required.continuous_spaces[ispace].dX_psi) && ((!strcmp(functable->dominant_space, functable->continuous_spaces[ispace].space_name)) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[ispace]));
 
 			if (req)
 			{
 				oomph::Shape psi(eleminfo.nnode_of_space[ispace]);
 				oomph::DShape dpsids(eleminfo.nnode_of_space[ispace], std::max((unsigned int)1, el_dim));
-				this->dshape_local_of_space(ispace, s, psi, dpsids);				
+				const bool space_d2x = require_d2x && el_dim && eleminfo.nnode_of_space[ispace];
+				oomph::DShape d2psids(std::max((unsigned int)1, eleminfo.nnode_of_space[ispace]), MAX_N2DERIV);
+				if (space_d2x)
+					this->d2shape_local_of_space(ispace, s, psi, dpsids, d2psids);
+				else
+					this->dshape_local_of_space(ispace, s, psi, dpsids);
 				for (unsigned l = 0; l < eleminfo.nnode_of_space[ispace]; l++)
 				{
 					shape_info->shapes[ispace][l] = psi[l];
@@ -882,6 +1111,64 @@ namespace pyoomph
 						for (unsigned b = 0; b < el_dim; b++)
 						{
 							shape_info->dX_shapes[ispace][l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+						}
+					}
+
+					if (space_d2x)
+					{
+						for (unsigned int i = 0; i < n_dim; i++)
+						{
+							for (unsigned int j = 0; j < n_dim; j++)
+							{
+								double sum = 0.0;
+								for (unsigned b = 0; b < el_dim; b++)
+								{
+									for (unsigned c = 0; c < el_dim; c++)
+									{
+										sum += gab_gai[b][i] * gab_gai[c][j] * d2psids(l, PYOOMPH_D2_SLOT(b, c));
+										sum += gab_gai[c][j] * Qibc[i][b][c] * dpsids(l, b);
+									}
+								}
+								shape_info->d2x_shapes[history_index][ispace][l][PYOOMPH_D2_SLOT(i, j)] = sum;
+							}
+						}
+						for (unsigned a = 0; a < el_dim; a++)
+							for (unsigned b = 0; b < el_dim; b++)
+								shape_info->d2S_shapes[ispace][l][PYOOMPH_D2_SLOT(a, b)] = d2psids(l, PYOOMPH_D2_SLOT(a, b));
+					}
+
+
+					// Nodal-coordinate sensitivity of the second derivative. Differentiating
+					//    D_ij psi = M_i^b M_j^c psi_,bc + M_j^c Q[i][b][c] psi_,b
+					// by X^m_p only touches M and Q, since psi_,b and psi_,bc are reference-element
+					// quantities.
+					if (space_d2x && require_dxdshape)
+					{
+						const unsigned ND = n_dim, ED = el_dim, NN = eleminfo.nnode;
+						auto iM = [&](unsigned i2, unsigned b, unsigned m, unsigned p) { return ((i2 * ED + b) * NN + m) * ND + p; };
+						auto iQ = [&](unsigned i2, unsigned b, unsigned c, unsigned m, unsigned p) { return (((i2 * ED + b) * ED + c) * NN + m) * ND + p; };
+						for (unsigned int i = 0; i < n_dim; i++)
+						{
+							for (unsigned int j = 0; j < n_dim; j++)
+							{
+								const unsigned slot = PYOOMPH_D2_SLOT(i, j);
+								for (unsigned m = 0; m < eleminfo.nnode; m++)
+								{
+									for (unsigned int p = 0; p < n_dim; p++)
+									{
+										double sum = 0.0;
+										for (unsigned b = 0; b < el_dim; b++)
+										{
+											for (unsigned c = 0; c < el_dim; c++)
+											{
+												sum += (dM_dX[iM(i, b, m, p)] * gab_gai[c][j] + gab_gai[b][i] * dM_dX[iM(j, c, m, p)]) * d2psids(l, PYOOMPH_D2_SLOT(b, c));
+												sum += (dM_dX[iM(j, c, m, p)] * Qibc[i][b][c] + gab_gai[c][j] * dQ_dX[iQ(i, b, c, m, p)]) * dpsids(l, b);
+											}
+										}
+										shape_info->d_d2x_shape_dcoord[ispace][l][slot][m][p] = sum;
+									}
+								}
+							}
 						}
 					}
 					// TODO: Only if neccessary!
@@ -932,11 +1219,18 @@ namespace pyoomph
 
 		// Same pattern as above, for the discontinuous-Lagrange (DL) space (no "dominant space"
 		// fallback since DL fields are never used to represent the geometry).
-		if (required.DL.dx_psi || required.DL.psi)
+		if (required.DL.dx_psi || required.DL.psi || required.DL.d2x_psi)
 		{
 			oomph::Shape psi(eleminfo.nnode_DL);
 			oomph::DShape dpsids(eleminfo.nnode_DL, std::max((unsigned int)1, el_dim));
-			this->dshape_local_at_s_DL(s, psi, dpsids);
+			// The DL basis is affine in s in every dimension, so d2psids is identically zero - but the
+			// physical second derivative is not, since the Q term survives on a curved element.
+			const bool space_d2x_DL = require_d2x && el_dim && eleminfo.nnode_DL;
+			oomph::DShape d2psids(std::max((unsigned int)1, eleminfo.nnode_DL), MAX_N2DERIV);
+			if (space_d2x_DL)
+				this->d2shape_local_at_s_DL(s, psi, dpsids, d2psids);
+			else
+				this->dshape_local_at_s_DL(s, psi, dpsids);
 			for (unsigned l = 0; l < eleminfo.nnode_DL; l++)
 			{
 				shape_info->shape_DL[l] = psi[l];
@@ -959,6 +1253,64 @@ namespace pyoomph
 						shape_info->dX_shape_DL[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
 					}
 				}
+
+				if (space_d2x_DL)
+				{
+					for (unsigned int i = 0; i < n_dim; i++)
+					{
+						for (unsigned int j = 0; j < n_dim; j++)
+						{
+							double sum = 0.0;
+							for (unsigned b = 0; b < el_dim; b++)
+							{
+								for (unsigned c = 0; c < el_dim; c++)
+								{
+									sum += gab_gai[b][i] * gab_gai[c][j] * d2psids(l, PYOOMPH_D2_SLOT(b, c));
+									sum += gab_gai[c][j] * Qibc[i][b][c] * dpsids(l, b);
+								}
+							}
+							shape_info->d2x_shape_DL[history_index][l][PYOOMPH_D2_SLOT(i, j)] = sum;
+						}
+					}
+					for (unsigned a = 0; a < el_dim; a++)
+						for (unsigned b = 0; b < el_dim; b++)
+							shape_info->d2S_shape_DL[l][PYOOMPH_D2_SLOT(a, b)] = d2psids(l, PYOOMPH_D2_SLOT(a, b));
+				}
+
+
+					// Nodal-coordinate sensitivity of the second derivative. Differentiating
+					//    D_ij psi = M_i^b M_j^c psi_,bc + M_j^c Q[i][b][c] psi_,b
+					// by X^m_p only touches M and Q, since psi_,b and psi_,bc are reference-element
+					// quantities.
+					if (space_d2x_DL && require_dxdshape)
+					{
+						const unsigned ND = n_dim, ED = el_dim, NN = eleminfo.nnode;
+						auto iM = [&](unsigned i2, unsigned b, unsigned m, unsigned p) { return ((i2 * ED + b) * NN + m) * ND + p; };
+						auto iQ = [&](unsigned i2, unsigned b, unsigned c, unsigned m, unsigned p) { return (((i2 * ED + b) * ED + c) * NN + m) * ND + p; };
+						for (unsigned int i = 0; i < n_dim; i++)
+						{
+							for (unsigned int j = 0; j < n_dim; j++)
+							{
+								const unsigned slot = PYOOMPH_D2_SLOT(i, j);
+								for (unsigned m = 0; m < eleminfo.nnode; m++)
+								{
+									for (unsigned int p = 0; p < n_dim; p++)
+									{
+										double sum = 0.0;
+										for (unsigned b = 0; b < el_dim; b++)
+										{
+											for (unsigned c = 0; c < el_dim; c++)
+											{
+												sum += (dM_dX[iM(i, b, m, p)] * gab_gai[c][j] + gab_gai[b][i] * dM_dX[iM(j, c, m, p)]) * d2psids(l, PYOOMPH_D2_SLOT(b, c));
+												sum += (dM_dX[iM(j, c, m, p)] * Qibc[i][b][c] + gab_gai[c][j] * dQ_dX[iQ(i, b, c, m, p)]) * dpsids(l, b);
+											}
+										}
+										shape_info->d_d2x_shape_dcoord_DL[l][slot][m][p] = sum;
+									}
+								}
+							}
+						}
+					}
 				if (require_dxdshape)
 				{
 					for (unsigned int i = 0; i < n_dim; i++)
@@ -1022,11 +1374,11 @@ namespace pyoomph
 	// the priority chain C2TB -> C2 -> C1TB -> C1 depending on which nodes/spaces are present.
 	void BulkElementBase::set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes)
 	{
-		bool required_C2TB = required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].psi;
-		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C2TB"));
+		bool required_C2TB = required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].d2x_psi;
+		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.Pos.d2x_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C2TB"));
 		
-		bool required_C1TB = required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].psi;		
-		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C1TB"));
+		bool required_C1TB = required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].d2x_psi;		
+		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.Pos.d2x_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C1TB"));
 		
 		if (required_C2TB)
 		{
@@ -1035,6 +1387,10 @@ namespace pyoomph
 			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C2TB];
 			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C2TB];
 			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C2TB];
+			for (unsigned k = 0; k < 3; k++) shape_info->d2x_shape_Pos[k] = shape_info->d2x_shapes[k][SPACE_INDEX_C2TB];
+			shape_info->d2S_shape_Pos = shape_info->d2S_shapes[SPACE_INDEX_C2TB];
+			shape_info->d_d2x_shape_dcoord_Pos = shape_info->d_d2x_shape_dcoord[SPACE_INDEX_C2TB];
+			shape_info->d2_d2x2_shape_dcoord_Pos = shape_info->d2_d2x2_shape_dcoord[SPACE_INDEX_C2TB];
 			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C2TB];
 		}
 		else if (this->eleminfo.nnode_of_space[SPACE_INDEX_C2])
@@ -1044,6 +1400,10 @@ namespace pyoomph
 			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C2];
 			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C2];
 			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C2];
+			for (unsigned k = 0; k < 3; k++) shape_info->d2x_shape_Pos[k] = shape_info->d2x_shapes[k][SPACE_INDEX_C2];
+			shape_info->d2S_shape_Pos = shape_info->d2S_shapes[SPACE_INDEX_C2];
+			shape_info->d_d2x_shape_dcoord_Pos = shape_info->d_d2x_shape_dcoord[SPACE_INDEX_C2];
+			shape_info->d2_d2x2_shape_dcoord_Pos = shape_info->d2_d2x2_shape_dcoord[SPACE_INDEX_C2];
 			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C2];
 		}
 		else if (required_C1TB)
@@ -1052,7 +1412,11 @@ namespace pyoomph
 			for (unsigned k = 0; k < 3; k++) shape_info->dx_shape_Pos[k] = shape_info->dx_shapes[k][SPACE_INDEX_C1TB];
 			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C1TB];
 			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C1TB];
-			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1TB];		
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1TB];
+			for (unsigned k = 0; k < 3; k++) shape_info->d2x_shape_Pos[k] = shape_info->d2x_shapes[k][SPACE_INDEX_C1TB];
+			shape_info->d2S_shape_Pos = shape_info->d2S_shapes[SPACE_INDEX_C1TB];
+			shape_info->d_d2x_shape_dcoord_Pos = shape_info->d_d2x_shape_dcoord[SPACE_INDEX_C1TB];
+			shape_info->d2_d2x2_shape_dcoord_Pos = shape_info->d2_d2x2_shape_dcoord[SPACE_INDEX_C1TB];		
 			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C1TB];
 		}		
 		else
@@ -1063,6 +1427,10 @@ namespace pyoomph
 			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C1];
 			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C1];
 			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1];
+			for (unsigned k = 0; k < 3; k++) shape_info->d2x_shape_Pos[k] = shape_info->d2x_shapes[k][SPACE_INDEX_C1];
+			shape_info->d2S_shape_Pos = shape_info->d2S_shapes[SPACE_INDEX_C1];
+			shape_info->d_d2x_shape_dcoord_Pos = shape_info->d_d2x_shape_dcoord[SPACE_INDEX_C1];
+			shape_info->d2_d2x2_shape_dcoord_Pos = shape_info->d2_d2x2_shape_dcoord[SPACE_INDEX_C1];
 			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C1];
 		}
 	}

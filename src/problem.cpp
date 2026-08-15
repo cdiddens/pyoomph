@@ -60,25 +60,28 @@ namespace pyoomph
 	// the nested bulk_shapes/opposite_shapes sub-structures (allocating them in dest on demand). Used to
 	// accumulate, over all residual/Jacobian/Hessian/integral/etc. contributions of a code, the union of
 	// shape information that must be computed for a given element.
+	// Merges one per-space flag set. Kept as a helper so that adding a flag to
+	// JITFuncSpec_RequiredShapes_For_Space_t cannot be half-forgotten in one of the seven call sites
+	// below - a missed flag leaves the corresponding buffer unfilled and is read as garbage rather
+	// than crashing.
+	static inline void RequiredShapes_merge_space(const JITFuncSpec_RequiredShapes_For_Space_t &src, JITFuncSpec_RequiredShapes_For_Space_t &dest)
+	{
+		dest.psi |= src.psi;
+		dest.dx_psi |= src.dx_psi;
+		dest.dX_psi |= src.dX_psi;
+		dest.d2x_psi |= src.d2x_psi;
+		dest.d2X_psi |= src.d2X_psi;
+	}
+
 	void RequiredShapes_merge(JITFuncSpec_RequiredShapes_FiniteElement_t *src, JITFuncSpec_RequiredShapes_FiniteElement_t *dest)
 	{
 		for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
 		{
-			dest->continuous_spaces[i].psi |= src->continuous_spaces[i].psi;
-			dest->continuous_spaces[i].dx_psi |= src->continuous_spaces[i].dx_psi;
-			dest->continuous_spaces[i].dX_psi |= src->continuous_spaces[i].dX_psi;
-		}		
-		dest->DL.psi |= src->DL.psi;
-		dest->D0.psi |= src->D0.psi;
-	
-		dest->DL.dx_psi |= src->DL.dx_psi;
-		dest->D0.dx_psi |= src->D0.dx_psi;
-		dest->DL.dX_psi |= src->DL.dX_psi;
-		dest->D0.dX_psi |= src->D0.dX_psi;
-		dest->Pos.psi |= src->Pos.psi;
-		dest->Pos.dx_psi |= src->Pos.dx_psi;
-		dest->Pos.dX_psi |= src->Pos.dX_psi;
-		
+			RequiredShapes_merge_space(src->continuous_spaces[i], dest->continuous_spaces[i]);
+		}
+		RequiredShapes_merge_space(src->DL, dest->DL);
+		RequiredShapes_merge_space(src->D0, dest->D0);
+		RequiredShapes_merge_space(src->Pos, dest->Pos);
 
 		dest->normal |= src->normal;
 		dest->elemsize_Eulerian |= src->elemsize_Eulerian;

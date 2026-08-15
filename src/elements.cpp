@@ -292,6 +292,63 @@ namespace pyoomph
 
 	JITShapeInfo_t *Default_shape_info_buffer = NULL;
 	//JITShapeInfo_t *temp_shape_info_buffer = NULL;
+
+	// What the (process-wide, shared) shape buffer must be able to hold. The optional parts are kept
+	// out of the buffer unless some code instance actually asks for them, and the buffer is grown
+	// when a later instance needs more than the one already allocated (see BulkElementBase's ctor).
+	//
+	// The second-derivative arrays are sized from the nodal dimension rather than from the global
+	// MAX_NODES/MAX_NODAL_DIM constants, because d2_d2x2_shape_dcoord is
+	// nnode*MAX_N2DERIV*nnode*ndim*nnode*ndim doubles per space: 38 MB per space per buffer (i.e.
+	// 765 MB over the five-buffer chain and four spaces) at nnode=27/ndim=3, but 93 kB for a 2D
+	// problem. Bounding nnode by 3^ndim is safe - the largest element of dimension d is the C2
+	// Q-element with 3^d nodes, and an element's dimension never exceeds the nodal dimension.
+	struct ShapeBufferCaps
+	{
+		bool hessian_moving_mesh = false;   // int_pt_weights_d2_coords, d2_dx2_shape_dcoord, ...
+		bool second_derivs = false;         // d2x_shapes, d2S_shapes
+		bool second_derivs_dcoord = false;  // d_d2x_shape_dcoord (moving mesh)
+		bool second_derivs_hessian = false; // d2_d2x2_shape_dcoord (moving mesh + analytic Hessian)
+		unsigned second_deriv_nodal_dim = 0;
+		unsigned second_deriv_nodes() const
+		{
+			if (!second_deriv_nodal_dim) return 0; // nothing requested -> allocate nothing
+			unsigned n = 1;
+			for (unsigned d = 0; d < second_deriv_nodal_dim; d++) n *= 3;
+			return n;
+		}
+		// True if a buffer allocated for *this also satisfies everything "need" asks for.
+		bool covers(const ShapeBufferCaps &need) const
+		{
+			return (hessian_moving_mesh || !need.hessian_moving_mesh) &&
+				   (second_derivs || !need.second_derivs) &&
+				   (second_derivs_dcoord || !need.second_derivs_dcoord) &&
+				   (second_derivs_hessian || !need.second_derivs_hessian) &&
+				   (second_deriv_nodal_dim >= need.second_deriv_nodal_dim);
+		}
+		void absorb(const ShapeBufferCaps &need)
+		{
+			hessian_moving_mesh |= need.hessian_moving_mesh;
+			second_derivs |= need.second_derivs;
+			second_derivs_dcoord |= need.second_derivs_dcoord;
+			second_derivs_hessian |= need.second_derivs_hessian;
+			if (need.second_deriv_nodal_dim > second_deriv_nodal_dim) second_deriv_nodal_dim = need.second_deriv_nodal_dim;
+		}
+	};
+
+	// Capabilities the currently allocated Default_shape_info_buffer was built with.
+	static ShapeBufferCaps Default_shape_info_buffer_caps;
+
+	// Whether any space anywhere in this required-shapes tree (including the bulk/opposite
+	// sub-structures) asks for second spatial derivatives.
+	static bool required_shapes_want_d2x(const JITFuncSpec_RequiredShapes_FiniteElement_t *r)
+	{
+		if (!r) return false;
+		if (r->Pos.d2x_psi || r->DL.d2x_psi || r->D0.d2x_psi) return true;
+		for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+			if (r->continuous_spaces[i].d2x_psi) return true;
+		return required_shapes_want_d2x(r->bulk_shapes) || required_shapes_want_d2x(r->opposite_shapes);
+	}
 	DynamicBulkElementInstance *BulkElementBase::__CurrentCodeInstance = NULL;
 	unsigned BulkElementBase::zeta_time_history = 0;
 	unsigned BulkElementBase::zeta_coordinate_type = 0; // 0 means Lagrangian, 1 Eulerian, on co-dimensional meshes it will be the boundary coordinate (if set)
@@ -759,10 +816,12 @@ namespace pyoomph
 	// residual assembly. Unless FIXED_SIZE_SHAPE_BUFFER is defined, every array is sized generously
 	// to fixed upper bounds (MAX_NODES/MAX_NODAL_DIM/MAX_TIME_WEIGHTS/MAX_HANG/MAX_FIELDS) covering
 	// the largest supported element type, so the same buffer can be reused across all element types
-	// without reallocation; with_analytical_hessian_moving_mesh additionally (de)allocates the
-	// second-derivative buffers only needed when computing analytic Hessians on a moving (ALE) mesh.
-	void alloc_dealloc_single_shape_buffer(bool do_alloc, JITShapeInfo_t * PYOOMPH_RESTRICT *buff, bool with_analytical_hessian_moving_mesh)
+	// without reallocation. The optional parts selected by "caps" (analytic Hessians on a moving
+	// (ALE) mesh, and the second-spatial-derivative family) are left out - and their pointers NULLed
+	// - unless some code instance actually asks for them.
+	void alloc_dealloc_single_shape_buffer(bool do_alloc, JITShapeInfo_t * PYOOMPH_RESTRICT *buff, const ShapeBufferCaps &caps)
 	{
+		const bool with_analytical_hessian_moving_mesh = caps.hessian_moving_mesh;
 		if (!(*buff))
 		{
 			if (do_alloc)
@@ -794,7 +853,6 @@ namespace pyoomph
 		}
 				
 		my_alloc_or_free(do_alloc, (*buff)->d_dx_shape_dcoord_DL, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
-		my_alloc_or_free(do_alloc, (*buff)->d_dshape_dx_tensor, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODAL_DIM);
 
 		for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
 		{
@@ -853,6 +911,60 @@ namespace pyoomph
 			}
 			(*buff)->d2_dx2_shape_dcoord_DL = NULL;
 			(*buff)->d2_normal_d2coord = NULL;
+		}
+
+		// Second spatial derivatives. Sized from the nodal dimension, not from MAX_NODES/MAX_NODAL_DIM
+		// - see ShapeBufferCaps for why that matters for d2_d2x2_shape_dcoord in particular.
+		{
+			const int D2_NODES = (int)caps.second_deriv_nodes();
+			const int D2_DIM = (int)caps.second_deriv_nodal_dim;
+
+			if (caps.second_derivs || !do_alloc)
+			{
+				for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+				{
+					for (unsigned k = 0; k < 3; k++)
+						my_alloc_or_free(do_alloc, (*buff)->d2x_shapes[k][i], D2_NODES, MAX_N2DERIV);
+					my_alloc_or_free(do_alloc, (*buff)->d2S_shapes[i], D2_NODES, MAX_N2DERIV);
+				}
+				for (unsigned k = 0; k < 3; k++)
+					my_alloc_or_free(do_alloc, (*buff)->d2x_shape_DL[k], D2_NODES, MAX_N2DERIV);
+				my_alloc_or_free(do_alloc, (*buff)->d2S_shape_DL, D2_NODES, MAX_N2DERIV);
+			}
+			else
+			{
+				for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+				{
+					for (unsigned k = 0; k < 3; k++) (*buff)->d2x_shapes[k][i] = NULL;
+					(*buff)->d2S_shapes[i] = NULL;
+				}
+				for (unsigned k = 0; k < 3; k++) (*buff)->d2x_shape_DL[k] = NULL;
+				(*buff)->d2S_shape_DL = NULL;
+			}
+
+			if (caps.second_derivs_dcoord || !do_alloc)
+			{
+				for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+					my_alloc_or_free(do_alloc, (*buff)->d_d2x_shape_dcoord[i], D2_NODES, MAX_N2DERIV, D2_NODES, D2_DIM);
+				my_alloc_or_free(do_alloc, (*buff)->d_d2x_shape_dcoord_DL, D2_NODES, MAX_N2DERIV, D2_NODES, D2_DIM);
+			}
+			else
+			{
+				for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++) (*buff)->d_d2x_shape_dcoord[i] = NULL;
+				(*buff)->d_d2x_shape_dcoord_DL = NULL;
+			}
+
+			if (caps.second_derivs_hessian || !do_alloc)
+			{
+				for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
+					my_alloc_or_free(do_alloc, (*buff)->d2_d2x2_shape_dcoord[i], D2_NODES, MAX_N2DERIV, D2_NODES, D2_DIM, D2_NODES, D2_DIM);
+				my_alloc_or_free(do_alloc, (*buff)->d2_d2x2_shape_dcoord_DL, D2_NODES, MAX_N2DERIV, D2_NODES, D2_DIM, D2_NODES, D2_DIM);
+			}
+			else
+			{
+				for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++) (*buff)->d2_d2x2_shape_dcoord[i] = NULL;
+				(*buff)->d2_d2x2_shape_dcoord_DL = NULL;
+			}
 		}
 
 #ifndef FIXED_SIZE_SHAPE_BUFFER
@@ -915,12 +1027,12 @@ namespace pyoomph
 		{
 			if ((*buff)->bulk_shapeinfo)
 			{
-				alloc_dealloc_single_shape_buffer(false, &((*buff)->bulk_shapeinfo), with_analytical_hessian_moving_mesh);
+				alloc_dealloc_single_shape_buffer(false, &((*buff)->bulk_shapeinfo), caps);
 				delete (*buff)->bulk_shapeinfo;
 			}
 			if ((*buff)->opposite_shapeinfo)
 			{
-				alloc_dealloc_single_shape_buffer(false, &((*buff)->opposite_shapeinfo), with_analytical_hessian_moving_mesh);
+				alloc_dealloc_single_shape_buffer(false, &((*buff)->opposite_shapeinfo), caps);
 				delete (*buff)->opposite_shapeinfo;
 			}
 			// delete *buff; //XXX: The main default shape buffer is not deallocated by default! Otherwise, reallocation does not work since DefaultShapeBuffer will be different than BulkElementBase::shape_buffer
@@ -931,22 +1043,22 @@ namespace pyoomph
 	// bulk_shapeinfo and opposite_shapeinfo (used by FaceElements to access the bulk/opposite
 	// element's shape info), and one level further (bulk-of-opposite, bulk-of-bulk) since those
 	// are also dereferenced when assembling flux/interface contributions.
-	void alloc_dealloc_all_shape_buffers(bool do_alloc, JITShapeInfo_t **buff, bool with_analytical_hessian_moving_mesh)
+	void alloc_dealloc_all_shape_buffers(bool do_alloc, JITShapeInfo_t **buff, const ShapeBufferCaps &caps)
 	{
 		if (do_alloc)
 		{
 			__shape_buffer_mem_usage = 0;
-			alloc_dealloc_single_shape_buffer(true, buff, with_analytical_hessian_moving_mesh);
-			alloc_dealloc_single_shape_buffer(true, &((*buff)->bulk_shapeinfo), with_analytical_hessian_moving_mesh);
-			alloc_dealloc_single_shape_buffer(true, &((*buff)->opposite_shapeinfo), with_analytical_hessian_moving_mesh);
-			alloc_dealloc_single_shape_buffer(true, &((*buff)->opposite_shapeinfo->bulk_shapeinfo), with_analytical_hessian_moving_mesh);
-			alloc_dealloc_single_shape_buffer(true, &((*buff)->bulk_shapeinfo->bulk_shapeinfo), with_analytical_hessian_moving_mesh);
+			alloc_dealloc_single_shape_buffer(true, buff, caps);
+			alloc_dealloc_single_shape_buffer(true, &((*buff)->bulk_shapeinfo), caps);
+			alloc_dealloc_single_shape_buffer(true, &((*buff)->opposite_shapeinfo), caps);
+			alloc_dealloc_single_shape_buffer(true, &((*buff)->opposite_shapeinfo->bulk_shapeinfo), caps);
+			alloc_dealloc_single_shape_buffer(true, &((*buff)->bulk_shapeinfo->bulk_shapeinfo), caps);
 		//	std::cout << "Allocated " << __shape_buffer_mem_usage / (1024.0 * 1024.0) << " MB for the shape buffer" << std::endl;
 		}
 		else
 		{
 			// Deallocation of bulk_shapeinfo and opposite_shapeinfo is done in alloc_dealloc_single_shape_buffer
-			alloc_dealloc_single_shape_buffer(false, buff, with_analytical_hessian_moving_mesh);
+			alloc_dealloc_single_shape_buffer(false, buff, caps);
 		}
 	}
 
@@ -964,21 +1076,32 @@ namespace pyoomph
 			throw_runtime_error("Element generated without jit code");
 		}
 
-		bool require_moving_hessian_buffer = this->codeinst->get_func_table()->hessian_generated && this->codeinst->get_func_table()->moving_nodes;
-		//     std::cout << "SHAPE BUFFER INFO " << Default_shape_info_buffer << "  REQUI " << require_moving_hessian_buffer << std::endl;
-		//     if (Default_shape_info_buffer) std::cout << Default_shape_info_buffer->int_pt_weights_d2_coords << std::endl;
+		const JITFuncSpec_Table_FiniteElement_t *ft = this->codeinst->get_func_table();
+
+		ShapeBufferCaps needed;
+		needed.hessian_moving_mesh = ft->hessian_generated && ft->moving_nodes;
+		if (required_shapes_want_d2x(&(ft->merged_required_shapes)))
+		{
+			needed.second_derivs = true;
+			needed.second_deriv_nodal_dim = ft->nodal_dim;
+			// Same gate as require_dxdshape in fill_shape_info_at_s: with an FD position Jacobian the
+			// shape sensitivities are never asked for.
+			needed.second_derivs_dcoord = ft->moving_nodes && !ft->fd_position_jacobian;
+			needed.second_derivs_hessian = needed.second_derivs_dcoord && ft->hessian_generated;
+		}
+
 		if (!Default_shape_info_buffer)
 		{
-			alloc_dealloc_all_shape_buffers(true, &Default_shape_info_buffer, require_moving_hessian_buffer);
-			//alloc_dealloc_all_shape_buffers(true, &temp_shape_info_buffer, require_moving_hessian_buffer);
+			Default_shape_info_buffer_caps = needed;
+			alloc_dealloc_all_shape_buffers(true, &Default_shape_info_buffer, Default_shape_info_buffer_caps);
 		}
-		else if (require_moving_hessian_buffer && Default_shape_info_buffer->int_pt_weights_d2_coords == NULL)
+		else if (!Default_shape_info_buffer_caps.covers(needed))
 		{
-			alloc_dealloc_all_shape_buffers(false, &Default_shape_info_buffer, require_moving_hessian_buffer);
-			alloc_dealloc_all_shape_buffers(true, &Default_shape_info_buffer, require_moving_hessian_buffer);
-
-			//alloc_dealloc_all_shape_buffers(false, &temp_shape_info_buffer, require_moving_hessian_buffer);
-			//alloc_dealloc_all_shape_buffers(true, &temp_shape_info_buffer, require_moving_hessian_buffer);
+			// A later code instance needs more than the buffer was built with. Free with the caps it
+			// was allocated with (otherwise the recursive free walks the wrong depths), then grow.
+			alloc_dealloc_all_shape_buffers(false, &Default_shape_info_buffer, Default_shape_info_buffer_caps);
+			Default_shape_info_buffer_caps.absorb(needed);
+			alloc_dealloc_all_shape_buffers(true, &Default_shape_info_buffer, Default_shape_info_buffer_caps);
 		}
 		shape_info = Default_shape_info_buffer;
 
@@ -1541,6 +1664,104 @@ namespace pyoomph
 	{
 		//  if (this->has_bubble()) throw_runtime_error("Implement for bubble-enriched elements");
 		this->dshape_local_at_s_C1(s, psi, dpsi);
+	}
+
+	// ------------------------------------------------------------------------------------------
+	// Second local derivatives of the shape functions. See the declarations in elements.hpp for the
+	// slot convention (PYOOMPH_D2_SLOT, full square, not oomph-lib's N2deriv packing).
+	// ------------------------------------------------------------------------------------------
+
+	void BulkElementBase::remap_oomph_d2shape_packing(unsigned el_dim, unsigned nnode, const oomph::DShape &d2psids_oomph, oomph::DShape &d2psi)
+	{
+		// oomph-lib packs the local second derivatives dimension-dependently (1D: {00}; 2D:
+		// {00,11,01}; 3D: {00,11,22,01,02,12}) - see FiniteElement::N2deriv. Unpack into the square
+		// layout, writing both orders of the mixed entries.
+		static const unsigned mixed_a[3] = {0, 0, 1};
+		static const unsigned mixed_b[3] = {1, 2, 2};
+		for (unsigned l = 0; l < nnode; l++)
+		{
+			for (unsigned k = 0; k < MAX_N2DERIV; k++) d2psi(l, k) = 0.0;
+			for (unsigned a = 0; a < el_dim; a++)
+				d2psi(l, PYOOMPH_D2_SLOT(a, a)) = d2psids_oomph(l, a);
+			// The mixed slots follow the pure ones and are ordered 01, 02, 12 - but only the
+			// combinations that exist for this element dimension are present.
+			unsigned nmixed = (el_dim < 2 ? 0 : (el_dim == 2 ? 1 : 3));
+			for (unsigned m = 0; m < nmixed; m++)
+			{
+				const double v = d2psids_oomph(l, el_dim + m);
+				d2psi(l, PYOOMPH_D2_SLOT(mixed_a[m], mixed_b[m])) = v;
+				d2psi(l, PYOOMPH_D2_SLOT(mixed_b[m], mixed_a[m])) = v;
+			}
+		}
+	}
+
+	void BulkElementBase::d2shape_local_pyoomph(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const
+	{
+		const unsigned el_dim = this->dim();
+		const unsigned n_node = this->nnode();
+		if (!el_dim)
+		{
+			for (unsigned l = 0; l < n_node; l++)
+				for (unsigned k = 0; k < MAX_N2DERIV; k++) d2psi(l, k) = 0.0;
+			this->shape(s, psi);
+			return;
+		}
+		// N2deriv[el_dim] entries: 1 / 3 / 6 for el_dim 1 / 2 / 3.
+		oomph::DShape d2psids_oomph(n_node, (el_dim == 1 ? 1 : (el_dim == 2 ? 3 : 6)));
+		this->d2shape_local(s, psi, dpsi, d2psids_oomph);
+		remap_oomph_d2shape_packing(el_dim, n_node, d2psids_oomph, d2psi);
+	}
+
+	// The per-space defaults. Anything that reaches these has no implementation for that space; the
+	// message is deliberately explicit because the alternative (silently returning zeros) would be
+	// wrong numbers rather than an error.
+	static void d2shape_local_not_implemented(const BulkElementBase *el, const std::string &space)
+	{
+		throw_runtime_error("Second spatial derivatives of the shape functions are not implemented for the '" + space +
+							"' space of element type " + std::string(typeid(*el).name()) +
+							".\nThey are needed for e.g. grad(grad(...)), div(grad(...)) or partial_x(...,2)."
+							"\nUse the integrated-by-parts weak form instead, e.g. -weak(grad(u),grad(v)) plus the corresponding surface term.");
+	}
+
+	void BulkElementBase::d2shape_local_at_s_C1(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const
+	{
+		d2shape_local_not_implemented(this, "C1");
+	}
+
+	void BulkElementBase::d2shape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const
+	{
+		d2shape_local_not_implemented(this, "C2");
+	}
+
+	// DL shape functions are affine in the local coordinates in every dimension, so their local
+	// second derivatives vanish identically. (The *physical* second derivative is still nonzero on
+	// curved elements - it comes entirely from the X_{k,ab} term.)
+	void BulkElementBase::d2shape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const
+	{
+		this->dshape_local_at_s_DL(s, psi, dpsi);
+		for (unsigned l = 0; l < this->eleminfo.nnode_DL; l++)
+			for (unsigned k = 0; k < MAX_N2DERIV; k++) d2psi(l, k) = 0.0;
+	}
+
+	// Same fallback rule as the first-derivative versions: without bubble enrichment the TB spaces
+	// are the plain ones.
+	void BulkElementBase::d2shape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const
+	{
+		this->d2shape_local_at_s_C1(s, psi, dpsi, d2psi);
+	}
+
+	void BulkElementBase::d2shape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const
+	{
+		this->d2shape_local_at_s_C2(s, psi, dpsi, d2psi);
+	}
+
+	bool BulkElementBase::supports_second_spatial_derivatives(std::string &why) const
+	{
+		// A point/ODE element has no local coordinates, so every spatial derivative is zero anyway and
+		// the fill short-circuits before any d2shape_local is needed.
+		if (!this->dim()) return true;
+		why = "element type " + std::string(typeid(*this).name()) + " does not implement second derivatives of its shape functions";
+		return false;
 	}
 
 	// Interpolates the discontinuous-Lagrange (DL) fields at local coordinate s from their

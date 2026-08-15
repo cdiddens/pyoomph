@@ -388,8 +388,22 @@ def grad(arg:ExpressionOrNum,lagrangian:bool=False,nondim:bool=False,coordsys:Op
 		accordingly.
 
 		The argument must be a scalar or a vector: the gradient of a rank-2 tensor would be rank 3, which is not
-		implemented. Also, only first derivatives of the basis functions are available, so a second derivative of a
-		field, e.g. ``div(grad(u))``, cannot be assembled - use the integrated-by-parts form ``weak(grad(u),grad(v))``.
+		implemented.
+
+		Second derivatives of the basis functions *are* available, so ``grad(grad(u))``, ``div(grad(u))`` and
+		``partial_x(u,2)`` can be assembled directly. Prefer the integrated-by-parts form
+		``-weak(grad(u),grad(v))`` plus the corresponding surface term anyway wherever you have the choice: on the C0
+		Lagrange spaces used here the second derivative is discontinuous across element boundaries, so the strong form
+		is an element-wise object and not the distributional Laplacian. The restrictions on the strong form are
+
+		* Only Eulerian second derivatives. ``grad(..., lagrangian=True)`` cannot be nested.
+		* Not available on wedge and pyramid elements, nor on 0d (point/ODE) domains, where it is trivially zero.
+		* On an interface the result is the tangential derivative of the surface gradient. Its trace, i.e.
+		  ``div(grad(u))``, is exactly the Laplace-Beltrami operator, but the full tensor ``grad(grad(u))`` is *not*
+		  symmetric there: it carries a second-fundamental-form part. Second derivatives of a *bulk* field evaluated on
+		  an interface, ``grad(grad(var("u",domain="..")))``, are the ordinary symmetric ones.
+		* Analytical Hessians (as used by bifurcation tracking) of a second derivative on a moving mesh are not
+		  implemented and raise an error; use ``analytic_hessian=False`` there.
 	"""
 	if isinstance(arg,str):
 		arg=var(arg)

@@ -1544,7 +1544,7 @@ namespace pyoomph
 		// current configuration - the same convention as int_pt_weight[]. The undifferentiated shapes
 		// and the Lagrangian/local-coordinate derivatives are properties of the reference element and
 		// do not move with the mesh, so they have no such index.
-		if (dynamic_cast<D1XBasisFunction *>(basis) && !dynamic_cast<D1XBasisFunctionLagr *>(basis))
+		if (basis->is_eulerian_deriv())
 		{
 			const bool past = history_geometry && time_history_index > 0 && forcode->history_geometry_is_relevant();
 			size_t br = shape_str.find('[');
@@ -1621,6 +1621,34 @@ namespace pyoomph
 		}
 	}
 
+	// Second derivatives. The cache deliberately sits here, on the space's root BasisFunction, so
+	// that both routes to the same mixed derivative land in the same slot - see the declaration in
+	// codegen.hpp. All slots are filled at once (as get_diff_x does for the first derivatives) so
+	// that creation_index assignment stays reproducible across separate runs of the same input.
+	BasisFunction *BasisFunction::get_second_diff_x(unsigned dir_inner, unsigned dir_outer)
+	{
+		if (basis_deriv2_x.empty())
+		{
+			basis_deriv2_x.resize(MAX_N2DERIV, NULL);
+			for (unsigned int i = 0; i < 3; i++)
+				for (unsigned int j = 0; j < 3; j++)
+					basis_deriv2_x[PYOOMPH_D2_SLOT(i, j)] = new D2XBasisFunction(space, i, j);
+		}
+		return basis_deriv2_x[PYOOMPH_D2_SLOT(dir_inner, dir_outer)];
+	}
+
+	BasisFunction *BasisFunction::get_second_diff_S(unsigned dir_inner, unsigned dir_outer)
+	{
+		if (local_coord_deriv2_x.empty())
+		{
+			local_coord_deriv2_x.resize(MAX_N2DERIV, NULL);
+			for (unsigned int i = 0; i < 3; i++)
+				for (unsigned int j = 0; j < 3; j++)
+					local_coord_deriv2_x[PYOOMPH_D2_SLOT(i, j)] = new D2XBasisFunctionLocalCoord(space, i, j);
+		}
+		return local_coord_deriv2_x[PYOOMPH_D2_SLOT(dir_inner, dir_outer)];
+	}
+
 	BasisFunction::~BasisFunction()
 	{
 		for (unsigned int i = 0; i < basis_deriv_x.size(); i++)
@@ -1629,27 +1657,84 @@ namespace pyoomph
 		for (unsigned int i = 0; i < lagr_deriv_x.size(); i++)
 			if (lagr_deriv_x[i])
 				delete lagr_deriv_x[i];
+		// local_coord_deriv_x used to be leaked here
+		for (unsigned int i = 0; i < local_coord_deriv_x.size(); i++)
+			if (local_coord_deriv_x[i])
+				delete local_coord_deriv_x[i];
+		for (unsigned int i = 0; i < basis_deriv2_x.size(); i++)
+			if (basis_deriv2_x[i])
+				delete basis_deriv2_x[i];
+		for (unsigned int i = 0; i < local_coord_deriv2_x.size(); i++)
+			if (local_coord_deriv2_x[i])
+				delete local_coord_deriv2_x[i];
 	}
 	std::string BasisFunction::to_string()
 	{
 		return "BASIS of " + space->get_name();
 	}
 
-	// Second spatial derivatives of basis functions (i.e. differentiating an already-once-differentiated
-	// D1XBasisFunction again) are not supported by the code generator.
-	BasisFunction *D1XBasisFunction::get_diff_x(unsigned)
+	// Differentiating an already-once-differentiated basis a second time. The cache is looked up on
+	// the space's ROOT basis, and the index pair is canonicalised to (min, max) - but only where
+	// d/dx_i d/dx_j is actually symmetric, i.e. on a domain without codimension. On a surface
+	// pyoomph's metric-based derivative gives the tangential derivative of the surface gradient,
+	// which is genuinely asymmetric (see jitbridge.h), so there the two orders must stay distinct.
+	BasisFunction *D1XBasisFunction::get_diff_x(unsigned dir_outer)
 	{
-		throw_runtime_error("Cannot handle second order derivatives of basis functions yet");
+		unsigned a = direction, b = dir_outer;
+		const FiniteElementCode *code = space->get_code();
+		if (code && code->get_dimension() == (int)code->nodal_dimension() && a > b)
+		{
+			std::swap(a, b);
+		}
+		return space->get_basis()->get_second_diff_x(a, b);
 	}
 
 	BasisFunction *D1XBasisFunction::get_diff_X(unsigned)
 	{
-		throw_runtime_error("Cannot handle second order derivatives of basis functions yet");
+		throw_runtime_error("Cannot mix an Eulerian and a Lagrangian spatial derivative of a basis function, i.e. d/dX(d/dx(...))");
 	}
 
 	BasisFunction *D1XBasisFunction::get_diff_S(unsigned)
 	{
-		throw_runtime_error("Cannot handle second order derivatives of basis functions yet");
+		throw_runtime_error("Cannot mix an Eulerian and a local-coordinate derivative of a basis function, i.e. d/dS(d/dx(...))");
+	}
+
+	BasisFunction *D1XBasisFunctionLagr::get_diff_x(unsigned)
+	{
+		throw_runtime_error("Cannot mix a Lagrangian and an Eulerian spatial derivative of a basis function, i.e. d/dx(d/dX(...))");
+	}
+
+	BasisFunction *D1XBasisFunctionLagr::get_diff_X(unsigned)
+	{
+		throw_runtime_error("Second order LAGRANGIAN derivatives of basis functions are not implemented. Only the Eulerian ones, e.g. grad(grad(...)) or div(grad(...)), are available.");
+	}
+
+	BasisFunction *D1XBasisFunctionLagr::get_diff_S(unsigned)
+	{
+		throw_runtime_error("Cannot mix a Lagrangian and a local-coordinate derivative of a basis function");
+	}
+
+	BasisFunction *D1XBasisFunctionLocalCoord::get_diff_S(unsigned dir_outer)
+	{
+		unsigned a = direction, b = dir_outer;
+		if (a > b) std::swap(a, b); // d2/(ds_a ds_b) is always symmetric - these are reference-element coordinates
+		return space->get_basis()->get_second_diff_S(a, b);
+	}
+
+	// Third and higher derivatives
+	BasisFunction *D2XBasisFunction::get_diff_x(unsigned)
+	{
+		throw_runtime_error("Cannot handle third order derivatives of basis functions");
+	}
+
+	BasisFunction *D2XBasisFunction::get_diff_X(unsigned)
+	{
+		throw_runtime_error("Cannot handle third order derivatives of basis functions");
+	}
+
+	BasisFunction *D2XBasisFunction::get_diff_S(unsigned)
+	{
+		throw_runtime_error("Cannot handle third order derivatives of basis functions");
 	}
 
 	std::string D1XBasisFunction::get_c_varname(FiniteElementCode *, std::string test_index)
@@ -1736,6 +1821,95 @@ namespace pyoomph
 		{
 			return "dS_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
 		}
+	}
+
+	// -------------------------------------------------------------------------------------------
+	// Second derivatives. The slot index is resolved to an integer literal HERE, at generation
+	// time, by calling the very same PYOOMPH_D2_SLOT macro that the runtime fill uses - so the two
+	// cannot drift apart.
+	// -------------------------------------------------------------------------------------------
+
+	std::string D2XBasisFunction::get_c_varname(FiniteElementCode *, std::string test_index)
+	{
+		return "d2x_testfunction[" + test_index + "][" + std::to_string(get_slot()) + "]";
+	}
+
+	static std::string d2_direction_string(unsigned dir)
+	{
+		return (dir == 0 ? "x" : (dir == 1 ? "y" : "z"));
+	}
+
+	std::string D2XBasisFunction::to_string()
+	{
+		return "d^2/(d" + d2_direction_string(direction) + " d" + d2_direction_string(direction2) + ") of BASIS of " + space->get_name();
+	}
+
+	std::string D2XBasisFunction::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	{
+		const std::string slot = std::to_string(PYOOMPH_D2_SLOT(direction, direction2));
+		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
+		{
+			return "d2x_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + slot + "]";
+		}
+		else
+		{
+			return "d2x_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + slot + "]";
+		}
+	}
+
+	std::string D2XBasisFunctionLocalCoord::get_c_varname(FiniteElementCode *, std::string test_index)
+	{
+		return "d2S_testfunction[" + test_index + "][" + std::to_string(get_slot()) + "]";
+	}
+
+	std::string D2XBasisFunctionLocalCoord::to_string()
+	{
+		return "d^2/(ds^" + std::to_string(direction + 1) + " ds^" + std::to_string(direction2 + 1) + ") of BASIS of " + space->get_name();
+	}
+
+	std::string D2XBasisFunctionLocalCoord::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	{
+		const std::string slot = std::to_string(PYOOMPH_D2_SLOT(direction, direction2));
+		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
+		{
+			return "d2S_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + slot + "]";
+		}
+		else
+		{
+			return "d2S_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + slot + "]";
+		}
+	}
+
+	// Name of, and index into, the shape-function sensitivity arrays w.r.t. the nodal coordinates
+	// (the "COORDDIFF" family), for a first OR a second Eulerian derivative of a basis function.
+	// The second-derivative arrays are addressed by the packed PYOOMPH_D2_SLOT(inner,outer) rather
+	// than by a single direction, and live in their own d_d2x_/d2_d2x2_ arrays.
+	static std::string dcoord_shape_array(const BasisFunction *bf, bool second_coord_derivative)
+	{
+		const bool is_d2 = (bf->deriv_order() == 2);
+		if (is_d2 && second_coord_derivative)
+		{
+			// d2_d2x2_shape_dcoord is declared and allocated, but fill_shape_info_at_s does not fill it
+			// yet - reading it would silently give a Hessian of zeros rather than an error.
+			throw_runtime_error("Analytical Hessians of SECOND spatial derivatives on a moving mesh are not implemented yet.\n"
+								"This combination arises from e.g. div(grad(u)) in the residual together with "
+								"setup_for_stability_analysis(analytic_hessian=True) on a domain whose coordinates are unknowns.\n"
+								"Either use the integrated-by-parts weak form, e.g. -weak(grad(u),grad(v)) plus the surface term, "
+								"or pass analytic_hessian=False.");
+		}
+		std::string base = second_coord_derivative ? (is_d2 ? "d2_d2x2_shape_dcoord" : "d2_dx2_shape_dcoord")
+												   : (is_d2 ? "d_d2x_shape_dcoord" : "d_dx_shape_dcoord");
+		const std::string sn = bf->get_space()->get_shape_name();
+		if (sn == "C2TB" || sn == "C2" || sn == "C1TB" || sn == "C1")
+			return base + "[SPACE_INDEX_" + sn + "]";
+		return base + "_" + sn;
+	}
+
+	static std::string dcoord_shape_index(BasisFunction *bf)
+	{
+		if (D2XBasisFunction *d2 = dynamic_cast<D2XBasisFunction *>(bf))
+			return std::to_string(d2->get_slot());
+		return std::to_string(dynamic_cast<D1XBasisFunction *>(bf)->get_direction());
 	}
 
 
@@ -1940,7 +2114,7 @@ namespace pyoomph
 			decl_lines.push_back(indent + "double " + varname + "=0.0;");
 			if (including_nodal_diffs)
 			{
-				if (dynamic_cast<D1XBasisFunction *>(s.basis) && !dynamic_cast<D1XBasisFunctionLagr *>(s.basis))
+				if (s.basis->is_eulerian_deriv())
 				{
 					required_coorddiffs.insert(s);
 				}
@@ -2050,16 +2224,8 @@ namespace pyoomph
 					std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 					std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_COORDDIFF_" + std::to_string(i) + "_" + s.field->get_name();
 					std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
-					std::string shapename=s.basis->get_space()->get_shape_name();
-					if (shapename=="C2TB" || shapename=="C2" || shapename=="C1TB" || shapename=="C1")
-					{
-						shapename="d_dx_shape_dcoord[SPACE_INDEX_"+shapename+"]";
-					}
-					else
-					{
-						shapename="d_dx_shape_dcoord_" + s.basis->get_space()->get_shape_name();
-					}
-					std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->" + shapename + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "]";
+					std::string shapename = dcoord_shape_array(s.basis, false);
+					std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->" + shapename + "[l_shape][" + dcoord_shape_index(s.basis) + "][m][" + std::to_string(i) + "]";
 					//os << indent << "       " << coorddiffname << "[m]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
 					calc_lines.push_back(indent + "       " + coorddiffname + "[m]+=" + nodal_data + " * " + shapestr + ";");
 				}
@@ -2115,16 +2281,8 @@ namespace pyoomph
 							std::string code_type = for_code->get_owner_prefix(s.basis->get_space());
 							std::string coorddiffname = code_type + "intrp_" + dtstring + "_" + s.basis->get_dx_str() + "_2ndCOORDDIFF_" + std::to_string(i) + "_" + std::to_string(j) + "_" + s.field->get_name();
 							std::string nodal_data = s.get_nodal_data_string(for_code, "l_shape");
-							std::string shapename=s.basis->get_space()->get_shape_name();
-							if (shapename=="C2TB" || shapename=="C2" || shapename=="C1TB" || shapename=="C1")
-							{
-								shapename="d2_dx2_shape_dcoord[SPACE_INDEX_"+shapename+"]";
-							}
-							else
-							{
-								shapename="d2_dx2_shape_dcoord_" + s.basis->get_space()->get_shape_name();
-							}
-							std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->" + shapename + "[l_shape][" + std::to_string(dynamic_cast<D1XBasisFunction *>(s.basis)->get_direction()) + "][m][" + std::to_string(i) + "][m2][" + std::to_string(j) + "]";
+							std::string shapename = dcoord_shape_array(s.basis, true);
+							std::string shapestr = for_code->get_shape_info_str(s.basis->get_space()) + "->" + shapename + "[l_shape][" + dcoord_shape_index(s.basis) + "][m][" + std::to_string(i) + "][m2][" + std::to_string(j) + "]";
 							//os << indent << "             " << coorddiffname << "[m][m2]+=" << nodal_data << " * " << shapestr << ";" << std::endl;
 							hess_lines.push_back(indent + "             " + coorddiffname + "[m][m2]+=" + nodal_data + " * " + shapestr + ";");
 						}
@@ -2893,6 +3051,8 @@ namespace pyoomph
 				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shapes[0][SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
 				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
 				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
+				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2x_testfunction) = " << shapeinfo << "->d2x_shapes[0][SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
+				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2S_testfunction) = " << shapeinfo << "->d2S_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
 			}
 			else
 			{
@@ -2900,6 +3060,8 @@ namespace pyoomph
 				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shape_" << this->get_shape_name() << "[0];" << std::endl;
 				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shape_" << this->get_shape_name() << ";" << std::endl;
 				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shape_" << this->get_shape_name() << ";" << std::endl;
+				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2x_testfunction) = " << shapeinfo << "->d2x_shape_" << this->get_shape_name() << "[0];" << std::endl;
+				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2S_testfunction) = " << shapeinfo << "->d2S_shape_" << this->get_shape_name() << ";" << std::endl;
 			}
 
 			oss << indent << "  for (unsigned int l_test=0;l_test<" << numnodes_str << ";l_test++)" << std::endl;
@@ -3137,8 +3299,16 @@ namespace pyoomph
 	// identical; external D0 spaces never need shape data (their DoF is not spatially interpolated).
 	void FiniteElementCode::mark_shapes_required(std::string func_type, FiniteElementSpace *space, BasisFunction *bf)
 	{
+		// Order matters: D2XBasisFunction derives from D1XBasisFunction, so the second derivatives
+		// have to be classified first or they would be marked as "dx_psi" and their buffer would
+		// never be filled.
 		std::string dx_type = "psi";
-		if (dynamic_cast<D1XBasisFunction *>(bf))
+		if (bf->deriv_order() == 2)
+		{
+			// d2S_shapes rides on the same flag as d2x_shapes, exactly as dS_shapes does on dx_psi.
+			dx_type = "d2x_psi";
+		}
+		else if (dynamic_cast<D1XBasisFunction *>(bf))
 		{
 			dx_type = "dx_psi";
 			if (dynamic_cast<D1XBasisFunctionLagr *>(bf))
@@ -4898,7 +5068,7 @@ namespace pyoomph
 				// An Eulerian shape derivative evaluated in the past has to be taken on the mesh as it
 				// was then, so the geometry of that history level must be computed as well.
 				const pyoomph::ShapeExpansion &sp = GiNaC::ex_to<GiNaC::GiNaCShapeExpansion>(*i).get_struct();
-				if (sp.history_geometry && sp.time_history_index != 0 && this->history_geometry_is_relevant() && dynamic_cast<D1XBasisFunction *>(sp.basis) && !dynamic_cast<D1XBasisFunctionLagr *>(sp.basis))
+				if (sp.history_geometry && sp.time_history_index != 0 && this->history_geometry_is_relevant() && sp.basis->is_eulerian_deriv())
 				{
 					this->mark_shapes_required(for_what, this->get_my_position_space(), "history_geometry" + std::to_string(sp.time_history_index));
 				}
@@ -7927,7 +8097,7 @@ namespace pyoomph
 			{
 				if (psientry.second)
 				{
-					if (psientry.first=="psi" || psientry.first=="dx_psi" || psientry.first=="dX_psi")
+					if (psientry.first=="psi" || psientry.first=="dx_psi" || psientry.first=="dX_psi" || psientry.first=="d2x_psi" || psientry.first=="d2X_psi")
 					{
 						if (fieldentry.first->get_name()=="C1" || fieldentry.first->get_name()=="C1TB"||  fieldentry.first->get_name()=="C2" || fieldentry.first->get_name()=="C2TB")
 						{
@@ -11001,25 +11171,18 @@ namespace GiNaC
 							{
 								throw_runtime_error("DD")
 							}
-							std::string shapename=sp.basis->get_space()->get_shape_name();
-							if (shapename=="C2TB" || shapename=="C2" || shapename=="C1TB" || shapename=="C1")
-							{
-								shapename="d_dx_shape_dcoord[SPACE_INDEX_" + sp.basis->get_space()->get_shape_name() + "]";
-							}						
-							else
-							{
-								shapename="d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
-							}
+							std::string shapename = dcoord_shape_array(sp.basis, false);
+							const std::string dirstr = dcoord_shape_index(sp.basis);
 							if (sp.nodal_coord_dir >= 0)
 							{
 								std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->" + shapename;
-								shapestr += "[l_shape2][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][l_shape][" + std::to_string(sp.nodal_coord_dir) + "]";
+								shapestr += "[l_shape2][" + dirstr + "][l_shape][" + std::to_string(sp.nodal_coord_dir) + "]";
 								c.s << shapestr;
 							}
 							else
 							{
 								std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->" + shapename;
-								shapestr += "[l_shape][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][" + "l_shape2" + "][" + std::to_string(sp.nodal_coord_dir2) + "]";
+								shapestr += "[l_shape][" + dirstr + "][" + "l_shape2" + "][" + std::to_string(sp.nodal_coord_dir2) + "]";
 								c.s << shapestr;
 							}
 						}
@@ -11341,7 +11504,7 @@ namespace GiNaC
 			if (sp.nodal_coord_dir >= 0 || sp.nodal_coord_dir2 >= 0)
 				throw_runtime_error("We have a derived shape expansion-> only psi^l. If it is dxpsi^l, we might have a COORDDIFF, which might give an u term ");
 			int coord_dir = (get_sname() == "coordinate_x" ? 0 : (get_sname() == "coordinate_y" ? 1 : 2));
-			if ((dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis) && !(dynamic_cast<pyoomph::D1XBasisFunctionLagr *>(sp.basis))))
+			if (sp.basis->is_eulerian_deriv())
 			{
 				if (get_sname() == "coordinate_x" || get_sname() == "coordinate_y" || get_sname() == "coordinate_z")
 				{
@@ -11383,7 +11546,7 @@ namespace GiNaC
 				if (pyoomph::__derive_shapes_by_second_index)
 					se.is_derived_other_index = true;
 				// Here we have to check wether we derive e.g. dX_l/dt*dphi_l/dx. It will give another contribution from the coordinate diff
-				if (sp.dt_order && (dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis) && !(dynamic_cast<pyoomph::D1XBasisFunctionLagr *>(sp.basis))))
+				if (sp.dt_order && sp.basis->is_eulerian_deriv())
 				{
 					std::ostringstream ossn;
 					ossn << s;
@@ -11413,7 +11576,7 @@ namespace GiNaC
 						se.is_derived_other_index = true;
 					}
 					// Here we have to check wether we derive e.g. dX_l/dt*dphi_l/dx. It will give another contribution from the coordinate diff
-					if (sp.dt_order && (dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis) && !(dynamic_cast<pyoomph::D1XBasisFunctionLagr *>(sp.basis))))
+					if (sp.dt_order && sp.basis->is_eulerian_deriv())
 					{
 						std::ostringstream oss;
 						oss << (*this) << " WT " << s;
@@ -11431,7 +11594,7 @@ namespace GiNaC
 		{
 
 			int coord_dir = (get_sname() == "coordinate_x" ? 0 : (get_sname() == "coordinate_y" ? 1 : 2));
-			if ((dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis) && !(dynamic_cast<pyoomph::D1XBasisFunctionLagr *>(sp.basis))))
+			if (sp.basis->is_eulerian_deriv())
 			{
 				//		   std::cout << "  hit else case "  << (*this) << "  " << sp.field->get_name() <<  "   WRT " << s << " sname " << sname << " dir " << coord_dir<<  std::endl;
 				if (get_sname() == "coordinate_x" || get_sname() == "coordinate_y" || get_sname() == "coordinate_z")
@@ -11479,18 +11642,8 @@ namespace GiNaC
 			const auto &femprint = dynamic_cast<const print_csrc_FEM &>(c);
 			if (femprint.FEM_opts->for_code)
 			{
-				std::string shapename = sp.basis->get_space()->get_shape_name();
-				std::string shapename2;
-				if (shapename == "C2TB" || shapename == "C2" || shapename == "C1TB" || shapename == "C1")
-				{
-					shapename = "d_dx_shape_dcoord[SPACE_INDEX_" + sp.basis->get_space()->get_shape_name() + "]";
-					shapename2="d2_dx2_shape_dcoord[SPACE_INDEX_" + sp.basis->get_space()->get_shape_name() + "]";
-				}
-				else
-				{
-					shapename = "d_dx_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
-					shapename2 = "d2_dx2_shape_dcoord_" + sp.basis->get_space()->get_shape_name();
-				}
+				const std::string shapename = dcoord_shape_array(sp.basis, false);
+				const std::string shapename2 = dcoord_shape_array(sp.basis, true);
 				if (sp.nodal_coord_dir == -1)
 				{
 					c.s << sp.basis->get_c_varname(femprint.FEM_opts->for_code, "l_test");
@@ -11498,13 +11651,13 @@ namespace GiNaC
 				else if (sp.nodal_coord_dir2 == -1)
 				{
 					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->"+ shapename;
-					shapestr += "[l_test][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][" + (sp.is_derived_other_index ? "l_shape2" : "l_shape") + "][" + std::to_string(sp.nodal_coord_dir) + "]";
+					shapestr += "[l_test][" + dcoord_shape_index(sp.basis) + "][" + (sp.is_derived_other_index ? "l_shape2" : "l_shape") + "][" + std::to_string(sp.nodal_coord_dir) + "]";
 					c.s << shapestr;
 				}
 				else
 				{
 					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->"+ shapename2;
-					shapestr += "[l_test][" + std::to_string(dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis)->get_direction()) + "][l_shape][" + std::to_string(sp.nodal_coord_dir) + "][l_shape2][" + std::to_string(sp.nodal_coord_dir2) + "]";
+					shapestr += "[l_test][" + dcoord_shape_index(sp.basis) + "][l_shape][" + std::to_string(sp.nodal_coord_dir) + "][l_shape2][" + std::to_string(sp.nodal_coord_dir2) + "]";
 					c.s << shapestr;
 				}
 				return;
@@ -11609,7 +11762,7 @@ namespace GiNaC
 			std::ostringstream oss;
 			oss << s;
 			std::string sname = oss.str();
-			if (dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis) && !(dynamic_cast<pyoomph::D1XBasisFunctionLagr *>(sp.basis)))
+			if (sp.basis->is_eulerian_deriv())
 			{
 				if (sname == "coordinate_x" || sname == "coordinate_y" || sname == "coordinate_z")
 				{

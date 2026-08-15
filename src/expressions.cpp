@@ -2489,7 +2489,7 @@ namespace pyoomph
 					// split every affected interpolation into two identical C variables - and since
 					// time_scheme() asks for apply_on_others at level 0 for the plain BDF schemes, that
 					// would duplicate interpolations throughout ordinary residuals.
-					bool geom_matters = apply_on_others && dynamic_cast<pyoomph::D1XBasisFunction *>(sp.basis) && !dynamic_cast<pyoomph::D1XBasisFunctionLagr *>(sp.basis);
+					bool geom_matters = apply_on_others && sp.basis->is_eulerian_deriv();
 					sp_past.history_geometry = geom_matters && (index > 0);
 					if (is_int)
 					{

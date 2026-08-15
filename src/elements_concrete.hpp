@@ -194,6 +194,9 @@ namespace pyoomph
     void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_C2TB(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C1 is this element's own (QElement<1,2>) space.
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
 
     unsigned nrecovery_order() override { return 1; }
     unsigned nvertex_node() const override { return oomph::QElement<1, 2>::nvertex_node(); }
@@ -261,6 +264,10 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C2 is this element's own (QElement<1,3>) space.
+    void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
     int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       nsubdiv = 1;
@@ -321,6 +328,9 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C1 is this element's own (TElement<1,2>) space.
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
 
     unsigned nrecovery_order() override { return 1; }
     unsigned nvertex_node() const override { return oomph::TElement<1, 2>::nvertex_node(); }
@@ -389,6 +399,10 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C2 is this element's own (TElement<1,3>) space.
+    void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
     int get_num_numpy_elemental_indices(bool , unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       nsubdiv = 1;
@@ -442,6 +456,9 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C1 is this element's own (QElement<2,2>) space.
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
 
     void add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
     void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
@@ -515,6 +532,10 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C2 is this element's own (QElement<2,3>) space.
+    void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
 
     oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index) override;
     
@@ -595,6 +616,9 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C1 is this element's own (TElement<2,2>) space.
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
     void add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
     void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
@@ -652,7 +676,12 @@ namespace pyoomph
     void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }    
-    inline void d2shape_local(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const override { throw_runtime_error("Implement"); }
+    // The MINI bubble enrichment is pyoomph's own (see elements_2d.cpp), so oomph-lib's
+    // TElement<2,2>::d2shape_local would silently ignore the bubble node.
+    void d2shape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids, oomph::DShape &d2psids) const override;
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    void d2shape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
 
     void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const override;
     bool has_bubble() const override { return true; }
@@ -716,6 +745,10 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C2 is this element's own (TElement<2,3>) space.
+    void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
     void add_node_from_finer_neighbor_for_tesselated_numpy(const oomph::Vector<double> &s_coarse, oomph::Node *n, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
     void inform_coarser_neighbors_for_tesselated_numpy(std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) override;
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
@@ -775,7 +808,14 @@ namespace pyoomph
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { BulkElementTri2dC2::dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { oomph::TBubbleEnrichedElementShape<2, 3>::dshape_local(s, psi, dpsi); }
     
-    inline void d2shape_local(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const override { throw_runtime_error("Implement"); }
+    // oomph-lib does implement the enriched second derivatives; the override is needed because the
+    // inherited BulkElementTri2dC2 one would return the unenriched TElement<2,3> basis.
+    inline void d2shape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids, oomph::DShape &d2psids) const override { oomph::TBubbleEnrichedElementShape<2, 3>::d2shape_local(s, psi, dpsids, d2psids); }
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    void d2shape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    void d2shape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
     inline void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override { oomph::TBubbleEnrichedElementShape<2, 3>::shape(s, psi); }
     inline void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const override { oomph::TBubbleEnrichedElementShape<2, 3>::dshape_local(s, psi, dpsids); }
     inline void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const override { oomph::TBubbleEnrichedElementShape<2, 3>::local_coordinate_of_node(j, s); }
@@ -818,6 +858,9 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C1 is this element's own (QElement<3,2>) space.
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
 
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
@@ -884,6 +927,10 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C2 is this element's own (QElement<3,3>) space.
+    void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
 
     
 
@@ -966,6 +1013,9 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C1 is this element's own (TElement<3,2>) space.
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
 
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
@@ -1024,6 +1074,12 @@ namespace pyoomph
     void shape_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi) const override { this->shape(s, psi); }
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
+    // Without this override the inherited oomph::TElement<3,2>::d2shape_local would be used, which
+    // knows nothing about the 5th (bubble) node and would silently return wrong numbers.
+    void d2shape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids, oomph::DShape &d2psids) const override;
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    void d2shape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const override;
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
@@ -1086,6 +1142,10 @@ namespace pyoomph
     void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+    // Second local derivatives: C2 is this element's own (TElement<3,3>) space.
+    void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
 
     
 
@@ -1183,7 +1243,13 @@ namespace pyoomph
     void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { BulkElementTetra3dC2::dshape_local(s, psi, dpsi); }
     void dshape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
     void dshape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { oomph::TBubbleEnrichedElementShape<3, 3>::dshape_local(s, psi, dpsi); }
-    inline void d2shape_local(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &, oomph::DShape &) const override { throw_runtime_error("Implement"); }
+    // As for the 2d bubble-enriched triangle above.
+    inline void d2shape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids, oomph::DShape &d2psids) const override { oomph::TBubbleEnrichedElementShape<3, 3>::d2shape_local(s, psi, dpsids, d2psids); }
+    void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    void d2shape_local_at_s_C1TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+    void d2shape_local_at_s_C2TB(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+    bool supports_second_spatial_derivatives(std::string &) const override { return true; }
     inline void shape(const oomph::Vector<double> &s, oomph::Shape &psi) const override { oomph::TBubbleEnrichedElementShape<3, 3>::shape(s, psi); }
     inline void dshape_local(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsids) const override { oomph::TBubbleEnrichedElementShape<3, 3>::dshape_local(s, psi, dpsids); }
     inline void local_coordinate_of_node(const unsigned &j, oomph::Vector<double> &s) const override { oomph::TBubbleEnrichedElementShape<3, 3>::local_coordinate_of_node(j, s); }
@@ -1229,6 +1295,9 @@ namespace pyoomph
       void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
       void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+      // Second local derivatives: C1 is this element's own space.
+      void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+      bool supports_second_spatial_derivatives(std::string &) const override { return true; }
       
       int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
       {
@@ -1294,6 +1363,9 @@ namespace pyoomph
       void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_C2(const oomph::Vector<double> &, oomph::Shape &, oomph::DShape &) const override { throw_runtime_error("Makes no sense"); }
       void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;      
+      // Second local derivatives: C1 is this element's own space.
+      void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+      bool supports_second_spatial_derivatives(std::string &) const override { return true; }
       int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
       {
           if (tesselate_tri)
@@ -1359,6 +1431,10 @@ namespace pyoomph
       void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { oomph::WedgeElementShapeC1::dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+      // Second local derivatives: C2 is this element's own space; C1 comes from the linear shape class.
+      void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+      void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+      bool supports_second_spatial_derivatives(std::string &) const override { return true; }
       
       int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
       {
@@ -1486,6 +1562,10 @@ namespace pyoomph
       void dshape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { this->dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override { oomph::PyramidElementShapeC1::dshape_local(s, psi, dpsi); }
       void dshape_local_at_s_DL(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi) const override;
+      // Second local derivatives: C2 is this element's own space; C1 comes from the linear shape class.
+      void d2shape_local_at_s_C2(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override { this->d2shape_local_pyoomph(s, psi, dpsi, d2psi); }
+      void d2shape_local_at_s_C1(const oomph::Vector<double> &s, oomph::Shape &psi, oomph::DShape &dpsi, oomph::DShape &d2psi) const override;
+      bool supports_second_spatial_derivatives(std::string &) const override { return true; }
       
       int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
       {
