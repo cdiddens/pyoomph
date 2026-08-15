@@ -344,6 +344,37 @@ class StokesEquations(Equations):
         self.pressure_name=pressure_name
         
 
+    def get_stabilization_traction(self,normal:Expression,bulk_domain:"str | FiniteElementCodeGenerator | None"=None)->Expression:
+        """
+        Traction that *bulk* stabilization terms deposit on a boundary.
+
+        Any bulk term written against ``grad(v)`` leaves a surface integral behind when it is
+        integrated by parts, so the natural boundary condition of a stabilized formulation is not
+        :math:`\\vec{n}\\cdot\\vec{\\vec{\\sigma}} = \\vec{t}` but
+        :math:`\\vec{n}\\cdot\\vec{\\vec{\\sigma}} + \\vec{t}_\\text{stab} = \\vec{t}`. That is
+        consistent -- every :math:`\\vec{t}_\\text{stab}` here is proportional to a residual that
+        vanishes for the exact solution -- but it is not zero on a finite mesh, so a boundary that
+        is meant to carry a prescribed traction (a free surface, an imposed normal traction, a
+        far field) has to subtract it to impose the *physical* traction.
+
+        The interface equations of this module do that automatically. They call this method with
+        the outward normal and with the *parent* (bulk) domain, which matters: on an interface
+        :py:func:`~pyoomph.expressions.generic.grad` is the surface gradient, so a strong residual
+        assembled without ``evaluate_in_domain`` would silently lose all normal derivatives.
+
+        The base (unstabilized) equations return zero, i.e. nothing changes for them. See
+        :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes` for the override.
+
+        Args:
+            normal: The outward normal of the boundary.
+            bulk_domain: Domain in which the strong residual must be evaluated, i.e. the parent
+                domain of the interface the correction is added on.
+
+        Returns:
+            The traction vector to be subtracted, zero here.
+        """
+        return Expression(0)
+
     def get_velocity_space_from_mode(self,for_interface=False)->FiniteElementSpaceEnum:
         velospace:dict[str,FiniteElementSpaceEnum]={"C1":"C1","CR":"C2TB","TH":"C2","SV":"C2","D2D1":"D2","D1D0":"D1","D2TBD1":"D2TB","mini":"C1TB","C2DL":"C2","C2":"C2"}
         res=velospace[self.mode]
@@ -453,7 +484,11 @@ class StokesEquations(Equations):
     # In case of complete Dirichlet velocity conditions, we need to fix a single dof of pressure
     # A single node is selected in case of Taylor hood, otherwise a single element is selected
     def create_pressure_fixation(self, *, value:float | None=None)->PressureFixationTaylorHood | PressureFixationCrouzeixRaviart | PressureFixationScottVogelius:
-        if self.mode in {"TH","C1","mini"}:
+        # "C2" is the equal-order C2/C2 pair: its pressure is nodal just like Taylor-Hood's, and
+        # PressureFixationTaylorHood pins node_pt(0), a vertex node, which carries every continuous
+        # space. Equal-order pairs still need this: PSPG leaves the constant pressure mode in the
+        # nullspace, because grad(q) annihilates constants.
+        if self.mode in {"TH","C1","C2","mini"}:
             return PressureFixationTaylorHood(self.pressure_name,value)
         elif self.mode == "CR":
             return PressureFixationCrouzeixRaviart(self.pressure_name,value)
@@ -617,6 +652,9 @@ class NavierStokesNormalTraction(InterfaceEquations):
         _, utest = var_and_test(peqs.velocity_name)
         n = self.get_normal()
         self.add_residual(weak(self.normal_traction, dot(n, utest)))
+        # With a stabilized formulation the natural BC is n.sigma + t_stab = t, so subtract t_stab
+        # to make the *prescribed* traction the physical one. Zero for the unstabilized equations.
+        self.add_residual(-weak(peqs.get_stabilization_traction(n,self.get_parent_domain()),utest))
 
 
 class NavierStokesFreeSurface(InterfaceEquations):
@@ -755,6 +793,10 @@ class NavierStokesFreeSurface(InterfaceEquations):
         else:
             self.add_residual(weak(self.surface_tension, div(u_test)) )
         self.add_residual(weak(self.additional_normal_traction ,dot(n, u_test)) )
+        # A stabilized bulk leaves its own traction on this boundary (see
+        # StokesEquations.get_stabilization_traction); subtract it so that the free surface balances
+        # the *physical* stress against the surface tension. Zero without stabilization.
+        self.add_residual(-weak(flow_eqs.get_stabilization_traction(n,self.get_parent_domain()),u_test))
 
     def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
         flow_eqs=self.get_parent_equations(StokesEquations)
@@ -979,6 +1021,10 @@ class NavierStokesSlipLength(InterfaceEquations):
         mu=peqs.dynamic_viscosity
         factor = mu / (self.sliplength)
         self.add_residual(factor * weak(utang-utang_wall, utest_tang))
+        # Only the tangential part here: the normal direction of this boundary is not traction-free
+        # but constrained by whatever enforces no penetration, which absorbs the normal footprint.
+        tstab = flow_eqs.get_stabilization_traction(n,self.get_parent_domain())
+        self.add_residual(-weak(tstab - dot(tstab, n) * n, utest_tang))
         if self.surface_tension is not None:
             impose_surface_tension_directly=False
             if impose_surface_tension_directly:
@@ -1022,6 +1068,10 @@ class NavierStokesPrescribedNormalVelocity(InterfaceEquations):
         l,ltest=var_and_test(self.lagrange_multiplier_name)
         self.add_residual(weak(dot(u,n)-self.normal_velocity,ltest))
         self.add_residual(weak(l,dot(utest,n)))
+        # Tangentially this boundary is do-nothing, so it inherits the stabilization traction there;
+        # normally the Lagrange multiplier absorbs it (it *is* the normal traction).
+        tstab = flow_eqs.get_stabilization_traction(n,self.get_parent_domain())
+        self.add_residual(-weak(tstab - dot(tstab, n) * n, utest - dot(utest, n) * n))
 
     def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
         assert isinstance(mesh,InterfaceMesh)
@@ -1295,6 +1345,7 @@ class StokesFlowRadialFarField(InterfaceEquations):
         normstrain=matproduct(strain,n)
         p,ptest=var_and_test(stokes_eqs.pressure_name)
         self.add_weak(-normstrain+self.pinfty*n,utest)
+        self.add_weak(-stokes_eqs.get_stabilization_traction(n,self.get_parent_domain()),utest)
 
 
 from ..typings import _set_public_api

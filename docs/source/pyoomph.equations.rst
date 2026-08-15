@@ -26,6 +26,7 @@ Submodules
    pyoomph.equations.ode
    pyoomph.equations.poisson
    pyoomph.equations.potential_flow
+   pyoomph.equations.stabilized_ns
    pyoomph.equations.stokes_stream_func
    pyoomph.equations.solid
    pyoomph.equations.topological_changes
