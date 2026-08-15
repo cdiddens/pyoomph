@@ -3,7 +3,7 @@
 Status: **in the tree** as `pyoomph/equations/stabilization.py`, wired into
 `pyoomph/equations/advection_diffusion.py` and `pyoomph/equations/multi_component.py`. Covered by
 `tests/test_stabilized_transport.py`. One line of C++ was touched, the return type of `div`
-(§2), and two pre-existing defects were fixed along the way (§7).
+(§2), and two pre-existing defects were fixed along the way (§9).
 
 This is the scalar-transport counterpart of `stabilized_navier_stokes.md`, and it is worth reading
 that one first: the design, the `tau` formulas, the units traps and the `subexpression()` placement
@@ -15,8 +15,8 @@ are the same, and the shared pieces now live in one module rather than two.
 
 One new module holding three things:
 
-* the **free functions** `element_h`, `inv_dt`, `regularized_magnitude`, `tau_advective_diffusive`
-  and `divergence`, shared with `stabilized_ns.py`, which was refactored to delegate to them;
+* the **free functions** `element_h`, `inv_dt`, `regularized_magnitude` and
+  `tau_advective_diffusive`, shared with `stabilized_ns.py`, which was refactored to delegate to them;
 * `ScalarTransportStabilization`, a settings bundle, so each equation class gains exactly *one*
   keyword argument instead of a dozen;
 * `ScalarTransportEquations`, the base class of the three transport equations, which supplies
@@ -128,7 +128,63 @@ is the §5 trap of the flow document — `timestepper_weight` is the *nondimensi
 `eps` under a square root is a unit error — and the discontinuity capturing term adds two more
 instances of it, in the regularizations of `|grad c|` and `|R|`.
 
-## 5. The interface physics is untouched, and that is measured, not argued
+## 5. What it buys on a real problem: intense-Marangoni instability
+
+The Hele-Shaw Marangoni instability of `docs/source/tutorial/mcflow/marangoni_instability.py`, driven
+hard: surface tension linear in the ethanol mass fraction with `dsigma/dc = 100 mN/m`, the liquid
+mutual diffusivity pinned at `1e-10 m^2/s`, a **fixed** 36x18 mesh and a fixed timestep for every
+variant. Fixed on purpose -- with spatial adaptivity the solver refines away exactly the
+under-resolution a stabilization exists to handle, so an adaptive run compares mesh generators. Mean
+mesh Peclet number reaches ~17. `set_num_threads(1)` throughout; the divergence times below repeat
+to the digit across runs.
+
+| variant | survives to | mean Pe_h | wall |
+|---|---|---|---|
+| none | **t = 0.873** (diverged) | 16.9 | 64 s |
+| compo SUPG | **t = 1.2** (full run) | 14.1 | 98 s |
+| compo GLS | t = 0.786 (diverged) | 14.7 | 72 s |
+| compo SUPG + ns SUPG | **t = 1.2** (full run) | 14.1 | 111 s |
+| ns SUPG alone | t = 0.765 (diverged) | 16.7 | 72 s |
+| compo SUPG+DC | t = 0.003, i.e. step 1 | — | — |
+
+Four things worth keeping:
+
+* **SUPG on the composition is what rescues it**, and stabilizing the *flow* instead does nothing
+  (0.765 against the unstabilized 0.873, i.e. inside the noise of the failure). The instability is
+  limited by the composition transport, not by the momentum equation. Reaching for the flow
+  stabilization first would have been the natural guess and would have been wrong.
+* **GLS is worse than SUPG here**, dying earlier than the unstabilized run. Same ordering as the
+  ASGS result of §4 and as `stabilized_navier_stokes.md` §7 records for the momentum version: the
+  extra diffusive perturbation is the fragile part. Prefer plain SUPG.
+* **Robustness is not accuracy.** Refining to 72x36 with the timestep halved, the *unstabilized* run
+  now dies at step 4 while SUPG reaches t = 0.35 -- but the mean kinetic energy at t = 0.15/0.30 is
+  0.061/0.043 on the coarse mesh against 0.108/0.106 on the fine one. The coarse stabilized run is
+  over-damped by roughly a factor of two. SUPG lets you obtain an answer where the Galerkin scheme
+  has none; it does not excuse you from a resolution study. (Why the finer *unstabilized* mesh fails
+  sooner than the coarse one is not explained here.)
+* **`dc_factor = 1` is not a usable default for the discontinuity capturing term**, see §6.
+
+## 6. Discontinuity capturing: measured limits
+
+On the problem above the first Newton solve diverges outright at `dc_factor` 1, 0.1 and 0.03, and
+only runs at 0.01. Newton *diverges* rather than producing NaN -- residuals 0.0027, 0.13, 0.22, 3.27,
+0.97 -- so it is the strength of the nonlinearity and not a singular Jacobian.
+
+The threshold is remarkably insensitive to everything else tried: it is unchanged by `dc_eps`
+anywhere from 1e-10 to 1e-1, by `dc_form` (crosswind and isotropic fail identically), by
+`newton_relaxation_factor=0.5`, and by `globally_convergent_newton=True`.
+
+`dc_subtract_supg` (Codina's form: subtract the diffusivity SUPG already supplies, floor at zero)
+was added while chasing this and is now the default. It is the right formulation -- the raw ratio is
+unbounded and stays active on a smooth solution, where `|R|/(rho|grad c|)` is of order `|a|`, the
+full first-order-upwind diffusivity -- and it measurably changes the answer where the term runs, 6%
+in kinetic energy at `dc_factor` = 0.01. **It does not move the divergence threshold**, which is
+what it was originally reached for; that initial diagnosis was wrong and the docstring says so.
+
+`dc_factor` is left at the textbook 1 rather than retuned, because one problem is not enough to set
+a default. The docstring tells the user to start at 0.01.
+
+## 7. The interface physics is untouched, and that is measured, not argued
 
 The requirement was that switching a stabilization on must not perturb the Marangoni stress, the
 kinematic boundary condition, mass transfer, latent heat, surfactant transport or the contact-angle
@@ -160,7 +216,7 @@ flow side.
 with all three switches at their defaults, is `numpy.array_equal`-identical to the same problem on
 `develop`.
 
-## 6. Closing the gap on the flow side
+## 8. Closing the gap on the flow side
 
 `MultiComponentNavierStokesInterface` is a standalone `InterfaceEquations`, not a subclass of
 `NavierStokesFreeSurface`, and it never called `get_stabilization_traction` — so a flow stabilization
@@ -177,7 +233,7 @@ does not call the hook either, so the two were already consistent.
 The two-phase correction is **reasoned, not measured** — it only activates with
 `natural_bc_correction=True` on a stabilized outer phase, which nothing in the tutorials does.
 
-## 7. Two things found along the way, not fixed here
+## 9. Two things found along the way
 
 **The GCL branch of `CompositionAdvectionDiffusionEquations` dropped `dt_factor` — fixed.** It used a
 plain `add_dweak_dt(rho_factor*f, f_test, scheme=...)` with no `self.dt_factor`, while the two
@@ -200,7 +256,7 @@ Also worth knowing when diffing two runs: `get_dof_description()` can return the
 in a different *order* between runs, because the mass-transfer model iterates a Python `set` of
 component names. Fix `PYTHONHASHSEED` or match rows by name, not by index.
 
-## 8. Loose ends
+## 10. Loose ends
 
 * **`C_I = 4` is unmeasured for scalar transport.** It is inherited from `StabilizedNavierStokes` for
   consistency, where §7 of that document measures `C_I = 36` as the only value reaching O(h^2). A

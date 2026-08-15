@@ -222,6 +222,10 @@ class ScalarTransportStabilization:
             it in all directions.
         dc_eps: relative regularization of :math:`|\\nabla c|` and :math:`|R|` in
             :math:`\\nu_\\text{dc}`.
+        dc_subtract_supg: use Codina's capped form, i.e. subtract the diffusivity SUPG already
+            supplies and floor at zero, see :py:meth:`ScalarTransportEquations.dc_diffusivity`. On by
+            default: the uncapped ratio is unbounded and does not switch itself off on a smooth
+            solution, which makes it unusable at ``dc_factor`` = 1.
         natural_bc_correction: which parts of the stabilization's footprint on the natural boundary
             condition the flux boundary conditions should subtract, so that they impose the physical
             flux rather than the physical flux plus that footprint. ``True`` for all of them,
@@ -241,6 +245,7 @@ class ScalarTransportStabilization:
                  dc_factor: ExpressionOrNum = 1,
                  dc_form: Literal["crosswind", "isotropic"] = "crosswind",
                  dc_eps: ExpressionOrNum = 1e-10,
+                 dc_subtract_supg: bool = True,
                  natural_bc_correction: "bool | Iterable[str]" = False):
         if terms is None:
             self.terms: set[str] = set()
@@ -276,6 +281,7 @@ class ScalarTransportStabilization:
             raise ValueError(f"unknown dc_form '{dc_form}'")
         self.dc_form: Literal["crosswind", "isotropic"] = dc_form
         self.dc_eps = dc_eps
+        self.dc_subtract_supg = dc_subtract_supg
 
         if isinstance(natural_bc_correction, bool):
             self.natural_bc_correction: set[str] = {"SUPG", "DC"} if natural_bc_correction else set()
@@ -434,8 +440,25 @@ class ScalarTransportEquations(Equations):
 
     def dc_diffusivity(self, fieldname: str, R: Expression) -> Expression:
         """
-        The discontinuity capturing artificial diffusivity
-        :math:`\\nu_\\text{dc}=C\\,\\frac{h}{2}\\frac{|R|}{\\hat\\rho|\\nabla c|}` (m^2/s).
+        The discontinuity capturing artificial diffusivity (m^2/s),
+
+        .. math:: \\nu_\\text{dc} = \\max\\left(0,\\;
+                  C\\,\\frac{h}{2}\\frac{|R|}{\\hat\\rho\\,|\\nabla c|} - \\tau|\\vec{a}|^2\\right)
+
+        i.e. Codina's form: the raw ratio *minus* the diffusivity SUPG already supplies, floored at
+        zero. The subtraction is what switches the term off where SUPG is already doing the job;
+        without it the ratio is unbounded and stays active on a perfectly smooth solution, since
+        :math:`|R|/(\\hat\\rho|\\nabla c|)` is of order :math:`|\\vec{a}|` there, which is the full
+        first-order-upwind diffusivity. Set ``dc_subtract_supg=False`` for the raw ratio.
+
+        **This term needs tuning and is off by default for good reason.** On an intense-Marangoni
+        instability at mesh Peclet ~17 the first Newton solve diverges outright at ``dc_factor`` 1,
+        0.1 and 0.03, and only runs at 0.01. That threshold is a property of the term's
+        nonlinearity, not of its size or its regularization: it is unchanged by the cap above, by
+        ``dc_eps`` anywhere from 1e-10 to 1e-1, by ``dc_form``, by a Newton relaxation factor of 0.5
+        and by a globally convergent Newton. The cap does change the answer where the term does run
+        -- 6% in kinetic energy at ``dc_factor`` = 0.01 -- it just does not move that threshold.
+        Start at ``dc_factor`` = 0.01 and raise it only as far as Newton tolerates.
 
         Both magnitudes are regularized square roots rather than ``absolute_value``: the derivative
         of :math:`|x|` is 0/0 at the origin, and both :math:`R` and :math:`\\nabla c` are exactly
@@ -451,8 +474,11 @@ class ScalarTransportEquations(Equations):
         Reps = cfg.dc_eps * scale_factor(fieldname) / scale_factor("temporal") * rho_hat
         gmag = regularized_magnitude(g, geps)
         Rmag = square_root(R * R + Reps ** 2)
-        return _maybe_sub(self._wrap_tau, cfg.dc_factor * self.stabilization_element_h() / 2
-                          * Rmag / (rho_hat * gmag))
+        nu = cfg.dc_factor * self.stabilization_element_h() / 2 * Rmag / (rho_hat * gmag)
+        if cfg.dc_subtract_supg:
+            U = self.stabilization_velocity_magnitude()
+            nu = maximum(nu - self.tau(fieldname) * U ** 2, 0)
+        return _maybe_sub(self._wrap_tau, nu)
 
     def add_stabilization_residuals(self, ts: "Callable[[Any],Any] | None" = None):
         """
