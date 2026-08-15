@@ -39,6 +39,7 @@ the useful part. Code examples in `examples/` are runnable companions, not snipp
 | | |
 |---|---|
 | [code_generation.md](code_generation.md) | Where code-generation time goes, and whether the emitted C can be made faster. (Mostly it cannot — the C compiler is already good at it.) |
+| [initialisation_cost.md](initialisation_cost.md) | Why `initialise()` took 25 s for a million dofs before anything was solved, what removed a quarter of it, and why skipping the elemental equation numbering cannot work (`assign_local_eqn_numbers` also rebuilds `eleminfo`). Also: how to profile any of this when `perf` is unavailable and `cProfile` cannot see nanobind. |
 | [structural_assembly.md](structural_assembly.md) | Precomputed CSR sparsity, value-only re-assembly, and the distributed exchange. |
 | [jacobian_block_flags.md](jacobian_block_flags.md) | Per-block proven symmetry/constancy bits from the symbolic block expressions, their problem-level AND-union in `_jacobian_structure.txt`, and the print-free global-parameter registration that came out of it. Consumers not built yet. |
 | [static_condensation.md](static_condensation.md) | Eliminating element-local dofs (CR bubbles, DL/D0/DG fields) from the assembled system and reconstructing them after the Newton update. Halves the factorisation time; serial and experimental. |
