@@ -853,6 +853,10 @@ namespace pyoomph
 		bool require_d2x = required.Pos.d2x_psi || required.DL.d2x_psi;
 		for (unsigned int isp = 0; isp < NUM_CONTINUOUS_SPACES; isp++)
 			require_d2x |= required.continuous_spaces[isp].d2x_psi;
+		// The spatial derivative of the normal needs the GEOMETRY's second local derivatives (X_{k,ab}
+		// and everything built from them) but none of the per-FIELD second derivatives, so it widens
+		// only the geometry gate below - never `space_d2x`.
+		const bool require_geom_d2 = require_d2x || required.normal_deriv;
 
 		oomph::DenseMatrix<double> interpolated_t(el_dim, n_dim, 0.0); // Tangents
 		oomph::DenseMatrix<double> interpolated_T(el_dim, n_lagr, 0.0);
@@ -865,7 +869,7 @@ namespace pyoomph
 		// formula below, so it is built once here rather than per space.
 		oomph::DShape d2psids_Element(std::max((unsigned int)1, n_node), MAX_N2DERIV);
 		double Xkab[3][MAX_N2DERIV];
-		if (require_d2x && el_dim)
+		if (require_geom_d2 && el_dim)
 		{
 			std::string why;
 			if (!this->supports_second_spatial_derivatives(why))
@@ -1170,7 +1174,7 @@ namespace pyoomph
 		double Qibc[3][3][3];   // [i_dim][b_eldim][c_eldim]
 		double dgab_ds[3][3][3]; // dg^{ab}/ds_c
 		std::vector<double> dM_dX, dQ_dX, d2M_dXdX, d2Q_dXdX; // nodal-coordinate sensitivities, see fill_d2x_dNodalPos_helper
-		if (require_d2x && el_dim)
+		if (require_geom_d2 && el_dim)
 		{
 			// dg_{ed}/ds_c = t_{e,i} X_{i,dc} + t_{d,i} X_{i,ec}, then
 			// dg^{ab}/ds_c = -g^{ae} (dg_{ed}/ds_c) g^{db}.
@@ -1521,12 +1525,214 @@ namespace pyoomph
 			}
 		}
 
-		if (required.normal) // TODO: Better normal
+		if (required.normal || required.normal_deriv)
 		{
 			oomph::Vector<double> unit_normal(this->nodal_dimension());
 			this->get_normal_at_s(s, unit_normal, (require_dxdshape ? shape_info->d_normal_dcoord : NULL), ((require_hessian && require_dxdshape) ? shape_info->d2_normal_d2coord : NULL), history_index);
 			for (unsigned int i = 0; i < nodal_dimension(); i++)
 				shape_info->normal[history_index][i] = unit_normal[i];
+
+			// ------------------------------------------------------------------------------------
+			// First SPATIAL derivative of the normal.
+			//
+			// n is characterised by n.t_a = 0 and |n| = 1. Differentiating both by s_b gives
+			// (dn/ds_b).t_a = -n.X_{,ab} and n.(dn/ds_b) = 0, and for codimension 1 the tangents
+			// together with n span the ambient space, so dn/ds_b is fully determined. Contracting
+			// with M_j^(b) = gab_gai[b][j]:
+			//
+			//    B_bc      := n_k X_{k,bc}                  (second fundamental form, local indices)
+			//    dn_i/dx_j  = - M_i^(c) M_j^(b) B_bc
+			//
+			// which is symmetric in i,j (X_{k,bc} is), i.e. minus the Weingarten map, and whose trace
+			// -g^{bc} B_bc is the mean curvature. n enters linearly, so whichever orientation
+			// get_normal_at_s or oomph-lib's outer_unit_normal/normal_sign() picked is inherited.
+			// Being written in the metric, this is one formula for every element dimension.
+			if (required.normal_deriv)
+			{
+				for (unsigned int i = 0; i < n_dim; i++)
+					for (unsigned int j = 0; j < n_dim; j++)
+						shape_info->dnormal_dx[history_index][i][j] = 0.0;
+
+				if (el_dim) // a point normal is constant, so its spatial derivative vanishes
+				{
+					// Codimension 1 is what makes dn/ds_b determined: n.t_a = 0 and |n| = 1 only pin it
+					// down when {t_1..t_eldim, n} spans the ambient space. For a line in 3d the normal
+					// is still perfectly well defined (oomph-lib returns the co-normal), but it has an
+					// out-of-surface derivative that these two conditions say nothing about, so the
+					// formula below would return a plausible wrong answer rather than fail.
+					if (n_dim != el_dim + 1)
+						throw_runtime_error("A spatial derivative of the normal, e.g. from grad(normal) or div(normal), is only defined for a codimension of 1, but this is a " + std::to_string(el_dim) + "-dimensional element in " + std::to_string(n_dim) + " dimensions.");
+					std::string why;
+					if (!this->supports_second_spatial_derivatives(why))
+						throw_runtime_error("A spatial derivative of the normal, e.g. from grad(normal) or div(normal), was requested, but " + why);
+
+					double Bbc[3][3];
+					for (unsigned b = 0; b < el_dim; b++)
+						for (unsigned c = 0; c < el_dim; c++)
+						{
+							double sum = 0.0;
+							for (unsigned int k = 0; k < n_dim; k++)
+								sum += unit_normal[k] * Xkab[k][PYOOMPH_D2_SLOT(b, c)];
+							Bbc[b][c] = sum;
+						}
+
+					for (unsigned int i = 0; i < n_dim; i++)
+						for (unsigned int j = 0; j < n_dim; j++)
+						{
+							double sum = 0.0;
+							for (unsigned b = 0; b < el_dim; b++)
+								for (unsigned c = 0; c < el_dim; c++)
+									sum -= gab_gai[c][i] * gab_gai[b][j] * Bbc[b][c];
+							shape_info->dnormal_dx[history_index][i][j] = sum;
+						}
+
+					// Nodal-coordinate sensitivities. Note the index sets differ: dn_k/dX and the
+					// output live on the BULK element's nodes, while dM_dX and Psi_{m,bc} are indexed
+					// by this element's own nodes, so the latter are scattered through
+					// normal_coord_node(). Bulk nodes that are not on the face keep a zero entry,
+					// which is correct - the unit normal does not depend on them.
+					if (require_dxdshape && history_index == 0)
+					{
+						const unsigned n_coord_nodes = this->n_normal_coord_nodes();
+						const unsigned NN = eleminfo.nnode, ND = n_dim, ED = el_dim;
+						(void)NN;
+						auto iM = [&](unsigned i2, unsigned b, unsigned m, unsigned p) { return ((i2 * ED + b) * NN + m) * ND + p; };
+
+						for (unsigned int i = 0; i < n_dim; i++)
+							for (unsigned int j = 0; j < n_dim; j++)
+								for (unsigned m = 0; m < n_coord_nodes; m++)
+									for (unsigned int p = 0; p < n_dim; p++)
+										shape_info->d_dnormal_dx_dcoord[i][j][m][p] = 0.0;
+
+						// The part that is naturally bulk-indexed: -M M (dn_k/dX^m_p) X_{k,bc}
+						for (unsigned int i = 0; i < n_dim; i++)
+							for (unsigned int j = 0; j < n_dim; j++)
+								for (unsigned m = 0; m < n_coord_nodes; m++)
+									for (unsigned int p = 0; p < n_dim; p++)
+									{
+										double sum = 0.0;
+										for (unsigned b = 0; b < el_dim; b++)
+											for (unsigned c = 0; c < el_dim; c++)
+											{
+												double dB = 0.0;
+												for (unsigned int k = 0; k < n_dim; k++)
+													dB += shape_info->d_normal_dcoord[k][m][p] * Xkab[k][PYOOMPH_D2_SLOT(b, c)];
+												sum -= gab_gai[c][i] * gab_gai[b][j] * dB;
+											}
+										shape_info->d_dnormal_dx_dcoord[i][j][m][p] += sum;
+									}
+
+						// The parts indexed by this element's own nodes, scattered onto bulk nodes:
+						// the two dM/dX terms and the n_p Psi_{m,bc} term.
+						for (unsigned mloc = 0; mloc < eleminfo.nnode; mloc++)
+						{
+							const unsigned m = this->normal_coord_node(mloc);
+							for (unsigned int p = 0; p < n_dim; p++)
+								for (unsigned int i = 0; i < n_dim; i++)
+									for (unsigned int j = 0; j < n_dim; j++)
+									{
+										double sum = 0.0;
+										for (unsigned b = 0; b < el_dim; b++)
+											for (unsigned c = 0; c < el_dim; c++)
+											{
+												sum -= (dM_dX[iM(i, c, mloc, p)] * gab_gai[b][j] + gab_gai[c][i] * dM_dX[iM(j, b, mloc, p)]) * Bbc[b][c];
+												sum -= gab_gai[c][i] * gab_gai[b][j] * unit_normal[p] * d2psids_Element(mloc, PYOOMPH_D2_SLOT(b, c));
+											}
+										shape_info->d_dnormal_dx_dcoord[i][j][m][p] += sum;
+									}
+						}
+
+						// Second nodal-coordinate derivative. Differentiating
+						//   dn_i/dx_j = -M_i^c M_j^b B_bc ,  B_bc = n_k X_{k,bc}
+						// twice gives nine groups; with d2X/dXdX = 0 (X is linear in the nodal
+						// positions) the only new ingredients are d2M_dXdX and d2_normal_d2coord,
+						// both already available.
+						//
+						// The two index sets collide here on BOTH slots, so rather than classifying
+						// every term as face/face, face/bulk or bulk/bulk, the face-indexed quantities
+						// are first scattered into bulk-indexed temporaries. Every term below is then
+						// written in one index set. Off-face bulk entries stay zero, which is correct.
+						if (require_hessian && shape_info->d2_dnormal_dx_d2coord && shape_info->d2_normal_d2coord)
+						{
+							const unsigned NX = n_coord_nodes * ND;
+							auto mp_of = [&](unsigned m, unsigned p) { return m * ND + p; };
+							// dM_i^(c)/dX, scattered to bulk nodes
+							std::vector<double> dMb(ND * ED * NX, 0.0);
+							auto iMb = [&](unsigned i2, unsigned c, unsigned mp) { return (i2 * ED + c) * NX + mp; };
+							// Psi_{m,bc}, scattered to bulk nodes
+							std::vector<double> Psib(NX * MAX_N2DERIV, 0.0);
+							// d2M_i^(c)/dXdX, scattered on both slots
+							std::vector<double> d2Mb(ND * ED * NX * NX, 0.0);
+							auto iM2b = [&](unsigned i2, unsigned c, unsigned mp, unsigned mp2) { return ((i2 * ED + c) * NX + mp) * NX + mp2; };
+							const unsigned NXloc = eleminfo.nnode * ND;
+							auto iM2loc = [&](unsigned i2, unsigned c, unsigned mp, unsigned mp2) { return ((i2 * ED + c) * NXloc + mp) * NXloc + mp2; };
+
+							for (unsigned mloc = 0; mloc < eleminfo.nnode; mloc++)
+							{
+								const unsigned m = this->normal_coord_node(mloc);
+								for (unsigned int p = 0; p < n_dim; p++)
+								{
+									for (unsigned int i = 0; i < n_dim; i++)
+										for (unsigned c = 0; c < el_dim; c++)
+											dMb[iMb(i, c, mp_of(m, p))] += dM_dX[iM(i, c, mloc, p)];
+									for (unsigned b = 0; b < el_dim; b++)
+										for (unsigned c = 0; c < el_dim; c++)
+											Psib[mp_of(m, p) * MAX_N2DERIV + PYOOMPH_D2_SLOT(b, c)] = d2psids_Element(mloc, PYOOMPH_D2_SLOT(b, c));
+								}
+							}
+							if (!d2M_dXdX.empty())
+							{
+								for (unsigned mloc = 0; mloc < eleminfo.nnode; mloc++)
+									for (unsigned int p = 0; p < n_dim; p++)
+										for (unsigned m2loc = 0; m2loc < eleminfo.nnode; m2loc++)
+											for (unsigned int p2 = 0; p2 < n_dim; p2++)
+											{
+												const unsigned dst = mp_of(this->normal_coord_node(mloc), p), dst2 = mp_of(this->normal_coord_node(m2loc), p2);
+												for (unsigned int i = 0; i < n_dim; i++)
+													for (unsigned c = 0; c < el_dim; c++)
+														d2Mb[iM2b(i, c, dst, dst2)] += d2M_dXdX[iM2loc(i, c, mp_of(mloc, p), mp_of(m2loc, p2))];
+											}
+							}
+
+							for (unsigned int i = 0; i < n_dim; i++)
+								for (unsigned int j = 0; j < n_dim; j++)
+									for (unsigned m = 0; m < n_coord_nodes; m++)
+										for (unsigned int p = 0; p < n_dim; p++)
+											for (unsigned m2 = 0; m2 < n_coord_nodes; m2++)
+												for (unsigned int p2 = 0; p2 < n_dim; p2++)
+												{
+													const unsigned mp = mp_of(m, p), mp2 = mp_of(m2, p2);
+													double sum = 0.0;
+													for (unsigned b = 0; b < el_dim; b++)
+														for (unsigned c = 0; c < el_dim; c++)
+														{
+															const unsigned sl = PYOOMPH_D2_SLOT(b, c);
+															// dB/dX, d'B/dX' and d'dB
+															double dB = unit_normal[p] * Psib[mp * MAX_N2DERIV + sl];
+															double dpB = unit_normal[p2] * Psib[mp2 * MAX_N2DERIV + sl];
+															double d2B = 0.0;
+															for (unsigned int k = 0; k < n_dim; k++)
+															{
+																dB += shape_info->d_normal_dcoord[k][m][p] * Xkab[k][sl];
+																dpB += shape_info->d_normal_dcoord[k][m2][p2] * Xkab[k][sl];
+																d2B += shape_info->d2_normal_d2coord[k][m][p][m2][p2] * Xkab[k][sl];
+															}
+															d2B += shape_info->d_normal_dcoord[p2][m][p] * Psib[mp2 * MAX_N2DERIV + sl];
+															d2B += shape_info->d_normal_dcoord[p][m2][p2] * Psib[mp * MAX_N2DERIV + sl];
+
+															sum -= d2Mb[iM2b(i, c, mp, mp2)] * gab_gai[b][j] * Bbc[b][c];
+															sum -= gab_gai[c][i] * d2Mb[iM2b(j, b, mp, mp2)] * Bbc[b][c];
+															sum -= (dMb[iMb(i, c, mp)] * dMb[iMb(j, b, mp2)] + dMb[iMb(i, c, mp2)] * dMb[iMb(j, b, mp)]) * Bbc[b][c];
+															sum -= (dMb[iMb(i, c, mp)] * gab_gai[b][j] + gab_gai[c][i] * dMb[iMb(j, b, mp)]) * dpB;
+															sum -= (dMb[iMb(i, c, mp2)] * gab_gai[b][j] + gab_gai[c][i] * dMb[iMb(j, b, mp2)]) * dB;
+															sum -= gab_gai[c][i] * gab_gai[b][j] * d2B;
+														}
+													shape_info->d2_dnormal_dx_d2coord[i][j][m][p][m2][p2] = sum;
+												}
+						}
+					}
+				}
+			}
 		}
 		
 		if (D2X2_dshape) delete D2X2_dshape;

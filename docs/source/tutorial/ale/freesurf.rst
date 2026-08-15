@@ -55,7 +55,7 @@ The second condition is the dynamic boundary condition. This one states that the
    -\left\langle \sigma\kappa\vec{n}+\nabla_S \sigma, \vec{v} \right\rangle
    \end{aligned}
 
-as interface contribution to the velocity test function :math:`\vec{v}`. However, it is not trivial to calculate the curvature :math:`\kappa=-\nabla_S\cdot \vec{n}`. In fact, pyoomph does not allow one to calculate the surface divergence of the normal yet. Instead, we make use of the *surface divergence theorem*. For an arbitrary vector field :math:`\vec{w}` defined on the interface :math:`\Gamma`, we have the relation
+as interface contribution to the velocity test function :math:`\vec{v}`. However, it is not trivial to calculate the curvature :math:`\kappa=-\nabla_S\cdot \vec{n}`. pyoomph can nowadays evaluate it directly, i.e. ``div(var("normal"))`` works and gives :math:`\nabla_S\cdot\vec{n}`, which is :math:`+2/R` on a sphere of radius :math:`R` since pyoomph's interface normal points out of the bulk domain. For the free surface, however, the *surface divergence theorem* is still the better route: it needs no second derivative of the geometry at all, and it delivers the Laplace pressure and the Marangoni stress from a single term, together with the boundary contribution we will need for the contact angle. For an arbitrary vector field :math:`\vec{w}` defined on the interface :math:`\Gamma`, we have the relation
 
 .. math:: \int_\Gamma \nabla_S\cdot\vec{w}\, \mathrm{d}A = \int_\Gamma \left(\nabla_S\cdot\vec{n}\right) \left(\vec{n}\cdot\vec{w}\right) \mathrm{d}A +\int_{\partial\Gamma} \vec{w}\cdot\vec{N}\, \mathrm{d}l
 

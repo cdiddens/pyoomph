@@ -545,6 +545,16 @@ namespace pyoomph
     // coordinates, for use by generated code implementing normal-dependent boundary conditions.
     virtual void get_normal_at_s(const oomph::Vector<double> &s, oomph::Vector<double> &n, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2, unsigned history_index = 0) const;
 
+    // The node index set in which the normal's coordinate sensitivities are expressed. For an
+    // interface element that is the PARENT (bulk) element's nodes, not this element's own - see
+    // InterfaceElementBase::get_dnormal_dcoords_at_s, which builds them from
+    // Bulk_element_pt->dshape_local. The generated code loops over the same set, because
+    // mark_further_required_fields marks "psi" on the bulk's position space. Quantities that are
+    // naturally indexed by this element's own nodes (the metric, the shape functions) therefore have
+    // to be scattered through normal_coord_node() when they are combined with them.
+    virtual unsigned n_normal_coord_nodes() const { return this->nnode(); }
+    virtual unsigned normal_coord_node(unsigned l) const { return l; }
+
     // Discontinuous fields are stored as internal_data, on interfaces possibly also on external_data
     virtual oomph::Data *get_D0_nodal_data(const unsigned &fieldindex);
     virtual oomph::Data *get_DL_nodal_data(const unsigned &fieldindex);    
@@ -1275,6 +1285,8 @@ namespace pyoomph
     // opposite interface element, the opposite's bulk), which the base walk cannot see.
     void fill_local_dof_contribution_indices(std::vector<int> &dest) override;
     void get_dnormal_dcoords_at_s(const oomph::Vector<double> &s, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT dnormal_dcoord, double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2normal_dcoord2) const override;
+    unsigned n_normal_coord_nodes() const override { return this->bulk_element_pt()->nnode(); }
+    unsigned normal_coord_node(unsigned l) const override { return const_cast<InterfaceElementBase *>(this)->bulk_node_number(l); }
 
     // Maps a local coordinate s on this interface element to the corresponding local coordinate on
     // the opposite_side interface element, accounting for possibly different node/edge orientation

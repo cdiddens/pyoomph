@@ -84,6 +84,7 @@ namespace pyoomph
 		RequiredShapes_merge_space(src->Pos, dest->Pos);
 
 		dest->normal |= src->normal;
+		dest->normal_deriv |= src->normal_deriv;
 		dest->elemsize_Eulerian |= src->elemsize_Eulerian;
 		dest->elemsize_Lagrangian |= src->elemsize_Lagrangian;
 		dest->elemsize_Eulerian_cartesian |= src->elemsize_Eulerian_cartesian;

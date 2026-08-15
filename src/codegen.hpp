@@ -158,6 +158,10 @@ namespace pyoomph
       unsigned history_step = 0;      // For evaluations in past: the normal of a previous configuration
       bool no_jacobian = false;
       bool no_hessian = false;
+      // -1 for the plain normal, otherwise the direction j of dn_i/dx_j. Independent of
+      // deriv_direction/deriv_direction2, which are nodal-COORDINATE derivatives: a spatially derived
+      // normal still has a moving-mesh Jacobian and Hessian.
+      int spatial_deriv_direction = -1;
       bool is_derived_by_lshape2() const { return derived_by_second_index; }
       const FiniteElementCode *get_code() const { return code; }
       unsigned get_direction() const { return direction; }

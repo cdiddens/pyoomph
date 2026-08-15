@@ -873,6 +873,8 @@ namespace pyoomph
 
 		for (unsigned k = 0; k < 3; k++)
 			my_alloc_or_free(do_alloc, (*buff)->normal[k], MAX_NODAL_DIM);
+		for (unsigned k = 0; k < 3; k++)
+			my_alloc_or_free(do_alloc, (*buff)->dnormal_dx[k], MAX_NODAL_DIM, MAX_NODAL_DIM);
 
 		my_alloc_or_free(do_alloc, (*buff)->timestepper_weights_dt_BDF1, MAX_TIME_WEIGHTS);
 		my_alloc_or_free(do_alloc, (*buff)->timestepper_weights_dt_BDF2, MAX_TIME_WEIGHTS);
@@ -886,6 +888,7 @@ namespace pyoomph
 #endif
 
 		my_alloc_or_free(do_alloc, (*buff)->d_normal_dcoord, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
+		my_alloc_or_free(do_alloc, (*buff)->d_dnormal_dx_dcoord, MAX_NODAL_DIM, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
 
 		if (with_analytical_hessian_moving_mesh || !do_alloc)
 		{
@@ -899,6 +902,7 @@ namespace pyoomph
 			my_alloc_or_free(do_alloc, (*buff)->d2_dx2_shape_dcoord_DL, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
 
 			my_alloc_or_free(do_alloc, (*buff)->d2_normal_d2coord, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
+			my_alloc_or_free(do_alloc, (*buff)->d2_dnormal_dx_d2coord, MAX_NODAL_DIM, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM, MAX_NODES, MAX_NODAL_DIM);
 		}
 		else
 		{
@@ -911,6 +915,7 @@ namespace pyoomph
 			}
 			(*buff)->d2_dx2_shape_dcoord_DL = NULL;
 			(*buff)->d2_normal_d2coord = NULL;
+			(*buff)->d2_dnormal_dx_d2coord = NULL;
 		}
 
 		// Second spatial derivatives. Sized from the nodal dimension, not from MAX_NODES/MAX_NODAL_DIM

@@ -290,9 +290,21 @@ typedef struct JITShapeInfo
   unsigned int jacobian_size;
   unsigned int mass_matrix_size;
 
-  double ARRAY_DECL_NDIM(normal)[3];         // (history, direction) //TODO: This does not allow for divergence of the normal etc.
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT d_normal_dcoord; // Derivative of the normal wrt. nodal coordinates [ipt][dir][coord node][coord dir]
-  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_normal_d2coord; // Second order derivative of the normal wrt. nodal coordinates [ipt][dir][coord node 1][coord dir 1][coord node 2][coord dir 2]
+  double ARRAY_DECL_NDIM(normal)[3];         // (history, direction)
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT* PYOOMPH_RESTRICT d_normal_dcoord; // Derivative of the normal wrt. nodal coordinates [dir][coord node][coord dir]
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_normal_d2coord; // Second order derivative of the normal wrt. nodal coordinates [dir][coord node 1][coord dir 1][coord node 2][coord dir 2]
+
+  // First SPATIAL derivative of the normal, dn_i/dx_j - i.e. minus the second fundamental form, whose
+  // trace div(n) is the mean curvature. Built as -M_i^(c) M_j^(b) n_k X_{k,bc} (see
+  // fill_shape_info_at_s), hence symmetric in i,j and independent of the normal's orientation
+  // convention. The history index matches normal[] above.
+  //
+  // The "coord node" index of the sensitivities below is the node of the BULK element, exactly as for
+  // d_normal_dcoord: on an interface the normal's coordinate dependence is expressed in terms of the
+  // parent element's nodes, and the generated code loops over that same set.
+  double ARRAY_DECL_NDIM(ARRAY_DECL_NDIM(dnormal_dx))[3];                        // [history][normal comp i][spatial dir j]
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d_dnormal_dx_dcoord;  // [i][j][coord node][coord dir]
+  double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dnormal_dx_d2coord; // [i][j][coord node][coord dir][coord node 2][coord dir 2]
 
   // double * dx_shape_at_center_C1; //Gradients of C1 space at center //Required for SUPG
 
@@ -355,7 +367,11 @@ typedef struct JITFuncSpec_RequiredShapes_FiniteElement
   JITFuncSpec_RequiredShapes_For_Space_t DL;    
   JITFuncSpec_RequiredShapes_For_Space_t D0;      
     
-  bool normal;                                   
+  bool normal;
+  // Separate from `normal`, because dn_i/dx_j needs the GEOMETRY's second local derivatives, which
+  // are otherwise only computed when some field asks for d2x_psi. A plain var("normal") must not
+  // start paying for d2shape_local.
+  bool normal_deriv;
   bool elemsize_Eulerian,elemsize_Lagrangian;
   bool elemsize_Eulerian_cartesian,elemsize_Lagrangian_cartesian;  
 

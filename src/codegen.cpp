@@ -1245,19 +1245,19 @@ namespace pyoomph
       
 	bool operator==(const NormalSymbol &lhs, const NormalSymbol &rhs)
 	{
-		return lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2()  && lhs.expansion_mode == rhs.expansion_mode && lhs.no_jacobian == rhs.no_jacobian && lhs.no_hessian == rhs.no_hessian && lhs.history_step == rhs.history_step;
+		return lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2()  && lhs.expansion_mode == rhs.expansion_mode && lhs.no_jacobian == rhs.no_jacobian && lhs.no_hessian == rhs.no_hessian && lhs.history_step == rhs.history_step && lhs.spatial_deriv_direction == rhs.spatial_deriv_direction;
 	}
+	// Ordering by a tuple rather than the former chain of nested equality tests, in which every new
+	// clause had to repeat all the preceding ones - adding spatial_deriv_direction to that chain
+	// would have meant a tenth copy of the whole prefix.
 	bool operator<(const NormalSymbol &lhs, const NormalSymbol &rhs)
 	{
-		return lhs.get_code()->get_creation_index() < rhs.get_code()->get_creation_index() 
-		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() < rhs.get_direction()) 
-		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() < rhs.get_derived_direction()) 
-		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.get_derived_direction2() < rhs.get_derived_direction2()) 
-		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_derived_by_lshape2() < rhs.is_derived_by_lshape2()) 		
-		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2() && lhs.expansion_mode < rhs.expansion_mode) 
-		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2() && lhs.expansion_mode == rhs.expansion_mode && lhs.no_jacobian < rhs.no_jacobian) 
-		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2() && lhs.expansion_mode == rhs.expansion_mode && lhs.no_jacobian == rhs.no_jacobian && lhs.no_hessian < rhs.no_hessian)
-		 || (lhs.get_code() == rhs.get_code() && lhs.get_direction() == rhs.get_direction() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2() && lhs.expansion_mode == rhs.expansion_mode && lhs.no_jacobian == rhs.no_jacobian && lhs.no_hessian == rhs.no_hessian && lhs.history_step < rhs.history_step);
+		return std::make_tuple(lhs.get_code()->get_creation_index(), lhs.get_direction(), lhs.get_derived_direction(),
+							   lhs.get_derived_direction2(), lhs.is_derived_by_lshape2(), lhs.expansion_mode,
+							   lhs.no_jacobian, lhs.no_hessian, lhs.history_step, lhs.spatial_deriv_direction) <
+			   std::make_tuple(rhs.get_code()->get_creation_index(), rhs.get_direction(), rhs.get_derived_direction(),
+							   rhs.get_derived_direction2(), rhs.is_derived_by_lshape2(), rhs.expansion_mode,
+							   rhs.no_jacobian, rhs.no_hessian, rhs.history_step, rhs.spatial_deriv_direction);
 	}
 
 	bool operator<(const SubExpression &lhs, const SubExpression &rhs)
@@ -5007,6 +5007,8 @@ namespace pyoomph
 				if (sp.get_code() == this || sp.get_code() == NULL)
 				{
 					this->mark_shapes_required(for_what, this->get_my_position_space(), "normal");
+					if (sp.spatial_deriv_direction >= 0)
+						this->mark_shapes_required(for_what, this->get_my_position_space(), "normal_deriv");
 					if (this->bulk_code)
 					{
 						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
@@ -5019,6 +5021,8 @@ namespace pyoomph
 				else if (this->bulk_code && sp.get_code() == this->bulk_code)
 				{
 					this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "normal");
+					if (sp.spatial_deriv_direction >= 0)
+						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "normal_deriv");
 					if (this->bulk_code->bulk_code)
 					{
 						this->mark_shapes_required(for_what, this->bulk_code->bulk_code->get_my_position_space(), "psi");
@@ -5031,6 +5035,8 @@ namespace pyoomph
 				else if (this->opposite_interface_code && sp.get_code() == this->opposite_interface_code)
 				{
 					this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "normal");
+					if (sp.spatial_deriv_direction >= 0)
+						this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "normal_deriv");
 					if (this->opposite_interface_code->bulk_code)
 					{
 						this->mark_shapes_required(for_what, this->opposite_interface_code->bulk_code->get_my_position_space(), "psi");
@@ -7544,6 +7550,17 @@ namespace pyoomph
 		GiNaC::lst subslist2;
 		GiNaC::potential_real_symbol interpolated_x("interpolated_x"), interpolated_y("interpolated_y"), interpolated_z("interpolated_z");
 		GiNaC::potential_real_symbol normal_x("_normal[0]"), normal_y("_normal[1]"), normal_z("_normal[2]");
+		// Only the plain normal has a counterpart in the initial/Dirichlet condition C signature
+		// (the "_normal" argument). A spatially derived one would survive the substitution below and
+		// then fail the "not a numeric" dry run with an unintelligible message.
+		for (GiNaC::const_preorder_iterator it = expression.preorder_begin(); it != expression.preorder_end(); ++it)
+		{
+			if (GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(*it) &&
+				GiNaC::ex_to<GiNaC::GiNaCNormalSymbol>(*it).get_struct().spatial_deriv_direction >= 0)
+			{
+				throw_runtime_error("Spatial derivatives of the normal, e.g. grad(normal) or div(normal), cannot be used in initial or Dirichlet conditions - only the normal itself is available there.");
+			}
+		}
 		subslist.append(this->get_normal_component(0) == normal_x);
 		subslist.append(this->get_normal_component(1) == normal_y);
 		subslist.append(this->get_normal_component(2) == normal_z);
@@ -10805,17 +10822,21 @@ namespace GiNaC
 				std::string n_hist = "[0]";
 				if (sp.history_step > 0 && femprint.FEM_opts->for_code->history_geometry_is_relevant())
 					n_hist = "[" + std::to_string(sp.history_step) + "]";
+				// A spatially derived normal reads from the parallel dnormal_dx family; the
+				// nodal-coordinate derivative index means exactly the same thing in both.
+				const std::string base = (sp.spatial_deriv_direction >= 0 ? "dnormal_dx" : "normal");
+				const std::string spatial_idx = (sp.spatial_deriv_direction >= 0 ? "[" + std::to_string(sp.spatial_deriv_direction) + "]" : "");
 				if (sp.get_derived_direction() == -1)
 				{
-					c.s << prefix << "normal" << n_hist << "[" << sp.get_direction() << "]";
+					c.s << prefix << base << n_hist << "[" << sp.get_direction() << "]" << spatial_idx;
 				}
 				else if (sp.get_derived_direction2() == -1)
 				{
-					c.s << prefix << "d_normal_dcoord[" << sp.get_direction() << "][" << (sp.is_derived_by_lshape2() ? "l_shape2" : "l_shape") << "][" << sp.get_derived_direction() << "]";
+					c.s << prefix << "d_" << base << "_dcoord[" << sp.get_direction() << "]" << spatial_idx << "[" << (sp.is_derived_by_lshape2() ? "l_shape2" : "l_shape") << "][" << sp.get_derived_direction() << "]";
 				}
 				else
 				{
-					c.s << prefix << "d2_normal_d2coord[" << sp.get_direction() << "][l_shape][" << sp.get_derived_direction() << "][l_shape2][" << sp.get_derived_direction2() << "]";
+					c.s << prefix << "d2_" << base << "_d2coord[" << sp.get_direction() << "]" << spatial_idx << "[l_shape][" << sp.get_derived_direction() << "][l_shape2][" << sp.get_derived_direction2() << "]";
 				}
 				return;
 			}
@@ -10838,9 +10859,37 @@ namespace GiNaC
 	GiNaC::ex GiNaCNormalSymbol::derivative(const GiNaC::symbol &s) const
 	{
         
-		if (s == pyoomph::expressions::t || s == pyoomph::expressions::x || s == pyoomph::expressions::y || s == pyoomph::expressions::z || s == pyoomph::expressions::X || s == pyoomph::expressions::Y || s == pyoomph::expressions::Z)
+		// First EULERIAN spatial derivative: dn_i/dx_j, i.e. minus the Weingarten map. See
+		// fill_shape_info_at_s for the formula. Second spatial derivatives are not implemented.
+		if (s == pyoomph::expressions::x || s == pyoomph::expressions::y || s == pyoomph::expressions::z)
 		{
-			throw_runtime_error("Cannot derive the normal with respect to space or time yet");
+			const pyoomph::NormalSymbol &sp = get_struct();
+			if (sp.spatial_deriv_direction >= 0)
+				throw_runtime_error("Second spatial derivatives of the normal are not implemented, i.e. grad(grad(normal)) or div(grad(normal)).");
+			if (sp.get_derived_direction() != -1)
+				throw_runtime_error("Cannot take a spatial derivative of a normal that has already been derived with respect to the nodal coordinates.");
+			if (sp.history_step > 0)
+				return 0; // the geometry of a past configuration does not depend on the current unknowns
+			pyoomph::NormalSymbol nret = sp;
+			nret.spatial_deriv_direction = (s == pyoomph::expressions::x ? 0 : (s == pyoomph::expressions::y ? 1 : 2));
+			return GiNaC::GiNaCNormalSymbol(nret);
+		}
+		if (s == pyoomph::expressions::t)
+		{
+			throw_runtime_error("Cannot derive the normal with respect to time yet. Use partial_t(...) of the mesh positions instead.");
+		}
+		if (s == pyoomph::expressions::X || s == pyoomph::expressions::Y || s == pyoomph::expressions::Z)
+		{
+			throw_runtime_error("Cannot derive the normal with respect to the Lagrangian coordinates yet. Only the Eulerian derivative, e.g. grad(normal) or div(normal), is available.");
+		}
+		// Local element coordinates would otherwise fall through to the "return 0" at the very end of
+		// this function. That was unreachable while every spatial derivative threw above, but is now
+		// reached through AxisymmetryBreakingCoordinateSystem::vector_divergence, which contains
+		// diff(arg[i], local_coordinate_1) terms - and a silent zero there is a plausible-looking
+		// wrong eigenvalue rather than an error.
+		if (s == pyoomph::expressions::local_coordinate_1 || s == pyoomph::expressions::local_coordinate_2 || s == pyoomph::expressions::local_coordinate_3)
+		{
+			throw_runtime_error("Cannot derive the normal with respect to the local element coordinates yet. Only the Eulerian derivative, e.g. grad(normal) or div(normal), is available.");
 		}
 		else
 		{
@@ -10892,6 +10941,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 							else
@@ -10900,6 +10950,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 						}
@@ -10927,6 +10978,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 							else
@@ -10935,6 +10987,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 						}
@@ -10967,6 +11020,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 							else
@@ -10975,6 +11029,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 						}
@@ -11007,6 +11062,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 							else
@@ -11015,6 +11071,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 						}
@@ -11047,6 +11104,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 							else
@@ -11055,6 +11113,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 						}
@@ -11086,6 +11145,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 							else
@@ -11094,6 +11154,7 @@ namespace GiNaC
 								nret.no_jacobian = sp.no_jacobian;
 								nret.no_hessian = sp.no_hessian;
 								nret.expansion_mode = sp.expansion_mode;
+								nret.spatial_deriv_direction = sp.spatial_deriv_direction; // carry the spatial index into the coordinate-derived symbol
 								return GiNaCNormalSymbol(nret);
 							}
 						}

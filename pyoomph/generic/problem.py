@@ -1099,7 +1099,16 @@ class Problem(_pyoomph.Problem):
         self.assign_eqn_numbers()
         worst = 0.0
         worst_where = ""
-        for name, mesh in self._meshdict.items():
+        # _meshdict holds only the bulk meshes; the interface meshes hang off them and carry their own
+        # elements, which is where e.g. a curvature or surface-tension residual lives. Walking only
+        # _meshdict silently skipped every one of them.
+        def _all_meshes(m, prefix):
+            yield prefix, m
+            for iname, imesh in getattr(m, "_interfacemeshes", {}).items():
+                yield from _all_meshes(imesh, prefix + "/" + iname)
+
+        for topname, topmesh in list(self._meshdict.items()):
+          for name, mesh in _all_meshes(topmesh, topname):
             if only_domains is not None and name not in only_domains:
                 continue
             for ie in range(mesh.nelement()):
