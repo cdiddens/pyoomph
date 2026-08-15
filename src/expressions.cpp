@@ -1478,7 +1478,19 @@ namespace pyoomph
 			return sys->div(v, ndim, edim, _flags);
 		}
 
-		REGISTER_FUNCTION(div, eval_func(div_eval))
+		// Declared commutative on purpose. Without a return type GiNaC infers one from the first
+		// argument, and grad is noncommutative, so a *held* div(grad(c)) - held whenever the argument
+		// still contains an unexpanded placeholder, see need_to_hold - inherited that. GiNaC's
+		// add::eval() then refused to add a number to it: "sum of non-commutative objects has non-zero
+		// numeric term". That made the scalar Laplacian unusable inside any nonlinear expression, e.g.
+		// the sqrt(R^2+eps^2) of a discontinuity-capturing term, even though div(grad(c)) is a scalar
+		// and trace(grad(grad(c))) - the identical quantity - was accepted.
+		// div lowers the rank by one, so commutative is the honest tag for the vector argument. For a
+		// tensor argument the result is a vector and the tag is then a white lie; all it costs is
+		// GiNaC's guard against adding a bare number to an *isolated* tensor divergence, and that
+		// guard survives as soon as the vector is summed with a grad, which is how every strong
+		// residual is built. dot, trace and determinant are declared the same way.
+		REGISTER_FUNCTION(div, eval_func(div_eval).set_return_type(GiNaC::return_types::commutative))
 
 		////////////////
 
