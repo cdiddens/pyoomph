@@ -149,6 +149,8 @@ class StabilizedNavierStokes(NavierStokesEquations):
             diffusive side; 36 converges measurably better.
         c_t: coefficient of the transient term in :math:`\\tau_M`.
         c_C: coefficient in :math:`\\tau_C = h^2/(c_C\\tau_M)`.
+        c_r: coefficient of the linear-drag rate in :math:`\\tau_M`, see
+            :py:meth:`StabilizedNavierStokes.linear_drag_rate`.
         velocity_eps: :math:`|\\vec{u}|` is regularized as
             :math:`\\sqrt{\\vec{u}\\cdot\\vec{u}+(\\varepsilon U)^2}` so that :math:`\\tau` stays
             differentiable at rest. Given *relative* to the velocity scale, so that it remains
@@ -176,7 +178,7 @@ class StabilizedNavierStokes(NavierStokesEquations):
                  constant_viscosity: bool = True,
                  transient_tau: "Literal['auto'] | bool" = "auto",
                  natural_bc_correction: "bool | Iterable[str]" = False,
-                 C_I: float = 4.0, c_t: float = 2.0, c_C: float = 4.0,
+                 C_I: float = 4.0, c_t: float = 2.0, c_C: float = 4.0, c_r: float = 1.0,
                  velocity_eps: ExpressionOrNum = 1e-10,
                  stab_factor: ExpressionOrNum = 1,
                  **kwargs:Any):
@@ -198,7 +200,7 @@ class StabilizedNavierStokes(NavierStokesEquations):
         unknown_corr = self.natural_bc_correction - {"SUPG","LSIC","REYNOLDS"}
         if unknown_corr:
             raise ValueError(f"unknown natural_bc_correction terms {sorted(unknown_corr)}")
-        self.C_I, self.c_t, self.c_C = C_I, c_t, c_C
+        self.C_I, self.c_t, self.c_C, self.c_r = C_I, c_t, c_C, c_r
         self.velocity_eps = velocity_eps
         self.stab_factor = stab_factor
 
@@ -325,6 +327,28 @@ class StabilizedNavierStokes(NavierStokesEquations):
         """
         return _inv_dt(self.transient_tau)
 
+    def linear_drag_rate(self)->ExpressionOrNum:
+        """
+        Rate (1/s) of any term of the momentum equation that is *linear in the velocity itself*, and
+        which therefore belongs in :math:`\\tau` alongside :math:`1/\\Delta t`, :math:`|a|/h` and
+        :math:`\\nu/h^2`.
+
+        Currently that is the Hele-Shaw drag :math:`-12\\mu\\vec{u}/\\delta^2`, i.e. a rate of
+        :math:`12\\nu/\\delta^2`. Leaving it out is not a small error: on a 20 um Hele-Shaw cell it
+        is roughly 24 times the in-plane viscous rate :math:`\\nu/h^2`, so :math:`\\tau` came out
+        about two orders of magnitude too large and PSPG then suppressed a Marangoni-driven flow by
+        four orders of magnitude. See ``dev_docs/stabilized_scalar_transport.md``.
+
+        Override this to add a Darcy drag or any other linear sink of the same kind. Note that a
+        drag folded into ``bulkforce`` by hand cannot be detected here -- ``bulkforce`` is an
+        arbitrary vector -- so it has to be declared through this method.
+        """
+        if self.hele_shaw_thickness is None:
+            return 0
+        rho = self.mass_density
+        assert rho is not None
+        return 12 * self.dynamic_viscosity / (rho * self.hele_shaw_thickness ** 2)
+
     def _tau_M_raw(self)->Expression:
         """:math:`\\tau_M` without ``stab_factor``. :math:`\\tau_C` is built from it, so the
         prefactor has to be applied once at the end of each -- applying it inside would make it
@@ -333,7 +357,8 @@ class StabilizedNavierStokes(NavierStokesEquations):
         assert rho is not None
         return tau_advective_diffusive(self.element_h(), self.velocity_magnitude(),
                                        self.dynamic_viscosity / rho, self.inv_dt(),
-                                       self.tau_formula, self.C_I, self.c_t)
+                                       self.tau_formula, self.C_I, self.c_t,
+                                       reaction=self.linear_drag_rate(), c_r=self.c_r)
 
     def tau_M(self)->Expression:
         """The momentum stabilization parameter :math:`\\tau_M`, in units of time."""

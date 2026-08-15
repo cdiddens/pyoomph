@@ -330,6 +330,10 @@ class StokesEquations(Equations):
             self.dynamic_viscosity = dynamic_viscosity
             self.mass_density = mass_density
 
+        # Kept as an attribute, not just folded into bulkforce: the drag is a *linear* term in u, i.e.
+        # a reaction rate of the momentum operator, and a residual-based stabilization has to know
+        # about it to size tau. It cannot be recovered from bulkforce, which is an arbitrary vector.
+        self.hele_shaw_thickness = hele_shaw_thickness
         if hele_shaw_thickness is not None:
             hsdamp = -12 * self.dynamic_viscosity * var("velocity") / hele_shaw_thickness ** 2
             bulkforce = hsdamp if bulkforce is None else bulkforce+hsdamp

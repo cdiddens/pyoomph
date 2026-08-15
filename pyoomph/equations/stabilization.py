@@ -113,13 +113,21 @@ def _maybe_sub(wrap: bool, expr: Expression) -> Expression:
 
 def tau_advective_diffusive(h: Expression, U: Expression, diffusivity: ExpressionOrNum,
                             idt: Expression, formula: Literal["shakib", "codina", "tezduyar"] = "shakib",
-                            C_I: float = 4.0, c_t: float = 2.0) -> Expression:
+                            C_I: float = 4.0, c_t: float = 2.0,
+                            reaction: ExpressionOrNum = 0, c_r: float = 1.0) -> Expression:
     """
-    The stabilization parameter of a transient advection-diffusion operator, in units of *time*.
+    The stabilization parameter of a transient advection-diffusion-*reaction* operator, in units of
+    *time*.
 
     Identical in form for momentum and for a transported scalar -- only ``diffusivity`` differs
     (:math:`\\nu=\\mu/\\rho` there, :math:`D` or :math:`k/(\\rho c_p)` here), which is why it is one
     function and not two.
+
+    :math:`\\tau` is the inverse of a sum of *rates*, one per mechanism that can remove a
+    perturbation: :math:`1/\\Delta t`, :math:`|\\vec{a}|/h`, :math:`D/h^2` and the reaction rate.
+    Leaving a mechanism out makes :math:`\\tau` too large by whatever that rate contributes, and
+    :math:`\\tau` too large is not a mild error -- see the Hele-Shaw measurement in
+    ``dev_docs/stabilized_scalar_transport.md``.
 
     Args:
         h: element length scale, see :py:func:`element_h`.
@@ -130,14 +138,19 @@ def tau_advective_diffusive(h: Expression, U: Expression, diffusivity: Expressio
             the sum) or ``"tezduyar"``.
         C_I: coefficient of the diffusive term; :math:`\\tau\\to h^2/(C_I D)` in the diffusive limit.
         c_t: coefficient of the transient term.
+        reaction: rate (1/s) of any term *linear in the transported quantity itself*, e.g. the
+            Hele-Shaw drag :math:`12\\nu/\\delta^2` or a Darcy drag. Zero by default.
+        c_r: coefficient of that reaction term.
     """
     idt = c_t * idt
+    react = c_r * reaction
     if formula == "shakib":
-        return 1 / square_root(idt ** 2 + (2 * U / h) ** 2 + (C_I * diffusivity / h ** 2) ** 2)
+        return 1 / square_root(idt ** 2 + (2 * U / h) ** 2 + (C_I * diffusivity / h ** 2) ** 2
+                               + react ** 2)
     elif formula == "codina":
-        return 1 / (idt + 2 * U / h + C_I * diffusivity / h ** 2)
+        return 1 / (idt + 2 * U / h + C_I * diffusivity / h ** 2 + react)
     elif formula == "tezduyar":
-        return 1 / (idt + 2 * U / (h * _z_tezduyar(U * h / (2 * diffusivity))))
+        return 1 / (idt + 2 * U / (h * _z_tezduyar(U * h / (2 * diffusivity))) + react)
     raise ValueError(f"unknown tau_formula '{formula}'")
 
 

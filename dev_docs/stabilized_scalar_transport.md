@@ -3,7 +3,7 @@
 Status: **in the tree** as `pyoomph/equations/stabilization.py`, wired into
 `pyoomph/equations/advection_diffusion.py` and `pyoomph/equations/multi_component.py`. Covered by
 `tests/test_stabilized_transport.py`. One line of C++ was touched, the return type of `div`
-(§2), and two pre-existing defects were fixed along the way (§9).
+(§2), and two pre-existing defects were fixed along the way (§10).
 
 This is the scalar-transport counterpart of `stabilized_navier_stokes.md`, and it is worth reading
 that one first: the design, the `tau` formulas, the units traps and the `subexpression()` placement
@@ -164,7 +164,57 @@ Four things worth keeping:
   sooner than the coarse one is not explained here.)
 * **`dc_factor = 1` is not a usable default for the discontinuity capturing term**, see §6.
 
-## 6. Discontinuity capturing: measured limits
+## 6. tau must include a linear drag, or PSPG suppresses the flow it should support
+
+Asked to run the same problem on the equal-order pairs that PSPG exists to enable, every one of them
+came back *stable and wrong*: the run completes, evaporation is unaffected, and the Marangoni flow
+decays to nothing. `ke` at t = 0.3 against the Taylor-Hood reference's 4.3e-02:
+
+| flow / composition | before | after |
+|---|---|---|
+| C1/C1 + C1 SUPG | 4.5e-06 | 9.6e-04 |
+| C1/C1 + C2 SUPG | 1.7e-06 | 3.4e-04 |
+| C2/C2 + C2 SUPG | 1.6e-06 | **3.9e-02** |
+| TH + C1 SUPG (no PSPG) | 4.6e-02 | unchanged |
+
+It is PSPG, not the linear velocity: C2/C2 died as thoroughly as C1/C1, PSPG on *Taylor-Hood* cut
+the flow eightfold and then diverged, and turning the flow SUPG off changed nothing. The composition
+side is innocent throughout -- TH with a C1 composition is indistinguishable from TH with C2, at
+4145 dofs against 7169.
+
+**Cause.** `tau` is the inverse of a sum of rates, one per mechanism that can damp a perturbation:
+`1/dt`, `|a|/h`, `C_I nu/h^2`. The Hele-Shaw drag `-12 mu u/delta^2` is a fourth such mechanism --
+linear in the velocity, i.e. a reaction rate of `12 nu/delta^2` -- and it was missing. On a 20 um
+cell that rate is 4.5e4 1/s against the in-plane viscous 7.8e3 1/s, so `tau` came out ~6x too large,
+and the PSPG term scales with it.
+
+**Fix.** `tau_advective_diffusive` gained a `reaction` argument, and `StabilizedNavierStokes` a
+`linear_drag_rate()` hook that returns `12 nu/delta^2` when `hele_shaw_thickness` is set and zero
+otherwise. `StokesEquations` now keeps `hele_shaw_thickness` as an attribute -- it could not be
+recovered from `bulkforce`, which is an arbitrary vector, and a drag folded in there by hand still
+cannot be, so it has to be declared through the hook. Override `linear_drag_rate` for a Darcy drag.
+
+The "after" column above is that fix at *default* settings. C2/C2 lands within 10% of Taylor-Hood,
+from four orders out. C1/C1 gains a factor of 200 but is still low, and needs `stab_factor` ~ 0.2 on
+top (0.0497 at t = 0.15 against the reference 0.0613) -- where before the fix it needed 0.01. So the
+drag term removes about 20x of the 100x manual detuning, and a residual C1/C1 calibration issue
+remains, consistent with `stabilized_navier_stokes.md` §7 measuring `C_I = 4` as too diffusive and
+even `C_I = 36` as not enough.
+
+Verified not to touch anything without a Hele-Shaw thickness: the four stabilization variants on the
+Poiseuille check return identical errors before and after.
+
+A caveat on that check. Its four variants used to report the *same* error to four digits, which was
+read as "nothing moved"; they in fact differ (1.376e-03 for PSPG, 1.336e-03 for GLS/ASGS) and the
+agreement was the shared-output-directory JIT cache of §10 handing every variant the first one's
+compiled code. Any A/B over constructor flags needs one output directory per `Problem`.
+
+The scalar transport equations have their own linear sink -- `get_reaction_rate` on a mixture -- and
+it is *not* in their `tau` either. The machinery is now there (`tau_advective_diffusive(reaction=)`);
+wiring it up needs the derivative of the reaction with respect to the field, not the rate itself, and
+is left undone.
+
+## 7. Discontinuity capturing: measured limits
 
 On the problem above the first Newton solve diverges outright at `dc_factor` 1, 0.1 and 0.03, and
 only runs at 0.01. Newton *diverges* rather than producing NaN -- residuals 0.0027, 0.13, 0.22, 3.27,
@@ -184,7 +234,7 @@ what it was originally reached for; that initial diagnosis was wrong and the doc
 `dc_factor` is left at the textbook 1 rather than retuned, because one problem is not enough to set
 a default. The docstring tells the user to start at 0.01.
 
-## 7. The interface physics is untouched, and that is measured, not argued
+## 8. The interface physics is untouched, and that is measured, not argued
 
 The requirement was that switching a stabilization on must not perturb the Marangoni stress, the
 kinematic boundary condition, mass transfer, latent heat, surfactant transport or the contact-angle
@@ -216,7 +266,7 @@ flow side.
 with all three switches at their defaults, is `numpy.array_equal`-identical to the same problem on
 `develop`.
 
-## 8. Closing the gap on the flow side
+## 9. Closing the gap on the flow side
 
 `MultiComponentNavierStokesInterface` is a standalone `InterfaceEquations`, not a subclass of
 `NavierStokesFreeSurface`, and it never called `get_stabilization_traction` — so a flow stabilization
@@ -233,7 +283,7 @@ does not call the hook either, so the two were already consistent.
 The two-phase correction is **reasoned, not measured** — it only activates with
 `natural_bc_correction=True` on a stabilized outer phase, which nothing in the tutorials does.
 
-## 9. Two things found along the way
+## 10. Three things found along the way
 
 **The GCL branch of `CompositionAdvectionDiffusionEquations` dropped `dt_factor` — fixed.** It used a
 plain `add_dweak_dt(rho_factor*f, f_test, scheme=...)` with no `self.dt_factor`, while the two
@@ -246,6 +296,17 @@ taken at each history step's own value rather than scaling the term.
 **This changes results for anyone who combined `GCL=True` with `compo_dt_factor != 1`.** With the
 default `compo_dt_factor=1` nothing moves, which is every tutorial in the tree.
 
+**`surface_tension_theta` was inert on the unprojected branch — fixed.** Without a
+`surface_tension_projection_space`, theta=0 and theta=1 gave identical trajectories over 218 steps of
+the instability of §5, right down to the divergence time; with a projection space the same switch
+moved the kinetic energy from 0.194 to 0.323. Only that branch additionally wrapped the already
+lagged sigma in `time_scheme(momentum_scheme, ...)`, and only the *full* one-step lag collapsed
+(theta=0.5 always bit). Theta is a statement about which time level sigma is taken at, so it now
+replaces the momentum scheme's treatment of that term instead of composing with it; theta=1 is
+untouched. `MultiComponentNavierStokesInterfaceBalancedEnd` needed the same split, since its own
+comment requires the expression to match the parent exactly or the end-point Neumann term stops
+cancelling. Theta is now monotone: 1 / 0.75 / 0.5 / 0 gives ke = 0.194 / 0.215 / 0.269 / 0.354.
+
 **Several `Problem`s in one output directory share the JIT cache and reuse each other's code.**
 Sweeping variants that differ only in constructor flags — exactly what a stabilization comparison
 does — silently gives every variant the first one's compiled equations, so they all look identical.
@@ -256,7 +317,7 @@ Also worth knowing when diffing two runs: `get_dof_description()` can return the
 in a different *order* between runs, because the mass-transfer model iterates a Python `set` of
 component names. Fix `PYTHONHASHSEED` or match rows by name, not by index.
 
-## 10. Loose ends
+## 11. Loose ends
 
 * **`C_I = 4` is unmeasured for scalar transport.** It is inherited from `StabilizedNavierStokes` for
   consistency, where §7 of that document measures `C_I = 36` as the only value reaching O(h^2). A
