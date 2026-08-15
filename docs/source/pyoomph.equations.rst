@@ -9,7 +9,6 @@ Submodules
 
    pyoomph.equations.ALE
    pyoomph.equations.NSCH
-   pyoomph.equations.SUPG
    pyoomph.equations.additional
    pyoomph.equations.advection_diffusion
    pyoomph.equations.cahn_hilliard

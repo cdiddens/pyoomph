@@ -225,7 +225,7 @@ Full example — 1D DG advection-diffusion with upwinding and a symmetric-interi
 diffusion term (`docs/source/tutorial/dg/convection_diffusion.py`):
 ```python
 from pyoomph import *
-from pyoomph.equations.SUPG import *  # for is_DG_space / element-size helpers
+from pyoomph.expressions import is_DG_space  # also reachable via "from pyoomph import *"
 
 class ConvectionDiffusionEquation(Equations):
     def __init__(self, u, D, space="C2", alpha_DG=2):

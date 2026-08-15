@@ -45,9 +45,10 @@ derivatives of the shape functions; pyoomph has those, so the scheme here is gen
 rather than dropping the term. On a quadratic velocity space dropping it costs three orders of
 magnitude in the pressure error, so it is not an approximation one can make silently.
 
-The older :py:mod:`pyoomph.equations.SUPG` is an earlier, independent attempt at the same thing. It
-adds the stabilization *alongside* the flow equations instead of subclassing them, and its strong
-residual omits the viscous term.
+This module replaces the former ``pyoomph.equations.SUPG``, which added the stabilization
+*alongside* the flow equations instead of subclassing them and whose strong residual omitted the
+viscous term. Its ``ElementSizeForSUPG`` helper is gone too: the element length scale is available
+directly as ``var("cartesian_element_length_h")``.
 """
 
 from .. import *

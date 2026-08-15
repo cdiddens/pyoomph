@@ -26,7 +26,7 @@
 
 
 from pyoomph import *
-from pyoomph.equations.SUPG import * # To calculate the element size
+from pyoomph.expressions import *
 
 
 class ConvectionDiffusionEquation(Equations):

@@ -35,7 +35,6 @@ from .navier_stokes import NavierStokesEquations #type:ignore
 from ..materials.generic import *
 from ..typings import *
 from ..materials.mass_transfer import MassTransferModelBase
-from .SUPG import ElementSizeForSUPG
 from .generic import get_interface_field_connection_space
 
 if TYPE_CHECKING:
@@ -92,7 +91,7 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
 
 def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteElementSpaceEnum="C1", compo_dt_factor:ExpressionOrNum=1, ns_mode:Literal["TH","CR","mini"]="TH", boussinesq:bool=False,
                              gravity:ExpressionNumOrNone=None, bulkforce:ExpressionNumOrNone=None, ns_dt_factor:ExpressionOrNum=1, ns_nl_factor:ExpressionNumOrNone=None, with_IC:bool=True,
-                             hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:float | None=None, useCompoSUPG:bool=False,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False) -> Equations:
+                             hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:float | None=None, isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False) -> Equations:
     """
     Assembles a system for multi-component flow with advection-diffusion equations for mass fraction fields of the mixture composition and the Navier-Stokes equations. Potentially, also a temperature field is included.
 
@@ -109,7 +108,6 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         with_IC: Include the initial mixture composition (and temperature) as initial condition.
         hele_shaw_thickness: If set, we consider a Hele-Shaw flow with the given thickness. This modifies a few terms in the Navier-Stokes equations.
         spatial_errors: Add spatial error estimators automatically.
-        useCompoSUPG: Use SUPG for the composition advection.
         isothermal: If set to false, a temperature field is included.
         initial_temperature: Temperature initial condition.
         additional_advection: Adds an additional advection term.
@@ -135,12 +133,10 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
     wind=var("velocity")+additional_advection
     
     cp = CompositionAdvectionDiffusionEquations(fluid_props=fluid_props, space=compo_space, dt_factor=compo_dt_factor,
-                                                boussinesq=boussinesq, useSUPG=useCompoSUPG,wind=wind,integrate_advection_by_parts=integrate_advection_by_parts,wrap_params_in_subexpressions=wrap_params_in_subexpressions,GCL=GCL,scheme=compo_scheme)
+                                                boussinesq=boussinesq, wind=wind,integrate_advection_by_parts=integrate_advection_by_parts,wrap_params_in_subexpressions=wrap_params_in_subexpressions,GCL=GCL,scheme=compo_scheme)
     res = ns + cp
     if not isothermal:
         res+=TemperatureAdvectionConductionEquation(fluid_props,space=compo_space,wind=wind,adv_factor=thermal_adv_factor,dt_factor=thermal_dt_factor)
-    if useCompoSUPG:
-        res += ElementSizeForSUPG()
     if with_IC:
         res += CompositionInitialCondition(fluid_props,isothermal,initial_temperature)
     if spatial_errors is not None:
@@ -170,14 +166,13 @@ class CompositionAdvectionDiffusionEquations(Equations):
         wind(ExpressionOrNum): The wind field. Default is 0.
         dt_factor(ExpressionOrNum): The temporal factor. Default is 1.
         boussinesq(bool): Whether to consider the Boussinesq approximation. Default is False.
-        useSUPG(bool): Whether to use the SUPG method. Default is False.
         integrate_advection_by_parts(bool): Whether to integrate the advection term by parts. Default is False.
         wrap_params_in_subexpressions(bool): Whether to wrap the parameters in subexpressions using GiNaC. Default is True.
         GCL(bool): Whether to consider the Generalized Continuity Equation. Default is False.
         scheme(TimeSteppingScheme): The time stepping scheme. Default is "BDF2".
     """
         
-    def __init__(self, fluid_props:AnyFluidProperties, *, space:FiniteElementSpaceEnum="C2", wind:ExpressionOrNum=var("velocity"), dt_factor:ExpressionOrNum=1, boussinesq:bool=False, useSUPG:bool=False,integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions:bool=True, GCL:bool=False, scheme:TimeSteppingScheme="BDF2"):        
+    def __init__(self, fluid_props:AnyFluidProperties, *, space:FiniteElementSpaceEnum="C2", wind:ExpressionOrNum=var("velocity"), dt_factor:ExpressionOrNum=1, boussinesq:bool=False,integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions:bool=True, GCL:bool=False, scheme:TimeSteppingScheme="BDF2"):        
         super().__init__()
         self.dt_factor = dt_factor
         self.space:FiniteElementSpaceEnum = space
@@ -191,7 +186,6 @@ class CompositionAdvectionDiffusionEquations(Equations):
         for n in sorted(self.fluid_props.required_adv_diff_fields):
             self.component_names["massfrac_" + n] = n
             self.fieldnames.append("massfrac_" + n)
-        self.useSUPG = useSUPG
         self.requires_interior_facet_terms=is_DG_space(self.space)
         self.DG_alpha=1
         self.wrap_params_in_subexpressions=wrap_params_in_subexpressions
@@ -266,34 +260,11 @@ class CompositionAdvectionDiffusionEquations(Equations):
             self.set_test_scaling({"massfrac_"+self.fluid_props.passive_field:scale_factor("temporal") / scale_factor("mass_density")})
 
 
-    def get_supg_tau(self, field:str) -> Expression:
-        elsize_eqs = self.get_combined_equations().get_equation_of_type(ElementSizeForSUPG)
-        if elsize_eqs is None or (isinstance(elsize_eqs, list) and len(elsize_eqs) == 0):
-            raise RuntimeError("SUPG only works if combined with a ElementSizeForSUPG Equation")
-        assert isinstance(elsize_eqs,ElementSizeForSUPG)
-        elemsize = var(elsize_eqs.varname)
-        urel = self.wind - eval_flag("moving_mesh") * mesh_velocity()
-        usqr = subexpression(dot(urel, urel))
-        dt = subexpression(var("time") - evaluate_in_past(var("time")) + 1e-20 * scale_factor("temporal"))
-        ht = subexpression(square_root(elemsize, self.get_element_dimension()) + 1e-20 * scale_factor("spatial"))
-        k = 1 if self.space == "C1" else 2
-        Ck = 60 * (2 ** (k - 2))
-        sigma_BDF = 2
-        if len(self.component_names) > 1:
-            raise RuntimeError("SUPG does not work yet for ternary or higher systems")
-        Dc=self.get_diffusion_coefficient(field)
-        if Dc is None:
-            return Expression(0)
-        D = subexpression(Dc)
-        tau = subexpression(1 / square_root((sigma_BDF / dt) ** 2 + usqr / ht ** 2 + Ck * (D / ht ** 2) ** 2))
-        return tau
-
     def define_residuals(self):
         rho_ref = scale_factor("mass_density")
         rho = self.fluid_props.mass_density
         ts=lambda expr : time_scheme(self.scheme, expr)
         for fn in self.fieldnames:
-            res:Expression | None = None
             f, f_test = var_and_test(fn)
             Jdiff = self.get_diffusive_mass_flux_expression_for(self.component_names[fn])
             if self.stop_on_zero_diffusive_flux and is_zero(Jdiff):
@@ -304,30 +275,18 @@ class CompositionAdvectionDiffusionEquations(Equations):
             else:
                 rho_factor = rho
             if self.integrate_advection_by_parts:
-                if self.useSUPG:
-                    raise RuntimeError("TODO")      
-                if self.GCL:          
+                if self.GCL:
                     self.add_dweak_dt(rho_factor * f, f_test, scheme=self.scheme)
-                    if self.useSUPG:
-                        raise RuntimeError("TODO")
                     w=mesh_velocity(scheme=self.scheme)
                     self.add_residual(-weak(ts(rho_factor *(self.wind-w)*f),grad(f_test)))
                 else:
                     res = ts(rho_factor * (self.dt_factor * partial_t(f)))
                     self.add_residual(weak(res, f_test))
                     self.add_residual(-weak(ts(rho_factor *self.wind*f),grad(f_test)))
-                
             else:
-                res = ts(rho_factor * (self.dt_factor * partial_t(f) + dot(self.wind, grad(f))))
-                self.add_residual(weak(res, f_test))
-            if self.useSUPG:
-                # useSUPG=True together with integrate_advection_by_parts=True already raises above (line ~304),
-                # so at this point res was necessarily assigned via the non-"integrate_advection_by_parts" branch.
-                assert res is not None
-                res = subexpression(res)  # XXX Does not work here!
-                self.add_residual(weak(self.get_supg_tau(self.component_names[fn]) * self.wind * res, grad(f_test)))
-            
-            self.add_residual(-weak(ts(Jdiff), grad(f_test)))  
+                self.add_residual(weak(ts(rho_factor * (self.dt_factor * partial_t(f) + dot(self.wind, grad(f)))), f_test))
+
+            self.add_residual(-weak(ts(Jdiff), grad(f_test)))
             if isinstance(self.fluid_props,MixtureLiquidProperties):
                 reaction_rate=self.fluid_props.get_reaction_rate(self.component_names[fn])
                 self.add_residual(-weak(ts(reaction_rate),f_test))

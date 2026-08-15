@@ -6,10 +6,11 @@ Status: **in the tree** as `pyoomph/equations/stabilized_ns.py`, with a small ho
 `backflow.py`/`bfscan.py`, `units.py`, `bench_subexpr.py`, and a `README.md` carrying the full result
 tables). No C++ was touched.
 
-`pyoomph/equations/SUPG.py` is an earlier, independent attempt (`ElementSizeForSUPG`, `PSPG`,
-`ASGS`). It adds the stabilization *alongside* the flow equations instead of subclassing them, and
-its strong residual omits the viscous term. Two concrete problems with it are documented below
-(§2, §5); it is not otherwise touched.
+`pyoomph/equations/SUPG.py` was the earlier, independent attempt (`ElementSizeForSUPG`,
+`GenericStabilizationMethod`, `PSPG`, `ASGS`). It added the stabilization *alongside* the flow
+equations instead of subclassing them, and its strong residual omitted the viscous term (§2); its
+`ASGS.get_tau1` carried the dimensional-units bug of §5 in a dead line. **It has been removed**
+(§9).
 
 ---
 
@@ -45,8 +46,8 @@ R_M = rho (d_t u + (u - u_mesh).grad u) + grad p - div(2 mu D(u)) - f - rho g
 
 `div(2 mu D(u))` is `mu (div(grad(u)) + grad(div(u)))` for constant `mu`, which needs second
 derivatives of the shape functions. Those arrived with the "Allow second order spatial derivatives"
-commits. Before them the term had to be dropped, which is what `equations/SUPG.py`'s
-`GenericStabilizationMethod.get_momentum_residual` still does.
+commits. Before them the term had to be dropped, which is what the removed `equations/SUPG.py`'s
+`GenericStabilizationMethod.get_momentum_residual` did.
 
 **Dropping it is not harmless.** Kovasznay flow at Re = 40, C2/C2 with SUPG+PSPG+LSIC:
 
@@ -161,10 +162,10 @@ tau = 1/sqrt((c_t*timestepper_weight(1,0,"BDF1"))**2 + (2*U/h)**2 + (C_I*nu/h**2
 
 mixes `1/s^2` with a pure number, and pyoomph rejects it outright
 ("Adding/subtracting different units \[second^(-2)\] and \[1\]"). It has to be divided by
-`scale_factor("temporal")`. `equations/SUPG.py`'s `ASGS.get_tau1` contains exactly this construction
-— `self.alpha*timestepper_weight(1,0,"BDF1") + 4*mu/(h**2*rho)` — but the line is dead: `tau1` is
-overwritten on the next line and the transient term never reaches the residual. Worth cleaning up
-whenever that file is touched, because it will bite the first person who un-deletes it.
+`scale_factor("temporal")`. The removed `equations/SUPG.py`'s `ASGS.get_tau1` contained exactly this
+construction — `self.alpha*timestepper_weight(1,0,"BDF1") + 4*mu/(h**2*rho)` — in a dead line:
+`tau1` was overwritten immediately after, so the transient term never reached the residual and the
+bug never surfaced. It went out with the file.
 
 Using the BDF1 weight rather than an explicit `1/dt` is otherwise the right call: pyoomph zeroes the
 weights in a steady solve, so the transient term of tau switches itself off instead of dividing by an
@@ -230,7 +231,8 @@ physics) so the benchmark can flip them without touching the residual code.
   metric-tensor form `tau = (u.G.u + C_I nu^2 G:G + (c_t/dt)^2)^(-1/2)` is much better. Not
   implemented; it needs the inverse Jacobian of the element map exposed symbolically.
   Note `cartesian_element_length_h`, not `element_length_h`: the latter is the *revolved* volume in
-  axisymmetry, so tau would grow like `r^(1/3)` away from the axis.
+  axisymmetry, so tau would grow like `r^(1/3)` away from the axis. It is also the *live* size, i.e.
+  differentiated through the mesh dofs on an ALE mesh — see the frozen-element-size discussion in §9.
 * **ASGS diverges on the free-surface case.** It differs from GLS only in the sign of the viscous
   perturbation (adjoint rather than operator) and is the less robust of the two here.
 * **Variable viscosity** is behind `constant_viscosity=False`, which makes GiNaC differentiate
@@ -294,3 +296,58 @@ nullspace, since `grad(q)` annihilates constants. Verified on an enclosed lid-dr
 C2/C1, C1/C1 and C2/C2.
 
 ---
+
+---
+
+## 9. Removal of `pyoomph.equations.SUPG`, and the frozen element size
+
+The old module is gone. An AST scan over `pyoomph/`, `docs/source/tutorial/`, `tests/` and the
+`pyoomph_runs/` tree found that of its five classes, `GenericStabilizationMethod`, `PSPG`, `ASGS`
+and `ElementSizeFromInitialCartesianSize` had **no users at all** — `stabilized_ns` supersedes them
+— and only `ElementSizeForSUPG` was used, by exactly two places:
+
+* `pyoomph/equations/multi_component.py`, behind the `useCompoSUPG` / `useSUPG` flags. Those flags,
+  `CompositionAdvectionDiffusionEquations.get_supg_tau()` and the SUPG residual term are removed.
+  The feature was incomplete anyway: it raised `RuntimeError("TODO")` when combined with
+  `integrate_advection_by_parts`, and `RuntimeError("SUPG does not work yet for ternary or higher
+  systems")` for anything past a binary mixture.
+* `docs/source/tutorial/pde/convdiffu/convdiffu_SUPG.py`, which now takes the element size from
+  `var("cartesian_element_length_h")` instead. On that tutorial's `LineMesh(N=100, size=100)` both
+  give exactly `h = 1`, so the tutorial's physics is unchanged; `supg.rst` was updated accordingly.
+
+Two further references were spurious: `docs/source/tutorial/dg/convection_diffusion.py` and
+`AGENTS_ADVANCED.md` both did `from pyoomph.equations.SUPG import *` "for is_DG_space", but
+`is_DG_space` lives in `pyoomph/expressions/generic.py` and only arrived through the star-import
+chain. Both now import what they actually use. (Watch out for this pattern in general: the deleted
+star-import was also the only source of `vector` in the two tutorials, which is why they now carry
+an explicit `from pyoomph.expressions import *`.)
+
+### The frozen element size
+
+`ElementSizeForSUPG` was **not** merely a slower `var("cartesian_element_length_h")`, even though
+the note in `supg.rst` used to say so. It projected the Cartesian element measure onto a `D0` field
+with `discontinuous_refinement_exponent=1` and then **pinned** it in
+`before_assigning_equations_postorder`. On a moving mesh that makes the element size a *frozen*
+quantity: it holds the size the element had when the equations were assigned, and contributes no
+Jacobian entries with respect to the nodal positions.
+
+`var("cartesian_element_length_h")`, which `StabilizedNavierStokes.element_h()` uses, is the live
+size. On an ALE mesh it is differentiated through the mesh degrees of freedom, so `tau` couples the
+momentum and mesh blocks of the Jacobian:
+
+* **For:** it is the consistent linearization, so Newton keeps its quadratic convergence, and `tau`
+  actually tracks a deforming element instead of drifting away from it. On a strongly deforming
+  free surface the frozen size is simply wrong after a while, and there is no mechanism to refresh
+  it short of a remesh.
+* **Against:** extra Jacobian coupling. The velocity/pressure rows acquire entries in the mesh
+  columns that a Galerkin discretization would not have, which matters for a block preconditioner
+  or a fieldsplit that assumes the flow block is self-contained, and it makes the assembled
+  Jacobian denser.
+
+The free-surface tests here (oscillating droplet in 2D and axisymmetry, static hemisphere,
+Rayleigh/Lamb periods to ~1 %) all used the live size without trouble, so the live size is the
+right default. But the choice is a genuine trade-off rather than an oversight in the old module,
+and it is the one thing `ElementSizeForSUPG` did that is not trivially reproducible. If it is ever
+wanted back, the clean form is a `frozen_element_size` option on `StabilizedNavierStokes` that
+swaps `element_h()` for a pinned `D0` projection — a dozen lines, and worth doing the moment a
+block preconditioner wants the flow rows free of mesh columns.

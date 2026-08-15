@@ -26,7 +26,7 @@
 
 
 from pyoomph import *
-from pyoomph.equations.SUPG import * # To calculate the element size
+from pyoomph.expressions import *
 
 
 class ConvectionDiffusionEquationWithSUPG(Equations):
@@ -41,12 +41,8 @@ class ConvectionDiffusionEquationWithSUPG(Equations):
         self.define_scalar_field("c", "C1") # Take the coarse space C1
 
     def get_supg_tau(self):
-        # We must find an equation of the type ElementSizeForSUPG, which calculates the element size
-        elsize_eqs = self.get_combined_equations().get_equation_of_type(ElementSizeForSUPG, always_as_list=True)
-        if len(elsize_eqs)!=1: # User must combine it with a single ElementSizeForSUPG instance
-            raise RuntimeError("SUPG only works if combined with a single ElementSizeForSUPG equation")
-        elsize_eqs=elsize_eqs[0] # get the ElementSizeForSUPG object, which is combined with this equation
-        h = elsize_eqs.get_element_h() + 1e-15 # element size, add a tiny offset to prevent errors
+        # Typical element length scale, i.e. (length/area/volume)**(1/dim) measured in Cartesian space
+        h = var("cartesian_element_length_h") + 1e-15 # add a tiny offset to prevent errors
         u_mag=square_root(dot(self.u,self.u))+1e-15 # velocity magnitude , add a tiny offset to prevent errors
         Pe_h=u_mag*h/(2*self.D) # Mesh Peclet number
         beta=1/tanh(Pe_h)-1/Pe_h # coefficient activating SUPG if Pe becomes large
@@ -75,8 +71,6 @@ class OneDimAdvectionDiffusionProblem(Problem):
 
         eqs=TextFileOutput()
         eqs+=ConvectionDiffusionEquationWithSUPG(u=self.u,D=self.D,with_SUPG=self.with_SUPG)
-        if self.with_SUPG:
-            eqs+=ElementSizeForSUPG() # We must add the element size
 
         x=var("coordinate_x")
         cinit=exp(-x**2*0.25)
