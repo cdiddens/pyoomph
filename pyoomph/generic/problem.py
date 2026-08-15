@@ -1061,6 +1061,68 @@ class Problem(_pyoomph.Problem):
         glob_row_start[n]=nnz_offset
         return numpy.concatenate(all_values),numpy.concatenate(all_colindex),glob_row_start #type:ignore
 
+    def debug_analytic_hessian_by_fd(self, epsilon:float=1e-5, num_vectors:int=2, seed:int=1,
+                                     verbose:bool=False,
+                                     only_domains:list[str] | None=None) -> float:
+        """Check the analytically generated Hessian against finite differences, element by element.
+
+        For each element this forms random vectors Y and C and compares the analytic Hessian-vector
+        product ``d2R_i/(du_j du_k) Y_i C_k`` against a finite difference of the *analytic* Jacobian
+        along C. It therefore validates the Hessian only relative to the Jacobian; combine it with
+        :py:attr:`debug_jacobian_by_fd_epsilon`, which validates the Jacobian against finite
+        differences of the residual, to pin down the whole chain.
+
+        Requires the analytic Hessian to have been generated, i.e.
+        ``setup_for_stability_analysis(analytic_hessian=True)`` before initialisation.
+
+        Args:
+            epsilon: entries whose discrepancy exceeds this are printed. Also the threshold this
+                method raises on, unless it is <= 0.
+            num_vectors: how many C directions to test per element.
+            seed: seed of the (deterministic) random vectors.
+            verbose: print a line per element rather than only the offenders.
+            only_domains: restrict to these mesh names; all meshes by default.
+
+        Returns:
+            The largest relative discrepancy found over all elements. Each entry is scaled by
+            ``max(1, |analytic|, |finite difference|)``, since the products range over many orders of
+            magnitude and an absolute threshold would either drown in noise or miss the small entries.
+
+        Raises:
+            RuntimeError: if that discrepancy exceeds ``epsilon`` and ``epsilon>0``.
+        """
+        import random as _random
+        rng = _random.Random(seed)
+        # The finite-difference half perturbs the element's dofs through oomph-lib's Dof_pt, which is
+        # only populated when this is switched on before the equation numbers are assigned.
+        self._enable_store_local_dof_pt_in_elements()
+        self.assign_eqn_numbers()
+        worst = 0.0
+        worst_where = ""
+        for name, mesh in self._meshdict.items():
+            if only_domains is not None and name not in only_domains:
+                continue
+            for ie in range(mesh.nelement()):
+                el = mesh.element_pt(ie)
+                nd = el.ndof()
+                if nd == 0:
+                    continue
+                Y = [rng.uniform(-1.0, 1.0) for _ in range(nd)]
+                C = [[rng.uniform(-1.0, 1.0) for _ in range(nd)] for _ in range(num_vectors)]
+                # A pure printout threshold here; the raising decision is made below on the
+                # (possibly relative) value, so pass a threshold that only prints real offenders.
+                delta = el._debug_hessian(Y, C, epsilon if not verbose else -1.0)
+                if delta > worst:
+                    worst = delta
+                    worst_where = name + " element " + str(ie)
+                if verbose:
+                    print("HESSIAN FD CHECK", name, "element", ie, "ndof", nd, "delta", delta)
+        if epsilon > 0 and worst > epsilon:
+            raise RuntimeError("Analytical Hessian disagrees with finite differences of the Jacobian: "
+                               "worst discrepancy " + str(worst) + " at " + worst_where +
+                               " (threshold " + str(epsilon) + "). The offending entries were printed above.")
+        return worst
+
     def remove_equations(self, path:str, of_type:type[BaseEquations] | None=None, only_if:Callable[[BaseEquations],bool]=lambda eqn: True,fail_if_not_exist:bool=False):
         if hasattr(self,"_equation_system"):
             eqtree = self._equation_system.get_by_path(path)

@@ -1887,16 +1887,6 @@ namespace pyoomph
 	static std::string dcoord_shape_array(const BasisFunction *bf, bool second_coord_derivative)
 	{
 		const bool is_d2 = (bf->deriv_order() == 2);
-		if (is_d2 && second_coord_derivative)
-		{
-			// d2_d2x2_shape_dcoord is declared and allocated, but fill_shape_info_at_s does not fill it
-			// yet - reading it would silently give a Hessian of zeros rather than an error.
-			throw_runtime_error("Analytical Hessians of SECOND spatial derivatives on a moving mesh are not implemented yet.\n"
-								"This combination arises from e.g. div(grad(u)) in the residual together with "
-								"setup_for_stability_analysis(analytic_hessian=True) on a domain whose coordinates are unknowns.\n"
-								"Either use the integrated-by-parts weak form, e.g. -weak(grad(u),grad(v)) plus the surface term, "
-								"or pass analytic_hessian=False.");
-		}
 		std::string base = second_coord_derivative ? (is_d2 ? "d2_d2x2_shape_dcoord" : "d2_dx2_shape_dcoord")
 												   : (is_d2 ? "d_d2x_shape_dcoord" : "d_dx_shape_dcoord");
 		const std::string sn = bf->get_space()->get_shape_name();

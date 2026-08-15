@@ -275,12 +275,15 @@ namespace pyoomph
     // Outputs are flat arrays with the index helpers documented at the definition:
     //   dM_dX  [i_dim][b_eldim][m_node][p_dim]
     //   dQ_dX  [i_dim][b_eldim][c_eldim][m_node][p_dim]
+    //   d2M_dXdX [i_dim][b_eldim][m_node][p_dim][m2_node][p2_dim]           (only if non-NULL)
+    //   d2Q_dXdX [i_dim][b_eldim][c_eldim][m_node][p_dim][m2_node][p2_dim]   (only if non-NULL)
     void fill_d2x_dNodalPos_helper(unsigned n_node, unsigned n_dim, unsigned el_dim,
                                    const oomph::DenseMatrix<double> &interpolated_t,
                                    const oomph::DShape &dpsids_Element, const oomph::DShape &d2psids_Element,
                                    const oomph::DenseMatrix<double> &aup, const double (*Xkab)[MAX_N2DERIV],
                                    const double (*dgab_ds)[3][3],
-                                   std::vector<double> &dM_dX, std::vector<double> &dQ_dX) const;
+                                   std::vector<double> &dM_dX, std::vector<double> &dQ_dX,
+                                   std::vector<double> *d2M_dXdX = NULL, std::vector<double> *d2Q_dXdX = NULL) const;
     // Finite-difference fallback for the Jacobian contribution from the Lagrangian (undeformed
     // solid) position degrees of freedom, used where an analytic derivative is not available.
     virtual void fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian);
@@ -1143,7 +1146,10 @@ namespace pyoomph
     // Debug helper analogous to debug_analytical_jacobian, but for the Hessian: compares the
     // analytic Hessian-vector product fill_in_generic_hessian(Y, C, ...) against a finite-difference
     // approximation with step epsilon.
-    virtual void debug_hessian(std::vector<double> Y, std::vector<std::vector<double>> C, double epsilon);
+    // Compares the analytical Hessian-vector products against finite differences of the (analytical)
+    // Jacobian and returns the largest absolute discrepancy, so a caller can assert on it. Entries
+    // exceeding epsilon are additionally printed; pass epsilon<=0 to print everything.
+    virtual double debug_hessian(std::vector<double> Y, std::vector<std::vector<double>> C, double epsilon);
     // Looks up all (Data*, index) pairs holding the field called "name" on this element (nodal,
     // internal or external data as appropriate); use_elemental_indices selects whether the returned
     // index is the element-local field index or the raw Data-object component index.

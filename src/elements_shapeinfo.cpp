@@ -601,8 +601,10 @@ namespace pyoomph
 													const oomph::DShape &dpsids_Element, const oomph::DShape &d2psids_Element,
 													const oomph::DenseMatrix<double> &aup, const double (*Xkab)[MAX_N2DERIV],
 													const double (*dgab_ds)[3][3],
-													std::vector<double> &dM_dX, std::vector<double> &dQ_dX) const
+													std::vector<double> &dM_dX, std::vector<double> &dQ_dX,
+													std::vector<double> *d2M_dXdX, std::vector<double> *d2Q_dXdX) const
 	{
+		const bool want_hessian = (d2M_dXdX != NULL);
 		// Flat index helpers. el_dim, n_dim <= 3; n_node is the element's node count.
 		const unsigned ND = n_dim, ED = el_dim, NN = n_node;
 		auto iM = [&](unsigned i, unsigned b, unsigned m, unsigned p) { return ((i * ED + b) * NN + m) * ND + p; };
@@ -664,6 +666,89 @@ namespace pyoomph
 							d2gab_dsdX[iGs(a, b, c, m, p)] = sum;
 						}
 
+		// ---- Second nodal-coordinate derivatives -------------------------------------------------
+		// The same chain one level further. The covariant metric is quadratic in X, so its second
+		// derivative is constant in X and the third (mixed with one s) closes the recursion:
+		//    d2g_{ed}/(dX^m_p dX^m2_p2)      = delta_{p p2} (Psi_{m,e} Psi_{m2,d} + Psi_{m2,e} Psi_{m,d})
+		//    d2(dg_{ed}/ds_c)/(dX^m_p dX^m2_p2)
+		//        = delta_{p p2} (Psi_{m,e} Psi_{m2,dc} + Psi_{m2,e} Psi_{m,dc}
+		//                      + Psi_{m,d} Psi_{m2,ec} + Psi_{m2,d} Psi_{m,ec})
+		// and with A = g^{-1}, writing d for d/dX^m_p and d' for d/dX^m2_p2,
+		//    d'dA     = -(d'A)(dg)A - A(d'dg)A - A(dg)(d'A)
+		//    d'd dcA  = -(d'dA)(dcg)A - (dA)(d'dcg)A - (dA)(dcg)(d'A)
+		//               -(d'A)(ddcg)A - A(d'd dcg)A - A(ddcg)(d'A)
+		//               -(d'A)(dcg)(dA) - A(d'dcg)(dA) - A(dcg)(d'dA)
+		//
+		// Nodes and directions are flattened into a single coordinate index mp = m*ND + p here, since
+		// everything below is a double sum over them.
+		const unsigned NX = NN * ND;
+		auto iGG = [&](unsigned a, unsigned b, unsigned mp, unsigned mp2) { return ((a * ED + b) * NX + mp) * NX + mp2; };
+		auto iGGs = [&](unsigned a, unsigned b, unsigned c, unsigned mp, unsigned mp2) { return (((a * ED + b) * ED + c) * NX + mp) * NX + mp2; };
+		// Read a [a][b][m][p]-shaped array with the flattened coordinate index
+		auto flat = [&](const std::vector<double> &v, unsigned a, unsigned b, unsigned mp) { return v[((a * ED + b) * NN + mp / ND) * ND + mp % ND]; };
+		auto psi_a = [&](unsigned mp, unsigned a) { return dpsids_Element(mp / ND, a); };
+		auto psi_ac = [&](unsigned mp, unsigned a, unsigned c) { return d2psids_Element(mp / ND, PYOOMPH_D2_SLOT(a, c)); };
+		auto dir_of = [&](unsigned mp) { return mp % ND; };
+		// d(dg_{ed}/ds_c)/dX^mp, i.e. the mixed second derivative already used above
+		auto d_dcgcov = [&](unsigned e, unsigned d, unsigned c, unsigned mp) {
+			const unsigned p = dir_of(mp);
+			return psi_a(mp, e) * Xkab[p][PYOOMPH_D2_SLOT(d, c)] + interpolated_t(e, p) * psi_ac(mp, d, c) + psi_a(mp, d) * Xkab[p][PYOOMPH_D2_SLOT(e, c)] + interpolated_t(d, p) * psi_ac(mp, e, c);
+		};
+
+		std::vector<double> d2gab_dXdX, d3gab_dsdXdX;
+		if (want_hessian)
+		{
+			d2gab_dXdX.assign(ED * ED * NX * NX, 0.0);
+			for (unsigned a = 0; a < ED; a++)
+				for (unsigned b = 0; b < ED; b++)
+					for (unsigned mp = 0; mp < NX; mp++)
+						for (unsigned mp2 = 0; mp2 < NX; mp2++)
+						{
+							const bool same_dir = (dir_of(mp) == dir_of(mp2));
+							double sum = 0.0;
+							for (unsigned e = 0; e < ED; e++)
+								for (unsigned d = 0; d < ED; d++)
+								{
+									const double d2gcov = same_dir ? (psi_a(mp, e) * psi_a(mp2, d) + psi_a(mp2, e) * psi_a(mp, d)) : 0.0;
+									sum -= flat(dgab_dX, a, e, mp2) * flat(dgcov_dX, e, d, mp) * aup(d, b);
+									sum -= aup(a, e) * d2gcov * aup(d, b);
+									sum -= aup(a, e) * flat(dgcov_dX, e, d, mp) * flat(dgab_dX, d, b, mp2);
+								}
+							d2gab_dXdX[iGG(a, b, mp, mp2)] = sum;
+						}
+
+			d3gab_dsdXdX.assign(ED * ED * ED * NX * NX, 0.0);
+			for (unsigned a = 0; a < ED; a++)
+				for (unsigned b = 0; b < ED; b++)
+					for (unsigned c = 0; c < ED; c++)
+						for (unsigned mp = 0; mp < NX; mp++)
+							for (unsigned mp2 = 0; mp2 < NX; mp2++)
+							{
+								const bool same_dir = (dir_of(mp) == dir_of(mp2));
+								double sum = 0.0;
+								for (unsigned e = 0; e < ED; e++)
+									for (unsigned d = 0; d < ED; d++)
+									{
+										const double A_ae = aup(a, e), A_db = aup(d, b);
+										const double dA_ae = flat(dgab_dX, a, e, mp), dpA_ae = flat(dgab_dX, a, e, mp2);
+										const double dA_db = flat(dgab_dX, d, b, mp), dpA_db = flat(dgab_dX, d, b, mp2);
+										const double dcg = dgcov_ds[e][d][c];
+										const double ddcg = d_dcgcov(e, d, c, mp), dpdcg = d_dcgcov(e, d, c, mp2);
+										const double d2dcg = same_dir ? (psi_a(mp, e) * psi_ac(mp2, d, c) + psi_a(mp2, e) * psi_ac(mp, d, c) + psi_a(mp, d) * psi_ac(mp2, e, c) + psi_a(mp2, d) * psi_ac(mp, e, c)) : 0.0;
+										sum -= d2gab_dXdX[iGG(a, e, mp, mp2)] * dcg * A_db;
+										sum -= dA_ae * dpdcg * A_db;
+										sum -= dA_ae * dcg * dpA_db;
+										sum -= dpA_ae * ddcg * A_db;
+										sum -= A_ae * d2dcg * A_db;
+										sum -= A_ae * ddcg * dpA_db;
+										sum -= dpA_ae * dcg * dA_db;
+										sum -= A_ae * dpdcg * dA_db;
+										sum -= A_ae * dcg * d2gab_dXdX[iGG(d, b, mp, mp2)];
+									}
+								d3gab_dsdXdX[iGGs(a, b, c, mp, mp2)] = sum;
+							}
+		}
+
 		// dM_i^(b)/dX^m_p = (dg^{ab}/dX^m_p) t_{a,i} + g^{ab} delta_{ip} Psi_{m,a}
 		for (unsigned int i = 0; i < ND; i++)
 			for (unsigned b = 0; b < ED; b++)
@@ -698,6 +783,57 @@ namespace pyoomph
 								}
 							}
 							dQ_dX[iQ(i, b, c, m, p)] = sum;
+						}
+
+		if (!want_hessian)
+			return;
+
+		// d2M_i^(b) = (d'd g^{ab}) t_{a,i} + (d g^{ab}) delta_{i p2} Psi_{m2,a} + (d' g^{ab}) delta_{ip} Psi_{m,a}
+		auto iM2 = [&](unsigned i, unsigned b, unsigned mp, unsigned mp2) { return ((i * ED + b) * NX + mp) * NX + mp2; };
+		auto iQ2 = [&](unsigned i, unsigned b, unsigned c, unsigned mp, unsigned mp2) { return (((i * ED + b) * ED + c) * NX + mp) * NX + mp2; };
+		d2M_dXdX->assign(ND * ED * NX * NX, 0.0);
+		d2Q_dXdX->assign(ND * ED * ED * NX * NX, 0.0);
+		for (unsigned int i = 0; i < ND; i++)
+			for (unsigned b = 0; b < ED; b++)
+				for (unsigned mp = 0; mp < NX; mp++)
+					for (unsigned mp2 = 0; mp2 < NX; mp2++)
+					{
+						double sum = 0.0;
+						for (unsigned a = 0; a < ED; a++)
+						{
+							sum += d2gab_dXdX[iGG(a, b, mp, mp2)] * interpolated_t(a, i);
+							if (i == dir_of(mp2)) sum += flat(dgab_dX, a, b, mp) * psi_a(mp2, a);
+							if (i == dir_of(mp)) sum += flat(dgab_dX, a, b, mp2) * psi_a(mp, a);
+						}
+						(*d2M_dXdX)[iM2(i, b, mp, mp2)] = sum;
+					}
+
+		// d2Q[i][b][c] = (d'd dc g^{ab}) t_{a,i} + (d dc g^{ab}) delta_{i p2} Psi_{m2,a}
+		//              + (d' dc g^{ab}) delta_{ip} Psi_{m,a} + (d'd g^{ab}) X_{i,ac}
+		//              + (d g^{ab}) delta_{i p2} Psi_{m2,ac} + (d' g^{ab}) delta_{ip} Psi_{m,ac}
+		for (unsigned int i = 0; i < ND; i++)
+			for (unsigned b = 0; b < ED; b++)
+				for (unsigned c = 0; c < ED; c++)
+					for (unsigned mp = 0; mp < NX; mp++)
+						for (unsigned mp2 = 0; mp2 < NX; mp2++)
+						{
+							double sum = 0.0;
+							for (unsigned a = 0; a < ED; a++)
+							{
+								sum += d3gab_dsdXdX[iGGs(a, b, c, mp, mp2)] * interpolated_t(a, i);
+								sum += d2gab_dXdX[iGG(a, b, mp, mp2)] * Xkab[i][PYOOMPH_D2_SLOT(a, c)];
+								if (i == dir_of(mp2))
+								{
+									sum += d2gab_dsdX[iGs(a, b, c, mp / ND, mp % ND)] * psi_a(mp2, a);
+									sum += flat(dgab_dX, a, b, mp) * psi_ac(mp2, a, c);
+								}
+								if (i == dir_of(mp))
+								{
+									sum += d2gab_dsdX[iGs(a, b, c, mp2 / ND, mp2 % ND)] * psi_a(mp, a);
+									sum += flat(dgab_dX, a, b, mp2) * psi_ac(mp, a, c);
+								}
+							}
+							(*d2Q_dXdX)[iQ2(i, b, c, mp, mp2)] = sum;
 						}
 	}
 
@@ -1033,7 +1169,7 @@ namespace pyoomph
 		// ------------------------------------------------------------------------------------------
 		double Qibc[3][3][3];   // [i_dim][b_eldim][c_eldim]
 		double dgab_ds[3][3][3]; // dg^{ab}/ds_c
-		std::vector<double> dM_dX, dQ_dX; // nodal-coordinate sensitivities, see fill_d2x_dNodalPos_helper
+		std::vector<double> dM_dX, dQ_dX, d2M_dXdX, d2Q_dXdX; // nodal-coordinate sensitivities, see fill_d2x_dNodalPos_helper
 		if (require_d2x && el_dim)
 		{
 			// dg_{ed}/ds_c = t_{e,i} X_{i,dc} + t_{d,i} X_{i,ec}, then
@@ -1067,7 +1203,8 @@ namespace pyoomph
 			if (require_dxdshape)
 			{
 				this->fill_d2x_dNodalPos_helper(n_node, n_dim, el_dim, interpolated_t, dpsids_Element, d2psids_Element,
-												aup_Euler, Xkab, dgab_ds, dM_dX, dQ_dX);
+												aup_Euler, Xkab, dgab_ds, dM_dX, dQ_dX,
+												(require_hessian ? &d2M_dXdX : NULL), (require_hessian ? &d2Q_dXdX : NULL));
 			}
 		}
 
@@ -1167,6 +1304,36 @@ namespace pyoomph
 										}
 										shape_info->d_d2x_shape_dcoord[ispace][l][slot][m][p] = sum;
 									}
+								}
+
+								// Second nodal-coordinate derivative, i.e. one more application of the
+								// product rule to D_ij psi = M_i^b M_j^c psi_,bc + M_j^c Q[i][b][c] psi_,b.
+								if (require_hessian)
+								{
+									const unsigned NX = NN * ND;
+									auto iM2 = [&](unsigned i2, unsigned b, unsigned mp, unsigned mp2) { return ((i2 * ED + b) * NX + mp) * NX + mp2; };
+									auto iQ2 = [&](unsigned i2, unsigned b, unsigned c, unsigned mp, unsigned mp2) { return (((i2 * ED + b) * ED + c) * NX + mp) * NX + mp2; };
+									for (unsigned m = 0; m < eleminfo.nnode; m++)
+										for (unsigned int p = 0; p < n_dim; p++)
+											for (unsigned m2 = 0; m2 < eleminfo.nnode; m2++)
+												for (unsigned int p2 = 0; p2 < n_dim; p2++)
+												{
+													const unsigned mp = m * ND + p, mp2 = m2 * ND + p2;
+													double sum = 0.0;
+													for (unsigned b = 0; b < el_dim; b++)
+													{
+														for (unsigned c = 0; c < el_dim; c++)
+														{
+															const double psi_bc = d2psids(l, PYOOMPH_D2_SLOT(b, c));
+															const double psi_b = dpsids(l, b);
+															sum += (d2M_dXdX[iM2(i, b, mp, mp2)] * gab_gai[c][j] + gab_gai[b][i] * d2M_dXdX[iM2(j, c, mp, mp2)]) * psi_bc;
+															sum += (dM_dX[iM(i, b, m, p)] * dM_dX[iM(j, c, m2, p2)] + dM_dX[iM(i, b, m2, p2)] * dM_dX[iM(j, c, m, p)]) * psi_bc;
+															sum += (d2M_dXdX[iM2(j, c, mp, mp2)] * Qibc[i][b][c] + gab_gai[c][j] * d2Q_dXdX[iQ2(i, b, c, mp, mp2)]) * psi_b;
+															sum += (dM_dX[iM(j, c, m, p)] * dQ_dX[iQ(i, b, c, m2, p2)] + dM_dX[iM(j, c, m2, p2)] * dQ_dX[iQ(i, b, c, m, p)]) * psi_b;
+														}
+													}
+													shape_info->d2_d2x2_shape_dcoord[ispace][l][slot][m][p][m2][p2] = sum;
+												}
 								}
 							}
 						}

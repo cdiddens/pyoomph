@@ -336,6 +336,69 @@ def test_moving_mesh_position_jacobian_of_a_strong_laplacian():
 
 
 # ---------------------------------------------------------------------------------------------
+# Moving mesh, analytic Hessian: d2_d2x2_shape_dcoord
+#
+# Problem.debug_analytic_hessian_by_fd() compares the analytic Hessian-vector products against a
+# central difference of the analytic Jacobian. Its noise floor here is around 1e-8; zeroing the
+# second-derivative Hessian term on purpose takes the discrepancy to ~1.9, so the check is sensitive
+# to the thing it is meant to test by some eight orders of magnitude.
+#
+# The residual has to be nonlinear in u AND contain a second derivative: for the plain strong-form
+# Laplacian the residual is linear, so its Hessian vanishes and nothing is tested. The mesh has to be
+# distorted for the same reason as everywhere else here.
+# ---------------------------------------------------------------------------------------------
+
+def _hessian_fd_check(mesh_factory, boundaries, dim):
+    from pyoomph.equations.ALE import LaplaceSmoothedMesh
+
+    class Eq(Equations):
+        def define_fields(self):
+            self.define_scalar_field("u", "C2")
+
+        def define_residuals(self):
+            u, v = var_and_test("u")
+            self.add_residual(weak((1 + u ** 2) * div(grad(u)), v) + weak(1, v))
+
+    class P(Problem):
+        def define_problem(self):
+            self.add_mesh(mesh_factory())
+            eqs = Eq() + LaplaceSmoothedMesh()
+            pinned = {"mesh_x": True, "mesh_y": True}
+            if dim == 3:
+                pinned["mesh_z"] = True
+            for b in boundaries:
+                eqs += DirichletBC(**pinned) @ b
+            eqs += DirichletBC(u=0) @ "left" + DirichletBC(u=0) @ "right"
+            self.add_equations(eqs @ "domain")
+
+    with P() as p:
+        p.setup_for_stability_analysis(analytic_hessian=True)
+        p.initialise()
+        m = p.get_mesh("domain")
+        for n in m.nodes():
+            a, b = n.x(0), n.x(1)
+            n.set_x(0, a + 0.30 * a * b)
+            n.set_x(1, b - 0.20 * a * b)
+        for n in m.nodes():
+            n.set_value(0, 0.3 * n.x(0) + 0.7 * n.x(1) ** 2 + 0.2)
+        return p.debug_analytic_hessian_by_fd(epsilon=1e-4)
+
+
+def test_moving_mesh_hessian_quads():
+    _hessian_fd_check(lambda: RectangularQuadMesh(N=2), ("top", "bottom", "left", "right"), 2)
+
+
+def test_moving_mesh_hessian_triangles():
+    _hessian_fd_check(lambda: RectangularQuadMesh(N=2, split_in_tris="crossed"),
+                      ("top", "bottom", "left", "right"), 2)
+
+
+def test_moving_mesh_hessian_bricks():
+    _hessian_fd_check(lambda: CuboidBrickMesh(N=2),
+                      ("top", "bottom", "left", "right", "front", "back"), 3)
+
+
+# ---------------------------------------------------------------------------------------------
 # Things that must be refused rather than answered wrongly
 # ---------------------------------------------------------------------------------------------
 

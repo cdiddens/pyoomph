@@ -402,8 +402,6 @@ def grad(arg:ExpressionOrNum,lagrangian:bool=False,nondim:bool=False,coordsys:Op
 		  ``div(grad(u))``, is exactly the Laplace-Beltrami operator, but the full tensor ``grad(grad(u))`` is *not*
 		  symmetric there: it carries a second-fundamental-form part. Second derivatives of a *bulk* field evaluated on
 		  an interface, ``grad(grad(var("u",domain="..")))``, are the ordinary symmetric ones.
-		* Analytical Hessians (as used by bifurcation tracking) of a second derivative on a moving mesh are not
-		  implemented and raise an error; use ``analytic_hessian=False`` there.
 	"""
 	if isinstance(arg,str):
 		arg=var(arg)

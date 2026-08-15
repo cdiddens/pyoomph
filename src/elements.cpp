@@ -1088,6 +1088,9 @@ namespace pyoomph
 			// shape sensitivities are never asked for.
 			needed.second_derivs_dcoord = ft->moving_nodes && !ft->fd_position_jacobian;
 			needed.second_derivs_hessian = needed.second_derivs_dcoord && ft->hessian_generated;
+			// The Hessian branch of fill_shape_info_at_s writes d2_d2x2_shape_dcoord whenever both are
+			// on, so the first-order sensitivities have to be there too.
+			if (needed.second_derivs_hessian) needed.second_derivs_dcoord = true;
 		}
 
 		if (!Default_shape_info_buffer)

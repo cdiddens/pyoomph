@@ -558,11 +558,11 @@ void PyReg_Mesh(nb::module_ &m)
 	// if the element is of another kind (e.g. a plain oomph-lib element or an ODE element).
 	auto &decl_GeneralisedElement = (*py_decl_GeneralisedElement);
 	decl_GeneralisedElement
-		.def("_debug_hessian", [](oomph::GeneralisedElement *self, std::vector<double> Y, std::vector<std::vector<double>> C, double epsilon)
+		.def("_debug_hessian", [](oomph::GeneralisedElement *self, std::vector<double> Y, std::vector<std::vector<double>> C, double epsilon) -> double
 			 {
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
-			if (!be) { throw_runtime_error("Not a BulkelementBase"); return;	   }
-			be->debug_hessian(Y,C,epsilon); }, nb::arg("Y"), nb::arg("C"), nb::arg("epsilon"), "Debugging helper comparing the analytically assembled Hessian against a finite-difference approximation")
+			if (!be) { throw_runtime_error("Not a BulkelementBase"); return 0.0;	   }
+			return be->debug_hessian(Y,C,epsilon); }, nb::arg("Y"), nb::arg("C"), nb::arg("epsilon"), "Debugging helper comparing the analytically assembled Hessian against finite differences of the analytical Jacobian. Returns the largest absolute discrepancy; entries exceeding epsilon are printed. Requires Problem.enable_store_local_dof_pt_in_elements() before assign_eqn_numbers() - use Problem.debug_analytic_hessian_by_fd(), which arranges that.")
 		.def("get_meshio_type_index", [](oomph::GeneralisedElement *self) -> unsigned int
 			 {
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);

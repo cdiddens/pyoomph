@@ -417,10 +417,22 @@ namespace pyoomph
 	}
 
 	// Debug helper: compares the analytical Hessian-vector product (Y,C) -> product against a
-	// finite-difference approximation obtained by perturbing each dof and re-assembling the
-	// Jacobian, to validate the JIT-generated analytical Hessian code. Not used in production
-	// assembly; intended to be called interactively/from Python when debugging.
-	void BulkElementBase::debug_hessian(std::vector<double> Y, std::vector<std::vector<double>> C, double epsilon)
+	// finite-difference approximation obtained by perturbing the dofs along each C vector and
+	// re-assembling the Jacobian, to validate the JIT-generated analytical Hessian code.
+	//
+	// The reference is the *analytical* Jacobian, so this is only as good as that Jacobian - use it
+	// together with Problem.debug_jacobian_by_fd_epsilon, which validates the Jacobian itself against
+	// finite differences of the residual. The two together pin down the whole chain.
+	//
+	// Returns the largest absolute discrepancy found. Not used in production assembly.
+	//
+	// Call it through Problem.debug_analytic_hessian_by_fd() rather than directly: the
+	// finite-difference half perturbs the dofs through dof_pt_vector(), and oomph-lib only fills the
+	// Dof_pt array behind it when Problem::enable_store_local_dof_pt_in_elements() was switched on
+	// before the equation numbers were assigned. Its own check for that sits inside #ifdef PARANOID,
+	// so in this build the omission is a segfault rather than a message, and Dof_pt is private so it
+	// cannot be probed from here.
+	double BulkElementBase::debug_hessian(std::vector<double> Y, std::vector<std::vector<double>> C, double epsilon)
 	{
 		if (Y.size() != this->ndof())
 			throw_runtime_error("Y vector is wrong in size " + std::to_string(Y.size()) + "  vs.  " + std::to_string(this->ndof()));
@@ -489,36 +501,46 @@ namespace pyoomph
 			C_mult[i] *= FD_step;
 		}
 
+		// Central difference along each C direction. A one-sided difference against jac_base is only
+		// first order accurate, which on a moving mesh leaves a residue around 1e-4 - the same order
+		// as a real error - and makes the check useless there.
 		for (unsigned i = 0; i < C.size(); i++)
 		{
+			oomph::DenseMatrix<double> jac_plus(this->ndof()), jac_minus(this->ndof());
 			for (unsigned n = 0; n < this->ndof(); n++)
-			{
 				*dof_pt[n] += C_mult[i] * C[i][n];
-			}
-			oomph::DenseMatrix<double> jac_C(this->ndof());
-			this->get_jacobian(dummy_res, jac_C);
+			this->get_jacobian(dummy_res, jac_plus);
 			for (unsigned n = 0; n < this->ndof(); n++)
-			{
+				*(dof_pt[n]) = dofbackup[n] - C_mult[i] * C[i][n];
+			this->get_jacobian(dummy_res, jac_minus);
+			for (unsigned n = 0; n < this->ndof(); n++)
 				*(dof_pt[n]) = dofbackup[n];
-			}
 
 			for (unsigned n = 0; n < this->ndof(); n++)
 			{
 				double prod_c = 0.0;
 				for (unsigned m = 0; m < this->ndof(); m++)
 				{
-					prod_c += (jac_C(n, m) - jac_base(n, m)) * Y[m];
+					prod_c += (jac_plus(n, m) - jac_minus(n, m)) * Y[m];
 				}
-				fdprod(i, n) += prod_c / C_mult[i];
+				fdprod(i, n) += prod_c / (2.0 * C_mult[i]);
 			}
 		}
 
+		// Report a RELATIVE discrepancy: the products themselves range over many orders of magnitude
+		// across elements and dof pairs, so an absolute threshold would either drown in noise or miss
+		// errors in the small entries.
+		double worst = 0.0;
 		for (unsigned int iv = 0; iv < C.size(); iv++)
 		{
 			bool Cheader_written = false;
 			for (unsigned int id = 0; id < this->ndof(); id++)
 			{
-				if (epsilon <= 0 || std::fabs(fdprod(iv, id) - anaprod(iv, id)) > epsilon)
+				const double scale = std::max(1.0, std::max(std::fabs(anaprod(iv, id)), std::fabs(fdprod(iv, id))));
+				const double delta = std::fabs(fdprod(iv, id) - anaprod(iv, id)) / scale;
+				if (delta > worst)
+					worst = delta;
+				if (epsilon <= 0 || delta > epsilon)
 				{
 					if (!Cheader_written)
 					{
@@ -528,10 +550,11 @@ namespace pyoomph
 						std::cout << std::endl;
 						Cheader_written = true;
 					}
-					std::cout << "     COMPONENT " << id << " : FD: " << fdprod(iv, id) << " ANA: " << anaprod(iv, id) << " DELTA: " << std::fabs(fdprod(iv, id) - anaprod(iv, id)) << std::endl;
+					std::cout << "     COMPONENT " << id << " : FD: " << fdprod(iv, id) << " ANA: " << anaprod(iv, id) << " REL.DELTA: " << delta << std::endl;
 				}
 			}
 		}
+		return worst;
 	}
 
 	// Assembles the full (dense, flattened as ndof x ndof*ndof) Hessian tensor d^2R/dU^2 by
