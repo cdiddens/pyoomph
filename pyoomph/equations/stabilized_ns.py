@@ -120,9 +120,27 @@ class StabilizedNavierStokes(NavierStokesEquations):
             squares), ``"codina"`` (inverse of the sum) or ``"tezduyar"``.
         tauC_formula: ``"codina"`` (:math:`h^2/(c_C\\tau_M)`) or ``"tezduyar"``.
         include_viscous_in_residual: keep :math:`-\\nabla\\cdot(2\\mu\\mathbf{D})` in the strong
-            residual. Required for consistency on C2 velocities; on C1 velocities the term is
-            elementwise zero anyway, so leaving it on costs nothing. Only set this to False to
-            reproduce a formulation that has no second derivatives available.
+            residual.
+
+            **Switch it off on a mesh of linear simplices.** On an affine element map the second
+            derivatives of C1 shape functions vanish identically, so the term contributes nothing
+            and computing it is pure cost -- measured, dropping it changes the residual by exactly 0
+            on C1 triangles, and saves about 1.37x on Jacobian assembly.
+
+            **On C1 quads it depends on the viscous form, which is easy to get wrong.** The stress
+            form assembles :math:`\\mu(\\nabla\\cdot\\nabla\\vec{u} + \\nabla(\\nabla\\cdot\\vec{u}))`,
+            and the second term contains the *mixed* derivative
+            :math:`\\partial_{xy}u`, which a bilinear map does not kill even on an undistorted
+            rectangle. Measured on C1 quads: **4.0e-01** with ``viscous_form="stress"`` (the default)
+            against 0 with ``"laplace"``. So the simplex rule is the safe one; a quad mesh only
+            qualifies in the Laplace form, and then only while it stays undistorted.
+
+            Dropping it on C2 velocities costs three orders of magnitude in the pressure error
+            (dev_docs §2). It must also be off on wedges, pyramids and 0d domains, where second
+            derivatives do not exist.
+
+            The scalar-transport counterpart is
+            :py:attr:`~pyoomph.equations.stabilization.ScalarTransportStabilization.include_diffusion_in_residual`.
         constant_viscosity: assume :math:`\\nabla\\mu=0` when forming
             :math:`\\nabla\\cdot(2\\mu\\mathbf{D})`. Set to False for a variable viscosity, which
             makes GiNaC differentiate through it.

@@ -3,7 +3,7 @@
 Status: **in the tree** as `pyoomph/equations/stabilization.py`, wired into
 `pyoomph/equations/advection_diffusion.py` and `pyoomph/equations/multi_component.py`. Covered by
 `tests/test_stabilized_transport.py`. One line of C++ was touched, the return type of `div`
-(§2), and two pre-existing defects were fixed along the way (§10).
+(§2), and two pre-existing defects were fixed along the way (§11).
 
 This is the scalar-transport counterpart of `stabilized_navier_stokes.md`, and it is worth reading
 that one first: the design, the `tau` formulas, the units traps and the `subexpression()` placement
@@ -206,7 +206,7 @@ Poiseuille check return identical errors before and after.
 
 A caveat on that check. Its four variants used to report the *same* error to four digits, which was
 read as "nothing moved"; they in fact differ (1.376e-03 for PSPG, 1.336e-03 for GLS/ASGS) and the
-agreement was the shared-output-directory JIT cache of §10 handing every variant the first one's
+agreement was the shared-output-directory JIT cache of §11 handing every variant the first one's
 compiled code. Any A/B over constructor flags needs one output directory per `Problem`.
 
 The scalar transport equations have their own linear sink -- `get_reaction_rate` on a mixture -- and
@@ -214,7 +214,42 @@ it is *not* in their `tau` either. The machinery is now there (`tau_advective_di
 wiring it up needs the derivative of the reaction with respect to the field, not the rate itself, and
 is left undone.
 
-## 7. Discontinuity capturing: measured limits
+## 7. Turning the second derivatives off, and when that is free
+
+Both stabilizations already had a switch for the second-derivative term --
+`include_diffusion_in_residual` on the scalar side, `include_viscous_in_residual` on the momentum
+side. They were documented as a fallback for meshes where second derivatives do not exist at all
+(wedges, pyramids, 0d). They are also a performance option, and the docstrings now say so with the
+measurements below.
+
+Dropping the term saves **1.37x on Jacobian assembly** (C1/C1 flow + C1 advection-diffusion, 6243
+dofs, interleaved A/B/A/B, median of 9): the whole second-derivative shape machinery stops being
+generated. Whether that is free or an approximation depends on the element, and not simply on the
+space. Relative change of the residual when dropping it:
+
+| operator | C1 tris | C1 tets | C1 quads, rect | C1 quads, warped | C2 tris | C2 tets |
+|---|---|---|---|---|---|---|
+| scalar `div(D grad c)` | 0 | 0 | 1.8e-17 | 2.4e-02 | 1.4e-01 | 1.6e-01 |
+| momentum, `viscous_form="laplace"` | 0 | — | 0 | — | — | — |
+| momentum, `viscous_form="stress"` | 0 | — | **4.0e-01** | — | — | — |
+
+Two things there are worth knowing.
+
+**An undistorted Q1 quad qualifies for the scalar term, and it is a trap.** A bilinear function has
+`d_xx = d_yy = 0`, so its Laplacian vanishes on a rectangle just as it does on a simplex. It stops
+vanishing the moment the quad stops being a rectangle -- 2.4e-02 after a bilinear warp -- which is
+every distorted mesh and every moving mesh. The rule to state is the simplex one.
+
+**The momentum term is not free on a Q1 quad even undistorted, and only in the stress form.** The
+stress form assembles `mu (div(grad u) + grad(div u))`, and the second piece contains the *mixed*
+derivative `d_xy u`, which a bilinear map does not kill. Hence 4.0e-01 in the default stress form
+against 0 in the Laplace form on the very same mesh.
+
+An earlier revision of this document quoted "3.0e-01 on C1 quads" for the scalar term. That number
+was measured with both switches thrown at once and belongs to the momentum stress term; the scalar
+term on that mesh is 1.8e-17. Measuring the two operators separately is what separated them.
+
+## 8. Discontinuity capturing: measured limits
 
 On the problem above the first Newton solve diverges outright at `dc_factor` 1, 0.1 and 0.03, and
 only runs at 0.01. Newton *diverges* rather than producing NaN -- residuals 0.0027, 0.13, 0.22, 3.27,
@@ -234,7 +269,7 @@ what it was originally reached for; that initial diagnosis was wrong and the doc
 `dc_factor` is left at the textbook 1 rather than retuned, because one problem is not enough to set
 a default. The docstring tells the user to start at 0.01.
 
-## 8. The interface physics is untouched, and that is measured, not argued
+## 9. The interface physics is untouched, and that is measured, not argued
 
 The requirement was that switching a stabilization on must not perturb the Marangoni stress, the
 kinematic boundary condition, mass transfer, latent heat, surfactant transport or the contact-angle
@@ -266,7 +301,7 @@ flow side.
 with all three switches at their defaults, is `numpy.array_equal`-identical to the same problem on
 `develop`.
 
-## 9. Closing the gap on the flow side
+## 10. Closing the gap on the flow side
 
 `MultiComponentNavierStokesInterface` is a standalone `InterfaceEquations`, not a subclass of
 `NavierStokesFreeSurface`, and it never called `get_stabilization_traction` — so a flow stabilization
@@ -283,7 +318,7 @@ does not call the hook either, so the two were already consistent.
 The two-phase correction is **reasoned, not measured** — it only activates with
 `natural_bc_correction=True` on a stabilized outer phase, which nothing in the tutorials does.
 
-## 10. Three things found along the way
+## 11. Three things found along the way
 
 **The GCL branch of `CompositionAdvectionDiffusionEquations` dropped `dt_factor` — fixed.** It used a
 plain `add_dweak_dt(rho_factor*f, f_test, scheme=...)` with no `self.dt_factor`, while the two
@@ -317,7 +352,7 @@ Also worth knowing when diffing two runs: `get_dof_description()` can return the
 in a different *order* between runs, because the mass-transfer model iterates a Python `set` of
 component names. Fix `PYTHONHASHSEED` or match rows by name, not by index.
 
-## 11. Loose ends
+## 12. Loose ends
 
 * **`C_I = 4` is unmeasured for scalar transport.** It is inherited from `StabilizedNavierStokes` for
   consistency, where §7 of that document measures `C_I = 36` as the only value reaching O(h^2). A

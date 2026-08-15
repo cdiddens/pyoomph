@@ -368,6 +368,99 @@ def test_stabilization_touches_only_its_own_rows(switch, expected_rows):
     assert not unexpected, "%s=%s also moved %s" % (switch, setting, sorted(unexpected))
 
 
+def _bilinear_distort(mesh):
+    """A globally bilinear node map: elements stay quads but stop being rectangles."""
+    for n in mesh.nodes():
+        a, b = n.x(0), n.x(1)
+        n.set_x(0, a + 0.30 * a * b)
+        n.set_x(1, b - 0.20 * a * b)
+
+
+@pytest.mark.parametrize("split,space,distort,exact", [
+    ("alternate_left", "C1", False, True),   # affine simplex: second derivatives vanish identically
+    ("alternate_left", "C2", False, False),  # quadratic on a simplex: they do not
+    (False, "C1", False, True),              # Q1 on a rectangle: d_xx = d_yy = 0, so the Laplacian is too
+    (False, "C1", True, False),              # ... but not once the quad stops being a rectangle
+])
+def test_dropping_the_scalar_second_derivative(split, space, distort, exact):
+    """``include_diffusion_in_residual=False`` is advertised as free on linear simplices and as an
+    approximation otherwise. Both halves are load-bearing, and the quad rows are why the advertised
+    rule is about *simplices* and not merely about C1: an undistorted Q1 quad happens to qualify,
+    but any distortion -- i.e. every moving mesh -- ends that."""
+    class P(Problem):
+        def __init__(self, keep):
+            super().__init__()
+            self.keep = keep
+
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=8, size=[1, 1], split_in_tris=split))
+            eqs = AdvectionDiffusionEquations(
+                "c", diffusivity=0.01, space=cast(FiniteElementSpaceEnum, space),
+                consider_scaling=False, wind=_WIND,
+                stabilization=ScalarTransportStabilization(
+                    "SUPG", include_diffusion_in_residual=self.keep))
+            for b in ["left", "right", "top", "bottom"]:
+                eqs = eqs + DirichletBC(c=var("coordinate_x") ** 2 + var("coordinate_y")) @ b
+            self.add_equations(eqs @ "domain")
+
+    res = []
+    for keep in (True, False):
+        with _fresh(P(keep)) as p:
+            p.initialise()
+            if distort:
+                _bilinear_distort(p.get_mesh("domain"))
+            p.set_initial_condition()
+            res.append(numpy.array(p.get_residuals()))
+    rel = numpy.max(numpy.abs(res[0] - res[1])) / max(numpy.max(numpy.abs(res[0])), 1e-300)
+    if exact:
+        assert rel < 1e-14, "dropping the term is supposed to be free here, but moved by %g" % rel
+    else:
+        assert rel > 1e-3, "dropping the term is supposed to matter here, but moved only %g" % rel
+
+
+@pytest.mark.parametrize("split,viscous_form,exact", [
+    ("alternate_left", "stress", True),   # affine simplex: free whatever the form
+    (False, "laplace", True),             # Q1 rectangle, only div(grad u): free
+    (False, "stress", False),             # ... but the stress form adds grad(div u), whose MIXED
+])                                        # derivative a bilinear map does not kill
+def test_dropping_the_viscous_second_derivative(split, viscous_form, exact):
+    """The momentum counterpart, and the trap in it: ``include_viscous_in_residual=False`` is free on
+    a C1 quad mesh only in the Laplace form. In the default stress form the same mesh gives a ~40%
+    different stabilization, because grad(div(u)) survives a bilinear map."""
+    from pyoomph.equations.stabilized_ns import StabilizedNavierStokes
+
+    class P(Problem):
+        def __init__(self, keep):
+            super().__init__()
+            self.keep = keep
+
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=8, size=[1, 1], split_in_tris=split))
+            eqs = StabilizedNavierStokes(
+                space="C1C1", stabilization="SUPG+PSPG",
+                viscous_form=cast(Any, viscous_form),
+                dynamic_viscosity=0.01, mass_density=1,
+                include_viscous_in_residual=self.keep)
+            eqs += DirichletBC(velocity_x=0, velocity_y=0) @ "bottom"
+            eqs += DirichletBC(velocity_x=1, velocity_y=0) @ "top"
+            eqs += DirichletBC(velocity_x=0, velocity_y=0) @ "left"
+            eqs += DirichletBC(velocity_x=0, velocity_y=0) @ "right"
+            eqs += DirichletBC(pressure=0) @ "bottom/left"
+            self.add_equations(eqs @ "domain")
+
+    res = []
+    for keep in (True, False):
+        with _fresh(P(keep)) as p:
+            p.initialise()
+            p.set_initial_condition()
+            res.append(numpy.array(p.get_residuals()))
+    rel = numpy.max(numpy.abs(res[0] - res[1])) / max(numpy.max(numpy.abs(res[0])), 1e-300)
+    if exact:
+        assert rel < 1e-14, "dropping the term is supposed to be free here, but moved by %g" % rel
+    else:
+        assert rel > 1e-3, "dropping the term is supposed to matter here, but moved only %g" % rel
+
+
 def test_div_of_a_gradient_combines_with_numbers():
     """div() used to be registered without a return type, so GiNaC inferred one from its argument and
     a *held* div(grad(c)) inherited grad's non-commutativity. Adding a number to it then raised
