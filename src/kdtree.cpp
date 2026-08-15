@@ -324,6 +324,7 @@ namespace pyoomph
 	void KDTree::reset(unsigned _dim)
 	{
 		delete tree;
+		first_deferred_point = -1;
 		// dim must follow the tree we build here, and static_tree the fact that it is a dynamic one.
 		// add_point() upgrades the tree to 2d/3d only while dim is still lower, so leaving a stale
 		// (higher) dim behind means every subsequent point silently lands in this 1d tree, where
@@ -374,6 +375,7 @@ namespace pyoomph
 			//   tree->cloud=oldtree->cloud;
 			delete oldtree;
 			dim = 3;
+			first_deferred_point = -1; // the upgrade constructor re-indexes the entire cloud
 		}
 		else if (y && dim < 2)
 		{
@@ -383,6 +385,7 @@ namespace pyoomph
 			// tree->cloud=oldtree->cloud;
 			delete oldtree;
 			dim = 2;
+			first_deferred_point = -1; // the upgrade constructor re-indexes the entire cloud
 		}
 		unsigned index = tree->cloud.pts.size();
 		tree->cloud.pts.push_back({x, y, z});
@@ -390,6 +393,37 @@ namespace pyoomph
 		tree->addIndex(index);
 
 		return index;
+	}
+
+	// Append a point to the cloud without adding it to the index. Every query below calls
+	// index_deferred_points() first, so this is only ever a deferral, never an omission - it exists
+	// because nanoflann's dynamic adaptor rebuilds a sub-index on each addPoints() call, so adding
+	// n points one at a time costs far more than adding them as one range. Use it when many points
+	// are known to be coming and nothing will query the tree in between (see
+	// MeshTemplate::get_or_create_intermediate_node, which creates one node per element edge).
+	unsigned KDTree::add_point_deferred(double x, double y, double z)
+	{
+		if (static_tree)
+			throw_runtime_error("Cannot add a point to a static tree");
+		// A dimension upgrade has to happen here as well, and it indexes the whole cloud, so let
+		// add_point() handle that case rather than duplicating the rebuild.
+		if ((z && dim < 3) || (y && dim < 2))
+			return add_point(x, y, z);
+		unsigned index = tree->cloud.pts.size();
+		tree->cloud.pts.push_back({x, y, z});
+		if (first_deferred_point < 0)
+			first_deferred_point = (long)index;
+		return index;
+	}
+
+	void KDTree::index_deferred_points()
+	{
+		if (first_deferred_point < 0)
+			return;
+		const unsigned start = (unsigned)first_deferred_point;
+		first_deferred_point = -1;
+		if (tree->cloud.pts.size() > start)
+			tree->addIndices(start, tree->cloud.pts.size() - 1);
 	}
 
 	// Return the coordinates of the point previously stored at `index` (as returned by
@@ -411,6 +445,7 @@ namespace pyoomph
 	// so those cases are rejected up front without even querying the underlying tree.
 	int KDTree::point_present(double x, double y, double z, double epsilon)
 	{
+		index_deferred_points();
 		if (dim < 3 && fabs(z) > epsilon)
 			return -1;
 		if (dim < 2 && fabs(y) > epsilon)
@@ -420,6 +455,7 @@ namespace pyoomph
 
 	int KDTree::nearest_point(double x, double y, double z, double *distret)
 	{
+		index_deferred_points();
 		// std::cout << "CALLING NEAREST POINT ON " << tree << std::endl;
 		return tree->nearest_point(x, y, z, distret);
 	}
@@ -438,11 +474,13 @@ namespace pyoomph
 
 	std::vector<std::pair<uint32_t, double>> KDTree::radius_search(double radius, double x, double y, double z)
 	{
+		index_deferred_points();
 		return tree->radius_search(radius, x, y, z);
 	}
 
 	unsigned KDTree::k_nearest(unsigned k, double x, double y, double z, std::vector<uint32_t> &indices)
 	{
+		index_deferred_points();
 		return tree->k_nearest(k, x, y, z, indices);
 	}
 

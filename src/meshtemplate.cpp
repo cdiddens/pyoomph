@@ -467,12 +467,18 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		ninds[25] = templ->add_intermediate_node_unique(node_indices[6], node_indices[7]);
 		ninds[26] = node_indices[7];
 
-		// Missing from the intermediate layer
-		ninds[10] = templ->add_intermediate_node_unique(ninds[9], ninds[11]);
-		ninds[12] = templ->add_intermediate_node_unique(ninds[9], ninds[15]);
-		ninds[14] = templ->add_intermediate_node_unique(ninds[11], ninds[17]);
-		ninds[16] = templ->add_intermediate_node_unique(ninds[15], ninds[17]);
-		ninds[13] = templ->add_intermediate_node_unique(node_indices[0], node_indices[3], node_indices[5], node_indices[6], false);
+		// Missing from the intermediate layer. These four are the side-face centres: placed at the
+		// mid-point of the two vertical edge mid-points (as before), but *identified* by the four
+		// corners of the face they sit in - the wedge or pyramid on the other side of that face
+		// builds the same node from different parents, and only the corner set is common to both.
+		ninds[10] = templ->add_entity_centre_node_unique({node_indices[0], node_indices[1], node_indices[4], node_indices[5]}, {ninds[9], ninds[11]}, true);
+		ninds[12] = templ->add_entity_centre_node_unique({node_indices[0], node_indices[2], node_indices[4], node_indices[6]}, {ninds[9], ninds[15]}, true);
+		ninds[14] = templ->add_entity_centre_node_unique({node_indices[1], node_indices[3], node_indices[5], node_indices[7]}, {ninds[11], ninds[17]}, true);
+		ninds[16] = templ->add_entity_centre_node_unique({node_indices[2], node_indices[3], node_indices[6], node_indices[7]}, {ninds[15], ninds[17]}, true);
+		// The cell centre is interior, so it is never shared - but keying it on four of the eight
+		// corners could collide with a genuine face key elsewhere, so name it by all eight.
+		ninds[13] = templ->add_entity_centre_node_unique({node_indices[0], node_indices[1], node_indices[2], node_indices[3], node_indices[4], node_indices[5], node_indices[6], node_indices[7]},
+														 {node_indices[0], node_indices[3], node_indices[5], node_indices[6]}, false);
 		/*
 		 for (unsigned int j=0;j<27;j++)
 		 {
@@ -867,9 +873,19 @@ MeshTemplateElementTetraC2TB -> MeshTemplateElementTetraC2
 		ninds[16] = templ->add_intermediate_node_unique(ninds[12], ninds[14]);
 		ninds[17] = templ->add_intermediate_node_unique(ninds[13], ninds[14]);
 
-		for (unsigned offs = 0; offs < 6; offs++)
+		// offs 0..2 are the vertical edges (corner to corner, already canonical); offs 3..5 pair a
+		// bottom edge mid-point with the top one above it, i.e. they are the centres of the three
+		// quadrilateral side faces. Those faces are shared with bricks and pyramids, which place the
+		// same node from their own parents, so identify them by the face's four corners.
+		for (unsigned offs = 0; offs < 3; offs++)
 		{
 		  ninds[6 + offs] = templ->add_intermediate_node_unique(ninds[offs], ninds[offs + 12]);
+		}
+		static const unsigned quad_face_corners[3][4] = {{0, 1, 12, 13}, {0, 2, 12, 14}, {1, 2, 13, 14}};
+		for (unsigned offs = 3; offs < 6; offs++)
+		{
+		  const unsigned *fc = quad_face_corners[offs - 3];
+		  ninds[6 + offs] = templ->add_entity_centre_node_unique({ninds[fc[0]], ninds[fc[1]], ninds[fc[2]], ninds[fc[3]]}, {ninds[offs], ninds[offs + 12]}, true);
 		}
 		
 		return new MeshTemplateElementWedgeC2(ninds);
@@ -966,7 +982,9 @@ Index : Local coordinates (s0,s1,s2)
 		ninds[10] = templ->add_intermediate_node_unique(ninds[1], ninds[4]);
 		ninds[11] = templ->add_intermediate_node_unique(ninds[2], ninds[4]);
 		ninds[12] = templ->add_intermediate_node_unique(ninds[3], ninds[4]);
-		ninds[13] = templ->add_intermediate_node_unique(ninds[0], ninds[2]);
+		// The base-face centre, placed on the 0-2 diagonal as before but identified by all four base
+		// corners: the brick or wedge sharing that face names it the same way.
+		ninds[13] = templ->add_entity_centre_node_unique({ninds[0], ninds[1], ninds[2], ninds[3]}, {ninds[0], ninds[2]}, true);
 
 		return new MeshTemplateElementPyramidC2(ninds);
 	}
@@ -1198,6 +1216,7 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 1d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementLineC2 *res = new MeshTemplateElementLineC2(n1, n2, n3);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);		
 	}
 
@@ -1225,6 +1244,7 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 2d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementQuadC2 *res = new MeshTemplateElementQuadC2(n1, n2, n3, n4, n5, n6, n7, n8, n9);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);
 	}
 
@@ -1268,6 +1288,7 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 2d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementTriC2 *res = new MeshTemplateElementTriC2(n1, n2, n3, n4, n5, n6);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);		
 	}
 
@@ -1295,6 +1316,7 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementBrickC2 *res = new MeshTemplateElementBrickC2(inds);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);
 	}
 
@@ -1363,6 +1385,7 @@ Index : Local coordinates (s0,s1,s2)
 		}
 		MeshTemplateElementTetraC2 *res = new MeshTemplateElementTetraC2(use);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);
 	}
 
@@ -1402,6 +1425,7 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementWedgeC2 *res = new MeshTemplateElementWedgeC2(inds);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);		
 	}
 
@@ -1415,6 +1439,7 @@ Index : Local coordinates (s0,s1,s2)
 			throw_runtime_error("Tried to add a 3d element to a Mesh template which has already elements of dimension " + std::to_string(mesh_template->dim));
 		MeshTemplateElementPyramidC2 *res = new MeshTemplateElementPyramidC2(inds);
 		elements.push_back(res);
+		mesh_template->note_predefined_higher_order_element();
 		res->link_nodes_with_domain(this);		
 	}
 	
@@ -1622,6 +1647,7 @@ Index : Local coordinates (s0,s1,s2)
 		facetmap.clear();
 		domain=NULL;
 		inter_nodes_periodic.clear();
+		intermediate_node_map.clear(); // keyed by node index, so it dies with the nodes
 		kdtree.reset(1);
 	}
 
@@ -1705,24 +1731,114 @@ Index : Local coordinates (s0,s1,s2)
 	// call actually created a new node (rather than finding an existing boundary one), and
 	// that node lies on a boundary, record it in inter_nodes_periodic so a matching
 	// intermediate node on the periodic partner side can later be linked up (see set_element_code).
-	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2)
+	// Identity from `key_corners` (the corner nodes of the mesh entity this node belongs to),
+	// position from `parents` (the nodes it is the average of). See intermediate_node_map for why
+	// those are not always the same set. Boundary and domain membership are inherited as the
+	// intersection over the entity's corners - a face centre is on a boundary only if the whole face
+	// is - and the periodicity record keeps the *parents*, which is what set_element_code() matches
+	// against when it links up the partner side.
+	nodeindex_t MeshTemplate::add_intermediate_node_generic(const nodeindex_t *key_corners, unsigned nkey, const nodeindex_t *parents, unsigned nparents, bool boundary_possible)
 	{
-		nodeindex_t ni = add_node_unique(0.5 * (nodes[n1]->x + nodes[n2]->x), 0.5 * (nodes[n1]->y + nodes[n2]->y), 0.5 * (nodes[n1]->z + nodes[n2]->z));
-		// Merge the boundary information!
-		if (nodes[ni]->on_boundaries.empty())
+		intermediate_node_key_t key;
+		key.fill((nodeindex_t)-1);
+		if (nkey > key.size())
+			throw_runtime_error("Intermediate node key of " + std::to_string(nkey) + " corners exceeds the maximum of " + std::to_string(key.size()));
+		std::copy(key_corners, key_corners + nkey, key.begin());
+		std::sort(key.begin(), key.end()); // the key is a set: an entity is the same from either side
+
+		double x = 0.0, y = 0.0, z = 0.0;
+		for (unsigned i = 0; i < nparents; i++) { x += nodes[parents[i]]->x; y += nodes[parents[i]]->y; z += nodes[parents[i]]->z; }
+		const double n = (double)nparents;
+		x /= n; y /= n; z /= n;
+
+		bool created;
+		nodeindex_t ni;
+		auto it = intermediate_node_map.find(key);
+		if (it != intermediate_node_map.end())
 		{
-			std::set_intersection(nodes[n1]->on_boundaries.begin(), nodes[n1]->on_boundaries.end(), nodes[n2]->on_boundaries.begin(), nodes[n2]->on_boundaries.end(), std::inserter(nodes[ni]->on_boundaries, nodes[ni]->on_boundaries.begin()));
+			ni = it->second;
+			created = false;
 		}
+		else
+		{
+			if (has_predefined_higher_order_elements)
+			{
+				// A mesh that came with its own higher-order nodes has nodes this map never saw, so
+				// the geometric lookup is still the only way to find them.
+				const std::size_t nbefore = nodes.size();
+				ni = add_node_unique(x, y, z);
+				created = (nodes.size() != nbefore);
+			}
+			else
+			{
+				// The map is complete by construction, so no geometric lookup at all. The k-d tree
+				// still gets the point, but deferred: a conversion adds one node per entity and never
+				// queries in between, and indexing them one at a time makes nanoflann rebuild a
+				// sub-index per node. Any later query flushes the whole backlog in one range add.
+				MeshTemplateNode *nn = new MeshTemplateNode(x, y, z);
+				nn->index = nodes.size();
+				nodes.push_back(nn);
+				if (kdtree.add_point_deferred(x, y, z) != nn->index)
+				{
+					throw_runtime_error("Something is wrong with the KDTree");
+				}
+				ni = nn->index;
+				created = true;
+			}
+			intermediate_node_map[key] = ni;
+		}
+
+		// Fold the final intersection straight into the destination, so the two-corner case - by far
+		// the most common, one per element edge - does a single set_intersection and no temporary.
 		if (nodes[ni]->part_of_domain.empty())
 		{
-			std::set_intersection(nodes[n1]->part_of_domain.begin(), nodes[n1]->part_of_domain.end(), nodes[n2]->part_of_domain.begin(), nodes[n2]->part_of_domain.end(), std::inserter(nodes[ni]->part_of_domain, nodes[ni]->part_of_domain.begin()));
+			std::set<MeshTemplateElementCollection *> acc, tmp;
+			const std::set<MeshTemplateElementCollection *> *cur = &nodes[key_corners[0]]->part_of_domain;
+			for (unsigned i = 1; i + 1 < nkey && !cur->empty(); i++)
+			{
+				std::set<MeshTemplateElementCollection *> &out = ((i & 1) ? acc : tmp);
+				out.clear();
+				std::set_intersection(cur->begin(), cur->end(), nodes[key_corners[i]]->part_of_domain.begin(), nodes[key_corners[i]]->part_of_domain.end(), std::inserter(out, out.begin()));
+				cur = &out;
+			}
+			if (nkey > 1)
+				std::set_intersection(cur->begin(), cur->end(), nodes[key_corners[nkey - 1]]->part_of_domain.begin(), nodes[key_corners[nkey - 1]]->part_of_domain.end(), std::inserter(nodes[ni]->part_of_domain, nodes[ni]->part_of_domain.begin()));
+			else
+				nodes[ni]->part_of_domain = *cur;
 		}
-		if (nodes.size() == (ni + 1) && (!nodes[ni]->on_boundaries.empty())) // NODE WAS ADDED, store the information for later on patching the periodicity
+
+		if (!boundary_possible)
+			return ni;
+
+		if (nodes[ni]->on_boundaries.empty())
 		{
-			inter_nodes_periodic.push_back(MeshTemplatePeriodicIntermediateNodeInfo(ni, {n1, n2}));
+			std::set<unsigned int> acc, tmp;
+			const std::set<unsigned int> *cur = &nodes[key_corners[0]]->on_boundaries;
+			for (unsigned i = 1; i + 1 < nkey && !cur->empty(); i++)
+			{
+				std::set<unsigned int> &out = ((i & 1) ? acc : tmp);
+				out.clear();
+				std::set_intersection(cur->begin(), cur->end(), nodes[key_corners[i]]->on_boundaries.begin(), nodes[key_corners[i]]->on_boundaries.end(), std::inserter(out, out.begin()));
+				cur = &out;
+			}
+			if (nkey > 1)
+				std::set_intersection(cur->begin(), cur->end(), nodes[key_corners[nkey - 1]]->on_boundaries.begin(), nodes[key_corners[nkey - 1]]->on_boundaries.end(), std::inserter(nodes[ni]->on_boundaries, nodes[ni]->on_boundaries.begin()));
+			else
+				nodes[ni]->on_boundaries = *cur;
+		}
+
+		if (created && (!nodes[ni]->on_boundaries.empty())) // NODE WAS ADDED, store the information for later on patching the periodicity
+		{
+			inter_nodes_periodic.push_back(MeshTemplatePeriodicIntermediateNodeInfo(ni, std::vector<nodeindex_t>(parents, parents + nparents)));
 		}
 
 		return ni;
+	}
+
+	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2)
+	{
+		const nodeindex_t k[2] = {n1, n2};
+		return add_intermediate_node_generic(k, 2, k, 2, true);
 	}
 
 	// Get-or-create the node at the centroid of (n1,n2,n3) (e.g. a triangle-face bubble
@@ -1731,81 +1847,21 @@ Index : Local coordinates (s0,s1,s2)
 	// truly lie on a domain boundary even if all three parents do).
 	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, bool boundary_possible)
 	{
-		nodeindex_t ni = add_node_unique((nodes[n1]->x + nodes[n2]->x + nodes[n3]->x) / 3, (nodes[n1]->y + nodes[n2]->y + nodes[n3]->y) / 3, (nodes[n1]->z + nodes[n2]->z + nodes[n3]->z) / 3);
-
-		if (nodes[ni]->part_of_domain.empty())
-		{
-			std::set<MeshTemplateElementCollection *> part_of_domain, old;
-			std::set_intersection(nodes[n1]->part_of_domain.begin(), nodes[n1]->part_of_domain.end(), nodes[n2]->part_of_domain.begin(), nodes[n2]->part_of_domain.end(), std::inserter(part_of_domain, part_of_domain.begin()));
-			old = part_of_domain;
-			part_of_domain.clear();
-			std::set_intersection(nodes[n3]->part_of_domain.begin(), nodes[n3]->part_of_domain.end(), old.begin(), old.end(), std::inserter(part_of_domain, part_of_domain.begin()));
-			nodes[ni]->part_of_domain = part_of_domain;
-		}
-
-		if (!boundary_possible)
-			return ni;
-		// Check boundary
-		if (nodes[ni]->on_boundaries.empty())
-		{
-			std::set<unsigned int> on_boundaries, old;
-			std::set_intersection(nodes[n1]->on_boundaries.begin(), nodes[n1]->on_boundaries.end(), nodes[n2]->on_boundaries.begin(), nodes[n2]->on_boundaries.end(), std::inserter(on_boundaries, on_boundaries.begin()));
-			old = on_boundaries;
-			on_boundaries.clear();
-			std::set_intersection(nodes[n3]->on_boundaries.begin(), nodes[n3]->on_boundaries.end(), old.begin(), old.end(), std::inserter(on_boundaries, on_boundaries.begin()));
-			nodes[ni]->on_boundaries = on_boundaries;
-		}
-
-		if (nodes.size() == (ni + 1) && (!nodes[ni]->on_boundaries.empty())) // NODE WAS ADDED, store the information for later on patching the periodicity
-		{
-			inter_nodes_periodic.push_back(MeshTemplatePeriodicIntermediateNodeInfo(ni, {n1, n2, n3}));
-		}
-
-		return ni;
+		const nodeindex_t k[3] = {n1, n2, n3};
+		return add_intermediate_node_generic(k, 3, k, 3, boundary_possible);
 	}
 
 	// Same as the 3-parent overload above, but for the centroid of 4 nodes (e.g. a
 	// quadrilateral face/cell-center node).
 	nodeindex_t MeshTemplate::add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, bool boundary_possible)
 	{
-		nodeindex_t ni = add_node_unique(0.25 * (nodes[n1]->x + nodes[n2]->x + nodes[n3]->x + nodes[n4]->x), 0.25 * (nodes[n1]->y + nodes[n2]->y + nodes[n3]->y + nodes[n4]->y),
-										 0.25 * (nodes[n1]->z + nodes[n2]->z + nodes[n3]->z + nodes[n4]->z));
+		const nodeindex_t k[4] = {n1, n2, n3, n4};
+		return add_intermediate_node_generic(k, 4, k, 4, boundary_possible);
+	}
 
-		if (nodes[ni]->part_of_domain.empty())
-		{
-			std::set<MeshTemplateElementCollection *> part_of_domain, old;
-			std::set_intersection(nodes[n1]->part_of_domain.begin(), nodes[n1]->part_of_domain.end(), nodes[n2]->part_of_domain.begin(), nodes[n2]->part_of_domain.end(), std::inserter(part_of_domain, part_of_domain.begin()));
-			old = part_of_domain;
-			part_of_domain.clear();
-			std::set_intersection(nodes[n3]->part_of_domain.begin(), nodes[n3]->part_of_domain.end(), old.begin(), old.end(), std::inserter(part_of_domain, part_of_domain.begin()));
-			old = part_of_domain;
-			part_of_domain.clear();
-			std::set_intersection(nodes[n4]->part_of_domain.begin(), nodes[n4]->part_of_domain.end(), old.begin(), old.end(), std::inserter(part_of_domain, part_of_domain.begin()));
-			nodes[ni]->part_of_domain = part_of_domain;
-		}
-
-		if (!boundary_possible)
-			return ni;
-		// Check boundary
-		if (nodes[ni]->on_boundaries.empty())
-		{
-			std::set<unsigned int> on_boundaries, old;
-			std::set_intersection(nodes[n1]->on_boundaries.begin(), nodes[n1]->on_boundaries.end(), nodes[n2]->on_boundaries.begin(), nodes[n2]->on_boundaries.end(), std::inserter(on_boundaries, on_boundaries.begin()));
-			old = on_boundaries;
-			on_boundaries.clear();
-			std::set_intersection(nodes[n3]->on_boundaries.begin(), nodes[n3]->on_boundaries.end(), old.begin(), old.end(), std::inserter(on_boundaries, on_boundaries.begin()));
-			old = on_boundaries;
-			on_boundaries.clear();
-			std::set_intersection(nodes[n4]->on_boundaries.begin(), nodes[n4]->on_boundaries.end(), old.begin(), old.end(), std::inserter(on_boundaries, on_boundaries.begin()));
-			nodes[ni]->on_boundaries = on_boundaries;
-		}
-
-		if (nodes.size() == (ni + 1) && (!nodes[ni]->on_boundaries.empty())) // NODE WAS ADDED, store the information for later on patching the periodicity
-		{
-			inter_nodes_periodic.push_back(MeshTemplatePeriodicIntermediateNodeInfo(ni, {n1, n2, n3, n4}));
-		}
-
-		return ni;
+	nodeindex_t MeshTemplate::add_entity_centre_node_unique(const std::vector<nodeindex_t> &key_corners, const std::vector<nodeindex_t> &parents, bool boundary_possible)
+	{
+		return add_intermediate_node_generic(key_corners.data(), (unsigned)key_corners.size(), parents.data(), (unsigned)parents.size(), boundary_possible);
 	}
 
 	// Look up the numeric index of an already-registered boundary name; throws if unknown

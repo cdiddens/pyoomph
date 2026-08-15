@@ -39,6 +39,8 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <vector>
 #include <map>
 #include <set>
+#include <array>
+#include <unordered_map>
 #include <functional>
 #include <algorithm>
 
@@ -919,6 +921,53 @@ namespace pyoomph
     void build_curved_edge_map();
     std::vector<MeshTemplatePeriodicIntermediateNodeInfo> inter_nodes_periodic;
 
+    // Intermediate (edge-mid, face-centre, cell-centre) nodes, keyed by the SORTED set of corner
+    // nodes of the mesh entity they belong to. That set - not the node's position - is its identity:
+    // an edge, or a face, shared by two elements or by two domains is the same corner set seen
+    // twice and must yield the same node. add_intermediate_node_unique() used to ask
+    // add_node_unique() instead, i.e. a k-d tree nearest-neighbour query with a 1e-8 absolute
+    // tolerance, which is both slower (a query plus an incremental insertion into a dynamic
+    // nanoflann tree growing to a million points, ~1.5 s for one 250k-quad C1->C2 conversion) and
+    // weaker: two genuinely distinct entities whose centres happen to coincide were silently welded.
+    //
+    // The key is the entity's corners, NOT the parents the position is averaged from, and the two
+    // differ for four constructions - a brick's four side-face centres and its cell centre, a
+    // wedge's three quadrilateral-face centres, and a pyramid's base centre - which are placed from
+    // edge mid-points or a diagonal rather than from the corner set. Those elements meet bricks and
+    // each other across exactly those faces, so keying on the placement parents would have given the
+    // same physical node two identities and cracked every mixed hex/wedge/pyramid mesh. See
+    // add_intermediate_node_generic() and dev_docs/initialisation_cost.md.
+    typedef std::array<nodeindex_t, 8> intermediate_node_key_t; // 8 = a brick's corner count
+    struct intermediate_node_key_hash
+    {
+      std::size_t operator()(const intermediate_node_key_t &k) const
+      {
+        std::size_t h = 1469598103934665603ULL;
+        for (unsigned i = 0; i < k.size(); i++) { h ^= (std::size_t)k[i]; h *= 1099511628211ULL; }
+        return h;
+      }
+    };
+    std::unordered_map<intermediate_node_key_t, nodeindex_t, intermediate_node_key_hash> intermediate_node_map;
+    // Set as soon as an element of order higher than C1 is added to a collection *directly* (the
+    // add_*_C2 API, e.g. a second-order mesh read from a file) rather than produced by
+    // convert_for_C2_space(). Those elements bring midside nodes that never passed through
+    // add_intermediate_node_unique(), so they are absent from intermediate_node_map, and a C1
+    // element converted next to one of them can only find them geometrically. That is the sole case
+    // in which the k-d tree still has to be consulted on a map miss - and it costs a query plus an
+    // incremental insertion per new node, ~1.5 s for a 250k-quad conversion. Without such elements
+    // the map is complete by construction and every lookup is answered from it alone.
+    bool has_predefined_higher_order_elements = false;
+    // The one implementation behind all of the add_intermediate_node_unique() overloads and
+    // add_entity_centre_node_unique(): identity from `key_corners`, position from `parents`. Takes
+    // raw pointers rather than vectors because it runs once per element edge, face and cell of the
+    // whole mesh, and the callers all have their indices on the stack already.
+    nodeindex_t add_intermediate_node_generic(const nodeindex_t *key_corners, unsigned nkey, const nodeindex_t *parents, unsigned nparents, bool boundary_possible);
+
+  public:
+    void note_predefined_higher_order_element() { has_predefined_higher_order_elements = true; }
+
+  protected:
+
   public:
     MeshTemplate();
     // Clear all nodes/facets/collections, e.g. before rebuilding the template from scratch.
@@ -935,6 +984,12 @@ namespace pyoomph
     nodeindex_t add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2);
     nodeindex_t add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, bool boundary_possible); // For tri C2TB
     nodeindex_t add_intermediate_node_unique(const nodeindex_t &n1, const nodeindex_t &n2, const nodeindex_t &n3, const nodeindex_t &n4, bool boundary_possible);
+    // Add (or find) the centre node of a mesh entity whose identity is `key_corners` (the entity's
+    // corner nodes) but whose position is the average of `parents`. The two coincide for every
+    // element type except the four listed at intermediate_node_map, which place a face/cell centre
+    // from edge mid-points or a diagonal; those must still be *identified* by the corner set, or a
+    // brick and the wedge next to it name the shared face's centre differently and get two nodes.
+    nodeindex_t add_entity_centre_node_unique(const std::vector<nodeindex_t> &key_corners, const std::vector<nodeindex_t> &parents, bool boundary_possible);
 
     // Create (or reuse, via facetmap) the facet spanned by `vertexindices`
     // and attach it to the given curved geometry entity.
