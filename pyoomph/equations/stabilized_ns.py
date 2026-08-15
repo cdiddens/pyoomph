@@ -54,19 +54,12 @@ directly as ``var("cartesian_element_length_h")``.
 from .. import *
 from ..expressions import *
 from .navier_stokes import NavierStokesEquations, StokesEquations
+from .stabilization import (element_h as _element_h, inv_dt as _inv_dt, regularized_magnitude,
+                            tau_advective_diffusive, _z_tezduyar, _maybe_sub)
 from ..typings import *
 
 if TYPE_CHECKING:
     from ..generic.codegen import FiniteElementCodeGenerator
-
-
-def _z_tezduyar(Re_h:Expression)->Expression:
-    """Tezduyar's switch between the diffusive (Re_h<3) and the convective limit."""
-    return minimum(Re_h / 3, 1)
-
-
-def _maybe_sub(wrap:bool,expr:Expression)->Expression:
-    return subexpression(expr) if wrap else expr
 
 
 _SPACE_ALIASES:dict[str,str] = {"C2C1": "TH", "C1C1": "C1", "C2C2": "C2", "TH": "TH", "CR": "CR",
@@ -193,11 +186,11 @@ class StabilizedNavierStokes(NavierStokesEquations):
         super().__init__(**kwargs)
         self.space = space
         self.viscous_form = viscous_form
-        self.tau_formula = tau_formula
+        self.tau_formula:Literal["shakib","codina","tezduyar"] = tau_formula
         self.tauC_formula = tauC_formula
         self.include_viscous_in_residual = include_viscous_in_residual
         self.constant_viscosity = constant_viscosity
-        self.transient_tau = transient_tau
+        self.transient_tau:"Literal['auto'] | bool" = transient_tau
         if isinstance(natural_bc_correction, bool):
             self.natural_bc_correction:set[str] = {"SUPG","LSIC","REYNOLDS"} if natural_bc_correction else set()
         else:
@@ -252,7 +245,7 @@ class StabilizedNavierStokes(NavierStokesEquations):
         axisymmetric problem the latter is the revolved volume, so :math:`\\tau` would grow like
         :math:`r^{1/3}` away from the axis instead of tracking the actual cell size.
         """
-        return var("cartesian_element_length_h")
+        return _element_h()
 
     def convective_velocity(self)->Expression:
         """
@@ -275,7 +268,7 @@ class StabilizedNavierStokes(NavierStokesEquations):
         """
         a = self.convective_velocity()
         eps = self.velocity_eps * scale_factor(self.velocity_name)
-        return _maybe_sub(self._wrap_U, square_root(dot(a, a) + eps ** 2))
+        return _maybe_sub(self._wrap_U, regularized_magnitude(a, eps))
 
     def div_viscous_stress(self)->Expression:
         """
@@ -330,26 +323,17 @@ class StabilizedNavierStokes(NavierStokesEquations):
         :math:`\\tau` mixes 1/s^2 with a pure number and pyoomph rejects the expression in any
         dimensional problem.
         """
-        if self.transient_tau is False:
-            return Expression(0)
-        return timestepper_weight(1, 0, "BDF1") / scale_factor("temporal")
+        return _inv_dt(self.transient_tau)
 
     def _tau_M_raw(self)->Expression:
         """:math:`\\tau_M` without ``stab_factor``. :math:`\\tau_C` is built from it, so the
         prefactor has to be applied once at the end of each -- applying it inside would make it
         cancel out of :math:`\\tau_C=h^2/(c_C\\tau_M)` instead of scaling it."""
-        h, U = self.element_h(), self.velocity_magnitude()
         rho = self.mass_density
         assert rho is not None
-        nu = self.dynamic_viscosity / rho
-        idt = self.c_t * self.inv_dt()
-        if self.tau_formula == "shakib":
-            return 1 / square_root(idt ** 2 + (2 * U / h) ** 2 + (self.C_I * nu / h ** 2) ** 2)
-        elif self.tau_formula == "codina":
-            return 1 / (idt + 2 * U / h + self.C_I * nu / h ** 2)
-        elif self.tau_formula == "tezduyar":
-            return 1 / (idt + 2 * U / (h * _z_tezduyar(U * h / (2 * nu))))
-        raise ValueError(f"unknown tau_formula '{self.tau_formula}'")
+        return tau_advective_diffusive(self.element_h(), self.velocity_magnitude(),
+                                       self.dynamic_viscosity / rho, self.inv_dt(),
+                                       self.tau_formula, self.C_I, self.c_t)
 
     def tau_M(self)->Expression:
         """The momentum stabilization parameter :math:`\\tau_M`, in units of time."""
@@ -399,10 +383,10 @@ class StabilizedNavierStokes(NavierStokesEquations):
         global mass conservation is exact as it stands, and adding a boundary flux would break it.
         :py:class:`StabilizationBoundaryFlux` offers it for experiments.
 
-        Which of the three are actually returned is selected by ``natural_bc_correction``; the
-        default is the LSIC one only. Correcting the SUPG footprint measurably reduces the error at
-        the boundary but degrades the global pressure convergence, because the uncorrected outflow
-        term is part of what makes SUPG stable there.
+        Which of the three are actually returned is selected by ``natural_bc_correction``, which
+        defaults to *none*. Correcting the SUPG footprint measurably reduces the error at the
+        boundary but degrades the global pressure convergence, because the uncorrected outflow term
+        is part of what makes SUPG stable there.
 
         Returns zero if nothing is selected or no corresponding stabilization term is active.
         """

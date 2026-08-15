@@ -210,10 +210,19 @@ physics) so the benchmark can flip them without touching the residual code.
 
 ## 7. Loose ends
 
+* **The `tau` machinery now lives in `pyoomph/equations/stabilization.py`.** `element_h`, `inv_dt`,
+  `velocity_magnitude` and `_tau_M_raw` delegate to free functions shared with the scalar transport
+  stabilization, so a fix to `tau` cannot land in one of the two and not the other. The refactor was
+  checked to be expression-identical for all three `tau_formula` branches, not merely equivalent.
+  See [stabilized_scalar_transport.md](stabilized_scalar_transport.md).
+* **§2's "elementwise zero on C1 velocities" holds on affine elements only.** A Q1 field on a
+  bilinearly mapped quad has nonzero physical second derivatives — measured 3.9e-01 against 1.5e-16
+  on a rectangular mesh. The omission is therefore *not* free on a distorted or moving quad mesh.
 * **The module has no `tests/` coverage.** Everything is validated by the scripts in
   `pyoomph_runs/SUPG/stab/`, which are not pytest and take minutes each. The Poiseuille consistency
   check would make a good fast unit test: the exact solution lies in the C2 space, so every
-  consistent variant must return roundoff on a 32x8 mesh in a couple of seconds.
+  consistent variant must return roundoff on a 32x8 mesh in a couple of seconds. The scalar-transport
+  module's `tests/test_stabilized_transport.py` is the pattern to copy.
 * **`tau` constants are on the diffusive side.** `C_I = 4` gives `tau -> h^2/(4 nu)` in the Stokes
   limit — what the textbook formula "4 nu/h^2" literally says, but 3x the classical
   Hughes-Franca-Balestra value for Q1/Q1. Kovasznay, C1/C1 + PSPG at N = 48:

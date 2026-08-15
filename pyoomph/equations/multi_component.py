@@ -32,6 +32,7 @@ from ..generic import Equations, InterfaceEquations
 from ..equations.generic import InitialCondition, SpatialErrorEstimator, FiniteElementSpaceEnum
 from ..expressions import *  # Import grad et al
 from .navier_stokes import NavierStokesEquations #type:ignore
+from .stabilization import ScalarTransportEquations,ScalarTransportStabilization
 from ..materials.generic import *
 from ..typings import *
 from ..materials.mass_transfer import MassTransferModelBase
@@ -59,7 +60,9 @@ def CompositionInitialCondition(fluid_props:AnyFluidProperties,isothermal:bool,i
     return InitialCondition(degraded_start="auto", IC_name="", **icsettings)
 
 
-def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteElementSpaceEnum="C2", dt_factor:ExpressionOrNum=1, with_IC:bool=True, spatial_errors:float | None=None,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None) -> Equations:
+def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteElementSpaceEnum="C2", dt_factor:ExpressionOrNum=1, with_IC:bool=True, spatial_errors:float | None=None,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,
+                                  compo_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
+                                  thermal_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None) -> Equations:
     """
     Adds diffusion equations for the mass fractions of the components in a multi-component system, but without any Navier-Stokes equations. Can be used e.g. for diffusion-limited species transport in a gas phase.
 
@@ -71,13 +74,15 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
         spatial_errors: Add spatial error estimators automatically.
         isothermal: If set to ``False``, a temperature equation is included.
         initial_temperature: Initial condition for the temperature.
-    
+        compo_stabilization: Optional residual-based stabilization of the mass fraction transport. Without a wind there is nothing for SUPG to act on unless the mesh moves, so this is mainly of interest on an ALE mesh.
+        thermal_stabilization: The same for the temperature.
+
     Returns:
         A coupled set of equations for the mass fractions for the diffusive transport of the components in the mixture.
     """
-    res:Equations = CompositionAdvectionDiffusionEquations(fluid_props, space=space, dt_factor=dt_factor, wind=0)
+    res:Equations = CompositionAdvectionDiffusionEquations(fluid_props, space=space, dt_factor=dt_factor, wind=0, stabilization=compo_stabilization)
     if not isothermal:
-        res+=TemperatureConductionEquation(fluid_props,space=space)
+        res+=TemperatureConductionEquation(fluid_props,space=space,stabilization=thermal_stabilization)
     if with_IC:
         res += CompositionInitialCondition(fluid_props,isothermal,initial_temperature)
     if spatial_errors is not None:
@@ -89,9 +94,12 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
     return res
 
 
-def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteElementSpaceEnum="C1", compo_dt_factor:ExpressionOrNum=1, ns_mode:Literal["TH","CR","mini"]="TH", boussinesq:bool=False,
+def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteElementSpaceEnum="C1", compo_dt_factor:ExpressionOrNum=1, ns_mode:Literal["TH","CR","mini","C1","C2","C2C1","C1C1","C2C2"]="TH", boussinesq:bool=False,
                              gravity:ExpressionNumOrNone=None, bulkforce:ExpressionNumOrNone=None, ns_dt_factor:ExpressionOrNum=1, ns_nl_factor:ExpressionNumOrNone=None, with_IC:bool=True,
-                             hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:float | None=None, isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False) -> Equations:
+                             hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:float | None=None, isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False,
+                             ns_stabilization:"str | Iterable[str] | None"=None, ns_stabilization_options:"dict[str,Any] | None"=None,
+                             compo_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
+                             thermal_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None) -> Equations:
     """
     Assembles a system for multi-component flow with advection-diffusion equations for mass fraction fields of the mixture composition and the Navier-Stokes equations. Potentially, also a temperature field is included.
 
@@ -119,24 +127,62 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         thermal_dt_factor: Factor for the time derivative of the temperature field.
         thermal_adv_factor: Factor for the advection term of the temperature field.
         GCL: If True, the Geometric Conservation Law is enforced in the ALE formulation of the Navier-Stokes equations and the composition equations.
+        ns_stabilization: Residual-based stabilization of the flow, e.g. ``"SUPG+PSPG"``. Anything but ``None`` switches the flow equations to :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes`. This is what makes the inf-sup unstable equal-order pairs ``ns_mode="C1C1"``/``"C2C2"`` usable.
+        ns_stabilization_options: Further arguments of :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes`, e.g. ``{"tau_formula":"codina","C_I":36}``.
+        compo_stabilization: Residual-based stabilization of the mass fraction transport, see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`.
+        thermal_stabilization: The same for the temperature transport.
+
+    The three stabilization switches are independent and all default to *off*, i.e. to exactly the
+    system that was assembled before they existed. None of them perturbs the interface physics:
+    every added term is an element-interior integral written against the test function of the
+    stabilized field only, so the Marangoni stress, the kinematic boundary condition, mass transfer,
+    latent heat, surfactant transport and the contact-angle conditions -- which test against
+    ``velocity``, ``mesh`` and the interface fields -- are structurally untouched and see the
+    stabilized fields only through their values. The one exception is the discontinuity capturing
+    term ``"DC"``, which is diffusion-like and therefore does change the natural boundary condition
+    of the transported field; it is off by default and its footprint is exposed as
+    ``get_stabilization_flux``.
 
     Returns:
-        A coupled set of equations describing the multi-component flow of the mixture 
+        A coupled set of equations describing the multi-component flow of the mixture
     """
-    
+
     if GCL:
         if not integrate_advection_by_parts:
             integrate_advection_by_parts=True
             print("WARNING: For GCL, the advection term of the composition equations is integrated by parts automatically.")
-    ns = NavierStokesEquations(fluid_props=fluid_props, mode=ns_mode, boussinesq=boussinesq, gravity=gravity,
-                               bulkforce=bulkforce, dt_factor=ns_dt_factor, nonlinear_factor=ns_nl_factor,momentum_scheme=momentum_scheme,continuity_scheme=continuity_scheme,wrap_params_in_subexpressions=wrap_params_in_subexpressions, hele_shaw_thickness=hele_shaw_thickness,GCL=GCL)
+    ns_common:dict[str,Any] = dict(fluid_props=fluid_props, boussinesq=boussinesq, gravity=gravity,
+                                   bulkforce=bulkforce, dt_factor=ns_dt_factor, nonlinear_factor=ns_nl_factor,
+                                   momentum_scheme=momentum_scheme, continuity_scheme=continuity_scheme,
+                                   wrap_params_in_subexpressions=wrap_params_in_subexpressions,
+                                   hele_shaw_thickness=hele_shaw_thickness, GCL=GCL)
+    ns:Equations
+    inf_sup_stable = ns_mode in {"TH","CR","SV","mini","C2C1"}
+    if not inf_sup_stable and (ns_stabilization is None or "PSPG" not in ns_stabilization):
+        # Not an error: mode="C1"/"C2" were reachable before and stay reachable. But without PSPG the
+        # equal-order pairs are unsolvable rather than merely inaccurate, so say so once.
+        print("WARNING: ns_mode='"+str(ns_mode)+"' is an equal-order velocity/pressure pair. It is "
+              "inf-sup unstable and the pressure checkerboards unless ns_stabilization contains 'PSPG'.")
+    if ns_stabilization is None and not ns_stabilization_options:
+        # Deliberately the plain class, not StabilizedNavierStokes(stabilization="none"): the default
+        # must generate literally the same code as before, not merely an equivalent system. The alias
+        # lookup is the identity for TH/CR/mini, so nothing changes for the documented values.
+        from .stabilized_ns import _SPACE_ALIASES
+        ns = NavierStokesEquations(mode=cast(Any,_SPACE_ALIASES.get(ns_mode,ns_mode)), **ns_common)
+    else:
+        from .stabilized_ns import StabilizedNavierStokes
+        if ns_stabilization is not None and "PSPG" in ns_stabilization and inf_sup_stable:
+            print("WARNING: PSPG on the inf-sup stable "+str(ns_mode)+" pair. It is not needed there and "
+                  "measurably degrades the pressure error and the divergence of the velocity.")
+        ns = StabilizedNavierStokes(space=ns_mode, stabilization=ns_stabilization if ns_stabilization is not None else "none",
+                                    **(ns_stabilization_options or {}), **ns_common)
     wind=var("velocity")+additional_advection
-    
+
     cp = CompositionAdvectionDiffusionEquations(fluid_props=fluid_props, space=compo_space, dt_factor=compo_dt_factor,
-                                                boussinesq=boussinesq, wind=wind,integrate_advection_by_parts=integrate_advection_by_parts,wrap_params_in_subexpressions=wrap_params_in_subexpressions,GCL=GCL,scheme=compo_scheme)
+                                                boussinesq=boussinesq, wind=wind,integrate_advection_by_parts=integrate_advection_by_parts,wrap_params_in_subexpressions=wrap_params_in_subexpressions,GCL=GCL,scheme=compo_scheme,stabilization=compo_stabilization)
     res = ns + cp
     if not isothermal:
-        res+=TemperatureAdvectionConductionEquation(fluid_props,space=compo_space,wind=wind,adv_factor=thermal_adv_factor,dt_factor=thermal_dt_factor)
+        res+=TemperatureAdvectionConductionEquation(fluid_props,space=compo_space,wind=wind,adv_factor=thermal_adv_factor,dt_factor=thermal_dt_factor,stabilization=thermal_stabilization)
     if with_IC:
         res += CompositionInitialCondition(fluid_props,isothermal,initial_temperature)
     if spatial_errors is not None:
@@ -151,7 +197,7 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
     return res
 
 
-class CompositionAdvectionDiffusionEquations(Equations):
+class CompositionAdvectionDiffusionEquations(ScalarTransportEquations):
     """
     Represents the advection-diffusion equation for a single component in a multi-component system. 
     The equation is given by:
@@ -170,9 +216,10 @@ class CompositionAdvectionDiffusionEquations(Equations):
         wrap_params_in_subexpressions(bool): Whether to wrap the parameters in subexpressions using GiNaC. Default is True.
         GCL(bool): Whether to consider the Generalized Continuity Equation. Default is False.
         scheme(TimeSteppingScheme): The time stepping scheme. Default is "BDF2".
+        stabilization: Optional residual-based stabilization (SUPG etc.) of the mass fraction transport, see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all.
     """
-        
-    def __init__(self, fluid_props:AnyFluidProperties, *, space:FiniteElementSpaceEnum="C2", wind:ExpressionOrNum=var("velocity"), dt_factor:ExpressionOrNum=1, boussinesq:bool=False,integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions:bool=True, GCL:bool=False, scheme:TimeSteppingScheme="BDF2"):        
+
+    def __init__(self, fluid_props:AnyFluidProperties, *, space:FiniteElementSpaceEnum="C2", wind:ExpressionOrNum=var("velocity"), dt_factor:ExpressionOrNum=1, boussinesq:bool=False,integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions:bool=True, GCL:bool=False, scheme:TimeSteppingScheme="BDF2", stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
         super().__init__()
         self.dt_factor = dt_factor
         self.space:FiniteElementSpaceEnum = space
@@ -191,7 +238,8 @@ class CompositionAdvectionDiffusionEquations(Equations):
         self.wrap_params_in_subexpressions=wrap_params_in_subexpressions
         self.GCL=GCL
         self.scheme:TimeSteppingScheme=scheme
-        
+        self._init_stabilization(stabilization)
+
     def optional_subexpression(self,expr):
         if self.wrap_params_in_subexpressions:
             return subexpression(expr)
@@ -251,6 +299,52 @@ class CompositionAdvectionDiffusionEquations(Equations):
         assert isinstance(self.fluid_props,(MixtureLiquidProperties,MixtureGasProperties))
         return self.fluid_props.get_diffusive_mass_flux_for(fn)
 
+    # ---- hooks of the stabilization base class ---------------------------------------------------
+
+    def stabilized_fieldnames(self) -> list[str]:
+        # Only the *solved* fields. The passive one is a substitution, and its test function is minus
+        # the sum of these (define_fields), so writing against it would smear a term into every row.
+        return self.fieldnames
+
+    def stabilization_wind(self) -> ExpressionOrNum:
+        return self.wind
+
+    def stabilization_residual_scale(self, fieldname:str) -> ExpressionOrNum:
+        # The residual of these equations is a *mass* balance, so everything carries rho
+        return scale_factor("mass_density") if self.boussinesq else self.fluid_props.mass_density
+
+    def stabilization_diffusivity(self, fieldname:str) -> ExpressionOrNum:
+        # tau only needs a representative scalar diffusivity, i.e. the diagonal entry. The full
+        # matrix (and thermophoresis) still enters the strong residual through the diffusive flux.
+        D = self.get_diffusion_coefficient(self.component_names[fieldname])
+        assert D is not None
+        return D
+
+    def strong_residual(self, fieldname:str) -> Expression:
+        rho_factor = self.stabilization_residual_scale(fieldname)
+        f = var(fieldname)
+        conservative = self.stab_cfg.conservative_residual
+        if conservative == "auto":
+            conservative = self.integrate_advection_by_parts
+        if conservative:
+            if self.GCL:
+                # The GCL branch assembles the time derivative of the whole integral, i.e. strongly
+                # d_t(rho f) + div(rho f u_mesh), which together with -weak(rho (a-u_m) f, grad v)
+                # gives the conservative form below.
+                R = self.dt_factor * partial_t(rho_factor * f) + div(rho_factor * self.wind * f)
+            else:
+                R = rho_factor * self.dt_factor * partial_t(f) + div(rho_factor * self.wind * f)
+        else:
+            R = rho_factor * (self.dt_factor * partial_t(f) + dot(self.wind, grad(f)))
+        if self.stab_cfg.include_diffusion_in_residual:
+            # The weak diffusion term is -weak(Jdiff, grad(v)), so the strong counterpart is +div(J).
+            # Jdiff already carries the full diffusion matrix, thermophoresis and the -rho factor.
+            R = R + div(convert_to_expression(
+                self.get_diffusive_mass_flux_expression_for(self.component_names[fieldname])))
+        if isinstance(self.fluid_props, MixtureLiquidProperties):
+            R = R - self.fluid_props.get_reaction_rate(self.component_names[fieldname])
+        return R
+
     def define_scaling(self):
         for fn in self.fieldnames:
             self.set_test_scaling({fn: scale_factor("temporal") / scale_factor("mass_density")})
@@ -298,6 +392,7 @@ class CompositionAdvectionDiffusionEquations(Equations):
                 self.add_residual(-weak(ts(reaction_rate),f_test))
             if self.requires_interior_facet_terms:
                 raise RuntimeError("TODO: DG implementation")
+        self.add_stabilization_residuals(ts)
 
 
 class CompositionAdvectionDiffusionFluxEquations(InterfaceEquations):
@@ -315,10 +410,16 @@ class CompositionAdvectionDiffusionFluxEquations(InterfaceEquations):
         self.fluxes = kwargs.copy()
 
     def define_residuals(self):
+        parent = self.get_parent_equations(CompositionAdvectionDiffusionEquations)
         for name, flux in self.fluxes.items():
             fname = "massfrac_" + name
             test = testfunction(fname)
             self.add_residual(weak(flux, test))
+            if isinstance(parent, CompositionAdvectionDiffusionEquations):
+                # A stabilized bulk deposits its own flux here; subtract it so that the flux imposed
+                # is the physical one. Zero unless natural_bc_correction is switched on.
+                self.add_residual(-weak(parent.get_stabilization_flux(fname, self.get_normal(),
+                                                                      self.get_parent_domain()), test))
 
 
 class MultiComponentNavierStokesInterface(InterfaceEquations):
@@ -623,6 +724,14 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
 
         
         self.add_residual(weak(self.additional_normal_traction,dot(n,u_test)))
+
+        # A stabilized bulk leaves its own traction on this boundary (see
+        # StokesEquations.get_stabilization_traction); subtract it so that the free surface balances
+        # the *physical* stress against the surface tension, i.e. so that a flow stabilization cannot
+        # perturb the Marangoni/mass-transfer balance. This is what NavierStokesFreeSurface does; the
+        # class here is not a subclass of it, so it has to be repeated. Zero without stabilization.
+        self.add_residual(-weak(ns_inner.get_stabilization_traction(n,self.get_parent_domain()),u_test))
+
         if self.masstransfer_model is not None:
             self.masstransfer_model._setup_for_code(self.get_current_code_generator(),self.interface_props)
             vap_recoil=self.masstransfer_model.get_vapor_recoil_pressure()
@@ -646,6 +755,10 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                     flux = -wi * total_mass_transfer_rate + partial_mass_transfer_rates.get(name, 0)
                 # flux = wi * total_mass_flux + partial_mass_transfer_rates.get(name, 0)
                 self.add_residual(weak(time_scheme(advdiffu_inner.scheme, flux), wi_test))
+                # The branch above concerns the *Galerkin* advection's own surface term and is
+                # orthogonal to the stabilization footprint, so this correction is the same either
+                # way. Zero unless natural_bc_correction is switched on.
+                self.add_residual(-weak(advdiffu_inner.get_stabilization_flux(fname,n,self.get_parent_domain()),wi_test))
 
             # Component dynamics outside if necessary
             if self.get_opposite_side_of_interface(raise_error_if_none=False):
@@ -668,6 +781,8 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                                 flux += -wi * total_mass_transfer_rate
                                 # flux += wi * total_mass_flux
                             self.add_residual(-weak(flux, wi_test))
+                            # Same correction for the outer bulk, whose outward normal is -n
+                            self.add_residual(-weak(outadvdiffu.get_stabilization_flux(fname,-n,oppblk),wi_test))
                         if outadvdiffu.fluid_props.passive_field is not None and outadvdiffu.fluid_props.passive_field in partial_mass_transfer_rates.keys() and not self._has_opposite_flow:
                             raise RuntimeError("The exterior phase only solves component diffusion and the component '"+outadvdiffu.fluid_props.passive_field+"' is passive (not solved for explicitly). Yet, we have a mass transfer of this component. This is problematic. Please set passive_field in the exterior phase to some non-volatile component (usually, it is e.g. air, must be the dominant part of the exterior mixture) or solve the flow in the exterior phase by using CompositionFlowEquations instead of CompositionDiffusionEquations")
 
@@ -679,6 +794,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                 self.masstransfer_model._clean_up_for_code()
                 _,T_test=var_and_test("temperature")
                 self.add_residual(weak(latent_flux,T_test))
+                self.add_residual(-weak(tins.get_stabilization_flux("temperature",n,self.get_parent_domain()),T_test))
 
 
         # Connect the velocity with the opposite side
@@ -853,7 +969,9 @@ class CompositionDiffusionInfinityEquations(InterfaceEquations):
             assert D is not None
             y, y_test = var_and_test("massfrac_" + fn)
             R = square_root(dot(d, d))
-            
+            # Subtract the footprint a stabilized bulk leaves here. Zero by default.
+            self.add_residual(-weak(parent.get_stabilization_flux("massfrac_"+fn,n,self.get_parent_domain()),y_test))
+
             
             
             if real_dim==1:
@@ -874,12 +992,12 @@ class CompositionDiffusionInfinityEquations(InterfaceEquations):
 
 
 
-class TemperatureConductionEquation(Equations):
+class TemperatureConductionEquation(ScalarTransportEquations):
     """
     Represents the temperature conduction equation of the form:
-    
+
             rho * cp * partial_t(T) = div(k * grad(T))
-        
+
     Args:
         material(AnyMaterialProperties): The material properties.
         space(FiniteElementSpaceEnum): The finite element space. Default is "C2", i.e. quadratic continuous Lagrangian elements.
@@ -887,20 +1005,23 @@ class TemperatureConductionEquation(Equations):
         cp_override(ExpressionNumOrNone): The specific heat capacity. Default is None.
         lambda_override(ExpressionNumOrNone): The thermal conductivity. Default is None.
         dt_factor(ExpressionOrNum): The factor for the time derivative. Default is 1.
+        stabilization: Optional residual-based stabilization (SUPG etc.), see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all. Without a wind there is nothing to stabilize on a static mesh, but on a moving (ALE) mesh the transport by the mesh motion is stabilized.
     """
-    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1):
+    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
         super(TemperatureConductionEquation, self).__init__()
         self.material=material
         self.space:FiniteElementSpaceEnum=space
         self.rho_override,self.cp_override,self.lambda_override=rho_override,cp_override,lambda_override
         self.dt_factor=dt_factor
+        self._init_stabilization(stabilization)
 
     def define_fields(self):
         #self.define_scalar_field("temperature",self.space,testscale=scale_factor("spatial")**2/(scale_factor("temperature")*scale_factor("thermal_conductivity")))
         self.define_scalar_field("temperature", self.space, testscale=scale_factor("temporal") / (scale_factor("temperature") * scale_factor("rho_cp")))
 
-    def define_residuals(self):
-        T,T_test=var_and_test("temperature")
+    def get_rho_cp_k(self) -> tuple[ExpressionOrNum,ExpressionOrNum,ExpressionOrNum]:
+        """The three material coefficients, honouring the ``*_override`` arguments. Resolved in one
+        place so that the strong residual cannot drift away from the Galerkin one."""
         rho=self.material.mass_density if self.rho_override is None else self.rho_override
         k=self.material.thermal_conductivity if self.lambda_override is None else self.lambda_override
         cp=self.material.specific_heat_capacity if self.cp_override is None else self.cp_override
@@ -910,8 +1031,44 @@ class TemperatureConductionEquation(Equations):
             raise RuntimeError("No thermal_conductivity defined in "+str(self.material))
         if cp is None:
             raise RuntimeError("No specific_heat_capacity defined in "+str(self.material))
+        return rho,cp,k
+
+    # ---- hooks of the stabilization base class ---------------------------------------------------
+
+    def stabilized_fieldnames(self) -> list[str]:
+        return ["temperature"]
+
+    def stabilization_wind(self) -> ExpressionOrNum:
+        return 0   # pure conduction; the advective subclass overrides this
+
+    def stabilization_residual_scale(self, fieldname:str) -> ExpressionOrNum:
+        rho,cp,_=self.get_rho_cp_k()
+        return rho*cp
+
+    def stabilization_diffusivity(self, fieldname:str) -> ExpressionOrNum:
+        rho,cp,k=self.get_rho_cp_k()
+        return k/(rho*cp)   # the thermal diffusivity, i.e. m^2/s as tau requires
+
+    def strong_residual(self, fieldname:str) -> Expression:
+        T=var("temperature")
+        rho,cp,k=self.get_rho_cp_k()
+        R:Expression=self.dt_factor*rho*cp*partial_t(T)
+        if self.stab_cfg.include_diffusion_in_residual:
+            R=R-div(convert_to_expression(k)*grad(T))
+        return R
+
+    def define_galerkin_residuals(self):
+        """The Galerkin part alone. Subclasses extend *this*, not ``define_residuals``, so that the
+        stabilization stays the last thing added and is added exactly once."""
+        T,T_test=var_and_test("temperature")
+        rho,cp,k=self.get_rho_cp_k()
         self.add_residual(weak(self.dt_factor*rho*cp*partial_t(T),T_test))
         self.add_residual(weak(k*grad(T),grad(T_test)))
+
+    def define_residuals(self):
+        self.define_galerkin_residuals()
+        # No time_scheme wrapper here: unlike the composition equations these do not use one.
+        self.add_stabilization_residuals()
 
 
 class TemperatureHeatFlux(InterfaceEquations):
@@ -932,6 +1089,12 @@ class TemperatureHeatFlux(InterfaceEquations):
     def define_residuals(self):
         _,T_test=var_and_test("temperature")
         self.add_residual(-weak(self.q,T_test))
+        parent=self.get_parent_equations(TemperatureConductionEquation)
+        if isinstance(parent,TemperatureConductionEquation):
+            # Subtract the footprint a stabilized bulk leaves here, so that the imposed heat flux is
+            # the physical one. Zero unless natural_bc_correction is switched on.
+            self.add_residual(-weak(parent.get_stabilization_flux("temperature",self.get_normal(),
+                                                                  self.get_parent_domain()),T_test))
 
 
 class TemperatureAdvectionConductionEquation(TemperatureConductionEquation):
@@ -951,22 +1114,28 @@ class TemperatureAdvectionConductionEquation(TemperatureConductionEquation):
         cp_override(ExpressionNumOrNone): The specific heat capacity. Default is None.
         lambda_override(ExpressionNumOrNone): The thermal conductivity. Default is None.
         dt_factor(ExpressionOrNum): Multiplicative factor for the time derivative. Default is 1.
-        adv_factor(ExpressionOrNum): Multiplicative factor for the advection term. Default is 1.    
+        adv_factor(ExpressionOrNum): Multiplicative factor for the advection term. Default is 1.
+        stabilization: Optional residual-based stabilization (SUPG etc.), see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all.
     """
 
-    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",wind:ExpressionOrNum=var("velocity"),rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,adv_factor:ExpressionOrNum=1):
-        super(TemperatureAdvectionConductionEquation, self).__init__(material,space,rho_override=rho_override,cp_override=cp_override,lambda_override=lambda_override,dt_factor=dt_factor)
+    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",wind:ExpressionOrNum=var("velocity"),rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,adv_factor:ExpressionOrNum=1,stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
+        super(TemperatureAdvectionConductionEquation, self).__init__(material,space,rho_override=rho_override,cp_override=cp_override,lambda_override=lambda_override,dt_factor=dt_factor,stabilization=stabilization)
         self.wind=wind
         self.adv_factor=adv_factor
-        
 
-    def define_residuals(self):
-        super(TemperatureAdvectionConductionEquation, self).define_residuals()
+    def stabilization_wind(self) -> ExpressionOrNum:
+        return self.wind
+
+    def strong_residual(self,fieldname:str) -> Expression:
+        rho,cp,_=self.get_rho_cp_k()
+        return (super(TemperatureAdvectionConductionEquation,self).strong_residual(fieldname)
+                + self.adv_factor*rho*cp*dot(self.wind,grad(var("temperature"))))
+
+    def define_galerkin_residuals(self):
+        super(TemperatureAdvectionConductionEquation, self).define_galerkin_residuals()
         T,T_test=var_and_test("temperature")
-        u=self.wind
-        rho = self.material.mass_density if self.rho_override is None else self.rho_override
-        cp = self.material.specific_heat_capacity if self.cp_override is None else self.cp_override
-        self.add_residual(weak(self.adv_factor*rho*cp*dot(u,grad(T)),T_test))
+        rho,cp,_=self.get_rho_cp_k()
+        self.add_residual(weak(self.adv_factor*rho*cp*dot(self.wind,grad(T)),T_test))
 
 
 class TemperatureInfinityEquations(InterfaceEquations):
@@ -995,6 +1164,8 @@ class TemperatureInfinityEquations(InterfaceEquations):
         k=parent.material.thermal_conductivity
         T, T_test = var_and_test("temperature")
         self.add_residual(weak(k * (T - self.far_temperature) * dot(n, d) / dot(d, d), T_test))
+        # Subtract the footprint a stabilized bulk leaves here. Zero by default.
+        self.add_residual(-weak(parent.get_stabilization_flux("temperature",n,self.get_parent_domain()),T_test))
 
 
 class ThinLayerThermalConductionEquation(InterfaceEquations):
@@ -1089,6 +1260,10 @@ class BalanceGravityAtFarField(InterfaceEquations):
         x=var("coordinate")
         n=var("normal")
         self.add_residual(weak(rho*dot(self.g_vec,x-self.x_ref),dot(n,utest)))
+        # This is a traction boundary condition, so it has to subtract the traction a stabilized bulk
+        # deposits here, exactly as NavierStokesNormalTraction and StokesFlowRadialFarField do. The
+        # full vector, not only its normal part: the boundary is do-nothing tangentially.
+        self.add_residual(-weak(nseq.get_stabilization_traction(n,self.get_parent_domain()),utest))
 
 
 

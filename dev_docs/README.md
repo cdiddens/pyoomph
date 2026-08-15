@@ -51,6 +51,8 @@ the useful part. Code examples in `examples/` are runnable companions, not snipp
 | | |
 |---|---|
 | [viscoelastic_log_conformation.md](viscoelastic_log_conformation.md) | The log-conformation representation, and the confined-cylinder benchmark it was validated against. |
+| [stabilized_navier_stokes.md](stabilized_navier_stokes.md) | SUPG/PSPG/LSIC/GLS/ASGS/VMS for the momentum equations, the equal-order pairs they enable, and what a bulk stabilization leaves behind on a Neumann boundary. |
+| [stabilized_scalar_transport.md](stabilized_scalar_transport.md) | The same for advection-diffusion, mixture composition and temperature: shared `tau` machinery, why `div(grad(c))` had to be written as `trace(grad(grad(c)))`, and the measurement that no stabilization perturbs the interface physics. |
 | [tracers.md](tracers.md) | Passive tracer particles: formulation, adaptation, remeshing, MPI. |
 | [coordinate_system_tensor_ops.md](coordinate_system_tensor_ops.md) | Which tensor operators each coordinate system implements, and — §6 — how to test one at all. |
 

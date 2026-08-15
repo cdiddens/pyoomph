@@ -71,6 +71,12 @@ Results are depicted in :numref:`figpdesupg`.
 
     For the (Navier-)Stokes equations there is no need to assemble the stabilization by hand: :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes` provides SUPG, PSPG, LSIC/grad-div, GLS, ASGS and VMS, together with the equal-order velocity/pressure pairs they make usable.
 
+.. note::
+
+    The same holds for the transport equations shipped with pyoomph. :py:class:`~pyoomph.equations.advection_diffusion.AdvectionDiffusionEquations`, :py:class:`~pyoomph.equations.multi_component.CompositionAdvectionDiffusionEquations` and the temperature equations all take a ``stabilization`` argument, e.g. ``AdvectionDiffusionEquations("c", diffusivity=D, stabilization="SUPG")``, and :py:func:`~pyoomph.equations.multi_component.CompositionFlowEquations` exposes ``ns_stabilization``, ``compo_stabilization`` and ``thermal_stabilization`` independently. See :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization` for the options.
+
+    The :math:`\tau` derived below is the nodally exact one-dimensional choice, which is *not* among those options: :math:`\coth(\mathrm{Pe})-1/\mathrm{Pe}` is :math:`0/0` as :math:`\mathrm{Pe}\to0`. The built-in formulas regularize that limit instead. The derivation here is still the one worth reading to understand what :math:`\tau` is for.
+
 
 
 .. only:: html

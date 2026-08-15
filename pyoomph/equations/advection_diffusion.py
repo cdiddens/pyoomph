@@ -29,13 +29,14 @@ from ..materials.generic import MixtureLiquidProperties,MixtureGasProperties
 from .. import GlobalLagrangeMultiplier, WeakContribution
 from ..generic import Equations,InterfaceEquations
 from ..expressions import * #Import grad et al
+from .stabilization import ScalarTransportEquations,ScalarTransportStabilization
 
 from ..typings import *
 
 if TYPE_CHECKING:
    from ..generic import Problem
 
-class AdvectionDiffusionEquations(Equations):
+class AdvectionDiffusionEquations(ScalarTransportEquations):
    r"""
       .. _AdvectionDiffusionEquations:
 
@@ -68,9 +69,10 @@ class AdvectionDiffusionEquations(Equations):
          source(Union[ExpressionOrNum,Dict[str,ExpressionOrNum]]): The source term. Default is {}.
          advection_by_parts(Union[bool,Literal["skew"]]): Whether to integrate by partsthe weak form of the advective term. Default is False.
          velocity_name_for_scaling(str): The name of the velocity for scaling. Default is "velocity".
+         stabilization: Optional residual-based stabilization (SUPG etc.), see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all.
    """
 
-   def __init__(self,fieldnames:str | list[str]="advdiffu",*,diffusivity:ExpressionOrNum=1,space:"FiniteElementSpaceEnum"="C2",consider_scaling:bool=True,fluid_props:MixtureLiquidProperties | MixtureGasProperties | None=None,wind:ExpressionOrNum=var("velocity"),dt_factor:ExpressionOrNum=1,time_scheme:TimeSteppingScheme | None=None,source:ExpressionOrNum | dict[str, ExpressionOrNum]={},advection_by_parts:bool | Literal["skew"]=False,velocity_name_for_scaling="velocity"):
+   def __init__(self,fieldnames:str | list[str]="advdiffu",*,diffusivity:ExpressionOrNum=1,space:"FiniteElementSpaceEnum"="C2",consider_scaling:bool=True,fluid_props:MixtureLiquidProperties | MixtureGasProperties | None=None,wind:ExpressionOrNum=var("velocity"),dt_factor:ExpressionOrNum=1,time_scheme:TimeSteppingScheme | None=None,source:ExpressionOrNum | dict[str, ExpressionOrNum]={},advection_by_parts:bool | Literal["skew"]=False,velocity_name_for_scaling="velocity",stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
       super().__init__()
       self.dt_factor=dt_factor
       self.diffusivity=diffusivity      
@@ -97,6 +99,8 @@ class AdvectionDiffusionEquations(Equations):
          #exit()
          #self.diffusivity=fluid_props.diffusivity
       self.spatial_error_estimators=True
+      # The wind of this class is scaled by velocity_name_for_scaling, not necessarily by "velocity"
+      self._init_stabilization(stabilization,velocity_scale=velocity_name_for_scaling)
 
 
    def define_fields(self):
@@ -132,6 +136,54 @@ class AdvectionDiffusionEquations(Equations):
          raise RuntimeError("Implement mixed diffusion between "+str(f1)+" and "+str(f2) )
       return self.diffusivity
 
+   # ---- hooks of the stabilization mixin -------------------------------------------------------
+
+   def stabilized_fieldnames(self) -> list[str]:
+      return self.fieldnames
+
+   def stabilization_wind(self) -> ExpressionOrNum:
+      return self.wind
+
+   def stabilization_residual_scale(self,fieldname:str) -> ExpressionOrNum:
+      return 1  # this equation has no density/capacity factor in front of the time derivative
+
+   def stabilization_diffusivity(self,fieldname:str) -> ExpressionOrNum:
+      # tau only needs a representative scalar diffusivity, i.e. the diagonal entry. Cross-diffusion
+      # still enters the strong residual, just not the parameter.
+      D=self.get_diffusion_coefficient(self.component_names.get(fieldname,fieldname))
+      assert D is not None
+      return D
+
+   def strong_residual(self,fieldname:str) -> Expression:
+      f=var(fieldname)
+      # partial_t defaults to ALE="auto" and hence is already the *Eulerian* derivative, exactly as
+      # assembled. The mesh velocity therefore appears only in convective_velocity(), which sets the
+      # streamline direction and the cell Peclet number. Note that for dt_factor != 1 the two differ
+      # by (dt_factor-1)*u_mesh.grad(f): the strong residual mirrors the assembly, not the physics.
+      R:Expression=self.dt_factor*partial_t(f)
+      conservative=self.stab_cfg.conservative_residual
+      if conservative=="auto":
+         if self.advection_by_parts=="skew":
+            R=R+(dot(self.wind,grad(f))+div(self.wind*f))/2
+         elif self.advection_by_parts:
+            R=R+div(self.wind*f)
+         else:
+            R=R+dot(self.wind,grad(f))
+      elif conservative:
+         R=R+div(self.wind*f)
+      else:
+         R=R+dot(self.wind,grad(f))
+      R=R-convert_to_expression(self.source.get(fieldname,0))
+      if self.stab_cfg.include_diffusion_in_residual:
+         if self.fluid_props is not None:
+            for fn2 in self.fieldnames:
+               D=self.get_diffusion_coefficient(self.component_names[fieldname],self.component_names[fn2])
+               assert D is not None
+               R=R-div(D*grad(var(fn2)))
+         else:
+            R=R-div(self.diffusivity*grad(f))
+      return R
+
    def define_residuals(self):
       if self.time_scheme is None:
          ts:Callable[[Expression],Expression]=lambda x :x
@@ -166,6 +218,7 @@ class AdvectionDiffusionEquations(Equations):
                self.add_residual(weak(ts(dot(self.wind,grad(f))),f_test))
             diffuD=self.diffusivity
             self.add_residual(weak(ts(diffuD*grad(f)),grad(f_test)))
+      self.add_stabilization_residuals(ts)
 
 
    # Use this to either fix the average or the total integral of the field, i.e. add eqs+=AdvectionDiffusionEquations(...).with_integral_constraint(...)
@@ -216,10 +269,17 @@ class AdvectionDiffusionFluxInterface(Equations):
    """
       Represents the flux through the interface that naturally arises from the integration by parts of the diffusion term in the advection-diffusion equation.
 
+      .. note::
+         Unlike ``AdvectionDiffusionInfinity`` this is a plain
+         ``Equations``, not an ``InterfaceEquations``, so it cannot reach the bulk equations and
+         cannot subtract their ``get_stabilization_flux``. If a bulk stabilization with
+         ``natural_bc_correction`` is used, the flux imposed here is the physical one *plus* that
+         footprint.
+
       Args:
          **kwargs: name of the flux and its value.
    """
-      
+
    def __init__(self, **kwargs:ExpressionOrNum):
       super(AdvectionDiffusionFluxInterface, self).__init__()
       self.fluxes=kwargs.copy()
@@ -275,16 +335,23 @@ class AdvectionDiffusionInfinity(InterfaceEquations):
          parents=[parents]
       for fn,val in self.inftyvals.items():
          diffuD=None
+         owner=None
          for p in parents:
             assert isinstance(p,AdvectionDiffusionEquations)
             if fn in p.fieldnames:
                diffuD = p.get_diffusion_coefficient(fn)
+               owner = p
                break
          if diffuD is None:
             raise RuntimeError("Cannot find any diffusion coefficient for field "+fn)
          y, y_test = var_and_test(fn)
          R = square_root(dot(d, d))
-         
+         # A stabilized bulk deposits its own flux on this boundary; subtract it so that the
+         # far-field condition imposes the physical one. Zero unless natural_bc_correction is set.
+         assert owner is not None
+         self.add_residual(-weak(owner.get_stabilization_flux(fn,n,self.get_parent_domain()),y_test))
+
+
          real_dim=self.get_coordinate_system().get_actual_dimension(self.get_nodal_dimension())
          if real_dim==1:
             if self.farfield_length is None:
