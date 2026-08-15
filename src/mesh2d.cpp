@@ -26,6 +26,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "meshtemplate.hpp"
 #include "problem.hpp"
 #include "elements.hpp"
+#include "elements_concrete.hpp"
 #include "mesh2d.hpp"
 
 #include "Telements.h"

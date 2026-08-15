@@ -1,0 +1,1312 @@
+/*================================================================================
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+
+The main author may be contacted at c.diddens@utwente.nl
+
+================================================================================*/
+
+
+// Residual, Jacobian, mass-matrix and Hessian assembly: the generic JIT contribution entry points,
+// the multi-assembly driver, the finite-difference fallbacks for nodal and Lagrangian positions,
+// and the analytic-vs-FD debugging comparisons.
+
+#include "macroelements.hpp"
+#include "elements.hpp"
+#include "exception.hpp"
+#include "problem.hpp"
+#include "nodes.hpp"
+#include "meshtemplate.hpp"
+#include "expressions.hpp"
+#include "timestepper.hpp"
+
+namespace pyoomph
+{
+
+	// Multi-assembly: performs several residual/Jacobian/mass-matrix/Hessian-vector-product/
+	// parameter-derivative contributions (described by `info`, one entry per "contribution",
+	// e.g. bulk + several attached interfaces) for this element in a single pass, sharing one
+	// shape_info fill per integration point instead of recomputing shapes from scratch for each
+	// contribution separately. First merges the RequiredShapes of all requested contributions
+	// (so the shape buffer is filled generously enough for all of them at once) and determines
+	// the maximum needed shapeflag (0=residuals,1=+Jacobian,2=+mass matrix,3=+Hessian). Then
+	// loops over integration points (or just once, if the code was compiled with a private,
+	// non-shared shape buffer per contribution) and, for each requested contribution, calls the
+	// appropriate JIT-generated residual/Jacobian/mass-matrix function, parameter-derivative
+	// function, and/or Hessian-vector-product function.
+	void BulkElementBase::get_multi_assembly(std::vector<SinglePassMultiAssembleInfo> &info)
+	{
+		JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		JITFuncSpec_RequiredShapes_FiniteElement_t *required_shapes = (JITFuncSpec_RequiredShapes_FiniteElement_t *)std::calloc(1, sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));
+		int shapeflag = -1;
+		// std::cout << "MERGED ASSEMBLY " << std::endl;
+		// First pass: merge required shapes across all contributions and figure out the highest
+		// shapeflag (residuals/Jacobian/mass-matrix/Hessian) needed overall.
+		for (auto &inf : info)
+		{
+			if (inf.contribution < 0)
+				continue;
+			bool resjac_merged = false;
+			if (inf.residuals || inf.jacobian || inf.mass_matrix)
+			{
+				resjac_merged = true;
+				if (functable->fd_jacobian || functable->fd_position_jacobian)
+					throw_runtime_error("Multi-assembly does not work with fd_jacobian or fd_position_jacobian");
+				//    std::cout << "  MERGED ResJac " << inf.contribution << std::endl;
+				RequiredShapes_merge(&functable->shapes_required_ResJac[inf.contribution], required_shapes);
+			}
+			if (inf.residuals)
+				shapeflag = 0;
+			if (inf.jacobian && shapeflag < 1)
+				shapeflag = 1;
+			if (inf.mass_matrix && shapeflag < 2)
+				shapeflag = 2;
+			if (inf.hessians.size())
+			{
+				RequiredShapes_merge(&functable->shapes_required_Hessian[inf.contribution], required_shapes);
+				shapeflag = 3;
+				//    std::cout << "  MERGED HEssian " << inf.contribution << std::endl;
+			}
+			if (functable->ParameterDerivative)
+			{
+				for (auto &pdiff : inf.dparams)
+				{
+					unsigned global_param_index = codeinst->get_problem()->resolve_parameter_value_ptr(pdiff.parameter);
+					int paramindex = -1;
+					for (unsigned int i = 0; i < functable->numglobal_params; i++)
+					{
+						if (functable->global_paramindices[i] == global_param_index)
+						{
+							paramindex = i;
+							break;
+						}
+					}
+					if (paramindex >= 0)
+					{
+						if (functable->ParameterDerivative[inf.contribution] && functable->ParameterDerivative[inf.contribution][paramindex])
+						{
+							if (!resjac_merged && (pdiff.dRdparam || pdiff.dJdparam || pdiff.dMdparam))
+							{
+								resjac_merged = true;
+								if (functable->fd_jacobian || functable->fd_position_jacobian)
+									throw_runtime_error("Multi-assembly does not work with fd_jacobian or fd_position_jacobian");
+								//            std::cout << "  MERGED dParamResJac " << inf.contribution <<"   " << paramindex << "  " << pdiff.parameter << std::endl;
+								RequiredShapes_merge(&functable->shapes_required_ResJac[inf.contribution], required_shapes);
+							}
+							if (pdiff.dMdparam && shapeflag < 2)
+								shapeflag = 2;
+							else if (pdiff.dJdparam && shapeflag < 1)
+								shapeflag = 1;
+							else if (pdiff.dRdparam && shapeflag < 0)
+								shapeflag = 0;
+						}
+					}
+				}
+			}
+		}
+		// std::cout << " SHAPEFLAG " << shapeflag << std::endl;
+		if (shapeflag < 0)
+		{
+			RequiredShapes_free(required_shapes);
+			return; // Nothing to assemble at all
+		}
+
+		// This is the only benefit of this approach: We only have to do this once!
+		this->fill_hang_info_with_equations(*required_shapes, this->shape_info, NULL);
+		this->interpolate_hang_values();
+		prepare_shape_buffer_for_integration(*required_shapes, shapeflag);
+
+		bool has_hang = true; // Assuming always hanging at the moment
+      bool shared_multi_assemble=functable->use_shared_shape_buffer_during_multi_assemble;
+      functable->during_shared_multi_assembling=shared_multi_assemble;
+      unsigned n_int_pt=(shared_multi_assemble ? this->shape_info->n_int_pt : 1);
+      for (unsigned int i_int_pt=0;i_int_pt<n_int_pt;i_int_pt++)
+      {
+
+			for (auto &inf : info)
+			{
+				if (inf.contribution < 0)
+					continue;
+				// Fill the shape buffer once per integration point, shared across all contributions
+				// (only if the code table allows sharing; otherwise each contribution's function
+				// call internally handles filling the buffer for all points itself).
+				if (shared_multi_assemble)
+				{
+				  this->fill_shape_buffer_for_integration_point(i_int_pt,*required_shapes,shapeflag);
+				}
+
+				// Base contribution: residuals / Jacobian / mass matrix
+				if (inf.residuals || inf.jacobian || inf.mass_matrix)
+				{
+					JITFuncSpec_ResidualAndJacobian_FiniteElement func;
+					const oomph::TimeStepper *tstepper = (this->nnode() ? this->node_pt(0)->time_stepper_pt() : this->internal_data_pt(0)->time_stepper_pt());
+
+					if (tstepper->is_steady())
+					{
+						func = functable->ResidualAndJacobianSteady[inf.contribution];
+					}
+					else
+					{
+						if (!has_hang)
+							func = functable->ResidualAndJacobian_NoHang[inf.contribution];
+						else
+							func = functable->ResidualAndJacobian[inf.contribution];
+					}
+					if (func)
+					{
+						if (inf.mass_matrix) // residuals, Jacobian, Mass matrix
+						{
+							if (!inf.jacobian || !inf.residuals)
+								throw_runtime_error("Cannot multiassemble a mass matrix without setting Jacobian and residual (possibly dummies)");
+							shape_info->jacobian_size = inf.jacobian->nrow();
+							shape_info->mass_matrix_size = inf.mass_matrix->nrow();
+							//             std::cout << " AEESMBLE RJM " << inf.contribution << std::endl;
+							func(&eleminfo, shape_info, &(((*inf.residuals)[0])), &(inf.jacobian->entry(0, 0)), &(inf.mass_matrix->entry(0, 0)), 2);
+						}
+						else if (inf.jacobian) // residuals, Jacobian
+						{
+							if (!inf.residuals)
+								throw_runtime_error("Cannot multiassemble a Jacobian without setting residual (possibly dummy)");
+							//             std::cout << " AEESMBLE RJ " << inf.contribution << std::endl;
+							shape_info->jacobian_size = inf.jacobian->nrow();
+							func(&eleminfo, shape_info, &(((*inf.residuals)[0])), &(inf.jacobian->entry(0, 0)), NULL, 1);
+						}
+						else if (inf.residuals)
+						{
+							//             std::cout << " AEESMBLE R " << inf.contribution << std::endl;
+							func(&eleminfo, shape_info, &(((*inf.residuals)[0])), NULL, NULL, 0);
+						}
+					}
+				}
+
+				// Parameter derivatives
+				if (functable->ParameterDerivative)
+				{
+					for (auto &pinf : inf.dparams)
+					{
+						if (!functable->ParameterDerivative[inf.contribution])
+							continue;
+						unsigned global_param_index = codeinst->get_problem()->resolve_parameter_value_ptr(pinf.parameter);
+						int paramindex = -1;
+						for (unsigned int i = 0; i < functable->numglobal_params; i++)
+						{
+							if (functable->global_paramindices[i] == global_param_index)
+							{
+								paramindex = i;
+								break;
+							}
+						}
+						if (paramindex < 0)
+							continue;
+						if (!functable->ParameterDerivative[inf.contribution][paramindex])
+							continue;
+						if (pinf.dMdparam) // residuals, Jacobian, Mass matrix
+						{
+							if (!pinf.dJdparam || !pinf.dRdparam)
+								throw_runtime_error("Cannot multiassemble a mass matrix without setting Jacobian and residual (possibly dummies). Happens in parameter derivative");
+							//             std::cout << " AEESMBLE PARAMDERIV RJM " << inf.contribution << "  " << paramindex << "  " << pinf.parameter << std::endl;
+							shape_info->jacobian_size = pinf.dJdparam->nrow();
+							shape_info->mass_matrix_size = pinf.dMdparam->nrow();
+							functable->ParameterDerivative[inf.contribution][paramindex](&eleminfo, shape_info, &(((*pinf.dRdparam)[0])), &(pinf.dJdparam->entry(0, 0)), &(pinf.dMdparam->entry(0, 0)), 2);
+						}
+						else if (pinf.dJdparam) // residuals, Jacobian
+						{
+							if (!pinf.dRdparam)
+								throw_runtime_error("Cannot multiassemble a Jacobian without setting residual (possibly dummy). Happens in parameter derivative");
+							//             std::cout << " AEESMBLE PARAMDERIV RJ " << inf.contribution << "  " << paramindex << "  " << pinf.parameter << std::endl;
+							shape_info->jacobian_size = pinf.dJdparam->nrow();
+							functable->ParameterDerivative[inf.contribution][paramindex](&eleminfo, shape_info, &(((*pinf.dRdparam)[0])), &(pinf.dJdparam->entry(0, 0)), NULL, 1);
+						}
+						else if (pinf.dRdparam)
+						{
+							//             std::cout << " AEESMBLE PARAMDERIV R " << inf.contribution << "  " << paramindex << "  " << pinf.parameter << std::endl;
+							functable->ParameterDerivative[inf.contribution][paramindex](&eleminfo, shape_info, &(((*pinf.dRdparam)[0])), NULL, NULL, 0);
+						}
+					}
+				}
+
+				// Hessians
+				if (inf.hessians.size())
+				{
+					if (!functable->hessian_generated)
+						throw_runtime_error("You want to calculate Hessian contributions, but analytical Hessian were not set. Please call problem.setup_for_stability_analysis(analytic_hessian=True) before just-in-time compilation");
+
+					for (auto &hinf : inf.hessians)
+					{
+						if (!functable->HessianVectorProduct || !functable->HessianVectorProduct[inf.contribution])
+							continue;
+						if (!hinf.M_Hessian && !hinf.J_Hessian)
+							continue;
+						if (hinf.M_Hessian && !hinf.J_Hessian)
+							throw_runtime_error("You want to calculate Hessian mass contributions, but you must set a potentially dummy Hessian Jacobian.");
+						unsigned n_var = hinf.Y.size();
+						unsigned n_vec = hinf.J_Hessian->ncol();
+						if (n_var%n_vec!=0) throw_runtime_error("Y and Hessian must fulfill #Y modulo ncol(H) =0. Thereby, you can assembly multiple vectors products at once");
+						shape_info->jacobian_size = n_vec;
+						n_vec=n_var/n_vec;
+						//std::cout << "NVEC " << n_vec << std::endl;
+						if (hinf.M_Hessian)
+						{
+							//             std::cout << " AEESMBLE HESS JM " << inf.contribution << "  " << &hinf.Y << "  " <<  std::endl;
+							functable->HessianVectorProduct[inf.contribution](&eleminfo, shape_info, &hinf.Y[0], &(hinf.M_Hessian->entry(0, 0)), &(hinf.J_Hessian->entry(0, 0)), n_vec, (hinf.transposed ? 5:  2));
+						}
+						else
+						{
+							//            std::cout << " AEESMBLE HESS J " << inf.contribution << "  " << &hinf.Y << "  " <<  std::endl;
+							functable->HessianVectorProduct[inf.contribution](&eleminfo, shape_info, &hinf.Y[0], NULL, &(hinf.J_Hessian->entry(0, 0)), n_vec, (hinf.transposed ? 4:  1));
+						}
+					}
+				}
+			}
+		}
+      functable->during_shared_multi_assembling=false;
+		RequiredShapes_free(required_shapes);
+	}
+
+	///\short Compute the derivatives of the
+	/// residuals with respect to a parameter
+	/// Flag=1 (or 0): do (or don't) compute the Jacobian as well.
+	/// Flag=2: Fill in mass matrix too.
+	void BulkElementBase::fill_in_generic_dresidual_contribution_jit(double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam, oomph::DenseMatrix<double> &dmass_matrix_dparam, unsigned flag)
+	{
+
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (functable->current_res_jac < 0)
+			return;
+		if (!functable->ParameterDerivative)
+			return;
+		if (!functable->ParameterDerivative[functable->current_res_jac])
+			return;
+		unsigned global_param_index = codeinst->get_problem()->resolve_parameter_value_ptr(parameter_pt);
+		int paramindex = -1;
+		for (unsigned int i = 0; i < functable->numglobal_params; i++)
+		{
+			if (functable->global_paramindices[i] == global_param_index)
+			{
+				paramindex = i;
+				break;
+			}
+		}
+		if (paramindex < 0)
+			return; // Nothing to do -> Element does not depend on this parameter
+		if (!functable->ParameterDerivative[functable->current_res_jac][paramindex])
+			return;
+		this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
+		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
+		prepare_shape_buffer_for_integration(functable->shapes_required_ResJac[functable->current_res_jac], flag);
+		shape_info->jacobian_size = djac_dparam.nrow();
+		shape_info->mass_matrix_size = dmass_matrix_dparam.nrow();
+
+		if (!functable->ParameterDerivative[functable->current_res_jac][paramindex])
+			return;
+		if (flag)
+		{
+			if (flag >= 2) // residuals, Jacobian, Mass matrix
+			{
+				functable->ParameterDerivative[functable->current_res_jac][paramindex](&eleminfo, shape_info, &(dres_dparam[0]), &(djac_dparam.entry(0, 0)), &(dmass_matrix_dparam.entry(0, 0)), flag);
+			}
+			else // residuals, Jacobian
+			{
+				functable->ParameterDerivative[functable->current_res_jac][paramindex](&eleminfo, shape_info, &(dres_dparam[0]), &(djac_dparam.entry(0, 0)), NULL, flag);
+			}
+		}
+		else // Only residuals
+		{
+			functable->ParameterDerivative[functable->current_res_jac][paramindex](&eleminfo, shape_info, &(dres_dparam[0]), NULL, NULL, flag);
+		}
+	}
+
+	// The main JIT-driven residual/Jacobian/mass-matrix assembly entry point, called from
+	// oomph-lib's fill_in_contribution_to_* machinery (flag: 0=residuals only, 1=+Jacobian,
+	// >=2=+mass matrix). Two special redirections take priority over normal assembly: if
+	// __replace_RJM_by_param_deriv is set (used while computing derivatives w.r.t. a parameter
+	// via finite differences elsewhere), delegates to fill_in_generic_dresidual_contribution_jit
+	// instead; if enable_zeta_projection is set, assembles the (unrelated) zeta-projection
+	// residuals instead of the physical equations. Otherwise prepares the shape buffer, resolves
+	// hanging-node equation info, and calls the appropriate JIT-generated ResidualAndJacobian
+	// function (steady/unsteady, hanging/non-hanging variant).
+	void BulkElementBase::fill_in_generic_residual_contribution_jit(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &mass_matrix, unsigned flag)
+	{
+		if (__replace_RJM_by_param_deriv)
+		{
+			fill_in_generic_dresidual_contribution_jit(__replace_RJM_by_param_deriv, residuals, jacobian, mass_matrix, flag);
+			return;
+		}
+
+		if (this->enable_zeta_projection)
+		{
+			// Deliberately NOT cleared here. It used to be, which meant the projection residual was
+			// assembled exactly once per element and every subsequent assembly of the same element -
+			// the second Newton iteration, the residual-only pass, a re-solve - silently returned to
+			// the physical equations. The projection driver clears it when it is done.
+			residuals_for_zeta_projection(residuals, jacobian, flag);
+			return;
+		}
+
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (functable->current_res_jac < 0)
+			return;
+		if (!this->ndof())
+			return;
+
+		if (!functable->ResidualAndJacobian[functable->current_res_jac])
+			return;
+		prepare_shape_buffer_for_integration(functable->shapes_required_ResJac[functable->current_res_jac], flag);
+		shape_info->jacobian_size = jacobian.nrow();
+		shape_info->mass_matrix_size = mass_matrix.nrow();
+		bool has_hang = this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
+		has_hang = true;				 // ASSUME ALWAYS HANGING!
+		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
+		// std::cout << "RESIDUAL LENGTH  " << residuals.size() << "  " << this->nexternal_data() <<  std::endl;
+
+		JITFuncSpec_ResidualAndJacobian_FiniteElement func;
+		const oomph::TimeStepper *tstepper = (this->nnode() ? this->node_pt(0)->time_stepper_pt() : this->internal_data_pt(0)->time_stepper_pt());
+		if (tstepper->is_steady())
+		{
+			func = functable->ResidualAndJacobianSteady[functable->current_res_jac];
+		}
+		else
+		{
+			if (!has_hang)
+				func = functable->ResidualAndJacobian_NoHang[functable->current_res_jac];
+			else
+				func = functable->ResidualAndJacobian[functable->current_res_jac];
+		}
+
+		if (flag)
+		{
+			if (flag >= 2) // residuals, Jacobian, Mass matrix
+			{
+				/* for (unsigned int i=0;i<mass_matrix.nrow();i++)
+					 for (unsigned int j=0;j<mass_matrix.nrow();j++) if (mass_matrix(i,j)!=0.0) std::cout << "PREE " << mass_matrix(i,j) << std::endl ;
+			*/
+				func(&eleminfo, shape_info, &(residuals[0]), &(jacobian.entry(0, 0)), &(mass_matrix.entry(0, 0)), flag);
+				/* for (unsigned int i=0;i<mass_matrix.nrow();i++)
+					 for (unsigned int j=0;j<mass_matrix.nrow();j++) if (std::fabs(mass_matrix(i,j))>100.0) std::cout << "POST " << mass_matrix(i,j) << std::endl ;*/
+			}
+			else // residuals, Jacobian
+			{
+				func(&eleminfo, shape_info, &(residuals[0]), &(jacobian.entry(0, 0)), NULL, flag);
+			}
+		}
+		else // Only residuals
+		{
+			func(&eleminfo, shape_info, &(residuals[0]), NULL, NULL, flag);
+		}
+		/*
+		 std::cout << "C JACO " << std::endl;
+		 for (unsigned int i=0;i<jacobian.nrow();i++)
+		 {
+			 for (unsigned int j=0;j<jacobian.ncol();j++) std::cout << "\t" << jacobian.entry(i,j) ;
+			std::cout << std::endl;
+		 }
+		*/
+	}
+
+	// Debug helper: compares the analytical Hessian-vector product (Y,C) -> product against a
+	// finite-difference approximation obtained by perturbing each dof and re-assembling the
+	// Jacobian, to validate the JIT-generated analytical Hessian code. Not used in production
+	// assembly; intended to be called interactively/from Python when debugging.
+	void BulkElementBase::debug_hessian(std::vector<double> Y, std::vector<std::vector<double>> C, double epsilon)
+	{
+		if (Y.size() != this->ndof())
+			throw_runtime_error("Y vector is wrong in size " + std::to_string(Y.size()) + "  vs.  " + std::to_string(this->ndof()));
+		if (!C.size())
+			throw_runtime_error("Empty C matrix");
+		oomph::Vector<double> Ys(Y.size());
+		for (unsigned int i = 0; i < Ys.size(); i++)
+			Ys[i] = Y[i];
+		oomph::DenseMatrix<double> Cs(C.size(), C[0].size());
+		for (unsigned int iv = 0; iv < C.size(); iv++)
+		{
+			if (C[iv].size() != this->ndof())
+				throw_runtime_error("C vector entry " + std::to_string(iv) + " has wrong size");
+			for (unsigned int id = 0; id < this->ndof(); id++)
+				Cs(iv, id) = C[iv][id];
+		}
+		oomph::DenseMatrix<double> anaprod(C.size(), this->ndof(), 0.0);
+		this->fill_in_contribution_to_hessian_vector_products(Ys, Cs, anaprod);
+
+		// Now FDing it
+		oomph::DenseMatrix<double> fdprod(C.size(), this->ndof(), 0.0);
+		oomph::Vector<double> dummy_res(this->ndof());
+		oomph::DenseMatrix<double> jac_base(this->ndof());
+		this->get_jacobian(dummy_res, jac_base);
+		oomph::Vector<double *> dof_pt;
+		this->dof_pt_vector(dof_pt);
+		oomph::Vector<double> dofbackup(dof_pt.size());
+		for (unsigned int i = 0; i < dof_pt.size(); i++)
+			dofbackup[i] = *(dof_pt[i]);
+
+		////////////////////
+
+		const double FD_step = 1.0e-7;
+
+		// We can now construct our multipliers
+		// Prepare to scale
+		double dof_length = 0.0;
+		oomph::Vector<double> C_length(C.size(), 0.0);
+
+		for (unsigned n = 0; n < this->ndof(); n++)
+		{
+			if (std::fabs(dofbackup[n]) > dof_length)
+			{
+				dof_length = std::fabs(dofbackup[n]);
+			}
+		}
+
+		// C is assumed to have the same distribution as the dofs
+		for (unsigned i = 0; i < C.size(); i++)
+		{
+			for (unsigned n = 0; n < this->ndof(); n++)
+			{
+				if (std::fabs(C[i][n]) > C_length[i])
+				{
+					C_length[i] = std::fabs(C[i][n]);
+				}
+			}
+		}
+		///////////////////////////////7
+		// Form the multipliers
+		oomph::Vector<double> C_mult(C.size(), 0.0);
+		for (unsigned i = 0; i < C.size(); i++)
+		{
+			C_mult[i] = dof_length / C_length[i];
+			C_mult[i] += FD_step;
+			C_mult[i] *= FD_step;
+		}
+
+		for (unsigned i = 0; i < C.size(); i++)
+		{
+			for (unsigned n = 0; n < this->ndof(); n++)
+			{
+				*dof_pt[n] += C_mult[i] * C[i][n];
+			}
+			oomph::DenseMatrix<double> jac_C(this->ndof());
+			this->get_jacobian(dummy_res, jac_C);
+			for (unsigned n = 0; n < this->ndof(); n++)
+			{
+				*(dof_pt[n]) = dofbackup[n];
+			}
+
+			for (unsigned n = 0; n < this->ndof(); n++)
+			{
+				double prod_c = 0.0;
+				for (unsigned m = 0; m < this->ndof(); m++)
+				{
+					prod_c += (jac_C(n, m) - jac_base(n, m)) * Y[m];
+				}
+				fdprod(i, n) += prod_c / C_mult[i];
+			}
+		}
+
+		for (unsigned int iv = 0; iv < C.size(); iv++)
+		{
+			bool Cheader_written = false;
+			for (unsigned int id = 0; id < this->ndof(); id++)
+			{
+				if (epsilon <= 0 || std::fabs(fdprod(iv, id) - anaprod(iv, id)) > epsilon)
+				{
+					if (!Cheader_written)
+					{
+						std::cout << "  FOR C VECTOR " << iv << " : ";
+						for (unsigned k = 0; k < C[iv].size(); k++)
+							std::cout << C[iv][k] << "  ";
+						std::cout << std::endl;
+						Cheader_written = true;
+					}
+					std::cout << "     COMPONENT " << id << " : FD: " << fdprod(iv, id) << " ANA: " << anaprod(iv, id) << " DELTA: " << std::fabs(fdprod(iv, id) - anaprod(iv, id)) << std::endl;
+				}
+			}
+		}
+	}
+
+	// Assembles the full (dense, flattened as ndof x ndof*ndof) Hessian tensor d^2R/dU^2 by
+	// calling fill_in_generic_hessian with a dummy Y=0 vector (so no vector-product contraction
+	// happens) and flag=3 (request full Hessian assembly rather than a vector product).
+	void BulkElementBase::assemble_hessian_tensor(oomph::DenseMatrix<double> &hbuffer)
+	{
+		oomph::DenseMatrix<double> dummy(this->ndof(),this->ndof()*this->ndof(),0.0);// For the mass matrix
+		fill_in_generic_hessian(oomph::Vector<double>(this->ndof(),0.0), dummy, hbuffer, 3);
+	}
+
+	// Assembles both the residual Hessian (d^2R/dU^2) and the mass-matrix Hessian (d^2M/dU^2) as
+	// full rank-3 tensors directly via the JIT-generated HessianVectorProduct function (called
+	// with a NULL Y so it fills the full tensors instead of contracting with a vector). Requires
+	// the code to have been JIT-compiled with analytic Hessians enabled.
+   void BulkElementBase::assemble_hessian_and_mass_hessian(oomph::RankThreeTensor<double> & hbuffer,oomph::RankThreeTensor<double> & mbuffer)
+   {
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (functable->current_res_jac < 0)
+			return;
+		if (!this->ndof())
+			return;
+		if (!functable->hessian_generated)
+			throw_runtime_error("Tried to calculate an analytical Hessian, but the corresponding C code was not generated. Please call setup_for_stability_analysis(analytic_hessian=True) of the Problem instance before initialization of the Problem.");
+		if (!functable->HessianVectorProduct[functable->current_res_jac])
+			return;
+
+      hbuffer.resize(this->ndof(),this->ndof(),this->ndof());
+      hbuffer.initialise(0.0);
+      mbuffer.resize(this->ndof(),this->ndof(),this->ndof());
+      mbuffer.initialise(0.0);      
+		prepare_shape_buffer_for_integration(functable->shapes_required_Hessian[functable->current_res_jac], 3);
+		shape_info->jacobian_size = this->ndof();
+		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[functable->current_res_jac], this->shape_info, NULL);
+		this->interpolate_hang_values(); // This should be done elsewhere
+		JITFuncSpec_HessianVectorProduct_FiniteElement func = functable->HessianVectorProduct[functable->current_res_jac];
+
+		func(&eleminfo, shape_info, NULL, &(mbuffer(0, 0,0)), &(hbuffer(0, 0,0)), 1, 3);		   
+   }
+   
+
+	
+	// Residuals passed to fill_in_generic_residual_contribution_jit for solving projection of coordinates and fields.
+	void BulkElementBase::residuals_for_zeta_projection(oomph::Vector<double>& residuals, oomph::DenseMatrix<double>& jacobian, const unsigned& do_fill_jacobian){
+		
+		// Store element in variable.
+		FiniteElement *elem = dynamic_cast<FiniteElement *>(this);
+
+		// Element's dimension.
+		unsigned dim = elem->dim();
+
+		// Local coordinates.
+		oomph::Vector<double> s(dim,0.0);
+
+		// Number of nodes.
+		unsigned n_node = this->nnode();
+		// Number of positional dofs.
+      	const unsigned n_position_type = this->nnodal_position_type();
+		// Set the value of n_intpt.
+		const unsigned n_intpt = integral_pt()->nweight();
+
+		// Get projection time.
+		unsigned t =this->projection_time;
+
+		// Create a field map to loop through all fields in element.
+		auto *code_instance = this->get_code_instance();
+		auto *func_table = code_instance->get_func_table();
+		std::vector<int> field_map;
+		for (unsigned int si=0;si<func_table->num_present_dg_spaces;si++)
+		{
+			if (func_table->dg_spaces[si].numfields)
+		    {
+		     throw_runtime_error("Cannot interpolate discontinuous fields yet");
+		    }
+		}		
+		for (unsigned int si=0;si<func_table->num_present_continuous_spaces;si++)
+		{
+			if (func_table->continuous_spaces[si].numfields-func_table->continuous_spaces[si].numfields_basebulk)
+		    {
+		     throw_runtime_error("Cannot interpolate interface fields yet");
+		    }
+		}
+		
+
+		
+		field_map.resize(ncont_interpolated_values());
+		for (unsigned int i = 0; i < field_map.size(); i++){field_map[i] = i;}
+
+		// Loop over integration points.
+		for (unsigned ipt=0; ipt<n_intpt;ipt++){
+
+			// Get local coordinates at integration point.
+			for(unsigned i=0;i<dim;i++){s[i] = integral_pt()->knot(ipt, i);}
+
+			// Old element pointer.
+			BulkElementBase *old_elem = coords_oldmesh[ipt].first;
+			// NULL when this integration point could not be located in the old mesh at all - a point
+			// of the new mesh lying outside it, which a remesh of a curved boundary produces. There
+			// is nothing to project from, so the point contributes nothing rather than being
+			// dereferenced.
+			if (!old_elem)
+				continue;
+			oomph::Vector<double> old_s = coords_oldmesh[ipt].second;
+
+			// Shape functions.
+			oomph::Shape psi(n_node,n_position_type);
+			this->shape(s,psi);
+
+			// Jacobian of mapping from local to global coordinates.
+            double J = this->J_eulerian(s);
+
+			// Get weight at ipt.
+			double w = integral_pt()->weight(ipt);
+
+			// Premultiply weights with Jacobian.
+			double W = w * J;
+
+			// Current position at current mesh.
+			oomph::Vector<double> interpolated_zeta_curr(dim,0.0);
+			oomph::Vector<double> interpolated_x_curr(dim,0.0);
+			this->interpolated_zeta(s, interpolated_zeta_curr);
+			this->interpolated_x(0, s, interpolated_x_curr);
+
+			// Position in old element.
+			oomph::Vector<double> interpolated_zeta_old(dim,0.0);
+			oomph::Vector<double> interpolated_x_old(dim,0.0);
+			old_elem->interpolated_zeta(old_s, interpolated_zeta_old);
+			old_elem->interpolated_x(t, old_s, interpolated_x_old);
+
+			// Initialise local equation and local unknown.
+			int local_eqn=0;
+			int local_unknown=0;
+
+			// Loop through nodes.
+			for(unsigned l=0;l<n_node;l++){
+				
+				// Loop through position types.
+				for(unsigned k = 0; k < n_position_type; k++){
+
+					//======= Coordinates: FROZEN, not projected =========//
+					//
+					// The positions are not solved for here at all. The current ones are what the mesh
+					// generator produced and are already the answer; the history ones are what the mesh
+					// velocity is built from, and the nodal transfer that seeds this projection already
+					// delivers them to ~1e-13, which is better than this could.
+					//
+					// Projecting them was tried and does not work: the integration weights
+					// W = J_eulerian(s) * w depend on the very position dofs being solved for, and the
+					// Jacobian assembled here does not include that dependence, so the iteration is a
+					// fixed point rather than a Newton method. Started 3% away it diverged outright
+					// (1.7e-3, 7.1e-4, 4.7e-2, 1.6e+47, NaN, as elements inverted), and seeding it with
+					// the converged nodal answer did not save it either.
+					//
+					// They still need an equation, or the matrix is singular wherever positions are
+					// unknowns. A unit diagonal with a zero residual is that equation: it leaves them
+					// exactly where they are, and - the reason this matters for cost - it also keeps
+					// the geometry fixed, so the field system below is exactly linear and one
+					// factorisation serves every field and every history level.
+					if (do_fill_jacobian == 1)
+					{
+						for(unsigned i=0; i<dim; i++){
+							local_eqn = this->position_local_eqn(l, k, i);
+							if(local_eqn >= 0){
+								jacobian(local_eqn, local_eqn) += 1.0;
+							}
+						}
+					}
+				}  // End of the loop over position types: the field block below is per node only.
+
+				
+				//======= Fill residuals for fields =========//
+
+				// Get interpolated values for current mesh.
+				oomph::Vector<double> interpolated_values_curr;
+				this->get_interpolated_values(0, s, interpolated_values_curr);
+
+				// Get interpolated values for old mesh.
+				oomph::Vector<double> interpolated_values_old;
+				// old_s, not s: s is this element's local coordinate, which means nothing in the old
+				// element. The mapping from one to the other is the whole point of coords_oldmesh.
+				old_elem->get_interpolated_values(t, old_s, interpolated_values_old);
+
+				// Loop through every field.
+				for(unsigned field=0; field<field_map.size(); field++){
+
+					// field indexes a nodal VALUE, but field_map is sized by
+					// ncont_interpolated_values(), which counts the fields of the element's function
+					// space and need not equal the number of values a given node carries - a vertex
+					// and a mid-side node of a mixed C2/C1 element do not carry the same set. Asking
+					// nodal_local_eqn for a value the node does not have gives an index that is not a
+					// dof of this element, and writing at it corrupted the assembly (an abort inside
+					// sparse_assemble_row_or_column_compressed).
+					if (field >= elem->node_pt(l)->nvalue())
+						continue;
+
+					// Get local equation number.
+					local_eqn = elem->nodal_local_eqn(l, field);
+
+					// If it is a degree of freedom.
+					if(local_eqn >= 0){
+						// Add residuals.
+						residuals[local_eqn]+=(interpolated_values_curr[field]-interpolated_values_old[field]) * psi(l) * W;
+
+					// The Jacobian must be assembled INSIDE the local_eqn >= 0 test. It used to sit
+					// outside it, so for any pinned value - a Dirichlet condition, say - local_eqn is
+					// -1 and jacobian(-1, ...) wrote before the start of the elemental matrix. That
+					// is a heap overwrite, and it surfaced only later and elsewhere, as
+					// "free(): invalid size" inside sparse_assemble_row_or_column_compressed.
+					if (do_fill_jacobian == 1)
+					{
+						for (unsigned l2 = 0; l2 < n_node; l2++)
+						{
+							// The unknown is node l2's dof, not node l's. Indexing it by l made every
+							// entry of the row land in the SAME column, summing psi(l2)*psi(l) over l2
+							// into it - so the assembled matrix was not the mass matrix at all.
+							if (field >= elem->node_pt(l2)->nvalue())
+								continue;
+							local_unknown = elem->nodal_local_eqn(l2, field);
+
+							if (local_unknown >= 0)
+							{	
+								//Add Jacobian
+								jacobian(local_eqn, local_unknown) += psi(l2) * psi(l) * W;
+							}	
+						}
+					}
+					}
+				}
+			}
+		}
+	}
+   
+
+	// Shared implementation behind fill_in_contribution_to_hessian_vector_products() and
+	// assemble_hessian_tensor()/assemble_hessian_and_mass_hessian(): calls the JIT-generated
+	// HessianVectorProduct function to contract the residual Hessian d^2R/dU^2 with the given
+	// eigenvector Y and a set of directions C (flag selects vector-product vs. full-tensor mode,
+	// see the JITFuncSpec_HessianVectorProduct_FiniteElement calling convention).
+	void BulkElementBase::fill_in_generic_hessian(oomph::Vector<double> const &Y, oomph::DenseMatrix<double> &C, oomph::DenseMatrix<double> &product, unsigned flag)
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (functable->current_res_jac < 0)
+			return;
+		if (!this->ndof())
+			return;
+		if (!functable->hessian_generated)
+			throw_runtime_error("Tried to calculate an analytical Hessian, but the corresponding C code was not generated. Please call setup_for_stability_analysis(analytic_hessian=True) of the Problem instance before initialization of the Problem.");
+		if (!functable->HessianVectorProduct[functable->current_res_jac])
+			return;
+
+		unsigned n_vec = C.nrow();
+		unsigned n_var = Y.size();
+		if (flag == 3)
+			n_var = product.nrow();
+
+		prepare_shape_buffer_for_integration(functable->shapes_required_Hessian[functable->current_res_jac], 3);
+		shape_info->jacobian_size = n_var; // Storing the number of dofs now
+										   //& shape_info->mass_matrix_size=n_vec; // Won't be used, but storing the numbers of vects
+		// bool has_hang =
+		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[functable->current_res_jac], this->shape_info, NULL);
+		// bool has_hang = true;				 // ASSUME ALWAYS HANGING!
+		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
+		JITFuncSpec_HessianVectorProduct_FiniteElement func = functable->HessianVectorProduct[functable->current_res_jac];
+
+		// const double * Cs=&(const_cast<oomph::DenseMatrix<double>*>(&C)->entry(0,0)); // XXX: Dirty hack, but otherwise not possibility to call this
+		func(&eleminfo, shape_info, &(Y[0]), &(C.entry(0, 0)), &(product.entry(0, 0)), n_vec, flag);
+	}
+
+	// oomph-lib hook: computes product = sum_dofs Hessian(Y) * C^T, i.e. the Hessian-vector
+	// products needed for e.g. bifurcation tracking / stability analysis. Delegates to
+	// fill_in_generic_hessian in plain (non-tensor) vector-product mode.
+	void BulkElementBase::fill_in_contribution_to_hessian_vector_products(oomph::Vector<double> const &Y, oomph::DenseMatrix<double> const &C, oomph::DenseMatrix<double> &product)
+	{
+		oomph::DenseMatrix<double> Ccopy = C;
+		this->fill_in_generic_hessian(Y, Ccopy, product, 0);
+	}
+
+	void BulkElementBase::fill_in_jacobian_from_nodal_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
+	{
+		const unsigned n_node = this->nnode();
+		if (n_node == 0) return;
+
+		this->update_before_nodal_fd();
+
+		const unsigned n_dof = this->ndof();
+		oomph::Vector<double> newres(n_dof);
+		const double fd_step = this->Default_fd_jacobian_step;
+		int local_unknown = 0;
+
+		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map=this->get_nodal_space_index_to_element_index_map();
+		for (unsigned int ispace=0;ispace<codeinst->get_func_table()->num_present_continuous_spaces;ispace++)
+		{
+			auto *space_info=codeinst->get_func_table()->present_continuous_spaces[ispace];
+			if (space_info->numfields_basebulk)
+			{
+				for (unsigned n = 0; n < this->eleminfo.nnode_of_space[space_info->space_index]; n++)
+				{
+					oomph::Node *const local_node_pt = this->node_pt(space_node_to_elem_node_map[space_info->space_index][n]);
+					for (unsigned i = space_info->nodal_offset_basebulk; i < space_info->nodal_offset_basebulk+space_info->numfields_basebulk; i++)
+					{
+						if (local_node_pt->is_hanging(space_info->hangindex) == false)
+						{
+							local_unknown = this->nodal_local_eqn(space_node_to_elem_node_map[space_info->space_index][n], i);
+							if (local_unknown >= 0)
+							{
+								double *const value_pt = local_node_pt->value_pt(i);
+								const double old_var = *value_pt;
+								*value_pt += fd_step;
+								this->update_in_nodal_fd(i);
+								this->get_residuals(newres);
+								for (unsigned m = 0; m < n_dof; m++)
+								{
+									jacobian(m, local_unknown) = (newres[m] - residuals[m]) / fd_step;
+								}
+								*value_pt = old_var;
+								this->reset_in_nodal_fd(i);
+							}
+						}
+						else
+						{
+							oomph::HangInfo *hang_info_pt = local_node_pt->hanging_pt(space_info->hangindex);
+							const unsigned n_master = hang_info_pt->nmaster();
+							for (unsigned m = 0; m < n_master; m++)
+							{
+								oomph::Node *const master_node_pt = hang_info_pt->master_node_pt(m);					
+								local_unknown = this->local_hang_eqn(master_node_pt, i);						
+								if (local_unknown >= 0)
+								{
+									double *const value_pt = master_node_pt->value_pt(i);
+									const double old_var = *value_pt;
+									*value_pt += fd_step;
+									this->update_in_nodal_fd(i);
+									this->get_residuals(newres);
+									for (unsigned mm = 0; mm < n_dof; mm++)
+									{
+										jacobian(mm, local_unknown) = (newres[mm] - residuals[mm]) / fd_step;
+									}
+									*value_pt = old_var;
+									this->reset_in_nodal_fd(i);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		this->reset_after_nodal_fd();
+	}
+
+	// Debug helper: recomputes the Jacobian via the (base oomph-lib) finite-difference path and
+	// compares it entry-by-entry to the already-assembled analytical (JIT) `jacobian`, printing
+	// every entry that differs by more than diff_eps (with dof names) to help track down bugs in
+	// generated residual/Jacobian code. Optionally aborts (stop_on_jacobian_difference) with a
+	// detailed dump of the element's dof/equation-number bookkeeping.
+	void BulkElementBase::debug_analytical_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, double diff_eps)
+	{
+		oomph::Vector<double> fd_residuals(residuals.size(), 0.0);
+//		std::cout << "DB NDOF " << this->ndof() << std::endl  << std::flush;
+//		std::cout << "   J" << jacobian.nrow() << " x " << jacobian.ncol() << std::endl << std::flush;
+		oomph::DenseMatrix<double> fd_jacobian(jacobian.nrow(), jacobian.ncol(), 0.0);
+		if (codeinst->get_func_table()->missing_residual_assembly[codeinst->get_func_table()->current_res_jac])
+		{
+		    throw_runtime_error("The Jacobian of the residual "+std::string(codeinst->get_func_table()->res_jac_names[codeinst->get_func_table()->current_res_jac])+" cannot be calculated by finite differences, since the residual is not calculated at all.");
+		}
+		this->RefineableSolidElement::fill_in_contribution_to_jacobian(fd_residuals, fd_jacobian);
+		//	this->fill_in_jacobian_from_lagragian_by_fd(fd_residuals,fd_jacobian);
+		std::vector<std::string> dofnames = get_dof_names();
+		bool header_written = false;
+		for (unsigned int i = 0; i < jacobian.nrow(); i++)
+		{
+			for (unsigned int j = 0; j < jacobian.ncol(); j++)
+			{
+				double diff = fd_jacobian(i, j) - jacobian(i, j);
+				diff = fabs(diff);
+				if (diff > diff_eps)
+				{
+					if (!header_written)
+					{
+						std::cout << "DIFFERENCES IN JACOBIAN ndof=" << this->ndof() << " ELEM_DIM " << this->dim() << std::endl;
+						std::cout << "#I\tJ\tDOF_i\tDOF_j\tDIFF\tJana\tJfd\tRana_i\tRfd_i\tRana_j\tRfd_j" << std::endl;
+						header_written = true;
+					}
+					std::cout << i << "\t" << j << "\t" << dofnames[i] << "\t" << dofnames[j] << "\t" << diff << "\t" << jacobian(i, j) << "\t" << fd_jacobian(i, j) << "\t" << residuals[i] << "\t" << fd_residuals[i] << "\t" << residuals[j] << "\t" << fd_residuals[j] << std::endl;
+				}
+			}
+		}
+		if (header_written && codeinst->get_func_table()->stop_on_jacobian_difference)
+		{
+			const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+			// Now a very detailed list:
+			std::cout << "DOF LIST" << std::endl;
+			for (unsigned int i = 0; i < dofnames.size(); i++)
+			{
+				std::cout << "\t" << i << "\t" << dofnames[i] << std::endl;
+			}
+			std::cout << "NODAL VALUE EQ BUFFER" << std::endl;
+			for (unsigned int l = 0; l < this->nnode(); l++)
+			{
+				std::cout << "\t" << l;
+				for (unsigned int i = 0; i < this->node_pt(l)->nvalue(); i++)
+				{
+					std::cout << "\t" << eleminfo.nodal_local_eqn[l][i];
+				}
+				std::cout << std::endl;
+			}
+			std::cout << "POS VALUE EQ BUFFER" << std::endl;
+			for (unsigned int l = 0; l < this->nnode(); l++)
+			{
+				std::cout << "\t" << l;
+				for (unsigned int i = 0; i < dynamic_cast<Node *>(this->node_pt(l))->variable_position_pt()->nvalue(); i++)
+				{
+					std::cout << "\t" << eleminfo.pos_local_eqn[l][i];
+				}
+				std::cout << "\t@\t";
+				for (unsigned int i = 0; i < dynamic_cast<Node *>(this->node_pt(l))->variable_position_pt()->nvalue(); i++)
+				{
+					std::cout << "\t" << dynamic_cast<Node *>(this->node_pt(l))->variable_position_pt()->value(i);
+				}
+				std::cout << std::endl;
+			}
+			std::cout << "HANG INFO POS" << std::endl;
+			for (unsigned int l = 0; l < this->nnode(); l++)
+			{
+				std::cout << "\t" << l;
+				for (unsigned int j = 0; j < eleminfo.nodal_dim; j++)
+				{
+					std::cout << "\t[dim " << j << "] nmst: " << shape_info->hanginfo_Pos[j][l].nummaster;
+					for (int m = 0; m < shape_info->hanginfo_Pos[j][l].nummaster; m++)
+					{
+						std::cout << " (weight:" << shape_info->hanginfo_Pos[j][l].masters[m].weight << " eq:" << shape_info->hanginfo_Pos[j][l].masters[m].local_eqn << ")";
+					}
+				}
+				std::cout << std::endl;
+			}
+
+			auto print_hanginfo_for_space = [](JITShapeInfo_t * si_shape_info, const JITFuncSpec_Table_FiniteElement_SpaceInfo_t & space_info, unsigned nnode_space)
+			{
+				std::cout << "HANG INFO " << space_info.space_name << std::endl;
+				for (unsigned int l = 0; l < nnode_space; l++)
+				{
+					std::cout << "\t" << l;
+					for (unsigned int f = 0; f < space_info.numfields_basebulk; f++)
+					{
+						JITHangInfo_t * hangbuffer = si_shape_info->hanginfo[f + space_info.buffer_offset_basebulk];
+						std::cout << "\t[f" << f << "] nmst: " << hangbuffer[l].nummaster;
+						for (int m = 0; m < hangbuffer[l].nummaster; m++)
+							std::cout << " (weight:" << hangbuffer[l].masters[m].weight << " eq:" << hangbuffer[l].masters[m].local_eqn << ")";
+					}
+					for (unsigned int f = 0; f < space_info.numfields-space_info.numfields_basebulk; f++)
+					{
+						JITHangInfo_t * hangbuffer = si_shape_info->hanginfo[f + space_info.buffer_offset_interf];
+						std::cout << "\t[if" << f << "] nmst: " << hangbuffer[l].nummaster;
+						for (int m = 0; m < hangbuffer[l].nummaster; m++)
+							std::cout << " (weight:" << hangbuffer[l].masters[m].weight << " eq:" << hangbuffer[l].masters[m].local_eqn << ")";
+					}
+					std::cout << std::endl;
+				}
+			};
+
+			for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)
+			{
+				if (eleminfo.nnode_of_space[si])
+				{
+					print_hanginfo_for_space(shape_info, functable->continuous_spaces[si], eleminfo.nnode_of_space[si]);
+				}
+			}
+
+			if (functable->shapes_required_ResJac[functable->current_res_jac].bulk_shapes && dynamic_cast<InterfaceElementBase *>(this))
+			{
+				BulkElementBase *bel = dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this)->bulk_element_pt());
+				std::cout << "BULK HANG INFO POS" << std::endl;
+				for (unsigned int l = 0; l < bel->nnode(); l++)
+				{
+					std::cout << "\t" << l;
+					for (unsigned int j = 0; j < bel->eleminfo.nodal_dim; j++)
+					{
+						std::cout << "\t[dim " << j << "] nmst: " << shape_info->bulk_shapeinfo->hanginfo_Pos[j][l].nummaster;
+						for (int m = 0; m < shape_info->bulk_shapeinfo->hanginfo_Pos[j][l].nummaster; m++)
+						{
+							std::cout << " (weight:" << shape_info->bulk_shapeinfo->hanginfo_Pos[j][l].masters[m].weight << " eq:" << shape_info->bulk_shapeinfo->hanginfo_Pos[j][l].masters[m].local_eqn << ")";
+						}
+					}
+					std::cout << std::endl;
+				}
+
+				for (unsigned int si=0;si<NUM_CONTINUOUS_SPACES;si++)
+				{
+					if (bel->eleminfo.nnode_of_space[si])
+					{
+						std::cout << "BULK ";
+						print_hanginfo_for_space(shape_info->bulk_shapeinfo, functable->continuous_spaces[si], bel->eleminfo.nnode_of_space[si]);
+					}
+				}
+			}
+
+			InterfaceElementBase *ie = dynamic_cast<InterfaceElementBase *>(this);
+			std::string prefix = "";
+			while (ie)
+			{
+				prefix = prefix + "BULK_PARENT:";
+				BulkElementBase *be = dynamic_cast<BulkElementBase *>(ie->bulk_element_pt());
+				std::vector<std::string> pdofnames = be->get_dof_names();
+				std::cout << "DOFS FOR " << prefix << std::endl;
+				for (unsigned int i = 0; i < pdofnames.size(); i++)
+				{
+					std::cout << "\t" << i << "\t" << pdofnames[i] << std::endl;
+				}
+				ie = dynamic_cast<InterfaceElementBase *>(be);
+			}
+
+			throw_runtime_error("Mismatch in Jacobian in code: " + this->codeinst->get_code()->get_file_name());
+		}
+	}
+
+	// Fills in the Jacobian columns corresponding to nodal position (Lagrangian/geometric) dofs
+	// by finite-differencing the residuals with respect to each nodal coordinate in turn (used
+	// when the JIT-generated code cannot or does not provide the position-Jacobian analytically,
+	// e.g. moving-mesh problems with fd_position_jacobian set). Columns belonging to non-position
+	// ("Lagrangian") dofs are left untouched here (is_lagrangian_dof is currently unused/disabled
+	// via the commented-out block, so effectively every dof's row is updated for every perturbed
+	// position dof). Perturbs one nodal coordinate at a time (looping master nodes for hanging
+	// nodes), re-evaluates the residuals, and forms the FD column, restoring the coordinate
+	// afterwards.
+	void BulkElementBase::fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
+	{
+		const unsigned n_node = this->nnode();
+		if (n_node == 0)
+		{
+			return;
+		}
+
+		// Test if this is a complete finite difference loop
+		//  const JITFuncSpec_Table_FiniteElement_t * functable=codeinst->get_func_table();
+
+		update_before_solid_position_fd();
+		const unsigned n_position_type = this->nnodal_position_type();
+		const unsigned nodal_dim = this->nodal_dimension();
+		const unsigned n_dof = this->ndof();
+		oomph::Vector<double> newres(n_dof);
+		const double fd_step = this->Default_fd_jacobian_step;
+		int local_unknown = 0;
+
+		std::vector<bool> is_lagrangian_dof(this->ndof(), false);
+
+		/*
+		  for(unsigned l=0;l<n_node;l++)
+		   {
+			oomph::Node* const local_node_pt = this->node_pt(l);
+			if(local_node_pt->is_hanging()==false)
+			 {
+			  for(unsigned k=0;k<n_position_type;k++)
+			   {
+				for(unsigned i=0;i<nodal_dim;i++)
+				 {
+				  local_unknown = this->position_local_eqn(l,k,i);
+				  if(local_unknown >= 0)
+				   {
+					 is_lagrangian_dof[local_unknown]=true;
+				   }
+				 }
+			   }
+			 }
+			 else
+			 {
+			  oomph::HangInfo* hang_info_pt = local_node_pt->hanging_pt();
+			  const unsigned n_master = hang_info_pt->nmaster();
+			  for(unsigned m=0;m<n_master;m++)
+			   {
+				oomph::Node* const master_node_pt = hang_info_pt->master_node_pt(m);
+				oomph::DenseMatrix<int> Position_local_eqn_at_node = this->local_position_hang_eqn(master_node_pt);
+				for(unsigned k=0;k<n_position_type;k++)
+				 {
+				  for(unsigned i=0;i<nodal_dim;i++)
+				   {
+					local_unknown = Position_local_eqn_at_node(k,i);
+					if(local_unknown >= 0)
+					 {
+						 is_lagrangian_dof[local_unknown]=true;
+					 }
+				   }
+				 }
+			   }
+
+			 }
+			}      //TODO: Bulk element external position data
+
+		*/
+		for (unsigned l = 0; l < n_node; l++)
+		{
+			oomph::Node *const local_node_pt = this->node_pt(l);
+			if (local_node_pt->is_hanging() == false)
+			{
+				for (unsigned k = 0; k < n_position_type; k++)
+				{
+					for (unsigned i = 0; i < nodal_dim; i++)
+					{
+						local_unknown = this->position_local_eqn(l, k, i);
+						if (local_unknown >= 0)
+						{
+							double *const value_pt = &(local_node_pt->x_gen(k, i));
+							const double old_var = *value_pt;
+							*value_pt += fd_step;
+							//            local_node_pt->perform_auxiliary_node_update_fct();
+							update_in_solid_position_fd(l);
+							get_residuals(newres);
+							for (unsigned m = 0; m < n_dof; m++)
+							{
+								if (!is_lagrangian_dof[m])
+								{
+									// std::cout << "PERTURBED RESIDUALS " << l << "  " << k << "  " << i << "  at m " << m << " is " << (newres[m] - residuals[m])/fd_step << " WRITING TO (" << m << ", " << local_unknown << ")" << std::endl;
+									jacobian(m, local_unknown) = (newres[m] - residuals[m]) / fd_step;
+								}
+							}
+							*value_pt = old_var;
+							// local_node_pt->perform_auxiliary_node_update_fct();
+							// reset_in_solid_position_fd(l);
+						}
+					}
+				}
+			}
+			// Otherwise it's a hanging node
+			else
+			{
+				oomph::HangInfo *hang_info_pt = local_node_pt->hanging_pt();
+				const unsigned n_master = hang_info_pt->nmaster();
+				for (unsigned m = 0; m < n_master; m++)
+				{
+					oomph::Node *const master_node_pt = hang_info_pt->master_node_pt(m);
+					oomph::DenseMatrix<int> Position_local_eqn_at_node = this->local_position_hang_eqn(master_node_pt);
+					for (unsigned k = 0; k < n_position_type; k++)
+					{
+						for (unsigned i = 0; i < nodal_dim; i++)
+						{
+							local_unknown = Position_local_eqn_at_node(k, i);
+							if (local_unknown >= 0)
+							{
+								double *const value_pt = &(master_node_pt->x_gen(k, i));
+								const double old_var = *value_pt;
+								*value_pt += fd_step;
+								 master_node_pt->perform_auxiliary_node_update_fct();
+								update_in_solid_position_fd(l);
+								get_residuals(newres);
+
+								for (unsigned m = 0; m < n_dof; m++)
+								{
+									if (!is_lagrangian_dof[m])
+										jacobian(m, local_unknown) = (newres[m] - residuals[m]) / fd_step;
+								}
+
+								*value_pt = old_var;
+								// master_node_pt->perform_auxiliary_node_update_fct();
+								// reset_in_solid_position_fd(l);
+							}
+						}
+					}
+				}
+			} // End of hanging node case
+		}	  // End of loop over nodes
+     reset_after_solid_position_fd();
+		this->interpolate_hang_values();
+	}
+	
+	
+	void BulkElementBase::update_in_solid_position_fd(const unsigned &) // For FD with element_sizes, we have to update the element size buffer
+	{
+	 const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+	 if (functable->moving_nodes && (functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian_cartesian || functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian))
+	 {
+//	  std::cout << "UPDATE CALL" << std::endl;
+	  this->fill_shape_info_element_sizes(functable->shapes_required_ResJac[functable->current_res_jac],shape_info,0);
+	 }
+	}
+
+	// oomph-lib hook for residual + Jacobian assembly. Normally delegates to the JIT-generated
+	// analytical assembly; if the code table requests position-Jacobian entries by finite
+	// differences (fd_position_jacobian, for moving-mesh problems), those columns are patched in
+	// afterwards via fill_in_jacobian_from_lagragian_by_fd(). If debug_jacobian_epsilon is set,
+	// cross-checks the analytical Jacobian against a full FD one. If fd_jacobian is set for the
+	// whole element (rather than just positions), falls back entirely to oomph-lib's generic FD
+	// Jacobian.
+	void BulkElementBase::fill_in_contribution_to_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (!functable->fd_jacobian)
+		{
+			fill_in_generic_residual_contribution_jit(residuals, jacobian, oomph::GeneralisedElement::Dummy_matrix, 1);
+			if (functable->moving_nodes && functable->fd_position_jacobian)
+			{
+				this->fill_in_jacobian_from_lagragian_by_fd(residuals, jacobian);
+			}
+
+			if (functable->debug_jacobian_epsilon != 0.0 && functable->current_res_jac>=0)
+				debug_analytical_jacobian(residuals, jacobian, functable->debug_jacobian_epsilon);
+		}
+		else
+		{
+		   if (functable->current_res_jac<0) return;
+		   if (functable->missing_residual_assembly[functable->current_res_jac])
+		   {
+		    throw_runtime_error("The Jacobian of the residual "+std::string(functable->res_jac_names[functable->current_res_jac])+" cannot be calculated by finite differences, since the residual is not calculated at all.");
+		   }
+			this->RefineableSolidElement::fill_in_contribution_to_jacobian(residuals, jacobian);
+		}
+
+		/*
+			 std::vector<std::string> dofnames=get_dof_names();
+			 for (unsigned int i=0;i<jacobian.nrow();i++)
+			 {
+			   double minv=0;
+			   double maxv=0;
+			   for (unsigned int j=0;j<jacobian.ncol();j++)
+			   {
+				if (jacobian(i,j)<minv) minv=jacobian(i,j);
+				if (jacobian(i,j)>maxv) maxv=jacobian(i,j);
+			   }
+			   if (minv==0 && maxv==0)
+			   {
+				std::cout << "EMPTY JACOBIAN CONTRIBTUION IN ROW " << i << " corresponding to eq " << this->eqn_number(i) << "  which is " << dofnames[i] << std::endl;
+				std::cout << "ALL DOFS ARE " << std::endl;
+				for (unsigned int k=0;k<dofnames.size();k++) std::cout << "  " << k << "  " << dofnames[k] << std::endl;
+				std::cout << "HANGING INFO " << std::endl;
+				for (unsigned l=0;l<this->nnode();l++)
+				{
+				 if (this->node_pt(l)->is_hanging())
+				 {
+					  oomph::HangInfo* hang_info_pt = this->node_pt(l)->hanging_pt();
+						const unsigned n_master = hang_info_pt->nmaster();
+						std::cout << "  " << l << " master " << n_master << "  :  " ;
+						for(unsigned m=0;m<n_master;m++)
+						 {
+						  oomph::Node* const master_node_pt = hang_info_pt->master_node_pt(m);
+						  oomph::DenseMatrix<int> Position_local_eqn_at_node = this->local_position_hang_eqn(master_node_pt);
+						 for(unsigned ii=0;ii<this->node_pt(l)->ndim();ii++)
+						 {
+							  std::cout << " " << Position_local_eqn_at_node(0,ii);
+						  }
+						 }
+						 std::cout << std::endl;
+				 }
+				 else
+				 {
+					std::cout << "  " << l << " not hanging, eqs for direction: ";
+						 for(unsigned ii=0;ii<this->node_pt(l)->ndim();ii++)
+						 {
+							  std::cout << " " << this->position_local_eqn(l,0,ii);
+						  }
+					std::cout << std::endl;
+				 }
+				}
+				std::cout << "  N  EXTERNAL " << this->nexternal_data() << std::endl;
+			   }
+			 }
+			*/
+	}
+
+	// oomph-lib hook for residual + Jacobian + mass-matrix assembly (used e.g. for eigenproblems).
+	// FD mass matrices are not implemented (the fd_jacobian branch below is dead code, left in
+	// for reference, and would throw before reaching it); the normal path always calls the
+	// JIT-generated assembly with flag=2 (residuals + Jacobian + mass matrix).
+	void BulkElementBase::fill_in_contribution_to_jacobian_and_mass_matrix(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &mass_matrix)
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (functable->fd_jacobian)
+		{
+			throw_runtime_error("FD Mass matrix not implemented");
+			//WARNING: This takes the analytic mass matrix
+			codeinst->get_func_table()->fd_jacobian=false;
+			fill_in_generic_residual_contribution_jit(residuals, jacobian, mass_matrix, 2);
+			codeinst->get_func_table()->fd_jacobian=true;
+			residuals.initialise(0.0);
+			jacobian.initialise(0.0);
+			fill_in_generic_residual_contribution_jit(residuals, jacobian, mass_matrix, 1);
+			
+		}
+		fill_in_generic_residual_contribution_jit(residuals, jacobian, mass_matrix, 2);
+	}
+}

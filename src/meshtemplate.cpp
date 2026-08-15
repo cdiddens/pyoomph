@@ -23,6 +23,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #include "meshtemplate.hpp"
 #include "elements.hpp"
+#include "elements_concrete.hpp"
 #include "exception.hpp"
 #include "codegen.hpp"
 #include "ccompiler.hpp"

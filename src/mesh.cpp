@@ -29,6 +29,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <functional>
 
 #include "elements.hpp"
+#include "elements_concrete.hpp"
 #include "problem.hpp"
 #include "expressions.hpp"
 #include <cln/float.h>

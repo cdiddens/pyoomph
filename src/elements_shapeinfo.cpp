@@ -1,0 +1,1433 @@
+/*================================================================================
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+
+The main author may be contacted at c.diddens@utwente.nl
+
+================================================================================*/
+
+
+// Filling the JIT shape buffer: fill_shape_info_at_s and its nodal-position-derivative helper, the
+// Lagrangian Jacobian, element sizes, and the per-integration-point buffer preparation, plus the
+// local/integral expression evaluation and tracer geometry that ride on the same buffers.
+
+#include "macroelements.hpp"
+#include "elements.hpp"
+#include "exception.hpp"
+#include "problem.hpp"
+#include "nodes.hpp"
+#include "meshtemplate.hpp"
+#include "expressions.hpp"
+#include "timestepper.hpp"
+
+namespace pyoomph
+{
+
+	// Convenience overload that fills the element's own (default) shape_info buffer; see the
+	// shape_info-taking overload below for the actual work.
+	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
+	{
+		return fill_shape_info_at_s(s, index, required, this->shape_info, JLagr, flag, dxds,history_index);
+	}
+
+	/**
+	 * When the mesh moves, we must fill in additional buffer arrays in the shape_info for the Jacobian.
+	 *
+	 * `interpolated_t` stores the tangent vectors, i.e.
+	 *     interpolated_t(j:element_dim,i:nodal_dim)=sum_[l:numnodes] ( x^l_i * dpsi^l/ds_j )
+	 *
+	 * `dpsids_Element` stores the local shape derivatives (element space, i.e. max FE space in the element, C2TB/C2/C1)
+	 *     dpsids_Element(l:nnode,j:element_dim )= dpsi^l/ds_j
+	 *
+	 * `det_Eulerian`=sqrt(det(g_{ab})) with the metric tensor g_{ab}= g(a:element_dim, b:element_dim) = sum_[i:nodal_dim] ( interpolated_t(a, i) * interpolated_t(b, i) )
+	 *
+	 * `aup` is the inverse of the metric tensor, i.e. g^{ab}
+	 *
+	 * `DXdshape_il_jb' is the resulting rank-4-tensor DXdshape(i:nodal_dim,l:numnodes,j:nodal_dim,b:element_dim).
+	 *    It must return d(g^{ab}g_{a,j})/d(x_i^l) (summed over a[element_dim]) with the inverse metric tensor g^{ab} and the tangent g_{a,j}=interpolated_t(a,j)
+	 *
+	 * @param shape_info The destination shape information buffer
+	 * @param interpolated_t local tangent vectors of the element at the integration index
+	 * @param dpsids_Element stores the local shape derivatives with respect to the intrinsic coordinate s
+	 * @param det_Eulerian stores the determinant of the transformation from intrinsic coordinate s to Eulerian coordinate x
+	 * @param aup inverse of the metric tensor
+	 * @param require_hessian indicates whether we require second order derivatives
+	 * @param DXdshape_il_jb rank-4-tensor which is returned
+	 */
+
+	void BulkElementBase::fill_shape_info_at_s_dNodalPos_helper(JITShapeInfo_t *shape_info, const unsigned &index, const oomph::DenseMatrix<double> &interpolated_t, const oomph::DShape &dpsids_Element, const double det_Eulerian, const oomph::DenseMatrix<double> &aup, bool require_hessian, oomph::RankFourTensor<double> &DXdshape_il_jb,RankSixTensor * D2X2_dshape) const
+	{
+		unsigned el_dim = this->dim();
+		unsigned n_dim = this->nodal_dimension();
+		unsigned n_node = this->nnode();
+
+
+		// The spatial integral contribution `dx` of the Gauss-Legendre is given by dx=det_Eulerian*integral_pt()->weight(index);
+		// In particular, you get the size (length/area/volume) of the element by summing dx over all Gauss-Legendre integration points
+		// If the mesh moves, dx depends on the coordinates x^l_i and we require the derivatives of dx with respect to the coordinate dofs x^l_i, i.e. i-th coordinate component of the l-th node in the element
+		double dshape_dx[n_dim][n_node];
+		for (unsigned l = 0; l < n_node; l++)
+		{
+			for (unsigned i = 0; i < n_dim; i++)
+			{
+				// Variable to store the information of the derivative of shape function wrt x coordinates:
+				// dpsi^l/dx_i = sum_b^eldim( sum_a^eldim( g^ab * dpsi^l/ds^a * t_bi ) ). This will be used
+				// for Hessian calculation.
+				dshape_dx[i][l] = 0.0;
+
+				// Store information for the derivative of dx with respect to the x coordinates:
+				// d/dx^l_i(dx).
+				shape_info->int_pt_weights_d_coords[i][l] = 0.0;
+
+				for (unsigned a = 0; a < el_dim; a++)
+				{
+					for (unsigned b = 0; b < el_dim; b++)
+					{
+						dshape_dx[i][l] += aup(a, b) * dpsids_Element(l, b) * interpolated_t(a, i);
+					}
+				}
+
+				// This derivative expands into:
+				// sum_b^eldim( sum_a^eldim( g^ab * dpsi^l/ds^a * t_bi ) ) * sqrt(det(g^ab)) * weight(index), or simply:
+				// dshape_dx[i][l] * det_Eulerian * sqrt(det(g^ab)) * weight(index).
+				shape_info->int_pt_weights_d_coords[i][l] = dshape_dx[i][l] * det_Eulerian * integral_pt()->weight(index);
+			}
+		}
+		
+		// Helper tensors
+		// T^{l}_{gdj}=T[l][g][d][j]
+		double T[n_node][el_dim][el_dim][n_dim];
+		// G^{lab}_j=G[l][a][b][j]
+		double G[n_node][el_dim][el_dim][n_dim];
+		
+		//Fill the T tensor
+		for (unsigned int l=0;l<n_node;l++)
+		{
+		 for (unsigned int c=0;c<el_dim;c++)
+		 {
+		  for (unsigned int d=0;d<el_dim;d++)
+		  {
+			for (unsigned int j=0;j<n_dim;j++)
+			{
+			  T[l][c][d][j]=dpsids_Element(l,c)*interpolated_t(d, j)+dpsids_Element(l,d)*interpolated_t(c, j);
+			}
+		  }
+		 }
+		}
+		
+		//Fill the G tensor
+		for (unsigned int l=0;l<n_node;l++)
+		{
+		 for (unsigned int a=0;a<el_dim;a++)
+		 {
+		  for (unsigned int b=0;b<el_dim;b++)
+		  {
+			for (unsigned int j=0;j<n_dim;j++)
+			{
+			  double Gval=0.0;
+			  for (unsigned int c=0;c<el_dim;c++)
+			  {
+			   for (unsigned int d=0;d<el_dim;d++)
+			   {
+			     Gval-=aup(a,c)*T[l][c][d][j]*aup(d,b);
+			   }
+			  }
+			  G[l][a][b][j]=Gval;
+			}
+		  }
+		 }
+		}
+		
+
+
+		for (unsigned i = 0; i < n_dim; i++)
+		{
+			for (unsigned l = 0; l < n_node; l++)
+			{				
+				for (unsigned j = 0; j < n_dim; j++)
+				{					
+						for (unsigned b = 0; b < el_dim; b++)
+						{
+							DXdshape_il_jb(i, l, j, b) = 0.0;
+							for (unsigned a = 0; a < el_dim; a++)
+							{
+								if (i == j)
+									DXdshape_il_jb(i, l, j, b) += aup(a, b) * dpsids_Element(l, a);		
+								DXdshape_il_jb(i, l, j, b) += interpolated_t(a, j) * G[l][a][b][i]; // d(g^{ab})/d(X_i^l);
+							}
+						}					
+				}
+				
+			}
+		}
+
+		if (require_hessian)
+		{
+		   // Fill the E tensor. Note: D in the document is accessed as follows:
+		   //  	$D^{lb}_{ij}=DXdshape_il_jb(j,l,i,b)
+		   
+		   //fill E^{ll'beta}_{ijj'}=E_hess[i][beta][l][l'][j][j']
+		   for (unsigned int i=0;i<n_dim;i++) 
+		   {
+		     for (unsigned int b=0;b<el_dim;b++)
+		     {
+		       for (unsigned int l=0;l<n_node;l++)
+		       {		       
+		        for (unsigned int lp=0;lp<n_node;lp++)
+		        {
+		          for (unsigned int j=0;j<n_dim;j++)
+		          {
+		            for (unsigned int jp=0;jp<n_dim;jp++)
+		            {
+		             double Eval=0.0;
+		             // First term: -D^{l'c}_{ij'}T^l_{cdj}*g^{db}
+		             // and third term: -g^{ac}T^l_{cdj}*G^{l'db}_j*t_{a,i}
+		             for (unsigned int c=0;c<el_dim;c++)
+		             {
+		              for (unsigned int d=0;d<el_dim;d++)
+		              {
+		               double asum=0.0;
+		               for (unsigned int a=0;a<el_dim;a++)
+		               {
+		                asum+=aup(a,c)*G[lp][d][b][jp]*interpolated_t(a,i);
+		               }
+		               Eval-=T[l][c][d][j]*(DXdshape_il_jb(jp,lp,i,c)*aup(d,b) + asum);
+		              }
+		             }
+		             // Second term, only if j=jp:
+		             if (j==jp)
+		             {
+		               for (unsigned int c=0;c<el_dim;c++)
+		               {
+		                for (unsigned int d=0;d<el_dim;d++)
+		                {
+		                 for (unsigned int a=0;a<el_dim;a++)
+		                 {
+		                  Eval-=aup(a,c)*(dpsids_Element(l, c)*dpsids_Element(lp, d)+dpsids_Element(lp, c)*dpsids_Element(l, d))*aup(d,b)*interpolated_t(a,i);
+		                 }
+		                }
+		               }
+		             }
+		             // Last term, only if i==j
+		             if (i==j)
+		             {
+		              for (unsigned int a=0;a<el_dim;a++)
+		              {
+		                Eval+=G[lp][a][b][jp]*dpsids_Element(l,a);
+		              }
+		             }
+		             
+		             (*D2X2_dshape)(i,b,l,lp,j,jp)=Eval;
+
+		            }
+		          }
+		        }
+		       
+		       }
+		       /*
+		       // Test whether it is symmetric - it should be and apparently is
+		       for (unsigned int l=0;l<n_node;l++)
+		       {
+		        for (unsigned int lp=0;lp<n_node;lp++)
+		        {		       		       		     		          
+		          for (unsigned int j=0;j<n_dim;j++)
+		          {
+		            for (unsigned int jp=0;jp<n_dim;jp++)
+		            {
+		              double E1=(*D2X2_dshape)(i,b,l,lp,j,jp);
+		              double E2=(*D2X2_dshape)(i,b,lp,l,jp,j);
+		              double diff=E1-E2;
+		              if (diff*diff>1e-6)
+		              {
+		                std::cout << "E["<<i<<"]["<<b<<"]  ["<<l<<"]["<<lp<<"]["<<j<<"]["<<jp<<"] = " <<E1 << " and " << E2 << "for (l,j)<->(l',j') " << std::endl;		              
+		              }
+		            }
+		            
+		          }
+		        }
+		       }
+		       */
+		     }
+		   }
+
+
+			// Variable to store the second derivatives of shape function wrt to coordinates, i.e.,
+			// D_dshape_Dcoords[i][l][j][k] = d/dx_i^l(dpsi^k/dx_j). This can be developed into:
+			// sum_b^eldim( dpsi^k/ds^b * DXdshape_il_jb(i, l, j, b) ). Used for Hessian purposes.
+			double D_dshape_Dcoords[n_dim][n_node][n_dim][n_node];
+			for (unsigned int i = 0; i < n_dim; i++)
+			{
+				for (unsigned int l = 0; l < n_node; l++)
+				{
+					for (unsigned int j = 0; j < n_dim; j++)
+					{
+						for (unsigned int k = 0; k < n_node; k++)
+						{
+							D_dshape_Dcoords[i][l][j][k] = 0.0;
+							for (unsigned int b = 0; b < el_dim; b++)
+							{
+								D_dshape_Dcoords[i][l][j][k] += dpsids_Element(l, b) * DXdshape_il_jb(j, k, i, b);
+								//			           std::cout << "ACCU " << i <<  " " << l << "  " << j << "  " << k << "  " << D_dshape_Dcoords[i][l][j][k] <<std::endl;
+							}
+						}
+					}
+				}
+			}
+
+			for (unsigned i = 0; i < n_dim; i++)
+			{
+
+				for (unsigned j = 0; j < n_dim; j++)
+				{
+
+					for (unsigned l = 0; l < n_node; l++)
+					{
+
+						for (unsigned k = 0; k < n_node; k++)
+						{
+
+							// The derivative of dshape_dx[i][l] * det_Eulerian * sqrt(det(g^ab))
+							// wrt to the coordinates x_j^m should then be given by, applying the chain rule:
+							// det_Eulerian * D_dshape_Dcoords[i][l][j][k] + (det_Eulerian * dshape_dx[j][k]) * dshape_dx[i][l],
+							// where the quantities in paranthesis on the last term corresponds to the derivative of det_Eulerian
+							// wrt the coordinates.
+							shape_info->int_pt_weights_d2_coords[i][j][l][k] = integral_pt()->weight(index) * det_Eulerian * (dshape_dx[i][l] * dshape_dx[j][k] + D_dshape_Dcoords[i][l][j][k]);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Determinant of the Lagrangian (reference/undeformed) metric tensor at local coordinate s,
+	// i.e. the analogue of the usual Eulerian Jacobian but built from the Lagrangian nodal
+	// positions xi() instead of the (possibly moving) Eulerian positions. Used to integrate over
+	// the reference configuration, e.g. for Lagrangian element-size or elasticity formulations.
+	double BulkElementBase::J_Lagrangian(const oomph::Vector<double> &s)
+	{
+		unsigned el_dim = this->dim();
+		unsigned n_node = this->nnode();
+		unsigned n_lagr = this->nlagrangian();
+
+		//std::cout << "NLAGR " << n_lagr << "  " << el_dim << std::endl;
+		oomph::Shape psi_Element(n_node);
+		oomph::DShape dpsids_Element(n_node, std::max((unsigned int)1, el_dim));
+		this->dshape_local(s, psi_Element, dpsids_Element);
+		oomph::DenseMatrix<double> interpolated_T(el_dim, n_lagr, 0.0);
+		for (unsigned l = 0; l < n_node; l++)
+		{
+			for (unsigned i = 0; i < n_lagr; i++)
+			{
+				for (unsigned j = 0; j < el_dim; j++)
+				{
+					// interpolated_T(j,i) += dynamic_cast<pyoomph::Node*>(this->node_pt(l))->xi(i)*dpsids_Element(l,j);
+					interpolated_T(j, i) += this->raw_lagrangian_position_gen(l, 0, i) * dpsids_Element(l, j);
+				}
+			}
+		}
+
+		if (el_dim == 1)
+		{
+			double a11 = 0.0;
+			for (unsigned int i = 0; i < n_lagr; i++)
+				a11 += interpolated_T(0, i) * interpolated_T(0, i);
+			return sqrt(a11);
+		}
+		else if (el_dim == 2)
+		{
+			double amet[2][2];
+			for (unsigned al = 0; al < 2; al++)
+			{
+				for (unsigned be = 0; be < 2; be++)
+				{
+					amet[al][be] = 0.0;
+					for (unsigned i = 0; i < n_lagr; i++)
+					{
+						amet[al][be] += interpolated_T(al, i) * interpolated_T(be, i);
+					}
+				}
+			}
+			double det_a = amet[0][0] * amet[1][1] - amet[0][1] * amet[1][0];
+			return sqrt(det_a);
+		}
+		else if (el_dim == 0)
+		{
+			return 1;
+		}
+		else if (el_dim == 3)
+		{
+
+			double amet[3][3];
+			for (unsigned al = 0; al < 3; al++)
+			{
+				for (unsigned be = 0; be < 3; be++)
+				{
+					amet[al][be] = 0.0;
+					for (unsigned i = 0; i < n_lagr; i++)
+					{
+						amet[al][be] += interpolated_T(al, i) * interpolated_T(be, i);
+					}
+				}
+			}
+			double det_a = amet[0][0] * amet[1][1] * amet[2][2] + amet[0][1] * amet[1][2] * amet[2][0] + amet[0][2] * amet[1][0] * amet[2][1] - amet[0][0] * amet[1][2] * amet[2][1] - amet[0][1] * amet[1][0] * amet[2][2] - amet[0][2] * amet[1][1] * amet[2][0];
+			return sqrt(det_a);
+		}
+		else
+		{
+			throw_runtime_error("Implement for this dimension");
+			return 1;
+		}
+
+		return 1;
+	}
+	
+	
+	// Computes element-size related quantities requested via `required` (Eulerian/Lagrangian
+	// element size, in both the "physical" and Cartesian-only sense, i.e. without any extra
+	// geometric_jacobian/JacobianForElementSize weighting) by integrating over all knots, and,
+	// if the mesh moves (flag!=0), also their derivatives with respect to nodal coordinates
+	// (and, if flag indicates a Hessian is required, second derivatives). These are needed
+	// because element-size expressions in the generated code are not assembled point-wise like
+	// normal residuals but require a pre-integrated scalar (and its coordinate sensitivities).
+	void BulkElementBase::fill_shape_info_element_sizes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info,unsigned flag, unsigned history_index) const
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		bool require_hessian = flag > 2;
+		bool require_dxdshape = (flag && functable->moving_nodes && (!functable->fd_position_jacobian)); //&& (required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_DL)			
+		bool require_dx_elemsize=require_dxdshape && (required.elemsize_Eulerian ||  required.elemsize_Eulerian_cartesian);
+		if (require_dx_elemsize)
+		{
+		 // Fill the derivative buffer
+		 for (unsigned int i=0;i<this->nodal_dimension();i++)
+		 {
+		  	for (unsigned int l=0;l<this->nnode();l++)
+		   {
+		    shape_info->elemsize_Cart_d_coords[i][l]=0.0;
+		    shape_info->elemsize_d_coords[i][l]=0.0;		    
+		    if (require_hessian)
+		    {
+				for (unsigned int j=0;j<this->nodal_dimension();j++)
+			 	{
+			  		for (unsigned int m=0;m<this->nnode();m++)
+					{
+		      		shape_info->elemsize_d2_coords[i][j][l][m]=0.0;
+  		      		shape_info->elemsize_Cart_d2_coords[i][j][l][m]=0.0;		    		    
+  		      	}
+  		      }
+  		    }
+		   }
+		 }
+		 JITFuncSpec_RequiredShapes_FiniteElement_t req_dummy;
+		 memset(&req_dummy,0,sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));
+		 req_dummy.Pos.psi=req_dummy.Pos.dx_psi=true; // Calculate these
+		 double JLagr;
+       for(unsigned ipt_for_esize=0;ipt_for_esize<integral_pt()->nweight();ipt_for_esize++)		 
+       {  
+          //double w = integral_pt()->weight(ipt_for_esize);
+          oomph::Vector<double> s_for_esize(this->dim());
+          for (unsigned int _i = 0; _i < this->dim(); _i++)	s_for_esize[_i] = integral_pt()->knot(ipt_for_esize, _i);
+          this->fill_shape_info_at_s(s_for_esize,0,req_dummy, JLagr, flag,NULL,0); // TODO: Potentially other history indices here
+          oomph::Vector<double> x_for_esize(this->nodal_dimension(),0.0);
+          std::vector<double> dJdx(this->nodal_dimension(),0.0);
+          std::vector<double> d2Jdx2(this->nodal_dimension()*this->nodal_dimension(),0.0);   
+          double J=1.0;       
+          if (required.elemsize_Eulerian)
+          {          
+            this->interpolated_x(s_for_esize,x_for_esize);
+            J=functable->JacobianForElementSize(&eleminfo, &(x_for_esize[0]));
+            if (functable->JacobianForElementSizeSpatialDerivative && flag) 
+            {
+              functable->JacobianForElementSizeSpatialDerivative(&eleminfo, &(x_for_esize[0]),&(dJdx[0]));
+              if (functable->JacobianForElementSizeSecondSpatialDerivative && require_hessian) 
+              {
+                functable->JacobianForElementSizeSecondSpatialDerivative(&eleminfo, &(x_for_esize[0]),&(d2Jdx2[0]));              
+              }
+            }
+          }                      
+			 for (unsigned int i=0;i<this->nodal_dimension();i++)
+			 {
+			  	for (unsigned int l=0;l<this->nnode();l++)
+				{
+				 shape_info->elemsize_Cart_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l];
+				 if (required.elemsize_Eulerian)
+				 {
+				   shape_info->elemsize_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l]*J;				  
+				   shape_info->elemsize_d_coords[i][l]+=shape_info->int_pt_weight[0]*dJdx[i]*shape_info->shape_Pos[l];
+				 }
+				 if (require_hessian)
+				 {
+					for (unsigned int j=0;j<this->nodal_dimension();j++)
+				 	{
+				  		for (unsigned int m=0;m<this->nnode();m++)
+						{
+	  		      		shape_info->elemsize_Cart_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m];		    		    
+	  		      		if (required.elemsize_Eulerian)
+				         {
+					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m]*J;
+					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weight[0]*d2Jdx2[i*this->nodal_dimension()+j]*shape_info->shape_Pos[l]*shape_info->shape_Pos[m];  
+					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d_coords[i][l]*dJdx[j]*shape_info->shape_Pos[m];
+					   		
+				         }
+	  		      	}
+	  		      }
+	  		    }				 
+				}
+			 }          
+       }
+		}
+		
+		
+		
+		
+		// For a previous configuration the determinant has to be rebuilt from the old nodal positions.
+		// fill_shape_info_at_s already does exactly that and returns it; it also writes that history
+		// slot of the buffer as it goes, which is harmless because the per-integration-point pass
+		// rewrites the slot afterwards at the point that actually matters.
+		JITFuncSpec_RequiredShapes_FiniteElement_t minimal_for_history;
+		memset(&minimal_for_history, 0, sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));
+		auto eulerian_J_at_s = [&](const oomph::Vector<double> &s_at, unsigned ipt_at, unsigned hist) -> double
+		{
+			if (hist == 0) return J_eulerian_at_knot(ipt_at);
+			double JLagr_dummy_hist;
+			return fill_shape_info_at_s(s_at, ipt_at, minimal_for_history, shape_info, JLagr_dummy_hist, 0, NULL, hist);
+		};
+		if (required.elemsize_Eulerian || required.elemsize_Lagrangian)
+		{
+        //TODO: A bit redundant to do this for each integration point -> Move it in some other routine
+		  shape_info->elemsize_Eulerian[history_index]=0.0;
+		  shape_info->elemsize_Lagrangian=0.0;		  
+        for(unsigned ipt_for_esize=0;ipt_for_esize<integral_pt()->nweight();ipt_for_esize++)
+        {
+          double w = integral_pt()->weight(ipt_for_esize);
+          oomph::Vector<double> s_for_esize(this->dim());
+          for (unsigned int _i = 0; _i < this->dim(); _i++)	s_for_esize[_i] = integral_pt()->knot(ipt_for_esize, _i);
+          oomph::Vector<double> x_for_esize(this->nodal_dimension(),0.0);
+          if (required.elemsize_Eulerian)
+          {          
+            this->interpolated_x(history_index,s_for_esize,x_for_esize);
+            double J = eulerian_J_at_s(s_for_esize,ipt_for_esize,history_index);
+            shape_info->elemsize_Eulerian[history_index] += w*J*functable->JacobianForElementSize(&eleminfo, &(x_for_esize[0]));
+          }
+          if (required.elemsize_Lagrangian)
+          {
+            this->interpolated_xi(s_for_esize,x_for_esize);
+            double J = J_lagrangian_at_knot(ipt_for_esize);            
+            shape_info->elemsize_Lagrangian += w*J*functable->JacobianForElementSize(&eleminfo, &(x_for_esize[0]));          
+          }
+        }
+		}
+		if (required.elemsize_Eulerian_cartesian || required.elemsize_Lagrangian_cartesian)
+		{
+		  shape_info->elemsize_Eulerian_cartesian[history_index]=0.0;
+		  shape_info->elemsize_Lagrangian_cartesian=0.0;		  
+        for(unsigned ipt_for_esize=0;ipt_for_esize<integral_pt()->nweight();ipt_for_esize++)
+        {
+          double w = integral_pt()->weight(ipt_for_esize);
+          oomph::Vector<double> s_for_esize(this->dim());
+          for (unsigned int _i = 0; _i < this->dim(); _i++)	s_for_esize[_i] = integral_pt()->knot(ipt_for_esize, _i);
+          oomph::Vector<double> x_for_esize(this->nodal_dimension(),0.0);
+          if (required.elemsize_Eulerian_cartesian)
+          {          
+            this->interpolated_x(history_index,s_for_esize,x_for_esize);
+            double J = eulerian_J_at_s(s_for_esize,ipt_for_esize,history_index);
+            shape_info->elemsize_Eulerian_cartesian[history_index] += w*J;
+          }
+          if (required.elemsize_Lagrangian_cartesian)
+          {
+            this->interpolated_xi(s_for_esize,x_for_esize);
+            double J = J_lagrangian_at_knot(ipt_for_esize);            
+            shape_info->elemsize_Lagrangian_cartesian += w*J;          
+          }
+        }
+		}	
+		
+		if ( dynamic_cast<const InterfaceElementBase *>(this))
+		{
+			if (required.bulk_shapes)
+			{
+			 const BulkElementBase *bel = dynamic_cast<const BulkElementBase *>(dynamic_cast<const InterfaceElementBase *>(this)->bulk_element_pt());
+			 bel->fill_shape_info_element_sizes(*(required.bulk_shapes),shape_info->bulk_shapeinfo,flag,history_index);		 
+			}
+			
+			if (required.opposite_shapes)
+			{
+			 const BulkElementBase *opp = dynamic_cast<const BulkElementBase *>(dynamic_cast<const InterfaceElementBase *>(this)->get_opposite_side());
+			 opp->fill_shape_info_element_sizes(*(required.opposite_shapes),shape_info->opposite_shapeinfo,flag,history_index);		 
+			}
+	   }	   
+	}
+
+	// Central shape-function evaluator: at the given local coordinate s, fills the shape_info
+	// buffer with the values and physical (x/X) derivatives of every field space present in the
+	// element (C2TB, C2, C1TB, C1, DL, ...), plus (if the mesh moves) the sensitivities of those
+	// derivatives with respect to nodal coordinates, and (if a Hessian is requested) the second
+	// such sensitivities -- everything the JIT-generated residual/Jacobian/Hessian code needs at
+	// this integration/evaluation point. Returns the Eulerian Jacobian determinant det_Eulerian
+	// and, via the JLagr reference parameter, the Lagrangian one.
+	//
+	// Strategy: first build the (inverse) metric tensor from the tangent vectors, both in the
+	// Eulerian (interpolated_t) and Lagrangian (interpolated_T) configuration -- separately for
+	// el_dim 0/1/2/3, since the metric determinant/inverse formulas differ by dimension -- along
+	// with gab_gai[b][i] = g^{ab} g_{a,i}, the contraction used below to turn local-coordinate
+	// shape derivatives dpsi/ds into physical ones dpsi/dx. If the mesh can move, also computes
+	// DXdshape_il_jb = d(g^{ab} g_{a,j})/d(x_i^l) (and, for Hessians, D2X2_dshape) via
+	// fill_shape_info_at_s_dNodalPos_helper(), which are then reused for every field space below.
+	// Then, for each present field space, evaluates its local shape functions/derivatives
+	// (dshape_local_at_s_XXX) and combines them with gab_gai (and DXdshape_il_jb) to fill the
+	// corresponding shape_info->shape_XXX / dx_shape_XXX / dX_shape_XXX / dS_shape_XXX /
+	// d_dx_shape_dcoord_XXX / d2_dx2_shape_dcoord_XXX arrays -- but only if that space is
+	// actually required (per `required`) to avoid needless work.
+	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
+	{
+		bool require_hessian = flag > 2;
+
+		unsigned el_dim = this->dim();
+		unsigned n_dim = this->nodal_dimension();
+		unsigned n_node = this->nnode();
+		unsigned n_lagr = this->nlagrangian();
+
+		double det_Eulerian;
+
+		oomph::DenseMatrix<double> interpolated_t(el_dim, n_dim, 0.0); // Tangents
+		oomph::DenseMatrix<double> interpolated_T(el_dim, n_lagr, 0.0);
+		oomph::Shape psi_Element(n_node);
+		oomph::DShape dpsids_Element(n_node, std::max((unsigned int)1, el_dim));
+		this->dshape_local(s, psi_Element, dpsids_Element);
+		for (unsigned l = 0; l < n_node; l++)
+		{
+			for (unsigned i = 0; i < n_dim; i++)
+			{
+				for (unsigned j = 0; j < el_dim; j++)
+				{
+					interpolated_t(j, i) += this->nodal_position(history_index, l, i) * dpsids_Element(l, j);
+				}
+			}
+			for (unsigned i = 0; i < n_lagr; i++)
+			{
+				for (unsigned j = 0; j < el_dim; j++)
+				{					
+					interpolated_T(j, i) += this->raw_lagrangian_position_gen(l, 0, i) * dpsids_Element(l, j);
+				}
+			}
+		}
+
+		if (dxds)
+			*dxds = interpolated_t;
+
+		double gab_gai[el_dim][n_dim];		// stores [g^{ab} g_a]_i . First index is b second i
+		double gab_gai_Lagr[el_dim][n_dim]; // stores [g^{ab} g_a]_i . First index is b second i
+
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+
+		bool require_dxdshape = (flag && functable->moving_nodes && (!functable->fd_position_jacobian)); //&& (required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_DL)
+		// XXX: The last condition may not be used, since even dx depends on the coordinates
+		// TODO: Add a flag, whether we have a dx contribution in the residuals. If so, we always need it for moving nodes. If not (e.g. pure Lagrangian dX), we can skip it	
+ 
+		
+		oomph::RankFourTensor<double> DXdshape_il_jb; //[n_dim][n_node][n_dim][el_dim]; //this is d(g^{ab}g_{a,j})/d(x_i^l) //TODO: This could lead to stack problems due to size
+      RankSixTensor * D2X2_dshape=NULL;
+      if (require_hessian && require_dxdshape)
+      {
+        D2X2_dshape=new RankSixTensor(n_dim,el_dim,n_node,n_node,n_dim,n_dim);
+      }
+		if (el_dim == 1)
+		{
+			double a11 = 0.0;
+			for (unsigned int i = 0; i < n_dim; i++)
+				a11 += interpolated_t(0, i) * interpolated_t(0, i);
+			for (unsigned int i = 0; i < n_dim; i++)
+				gab_gai[0][i] = interpolated_t(0, i) / a11;
+			det_Eulerian = sqrt(a11);
+
+			// TODO: Only calc d(dx)/dcoords if necessary
+			if (require_dxdshape)
+			{
+				DXdshape_il_jb.resize(n_dim, n_node, n_dim, el_dim, 0.0); // this is d(g^{ab}g_{a,j})/d(x_i^l)
+				oomph::DenseMatrix<double> aup(1, 1, 1.0 / a11);
+				this->fill_shape_info_at_s_dNodalPos_helper(shape_info, index, interpolated_t, dpsids_Element, det_Eulerian, aup, require_hessian, DXdshape_il_jb,D2X2_dshape);
+			}
+
+			a11 = 0.0;
+			for (unsigned int i = 0; i < n_lagr; i++)
+				a11 += interpolated_T(0, i) * interpolated_T(0, i);
+			for (unsigned int i = 0; i < n_lagr; i++)
+				gab_gai_Lagr[0][i] = interpolated_T(0, i) / a11;
+			JLagr = sqrt(a11);
+		}
+		else if (el_dim == 2)
+		{
+			double amet[2][2];
+			for (unsigned al = 0; al < 2; al++)
+			{
+				for (unsigned be = 0; be < 2; be++)
+				{
+					amet[al][be] = 0.0;
+					for (unsigned i = 0; i < n_dim; i++)
+					{
+						amet[al][be] += interpolated_t(al, i) * interpolated_t(be, i);
+					}
+				}
+			}
+			double det_a = amet[0][0] * amet[1][1] - amet[0][1] * amet[1][0];
+			oomph::DenseMatrix<double> aup(2, 2);
+			aup(0, 0) = amet[1][1] / det_a;
+			aup(0, 1) = -amet[0][1] / det_a;
+			aup(1, 0) = -amet[1][0] / det_a;
+			aup(1, 1) = amet[0][0] / det_a;
+
+			for (unsigned int b = 0; b < 2; b++)
+			{
+				for (unsigned int i = 0; i < n_dim; i++)
+				{
+					gab_gai[b][i] = aup(0, b) * interpolated_t(0, i) + aup(1, b) * interpolated_t(1, i);
+				}
+			}
+			det_Eulerian = sqrt(det_a);
+
+			// TODO: Only calc d(dx)/dcoords if necessary
+			if (require_dxdshape)
+			{
+				DXdshape_il_jb.resize(n_dim, n_node, n_dim, el_dim, 0.0); // this is d(g^{ab}g_{a,j})/d(x_i^l)
+				this->fill_shape_info_at_s_dNodalPos_helper(shape_info, index, interpolated_t, dpsids_Element, det_Eulerian, aup, require_hessian, DXdshape_il_jb,D2X2_dshape);
+			}
+
+			// Lagr
+			for (unsigned al = 0; al < 2; al++)
+			{
+				for (unsigned be = 0; be < 2; be++)
+				{
+					amet[al][be] = 0.0;
+					for (unsigned i = 0; i < n_lagr; i++)
+					{
+						amet[al][be] += interpolated_T(al, i) * interpolated_T(be, i);
+					}
+				}
+			}
+			det_a = amet[0][0] * amet[1][1] - amet[0][1] * amet[1][0];
+			aup(0, 0) = amet[1][1] / det_a;
+			aup(0, 1) = -amet[0][1] / det_a;
+			aup(1, 0) = -amet[1][0] / det_a;
+			aup(1, 1) = amet[0][0] / det_a;
+
+			for (unsigned int b = 0; b < 2; b++)
+			{
+				for (unsigned int i = 0; i < n_lagr; i++)
+				{
+					gab_gai_Lagr[b][i] = aup(0, b) * interpolated_T(0, i) + aup(1, b) * interpolated_T(1, i);
+				}
+			}
+			JLagr = sqrt(det_a);
+		}
+		else if (el_dim == 0)
+		{
+			det_Eulerian = 1.0;
+			JLagr = 1.0;			
+			for (unsigned int ispace=0;ispace<NUM_CONTINUOUS_SPACES;ispace++)
+			{
+				for (unsigned l = 0; l < eleminfo.nnode_of_space[ispace]; l++)
+				{
+					shape_info->shapes[ispace][l] = 1.0;
+					for (unsigned int i = 0; i < n_dim; i++)					
+						shape_info->dx_shapes[history_index][ispace][l][i] = 0.0;
+					for (unsigned int i = 0; i < n_lagr; i++)
+						shape_info->dX_shapes[ispace][l][i] = 0.0;
+					for (unsigned int i = 0; i < el_dim; i++)
+						shape_info->dS_shapes[ispace][l][i] = 0.0;
+				}
+			}			
+			for (unsigned l = 0; l < eleminfo.nnode_DL; l++)
+			{
+				shape_info->shape_DL[l] = 1.0;
+				for (unsigned int i = 0; i < n_dim; i++)
+					shape_info->dx_shape_DL[history_index][l][i] = 0.0;
+				for (unsigned int i = 0; i < n_lagr; i++)
+					shape_info->dX_shape_DL[l][i] = 0.0;
+				for (unsigned int i = 0; i < el_dim; i++)
+					shape_info->dS_shape_DL[l][i] = 0.0;
+			}
+			for (unsigned l = 0; l < n_node; l++)
+			{
+				for (unsigned i = 0; i < n_dim; i++)
+				{
+					shape_info->int_pt_weights_d_coords[i][l] = 0.0;
+				}
+			}
+		}
+		else if (el_dim == 3)
+		{
+
+			double amet[3][3];
+			for (unsigned al = 0; al < 3; al++)
+			{
+				for (unsigned be = 0; be < 3; be++)
+				{
+					amet[al][be] = 0.0;
+					for (unsigned i = 0; i < n_dim; i++)
+					{
+						amet[al][be] += interpolated_t(al, i) * interpolated_t(be, i);
+					}
+				}
+			}
+			double det_a = amet[0][0] * amet[1][1] * amet[2][2] + amet[0][1] * amet[1][2] * amet[2][0] + amet[0][2] * amet[1][0] * amet[2][1] - amet[0][0] * amet[1][2] * amet[2][1] - amet[0][1] * amet[1][0] * amet[2][2] - amet[0][2] * amet[1][1] * amet[2][0];
+
+			oomph::DenseMatrix<double> aup(3, 3);
+			aup(0, 0) = (amet[1][1] * amet[2][2] - amet[1][2] * amet[2][1]) / det_a;
+			aup(0, 1) = -(amet[0][1] * amet[2][2] - amet[0][2] * amet[2][1]) / det_a;
+			aup(0, 2) = (amet[0][1] * amet[1][2] - amet[0][2] * amet[1][1]) / det_a;
+			aup(1, 0) = -(amet[1][0] * amet[2][2] - amet[1][2] * amet[2][0]) / det_a;
+			aup(1, 1) = (amet[0][0] * amet[2][2] - amet[0][2] * amet[2][0]) / det_a;
+			aup(1, 2) = -(amet[0][0] * amet[1][2] - amet[0][2] * amet[1][0]) / det_a;
+			aup(2, 0) = (amet[1][0] * amet[2][1] - amet[1][1] * amet[2][0]) / det_a;
+			aup(2, 1) = -(amet[0][0] * amet[2][1] - amet[0][1] * amet[2][0]) / det_a;
+			aup(2, 2) = (amet[0][0] * amet[1][1] - amet[0][1] * amet[1][0]) / det_a;
+
+			for (unsigned int b = 0; b < 3; b++)
+			{
+				for (unsigned int i = 0; i < n_dim; i++)
+				{
+					gab_gai[b][i] = aup(0, b) * interpolated_t(0, i) + aup(1, b) * interpolated_t(1, i) + aup(2, b) * interpolated_t(2, i);
+				}
+			}
+			det_Eulerian = sqrt(det_a);
+
+			// TODO: Only calc d(dx)/dcoords if necessary
+			if (require_dxdshape)
+			{
+				DXdshape_il_jb.resize(n_dim, n_node, n_dim, el_dim, 0.0); // this is d(g^{ab}g_{a,j})/d(x_i^l)
+				this->fill_shape_info_at_s_dNodalPos_helper(shape_info, index, interpolated_t, dpsids_Element, det_Eulerian, aup, require_hessian, DXdshape_il_jb,D2X2_dshape);
+			}
+
+			// Lagr
+			for (unsigned al = 0; al < 3; al++)
+			{
+				for (unsigned be = 0; be < 3; be++)
+				{
+					amet[al][be] = 0.0;
+					for (unsigned i = 0; i < n_lagr; i++)
+					{
+						amet[al][be] += interpolated_T(al, i) * interpolated_T(be, i);
+					}
+				}
+			}
+			det_a = amet[0][0] * amet[1][1] * amet[2][2] + amet[0][1] * amet[1][2] * amet[2][0] + amet[0][2] * amet[1][0] * amet[2][1] - amet[0][0] * amet[1][2] * amet[2][1] - amet[0][1] * amet[1][0] * amet[2][2] - amet[0][2] * amet[1][1] * amet[2][0];
+			aup(0, 0) = (amet[1][1] * amet[2][2] - amet[1][2] * amet[2][1]) / det_a;
+			aup(0, 1) = -(amet[0][1] * amet[2][2] - amet[0][2] * amet[2][1]) / det_a;
+			aup(0, 2) = (amet[0][1] * amet[1][2] - amet[0][2] * amet[1][1]) / det_a;
+			aup(1, 0) = -(amet[1][0] * amet[2][2] - amet[1][2] * amet[2][0]) / det_a;
+			aup(1, 1) = (amet[0][0] * amet[2][2] - amet[0][2] * amet[2][0]) / det_a;
+			aup(1, 2) = -(amet[0][0] * amet[1][2] - amet[0][2] * amet[1][0]) / det_a;
+			aup(2, 0) = (amet[1][0] * amet[2][1] - amet[1][1] * amet[2][0]) / det_a;
+			aup(2, 1) = -(amet[0][0] * amet[2][1] - amet[0][1] * amet[2][0]) / det_a;
+			aup(2, 2) = (amet[0][0] * amet[1][1] - amet[0][1] * amet[1][0]) / det_a;
+
+			for (unsigned int b = 0; b < 3; b++)
+			{
+				for (unsigned int i = 0; i < n_lagr; i++)
+				{
+					gab_gai_Lagr[b][i] = aup(0, b) * interpolated_T(0, i) + aup(1, b) * interpolated_T(1, i) + aup(2, b) * interpolated_T(2, i);
+				}
+			}
+			JLagr = sqrt(det_a);
+		}
+		else
+		{
+			throw_runtime_error("Implement for this dimension");
+		}
+
+		// Now to the parts for the spaces				
+		// A space's shapes are needed either because fields living in that space were explicitly
+		// requested, or because it is the "dominant" (i.e. geometry-defining, Pos) space of this
+		// element and Pos-shapes were requested.		
+
+		for (unsigned int ispace=0;ispace<NUM_CONTINUOUS_SPACES;ispace++)
+		{
+			bool req = required.continuous_spaces[ispace].dx_psi || required.continuous_spaces[ispace].psi;
+			req |= eleminfo.nnode_of_space[ispace] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.continuous_spaces[ispace].dX_psi) && ((!strcmp(functable->dominant_space, functable->continuous_spaces[ispace].space_name)) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[ispace]));
+
+			if (req)
+			{
+				oomph::Shape psi(eleminfo.nnode_of_space[ispace]);
+				oomph::DShape dpsids(eleminfo.nnode_of_space[ispace], std::max((unsigned int)1, el_dim));
+				this->dshape_local_of_space(ispace, s, psi, dpsids);				
+				for (unsigned l = 0; l < eleminfo.nnode_of_space[ispace]; l++)
+				{
+					shape_info->shapes[ispace][l] = psi[l];
+					for (unsigned int i = 0; i < n_dim; i++)
+					{
+						shape_info->dx_shapes[history_index][ispace][l][i] = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
+						{
+							shape_info->dx_shapes[history_index][ispace][l][i] += gab_gai[b][i] * dpsids(l, b);
+						}
+					}
+
+					for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shapes[ispace][l][i] =  dpsids(l, i);
+
+					for (unsigned int i = 0; i < n_lagr; i++)
+					{
+						shape_info->dX_shapes[ispace][l][i] = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
+						{
+							shape_info->dX_shapes[ispace][l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+						}
+					}
+					// TODO: Only if neccessary!
+					if (require_dxdshape)
+					{
+						for (unsigned int i = 0; i < n_dim; i++)
+						{
+							for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
+							{
+								for (unsigned int i2 = 0; i2 < n_dim; i2++)
+								{
+									shape_info->d_dx_shape_dcoord[ispace][l][i][l2][i2] = 0.0;
+									for (unsigned int b = 0; b < el_dim; b++)
+									{
+										shape_info->d_dx_shape_dcoord[ispace][l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b); // TODO: Also for all other shapes (C1, DL)
+									}
+								}
+							}
+						}
+						if (require_hessian)
+						{
+						for (unsigned int i = 0; i < n_dim; i++)
+							{
+								for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
+								{
+								for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
+								{
+									for (unsigned int j = 0; j < n_dim; j++)
+									{
+									for (unsigned int j2 = 0; j2 < n_dim; j2++)
+									{
+										shape_info->d2_dx2_shape_dcoord[ispace][l][i][lel][j][lel2][j2] = 0.0;
+										for (unsigned int b = 0; b < el_dim; b++)
+										{
+											shape_info->d2_dx2_shape_dcoord[ispace][l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
+										}
+									}
+									}
+								}
+							}
+						}
+						}
+					}
+				}
+			}
+		}
+		
+
+		// Same pattern as above, for the discontinuous-Lagrange (DL) space (no "dominant space"
+		// fallback since DL fields are never used to represent the geometry).
+		if (required.DL.dx_psi || required.DL.psi)
+		{
+			oomph::Shape psi(eleminfo.nnode_DL);
+			oomph::DShape dpsids(eleminfo.nnode_DL, std::max((unsigned int)1, el_dim));
+			this->dshape_local_at_s_DL(s, psi, dpsids);
+			for (unsigned l = 0; l < eleminfo.nnode_DL; l++)
+			{
+				shape_info->shape_DL[l] = psi[l];
+				for (unsigned int i = 0; i < n_dim; i++)
+				{
+					shape_info->dx_shape_DL[history_index][l][i] = 0.0;
+					for (unsigned b = 0; b < el_dim; b++)
+					{
+						shape_info->dx_shape_DL[history_index][l][i] += gab_gai[b][i] * dpsids(l, b);
+					}
+				}
+
+				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_DL[l][i] =  dpsids(l, i);
+
+				for (unsigned int i = 0; i < n_lagr; i++)
+				{
+					shape_info->dX_shape_DL[l][i] = 0.0;
+					for (unsigned b = 0; b < el_dim; b++)
+					{
+						shape_info->dX_shape_DL[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+					}
+				}
+				if (require_dxdshape)
+				{
+					for (unsigned int i = 0; i < n_dim; i++)
+					{
+						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
+						{
+							for (unsigned int i2 = 0; i2 < n_dim; i2++)
+							{
+								shape_info->d_dx_shape_dcoord_DL[l][i][l2][i2] = 0.0;
+								for (unsigned int b = 0; b < el_dim; b++)
+								{
+									shape_info->d_dx_shape_dcoord_DL[l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b);
+								}
+							}
+						}
+					}
+					if (require_hessian)
+					{
+					  for (unsigned int i = 0; i < n_dim; i++)
+						{
+							for (unsigned lel= 0; lel < eleminfo.nnode; lel++)
+							{
+							 for (unsigned lel2= 0; lel2 < eleminfo.nnode; lel2++)
+							 {
+								for (unsigned int j = 0; j < n_dim; j++)
+								{
+								 for (unsigned int j2 = 0; j2 < n_dim; j2++)
+								 {
+									shape_info->d2_dx2_shape_dcoord_DL[l][i][lel][j][lel2][j2] = 0.0;
+									for (unsigned int b = 0; b < el_dim; b++)
+									{
+										shape_info->d2_dx2_shape_dcoord_DL[l][i][lel][j][lel2][j2] += (*D2X2_dshape)(i,b,lel,lel2,j,j2) * dpsids(l, b);
+									}
+								 }
+								}
+							}
+						  }
+					  }
+					}
+				}
+			}
+		}
+
+		if (required.normal) // TODO: Better normal
+		{
+			oomph::Vector<double> unit_normal(this->nodal_dimension());
+			this->get_normal_at_s(s, unit_normal, (require_dxdshape ? shape_info->d_normal_dcoord : NULL), ((require_hessian && require_dxdshape) ? shape_info->d2_normal_d2coord : NULL), history_index);
+			for (unsigned int i = 0; i < nodal_dimension(); i++)
+				shape_info->normal[history_index][i] = unit_normal[i];
+		}
+		
+		if (D2X2_dshape) delete D2X2_dshape;
+
+		return det_Eulerian;
+	}
+
+
+	// Points the generic "Pos" shape pointers (shape_Pos, dx_shape_Pos, ...) to whichever concrete
+	// space (C2TB/C2/C1TB/C1) actually represents the element's geometry, so JIT code that reads
+	// shape_info->shape_Pos etc. does not need to know which space is dominant. Falls back down
+	// the priority chain C2TB -> C2 -> C1TB -> C1 depending on which nodes/spaces are present.
+	void BulkElementBase::set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes)
+	{
+		bool required_C2TB = required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].psi;
+		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C2TB"));
+		
+		bool required_C1TB = required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].psi;		
+		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C1TB"));
+		
+		if (required_C2TB)
+		{
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C2TB];
+			for (unsigned k = 0; k < 3; k++) shape_info->dx_shape_Pos[k] = shape_info->dx_shapes[k][SPACE_INDEX_C2TB];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C2TB];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C2TB];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C2TB];
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C2TB];
+		}
+		else if (this->eleminfo.nnode_of_space[SPACE_INDEX_C2])
+		{
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C2];
+			for (unsigned k = 0; k < 3; k++) shape_info->dx_shape_Pos[k] = shape_info->dx_shapes[k][SPACE_INDEX_C2];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C2];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C2];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C2];
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C2];
+		}
+		else if (required_C1TB)
+		{
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C1TB];
+			for (unsigned k = 0; k < 3; k++) shape_info->dx_shape_Pos[k] = shape_info->dx_shapes[k][SPACE_INDEX_C1TB];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C1TB];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C1TB];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1TB];		
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C1TB];
+		}		
+		else
+		{
+		  
+			shape_info->shape_Pos = shape_info->shapes[SPACE_INDEX_C1];
+			for (unsigned k = 0; k < 3; k++) shape_info->dx_shape_Pos[k] = shape_info->dx_shapes[k][SPACE_INDEX_C1];
+			shape_info->dX_shape_Pos = shape_info->dX_shapes[SPACE_INDEX_C1];
+			shape_info->dS_shape_Pos = shape_info->dS_shapes[SPACE_INDEX_C1];
+			shape_info->d_dx_shape_dcoord_Pos = shape_info->d_dx_shape_dcoord[SPACE_INDEX_C1];
+			shape_info->d2_dx2_shape_dcoord_Pos=shape_info->d2_dx2_shape_dcoord[SPACE_INDEX_C1];
+		}
+	}
+
+	// Fills shape_info for a single Gauss integration point ipt: evaluates fill_shape_info_at_s()
+	// at that point's local coordinate (and, if history-weighted time-integrals are required,
+	// also at the previous one or two history configurations, to get their Jacobians), and stores
+	// the combined integration weights (weight * Jacobian) used by JIT code to form dx/dX/etc.
+	void BulkElementBase::fill_shape_buffer_for_integration_point(unsigned ipt, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
+	{
+		oomph::Vector<double> s(this->dim());
+		for (unsigned int i = 0; i < this->dim(); i++)
+			s[i] = integral_pt()->knot(ipt, i);
+        double w = integral_pt()->weight(ipt);
+		
+		if (required_shapes.history_integral_dx1 || required_shapes.history_integral_dx2)
+		{			
+			JITFuncSpec_RequiredShapes_FiniteElement_t simplified_required_shapes;
+			memset(&simplified_required_shapes, 0, sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));			
+			double JLagr_dummy;			
+			if (required_shapes.history_integral_dx1)
+			{
+			  double Jhistory = fill_shape_info_at_s(s, ipt, simplified_required_shapes,  JLagr_dummy, 0,NULL,1);
+			  shape_info->int_pt_weight[1] = w * Jhistory;
+			}
+			if (required_shapes.history_integral_dx2)
+			{
+			  double Jhistory = fill_shape_info_at_s(s, ipt, simplified_required_shapes, JLagr_dummy, 0,NULL,2);
+			  shape_info->int_pt_weight[2] = w * Jhistory;
+			}
+		}
+
+		// Same integration point, but on the mesh as it was one or two steps ago. fill_shape_info_at_s
+		// builds all the geometry from the nodal positions at the requested history level and writes the
+		// configuration-dependent arrays into that level's slot, so these calls do not disturb the
+		// current-time fill below - everything they share with it (the undifferentiated shapes, the
+		// Lagrangian and local-coordinate derivatives) does not move with the mesh. Interfaces are
+		// covered too: the nested calls carry the same history level, so each element of the chain ends
+		// up with its own history slots filled.
+		for (unsigned k = 1; k <= 2; k++)
+		{
+			bool wanted = (k == 1 ? required_shapes.history_geometry1 : required_shapes.history_geometry2);
+			if (!wanted) continue;
+			double JLagr_hist;
+			fill_shape_info_at_s(s, ipt, required_shapes, JLagr_hist, 0, NULL, k);
+		}
+
+		double JLagr;
+		// J is the factor that turns the integration weight into the physical dx below. It is
+		// sqrt(det(g_ab)) built from the metric tensor, which is how pyoomph can integrate over
+		// elements of lower dimension than the nodal space (interface lines in 2D, surfaces in 3D)
+		// -- but it is therefore NON-NEGATIVE BY CONSTRUCTION and says nothing about orientation.
+		// An element that has turned inside out has a perfectly ordinary positive J. To see the
+		// inversion we need the SIGN of the mapping, which only exists when the mapping is square
+		// (el_dim == nodal_dim), and which we get from the tangent matrix dx/ds that
+		// fill_shape_info_at_s() already hands out through its optional out-parameter.
+		//
+		// This is the hottest loop in the code -- once per integration point per element per
+		// assembly -- so the detection is kept strictly off to the side: when
+		// detect_inverted_elements is false (the default) the branch below short-circuits on a
+		// static bool before any virtual dim()/nodal_dimension() call, and the dxds scratch matrix
+		// is never even constructed. Measured on a 60x60 quad mesh (14520 dofs, 240 interleaved
+		// Jacobian assemblies per arm): disabled is indistinguishable from a build with this block
+		// deleted entirely (within the ~2% run-to-run spread), enabled costs about +2%. That +2%
+		// is almost entirely the "*dxds = interpolated_t" DenseMatrix copy-assign inside
+		// fill_shape_info_at_s(), i.e. one small heap allocation per integration point -- if this
+		// ever needs to be cheaper, compute the signed determinant there, where interpolated_t
+		// already exists, instead of copying the matrix out.
+		double J;
+		if (!detect_inverted_elements)
+		{
+			J = fill_shape_info_at_s(s, ipt, required_shapes, JLagr, flag);
+		}
+		else if (this->dim() == 0 || this->dim() != this->nodal_dimension())
+		{
+			// No square mapping, hence no orientation to lose: interface/point elements.
+			J = fill_shape_info_at_s(s, ipt, required_shapes, JLagr, flag);
+		}
+		else
+		{
+			oomph::DenseMatrix<double> dxds;
+			J = fill_shape_info_at_s(s, ipt, required_shapes, JLagr, flag, &dxds);
+
+			// Signed determinant of dx/ds. Negative means the element is inside out, zero means it
+			// has collapsed; either way everything assembled from here on is meaningless. Raising
+			// it now, rather than letting the garbage residual propagate, is what lets
+			// adaptive_unsteady_newton_solve and the arclength loop reject the step and retry with
+			// a smaller one. InvertedElementError derives from oomph::OomphLibError, so a caller
+			// that knows nothing about it still sees an ordinary oomph-lib error, not a crash.
+			double detJ;
+			switch (this->dim())
+			{
+			case 1:
+				detJ = dxds(0, 0);
+				break;
+			case 2:
+				detJ = dxds(0, 0) * dxds(1, 1) - dxds(0, 1) * dxds(1, 0);
+				break;
+			default:
+				detJ = dxds(0, 0) * (dxds(1, 1) * dxds(2, 2) - dxds(1, 2) * dxds(2, 1)) - dxds(0, 1) * (dxds(1, 0) * dxds(2, 2) - dxds(1, 2) * dxds(2, 0)) + dxds(0, 2) * (dxds(1, 0) * dxds(2, 1) - dxds(1, 1) * dxds(2, 0));
+				break;
+			}
+			if (detJ <= 0.0)
+			{
+				std::ostringstream oss;
+				oss << "Inverted element: the signed determinant of the Eulerian mapping dx/ds is "
+					<< detJ << " (must be > 0) at integration point " << ipt << " of a "
+					<< this->dim() << "-dimensional element";
+				if (codeinst && codeinst->get_func_table() && codeinst->get_func_table()->domain_name)
+					oss << " on domain '" << codeinst->get_func_table()->domain_name << "'";
+				oss << "." << std::endl
+					<< "This usually means the mesh has been distorted too far, e.g. by too large a "
+					<< "time step or continuation step." << std::endl
+					<< "Detection can be switched off again with set_detect_inverted_elements(False).";
+				throw oomph::InvertedElementError(oss.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+			}
+		}
+
+		shape_info->int_pt_weight_unity= w;
+		shape_info->int_pt_weight[0] = w * J;
+		shape_info->int_pt_weight_Lagrangian = w * JLagr;
+
+	}
+
+	// One-time (per residual/Jacobian assembly, not per integration point) setup of shape_info:
+	// caches the number of integration points, the current time values/timesteps, and the
+	// per-history-value BDF1/BDF2/Newmark2 weights used by JIT code to form time derivatives
+	// (degrading to lower-order weights while too few unsteady steps have been taken yet), then
+	// resolves the "Pos" shape aliases and computes element-size related quantities. Must be
+	// called before fill_shape_buffer_for_integration_point() is used for the individual points.
+	void BulkElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		shape_info->n_int_pt = integral_pt()->nweight();
+
+		const oomph::TimeStepper *tstepper = (this->nnode() ? this->node_pt(0)->time_stepper_pt() : this->internal_data_pt(0)->time_stepper_pt());
+		if (tstepper->is_steady())
+		{
+			shape_info->timestepper_ntstorage = 0;
+			for (unsigned int i = 0; i < tstepper->ntstorage(); i++)
+			{
+				shape_info->timestepper_weights_dt_BDF1[i] = 0;
+				shape_info->timestepper_weights_dt_BDF2[i] = 0;
+				shape_info->timestepper_weights_dt_Newmark2[i] = 0;
+				if (functable->max_dt_order > 1)
+					shape_info->timestepper_weights_d2t_Newmark2[i] = 0;
+			}
+			shape_info->timestepper_weights_dt_BDF2_degr = shape_info->timestepper_weights_dt_BDF2;
+			shape_info->timestepper_weights_dt_Newmark2_degr = shape_info->timestepper_weights_dt_Newmark2;
+		}
+		else
+		{
+			shape_info->timestepper_ntstorage = tstepper->ntstorage();
+			const MultiTimeStepper *mtstepper = dynamic_cast<const MultiTimeStepper *>(tstepper);
+			if (mtstepper)
+			{
+				for (unsigned int i = 0; i < shape_info->timestepper_ntstorage; i++)
+				{
+					shape_info->timestepper_weights_dt_BDF1[i] = mtstepper->weightBDF1(1, i);
+					shape_info->timestepper_weights_dt_BDF2[i] = mtstepper->weightBDF2(1, i);
+					shape_info->timestepper_weights_dt_Newmark2[i] = mtstepper->weightNewmark2(1, i);
+					if (functable->max_dt_order > 1)
+						shape_info->timestepper_weights_d2t_Newmark2[i] = mtstepper->weightNewmark2(2, i);
+				}
+				unsigned unsteady_steps_done = mtstepper->get_num_unsteady_steps_done();
+				if (unsteady_steps_done == 0)
+				{
+					shape_info->timestepper_weights_dt_BDF2_degr = shape_info->timestepper_weights_dt_BDF1;
+					shape_info->timestepper_weights_dt_Newmark2_degr = shape_info->timestepper_weights_dt_BDF1;
+				}				
+				else
+				{
+					shape_info->timestepper_weights_dt_BDF2_degr = shape_info->timestepper_weights_dt_BDF2;
+					shape_info->timestepper_weights_dt_Newmark2_degr = shape_info->timestepper_weights_dt_Newmark2;
+				}
+			}
+			else
+			{
+				throw_runtime_error("Only the MultiTimeStepper is allowed");
+			}
+		}
+		for (unsigned int tt = 0; tt < tstepper->time_pt()->ndt(); tt++)
+		{
+			shape_info->t[tt] = tstepper->time_pt()->time(tt);
+			shape_info->dt[tt] = tstepper->time_pt()->dt(tt);
+		}
+
+		set_remaining_shapes_appropriately(shape_info, required_shapes);
+
+		_currently_assembled_element = this;
+		
+      // Should be fine here!
+      this->fill_shape_info_element_sizes(required_shapes,shape_info,flag);
+
+		// Element sizes on the mesh as it was one or two steps ago. Unlike the shape derivatives these
+		// are per element rather than per integration point, so they are done here. Each call writes only
+		// its own history slot; the dx_shapes it clobbers in passing (it sweeps the integration points
+		// internally) are rewritten by the per-integration-point fill that follows.
+		for (unsigned k = 1; k <= 2; k++)
+		{
+			bool wanted = (k == 1 ? required_shapes.history_geometry1 : required_shapes.history_geometry2);
+			if (!wanted) continue;
+			this->fill_shape_info_element_sizes(required_shapes, shape_info, 0, k);
+		}
+		
+	}
+
+	// Evaluates a user-defined "integral expression" (an expression integrated over the element);
+	// the actual loop over integration points happens inside the JIT-generated
+	// EvalIntegralExpression, which reads the prepared shape_info buffer.
+	double BulkElementBase::eval_integral_expression(unsigned index)
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (index >= functable->numintegral_expressions)
+			throw_runtime_error("Cannot evaluate integral expression at too large index " + std::to_string(index));		
+		this->interpolate_hang_values();
+		prepare_shape_buffer_for_integration(functable->shapes_required_IntegralExprs, 0);
+		return functable->EvalIntegralExpression(&eleminfo, this->shape_info, index);
+	}
+
+	// Evaluates a user-defined "local expression" (a pointwise, non-integrated expression) at a
+	// given node's local coordinate.
+	double BulkElementBase::eval_local_expression_at_node(unsigned index, unsigned node_index)
+	{
+		oomph::Vector<double> s;
+		this->local_coordinate_of_node(node_index, s);
+		return eval_local_expression_at_s(index, s);
+	}
+
+	// Evaluates a user-defined "local expression" at an arbitrary local coordinate s.
+	double BulkElementBase::eval_local_expression_at_s(unsigned index, const oomph::Vector<double> &s)
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (index >= functable->numlocal_expressions)
+			throw_runtime_error("Cannot evaluate local expression at too large index " + std::to_string(index));
+		
+		this->interpolate_hang_values();
+
+		double JLagr;
+		this->fill_shape_info_at_s(s, 0, codeinst->get_func_table()->shapes_required_LocalExprs, JLagr, 0);
+		this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_LocalExprs, 0);
+//		set_remaining_shapes_appropriately(shape_info, codeinst->get_func_table()->shapes_required_LocalExprs);
+      _currently_assembled_element = this;
+	    //std::cout << "CALLING EVAL LOCAL EXPRESSION  " << this << " ELEMINFO " << &eleminfo << std::endl;
+		return functable->EvalLocalExpression(&eleminfo, this->shape_info, index);
+	}
+
+	// Evaluates a user-defined "extremum expression" (used e.g. to track min/max of some field)
+	// at a given node's local coordinate.
+	double BulkElementBase::eval_extremum_expression_at_node(unsigned index, unsigned node_index)
+	{
+		oomph::Vector<double> s;
+		this->local_coordinate_of_node(node_index, s);
+		return eval_extremum_expression_at_s(index, s);
+	}
+
+	// Evaluates a user-defined "extremum expression" at an arbitrary local coordinate s.
+	double BulkElementBase::eval_extremum_expression_at_s(unsigned index, const oomph::Vector<double> &s)
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (index >= functable->numextremum_expressions)
+			throw_runtime_error("Cannot evaluate extremum expression at too large index " + std::to_string(index));
+		
+		this->interpolate_hang_values();
+
+		double JLagr;
+		this->fill_shape_info_at_s(s, 0, codeinst->get_func_table()->shapes_required_ExtremumExprs, JLagr, 0);
+		this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_ExtremumExprs, 0);
+      _currently_assembled_element = this;	    
+		return functable->EvalExtremumExpression(&eleminfo, this->shape_info, index);
+	}	
+
+	// Deliberately NOT built on fill_shape_info_at_s: this is called several times per Runge-Kutta
+	// stage and needs only the local shape derivatives and the nodal position history, none of the
+	// metric tensors, field interpolations and Jacobian bookkeeping that the shape buffer fill does.
+	// It also has to work unchanged on an interface element, where el_dim < nodal_dim.
+	void BulkElementBase::tracer_geometry_at_s(const oomph::Vector<double> &s, unsigned nlevel, const double *w, const double *dwdtau,
+											   oomph::Vector<double> *x, oomph::DenseMatrix<double> *J,
+											   oomph::Vector<double> *dXdtau) const
+	{
+		const unsigned el_dim = this->dim();
+		const unsigned n_dim = this->nodal_dimension();
+		const unsigned n_node = this->nnode();
+
+		oomph::Shape psi(n_node);
+		oomph::DShape dpsids(n_node, std::max((unsigned)1, el_dim));
+		this->dshape_local(s, psi, dpsids);
+
+		if (x)
+			x->assign(n_dim, 0.0);
+		if (J)
+		{
+			J->resize(el_dim, n_dim);
+			J->initialise(0.0);
+		}
+		if (dXdtau)
+			dXdtau->assign(n_dim, 0.0);
+
+		for (unsigned l = 0; l < n_node; l++)
+		{
+			for (unsigned i = 0; i < n_dim; i++)
+			{
+				double xl = 0.0, xdotl = 0.0;
+				for (unsigned k = 0; k < nlevel; k++)
+				{
+					const double pos = this->nodal_position(k, l, i);
+					xl += w[k] * pos;
+					if (dXdtau)
+						xdotl += dwdtau[k] * pos;
+				}
+				if (x)
+					(*x)[i] += psi(l) * xl;
+				if (dXdtau)
+					(*dXdtau)[i] += psi(l) * xdotl;
+				if (J)
+					for (unsigned a = 0; a < el_dim; a++)
+						(*J)(a, i) += dpsids(l, a) * xl;
+			}
+		}
+	}
+
+	// Per-element part of a tracer evaluation: timestepper weights, time levels and element sizes,
+	// none of which depend on where in the element the particle sits. Split out from
+	// eval_tracer_advection_at_s because that runs several times per Runge-Kutta sub-step while a
+	// particle stays in the same element, and prepare_shape_buffer_for_integration sweeps the
+	// element's integration points. The old code called neither, so any partial_t() inside an
+	// advection expression read whatever timestepper weights the last assembly had left behind.
+	void BulkElementBase::tracer_prepare_element()
+	{
+		this->interpolate_hang_values();
+		this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_TracerAdvection, 0);
+	}
+
+	// Evaluates a user-defined tracer-advection velocity field, in physical/Eulerian components, at
+	// an arbitrary local coordinate. Must be preceded by tracer_prepare_element() for this element.
+	//
+	// The history-geometry slots are filled first where the generated code asks for them, so that a
+	// gradient inside a past-level advection expression is taken on the configuration that level
+	// belongs to rather than on the current one.
+	//
+	// xvelo is sized 3: a coordinate system may produce more velocity components than the mesh has
+	// dimensions (an out-of-plane swirl on an axisymmetric mesh). Those extra components cannot move
+	// a particle that lives in the mesh; it is the caller's job to notice and complain rather than to
+	// drop them silently.
+	void BulkElementBase::eval_tracer_advection_at_s(unsigned index, const oomph::Vector<double> &s, oomph::Vector<double> &xvelo)
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (index >= functable->numtracer_advections)
+			throw_runtime_error("Cannot evaluate tracer advection at too large index " + std::to_string(index));
+		const JITFuncSpec_RequiredShapes_FiniteElement_t &required = functable->shapes_required_TracerAdvection;
+
+		for (unsigned k = 1; k <= 2; k++)
+		{
+			if (k == 1 ? required.history_geometry1 : required.history_geometry2)
+			{
+				double JLagr_hist;
+				this->fill_shape_info_at_s(s, 0, required, JLagr_hist, 0, NULL, k);
+			}
+		}
+		double JLagr;
+		this->fill_shape_info_at_s(s, 0, required, JLagr, 0);
+		set_remaining_shapes_appropriately(shape_info, required);
+
+		xvelo.assign(3, 0.0);
+		_currently_assembled_element = this;
+		functable->EvalTracerAdvection(&eleminfo, this->shape_info, index, &(xvelo[0]));
+	}
+}

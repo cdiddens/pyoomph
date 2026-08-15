@@ -46,6 +46,7 @@ namespace nb = nanobind;
 #include "../refinement_coupling.hpp"
 #include "../problem.hpp"
 #include "../elements.hpp"
+#include "../elements_concrete.hpp"
 #include "../mesh1d.hpp"
 #include "../mesh2d.hpp"
 #include "../mesh3d.hpp"
