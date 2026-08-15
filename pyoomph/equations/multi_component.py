@@ -276,7 +276,13 @@ class CompositionAdvectionDiffusionEquations(Equations):
                 rho_factor = rho
             if self.integrate_advection_by_parts:
                 if self.GCL:
-                    self.add_dweak_dt(rho_factor * f, f_test, scheme=self.scheme)
+                    # dt_factor scales the transient term. Here that term is the derivative of the
+                    # *whole* integral, so the factor multiplies it from outside instead of sitting
+                    # inside the d/dt, where the history terms would carry it at their own time
+                    # levels. This used to be a plain add_dweak_dt(), i.e. dt_factor was silently
+                    # dropped in this branch alone while the two below both applied it.
+                    self.add_residual(self.dt_factor*time_derivative_of_integral(
+                        weak(rho_factor * f, f_test), scheme=self.scheme))
                     w=mesh_velocity(scheme=self.scheme)
                     self.add_residual(-weak(ts(rho_factor *(self.wind-w)*f),grad(f_test)))
                 else:
