@@ -26,7 +26,6 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #include "macroelements.hpp"
 #include "elements.hpp"
-#include "elements_concrete.hpp"
 #include "exception.hpp"
 #include "problem.hpp"
 #include "nodes.hpp"
@@ -441,40 +440,4 @@ namespace pyoomph
 		return res;
 	}
 
-	// Developer-only utility (unused by the running code, invoked manually while adding a new element type):
-	// prints, to stdout, ready-to-paste C++ source for the "if (face==...) return {...};" body of a new
-	// get_vertex_nodes_of_face() override, by inspecting which of the element's face-local nodes are vertex nodes.
-	// The per-family node counts it hard-codes below are the same ones nnode_on_face_by_index() now carries.
-	void help_me_with_the_facets(const BulkElementBase *elem,int face_index)
-	{
-
-	  unsigned nnode_face;
-	  if (dynamic_cast<const BulkElementTetra3dC1*>(elem)) nnode_face=3;
-	  else if (dynamic_cast<const BulkElementTetra3dC2TB*>(elem)) nnode_face=7;
-	  else if (dynamic_cast<const BulkElementTetra3dC2*>(elem)) nnode_face=6;
-	  else if (dynamic_cast<const BulkElementWedge3dC1*>(elem)) {nnode_face=(face_index<2 ? 3 : 4);}
-	  else nnode_face=elem->nnode_on_face();	  
-	  std::set<oomph::Node*> vertex_nodes;
-	 // std::cout << "ELEMENT TYPE " << typeid(*elem).name() << " FACE INDEX " << face_index << " NODES ON FACE " << nnode_face << std::endl;
-	  //std::cout << " NNODE " << elem->nnode() << " NVERTEX NODE " << elem->nvertex_node() << std::endl;
-	  for (unsigned int i=0;i<elem->nvertex_node();i++)
-	  {
-	    vertex_nodes.insert(elem->vertex_node_pt(i));
-	  }
-	  //std::cout << "VERTEX NODES ARE " <<  vertex_nodes.size() << std::endl;
-	  std::cout << " if (face=="<<face_index<<") { return {";
-	  bool comma=false;
-	  for (unsigned i = 0; i < nnode_face; i++)
-      {      
-        unsigned bulk_number = elem->get_bulk_node_number(face_index, i);
-		if (vertex_nodes.count(elem->node_pt(bulk_number)))
-		{
-			//std::cout << typeid(*elem).name() << " FACE " << face_index << " NODE " << i << " BULK NUMBER " << bulk_number << " IS A VERTEX NODE " << std::endl;
-			if (comma) std::cout << ",";
-			else comma=true;
-			std::cout << "dynamic_cast<pyoomph::Node*>(this->node_pt(" << bulk_number << "))";
-		}
-	  }     
-	  std::cout << "};}" << std::endl; 
-    }
 }
