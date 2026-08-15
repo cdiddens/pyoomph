@@ -399,6 +399,296 @@ def test_moving_mesh_hessian_bricks():
 
 
 # ---------------------------------------------------------------------------------------------
+# The 3d element families, through the full pipeline rather than only at the shape-function level.
+#
+# The local second derivatives of every element type are finite-differenced against dshape_local
+# separately (that is where the wedge/pyramid D2Jet arithmetic and the MINI bubbles are pinned down);
+# what these check is that they survive the transform, the buffers and the code generator.
+#
+# A linear function is exact in every one of these spaces, wedges and the rational pyramid included,
+# so its discrete Hessian must vanish - which is again the X_{k,ab} cancellation, and on the pyramid
+# the geometry map is rational so that term is far from trivial. The quadratic needs C2.
+# ---------------------------------------------------------------------------------------------
+
+def _cube_mesh_class(kind):
+    import os
+    import sys
+    testdir = os.path.dirname(os.path.abspath(__file__))
+    if testdir not in sys.path:
+        sys.path.insert(0, testdir)
+    if kind == "tet":
+        from test_tet_refinement import TetCubeMesh
+        return TetCubeMesh
+    if kind == "wedge":
+        from test_wedge_refinement import WedgeCubeMesh
+        return WedgeCubeMesh
+    from test_pyramid_refinement import PyramidCubeMesh
+    return PyramidCubeMesh
+
+
+def _measure_3d(kind, space, fn):
+    cls = _cube_mesh_class(kind)
+
+    class P(Problem):
+        def define_problem(self):
+            self += cls(N=2)
+            self.add_equations((_Carrier(space) + _hessian_observables(3)) @ "domain")
+
+    with P() as p:
+        p.initialise()
+        m = p.get_mesh("domain")
+        _set_nodal(m, fn)
+        o = m.evaluate_all_observables()
+        vol = float(o["vol"])
+        return {k: float(o[k]) / vol for k in o if k != "vol"}
+
+
+import pytest
+
+
+@pytest.mark.parametrize("kind", ["tet", "wedge", "pyramid"])
+@pytest.mark.parametrize("space", ["C1", "C2"])
+def test_3d_families_reproduce_a_linear_function(kind, space):
+    res = _measure_3d(kind, space, lambda x, y, z: 0.3 * x - 0.7 * y + 1.1 * z + 0.4)
+    _check(res, 3, [[0.0] * 3] * 3, 0.0, tol=1e-10)
+
+
+@pytest.mark.parametrize("kind", ["tet", "wedge", "pyramid"])
+def test_3d_families_reproduce_a_quadratic(kind):
+    res = _measure_3d(kind, "C2", lambda x, y, z: x * x + 3 * x * y - 2 * y * y + z * z)
+    _check(res, 3, [[2.0, 3.0, 0.0], [3.0, -4.0, 0.0], [0.0, 0.0, 2.0]], 0.0)
+
+
+# ---------------------------------------------------------------------------------------------
+# Coordinate systems other than plain Cartesian
+#
+# grad/div bottom out in diff(., coordinate_x) inside the coordinate system, and the metric factors
+# are applied BEFORE the second diff, so the product rule is supposed to generate the extra terms by
+# itself. In axisymmetric coordinates that means div(grad(u)) = u_rr + u_zz + u_r/r and
+# grad(grad(u))[2,2] = u_r/r. The mesh keeps away from r=0, where the symbolic u_r/r would be
+# evaluated as 0/0 (Gauss points never land exactly on the axis, but there is no reason to rely on
+# that here).
+# ---------------------------------------------------------------------------------------------
+
+def _axisym_measure(fn, distort):
+    class P(Problem):
+        def define_problem(self):
+            self.set_coordinate_system("axisymmetric")
+            self.add_mesh(RectangularQuadMesh(N=3, size=[1, 1], lower_left=[1, 0]))
+            w = var("w")
+            H = grad(grad(w))
+            eqs = _Carrier() + IntegralObservables(lap=div(grad(w)), h00=H[0, 0], h11=H[1, 1],
+                                                  h22=H[2, 2], vol=1)
+            self.add_equations(eqs @ "domain")
+
+    with P() as p:
+        p.initialise()
+        m = p.get_mesh("domain")
+        if distort:
+            for n in m.nodes():
+                a, b = n.x(0), n.x(1)
+                n.set_x(0, a + 0.20 * (a - 1) * b)
+                n.set_x(1, b - 0.15 * (a - 1) * b)
+        _set_nodal(m, fn)
+        o = m.evaluate_all_observables()
+        v = float(o["vol"])
+        return {k: float(o[k]) / v for k in ("lap", "h00", "h11", "h22")}
+
+
+def test_axisymmetric_laplacian():
+    for distort in (False, True):
+        # w = r^2 : u_rr=2, u_zz=0, u_r/r=2  ->  lap 4
+        r = _axisym_measure(lambda x, y: x * x, distort)
+        assert abs(r["lap"] - 4.0) < 1e-9 and abs(r["h00"] - 2.0) < 1e-9
+        assert abs(r["h11"]) < 1e-9 and abs(r["h22"] - 2.0) < 1e-9
+        # w = z^2 : only u_zz
+        r = _axisym_measure(lambda x, y: y * y, distort)
+        assert abs(r["lap"] - 2.0) < 1e-9 and abs(r["h11"] - 2.0) < 1e-9
+        assert abs(r["h00"]) < 1e-9 and abs(r["h22"]) < 1e-9
+        # a constant has no derivatives at all, metric terms included
+        r = _axisym_measure(lambda x, y: 1.0 + 0.0 * x, distort)
+        assert max(abs(v) for v in r.values()) < 1e-9
+
+
+def test_axisymmetric_hoop_term_is_the_whole_laplacian_for_r_times_z():
+    """For w = r*z both u_rr and u_zz vanish, so the Laplacian is exactly the hoop term u_r/r, i.e.
+    grad(grad(w))[2,2]. On the undistorted mesh the r-weighted average of z/r over
+    r in [1,2], z in [0,1] is (1*1/2)/(3/2) = 1/3."""
+    r = _axisym_measure(lambda x, y: x * y, False)
+    assert abs(r["lap"] - r["h22"]) < 1e-12
+    assert abs(r["h00"]) < 1e-9 and abs(r["h11"]) < 1e-9
+    assert abs(r["lap"] - 1.0 / 3.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------------------------
+# Local element coordinates
+# ---------------------------------------------------------------------------------------------
+
+def test_second_derivative_with_respect_to_local_coordinates():
+    """d2S_shapes, i.e. D2XBasisFunctionLocalCoord. On a uniform N x N mesh of [0,1]^2 with local
+    coordinates in [-1,1], dx/ds = 1/(2N), so d2w/ds1^2 = w_xx/(2N)^2 and
+    d2w/(ds1 ds2) = w_xy/(2N)^2."""
+    N = 3
+
+    class P(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=N))
+            w = var("w")
+            s1, s2 = var("local_coordinate_1"), var("local_coordinate_2")
+            eqs = _Carrier() + IntegralObservables(dss=diff(diff(w, s1), s1),
+                                                   dst=diff(diff(w, s1), s2), vol=1)
+            self.add_equations(eqs @ "domain")
+
+    with P() as p:
+        p.initialise()
+        m = p.get_mesh("domain")
+        _set_nodal(m, lambda x, y: x * x + 3 * x * y)   # w_xx = 2, w_xy = 3
+        o = m.evaluate_all_observables()
+        v = float(o["vol"])
+        scale = 1.0 / (2.0 * N) ** 2
+        assert abs(float(o["dss"]) / v - 2.0 * scale) < 1e-12
+        assert abs(float(o["dst"]) / v - 3.0 * scale) < 1e-12
+
+
+# ---------------------------------------------------------------------------------------------
+# Surfaces on a MOVING mesh: codimension together with d_d2x_shape_dcoord and its Hessian
+# ---------------------------------------------------------------------------------------------
+
+def _moving_interface_problem(hessian):
+    from pyoomph.equations.ALE import LaplaceSmoothedMesh
+
+    class Bulk(Equations):
+        def define_fields(self):
+            self.define_scalar_field("d", "C2")
+
+        def define_residuals(self):
+            d, q = var_and_test("d")
+            self.add_residual(weak(grad(d), grad(q)) + weak(1, q))
+
+    class Surf(Equations):
+        def define_fields(self):
+            self.define_scalar_field("u", "C2")
+
+        def define_residuals(self):
+            u, v = var_and_test("u")
+            self.add_residual(weak((1 + u ** 2) * div(grad(u)), v) + weak(1, v))
+
+    class P(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=3))
+            eqs = Bulk() + LaplaceSmoothedMesh()
+            for b in ("top", "left", "right"):
+                eqs += DirichletBC(mesh_x=True, mesh_y=True) @ b
+            eqs += DirichletBC(mesh_x=True) @ "bottom"      # the interface may move vertically
+            eqs += DirichletBC(d=0) @ "top"
+            self.add_equations(eqs @ "domain")
+            self.add_equations(Surf() @ "domain/bottom")
+            if not hessian:
+                self.debug_jacobian_by_fd_epsilon = 1e-5
+
+    p = P()
+    if hessian:
+        p.setup_for_stability_analysis(analytic_hessian=True)
+    p.initialise()
+    m = p.get_mesh("domain")
+    for n in m.nodes():
+        a, b = n.x(0), n.x(1)
+        n.set_x(0, a + 0.30 * a * b)
+        n.set_x(1, b - 0.20 * a * b + 0.1 * a * (1 - a))   # curves the interface itself
+    im = p.get_mesh("domain/bottom")
+    _set_nodal(im, lambda x, y: 0.3 + 0.5 * x, name="u")
+    return p
+
+
+def test_surface_second_derivative_position_jacobian():
+    import io
+    import contextlib
+    p = _moving_interface_problem(hessian=False)
+    buf = io.StringIO()
+    with p:
+        with contextlib.redirect_stdout(buf):
+            p.assemble_jacobian(with_residual=False)
+    assert "DIFFERENCES IN JACOBIAN" not in buf.getvalue(), buf.getvalue()[:4000]
+
+
+def test_surface_second_derivative_hessian():
+    p = _moving_interface_problem(hessian=True)
+    with p:
+        p.debug_analytic_hessian_by_fd(epsilon=1e-4)
+
+
+# ---------------------------------------------------------------------------------------------
+# The discontinuous (DL) space
+# ---------------------------------------------------------------------------------------------
+
+def test_dl_second_derivative_on_a_moving_mesh():
+    """A DL basis is affine in the local coordinates, so its local second derivatives vanish and the
+    whole physical second derivative comes from the X_{k,ab} term. Checked through the Jacobian,
+    since DL dofs are element-internal and cannot simply be written like nodal values."""
+    import io
+    import contextlib
+    from pyoomph.equations.ALE import LaplaceSmoothedMesh
+
+    class Eq(Equations):
+        def define_fields(self):
+            self.define_scalar_field("p", "DL")
+
+        def define_residuals(self):
+            pf, r = var_and_test("p")
+            self.add_residual(weak((1 + pf ** 2) * div(grad(pf)), r) + weak(1, r))
+
+    class P(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=3))
+            eqs = Eq() + LaplaceSmoothedMesh()
+            for b in ("top", "bottom", "left", "right"):
+                eqs += DirichletBC(mesh_x=True, mesh_y=True) @ b
+            self.add_equations(eqs @ "domain")
+            self.debug_jacobian_by_fd_epsilon = 1e-5
+
+    buf = io.StringIO()
+    with P() as p:
+        p.initialise()
+        _bilinear_distort(p.get_mesh("domain"))
+        with contextlib.redirect_stdout(buf):
+            p.assemble_jacobian(with_residual=False)
+    assert "DIFFERENCES IN JACOBIAN" not in buf.getvalue(), buf.getvalue()[:4000]
+
+
+# ---------------------------------------------------------------------------------------------
+# Bubble-enriched spaces and hanging nodes
+# ---------------------------------------------------------------------------------------------
+
+def test_second_derivative_on_bubble_enriched_triangles():
+    res = _measure(lambda: RectangularQuadMesh(N=3, split_in_tris="crossed"),
+                   lambda x, y: x * x + 3 * x * y - 2 * y * y, 2, space="C2TB")
+    _check(res, 2, [[2.0, 3.0], [3.0, -4.0]], -2.0)
+
+
+def test_second_derivative_with_hanging_nodes():
+    """Adaptive refinement puts hanging nodes into the C2 space; the second derivatives have to go
+    through the same constraint machinery as the first ones."""
+
+    class P(Problem):
+        def define_problem(self):
+            self.add_mesh(RectangularQuadMesh(N=2))
+            self.max_refinement_level = 3
+            w = var("w")
+            eqs = _Carrier() + _hessian_observables(2) + SpatialErrorEstimator(w=1)
+            self.add_equations(eqs @ "domain")
+
+    with P() as p:
+        p.initialise()
+        p.refine_uniformly()
+        m = p.get_mesh("domain")
+        _set_nodal(m, lambda x, y: x * x + 3 * x * y - 2 * y * y)
+        o = m.evaluate_all_observables()
+        vol = float(o["vol"])
+        res = {k: float(o[k]) / vol for k in o if k != "vol"}
+        _check(res, 2, [[2.0, 3.0], [3.0, -4.0]], -2.0)
+
+
+# ---------------------------------------------------------------------------------------------
 # Things that must be refused rather than answered wrongly
 # ---------------------------------------------------------------------------------------------
 
