@@ -1304,8 +1304,9 @@ class NormalModeEigenbranchTracker(_NormalModeBifurcationTrackerBase):
                     return numpy.hstack([dRdp,lamb*dMRdp@Vr+dJRdp@Vr,0.0])                                
                 else:
                     R,JR,MR=self.start_multiassembly().R().J(self.real_contribution).M(self.real_contribution).assemble()
+                    R,=self.patch_residuals(eigen=False,R=[R])
                     JR,MR=self.patch_matrices(eigen=True,J=JR,M=MR)
-                    return numpy.hstack([R,lamb*MR@Vr+JR@Vr,numpy.dot(Vr,Vr if self.nonlinear_length_constraint else self.V0)-self.eigenscale*(self.eigenscale if self.nonlinear_length_constraint else 1)])                                
+                    return numpy.hstack([R,lamb*MR@Vr+JR@Vr,numpy.dot(Vr,Vr if self.nonlinear_length_constraint else self.V0)-self.eigenscale*(self.eigenscale if self.nonlinear_length_constraint else 1)])
             else:
                 assert dparameter is None, "dparameter not supported for require_jacobian=True"
                 R,J,JR,MR,HJVr,HMVr=self.start_multiassembly().R().J().J(self.real_contribution).M(self.real_contribution).dJdU(Vr).dMdU(Vr).assemble()

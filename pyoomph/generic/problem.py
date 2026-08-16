@@ -5098,6 +5098,17 @@ class Problem(_pyoomph.Problem):
         """
         Solves the associated generalized eigenproblem for the given number of eigenvalues and eigenvectors.
 
+        With ``J`` the Jacobian and ``M`` the mass matrix of the residual ``R(U, dU/dt) = 0``, i.e.
+        ``J = dR/dU`` and ``M = dR/d(dU/dt)``, the eigenvalues returned are the solutions of
+
+            lambda * M * v + J * v = 0
+
+        so a perturbation of the stationary solution evolves like ``v*exp(lambda*t)``: an eigenvalue
+        with a positive real part means the solution is unstable (cf. :py:meth:`is_stable_solution`),
+        and the imaginary part is the angular frequency of the oscillation. The same convention holds
+        for the normal-mode variants selected by ``azimuthal_m`` or ``normal_mode_k``, and for the
+        eigenvalue reported while a bifurcation or eigenbranch tracker is active.
+
         Args:
             n (int): The number of eigenvalues and eigenvectors to compute.
             shift (Union[float, complex, None], optional): The shift applied for shift-inverted approaches to solve the eigenproblem. Defaults to 0.

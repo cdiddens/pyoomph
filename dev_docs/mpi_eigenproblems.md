@@ -4,11 +4,56 @@ Status: **implemented and tested.** `tests/test_mpi_eigenvalues.py` (7 tests) co
 situations, the complex (azimuthal) path, the matrix-manipulator path and the refusal path. File and
 line references are to the tree state at the time of writing.
 
-**Goal.** Solve `J v = lambda M v` in parallel via SLEPc whenever pyoomph runs on more than one
-process — with `--distribute`, and equally without it, since the eigensolve parallelises either way.
-scipy/ARPACK cannot participate: it only ever sees one process' matrices. (It is no longer *refused*
-under `--distribute` — the matrices are gathered onto rank 0 and solved there, see
+**Goal.** Solve the generalized eigenproblem in parallel via SLEPc whenever pyoomph runs on more than
+one process — with `--distribute`, and equally without it, since the eigensolve parallelises either
+way. scipy/ARPACK cannot participate: it only ever sees one process' matrices. (It is no longer
+*refused* under `--distribute` — the matrices are gathered onto rank 0 and solved there, see
 [linear_solvers.md](linear_solvers.md) §9.6 — but that is a fallback, not parallelism.)
+
+---
+
+## 0. The sign convention, once
+
+Worth stating before any code below, because the same two letters mean two different matrices
+depending on which side of the nanobind boundary you are on, and every sign bug found in this area so
+far has been someone assuming the wrong one.
+
+The C++ core assembles the Jacobian and mass matrix of the residual `R(U, dU/dt) = 0` exactly as they
+appear in it:
+
+```
+J = dR/dU                M = dR/d(dU/dt)
+```
+
+`Problem::assemble_eigenproblem_matrices` (`src/problem.cpp`) and the nanobind binding pass both
+through untouched, and the JIT's `ADD_TO_MASS_MATRIX_*` macros (`src/jitbridge.h`) all accumulate
+with `+=`, so a term written `weak(partial_t(u), v)` gives a **positive** mass entry. A perturbation
+`v exp(lambda t)` of a stationary solution therefore satisfies
+
+```
+lambda M v + J v = 0
+```
+
+with `Re(lambda) > 0` meaning unstable. This is the convention documented to users
+(`docs/source/tutorial/temporal/stability/constraints.rst`) and the one every bifurcation tracker in
+`src/bifurcation.cpp` embeds: the fold row is `J Y = 0`, the Hopf rows are `(J + i*Omega*M) V = 0`,
+the azimuthal rows are the same with complex `J` and `M`, and eigenbranch tracking adds `+lambda_r M V`.
+Note this is the **opposite** of upstream oomph-lib's `HopfHandler`, deliberately: it is what makes
+`Omega` the imaginary part of `lambda` rather than its negative.
+
+The negation happens exactly once, in Python, in `GenericEigenSolver.get_J_M_n_and_type`
+(`pyoomph/solvers/generic.py`):
+
+```python
+matJ = csr_matrix((-J_val, J_ci, J_rs), shape=(J_nr, n))     # note the minus; M is NOT negated
+```
+
+so from there on — `SlepcEigenSolver.solve`, the scipy backend, the shift-invert operators, the
+matrix manipulators, everything in the rest of this document — the pair on the table is
+`(A, M) = (-J, M)` and the problem solved is the ordinary `A v = lambda M v`. `NormalFormCalculator`
+and `periodic_driving_response` repeat the same negation locally. `pyoomph/generic/assembly.py` and
+`pyoomph/utils/lyapunov.py` deliberately do **not**: they keep the raw `J`, because they are
+integrating the residual, not diagonalising it.
 
 ---
 

@@ -1287,9 +1287,12 @@ void PyReg_Problem(nb::module_ &m)
 				return std::make_tuple(n, M_nzz, M_nrow_local, M_values_arr, M_colindex_arr, M_row_start_arr, J_nzz, J_nrow_local, J_values_arr, J_colindex_arr, J_row_start_arr);
 			},
 			nb::arg("sigma_r"),
-			"Assemble the mass matrix M and Jacobian J needed to set up the generalized eigenproblem J x = lambda M x (e.g. for a shift-invert "
-			"eigensolver with real shift ``sigma_r``). Returns (n, M_nnz, M_nrow_local, M_values, M_column_index, M_row_start, J_nnz, J_nrow_local, "
-			"J_values, J_column_index, J_row_start), both matrices in local compressed sparse row (CSR) format.")
+			"Assemble the mass matrix M and Jacobian J of the generalized eigenproblem (e.g. for a shift-invert eigensolver with real shift "
+			"``sigma_r``). Both are returned exactly as they enter the residual ``R(U, dU/dt) = 0``, i.e. ``J = dR/dU`` and ``M = dR/d(dU/dt)``, "
+			"so the eigenvalue problem they define is ``lambda M x + J x = 0`` for a perturbation growing like ``exp(lambda*t)``. Callers that "
+			"want the usual ``A x = lambda M x`` form must therefore negate J, as the eigensolvers do. Returns (n, M_nnz, M_nrow_local, M_values, "
+			"M_column_index, M_row_start, J_nnz, J_nrow_local, J_values, J_column_index, J_row_start), both matrices in local compressed sparse "
+			"row (CSR) format.")
 		.def(
 			"_assemble_residual_jacobian", [](pyoomph::Problem *self, std::string name)
 			{

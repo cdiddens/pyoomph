@@ -1170,8 +1170,13 @@ namespace pyoomph
               residuals[raw_ndof + i] += (*Parameter_pt)  * M(i, j) * Eig_local[ j];
               residuals[2 * raw_ndof + i] += (*Parameter_pt)  * M(i, j) * Eig_local[raw_ndof +j];
 
-              jacobian(raw_ndof + i,j) += (*Parameter_pt)  * dMdU_Eig(i, j)* Eig_local[ j];
-              jacobian(2 * raw_ndof + i,j) += (*Parameter_pt)  * dMdU_Eig(i, j)* Eig_local[raw_ndof +j];
+              // dMdU_Eig is already contracted with the eigenvector: rows [0,raw_ndof) hold
+              // dM/dU . Phi and rows [raw_ndof,2*raw_ndof) hold dM/dU . Psi, exactly as used in the
+              // Omega blocks above. Multiplying by Eig_local again (and reading the Phi rows for the
+              // Psi equation) was a leftover; compare MyFoldHandler's dMduPhiH and the azimuthal
+              // handler, which both get this right.
+              jacobian(raw_ndof + i,j) += (*Parameter_pt)  * dMdU_Eig(i, j);
+              jacobian(2 * raw_ndof + i,j) += (*Parameter_pt)  * dMdU_Eig(raw_ndof + i, j);
 
               jacobian(raw_ndof + i,raw_ndof + j) += (*Parameter_pt)  * M(i, j);
               jacobian(2 * raw_ndof + i,2*raw_ndof+j) += (*Parameter_pt)  * M(i, j);
@@ -1198,6 +1203,14 @@ namespace pyoomph
     // [[J,Omega*M],[-Omega*M,J]] * (Phi,Psi) = rhs, with the right-hand side chosen as
     // the mass-matrix-only terms below (residuals[n]=M*Psi, residuals[raw_ndof+n]=-M*Phi)
     // since those need no extra assembly beyond the mass matrix already computed here.
+    //
+    // UNREACHABLE, and in the OTHER sign convention. Solve_which_system is never set to 2:
+    // solve_complex_system()/solve_standard_system() are inherited from oomph-lib and called from
+    // nowhere in src/. The blocks below are consequently oomph-lib's ([[J,+Omega*M],[-Omega*M,J]]),
+    // whereas the live full system uses dR[Phi]/dPsi = -Omega*M and dR[Psi]/dPhi = +Omega*M, since
+    // pyoomph's eigen rows are (J + i*Omega*M)V = 0 rather than oomph-lib's (J - i*Omega*M)V = 0.
+    // Do not "fix" the live code to agree with this block; fix this block, or delete it, if it is
+    // ever wired up.
     else if (Solve_which_system == 2)
     {
       unsigned raw_ndof = elem_pt->ndof();
@@ -1275,13 +1288,19 @@ namespace pyoomph
         for (unsigned j = 0; j < raw_ndof; j++)
         {
           unsigned global_unknown = elem_pt->eqn_number(j);
+          // Straight derivative of get_residuals()'s eigen rows, which are J*Phi - Omega*M*Psi and
+          // J*Psi + Omega*M*Phi. The Omega*dM/dp signs used to be the opposite ones, inherited
+          // verbatim from oomph-lib's HopfHandler, whose residual has the whole Omega*M block the
+          // other way round; this function therefore contradicted both get_residuals() and the
+          // parameter column that the analytic-Hessian branch of get_jacobian() builds below.
+          // Only visible when the mass matrix depends on the continuation parameter.
           // Real part
           dres_dparam[raw_ndof + i] +=
-              djac_dparam(i, j) * Phi.global_value(global_unknown) +
+              djac_dparam(i, j) * Phi.global_value(global_unknown) -
               Omega * dM_dparam(i, j) * Psi.global_value(global_unknown);
           // Imaginary part
           dres_dparam[2 * raw_ndof + i] +=
-              djac_dparam(i, j) * Psi.global_value(global_unknown) -
+              djac_dparam(i, j) * Psi.global_value(global_unknown) +
               Omega * dM_dparam(i, j) * Phi.global_value(global_unknown);
         }
       }
@@ -3245,7 +3264,7 @@ namespace pyoomph
   // generated code's "residual mode" (0: base/axisymmetric state, 1: real part of the m!=0
   // Jacobian/mass matrix, 2: imaginary part - selected here via set_assembled_residual()):
   //   [0, raw_ndof)              base (axisymmetric) residuals R(u)
-  //   [raw_ndof, 2*raw_ndof)     real part of (J_real+i*J_imag)*(Re+i*Im) - i*Omega*(M_real+i*M_imag)*(Re+i*Im)
+  //   [raw_ndof, 2*raw_ndof)     real part of (J_real+i*J_imag)*(Re+i*Im) + i*Omega*(M_real+i*M_imag)*(Re+i*Im)
   //   [2*raw_ndof, 3*raw_ndof)   imag part of the same (only if has_imaginary_part)
   //   3*raw_ndof [+1]            normalization equations, accumulated additively across elements
   // If has_imaginary_part is false, Omega is fixed at 0 and only the real eigen-equation/
@@ -3399,7 +3418,12 @@ namespace pyoomph
     {
       if (lambda_tracking)
       {
-   //     throw_runtime_error("Lambda tracking not implemented for finite difference Hessian");
+        // The refusal was commented out at some point, but this branch never grew the pieces
+        // eigenbranch tracking needs: the lambda*M terms are missing from the dVr/dVi blocks below
+        // and there is no column for lambda itself. get_residuals() does add them, so the Newton
+        // step would be taken with a Jacobian that does not match its own residual. Refuse, as
+        // MyHopfHandler and MyFoldHandler do in the same situation.
+        throw_runtime_error("Eigenbranch (lambda) tracking of a normal mode requires analytical Hessian products; the finite-difference branch does not assemble the lambda*M blocks");
       }
       // Get the base residuals, jacobian and mass matrix of real and imaginary parts
       set_assembled_residual(elem_pt, 1);
@@ -3427,8 +3451,11 @@ namespace pyoomph
             jacobian(2 * raw_ndof + n, 2 * raw_ndof + m) = jacobian_real(n, m) - Omega * M_imag(n, m);
             jacobian(2 * raw_ndof + n, raw_ndof + m) = jacobian_imag(n, m) + Omega * M_real(n, m);
             unsigned global_eqn = elem_pt->eqn_number(m);
-            jacobian(raw_ndof + n, 3 * raw_ndof + 1) += M_real(n, m) * imag_eigenvector.global_value(global_eqn) +
-                                                        M_imag(n, m) * real_eigenvector.global_value(global_eqn);
+            // The real row carries -Omega*(M_real*Im + M_imag*Re), so its Omega column is negative.
+            // This used to be a "+=", disagreeing with the analytic-Hessian branch's "-=" below;
+            // unlike the M_imag sign fixed alongside it, the M_real term here never vanishes.
+            jacobian(raw_ndof + n, 3 * raw_ndof + 1) -= M_real(n, m) * imag_eigenvector.global_value(global_eqn) +
+                                                       M_imag(n, m) * real_eigenvector.global_value(global_eqn);
             jacobian(2 * raw_ndof + n, 3 * raw_ndof + 1) += M_real(n, m) * real_eigenvector.global_value(global_eqn) -
                                                             M_imag(n, m) * imag_eigenvector.global_value(global_eqn);
           }
@@ -3868,7 +3895,11 @@ namespace pyoomph
     }
     else
     {
-      elem_pt->get_djacobian_and_dmass_matrix_dparameter(parameter_pt, dres_dparam, djac_real_dparam, dM_real_dparam);
+      // Only dres_dparam (the base rows) is wanted here. The matrices must go to the scratch
+      // djac_dparam/dM_dparam: writing them to djac_real_dparam/dM_real_dparam overwrote the m!=0
+      // real-part derivatives assembled above with the base (axisymmetric) ones, which the eigen
+      // rows below then used.
+      elem_pt->get_djacobian_and_dmass_matrix_dparameter(parameter_pt, dres_dparam, djac_dparam, dM_dparam);
     }
 
     // Initialise the pen-ultimate residual, which does not
