@@ -4947,7 +4947,20 @@ namespace pyoomph
 					// the nested subexpression's own cache is also what the chain rule wants here.
 					const bool was_in_hessian = pyoomph::__in_hessian;
 					pyoomph::__in_hessian = false;
+					// The result is cached in a scalar C variable, so it has to be the PURE partial
+					// derivative with respect to this one interpolated quantity. Differentiating by a
+					// coordinate field also produces the moving-mesh dpsi/dX contributions, and those are
+					// l_shape-indexed arrays that a scalar cannot hold: they came out inside
+					// d_subexpr_N_d_..._d2x00_coordinate_x as "..._COORDDIFF_0_u[l_shape]" and the
+					// generated code then failed to compile with "'l_shape' undeclared". They do not
+					// belong here anyway - the chain rule that consumes this cache sums over every
+					// required field and multiplies by dq/dX itself, so keeping them would double count.
+					// Only azimuthal/normal-mode expansions on a moving mesh reach this, since only they
+					// put second spatial derivatives of the coordinates into a subexpression.
+					const bool was_ignore_dpsi = pyoomph::__ignore_dpsi_coord_diffs_in_jacobian;
+					pyoomph::__ignore_dpsi_coord_diffs_in_jacobian = true;
 					GiNaC::ex dsdf = pyoomph::expressions::diff(subexpressions[j].get_expression(), f.field->get_symbol());
+					pyoomph::__ignore_dpsi_coord_diffs_in_jacobian = was_ignore_dpsi;
 					pyoomph::__in_hessian = was_in_hessian;
 					__derive_only_by_expansion_mode=NULL;
 					__deriv_subexpression_wrto = NULL;

@@ -3003,10 +3003,40 @@ namespace pyoomph
 			return arg.diff(deriv_arg) * signum(arg);
 		}
 
+		// |x| is real and non-negative whatever x is, and GiNaC has to be told so explicitly: without
+		// an info_func it treats absolute() as an arbitrary function of unknown reality. That matters
+		// for the azimuthal/normal-mode expansion, which separates real and imaginary parts:
+		// power::real_part() only leaves a fractional power alone when its basis reports
+		// info_flags::nonnegative, and otherwise rewrites it into polar form,
+		// |X|^p*(cos+I*sin)(p*atan2(Im,Re)). The generated element then referenced real_part/imag_part
+		// as if they were C functions and failed to load with "undefined symbol: imag_part".
+		// GiNaC's own abs does exactly this (abs_info in inifcns.cpp).
+		static bool absolute_info(const ex &arg, unsigned inf)
+		{
+			switch (inf)
+			{
+			case info_flags::real:
+			case info_flags::nonnegative:
+				return true;
+			case info_flags::positive:
+				return arg.info(info_flags::positive) || arg.info(info_flags::negative);
+			default:
+				return false;
+			}
+		}
+
+		static ex absolute_real_part(const ex &arg) { return absolute(arg); }
+		static ex absolute_imag_part(const ex &arg) { return 0; }
+		static ex absolute_conjugate(const ex &arg) { return absolute(arg); }
+
 		REGISTER_FUNCTION(absolute, eval_func(absolute_eval)
 										.print_func<print_csrc_float>(absolute_csrc_float)
 										.print_func<print_csrc_double>(absolute_csrc_float)
 										.expl_derivative_func(absolute_expl_derivative)
+										.info_func(absolute_info)
+										.real_part_func(absolute_real_part)
+										.imag_part_func(absolute_imag_part)
+										.conjugate_func(absolute_conjugate)
 										.set_return_type(GiNaC::return_types::commutative))
 
 		// signum(): sign of arg (returns 0 at exactly arg==0), printed as C "signum()"; deliberately differentiates to 0
@@ -3039,10 +3069,27 @@ namespace pyoomph
 			return 0; // TODO: Singularity, but this does not really matter here
 		}
 
+		// Real-valued for the real arguments it is meant for, and GiNaC has to be told, for the same
+		// reason as absolute() above: signum() reaches the azimuthal real/imaginary separation through
+		// d|x| = signum(x) dx, and an unevaluated imag_part(signum(...)) is emitted as a call to a
+		// C function that does not exist.
+		static bool signum_info(const ex &, unsigned inf)
+		{
+			return inf == info_flags::real;
+		}
+
+		static ex signum_real_part(const ex &arg) { return signum(arg); }
+		static ex signum_imag_part(const ex &) { return 0; }
+		static ex signum_conjugate(const ex &arg) { return signum(arg); }
+
 		REGISTER_FUNCTION(signum, eval_func(signum_eval)
 									  .print_func<print_csrc_float>(signum_csrc_float)
 									  .print_func<print_csrc_double>(signum_csrc_float)
 									  .expl_derivative_func(signum_expl_derivative)
+									  .info_func(signum_info)
+									  .real_part_func(signum_real_part)
+									  .imag_part_func(signum_imag_part)
+									  .conjugate_func(signum_conjugate)
 									  .set_return_type(GiNaC::return_types::commutative))
 
 		// minimum()/maximum(): min/max of two arguments, evaluated directly when both are numeric, else held

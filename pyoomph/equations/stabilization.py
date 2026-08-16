@@ -145,8 +145,14 @@ def tau_advective_diffusive(h: Expression, U: Expression, diffusivity: Expressio
     idt = c_t * idt
     react = c_r * reaction
     if formula == "shakib":
-        return 1 / square_root(idt ** 2 + (2 * U / h) ** 2 + (C_I * diffusivity / h ** 2) ** 2
-                               + react ** 2)
+        # absolute() is a no-op on a sum of squares, but it is what makes the square root survive an
+        # azimuthal/normal-mode expansion. GiNaC splits a fractional power into polar form unless the
+        # basis reports info_flags::nonnegative (power::real_part), and it cannot deduce that here:
+        # mul::info implements positive/negative but not nonnegative, so 4*U^2/h^2 is indeterminate.
+        # Without this, the m!=0 code came out as |X|^(-1/2)*(cos/sinh of imag_part(atan2(0,X))) and
+        # the generated element failed to load with "undefined symbol: imag_part".
+        return 1 / square_root(absolute(idt ** 2 + (2 * U / h) ** 2 + (C_I * diffusivity / h ** 2) ** 2
+                                        + react ** 2))
     elif formula == "codina":
         return 1 / (idt + 2 * U / h + C_I * diffusivity / h ** 2 + react)
     elif formula == "tezduyar":
