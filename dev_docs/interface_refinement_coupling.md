@@ -536,24 +536,39 @@ The old Python heuristic (`# Ensure same refinement at connected interfaces`) is
 the `# TODO: Ensure same refinement at connected interfaces` thirty lines below it that had been the
 honest summary of the situation since the branch began.
 
-**Added later: the gap is also where an empty adaptation is abandoned.** Knowing the decision before
-acting on it answers a second question for free — *is this adaptation going to change anything at all?* —
-and the answer is very often no. oomph only leaves its own adaption loop once an `adapt()` has reported
-0/0, so with `spatial_adapt>0` the last adaptation of every solve is a no-op by construction, and a mesh
-sitting at `max_refinement_level` with errors still above the refinement tolerance never reports anything
-else. Acting on that anyway cost a full `actions_before_adapt`/`actions_after_adapt` cycle — every
-interface mesh torn down and rebuilt, the global mesh reassembled — plus an `assign_eqn_numbers()`, which
-calls `invalidate_jacobian_structure()` unconditionally and so discarded the frozen sparsity pattern for
-a numbering that had not changed. `Problem._adapt_with_interfacial_errors` now runs select (and, when
-there is something to reconcile, `harmonise_adapt_selection`) *before* `custom_adapt.__enter__`, sums
-`Mesh._adapt_pending_counts()` over the meshes and the ranks, and skips the entire block when it comes
-out zero; `Mesh._adapt_abandon()` clears the stale `nrefined()`/`nunrefined()` statistics. The MPI sum is
-not optional: `assign_eqn_numbers()` is collective, so ranks disagreeing about whether to take the branch
-would deadlock rather than diverge. This is also why the uncoupled case now goes through the same three
-stages rather than through `adapt_by_elemental_errors()` — that call is exactly the three back to back,
-so there is nothing to lose, and one path means the gate is not tied to being coupled. Covered by
-`test_a_noop_adaptation_leaves_the_numbering_and_the_frozen_sparsity_alone` and its two neighbours in
-`tests/test_adaptivity.py`.
+**Added later, then reverted: skipping an empty adaptation.** Knowing the decision before acting on it
+answers a second question for free — *is this adaptation going to change anything at all?* — and the
+answer is very often no. oomph only leaves its own adaption loop once an `adapt()` has reported 0/0, so
+with `spatial_adapt>0` the last adaptation of every solve is a no-op by construction, and a mesh sitting
+at `max_refinement_level` with errors still above the refinement tolerance never reports anything else.
+Acting on that anyway costs a full `actions_before_adapt`/`actions_after_adapt` cycle — every interface
+mesh torn down and rebuilt, the global mesh reassembled — plus an `assign_eqn_numbers()`, which calls
+`invalidate_jacobian_structure()` unconditionally and so discards the frozen sparsity pattern for a
+numbering that has not changed. `Problem._adapt_with_interfacial_errors` therefore summed
+`Mesh._adapt_pending_counts()` over the meshes and the ranks and skipped the whole block when it came
+out zero, with `Mesh._adapt_abandon()` clearing the stale `nrefined()`/`nunrefined()` statistics.
+
+That is no longer done, because the saving was not the only thing being skipped. `_adapt_execute()` and
+`_adapt_finalise()` **reorder the nodes even when they refine nothing** — into the order the elements
+walk them, rather than the order the mesh generator created them in — and precisely because the no-op
+adaptation is universal, that reordering was what made every run agree on the node order. Skipping it
+left the order depending on the route: `load_state()`, a real refinement and a distribution rebuild
+reorder, a plain run does not. Anything comparing two runs then compared permuted states — restarts
+stopped being bit-identical (every value still exact, only its position moved), distributed runs stopped
+matching their serial reference, and `linear_response_drum.py` got the vertices first and the midside
+nodes afterwards out of `get_cached_mesh_data`, which broke a spline through them. That was 10 test
+failures and both tutorial passes of nightly 20260816. Restoring the teardown and renumbering around an
+empty refinement does *not* repair it: the order comes from the two stages themselves, so any future
+attempt has to start by making the two orders agree rather than by skipping one of them.
+`tests/test_state_file_restart.py` is what catches a reintroduction; `_adapt_pending_counts()` and
+`_adapt_abandon()` remain exposed but are now unused.
+
+The restructuring around the gap stands: select (and, when there is something to reconcile,
+`harmonise_adapt_selection`) still runs *before* `custom_adapt.__enter__`, and the uncoupled case still
+goes through the same three stages rather than through `adapt_by_elemental_errors()` — that call is
+exactly the three back to back, so there is nothing to lose, and one path means the reconciliation is not
+tied to being coupled. Covered by `test_a_noop_adaptation_leaves_the_mesh_and_the_node_order_alone` and
+its neighbours in `tests/test_adaptivity.py`.
 
 ### 13.7 Differing `max_refinement_level` (§9), as actually resolved
 
