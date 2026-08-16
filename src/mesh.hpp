@@ -998,6 +998,44 @@ namespace pyoomph
 			this->Nunrefined = 0;
 		}
 
+		// Put the node vector into the canonical order -- the order the elements walk the nodes in --
+		// and report whether that changed anything.
+		//
+		// This is the one thing an abandoned adaptation still has to do. oomph-lib does it in the
+		// branch of execute_selected_adaptation() that decides the adaptation is not worth carrying
+		// out, and says why in its own comment: "to establish a standard ordering regardless of the
+		// sequence of mesh refinements -- this is required to allow dump/restart on refined meshes".
+		// Skipping the adaptation skipped this with it, so a run that never refined kept the order the
+		// mesh generator built, while load_state(), a real refinement and a distribution rebuild all
+		// produced the canonical one -- and states written by one could no longer be compared with
+		// states of the other.
+		//
+		// Separated from adapt_execute() because the two have very different costs. The reordering is
+		// one sweep over the elements and is idempotent, so it changes something only the first time it
+		// is reached; the caller renumbers only in that case and keeps its Jacobian sparsity pattern on
+		// every later no-op adaptation, which is the whole point of abandoning one.
+		bool reorder_nodes_if_needed()
+		{
+			if (!this->refinement_possible()) return false;
+			oomph::Vector<oomph::Node *> reordering;
+			this->get_node_reordering(reordering, true);
+			const unsigned n = this->nnode();
+			bool changed = false;
+			for (unsigned i = 0; i < n; i++)
+			{
+				if (this->node_pt(i) != reordering[i])
+				{
+					changed = true;
+					break;
+				}
+			}
+			if (changed)
+			{
+				for (unsigned i = 0; i < n; i++) this->node_pt(i) = reordering[i];
+			}
+			return changed;
+		}
+
 	private:
 		// Carried from adapt_select() to adapt_execute(). oomph's own adapt() keeps these on the stack;
 		// the split needs them to survive the gap.

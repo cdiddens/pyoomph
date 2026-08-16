@@ -548,20 +548,36 @@ numbering that has not changed. `Problem._adapt_with_interfacial_errors` therefo
 `Mesh._adapt_pending_counts()` over the meshes and the ranks and skipped the whole block when it came
 out zero, with `Mesh._adapt_abandon()` clearing the stale `nrefined()`/`nunrefined()` statistics.
 
-That is no longer done, because the saving was not the only thing being skipped. `_adapt_execute()` and
-`_adapt_finalise()` **reorder the nodes even when they refine nothing** — into the order the elements
-walk them, rather than the order the mesh generator created them in — and precisely because the no-op
-adaptation is universal, that reordering was what made every run agree on the node order. Skipping it
-left the order depending on the route: `load_state()`, a real refinement and a distribution rebuild
-reorder, a plain run does not. Anything comparing two runs then compared permuted states — restarts
-stopped being bit-identical (every value still exact, only its position moved), distributed runs stopped
-matching their serial reference, and `linear_response_drum.py` got the vertices first and the midside
-nodes afterwards out of `get_cached_mesh_data`, which broke a spline through them. That was 10 test
-failures and both tutorial passes of nightly 20260816. Restoring the teardown and renumbering around an
-empty refinement does *not* repair it: the order comes from the two stages themselves, so any future
-attempt has to start by making the two orders agree rather than by skipping one of them.
-`tests/test_state_file_restart.py` is what catches a reintroduction; `_adapt_pending_counts()` and
-`_adapt_abandon()` remain exposed but are now unused.
+The first version of that skipped one thing too many. `_adapt_execute()` and `_adapt_finalise()`
+**reorder the nodes even when they refine nothing** — into the order the elements walk them, rather than
+the order the mesh generator created them in — and precisely because the no-op adaptation is universal,
+that reordering was what made every run agree on the node order. oomph-lib does it deliberately, in the
+branch of `execute_selected_adaptation()` that decides the adaptation is not worth carrying out, and
+says why: *"to establish a standard ordering regardless of the sequence of mesh refinements — this is
+required to allow dump/restart on refined meshes"*. Skipping it left the order depending on the route:
+`load_state()`, a real refinement and a distribution rebuild reorder, a plain run does not. Anything
+comparing two runs then compared permuted states — restarts stopped being bit-identical (every value
+still exact, only its position moved), distributed runs stopped matching their serial reference, and
+`linear_response_drum.py` got the vertices first and the midside nodes afterwards out of
+`get_cached_mesh_data`, which broke a spline through them. That was 10 test failures and both tutorial
+passes of nightly 20260816.
+
+The reordering is therefore done on its own, by `Mesh::reorder_nodes_if_needed()`
+(`Mesh._reorder_nodes_if_needed` in Python), which puts the node vector in the canonical order and
+reports whether that moved anything. It is idempotent, so it moves something only the first time it is
+reached — in practice the initial adaptation — and the caller renumbers only in that case. Every later
+no-op adaptation finds the order already canonical and keeps its interface meshes and its sparsity
+pattern. Note that restoring only the teardown and renumbering around an empty refinement does *not*
+work: the order comes from the two stages themselves, which is why the reordering had to be separated
+out rather than the wrapper put back.
+
+One case still takes the long way round: a **coupled interface on a distributed problem**. There the
+node order is not all an executed adaptation leaves behind — with the interface geometry itself an
+unknown (`ConnectMeshAtInterface`), a rank that skips the teardown ends up with four dofs the serial run
+does not have (`ale-tri_left` in `tests/test_mpi_interface_coupling.py`, 2942 against 2938,
+reproducibly), and reordering does not repair it. What the post-adapt repair does for that case has to
+be understood before the skip can be extended to it. Plain distributed problems are unaffected and do
+skip. `tests/test_state_file_restart.py` is what catches a regression in the node order.
 
 The restructuring around the gap stands: select (and, when there is something to reconcile,
 `harmonise_adapt_selection`) still runs *before* `custom_adapt.__enter__`, and the uncoupled case still

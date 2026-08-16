@@ -2381,41 +2381,77 @@ class Problem(_pyoomph.Problem):
         if coupled:
             _pyoomph._harmonise_adapt_selection(coupled,40) #type:ignore
 
-        # An adaptation that refines and unrefines nothing is run anyway, all the way through, and that
-        # is deliberate - it was once skipped and had to be put back.
+        # Deciding to do nothing is not a rare case but the normal end state: any mesh sitting at
+        # max_refinement_level with errors still above the refinement tolerance decides it on every
+        # solve, and oomph only leaves its own adaption loop once an adapt() has reported 0/0, so as
+        # long as spatial_adapt>0 the last adaptation of every step is a no-op by construction. Acting
+        # on it anyway is not free: actions_before_adapt() tears down every interface mesh,
+        # actions_after_adapt() rebuilds them, and assign_eqn_numbers() invalidates the Jacobian
+        # sparsity pattern unconditionally (Problem::invalidate_jacobian_structure), so the frozen
+        # sparsity is rebuilt for a numbering that did not change. That is what is skipped here.
         #
-        # Skipping was tempting because deciding to do nothing is not a rare case but the normal end
-        # state: any mesh sitting at max_refinement_level with errors still above the refinement
-        # tolerance decides it on every solve, and oomph only leaves its own adaption loop once an
-        # adapt() has reported 0/0, so as long as spatial_adapt>0 the last adaptation of every step is a
-        # no-op by construction. It is not free either: actions_before_adapt() tears down every
-        # interface mesh, actions_after_adapt() rebuilds them, and assign_eqn_numbers() invalidates the
-        # Jacobian sparsity pattern unconditionally (Problem::invalidate_jacobian_structure), so the
-        # frozen sparsity is rebuilt for a numbering that did not change.
+        # One thing survives the skip: the node ORDER. An executed adaptation puts the nodes into the
+        # order the elements walk them, and oomph-lib does the same in the branch of
+        # execute_selected_adaptation() that decides not to bother, on purpose - "required to allow
+        # dump/restart on refined meshes". Skipping that too is what the first version of this did, and
+        # since the no-op adaptation is universal, it was what made every run agree on the order. Runs
+        # then disagreed depending on the route to the mesh - load_state(), a real refinement and a
+        # distribution rebuild reorder, a plain run did not - and whatever compared two of them compared
+        # permuted states: restarts stopped being bit-identical (every value still exact, only its
+        # position moved), distributed runs stopped matching their serial reference, and a script
+        # reading mesh data back in coordinate order got all vertices first and the midside nodes
+        # afterwards. Nightly 20260816 failed 10 tests and linear_response_drum.py on it.
         #
-        # What that misses is that _adapt_execute()/_adapt_finalise() REORDER the nodes even when they
-        # refine nothing, into the order the elements walk them rather than the order the mesh
-        # generator created them in. Since the last adaptation of every solve is a no-op, every problem
-        # passed through that reordering, so all runs agreed on the order. Skipping it made the order
-        # depend on how a problem had got there - load_state(), a real refinement and a distribution
-        # rebuild reorder, a plain run does not - and anything that compares two runs then compares
-        # permuted states: restarts stopped being bit-identical (all values still exact, only their
-        # order moved), distributed runs stopped matching their serial reference, and a script reading
-        # mesh data back in coordinate order got all vertices first and the midside nodes afterwards.
-        # Nightly 20260816 failed 10 tests and linear_response_drum.py on it. Running the teardown and
-        # renumbering around an empty refinement is not enough to repair that: the order comes from the
-        # two stages themselves, so cheapening this has to start by making the orders agree.
-        with self.custom_adapt(True):
-            for name,_ in adaptable:
-                self.get_mesh(name)._adapt_execute()
-            for name,_ in adaptable:
-                self.get_mesh(name)._adapt_finalise()
+        # So the order is established here instead, and cheaply: the reordering is idempotent, so it
+        # moves something only the first time it is reached (in practice the initial adaptation) and the
+        # renumbering happens only then. Every later no-op adaptation finds the order already canonical
+        # and keeps both the interface meshes and the sparsity pattern.
+        #
+        # The exception is a COUPLED interface on a DISTRIBUTED problem, which still goes the long way
+        # round. There the node order is not the only thing an executed adaptation leaves behind: with
+        # the interface geometry itself an unknown (ConnectMeshAtInterface), a rank that skips the
+        # teardown keeps four dofs a serial run does not have - ale-tri_left in
+        # test_mpi_interface_coupling.py, 2942 against 2938, reproducibly. Reordering does not repair
+        # that, so whatever the post-adapt repair does there has to be understood before the skip can
+        # cover it; the plain distributed case is not affected and does skip.
+        #
+        # Summed over the processes before either decision is taken: assign_eqn_numbers() is collective,
+        # so ranks disagreeing about a branch would deadlock rather than diverge.
+        npending=0
+        for name,_ in adaptable:
+            nr,nu=self.get_mesh(name)._adapt_pending_counts()
+            npending+=nr+nu
+        if get_mpi_nproc()>1:
+            npending=int(get_mpi_sum(npending))
+
+        if npending==0 and not (coupled and self.is_distributed()):
+            reordered=0
             for name,_ in adaptable:
                 mesh=self.get_mesh(name)
-                if not self.is_quiet():
-                    print("IN MESH "+name+" ref=",mesh.nrefined(),"unref=",mesh.nunrefined())
-                nref += mesh.nrefined()
-                nuref += mesh.nunrefined()
+                mesh._adapt_abandon()
+                if mesh._reorder_nodes_if_needed():
+                    reordered+=1
+            if get_mpi_nproc()>1:
+                reordered=int(get_mpi_sum(reordered))
+            if reordered:
+                # First time here: the nodes moved, so the numbering has to follow them.
+                with self.custom_adapt(True):
+                    pass
+            if not self.is_quiet():
+                print("Nothing to refine or unrefine: leaving the meshes alone"
+                      +(" (nodes reordered once)" if reordered else ""))
+        else:
+            with self.custom_adapt(True):
+                for name,_ in adaptable:
+                    self.get_mesh(name)._adapt_execute()
+                for name,_ in adaptable:
+                    self.get_mesh(name)._adapt_finalise()
+                for name,_ in adaptable:
+                    mesh=self.get_mesh(name)
+                    if not self.is_quiet():
+                        print("IN MESH "+name+" ref=",mesh.nrefined(),"unref=",mesh.nunrefined())
+                    nref += mesh.nrefined()
+                    nuref += mesh.nunrefined()
 
         if has_arclength_data:
             dof_deriv=self.get_history_dofs(5)

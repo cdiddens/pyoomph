@@ -335,22 +335,27 @@ def test_refine_max_element_size_survives_remeshing():
 
 
 # ---------------------------------------------------------------------------------------------
-# An adaptation that decides to refine and unrefine nothing is run through anyway.
+# An adaptation that decides to refine and unrefine nothing is skipped - all of it except the node
+# reordering, which is the one part everything else depends on.
 #
 # Deciding nothing is the normal end state, not an edge case: oomph only leaves its own adaption
 # loop once an adapt() has reported 0/0, so with spatial_adapt>0 the last adaptation of every solve
 # is a no-op by construction, and a mesh sitting at max_refinement_level with errors still above the
-# refinement tolerance never reports anything else. Skipping it is therefore worth real time - it
-# tears down and rebuilds every interface mesh and reassigns the equation numbers, and
-# assign_eqn_numbers() invalidates the Jacobian sparsity pattern unconditionally, so the frozen
-# sparsity is thrown away and rebuilt for a numbering that did not change.
+# refinement tolerance never reports anything else. Skipping it is worth real time - otherwise every
+# interface mesh is torn down and rebuilt and assign_eqn_numbers() invalidates the Jacobian sparsity
+# pattern unconditionally, so the frozen sparsity is thrown away and rebuilt for a numbering that
+# did not change.
 #
-# It was skipped for exactly that reason and had to be put back: _adapt_execute()/_adapt_finalise()
-# also reorder the nodes when they refine nothing, and since the no-op adaptation is universal, that
-# reordering was what made all runs agree on the node order. Skipping it left the order depending on
-# the route taken to the mesh, and permuted states are what the suite then saw - see the comment in
-# Problem._adapt_with_interfacial_errors. test_state_file_restart.py is the guard: a restart is
-# bit-identical to its writer only while both orders agree, so reintroducing the skip fails there.
+# The first attempt skipped the reordering with it and had to be reverted: an executed adaptation
+# puts the nodes into the order the elements walk them, and since the no-op adaptation is universal,
+# that was what made every run agree on the order. Runs then disagreed depending on the route to the
+# mesh, and the suite compared permuted states. The reordering is now done on its own - it is
+# idempotent, so it costs one renumbering on the first adaptation and nothing afterwards.
+#
+# Hence two claims below, and they are not the same one: the numbering and the sparsity must survive
+# a no-op adaptation, and the node order must be the one every other route produces.
+# test_state_file_restart.py is the guard for the second: a restart is bit-identical to its writer
+# only while both orders agree.
 # ---------------------------------------------------------------------------------------------
 
 
@@ -375,19 +380,41 @@ def _node_order(problem):
 	return [(mesh.node_pt(i).x(0), mesh.node_pt(i).x(1)) for i in range(mesh.nnode())]
 
 
-def test_a_noop_adaptation_leaves_the_mesh_and_the_node_order_alone():
-	"""Running the no-op adaptation has to be a fixed point: the same dofs, in the same order.
-
-	Not the same thing as skipping it - the first of those adaptations is what puts the nodes in the
-	order every other route to this mesh produces, and only repeating it has to change nothing."""
+def test_a_noop_adaptation_leaves_the_numbering_and_the_frozen_sparsity_alone():
 	with _SaturatingPoissonProblem() as problem:
 		problem.max_refinement_level = 2
+		problem.keep_structural_zeros = True   # otherwise jacobian_structure_id is 0 and says nothing
 		problem.solve(spatial_adapt=2)
-		ndof, order = problem.ndof(), _node_order(problem)
-		# Every one of these solves ends in an adaptation that decides nothing.
+		ndof, structure_id = problem.ndof(), problem.jacobian_structure_id
+		nnz = problem._get_frozen_sparsity_nnz()
+		rebuilds = problem._get_frozen_sparsity_rebuild_count()
+		assert nnz > 0, "the frozen sparsity path did not engage at all, so this proves nothing"
+		# Every one of these solves ends in an adaptation that decides nothing. The reordering the
+		# first adaptation did is idempotent, so none of these has anything left to renumber for.
 		for _ in range(3):
 			problem.solve(spatial_adapt=2)
 		assert problem.ndof() == ndof
+		assert problem.jacobian_structure_id == structure_id, \
+			"the equations were renumbered although nothing was refined or unrefined"
+		assert problem._get_frozen_sparsity_nnz() == nnz
+		assert problem._get_frozen_sparsity_rebuild_count() == rebuilds, \
+			"the frozen sparsity pattern was rebuilt for an unchanged numbering"
+
+
+def test_a_noop_adaptation_leaves_the_nodes_in_the_canonical_order():
+	"""The skipped adaptation still has to leave the node order an executed one would produce.
+
+	Repeating it is then a fixed point. Skipping the reordering as well is what made a run that never
+	refined disagree with load_state() and with a distributed run about where each dof sits."""
+	with _SaturatingPoissonProblem() as problem:
+		problem.max_refinement_level = 2
+		problem.solve(spatial_adapt=2)
+		order = _node_order(problem)
+		mesh = problem.get_mesh("domain")
+		assert not mesh._reorder_nodes_if_needed(), \
+			"the nodes were not in the canonical order after an adaptation that refined nothing"
+		for _ in range(3):
+			problem.solve(spatial_adapt=2)
 		assert _node_order(problem) == order, \
 			"a no-op adaptation moved the nodes, so two runs can end up with permuted states"
 

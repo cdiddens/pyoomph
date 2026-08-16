@@ -1656,7 +1656,16 @@ void PyReg_Mesh(nb::module_ &m)
 			 {
 	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
 	   if (tm) tm->adapt_abandon(); }),
-			 "Discards a selection made by _adapt_select that will not be executed, so that nrefined()/nunrefined() report 0 rather than the previous adaptation's numbers");
+			 "Discards a selection made by _adapt_select that will not be executed, so that nrefined()/nunrefined() report 0 rather than the previous adaptation's numbers")
+		.def("_reorder_nodes_if_needed",mesh_method([](pyoomph::Mesh *self)
+			 {
+	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
+	   if (!tm) return false;
+	   return tm->reorder_nodes_if_needed(); }),
+			 "Puts the nodes into the canonical order the elements walk them in, as an executed adaptation would, and returns whether that "
+			 "moved anything. An abandoned adaptation still has to do this -- it is what makes a state file written by a run that never "
+			 "refined comparable with one written after a refinement or a restart -- and because it is idempotent, it moves something only "
+			 "the first time, so the caller renumbers once instead of on every no-op adaptation");
 
 	   /*
 	nb::class_<pyoomph::BulkElementODE0d, oomph::GeneralisedElement>(m, "BulkElementODE0d")
