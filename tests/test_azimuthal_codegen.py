@@ -173,3 +173,63 @@ def test_element_size_expansion_defaults_to_frozen():
         assert _pyoomph.get_expand_element_size_in_expansion_modes() is True
         # leave the global in its default state for whatever runs next
         p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False)
+
+
+def test_augmented_azimuthal_jacobian_is_exact_with_a_complex_mass_matrix():
+    """Every block of the azimuthal tracker's augmented Jacobian, against a full finite difference.
+
+    The eq_V_im residual carried `+ Omega*M_imag*Vi` where the eigenproblem (and pyoomph's own
+    Python tracker, and its own get_dresiduals_dparameter) use `- Omega*M_imag*Vi`. It was invisible
+    for every unstabilized formulation, whose m!=0 mass matrix has no imaginary part; a residual-based
+    stabilization gives it one, and then the tracker solved a slightly wrong system - the rising
+    bubble's critical Bond number came out 0.85% off and Newton converged only linearly.
+
+    The check finite-differences EVERY augmented column, so it also covers the Vr/Vi blocks that a
+    single directional probe misses.
+    """
+    import numpy
+    from pyoomph.equations.stabilized_ns import StabilizedNavierStokes
+
+    class P(Problem):
+        def define_problem(self):
+            self.A = self.define_global_parameter(A=1.0)
+            self.set_coordinate_system("axisymmetric")
+            self.add_mesh(_axisym_mesh())
+            eqs = StabilizedNavierStokes(space="C1C1", stabilization="SUPGPSPGLSIC",
+                                         viscous_form="stress", dynamic_viscosity=self.A,
+                                         mass_density=1)
+            eqs += DirichletBC(velocity_x=0, velocity_y=0) @ "bottom"
+            eqs += LaplaceSmoothedMesh()
+            eqs += DirichletBC(mesh_x=True, mesh_y=True) @ "bottom"
+            self.add_equations(eqs @ "domain")
+
+    with P() as p:
+        p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=True)
+        p.initialise()
+        n = p.ndof()
+        rng = numpy.random.default_rng(11)
+        p.set_current_dofs(numpy.array(p.get_current_dofs()[0]) + 0.05 * rng.standard_normal(n))
+        V = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        V /= numpy.linalg.norm(V)
+        p.activate_bifurcation_tracking("A", bifurcation_type="azimuthal", azimuthal_mode=1,
+                                        eigenvector=V, omega=0.3)
+        naug = p.ndof()
+        x0 = numpy.array(p.get_current_dofs()[0])
+        J = numpy.asarray(p.assemble_jacobian(with_residual=False).todense())
+
+        eps = 1e-6
+        worst, worst_at = 0.0, ""
+        lab = lambda i: ("base" if i < n else "Vr" if i < 2 * n else "Vi" if i < 3 * n
+                         else ("param" if i == 3 * n else "omega"))
+        for j in range(naug):
+            x = x0.copy(); x[j] += eps
+            p.set_current_dofs(x); rp = numpy.array(p.get_residuals())
+            x = x0.copy(); x[j] -= eps
+            p.set_current_dofs(x); rm = numpy.array(p.get_residuals())
+            col_fd = (rp - rm) / (2 * eps)
+            scale = max(numpy.max(numpy.abs(col_fd)), numpy.max(numpy.abs(J[:, j])), 1e-30)
+            rel = numpy.max(numpy.abs(J[:, j] - col_fd)) / scale
+            if rel > worst:
+                worst, worst_at = rel, "%s column %d" % (lab(j), j)
+        p.set_current_dofs(x0)
+        assert worst < 1e-5, "augmented Jacobian disagrees with a finite difference: %.3e at %s" % (worst, worst_at)

@@ -3301,7 +3301,7 @@ namespace pyoomph
         if (has_imaginary_part)
         {
           residuals[raw_ndof + i] +=jacobian_real(i, j) * re_ev - jacobian_imag(i, j) * im_ev - Omega * (M_real(i, j) * im_ev + M_imag(i, j) * re_ev);
-          residuals[2 * raw_ndof + i] += jacobian_real(i, j) * im_ev + jacobian_imag(i, j) * re_ev + Omega * (M_real(i, j) * re_ev + M_imag(i, j) * im_ev);
+          residuals[2 * raw_ndof + i] += jacobian_real(i, j) * im_ev + jacobian_imag(i, j) * re_ev + Omega * (M_real(i, j) * re_ev - M_imag(i, j) * im_ev);
         }
         else
         {
@@ -3429,7 +3429,7 @@ namespace pyoomph
             unsigned global_eqn = elem_pt->eqn_number(m);
             jacobian(raw_ndof + n, 3 * raw_ndof + 1) += M_real(n, m) * imag_eigenvector.global_value(global_eqn) +
                                                         M_imag(n, m) * real_eigenvector.global_value(global_eqn);
-            jacobian(2 * raw_ndof + n, 3 * raw_ndof + 1) -= M_real(n, m) * real_eigenvector.global_value(global_eqn) -
+            jacobian(2 * raw_ndof + n, 3 * raw_ndof + 1) += M_real(n, m) * real_eigenvector.global_value(global_eqn) -
                                                             M_imag(n, m) * imag_eigenvector.global_value(global_eqn);
           }
           else
@@ -3585,7 +3585,7 @@ namespace pyoomph
           if (has_imaginary_part) 
           {
             residuals[raw_ndof + i] += jacobian_real(i, j) * Eig[j] - jacobian_imag(i, j) * Eig[raw_ndof + j] - Omega * (M_real(i, j) * Eig[raw_ndof + j] + M_imag(i, j) * Eig[j]);
-            residuals[2 * raw_ndof + i] += jacobian_real(i, j) * Eig[raw_ndof + j] + jacobian_imag(i, j) * Eig[j] + Omega * (M_real(i, j) * Eig[j] + M_imag(i, j) * Eig[raw_ndof + j]);
+            residuals[2 * raw_ndof + i] += jacobian_real(i, j) * Eig[raw_ndof + j] + jacobian_imag(i, j) * Eig[j] + Omega * (M_real(i, j) * Eig[j] - M_imag(i, j) * Eig[raw_ndof + j]);
           }
           else
           {
@@ -3622,11 +3622,11 @@ namespace pyoomph
             jacobian(raw_ndof + m, 3 * raw_ndof) += dJ_real_dparam(m, n) * Eig[n] - dJ_imag_dparam(m, n) * Eig[raw_ndof + n] - Omega * (dM_real_dparam(m, n) * Eig[raw_ndof + n] + dM_imag_dparam(m, n) * Eig[n]);            
             jacobian(raw_ndof + m, 3 * raw_ndof + 1) -= M_real(m, n) * Eig[raw_ndof + n] + M_imag(m, n) * Eig[n];
 
-            jacobian(2 * raw_ndof + m, n) = JHess_real(raw_ndof + m, n) + JHess_imag(m, n) + Omega * (MHess_real(m, n) + MHess_imag(raw_ndof + m, n));
+            jacobian(2 * raw_ndof + m, n) = JHess_real(raw_ndof + m, n) + JHess_imag(m, n) + Omega * (MHess_real(m, n) - MHess_imag(raw_ndof + m, n));
             jacobian(2 * raw_ndof + m, raw_ndof + n) = jacobian_imag(m, n) + Omega * M_real(m, n);
             jacobian(2 * raw_ndof + m, 2 * raw_ndof + n) = jacobian_real(m, n) - Omega * M_imag(m, n);
-            jacobian(2 * raw_ndof + m, 3 * raw_ndof) += dJ_real_dparam(m, n) * Eig[raw_ndof + n] + dJ_imag_dparam(m, n) * Eig[n] + Omega * (dM_real_dparam(m, n) * Eig[n] + dM_imag_dparam(m, n) * Eig[raw_ndof + n]);
-            jacobian(2 * raw_ndof + m, 3 * raw_ndof + 1) += M_real(m, n) * Eig[n] + M_imag(m, n) * Eig[raw_ndof + n];            
+            jacobian(2 * raw_ndof + m, 3 * raw_ndof) += dJ_real_dparam(m, n) * Eig[raw_ndof + n] + dJ_imag_dparam(m, n) * Eig[n] + Omega * (dM_real_dparam(m, n) * Eig[n] - dM_imag_dparam(m, n) * Eig[raw_ndof + n]);
+            jacobian(2 * raw_ndof + m, 3 * raw_ndof + 1) += M_real(m, n) * Eig[n] - M_imag(m, n) * Eig[raw_ndof + n];            
           }
           else
           {
