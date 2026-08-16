@@ -93,9 +93,15 @@ with DrumProblem() as problem:
             # Get the response as nondimensional data. The response is stored as eigenvector, so we split it in real and imaginary part
             nd_resp_real=problem.get_cached_mesh_data("drum",eigenmode="real",eigenvector=0,nondimensional=True)
             nd_resp_imag=problem.get_cached_mesh_data("drum",eigenmode="imag",eigenvector=0,nondimensional=True)
-            # Add interpolators to perform the Bessel projection
-            interr=scipy.interpolate.UnivariateSpline(nd_resp_real.get_data("coordinate_x"),nd_resp_real.get_data("h"),k=3,s=0)
-            interi=scipy.interpolate.UnivariateSpline(nd_resp_imag.get_data("coordinate_x"),nd_resp_imag.get_data("h"),k=3,s=0)
+            # Add interpolators to perform the Bessel projection. Mesh data comes in the mesh's own
+            # node order, which is not the order along the radius - and a spline with s=0 insists on a
+            # strictly increasing x - so sort by the coordinate first rather than trusting the order.
+            def radial_spline(data):
+                r=numpy.asarray(data.get_data("coordinate_x"))
+                order=numpy.argsort(r)
+                return scipy.interpolate.UnivariateSpline(r[order],numpy.asarray(data.get_data("h"))[order],k=3,s=0)
+            interr=radial_spline(nd_resp_real)
+            interi=radial_spline(nd_resp_imag)
             # Calculate the Bessel decomposition of the response
             bessel_data=[]
             for i in range(numbessel):                
