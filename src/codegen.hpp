@@ -34,6 +34,12 @@ namespace pyoomph
 
    class FiniteElementCode;
 
+   // Whether eval_at_expansion_mode() tags the element size along with the fields, i.e. whether tau
+   // and anything else built from the element size is perturbed with the mesh in an azimuthal or
+   // Cartesian normal-mode expansion. Defined in codegen.cpp, set from Python through
+   // Problem.setup_for_stability_analysis(expand_element_size=...).
+   extern bool expand_element_size_in_expansion_modes;
+
    // Base class for the Python-side "Equations" objects (weak forms) that fill a FiniteElementCode.
    // _define_fields() registers the fields/spaces, _define_element() adds the residuals; both are
    // pure virtual and implemented in Python via nanobind overrides.
@@ -108,6 +114,12 @@ namespace pyoomph
 
    public:
       unsigned history_step = 0; // For evaluations in past: the element size of a previous configuration
+      // Which expansion mode this size belongs to, exactly as for ShapeExpansion/NormalSymbol/
+      // SpatialIntegralSymbol. The element size is a pure function of the nodal positions, so under an
+      // azimuthal/normal-mode expansion it does have a first-order perturbation, dh = dh/dX_l X_l^(1).
+      // Tagging it mode 1 (the default, see expand_element_size_in_expansion_modes) puts that term into
+      // the m!=0 Jacobian; leaving it at 0 freezes the size - and with it tau - at the base state.
+      int expansion_mode = 0;
       bool is_lagrangian() const { return lagrangian; }
       bool is_with_coordsys() const { return consider_coordsys; } // If true, it will be the integral including terms like 2*pi*r for axisymm, otherwise not
       bool is_derived() const { return derived; }

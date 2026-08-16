@@ -283,6 +283,12 @@ namespace pyoomph
 	bool __in_pitchfork_symmetry_constraint = false;                  // True while generating the extra pitchfork-symmetry-breaking constraint equations
 	int * __derive_only_by_expansion_mode = NULL;                     // If set, only derivatives w.r.t. this azimuthal/Fourier expansion mode are kept
 	bool __ignore_dpsi_coord_diffs_in_jacobian = false;                // Suppresses dpsi/dX (moving-mesh) contributions in the Jacobian for the current residual
+	// Whether eval_at_expansion_mode() also tags the element size, i.e. whether tau and anything else
+	// built from the element size is perturbed along with the mesh in an azimuthal/normal-mode
+	// expansion. False (the default) freezes it at the base state, which is both the meaningful
+	// reading for a Cartesian mesh metric and the one whose augmented Jacobian is exact. True
+	// reproduces the behaviour that existed before this flag.
+	bool expand_element_size_in_expansion_modes = false;
 	std::set<ShapeExpansion> __all_Hessian_shapeexps;                 // Accumulates all shape expansions encountered while building a Hessian contribution
 	std::set<TestFunction> __all_Hessian_testfuncs;                   // Accumulates all test functions encountered while building a Hessian contribution
 	std::set<FiniteElementField *,FiniteElementFieldPtrLess> __all_Hessian_indices_required;    // Fields that need a Hessian index (i.e. contribute to the outer derivative direction)
@@ -1222,7 +1228,7 @@ namespace pyoomph
 
 	bool operator==(const ElementSizeSymbol &lhs, const ElementSizeSymbol &rhs)
 	{
-		return lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() == rhs.is_derived2() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_with_coordsys() == rhs.is_with_coordsys() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2() && lhs.history_step == rhs.history_step;
+		return lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() == rhs.is_derived2() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_with_coordsys() == rhs.is_with_coordsys() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2() && lhs.history_step == rhs.history_step && lhs.expansion_mode == rhs.expansion_mode;
 	}
 	bool operator<(const ElementSizeSymbol &lhs, const ElementSizeSymbol &rhs)
 	{
@@ -1231,7 +1237,8 @@ namespace pyoomph
 			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() == rhs.is_derived2() && lhs.get_derived_direction2() < rhs.get_derived_direction2()) ||
 			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() == rhs.is_derived2() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_with_coordsys() < rhs.is_with_coordsys()) ||
 			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() == rhs.is_derived2() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_with_coordsys() == rhs.is_with_coordsys() && lhs.is_derived_by_lshape2() < rhs.is_derived_by_lshape2()) ||
-			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() == rhs.is_derived2() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_with_coordsys() == rhs.is_with_coordsys() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2() && lhs.history_step < rhs.history_step);
+			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() == rhs.is_derived2() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_with_coordsys() == rhs.is_with_coordsys() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2() && lhs.history_step < rhs.history_step) ||
+			   (lhs.get_code() == rhs.get_code() && lhs.is_lagrangian() == rhs.is_lagrangian() && lhs.is_derived() == rhs.is_derived() && lhs.get_derived_direction() == rhs.get_derived_direction() && lhs.is_derived2() == rhs.is_derived2() && lhs.get_derived_direction2() == rhs.get_derived_direction2() && lhs.is_with_coordsys() == rhs.is_with_coordsys() && lhs.is_derived_by_lshape2() == rhs.is_derived_by_lshape2() && lhs.history_step == rhs.history_step && lhs.expansion_mode < rhs.expansion_mode);
 	}
 
 	bool operator==(const NodalDeltaSymbol &lhs, const NodalDeltaSymbol &rhs)
@@ -10748,6 +10755,15 @@ namespace GiNaC
 	// element size never depends on the moving mesh; otherwise, differentiating w.r.t. one of this
 	// domain's coordinate_{x,y,z} symbols (when coordinates_as_dofs) yields the matching pre-built
 	// "derived" (or twice-derived) ElementSizeSymbol; any other symbol yields 0.
+	// The prebuilt derived element-size symbols are shared, so the expansion-mode tag of the symbol
+	// being differentiated has to be stamped onto a copy rather than onto the original.
+	static pyoomph::ElementSizeSymbol _tag_elemsize_mode(const pyoomph::ElementSizeSymbol &src, int mode)
+	{
+		pyoomph::ElementSizeSymbol res = src;
+		res.expansion_mode = mode;
+		return res;
+	}
+
 	template <>
 	GiNaC::ex GiNaCElementSizeSymbol::derivative(const GiNaC::symbol &s) const
 	{
@@ -10763,23 +10779,36 @@ namespace GiNaC
 		pyoomph::FiniteElementField *testf;
 		if (!code->coordinates_as_dofs || pyoomph::ignore_nodal_position_derivatives_for_pitchfork_symmetry())
 			return 0;
+		// Same expansion-mode rule as for shape expansions, normals and dx: a derivative only belongs to
+		// the family of position dofs this symbol is tagged with. An already-derived size is a function
+		// of the base geometry alone, so - as for the normal - it stays differentiable.
+		//
+		// The flag is needed on top of the tag because of WHEN the symbol appears: the element size
+		// enters a residual as var("cartesian_element_length_h"), a placeholder that is only resolved
+		// into this symbol while the code is generated, i.e. long after eval_at_expansion_mode() has
+		// walked the expression. So the mapper cannot tag it there, and the flag says what an untagged
+		// size means: expanded (differentiated in every pass, the exact derivative of the discrete
+		// residual, what bifurcation tracking needs) or frozen at the base state.
+		if (!pyoomph::expand_element_size_in_expansion_modes && pyoomph::__derive_only_by_expansion_mode &&
+			get_struct().expansion_mode != *pyoomph::__derive_only_by_expansion_mode && !get_struct().is_derived())
+			return 0;
 		// TODO: Other spaces, e.g. bulk
 		if (!get_struct().is_derived())
 		{
 			testf = code->get_field_by_name("coordinate_x");
 			if (testf && s == testf->get_symbol())
 			{
-				return 0 + GiNaCElementSizeSymbol(code->get_elemsize_derived(0, get_struct().is_with_coordsys()));
+				return 0 + GiNaCElementSizeSymbol(_tag_elemsize_mode(code->get_elemsize_derived(0, get_struct().is_with_coordsys()), get_struct().expansion_mode));
 			}
 			testf = code->get_field_by_name("coordinate_y");
 			if (testf && s == testf->get_symbol())
 			{
-				return 0 + GiNaCElementSizeSymbol(code->get_elemsize_derived(1, get_struct().is_with_coordsys()));
+				return 0 + GiNaCElementSizeSymbol(_tag_elemsize_mode(code->get_elemsize_derived(1, get_struct().is_with_coordsys()), get_struct().expansion_mode));
 			}
 			testf = code->get_field_by_name("coordinate_z");
 			if (testf && s == testf->get_symbol())
 			{
-				return 0 + GiNaCElementSizeSymbol(code->get_elemsize_derived(2, get_struct().is_with_coordsys()));
+				return 0 + GiNaCElementSizeSymbol(_tag_elemsize_mode(code->get_elemsize_derived(2, get_struct().is_with_coordsys()), get_struct().expansion_mode));
 			}
 		}
 		else if (!get_struct().is_derived2())
@@ -10788,17 +10817,17 @@ namespace GiNaC
 			testf = code->get_field_by_name("coordinate_x");
 			if (testf && s == testf->get_symbol())
 			{
-				return 0 + GiNaCElementSizeSymbol(code->get_elemsize_derived2(dir1, 0, get_struct().is_with_coordsys()));
+				return 0 + GiNaCElementSizeSymbol(_tag_elemsize_mode(code->get_elemsize_derived2(dir1, 0, get_struct().is_with_coordsys()), get_struct().expansion_mode));
 			}
 			testf = code->get_field_by_name("coordinate_y");
 			if (testf && s == testf->get_symbol())
 			{
-				return 0 + GiNaCElementSizeSymbol(code->get_elemsize_derived2(dir1, 1, get_struct().is_with_coordsys()));
+				return 0 + GiNaCElementSizeSymbol(_tag_elemsize_mode(code->get_elemsize_derived2(dir1, 1, get_struct().is_with_coordsys()), get_struct().expansion_mode));
 			}
 			testf = code->get_field_by_name("coordinate_z");
 			if (testf && s == testf->get_symbol())
 			{
-				return 0 + GiNaCElementSizeSymbol(code->get_elemsize_derived2(dir1, 2, get_struct().is_with_coordsys()));
+				return 0 + GiNaCElementSizeSymbol(_tag_elemsize_mode(code->get_elemsize_derived2(dir1, 2, get_struct().is_with_coordsys()), get_struct().expansion_mode));
 			}
 		}
 		return 0;

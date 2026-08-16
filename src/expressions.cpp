@@ -2681,6 +2681,21 @@ namespace pyoomph
 						return GiNaC::GiNaCNormalSymbol(sp);
 					}
 				}
+				// The element size is a pure function of the nodal positions, so it has a first-order
+				// perturbation like any other geometric quantity. Tagging it makes that dh part of the
+				// m!=0 Jacobian (the exact derivative of the discrete residual, which bifurcation
+				// tracking needs); leaving it untagged freezes it, and with it tau, at the base state -
+				// the usual "frozen coefficient" reading, and arguably the more meaningful one, since h
+				// is a Cartesian mesh metric whose azimuthal extent is not represented at all.
+				if (pyoomph::expand_element_size_in_expansion_modes && GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(inp))
+				{
+					GiNaC::GiNaCElementSizeSymbol se = GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(inp);
+					ElementSizeSymbol sp = se.get_struct();
+					if (sp.expansion_mode == index)
+						return inp;
+					sp.expansion_mode = index;
+					return GiNaC::GiNaCElementSizeSymbol(sp);
+				}
 				if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(inp))
 				{
 					GiNaC::GiNaCSpatialIntegralSymbol se = GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(inp);

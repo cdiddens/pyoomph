@@ -1370,6 +1370,20 @@ void PyReg_Expressions(nb::module_ &m)
 		nb::arg("expr"), nb::arg("index"), "Set the mode index (base or azimuthal mode) for  vars and nondims");
 
 	m.def(
+		"set_expand_element_size_in_expansion_modes", [](bool active)
+		{ pyoomph::expand_element_size_in_expansion_modes = active; },
+		nb::arg("active"),
+		"Whether an azimuthal/normal-mode expansion also perturbs the element size, i.e. whether the "
+		"stabilization parameter tau follows the mesh. True (the default) makes the m!=0 Jacobian the "
+		"exact derivative of the discrete residual, which bifurcation tracking needs; False freezes the "
+		"element size, and with it tau, at the base state. Must be set before the equations are "
+		"generated, i.e. before initialise().");
+	m.def("get_expand_element_size_in_expansion_modes", []()
+		  { return pyoomph::expand_element_size_in_expansion_modes; },
+		  "Whether an azimuthal/normal-mode expansion perturbs the element size, see "
+		  "set_expand_element_size_in_expansion_modes().");
+
+	m.def(
 		"GiNaC_internal_function_with_element_arg", [](const std::string &id, const std::vector<GiNaC::ex> &args)
 		{ return 0 + pyoomph::expressions::internal_function_with_element_arg(GiNaC::realsymbol(id), GiNaC::lst(args.begin(), args.end())); },
 		nb::arg("id"), nb::arg("args"), "Internal functions, used e.g. for elemental functions like element_size etc");

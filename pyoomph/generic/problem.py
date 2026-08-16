@@ -4990,7 +4990,7 @@ class Problem(_pyoomph.Problem):
         else:
             return tuple([*res]) #type:ignore
         
-    def setup_for_stability_analysis(self,analytic_hessian:bool=True,use_hessian_symmetry:bool=True,improve_pitchfork_on_unstructured_mesh:bool=False,improve_pitchfork_coordsys:"OptionalCoordinateSystem"=None,improve_pitchfork_position_coordsys:"OptionalCoordinateSystem"=None,shared_shapes_for_multi_assemble:bool | None=None,azimuthal_stability:bool | None=None,additional_cartesian_mode:bool | None=None):
+    def setup_for_stability_analysis(self,analytic_hessian:bool=True,use_hessian_symmetry:bool=True,improve_pitchfork_on_unstructured_mesh:bool=False,improve_pitchfork_coordsys:"OptionalCoordinateSystem"=None,improve_pitchfork_position_coordsys:"OptionalCoordinateSystem"=None,shared_shapes_for_multi_assemble:bool | None=None,azimuthal_stability:bool | None=None,additional_cartesian_mode:bool | None=None,expand_element_size:bool=False):
         """
         Sets up the problem for stability analysis, e.g. for improved pitchfork tracking on unsymmetric meshes, azimuthal stability, etc.
         Arguments which are None are not changed.
@@ -5003,6 +5003,15 @@ class Problem(_pyoomph.Problem):
             improve_pitchfork_position_coordsys (OptionalCoordinateSystem, optional): Coordinate system for improving pitchfork position space. Defaults to None.
             shared_shapes_for_multi_assemble (Optional[bool], optional): Flag indicating whether to use shared shapes for multi-assemble. Defaults to None.
             azimuthal_stability (Optional[bool], optional): Flag indicating whether to set up azimuthal stability code. Defaults to None.
+            expand_element_size (bool, optional): Whether the mode expansion also perturbs the element
+                size, i.e. whether a stabilization parameter tau built from it follows the mesh.
+                Defaults to False, the "frozen tau" reading: the element size keeps its base-state
+                value in the perturbation equations. That is the meaningful choice - the element size
+                is a Cartesian mesh metric, and at m!=0 the perturbed configuration is not even a
+                revolved 2d element, so its azimuthal extent is not represented at all - and it is
+                also the one whose augmented Jacobian is exact. Only matters on a moving mesh, and
+                only for equations that use the element size at all (the residual-based
+                stabilizations do); on the rising bubble it moves the tracked onset by 0.36%.
         """           
         if self.is_initialised():
             raise RuntimeError("Cannot call setup_for_stability_analysis after problem is initialised") 
@@ -5021,6 +5030,7 @@ class Problem(_pyoomph.Problem):
             self._setup_azimuthal_stability_code=azimuthal_stability
         if additional_cartesian_mode:
             self._setup_additional_cartesian_stability_code=additional_cartesian_mode
+        _pyoomph.set_expand_element_size_in_expansion_modes(expand_element_size)
         
     def is_normal_mode_stability_set_up(self)->Literal["azimuthal", "cartesian"] | Literal[False]:
         """

@@ -145,3 +145,31 @@ def test_stabilized_navier_stokes_with_azimuthal_stability_builds():
         p.initialise()
         J = p.assemble_jacobian(with_residual=False)
         assert J.nnz > 0
+
+
+def test_element_size_expansion_defaults_to_frozen():
+    """The element size must not follow the mesh in the mode expansion by default.
+
+    Measured on an oscillating free drop against Lamb's analytic eigenvalue (the frequency depends
+    only on the polar wavenumber l, so m=0/1/2 share a ground truth): with the element size expanded,
+    the l=2 damping rate came out 664% too large at 2439 dofs (2549% one refinement coarser), because
+    the perturbation of tau injects a spurious dissipation that only decays as the stabilization
+    itself vanishes with h. Frozen is within 6% and converging. See
+    pyoomph_runs/Bugs/AzimuthalTracking/oscillating_drop.py.
+    """
+    from pyoomph import _pyoomph
+
+    class P(Problem):
+        def define_problem(self):
+            self.set_coordinate_system("axisymmetric")
+            self.add_mesh(_axisym_mesh())
+            self.add_equations(Equations() @ "domain")
+
+    with P() as p:
+        p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False)
+        assert _pyoomph.get_expand_element_size_in_expansion_modes() is False
+        p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False,
+                                       expand_element_size=True)
+        assert _pyoomph.get_expand_element_size_in_expansion_modes() is True
+        # leave the global in its default state for whatever runs next
+        p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False)
