@@ -730,3 +730,92 @@ def test_lagrangian_second_derivative_is_refused():
     with pytest.raises(Exception):
         with P() as p:
             p.initialise()
+
+
+# ---------------------------------------------------------------------------------------------
+# Analytic Hessian of the AZIMUTHAL (m!=0) contributions when a normal is involved
+#
+# The Hessian of the m!=0 contributions is what azimuthal bifurcation tracking assembles into the
+# eigenvector rows of its augmented Jacobian. Deriving it runs the second differentiation under
+# expansion mode 0 (the base state) while the first ran under mode 1 (the eigenfunction), and a
+# normal that had already been derived once still carries the mode-1 label. Vetoing it on that
+# label dropped every d2_normal_d2coord term from the generated HessianVectorProduct of the m!=0
+# residual - the first derivatives were all there, so the result looked plausible - and azimuthal
+# bifurcation tracking then diverged on any moving mesh with a free surface.
+#
+# The check compares the augmented Jacobian against a central difference of the augmented residual
+# along a base-dof direction. Its noise floor is ~1e-7; with the terms missing it reads 5.0e-3, so
+# the check is sensitive to the thing it is meant to test by four orders of magnitude.
+#
+# No eigensolver is involved: the tracker is handed a synthetic "eigenvector", which is all the
+# Hessian blocks need. Only base-dof directions are probed, since perturbing the eigenvector dofs
+# from Python does not refresh the handler's internal copies of them.
+# ---------------------------------------------------------------------------------------------
+
+def test_azimuthal_hessian_with_normal_on_moving_mesh():
+    import numpy
+    from pyoomph.equations.ALE import LaplaceSmoothedMesh
+
+    class Eq(Equations):
+        def define_fields(self):
+            self.define_scalar_field("u", "C2")
+
+        def define_residuals(self):
+            u, v = var_and_test("u")
+            self.add_residual(weak(grad(u), grad(v)) + weak((1 + u ** 2), v))
+
+    class IFaceEq(Equations):
+        # the normal is the whole point: an interface term without one is differentiated correctly
+        def define_residuals(self):
+            u, v = var_and_test("u")
+            A = self.get_current_code_generator().get_problem().get_global_parameter("A")
+            self.add_residual(weak(A * u * dot(var("normal"), vector(1, 1)), v))
+
+    class P(Problem):
+        def define_problem(self):
+            self.A = self.define_global_parameter(A=1.0)
+            self.set_coordinate_system("axisymmetric")
+            # away from r=0, so nothing here depends on the axis treatment
+            self.add_mesh(RectangularQuadMesh(N=2, size=[1, 1], lower_left=[1, 0]))
+            eqs = Eq() + LaplaceSmoothedMesh() + IFaceEq() @ "top"
+            eqs += DirichletBC(mesh_x=True, mesh_y=True) @ "left"
+            eqs += DirichletBC(mesh_x=True, mesh_y=True) @ "bottom"
+            eqs += DirichletBC(mesh_x=True, mesh_y=True) @ "right"
+            eqs += DirichletBC(u=0) @ "bottom"
+            self.add_equations(eqs @ "domain")
+
+    with P() as p:
+        p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=True)
+        p.initialise()
+        nbase = p.ndof()
+
+        # A generic state: on a perfectly regular mesh several geometric second derivatives vanish
+        # identically and a missing term would not show up at all.
+        rng = numpy.random.default_rng(7)
+        x0 = numpy.array(p.get_current_dofs()[0]) + 0.02 * rng.standard_normal(nbase)
+        p.set_current_dofs(x0)
+
+        V = rng.standard_normal(nbase) + 1j * rng.standard_normal(nbase)
+        V /= numpy.linalg.norm(V)
+        p.activate_bifurcation_tracking("A", bifurcation_type="azimuthal", azimuthal_mode=1,
+                                        eigenvector=V, omega=0.3)
+        naug = p.ndof()
+        xaug = numpy.array(p.get_current_dofs()[0])
+        J = p.assemble_jacobian(with_residual=False)
+
+        d = numpy.zeros(naug)
+        d[:nbase] = rng.standard_normal(nbase)
+        d /= numpy.linalg.norm(d)
+        eps = 1e-6
+        p.set_current_dofs(xaug + eps * d)
+        rp = numpy.array(p.get_residuals())
+        p.set_current_dofs(xaug - eps * d)
+        rm = numpy.array(p.get_residuals())
+        p.set_current_dofs(xaug)
+
+        fd = (rp - rm) / (2 * eps)
+        ana = J @ d
+        # the eigenvector rows, i.e. everything the Hessian feeds
+        lo, hi = nbase, min(3 * nbase, naug)
+        rel = numpy.max(numpy.abs(ana[lo:hi] - fd[lo:hi])) / max(numpy.max(numpy.abs(fd[lo:hi])), 1e-30)
+        assert rel < 1e-5, "azimuthal Hessian disagrees with a finite difference: rel=%.3e" % rel

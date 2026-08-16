@@ -10899,7 +10899,16 @@ namespace GiNaC
 			// current unknowns -- see the note in GiNaCElementSizeSymbol::derivative.
 			if (sp.history_step > 0)
 				return 0;
-			if (pyoomph::__derive_only_by_expansion_mode && sp.expansion_mode != *pyoomph::__derive_only_by_expansion_mode)
+			// The expansion-mode tag says which family of position dofs the FIRST derivative refers to:
+			// mode 1 is the eigenfunction's mesh perturbation, mode 0 the base state. Once the normal
+			// has been derived by a nodal coordinate, what is left - dn/dX - is a function of the base
+			// geometry alone and carries the tag only as an inherited label, so the Hessian's second
+			// derivative (taken under mode 0) has to be let through. Vetoing it dropped every
+			// d2_normal_d2coord term from the Hessian of the azimuthal contributions: the generated
+			// HessianVectorProduct for the m!=0 residual had all 32 dnormal terms but not one d2normal.
+			// That is what made azimuthal bifurcation tracking diverge on moving meshes with a free
+			// surface (the only place a normal enters), while the base-state Hessian stayed correct.
+			if (pyoomph::__derive_only_by_expansion_mode && sp.expansion_mode != *pyoomph::__derive_only_by_expansion_mode && sp.get_derived_direction() == -1)
 				return 0;
 
 //      std::cout << "ENTERING NORMAL DIFF " << sp.no_jacobian << " " << pyoomph::__derive_shapes_by_second_index <<  " " << sp.no_hessian << std::endl;
