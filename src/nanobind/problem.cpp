@@ -1210,7 +1210,7 @@ void PyReg_Problem(nb::module_ &m)
 			nb::rv_policy::reference, nb::arg("parameter_name"),
 			"Return a global parameter. If it does not exist, it will be added and initialized with value 0.")
 		.def("get_global_parameter_names", &pyoomph::Problem::get_global_parameter_names,
-			 "Return the set of names of all global parameters currently defined on this problem.")
+			 "Return the names of all global parameters currently defined on this problem, sorted alphabetically.")
 		.def(
 			"get_current_dofs", [](pyoomph::Problem *self)
 			{

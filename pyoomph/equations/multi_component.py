@@ -29,6 +29,7 @@ from __future__ import annotations
  
 from ..meshes.mesh import AnyMesh, InterfaceMesh
 from ..generic import Equations, InterfaceEquations
+from ..generic.codegen import sorted_field_kwargs
 from ..equations.generic import InitialCondition, SpatialErrorEstimator, FiniteElementSpaceEnum
 from ..expressions import *  # Import grad et al
 from .navier_stokes import NavierStokesEquations #type:ignore
@@ -44,7 +45,10 @@ if TYPE_CHECKING:
 
 
 def CompositionInitialCondition(fluid_props:AnyFluidProperties,isothermal:bool,initial_temperature:ExpressionNumOrNone=None):
-    req_adv_diff = fluid_props.required_adv_diff_fields
+    # sorted throughout this module: required_adv_diff_fields is a set, so its iteration order is
+    # randomized per process by PYTHONHASHSEED. Anything derived from it that ends up in a field
+    # definition, a residual or a generated expression must not inherit that.
+    req_adv_diff = sorted(fluid_props.required_adv_diff_fields)
     ic = fluid_props.initial_condition
     icsettings = {"massfrac_" + n: ic["massfrac_" + n] for n in req_adv_diff if "massfrac_" + n in ic.keys()}
     if not isothermal:
@@ -87,7 +91,7 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
         res += CompositionInitialCondition(fluid_props,isothermal,initial_temperature)
     if spatial_errors is not None:
         if spatial_errors is True:
-            compo_fields = ["massfrac_" + n for n in fluid_props.required_adv_diff_fields]
+            compo_fields = ["massfrac_" + n for n in sorted(fluid_props.required_adv_diff_fields)]
             res += SpatialErrorEstimator(*compo_fields, for_which="both")
         elif spatial_errors is not False:
             raise RuntimeError("TODO")
@@ -187,7 +191,7 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         res += CompositionInitialCondition(fluid_props,isothermal,initial_temperature)
     if spatial_errors is not None:
         if spatial_errors is True:
-            compo_fields = ["massfrac_" + n for n in fluid_props.required_adv_diff_fields]
+            compo_fields = ["massfrac_" + n for n in sorted(fluid_props.required_adv_diff_fields)]
             res += SpatialErrorEstimator(*compo_fields, for_which="both", velocity=1)
         elif isinstance(spatial_errors,dict):
             res += SpatialErrorEstimator(**spatial_errors)
@@ -407,7 +411,7 @@ class CompositionAdvectionDiffusionFluxEquations(InterfaceEquations):
         
     def __init__(self, **kwargs:ExpressionOrNum):
         super(CompositionAdvectionDiffusionFluxEquations, self).__init__()
-        self.fluxes = kwargs.copy()
+        self.fluxes = sorted_field_kwargs(kwargs)
 
     def define_residuals(self):
         parent = self.get_parent_equations(CompositionAdvectionDiffusionEquations)
@@ -550,7 +554,9 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             surfs = {surfsI}
         else:
             surfs=surfsI
-        for s in surfs:
+        # sorted: interface_props.surfactants is a class-level set, so without this the surfconc_
+        # fields would get a hash-seed-dependent nodal index whenever there is more than one
+        for s in sorted(surfs):
             self.define_scalar_field("surfconc_" + s, facet_space)
             has_surfactants = True
         if has_surfactants:
@@ -750,7 +756,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         #total_mass_flux = actual_total_transfer_by_rho_inner * rho_inner
         if self.masstransfer_model is not None:
             # Component dynamics inside
-            for name in ns_inner.fluid_props.required_adv_diff_fields:
+            for name in sorted(ns_inner.fluid_props.required_adv_diff_fields):
                 fname = "massfrac_" + name
                 wi, wi_test = var_and_test(fname)
                 # Both of them are fine# TODO: But at pinned contact lines, we have to see
@@ -779,7 +785,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                         outadvdiffu = oppblkeq.get_equation_of_type(CompositionAdvectionDiffusionEquations)
                         assert isinstance(outadvdiffu,CompositionAdvectionDiffusionEquations)
                         # total_mass_flux = actual_total_transfer_by_rho_inner * rho_inner
-                        for name in outadvdiffu.fluid_props.required_adv_diff_fields:
+                        for name in sorted(outadvdiffu.fluid_props.required_adv_diff_fields):
                             fname = "massfrac_" + name
                             wi, wi_test = var_and_test(fname, domain=opp)
                             # Both of them are fine# TODO: But at pinned contact lines, we have to see
@@ -953,7 +959,7 @@ class CompositionDiffusionInfinityEquations(InterfaceEquations):
 
     def __init__(self, origin:ExpressionOrNum=vector([0]), farfield_length:ExpressionNumOrNone=None, **infinity_values:ExpressionOrNum):
         super(CompositionDiffusionInfinityEquations, self).__init__()
-        self.inftyvals = {**infinity_values}
+        self.inftyvals = sorted_field_kwargs(infinity_values)
         self.origin = origin
         self.farfield_length = farfield_length
 
@@ -964,7 +970,7 @@ class CompositionDiffusionInfinityEquations(InterfaceEquations):
         assert isinstance(parent,CompositionAdvectionDiffusionEquations)
         rho = parent.fluid_props.mass_density
 
-        req_adv_diff = parent.fluid_props.required_adv_diff_fields
+        req_adv_diff = sorted(parent.fluid_props.required_adv_diff_fields)
         ic = parent.fluid_props.initial_condition
         inftyvals = { n: ic["massfrac_" + n] for n in req_adv_diff if "massfrac_" + n in ic.keys()}
         for k, v in self.inftyvals.items():
@@ -1303,7 +1309,7 @@ class SurfactantsAtSolidInterface(InterfaceEquations):
         parent=self.get_parent_equations(of_type=CompositionAdvectionDiffusionEquations)
         assert isinstance(parent,CompositionAdvectionDiffusionEquations)
         res:list[str]=[]
-        for cname in parent.fluid_props.components:
+        for cname in sorted(parent.fluid_props.components):
             c=parent.fluid_props.get_pure_component(cname)
             if isinstance(c,SurfactantProperties) and cname in self.ls_properties.get_liquid_properties().components:
                 res.append(cname)

@@ -111,6 +111,32 @@ def _check_domain_name_or_pattern(name:str)->bool:
     return False
 
 
+_KwargValue=TypeVar("_KwargValue")
+
+def sorted_field_kwargs(kwargs:dict[str,_KwargValue])->dict[str,_KwargValue]:
+    """Return keyword arguments naming fields in a fixed (alphabetical) order.
+
+    Equations that take their fields as ``**kwargs`` get whatever order the caller's dict happens to
+    have. That is the literal source order when the call is written out by hand, but a *random* one,
+    differing from process to process, as soon as the caller builds the arguments from a set::
+
+        DirichletBC(**{"massfrac_"+c:True for c in mixture.required_adv_diff_fields})
+
+    Python randomizes the iteration order of a set of strings per process (PYTHONHASHSEED), so
+    without this the conditions would be stated - and the generated code written - in a different
+    order on every run. Normalizing here fixes that for every caller at once.
+
+    **Only for equations whose kwargs order is not otherwise observable.** Classes that DEFINE
+    fields from their kwargs (:py:class:`~pyoomph.equations.ode.ODEEquations`,
+    :py:class:`~pyoomph.equations.generic.ProjectExpression`, the Lagrange multiplier constraints)
+    must NOT use this: there the order sets the dof numbering, so sorting would renumber the dofs of
+    every existing script and invalidate the state files those scripts have already written. The
+    same holds for the observable classes, whose kwargs order is the column order of their output
+    files. Callers of those must sort their own arguments if they build them from a set.
+    """
+    return {k:kwargs[k] for k in sorted(kwargs.keys())}
+
+
 class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
     def __init__(self):
         super(FiniteElementCodeGenerator, self).__init__()

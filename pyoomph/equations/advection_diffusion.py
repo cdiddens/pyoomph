@@ -28,6 +28,7 @@ from __future__ import annotations
 from ..materials.generic import MixtureLiquidProperties,MixtureGasProperties
 from .. import GlobalLagrangeMultiplier, WeakContribution
 from ..generic import Equations,InterfaceEquations
+from ..generic.codegen import sorted_field_kwargs
 from ..expressions import * #Import grad et al
 from .stabilization import ScalarTransportEquations,ScalarTransportStabilization
 
@@ -91,7 +92,9 @@ class AdvectionDiffusionEquations(ScalarTransportEquations):
       self.component_names:dict[str,str]={}
       if self.fluid_props is not None:
          self.fieldnames=[]         
-         for n in self.fluid_props.required_adv_diff_fields:
+         # sorted, as in CompositionAdvectionDiffusionEquations: this list fixes the order in which
+         # the mass fraction fields are defined, and required_adv_diff_fields is an unordered set
+         for n in sorted(self.fluid_props.required_adv_diff_fields):
             self.component_names["massfrac_"+n]=n
             self.fieldnames.append("massfrac_"+n)
          #print(self.fluid_props.required_adv_diff_fields)
@@ -282,7 +285,7 @@ class AdvectionDiffusionFluxInterface(Equations):
 
    def __init__(self, **kwargs:ExpressionOrNum):
       super(AdvectionDiffusionFluxInterface, self).__init__()
-      self.fluxes=kwargs.copy()
+      self.fluxes=sorted_field_kwargs(kwargs)
 
    def define_residuals(self):
       for name,flux in self.fluxes.items():
@@ -322,7 +325,7 @@ class AdvectionDiffusionInfinity(InterfaceEquations):
    required_parent_type = AdvectionDiffusionEquations
    def __init__(self,origin:ExpressionOrNum=vector([0]), farfield_length:ExpressionNumOrNone=None,**kwargs:ExpressionOrNum):
       super(AdvectionDiffusionInfinity, self).__init__()
-      self.inftyvals={**kwargs}
+      self.inftyvals=sorted_field_kwargs(kwargs)
       self.origin=origin
       self.farfield_length=farfield_length
 

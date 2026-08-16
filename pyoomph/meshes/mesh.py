@@ -292,14 +292,14 @@ class BaseMesh(abc.ABC):
             for a in inspect.signature(l).parameters:
                 if not (a in cmb):
                     raise RuntimeError("During evaluation of integral observable "+name +
-                                       ": Cannot evaluate the observable "+name+". Possible are "+", ".join(cmb))
+                                       ": Cannot evaluate the observable "+name+". Possible are "+", ".join(sorted(cmb)))
                 args.append(self.evaluate_observable(a))
             res = l(*args)
 
         else:
 
             raise ValueError("Integral observable "+name +
-                             " not defined on this mesh. Possible integral observables on this mesh are: "+", ".join(cmb))
+                             " not defined on this mesh. Possible integral observables on this mesh are: "+", ".join(sorted(cmb)))
         return res
 
     def evaluate_all_observables(self) -> dict[str, ExpressionOrNum]:
@@ -312,7 +312,11 @@ class BaseMesh(abc.ABC):
             res[name] = self._evaluate_integral_function(name)
         args: dict[str, ExpressionOrNum] = {k: v for k, v in res.items()}
         args["time"] = self.get_problem().get_current_time()
-        remaining: set[str] = set(deps.keys())
+        # A list in declaration order, not a set: the order in which the dependent observables are
+        # resolved here is the insertion order of res, and hence the column order of the observable
+        # output files. Iterating a set of strings made those columns move from run to run, since
+        # Python randomizes that order per process.
+        remaining: list[str] = list(deps.keys())
         while len(remaining) > 0:
             torem: set[str] = set()
             for r in remaining:
@@ -333,7 +337,7 @@ class BaseMesh(abc.ABC):
             if len(torem) == 0:
                 raise RuntimeError(
                     "Cannot evaluate the dependent integral functions, probably due to unknown or circular arguments : "+str(remaining))
-            remaining = remaining-torem
+            remaining = [r for r in remaining if r not in torem]
         # Now remove the vector helpers
         for k in self._codegen._dependent_integral_funcs_is_vector_helper.keys():
             del res[k]

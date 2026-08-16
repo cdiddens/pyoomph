@@ -88,8 +88,20 @@ class MassTransferModelBase:
 
     @abstractmethod
     def identify_transfer_components(self)->set[str]:
+        # Returns a set, i.e. unordered. Every caller that defines fields, adds residuals or builds
+        # an expression from it must iterate it sorted - see sorted_transfer_components() below.
         raise NotImplementedError("identify_volatile_components")
         #return set()
+
+    def sorted_transfer_components(self)->list[str]:
+        """The transfer components in a fixed order.
+
+        Python randomizes the iteration order of a set of strings per process (PYTHONHASHSEED), so
+        iterating :py:meth:`identify_transfer_components` directly gave the ``masstrans_*`` fields a
+        different nodal index on every run. That changed the dof ordering, the generated C code and
+        hence the JIT cache key, so the same script produced bitwise different results run to run.
+        """
+        return sorted(self.identify_transfer_components())
 
     @abstractmethod
     def get_mass_transfer_rate_of(self, name:str)->Expression:
@@ -97,8 +109,7 @@ class MassTransferModelBase:
         #return 0
 
     def get_all_masstransfer_rates(self)->dict[str,Expression]:
-        vc=self.identify_transfer_components()
-        return {n:self.get_mass_transfer_rate_of(n) for n in vc}
+        return {n:self.get_mass_transfer_rate_of(n) for n in self.sorted_transfer_components()}
 
     def get_latent_heat_flux(self)->Expression:
         raise NotImplementedError("get_latent_heat_flux")
@@ -136,7 +147,9 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
                 props_outside=getattr(self,"props_outside",None)
                 if props_outside is None:
                     raise RuntimeError("Cannot find a space for the field "+name+". Please set the projection_space attribute of the mass transfer model.")
-                for c in props_outside.components:
+                # sorted: the loop stops at the first component that has a space, so an unordered
+                # set would let the answer depend on the hash seed whenever the spaces differ
+                for c in sorted(props_outside.components):
                     space=opp_pdom.get_space_of_field("massfrac_"+c)
                     if space!="":
                         break
@@ -146,7 +159,7 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
                 props_inside=getattr(self,"props_inside",None)
                 if props_inside is None:
                     raise RuntimeError("Cannot find a space for the field "+name+". Please set the projection_space attribute of the mass transfer model.")
-                for c in props_inside.components:
+                for c in sorted(props_inside.components):
                     space=pdom.get_space_of_field("massfrac_"+c)
                     if space!="":
                         break
@@ -170,24 +183,21 @@ class ProjectedMassTransferModelBase(MassTransferModelBase):
 
     def define_fields(self, ieqs:InterfaceEquations):
         if self.rates_as_fields:
-            comps = self.identify_transfer_components()
-            for ec in comps:
+            for ec in self.sorted_transfer_components():
                 ieqs.define_scalar_field(self.get_mass_transfer_name(ec), self.get_mass_transfer_space(ec,ieqs))
 
     def define_residuals(self, ieqs:InterfaceEquations):
         if self.rates_as_fields:
-            comps = self.identify_transfer_components()
-            for ec in comps:
+            for ec in self.sorted_transfer_components():
                 rhs = self.get_masstransfer_definition(ec)
                 j, jtest = var_and_test(self.get_mass_transfer_name(ec))
                 ieqs.add_residual(weak(j - rhs, jtest))
 
     def setup_scaling(self, ieqs:InterfaceEquations):
         if self.rates_as_fields:
-            comps = self.identify_transfer_components()
             kwargs:dict[str,"ExpressionOrNum | str"] = {}
             tkwargs:dict[str,"ExpressionOrNum | str"] = {}
-            for ec in comps:
+            for ec in self.sorted_transfer_components():
                 kwargs[self.get_mass_transfer_name(ec)] = "mass_transfer_rate"
                 if self.test_scale is not None:
                     tkwargs[self.get_mass_transfer_name(ec)] = self.test_scale
@@ -320,8 +330,7 @@ class LagrangeMultiplierMassTransferModel(FluidPropMassTransferModel):
         self.test_scale:ExpressionOrNum | None=None
 
     def define_fields(self,ieqs:InterfaceEquations):
-        evaps=self.identify_transfer_components()
-        for ec in evaps:
+        for ec in self.sorted_transfer_components():
             ieqs.define_scalar_field(self.get_mass_transfer_name(ec),self.get_mass_transfer_space(ec,ieqs))
 
     @abstractmethod
@@ -330,8 +339,7 @@ class LagrangeMultiplierMassTransferModel(FluidPropMassTransferModel):
         raise RuntimeError("IMPLEMENT!")
 
     def define_residuals(self,ieqs:InterfaceEquations):
-        evaps = self.identify_transfer_components()
-        for ec in evaps:
+        for ec in self.sorted_transfer_components():
             eq=self.get_equilibrium_expression(ec)
             _,ltest=var_and_test(self.get_mass_transfer_name(ec))
             ieqs.add_residual(weak(eq,ltest)) #*(self.test_scale if self.test_scale is not None else 1)
@@ -358,7 +366,7 @@ class LagrangeMultiplierMassTransferModelLiquidGas(LagrangeMultiplierMassTransfe
         assert opp_pdom is not None
         space=opp_pdom.get_space_of_field("massfrac_"+name)
         if space=="":
-            for c in self.props_outside.components:
+            for c in sorted(self.props_outside.components):
                space=opp_pdom.get_space_of_field("massfrac_"+c)
                if space!="":
                    break

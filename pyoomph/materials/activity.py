@@ -405,8 +405,10 @@ class UNIFACMultiReturnExpression(CustomMultiReturnExpression):
         server=ActivityModel.get_activity_model_by_name(modelname)
         assert isinstance(server,UNIFACLikeActivityModel), "UNIFACMultiReturnExpression requires a UNIFAC-like activity model, got "+str(type(server))+" for model name "+modelname
         self.server:UNIFACLikeActivityModel=server
-        unifac_components:dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,self.server) for cn in mix.components}
-        for cn in mix.components:
+        # sorted: mix.components is a set, and UNIFACMixture keeps the order it is constructed with.
+        # That order propagates into _allgroups/_nu/_As/... and hence into every generated sum.
+        unifac_components:dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,self.server) for cn in sorted(mix.components)}
+        for cn in sorted(mix.components):
             comp=mix.pure_properties[cn]
             assert isinstance(comp,PureLiquidProperties)
             subgroups=comp._UNIFAC_groups[modelname] 

@@ -225,7 +225,7 @@ class MaterialProperties:
                 frz=frozenset(mat_subclass.components)
                 if frz in cls.library[mat_subclass.state_of_matter]["mixed"].keys():
                     if not override:
-                        raise RuntimeError("You tried to register the mixed "+str(mat_subclass.state_of_matter)+" material with components '"+str(mat_subclass.components)+"', but there is already one defined. Please add override=True to the arguments of @MaterialProperties.register(override=True)")
+                        raise RuntimeError("You tried to register the mixed "+str(mat_subclass.state_of_matter)+" material with components '"+str(sorted(mat_subclass.components))+"', but there is already one defined. Please add override=True to the arguments of @MaterialProperties.register(override=True)")
                 cls.library[mat_subclass.state_of_matter]["mixed"][frz]=subclass
 
     #      cls.subclasses[message_type] = subclass
@@ -664,8 +664,8 @@ class MixtureDefinitionComponents():
                 init[e.compo.name] += e.quant
             props = get_mixture_properties(*comps)
             assert isinstance(props,(MixtureGasProperties,MixtureLiquidProperties))
-            molar_denom=sum([props.pure_properties[c].molar_mass*init[c] for c in props.components])
-            for c in props.components:
+            molar_denom=sum([props.pure_properties[c].molar_mass*init[c] for c in sorted(props.components)])
+            for c in sorted(props.components):
                 init[c]*=props.pure_properties[c].molar_mass/molar_denom
                 init[c]=float(init[c])
         elif quantity=="volume_fraction":
@@ -675,11 +675,11 @@ class MixtureDefinitionComponents():
                 init[e.compo.name] += e.quant
             props = get_mixture_properties(*comps)
             assert isinstance(props,(MixtureGasProperties,MixtureLiquidProperties))
-            rhos = {c: props.pure_properties[c].evaluate_at_condition(props.pure_properties[c].mass_density,temperature=temperature) for c in props.components}
+            rhos = {c: props.pure_properties[c].evaluate_at_condition(props.pure_properties[c].mass_density,temperature=temperature) for c in sorted(props.components)}
             for _, rho in rhos.items():
                 assert_dimensional_value(rho)
-            denom = sum([rhos[c] * init[c] for c in props.components])
-            for c in props.components:
+            denom = sum([rhos[c] * init[c] for c in sorted(props.components)])
+            for c in sorted(props.components):
                 init[c]*=rhos[c]/denom
                 init[c]=float(init[c])
         else:
@@ -901,17 +901,19 @@ class BaseMixedProperties:
         self._output_properties=self._output_properties.copy()
         def make_diffusion_coeff_lambda(k1:str,k2:str)->Callable[[MaterialProperties],ExpressionNumOrNone]:
             return lambda self: self.get_diffusion_coefficient(k1, k2) #type:ignore
-        for k1 in self.components:
+        # sorted: components is a set, and its iteration order would otherwise decide the order in
+        # which these properties are sampled to files
+        for k1 in sorted(self.components):
             if k1==self.passive_field:
                 continue
-            for k2 in self.components:
+            for k2 in sorted(self.components):
                 if k2 == self.passive_field:
                     continue
                 self._output_properties["diffusivity_"+k1+"__"+k2]=make_diffusion_coeff_lambda(k1,k2)
 
         self.required_adv_diff_fields=self.components-{self.passive_field}
         if self.components!=set(self.pure_properties.keys()):
-            raise ValueError("Cannot create a mixture with the components "+str(self.components)+" by passing the wrong pure component properties: "+str(self.pure_properties))
+            raise ValueError("Cannot create a mixture with the components "+str(sorted(self.components))+" by passing the wrong pure component properties: "+str(self.pure_properties))
         self._diffusion_table:dict[tuple[str,str],ExpressionOrNum]={}
 
 
@@ -974,7 +976,7 @@ class BaseMixedProperties:
             coeff = arg3
         elif arg2 is None and arg3 is None:
             assert isinstance(arg1, (Expression, int, float))
-            for c in self.components:
+            for c in sorted(self.components):
                 self.set_diffusion_coefficient(c, arg1, None)
             return
         else:
@@ -1021,13 +1023,13 @@ class BaseMixedProperties:
         res:ExpressionOrNum
         if n==self.passive_field:
             res=0
-            for c in self.components:
+            for c in sorted(self.components):
                 if c!=self.passive_field:
                     res-=self.get_diffusive_mass_flux_for(c)
             return res
 
         res = 0
-        for fn2 in self.components:
+        for fn2 in sorted(self.components):
             f2 = var("massfrac_"+fn2)
             D = self.get_diffusion_coefficient(n, fn2,default=0)
             assert D is not None
@@ -1046,7 +1048,7 @@ class BaseMixedProperties:
         Returns the mass fraction field for the given component.
         """
         if not self.pure_properties[name]:
-            raise ValueError("Mass fraction '"+name+"' is not in the components: "+str(self.components))
+            raise ValueError("Mass fraction '"+name+"' is not in the components: "+str(sorted(self.components)))
         return var("massfrac_"+name,**kwargs)
 
     def get_mole_fraction_field(self,name:str,**kwargs:Any)->Expression:
@@ -1054,7 +1056,7 @@ class BaseMixedProperties:
         Returns the mole fraction field for the given component.
         """
         if not self.pure_properties[name]:
-            raise ValueError("Mass fraction '"+name+"' is not in the components: "+str(self.components))
+            raise ValueError("Mass fraction '"+name+"' is not in the components: "+str(sorted(self.components)))
         return var("molefrac_"+name,**kwargs)
 
 
@@ -1362,11 +1364,11 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
         self._output_properties=self._output_properties.copy()
         def make_lambda_for_vapor_pressure(k:str)->Callable[[MaterialProperties],ExpressionNumOrNone]:
             return lambda props: self.get_vapor_pressure_for(k)
-        for k in self.components:
+        for k in sorted(self.components):
             self._output_properties["vapor_pressure_" + k] = make_lambda_for_vapor_pressure(k)
         def make_lambda_for_activity_coeff(k:str)->Callable[[MaterialProperties],ExpressionNumOrNone]:
             return lambda props: self.activity_coefficients.get(k)
-        for k in self.components:
+        for k in sorted(self.components):
             self._output_properties["activity_coefficient_" + k] = make_lambda_for_activity_coeff(k)
 
         self._reaction_rates:dict[str,ExpressionOrNum]={}
@@ -1458,13 +1460,13 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
         self._unifac_model=model
         if use_multi_return==True or ((use_multi_return is not False) and len(self.components)>=use_multi_return):
             self._unifac_multi_return=UNIFACMultiReturnExpression(self,model)
-            for cn in self.components:
+            for cn in sorted(self.components):
                 self.activity_coefficients[cn]=cast(Expression,self._unifac_multi_return.get_activity_coefficient(cn))
         else:
             server=ActivityModel.get_activity_model_by_name(modelname)
 
-            unifac_components:dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,server) for cn in self.components}
-            for cn in self.components:
+            unifac_components:dict[str,UNIFACMolecule]={cn:UNIFACMolecule(cn,server) for cn in sorted(self.components)}
+            for cn in sorted(self.components):
                 comp=self.pure_properties[cn]
                 assert isinstance(comp,PureLiquidProperties)
                 subgroups=comp._UNIFAC_groups[modelname] 
@@ -1474,7 +1476,7 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
                     unifac_components[cn].add_subgroup(sgn,amount)
             unifac_mix=UNIFACMixture(*unifac_components.values())
             unifac_mix.set_expression_generator(UNIFACPyoomphExpressionGenerator())
-            for cn in self.components:
+            for cn in sorted(self.components):
                 self.activity_coefficients[cn]=cast(Expression,unifac_mix.get_activity_coefficient_expression(cn))
 
         if set_vapor_pressures:
@@ -1484,7 +1486,7 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
         """
         Set the vapor pressures based on Raoult's law. Potentially set activity coefficients are considered.
         """
-        for c in self.components:
+        for c in sorted(self.components):
             cpure=self.pure_properties[c]
             assert isinstance(cpure,PureLiquidProperties)
             p_pure=cpure.get_vapor_pressure_for(c)
@@ -1988,7 +1990,7 @@ def get_mixture_properties(*purecompos:MaterialProperties,**kwargs:Any)->Materia
         raise RuntimeError("Should not happen")
     cls=MaterialProperties.library[som]["mixed"].get(frz)
     if cls is None:
-        raise KeyError("Mixture properties of mixture from " + str(comps) + " in state " + som + " not defined")
+        raise KeyError("Mixture properties of mixture from " + str(sorted(comps)) + " in state " + som + " not defined")
     if kwargs.get("return_class",False):
         return cls
     else:
@@ -2076,7 +2078,7 @@ def get_interface_properties(phaseA:MaterialProperties | MixtureDefinitionCompon
         if key in MaterialProperties.library["interfaces"][typus].keys():
             return MaterialProperties.library["interfaces"][typus][key](liquid, gas, surfactantsN)
         if len(scomps)>0:
-            raise RuntimeError("Cannot find a liquid-gas interface definition between liquid "+str(set(lcomps))+" and gas "+str(set(gcomps))+" with surfactants "+str(set(scomps)))
+            raise RuntimeError("Cannot find a liquid-gas interface definition between liquid "+str(sorted(lcomps))+" and gas "+str(sorted(gcomps))+" with surfactants "+str(sorted(scomps)))
         #key=(lcomps,frozenset(set()),frozenset(set()))
         #if key  in MaterialProperties.library["interfaces"][typus].keys():
         #    return MaterialProperties.library["interfaces"][typus][key](liquid,gas,surfactants)
@@ -2118,8 +2120,8 @@ def get_interface_properties(phaseA:MaterialProperties | MixtureDefinitionCompon
     if typus in MaterialProperties.library["interfaces"]["_defaults"].keys():
         return MaterialProperties.library["interfaces"]["_defaults"][typus](phaseA,phaseB,surfactantsN)
     else:
-        n1=phaseA.name if phaseA.is_pure else "["+", ".join(phaseA.components)+"]"
-        n2 = phaseB.name if phaseB.is_pure else "[" + ", ".join(phaseB.components) + "]"
+        n1=phaseA.name if phaseA.is_pure else "["+", ".join(sorted(phaseA.components))+"]"
+        n2 = phaseB.name if phaseB.is_pure else "[" + ", ".join(sorted(phaseB.components)) + "]"
         if len(surfactantsN)==0:
             raise RuntimeError("Cannot find an interface of type "+typus+" for "+n1+" | "+n2)
         else:

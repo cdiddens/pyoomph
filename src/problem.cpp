@@ -8087,10 +8087,17 @@ namespace pyoomph
 			for (unsigned int k=0;k<listed_domain_contributions.size();k++)
 			{
 				ss << "\t" << (char)('A' + k + (k>25 ? 6 : 0)) << ": from:  ";
-				unsigned int count=listed_domain_contributions[k].size();
+				// Sorted by name: listed_domain_contributions holds sets of *pointers*, so their
+				// iteration order follows the addresses and changed between runs under ASLR. The
+				// grouping is unaffected, but the dump could not be diffed across runs.
+				std::vector<std::string> contrib_names;
 				for (auto * dc : listed_domain_contributions[k])
+					contrib_names.push_back(dc->get_code()->get_full_domain_name());
+				std::sort(contrib_names.begin(), contrib_names.end());
+				unsigned int count=contrib_names.size();
+				for (auto const &nm : contrib_names)
 				{
-					ss << dc->get_code()->get_full_domain_name() << (--count ? " & " : "");
+					ss << nm << (--count ? " & " : "");
 				}
 				ss << std::endl;
 			}

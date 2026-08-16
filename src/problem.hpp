@@ -1170,11 +1170,16 @@ namespace pyoomph
 
     // const bool has_field(const std::string & name)  {return fields_by_name.count(name)>0;}
     bool has_global_parameter(const std::string &name) { return global_params_by_name.count(name) > 0; }
-    std::set<std::string> get_global_parameter_names()
+    // A vector, not a set: nanobind turns a std::set into a Python set, whose iteration order is
+    // randomized by PYTHONHASHSEED. That order reached the parameter columns of every text output
+    // file and the "Parameters: ..." lines, so two runs of the same script were not diffable.
+    // global_params_by_name is a std::map, hence already sorted by name.
+    std::vector<std::string> get_global_parameter_names()
     {
-      std::set<std::string> res;
+      std::vector<std::string> res;
+      res.reserve(global_params_by_name.size());
       for (auto const &pkeys : global_params_by_name)
-        res.insert(pkeys.first);
+        res.push_back(pkeys.first);
       return res;
     }
 

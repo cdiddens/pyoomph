@@ -183,7 +183,7 @@ def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteE
             lambda_override=thermal_overrides.get("thermal_conductivity",None)
         res += TemperatureAdvectionConductionEquation(fluid_props, space=compo_space,wind=u_advect,rho_override=rho_override,cp_override=cp_override,lambda_override=lambda_override)
     if with_IC:
-        req_adv_diff = fluid_props.required_adv_diff_fields
+        req_adv_diff = sorted(fluid_props.required_adv_diff_fields)
         ic = fluid_props.initial_condition
         icsettings = {"massfrac_"+n: ic["massfrac_" + n] for n in req_adv_diff if "massfrac_" + n in ic.keys()}
         if not isothermal:
@@ -198,7 +198,7 @@ def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteE
 
     if spatial_errors is not None:
         if spatial_errors is True:
-            compo_fields = {"massfrac_" + n: 1.0 for n in fluid_props.required_adv_diff_fields}
+            compo_fields = {"massfrac_" + n: 1.0 for n in sorted(fluid_props.required_adv_diff_fields)}
             res += SpatialErrorEstimator(velocity=1, **compo_fields) #type:ignore
         elif spatial_errors is not False:
             raise RuntimeError("TODO")
@@ -208,7 +208,7 @@ def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteE
 # Connection to a Navier-Stokes multi-component domain (imposing continuity of the composition)
 def CompositionPorousNavierStokesConnection(fluid_props:AnyFluidProperties):
     psinter:Equations=PorousNavierStokesConnection()
-    connfields = ["massfrac_" + n for n in fluid_props.required_adv_diff_fields]
+    connfields = ["massfrac_" + n for n in sorted(fluid_props.required_adv_diff_fields)]
     psinter += ConnectFieldsAtInterface(connfields)
     return psinter
 

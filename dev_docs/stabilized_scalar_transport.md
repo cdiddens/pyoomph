@@ -348,9 +348,13 @@ does — silently gives every variant the first one's compiled equations, so the
 Giving each `Problem` its own `set_output_directory` fixes it; the tests do that and say why. This is
 the same phenomenon `stabilized_navier_stokes.md` §7 records as the Tier-2 shadow-mode mismatch.
 
-Also worth knowing when diffing two runs: `get_dof_description()` can return the mass-transfer names
-in a different *order* between runs, because the mass-transfer model iterates a Python `set` of
-component names. Fix `PYTHONHASHSEED` or match rows by name, not by index.
+**Fixed since:** `get_dof_description()` used to return the mass-transfer names in a different
+*order* between runs, because the mass-transfer model iterated a Python `set` of component names -
+whose iteration order `PYTHONHASHSEED` randomizes per process. That reached the nodal indices of the
+`masstrans_*` fields, so the generated C code, the JIT cache key and the results all changed run to
+run. All such iterations now go through `MassTransferModelBase.sorted_transfer_components()`; the
+same sweep sorted the other component sets that feed field definitions or expressions (see
+`sorted(` in `multi_component.py`, `materials/generic.py`, `materials/activity.py`).
 
 ## 12. Loose ends
 

@@ -57,7 +57,7 @@ from __future__ import annotations
 # still being set up, so it must not depend on what the top-level __init__ has bound so far.
 from .. import _pyoomph_core as _pyoomph
 from ..expressions import var_and_test,var
-from ..generic.codegen import  InterfaceEquations,Equations,BaseEquations,ODEEquations,FiniteElementCodeGenerator
+from ..generic.codegen import  InterfaceEquations,Equations,BaseEquations,ODEEquations,FiniteElementCodeGenerator,sorted_field_kwargs
 from ..expressions.generic import ExpressionOrNum,ExpressionNumOrNone,FiniteElementSpaceEnum, grad,nondim, scale_factor,test_scale_factor,Expression,assert_valid_finite_element_space, testfunction,find_dominant_element_space,weak
 
 #Connects one or multiple fields at both sides of the interfaces via Lagrange multipliers
@@ -287,7 +287,7 @@ class SpatialErrorEstimator(Equations):
     def __init__(self,*fluxes:str | Expression,for_which:Literal["both","base","eigen"]="both",group:str="",normalize_relative:float=1.0,weight:float=1.0,**kwargs:ExpressionOrNum):
         super(SpatialErrorEstimator, self).__init__()
         self.fluxes:dict[str | Expression,ExpressionOrNum]={x:1.0 for x in fluxes}
-        for lhs,rhs in kwargs.items():
+        for lhs,rhs in sorted_field_kwargs(kwargs).items():
             self.fluxes[lhs]=rhs
         normalize_relative=float(normalize_relative)
         if not (0.0<=normalize_relative<=1.0):
@@ -612,7 +612,7 @@ class InitialCondition(BaseEquations):
 
     def __init__(self, *, degraded_start: bool | Literal["auto"] = "auto", IC_name: str = "", **kwargs: ExpressionOrNum):
         super(InitialCondition, self).__init__()
-        self._ics: dict[str, ExpressionOrNum] = {n: Expression(0 + v) for n, v in kwargs.items()}
+        self._ics: dict[str, ExpressionOrNum] = {n: Expression(0 + v) for n, v in sorted_field_kwargs(kwargs).items()}
         self._ic_name = IC_name
         self._degraded_start = degraded_start
 
@@ -647,7 +647,7 @@ class TemporalErrorEstimator(BaseEquations):
 
     def __init__(self, **fieldfactors: float):
         super(TemporalErrorEstimator, self).__init__()
-        self.fieldfactors = fieldfactors.copy()
+        self.fieldfactors = sorted_field_kwargs(fieldfactors)
 
     def define_error_estimators(self):       
         for f, v in self.fieldfactors.items():                        
@@ -844,7 +844,7 @@ class Scaling(BaseEquations):
     """
     def __init__(self,**kwargs:ExpressionOrNum | str):
         super(Scaling, self).__init__()
-        self.scales=kwargs.copy()
+        self.scales=sorted_field_kwargs(kwargs)
     def define_scaling(self):
         super(Scaling, self).define_scaling()
         self.set_scaling(self.scales)
@@ -859,7 +859,7 @@ class TestScaling(BaseEquations):
     __test__ = False
     def __init__(self,**kwargs:ExpressionOrNum | str):
         super(TestScaling, self).__init__()
-        self.scales=kwargs.copy()
+        self.scales=sorted_field_kwargs(kwargs)
 
     def define_scaling(self):
         super(TestScaling, self).define_scaling()
@@ -1562,7 +1562,7 @@ class NeumannBC(InterfaceEquations):
 
     def __init__(self, **fluxes:ExpressionOrNum):
         super(NeumannBC, self).__init__()
-        self.fluxes = fluxes.copy()
+        self.fluxes = sorted_field_kwargs(fluxes)
 
     def define_residuals(self):
         for name, flux in self.fluxes.items():
@@ -1586,8 +1586,7 @@ class DirichletBC(BaseEquations):
 
     def __init__(self, *, prefer_weak_for_DG: bool = True, **kwargs: ExpressionOrNum):
         super(DirichletBC, self).__init__()
-        self._dcs: dict[str, ExpressionOrNum] = {}
-        self._dcs.update(kwargs)
+        self._dcs: dict[str, ExpressionOrNum] = sorted_field_kwargs(kwargs)
         self.prefer_weak_for_DG = prefer_weak_for_DG
 
     def _expanded_dcs(self) -> dict[str, ExpressionOrNum]:
@@ -1880,7 +1879,7 @@ class PythonDirichletBC(Equations):
         # Merged in from the former BoundaryCondition base class, which had no other purpose left
         self.mesh:"AnySpatialMesh | None" = None
         self.active = True
-        self.vals = kwargs.copy()
+        self.vals = sorted_field_kwargs(kwargs)
         self.unpin_instead:bool = False
 
     def _is_ode(self):
