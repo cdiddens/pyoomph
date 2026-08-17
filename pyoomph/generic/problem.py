@@ -709,6 +709,9 @@ class Problem(_pyoomph.Problem):
         self._eigensolver=None
 
         self._runmode="delete"
+        #: Inner product in which the arclength constraint measures the solution part of a step; see
+        #: :py:meth:`set_arclength_inner_product`. None keeps oomph's plain dof-sum metric.
+        self._arclength_inner_product:"str | Callable[[NPFloatArray],float] | None"=None
         self._continue_initialized=False
         #: When resuming with ``--runmode continue``, carry on with the time step stored in the state
         #: file instead of the ``startstep`` (or any other initial dt) requested by the run statement
@@ -2502,6 +2505,20 @@ class Problem(_pyoomph.Problem):
             dof_deriv=self.get_history_dofs(5)
             dof_current=self.get_history_dofs(6)
             self._update_dof_vectors_for_continuation(dof_deriv,dof_current)
+            # Carrying the tangent through the history slots preserves its DIRECTION - measured against
+            # a freshly computed one, cos = 0.999999 - but not its length, because |dU/ds|^2 is a sum
+            # over degrees of freedom: refining 39 -> 79 dofs grew it by sqrt(2). The arclength
+            # constraint (dparameter/ds)^2 + theta^2*|dU/ds|^2 = 1 is what gives ds its meaning as a
+            # step length, so an unnormalised tangent silently changes the stride - measured 29% short
+            # on the first step after an adapt. oomph renormalises at the END of every step, so it
+            # healed itself after that one wrong step; renormalise here instead, which costs nothing and
+            # keeps the direction (both components are scaled by the same factor).
+            dparam_ds=self.get_arc_length_parameter_derivative()
+            theta_sqr=self.get_arc_length_theta_sqr()
+            tangent_norm=numpy.sqrt(dparam_ds*dparam_ds+theta_sqr*float(numpy.dot(dof_deriv,dof_deriv)))
+            if numpy.isfinite(tangent_norm) and tangent_norm>0.0:
+                self._update_dof_vectors_for_continuation(dof_deriv/tangent_norm,dof_current)
+                self._set_arc_length_parameter_derivative(float(dparam_ds/tangent_norm))
             
         if self._adapt_eigenindex is not None:
             eigfunc=self.get_history_dofs(3)+1j*self.get_history_dofs(4)
@@ -5478,6 +5495,132 @@ class Problem(_pyoomph.Problem):
         if Desired_newton_iterations_ds is not None:
             self._set_arclength_parameter("Desired_newton_iterations_ds",Desired_newton_iterations_ds)
 
+    def set_arclength_inner_product(self,kind:"str | Callable[[NPFloatArray],float] | None"="l2"):
+        """Choose the inner product in which arclength measures the *solution* part of a step.
+
+        oomph's arclength constraint is
+
+            (dparameter/ds)^2 + theta^2 * |dU/ds|^2 = 1
+
+        where ``|.|`` is the plain Euclidean norm of the dof vector - a **sum over degrees of freedom**,
+        not an integral, so it has no continuum limit. Measured on the Bratu problem, that sum grows
+        exactly in proportion to ndof (its ratio to ndof is constant to three digits over three decades),
+        which means the default ``theta^2 = 1`` is not a neutral choice but a mesh-dependent one: the
+        same ds buys 21x less parameter movement at 50000 dofs than at 39. ``Scale_arc_length`` papers
+        over it by tuning theta^2 until the parameter takes a fixed share of the arclength, and what it
+        converges to is theta^2 proportional to 1/ndof - i.e. it rediscovers the normalisation at
+        runtime, once per step.
+
+        This sets it directly instead, from a norm that is mesh-independent by construction:
+
+        * ``"l2"`` (or ``"mass"``): the mean square of the field, ``(v^T M v)/volume`` with the mass
+          matrix M. Mesh-independent and aware of how large each field actually is, since M carries the
+          integration weights. Requires the problem to *have* a mass matrix: dofs that appear in no
+          time-derivative term (pressure in an incompressible flow, Lagrange multipliers) get no weight
+          at all, so a step that only moves those is invisible to the constraint.
+        * ``"ndof"``: ``|v|^2/ndof``. Free - no assembly - and mesh-independent, weighting every dof
+          equally whatever it represents. The safe choice when there is no usable mass matrix.
+        * a callable taking the dof-derivative vector and returning its SQUARED norm, for a problem-
+          specific weighting (per-field scales, a subset of the dofs, ...).
+        * ``None``: leave theta^2 alone, i.e. the historical behaviour.
+
+        Since a scalar theta^2 has to reproduce a weighted norm, this works because only ONE direction
+        is ever measured: for the current tangent, ``theta^2 = ||v||_W^2 / ||v||_2^2`` makes the
+        Euclidean constraint agree with the W-weighted one exactly. It is re-derived before every step,
+        as the tangent turns.
+
+        Turns ``Scale_arc_length`` off, since the two would fight over the same scalar.
+        """
+        if isinstance(kind,str):
+            if kind not in ("l2","mass","ndof"):
+                raise ValueError("Unknown arclength inner product '"+kind+"'. Use 'l2' (mass-matrix "
+                                 "mean square), 'ndof' (Euclidean divided by ndof), a callable "
+                                 "returning a squared norm, or None to leave theta^2 alone.")
+        elif kind is not None and not callable(kind):
+            raise ValueError("The arclength inner product must be 'l2', 'ndof', a callable or None")
+        self._arclength_inner_product=kind
+        if kind is not None:
+            self.set_arc_length_parameter(scale_arc_length=False)
+
+    def _arclength_weighted_square_norm(self,v:"NPFloatArray")->float:
+        """``||v||_W^2`` for the configured inner product, or NaN if it cannot be formed."""
+        kind=self._arclength_inner_product
+        if callable(kind):
+            return float(kind(v))
+        if kind=="ndof":
+            return float(numpy.dot(v,v))/len(v)
+        # "l2"/"mass": the mass matrix carries the integration weights, so v^T M v is the integral of
+        # the squared field. Dividing by the volume (1^T M 1, which telescopes to the domain measure for
+        # a partition-of-unity basis) turns it into a mean square, i.e. a number of the size of the
+        # field itself rather than of the domain.
+        from scipy.sparse import csr_matrix  #type:ignore
+        n, _M_nzz, _M_nr, M_val, M_ci, M_rs, *_rest = self.assemble_eigenproblem_matrices(0.0) #type:ignore
+        M=csr_matrix((M_val,M_ci,M_rs),shape=(n,n))
+        if M.nnz==0:
+            return float("nan")   # no time derivatives anywhere: there is no mass matrix to weight with
+        volume=float(M.sum())
+        if not (volume>0):
+            return float("nan")
+        return float(v.dot(M.dot(v)))/volume
+
+    def _retune_arclength_theta(self)->float:
+        """Re-derive theta^2 from the configured inner product. Returns the factor to rescale ds by.
+
+        The tangent has to be renormalised along with theta^2, or the pair stops satisfying
+        ``(dp/ds)^2 + theta^2*|dU/ds|^2 = 1`` and ds loses its meaning as a step length. The direction
+        ``z = -(dU/ds)/(dp/ds) = dU/dparameter`` does not depend on theta^2, so it can be recomputed
+        from what is stored and renormalised exactly.
+
+        ds is rescaled by ``|dp/ds|_before / |dp/ds|_after`` for the same reason as in the bifurcation
+        GUI: along the tangent ``ds = dparameter/(dp/ds)``, so a changed metric buys a different step for
+        the same number.
+        """
+        if self._arclength_inner_product is None:
+            return 1.0
+        if self._get_n_unaugmented_dofs()!=0:
+            return 1.0   # bifurcation tracking: the dof vector is the augmented one, M would not match
+        v=self.get_arclength_dof_derivative_vector()
+        current=self.get_arclength_dof_current_vector()
+        # oomph keeps Dof_derivative and Dof_current as two independent vectors and does NOT always
+        # resize them together - calculate_continuation_derivatives_helper resizes only the derivative -
+        # so they can legitimately disagree, and one of them can be empty. Measured after
+        # locate_bifurcation: (len(Dof_derivative), len(Dof_current)) = (0, 1). Retuning from an
+        # inconsistent pair is meaningless, and writing it back throws "Mismatch in size of ddof and
+        # curr" from update_dof_vectors_for_continuation. Both are rebuilt at the start of the step that
+        # follows, so stepping aside here costs one step of the old metric and nothing else.
+        if len(v)==0 or len(current)!=len(v):
+            return 1.0
+        if self.is_distributed():
+            # Every norm here is a numpy dot over the LOCAL part of the vector, and the mass matrix is
+            # assembled serially, so on a distributed problem this would quietly weight the arclength by
+            # whatever share of the dofs this rank happens to hold. Refuse rather than return a number
+            # nobody can tell is wrong.
+            raise RuntimeError("set_arclength_inner_product() is not implemented for distributed "
+                               "problems: the norms would be taken over each rank's local dofs only. "
+                               "Call set_arclength_inner_product(None) before continuing under MPI.")
+        if len(v)!=self.ndof():
+            return 1.0
+        vv=float(numpy.dot(v,v))
+        dp0=self.get_arc_length_parameter_derivative()
+        if vv<=0.0 or not numpy.isfinite(vv) or abs(dp0)<1e-30:
+            # No tangent yet (the first step), or sitting at a fold where dp/ds vanishes and z cannot be
+            # formed. Either way there is nothing to renormalise; leave the metric as it is.
+            return 1.0
+        w=self._arclength_weighted_square_norm(v)
+        if not numpy.isfinite(w) or w<=0.0:
+            return 1.0
+        theta_new=w/vv
+        theta_old=self.get_arc_length_theta_sqr()
+        if not numpy.isfinite(theta_new) or theta_new<=0.0 or theta_new==theta_old:
+            return 1.0
+        z=-v/dp0
+        zz=float(numpy.dot(z,z))
+        dp_new=(1.0 if dp0>0 else -1.0)/numpy.sqrt(1.0+theta_new*zz)
+        self._update_dof_vectors_for_continuation(-dp_new*z,current)
+        self._set_arc_length_parameter_derivative(float(dp_new))
+        self._set_arc_length_theta_sqr(float(theta_new))
+        return abs(dp0)/abs(dp_new)
+
     def arclength_continuation(self, parameter: str | _pyoomph.GiNaC_GlobalParam, step: float, *,
                               spatial_adapt: int = 0, max_ds: float | None = None,
                               max_newton_iterations: int | None = None,
@@ -5518,6 +5661,10 @@ class Problem(_pyoomph.Problem):
             self._activate_solver_callback()
 
         step = float(step)
+        # Re-derive theta^2 from the configured inner product BEFORE the step, so the constraint this
+        # step imposes and the tangent it predicts along are consistent with each other. ds is rescaled
+        # by the same call, since a changed metric buys a different step for the same number.
+        step *= self._retune_arclength_theta()
         if max_ds is not None:
             max_ds = float(max_ds)
 

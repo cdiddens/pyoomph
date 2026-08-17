@@ -743,6 +743,9 @@ def test_ds_is_recast_when_the_arclength_metric_changes():
         def __init__(self):
             self.theta = 1.0
             self.dpds = 0.88
+            # A real Problem always has this; the recast steps aside when an inner product is set,
+            # because arclength_continuation has then already compensated internally.
+            self._arclength_inner_product = None
         def get_arc_length_theta_sqr(self):
             return self.theta
         def get_arc_length_parameter_derivative(self):
@@ -775,6 +778,12 @@ def test_ds_is_recast_when_the_arclength_metric_changes():
 
     # A vanishing dp/ds (right at a fold) would divide by zero; leave ds alone instead.
     stub.theta, stub.dpds = 1e-9, 0.0
+    assert c._recast_ds_after_metric_change(-0.05, 1.0, 0.88) == -0.05
+
+    # With an inner product set, Problem.arclength_continuation retunes theta^2 and rescales the step
+    # itself, so doing it again here would double-count.
+    stub._arclength_inner_product = "l2"
+    stub.theta, stub.dpds = 3.252, 0.7071067811865476
     assert c._recast_ds_after_metric_change(-0.05, 1.0, 0.88) == -0.05
 
 

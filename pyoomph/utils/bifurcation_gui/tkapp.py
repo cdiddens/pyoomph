@@ -173,6 +173,14 @@ class BifurcationTkApp:
         A("arclength_scaling_on","Scale arclength",lambda: c.set_arclength_scaling(True))
         A("arclength_scaling_off","Do not scale arclength",lambda: c.set_arclength_scaling(False))
         A("arclength_proportion","Parameter fraction of the arclength...",self._dialog_arclength_proportion)
+        # The metric the arclength measures the solution in. The dof-sum default is mesh-dependent:
+        # it is a sum over unknowns, so refining the mesh changes what a given ds buys.
+        A("arclength_metric_dofsum","Arclength metric: dof sum (oomph default)",
+          lambda: c.set_arclength_inner_product(None))
+        A("arclength_metric_ndof","Arclength metric: per dof (mesh-independent)",
+          lambda: c.set_arclength_inner_product("ndof"))
+        A("arclength_metric_l2","Arclength metric: L2 / mass matrix (mesh-independent)",
+          lambda: c.set_arclength_inner_product("l2"))
 
         # --- bifurcations
         A("locate_bifurcation","Locate bifurcation / switch branch",c.locate_bifurcation_or_switch,
@@ -315,6 +323,9 @@ class BifurcationTkApp:
         self._add_menu_item(m,"arclength_scaling_on")
         self._add_menu_item(m,"arclength_scaling_off")
         self._add_menu_item(m,"arclength_proportion")
+        self._add_menu_item(m,"arclength_metric_dofsum")
+        self._add_menu_item(m,"arclength_metric_ndof")
+        self._add_menu_item(m,"arclength_metric_l2")
 
         m=tk.Menu(menubar,tearoff=0)
         menubar.add_cascade(label="Bifurcation",menu=m)

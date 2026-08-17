@@ -1703,6 +1703,23 @@ class BifurcationController:
             # saying out loud, because it silently decides what ds means from here on.
             self.log("Scale arclength is off: theta^2 stays at its current value {:.4g}".format(theta))
 
+    def set_arclength_inner_product(self,kind:"str | None"):
+        """Choose the norm the arclength measures the solution in; see
+        :py:meth:`~pyoomph.generic.problem.Problem.set_arclength_inner_product`.
+
+        ``None`` restores oomph's dof-sum metric together with the scaling, which is what the
+        ``Scale arclength`` checkbox controls; the other choices make that scaling redundant and switch
+        it off, since both would be tuning the same scalar.
+        """
+        self.problem.set_arclength_inner_product(kind)
+        if kind is None:
+            self.set_arclength_scaling(self.scale_arc_length)
+            self.log("Arclength metric: oomph's dof sum")
+        else:
+            self.scale_arc_length=False
+            self.log("Arclength metric:",kind,
+                     "- mesh-independent, so the arclength scaling is no longer needed and is off")
+
     def set_arclength_proportion(self,proportion:float):
         """Set D, the share of the arclength the continuation parameter is given.
 
@@ -1736,6 +1753,12 @@ class BifurcationController:
         In a settled scaled sweep theta^2 moves every step while |dp/ds| stays pinned at sqrt(D), so the
         factor is 1 and this does nothing - it only acts where the metric really shifted.
         """
+        if self.problem._arclength_inner_product is not None:
+            # Problem.set_arclength_inner_product() retunes theta^2 inside arclength_continuation and
+            # rescales the step it passes on by the same rule as below. Applying it again here would
+            # double-count the correction - and with an inner product set, oomph's own Scale_arc_length
+            # is off, so nothing else can move theta^2 behind our back.
+            return ds
         theta_after=self.problem.get_arc_length_theta_sqr()
         if theta_after==theta_before:
             return ds

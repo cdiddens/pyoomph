@@ -62,6 +62,48 @@ def test_with_adapt():
 
 
 # ---------------------------------------------------------------------------------------------
+# Arclength continuation across an adaptation: the tangent has to come out the other side USABLE.
+# See dev_docs/arclength_inner_product.md.
+# ---------------------------------------------------------------------------------------------
+
+import os
+import subprocess
+import sys
+
+import pytest
+
+
+def _run_adapt_continuation_worker(tmp_path, inner_product):
+	here = os.path.dirname(os.path.abspath(__file__))
+	worker = os.path.join(here, "adapt_continuation_worker.py")
+	proc = subprocess.run([sys.executable, worker, "--inner-product", inner_product,
+	                       "--outdir", os.path.join(str(tmp_path), "out_" + inner_product)],
+	                      cwd=here, capture_output=True, text=True, timeout=900)
+	out = (proc.stdout or "") + (proc.stderr or "")
+	assert proc.returncode == 0, inner_product + " failed:\n" + out[-3000:]
+	assert "PYOOMPH_WORKER_DONE" in out, inner_product + " did not finish:\n" + out[-3000:]
+	return out
+
+
+@pytest.mark.parametrize("inner_product", ["none", "l2", "ndof"])
+def test_continuation_tangent_survives_an_adaptation(tmp_path, inner_product):
+	"""The continuation tangent must still satisfy the arclength constraint after a remesh.
+
+	pyoomph carries it across by stashing the two continuation vectors in history slots 5 and 6 before
+	adapting and reading them back afterwards, so oomph's projection interpolates them onto the new mesh
+	- much better than oomph's own path, which zero-fills Dof_derivative when the dof count changes.
+
+	Interpolation preserves the DIRECTION (the worker checks cos > 0.999 against a freshly computed
+	tangent; measured 0.999998) but not the length, because |dU/ds|^2 is a sum over dofs: refining
+	39 -> 79 grew it by sqrt(2) and left (dp/ds)^2 + theta^2*|dU/ds|^2 equal to 1.40 instead of 1. Since
+	that constraint is what gives ds its meaning as a step length, the first step after an adapt came out
+	29% short. Run for the plain metric and for both mesh-independent inner products.
+	"""
+	out = _run_adapt_continuation_worker(tmp_path, inner_product)
+	assert "ADAPT ndof 39 -> 79" in out, "the mesh must actually change:\n" + out[-2000:]
+
+
+# ---------------------------------------------------------------------------------------------
 # SpatialErrorEstimator normalisation and compound-flux grouping: what the elemental errors mean,
 # and how several independently added criteria combine.
 # See dev_docs/spatial_error_estimators.md.
