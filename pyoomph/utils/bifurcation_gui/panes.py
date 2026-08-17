@@ -121,7 +121,7 @@ class PlotterPane:
         self._canvas_widget=self.canvas.get_tk_widget()
         self._desired_aspect:float | None=None
         self._canvas_widget.place(x=0,y=0,relwidth=1.0,relheight=1.0)
-        self._holder.bind("<Configure>",lambda _e: self._apply_letterbox())
+        self._holder.bind("<Configure>",lambda _e: self._match_figure_to_canvas(self._apply_letterbox()))
         self.nav=NavigationToolbar2Tk(self.canvas,self.frame,pack_toolbar=False)
         self.nav.update()
         self.nav.pack(side=tk.BOTTOM,fill=tk.X)
@@ -194,7 +194,37 @@ class PlotterPane:
             return None
         return (dx/dy)/ar
 
-    def _apply_letterbox(self):
+    def _target_canvas_size(self)->tuple[int,int] | None:
+        """Pixel size the canvas should have: the pane, cropped to the plot's aspect."""
+        aspect=self._desired_aspect
+        w,h=self._holder.winfo_width(),self._holder.winfo_height()
+        if aspect is None or w<=1 or h<=1:
+            return None
+        if w/h>aspect:
+            return max(1,int(round(h*aspect))),h
+        return w,max(1,int(round(w/aspect)))
+
+    def _match_figure_to_canvas(self,target:tuple[int,int] | None):
+        """Give the figure exactly the canvas's pixel size.
+
+        Without this the plot jumped on the first replot after a resize, and stayed wrong. A plotter
+        that fixes an aspect sizes the figure in ABSOLUTE terms - image_size/dpi, e.g. 1280x739 px -
+        which has the right aspect but not the canvas's size. Tk only corrects the figure when the
+        WIDGET's size changes, and a replot does not change it, so nothing ever brought the two back
+        together: the figure stayed oversized and the drawing was scaled to fit.
+
+        Setting it here is a pure change of scale, since the letterboxed canvas already has the aspect
+        the plot asked for. forward=False because the canvas must not try to resize the widget back.
+        """
+        if target is None:
+            return
+        dpi=self.figure.dpi or 100.0
+        want=(target[0]/dpi,target[1]/dpi)
+        have=self.figure.get_size_inches()
+        if abs(have[0]-want[0])>1e-6 or abs(have[1]-want[1])>1e-6:
+            self.figure.set_size_inches(want[0],want[1],forward=False)
+
+    def _apply_letterbox(self)->tuple[int,int] | None:
         """Size the canvas to the aspect the plot definition asked for, centred in the pane.
 
         Without this, resizing the window broke the layout: the Tk canvas overwrites the figure size
@@ -207,17 +237,14 @@ class PlotterPane:
         Letterboxing the widget instead keeps the figure at the plot's own aspect, so everything the
         plot definition positioned stays put, and the pane shows what the saved image would show.
         """
-        aspect=self._desired_aspect
-        w,h=self._holder.winfo_width(),self._holder.winfo_height()
+        target=self._target_canvas_size()
         self._canvas_widget.place_forget()
-        if aspect is None or w<=1 or h<=1:
+        if target is None:
             self._canvas_widget.place(x=0,y=0,relwidth=1.0,relheight=1.0)
-            return
-        if w/h>aspect:
-            cw,ch=max(1,int(round(h*aspect))),h
-        else:
-            cw,ch=w,max(1,int(round(w/aspect)))
+            return None
+        cw,ch=target
         self._canvas_widget.place(relx=0.5,rely=0.5,anchor=tk.CENTER,width=cw,height=ch)
+        return target
 
     # ---------------------------------------------------------------- view locking
 
@@ -330,7 +357,9 @@ class PlotterPane:
                 self.status_var.set("invalid triangulation")
                 return False
             self._desired_aspect=self._plotter_figure_aspect()
-            self._apply_letterbox()
+            # Match the figure to the canvas BEFORE drawing: the plot definition has just resized the
+            # figure to its own absolute size, and drawing at that size is exactly the jump.
+            self._match_figure_to_canvas(self._apply_letterbox())
             self.canvas.draw()
             self._drawn_once=True
             if self._log is not None:
