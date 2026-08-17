@@ -264,6 +264,25 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
             return "no other parameters"
         return ", ".join("{:s} = {:.6g}".format(n,v) for n,v in sorted(fixed.items()))
 
+    def describe(self)->str:
+        """One line for a branch list: what this branch is, not merely how long it is.
+
+        "12 points" alone cannot be told apart from another diagram in a different parameter or from
+        a curve of bifurcations, which is the information actually needed when several are on screen.
+        """
+        parts=["{:d} point{:s}".format(len(self),"" if len(self)==1 else "s")]
+        if self.kind=="locus":
+            parts.append("{:s} locus: {:s} tracked, continued in {:s}".format(
+                self.bifurcation_type or "bifurcation",
+                str(self.tracked_parameter),str(self.continuation_parameter)))
+        elif self.continuation_parameter is not None:
+            parts.append("continued in "+self.continuation_parameter)
+        if not self.slice_is_known():
+            parts.append("slice unknown")
+        elif self.fixed_parameters():
+            parts.append("at "+self.describe_slice())
+        return " | ".join(parts)
+
     def to_state_dict(self):
         res={}
         res["points"]=[p.to_state_dict() for p in self]

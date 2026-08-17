@@ -469,6 +469,45 @@ def test_legacy_state_file_reports_the_slice_as_unknown():
     assert modern.describe_slice() == "no other parameters"
 
 
+def test_branch_describes_itself():
+    """A branch list has to say what each branch IS, not merely how many points it holds.
+
+    "12 points" cannot be told apart from another diagram in a different parameter or from a curve of
+    bifurcations, which is exactly what is needed once several are on screen.
+    """
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint)
+
+    def pt(mu, b, u=0.5):
+        return BifurcationGUISolutionPoint(mu, {"u": u}, -1.0, None, 0,
+                                           param_values={"mu": mu, "b": b})
+
+    sol = BifurcationGUISolutionBranch(kind="solution", continuation_parameter="mu")
+    sol.append(pt(1.0, 0.5))
+    assert sol.describe() == "1 point | continued in mu | at b = 0.5"
+    sol.append(pt(0.9, 0.5))
+    assert sol.describe().startswith("2 points | continued in mu")
+
+    locus = BifurcationGUISolutionBranch(kind="locus", continuation_parameter="b",
+                                         tracked_parameter="mu", bifurcation_type="fold")
+    locus.append(pt(-0.0625, 0.5))
+    locus.append(pt(-0.25, 1.0))
+    # Both parameters vary along a locus, so nothing is reported as held fixed.
+    assert locus.describe() == "2 points | fold locus: mu tracked, continued in b"
+
+    # A single-parameter problem has nothing to hold fixed and must not claim otherwise.
+    only = BifurcationGUISolutionBranch(kind="solution", continuation_parameter="r")
+    only.append(BifurcationGUISolutionPoint(1.0, {"x": 1.0}, -2.0, None, 0, param_values={"r": 1.0}))
+    assert only.describe() == "1 point | continued in r"
+
+    # A pre-slice state file says so rather than pretending nothing was held fixed.
+    legacy = BifurcationGUISolutionBranch.from_dict(
+        {"points": [{"param_value": 1.0, "obs_value": {"u": 1.0}, "eig_value_Re": -1.0,
+                     "eig_value_Im": 0.0, "statefile": None, "outstep": 0, "scoord": 0.0,
+                     "tangs": {}}]}, default_continuation_parameter="mu")
+    assert legacy.describe() == "1 point | continued in mu | slice unknown"
+
+
 def test_slice_detects_a_parameter_that_moved():
     """A branch whose supposedly fixed parameters drift must be flagged, not averaged.
 

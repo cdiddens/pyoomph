@@ -79,6 +79,7 @@ class BifurcationTkApp:
         self._check_vars:dict[str,tk.BooleanVar]={}
         self._tree_items:dict[str,tuple[Any,Any]]={}
         self._tree_index:dict[int,str]={}
+        self._branch_index:dict[int,str]={}
 
         self.root=tk.Tk()
         self.root.title(title if title is not None else "pyoomph bifurcation diagram")
@@ -609,10 +610,10 @@ class BifurcationTkApp:
         tab=ttk.Frame(self.side,padding=4)
         self.side.add(tab,text="Branches")
         self.tree=ttk.Treeview(tab,columns=("info",),show="tree headings",selectmode="browse")
-        self.tree.heading("#0",text="#")
-        self.tree.heading("info",text="parameter | observable | eigenvalue")
-        self.tree.column("#0",width=60,minwidth=50,stretch=False)
-        self.tree.column("info",width=260,minwidth=160)
+        self.tree.heading("#0",text="Branch / point")
+        self.tree.heading("info",text="Details")
+        self.tree.column("#0",width=92,minwidth=60,stretch=False)
+        self.tree.column("info",width=330,minwidth=160)
         scroll=ttk.Scrollbar(tab,orient=tk.VERTICAL,command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side=tk.RIGHT,fill=tk.Y)
@@ -864,6 +865,22 @@ class BifurcationTkApp:
             widget.insert(tk.END,"\n".join(lines))
         widget.configure(state=tk.DISABLED)
 
+    def _describe_branch(self,branch)->str:
+        """The branch's own summary, plus how it relates to the diagram being worked on."""
+        info=branch.describe()
+        if branch.kind=="locus":
+            # A locus varies two parameters deliberately, so it sits in no single slice and calling it
+            # "other slice" would be misleading - describe() already says what it is.
+            pass
+        elif not self.controller.branch_is_on_current_slice(branch):
+            info+="  [other slice]"
+        elif not self.controller.branch_can_be_plotted(branch):
+            info+="  [not on these axes]"
+        if not branch.slice_is_consistent():
+            # Its supposedly fixed parameters move along it, so it is not a section of anything.
+            info+="  [slice drifts!]"
+        return info
+
     def _update_tree(self):
         c=self.controller
         # Rebuilding the whole tree on every redraw would flicker and lose the scroll position, so
@@ -876,23 +893,31 @@ class BifurcationTkApp:
                 self.tree.delete(*self.tree.get_children())
                 self._tree_items={}
                 self._tree_index={}
+                self._branch_index={}
                 for ib,b in enumerate(c.branches):
                     node=self.tree.insert("","end",text="Branch {:d}".format(ib),
-                                          values=("{:d} points".format(len(b)),),open=True)
+                                          values=(self._describe_branch(b),),open=True)
                     self._tree_items[node]=(b,None)
+                    self._branch_index[id(b)]=node
                     for ip,p in enumerate(b):
                         child=self.tree.insert(node,"end",text="  {:d}".format(ip),
-                                               values=(p.describe(c._current_observable),))
+                                               values=(p.describe(c.y_axis),))
                         self._tree_items[child]=(b,p)
                         self._tree_index[id(p)]=child
             finally:
                 self._suspend_tree_callback=False
         else:
+            # The branch rows have to be refreshed even when the structure is unchanged: switching
+            # the continuation parameter or the axes changes which branches are on the current slice
+            # without adding or removing a single point.
             for b in c.branches:
+                node=self._branch_index.get(id(b))
+                if node is not None:
+                    self.tree.item(node,values=(self._describe_branch(b),))
                 for p in b:
                     item=self._tree_index.get(id(p))
                     if item is not None:
-                        self.tree.item(item,values=(p.describe(c._current_observable),))
+                        self.tree.item(item,values=(p.describe(c.y_axis),))
 
         target=c.selected_point if c.selected_point is not None else c.current_point
         item=self._tree_index.get(id(target)) if target is not None else None
