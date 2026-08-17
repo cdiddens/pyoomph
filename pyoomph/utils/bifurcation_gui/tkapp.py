@@ -177,6 +177,10 @@ class BifurcationTkApp:
         A("locate_bifurcation","Locate bifurcation / switch branch",c.locate_bifurcation_or_switch,
           toolbar="Find bif",is_solver_task=True,
           tooltip="At a bifurcation this switches branch, otherwise it tracks one down")
+        A("locate_selected_eigenvalue","Locate the bifurcation of the selected eigenvalue",
+          self._locate_selected_eigenvalue,is_solver_task=True,
+          enabled_when=lambda: self._selected_eigenindex() is not None,
+          tooltip="Track the eigenvalue picked in the Points tab rather than the one nearest the axis")
         A("locate_pitchfork","Locate pitchfork",lambda: c.locate_bifurcation(pitchfork=True),is_solver_task=True)
         A("branch_switch","Switch branch",c.branch_switch,toolbar="Switch",is_solver_task=True,
           enabled_when=at_bifurcation,tooltip="Only available at a classified bifurcation")
@@ -313,6 +317,7 @@ class BifurcationTkApp:
         m=tk.Menu(menubar,tearoff=0)
         menubar.add_cascade(label="Bifurcation",menu=m)
         self._add_menu_item(m,"locate_bifurcation")
+        self._add_menu_item(m,"locate_selected_eigenvalue")
         self._add_menu_item(m,"locate_pitchfork")
         self._add_menu_item(m,"branch_switch")
         m.add_separator()
@@ -662,8 +667,11 @@ class BifurcationTkApp:
         frame.pack(side=tk.TOP,fill=tk.BOTH,expand=True)
         self.eigen_label_var=tk.StringVar(value="")
         ttk.Label(frame,textvariable=self.eigen_label_var).pack(side=tk.TOP,anchor=tk.W)
+        # Selectable, because which eigenvalue is about to cross is something you read off this list -
+        # on an already-unstable branch it is not the leading one, and tracking the wrong one converges
+        # to the wrong bifurcation.
         self.eigen_tree=ttk.Treeview(frame,columns=("re","im"),show="tree headings",
-                                     selectmode="none",height=8)
+                                     selectmode="browse",height=8)
         self.eigen_tree.heading("#0",text="#")
         self.eigen_tree.heading("re",text="Re")
         self.eigen_tree.heading("im",text="Im")
@@ -677,6 +685,9 @@ class BifurcationTkApp:
         # An eigenvalue with a positive real part is the whole point of looking, so it is marked.
         self.eigen_tree.tag_configure("unstable",foreground="#b00000")
         self.eigen_tree.tag_configure("critical",foreground="#804000")
+        ttk.Button(frame,text="Locate the bifurcation of the selected eigenvalue",
+                   command=lambda: self._invoke(self._actions["locate_selected_eigenvalue"])).pack(
+                   side=tk.BOTTOM,fill=tk.X,pady=(4,0))
         self._eigen_signature=None
 
     def _info_box(self,parent,title:str)->tk.Text:
@@ -1190,6 +1201,24 @@ class BifurcationTkApp:
         if c.compute_spectrum(point):
             c.propagate_stability()
         self._eigen_signature=None      # force the eigenvalue list to rebuild
+
+    def _selected_eigenindex(self)->int | None:
+        """Which row of the eigenvalue list is picked, if any."""
+        if not hasattr(self,"eigen_tree"):
+            return None
+        sel=self.eigen_tree.selection()
+        if not sel:
+            return None
+        try:
+            return int(self.eigen_tree.item(sel[0],"text"))
+        except (ValueError,tk.TclError):
+            return None
+
+    def _locate_selected_eigenvalue(self):
+        index=self._selected_eigenindex()
+        if index is None:
+            return
+        self.controller.locate_bifurcation(eigenindex=index)
 
     def _nearest_detected(self):
         """The bracketed bifurcation nearest the selected (or current) point, if any."""

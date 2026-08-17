@@ -730,6 +730,48 @@ def test_test_functions_discriminate_fold_from_branch_point():
     assert any("branch_point" in m or "fold" in m for m in logged), "detections are reported"
 
 
+def test_a_bifurcation_of_a_second_eigenvalue_does_not_look_stable():
+    """Passing a bifurcation must not be assumed to swap stable for unstable.
+
+    The Kuramoto-Sivashinsky hexdot branch is the case: past its fold it already has one unstable
+    eigenvalue, and the transcritical point at gamma = 0 belongs to a SECOND one - so what follows is
+    MORE unstable, not stable. The segmentation used to flip its notion of stability at every located
+    bifurcation, which drew that stretch as a stable branch.
+    """
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint)
+
+    def pt(mu, unstable, at_bifurcation=False):
+        # A located bifurcation is flagged by an exactly zero leading real part, as tracking leaves it.
+        lead = 0 + 0j if at_bifurcation else (0.5 + 0j if unstable else -0.5 + 0j)
+        p = BifurcationGUISolutionPoint(mu, {"u": mu}, lead, None, 0)
+        p.unstable_count = unstable
+        return p
+
+    b = BifurcationGUISolutionBranch(kind="solution", continuation_parameter="mu")
+    for mu, n in [(0.4, 1), (0.3, 1), (0.2, 1)]:      # already unstable, from an earlier fold
+        b.append(pt(mu, n))
+    b.append(pt(0.1, 1, at_bifurcation=True))          # a second eigenvalue crosses here
+    for mu, n in [(0.0, 2), (-0.1, 2), (-0.2, 2)]:     # now two unstable, still not stable
+        b.append(pt(mu, n))
+
+    _segs, stabs = b.to_branch_stab_list("u")
+    assert True not in stabs, \
+        "a branch that is unstable on both sides of a bifurcation must not be drawn stable: " + str(stabs)
+    assert False in stabs, "and it must still be drawn as unstable"
+
+    # The ordinary case still behaves: stable, a bifurcation, then unstable.
+    b2 = BifurcationGUISolutionBranch(kind="solution", continuation_parameter="mu")
+    for mu, n in [(0.4, 0), (0.3, 0)]:
+        b2.append(pt(mu, n))
+    b2.append(pt(0.2, 0, at_bifurcation=True))
+    for mu, n in [(0.1, 1), (0.0, 1)]:
+        b2.append(pt(mu, n))
+    _segs2, stabs2 = b2.to_branch_stab_list("u")
+    assert True in stabs2 and False in stabs2, "the plain case must still show both: " + str(stabs2)
+    assert stabs2.index(True) < stabs2.index(False), "stable first, then unstable"
+
+
 def test_stability_indicator_and_the_inferred_toggle():
     """The segmentation reads stability through one accessor, so quick-mode points can take part.
 

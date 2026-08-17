@@ -195,7 +195,13 @@ class BifurcationGUISolutionPoint:
         unstable count, and NaN while that is unknown - which the segmentation turns into the neutral
         style it already uses for a piece straddling a change of stability.
         """
+        if self.eig_value_Re==0:
+            return 0.0          # a LOCATED bifurcation: the boundary itself
         if self.stability_source==STABILITY_EIGEN:
+            # The count, when it is known, rather than the leading real part: they agree while the
+            # spectrum is sorted by descending real part, but the count says what it means.
+            if self.unstable_count is not None:
+                return 1.0 if self.unstable_count>0 else -1.0
             return float(self.eig_value_Re)
         if trust_inferred and self.stability_source==STABILITY_INFERRED and self.unstable_count is not None:
             return 1.0 if self.unstable_count>0 else -1.0
@@ -461,12 +467,24 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
             return res,[]
         if len(self)==1:
             return numpy.array([[coord(self[0])]]),[None]
+        # Precomputed, because the stability AFTER a bifurcation is read off the points that follow it
+        # rather than assumed to be the opposite of what came before. Flipping is wrong whenever the
+        # bifurcation belongs to a second eigenvalue: on a branch that is already unstable, a further
+        # eigenvalue crossing makes it MORE unstable, and flipping marked what follows as stable.
+        svs=[sv(p) for p in self]
+
+        def stability_from(index:int)->bool | None:
+            """Stability of the first point at or after `index` whose own stability is known."""
+            for j in range(index,len(svs)):
+                v=svs[j]
+                if not unknown(v) and v!=0:
+                    return bool(v<0)
+            return None
+
         currseg=[]
-        currstab=sv(self[0])<0
-        if unknown(sv(self[0])) or sv(self[0])==0:
-            currstab=sv(self[1])<0
-        for p1,p2 in zip(self,self[1:]):
-            s1,s2=sv(p1),sv(p2)
+        currstab=stability_from(0)
+        for ip,(p1,p2) in enumerate(zip(self,self[1:])):
+            s1,s2=svs[ip],svs[ip+1]
             if unknown(s1) or unknown(s2):
                 # Nothing can be claimed across a pair whose stability is not known on both sides, so
                 # it becomes the same neutral piece a change of stability produces.
@@ -476,7 +494,8 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
                     currseg=[]
                 res.append(numpy.array([coord(p1),coord(p2)]))
                 stabs.append(None)
-                currstab=(s2<0) if not unknown(s2) else currstab
+                if not unknown(s2) and s2!=0:
+                    currstab=bool(s2<0)
             elif s2==0:
                 if len(currseg)==0:
                     currseg.append(coord(p1))
@@ -484,7 +503,8 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
                 res.append(numpy.array(currseg))
                 stabs.append(currstab)
                 currseg=[]
-                currstab=not currstab
+                after=stability_from(ip+2)
+                currstab=after if after is not None else (None if currstab is None else not currstab)
             elif s1*s2>=0: # Same stability
                 if len(currseg)==0:
                     currseg.append(coord(p1))
@@ -496,7 +516,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
                     currseg=[]
                 res.append(numpy.array([coord(p1),coord(p2)]))
                 stabs.append(None)
-                currstab=s2<0
+                currstab=bool(s2<0)
         if len(currseg)>0:
             res.append(numpy.array(currseg))
             stabs.append(currstab)

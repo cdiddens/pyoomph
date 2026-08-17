@@ -731,9 +731,19 @@ class BifurcationController:
         branch=self.current_branch if self.current_branch is not None else self._new_branch()
         if eig_value is None and measured and det_sign is None and dparam_ds is None:
             spectrum=self.problem.get_last_eigenvalues()
-            eig_value=spectrum[0]
-            if eig_values is None:
-                eig_values=list(spectrum)
+            if spectrum is None or len(spectrum)==0:
+                # The eigensolve produced nothing - a shift-invert with shift 0 near a fold is the easy
+                # way to get there. The point itself is perfectly good, so it is recorded WITHOUT a
+                # spectrum rather than lost along with the rest of the sweep; its stability then reads as
+                # unknown, exactly like a quick-mode point, and can be filled in later with
+                # compute_spectrum().
+                self.log("Warning: the eigensolve returned no eigenvalues here, so this point has no "
+                         "spectrum. Its stability is unknown; a nonzero shift usually helps.")
+                eig_values=[]
+            else:
+                eig_value=spectrum[0]
+                if eig_values is None:
+                    eig_values=list(spectrum)
         elif eig_value is not None and eig_values is None:
             eig_values=[eig_value]
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step)))
@@ -1577,26 +1587,55 @@ class BifurcationController:
         self.step()
         self._last_ds=(-1 if self._last_ds<0 else 1)*min(abs(self._last_ds),abs(ds_backup))
 
-    def locate_bifurcation(self,pitchfork:bool=False):
+    def critical_eigenindex(self)->int:
+        """Index of the eigenvalue nearest the imaginary axis, i.e. the one about to cross.
+
+        NOT the leading one, which is what bifurcation tracking picks by default. The spectrum is sorted
+        by descending real part, so on a branch that is ALREADY unstable index 0 is the eigenvalue that
+        crossed at some earlier bifurcation, while the one about to cross next is further down. Tracking
+        the leading one there converges to the wrong thing - the Kuramoto-Sivashinsky hexdot branch past
+        its fold is exactly that case: the transcritical point at gamma = 0 belongs to the SECOND
+        eigenvalue.
+        """
+        evs=self.problem.get_last_eigenvalues()
+        if evs is None or len(evs)==0:
+            return 0
+        return int(numpy.argmin(numpy.abs(numpy.real(numpy.asarray(evs)))))
+
+    def locate_bifurcation(self,pitchfork:bool=False,eigenindex:int | None=None):
+        """Find the nearest bifurcation and record it.
+
+        ``eigenindex`` selects which eigenvalue is expected to cross; by default the one nearest the
+        imaginary axis (:py:meth:`critical_eigenindex`). Pass it explicitly to track a particular mode -
+        the eigenvalue list in the Points tab is there to read the index off.
+        """
         if self.on_locus():
             raise RuntimeError("Already following a bifurcation. Leave the locus first "
                                "(Bifurcation -> Leave the locus) to work on an ordinary branch.")
         self._status("BIFURCATION FINDING"+(" (PITCHFORK)" if pitchfork else ""))
         self.problem.solve_eigenproblem(self.neigen,self.shift)
-        self.problem.activate_bifurcation_tracking(self._paramname,"pitchfork" if pitchfork else None)
+        if eigenindex is None:
+            eigenindex=self.critical_eigenindex()
+        evs=self.problem.get_last_eigenvalues()
+        if evs is not None and len(evs)>eigenindex:
+            self.log("Tracking eigenvalue {:d} of {:d}: {:.4g}{:+.4g}i{:s}".format(
+                eigenindex,len(evs),numpy.real(evs[eigenindex]),numpy.imag(evs[eigenindex]),
+                "" if eigenindex==0 else "  (not the leading one - this branch is already unstable)"))
+        self.problem.activate_bifurcation_tracking(self._paramname,"pitchfork" if pitchfork else None,
+                                                   eigenvector=eigenindex)
         self.problem.solve(max_newton_iterations=20)
         self._add_current_state()
         self._update_tangents()
         self.problem.deactivate_bifurcation_tracking()
         self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point())
 
-    def locate_bifurcation_or_switch(self):
+    def locate_bifurcation_or_switch(self,eigenindex:int | None=None):
         """What ``b`` has always done: at a bifurcation, switch branch; otherwise, go find one."""
         if self.current_point is not None and self.current_point.eig_value_Re==0:
             self.branch_switch()
         else:
             try:
-                self.locate_bifurcation()
+                self.locate_bifurcation(eigenindex=eigenindex)
             except Exception as e:
                 # Bifurcation tracking must be switched off again, otherwise the augmented system
                 # stays active and every subsequent solve operates on the wrong problem.
