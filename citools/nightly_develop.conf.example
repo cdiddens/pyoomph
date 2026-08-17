@@ -68,8 +68,42 @@ PYTHON="python3"
 # Hard limits, in seconds. A hung solve otherwise keeps the lock until the next night.
 TIMEOUT_BUILD=7200           # 2 h
 TIMEOUT_PYTEST=7200          # 2 h  (the full suite is ~11 min when healthy)
+TIMEOUT_DOCS=5400            # 1.5 h (~1 min of pip, ~1 min of sphinx, ~6 min of xelatex)
 TIMEOUT_TUTORIALS=28800      # 8 h  (a full tutorial pass is over an hour when healthy)
 TIMEOUT_TUTORIALS_MPI=28800  # 8 h  (the same scripts again, under mpirun)
+
+# ---------------------------------------------------------------------- docs ----
+
+# The documentation is built the way Read the Docs builds it: a virtualenv created from
+# scratch for the run, with nothing in it but `pip install -r docs/requirements.txt`. That
+# is the point of the step -- it is the only thing that says whether that requirements file
+# is still sufficient, RTD having no other input, and the only thing that puts every
+# docstring through autodoc. It needs to reach PyPI; on a machine with no outbound network
+# set DOCS_ENABLED=0 rather than collecting one pip failure per night.
+#
+# The checkout is put in front of the venv on PYTHONPATH, so what is documented is develop
+# and not the pyoomph wheel that requirements file pulls in -- the wheel is only there to
+# bring pyoomph's own dependencies along. The report names the file it imported; if that is
+# ever not the one under REPO_DIR, the step stops rather than quietly documenting the last
+# release.
+DOCS_ENABLED=1
+
+# Run xelatex over the generated tutorial as well, which is what Read the Docs does for its
+# "formats: - pdf". Worth leaving on where TeX is installed: the HTML build excludes
+# latex_tutorial.rst, so without this nothing ever typesets the tutorial as one document,
+# and LaTeX reports a document that broke off half way only in its exit status -- a
+# truncated PDF is written and uploaded like any other. Skipped by itself, with a note in
+# the report, when latexmk or xelatex is not on PATH.
+DOCS_PDF=1
+
+# Sphinx warnings the docs step is not allowed to fail on, as an extended regular
+# expression matched against each warning line. Anything else fails the run, which is the
+# point: docs warnings are otherwise noticed by nobody. The default covers only the missing
+# preCICE bindings, which docs/requirements.txt deliberately does not ask for and Read the
+# Docs does not have either, so that warning is the state RTD builds in rather than
+# something develop broke. Adding to this list is a decision to stop being told; prefer
+# fixing the warning.
+#DOCS_IGNORE_WARNINGS='Failed to import pyoomph\.solvers\.precice_adapter|No module named .precice.|module .pyoomph\.solvers. has no attribute .precice_adapter.'
 
 # The tutorial scripts are run a second time under `mpirun -n N`, without --distribute, so
 # that every rank builds the whole mesh -- which is what a user gets who simply starts a

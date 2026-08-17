@@ -6,7 +6,8 @@
 #     0 1 * * *  /path/to/pyoomph/citools/nightly_develop.sh
 #
 # It fast-forwards an existing checkout to origin/develop, rebuilds, runs the full pytest
-# suite and the tutorial pipeline twice -- serially and under mpirun -- and mails the result
+# suite, builds the documentation in a virtualenv of its own, runs the tutorial pipeline twice
+# -- serially and under mpirun -- and mails the result
 # to MAIL_TO. If origin/develop has not moved since the last run it does nothing at all and
 # sends no mail, so a quiet inbox means "nobody pushed", not "the nightly died" -- check
 # $LOG_DIR/nightly.log if in doubt, every wake-up leaves a line there.
@@ -53,8 +54,16 @@ ENV_SETUP=""
 PYTHON="python3"
 TIMEOUT_BUILD=7200
 TIMEOUT_PYTEST=7200
+TIMEOUT_DOCS=5400
 TIMEOUT_TUTORIALS=28800
 TIMEOUT_TUTORIALS_MPI=28800
+DOCS_ENABLED=1
+DOCS_PDF=1   # also run xelatex over the generated tutorial; skipped by itself without latexmk
+# Sphinx warnings the docs step is not allowed to fail on, as an extended regular expression.
+# Only preCICE by default: its Python bindings need the preCICE library, docs/requirements.txt
+# deliberately does not ask for it, and Read the Docs does not have it either -- so that one
+# warning is the state RTD builds in rather than something develop broke.
+DOCS_IGNORE_WARNINGS='Failed to import pyoomph\.solvers\.precice_adapter|No module named .precice.|module .pyoomph\.solvers. has no attribute .precice_adapter.'
 TUTORIAL_MPI_RANKS=4   # second tutorial pass under mpirun -n N; 0 switches it off
 MAIL_TO=""   # empty means "do not send"; set it in the config file, not here
 MAIL_FROM="pyoomph-nightly@$(hostname -f 2>/dev/null || hostname)"
@@ -646,6 +655,145 @@ else
     step_line "pytest --full" "skipped (build failed)"
 fi
 
+# ----------------------------------------------------------------------- docs ---
+#
+# The documentation, built the way Read the Docs builds it: an empty virtualenv with nothing in
+# it but `pip install -r docs/requirements.txt`. That answers two questions the rest of the
+# nightly never asks. Whether that requirements file is still sufficient -- it is RTD's only
+# input, so a dependency that is satisfied here merely because the interactive environment
+# happens to have it is a broken RTD build waiting for the next rebuild there. And whether the
+# docstrings still survive autodoc, which imports and introspects every module in the package.
+#
+# One deliberate departure from RTD: the checkout goes in front of the venv on PYTHONPATH, so
+# what gets documented is develop rather than the pyoomph wheel docs/requirements.txt pulls from
+# PyPI. The requirement stays in place regardless -- it is what installs pyoomph's own runtime
+# dependencies (numpy, scipy, meshio, pygmsh, matplotlib), which the checkout needs in order to
+# import at all; only the package itself is shadowed. Without this the step would document the
+# last release and could not possibly fail on anything develop did. It is not a hypothetical
+# difference: against the 0.1.9 wheel, autodoc cannot import pyoomph.equations.additional,
+# .stabilization, .stabilized_ns, .viscoelastic or pyoomph.meshes.tqmesh, because they are newer
+# than the release -- which is also why those API pages are empty on readthedocs.io.
+#
+# mpi4py on top of the requirements, for the same reason: a development build has no
+# pyoomph/NO_MPI marker, so `import pyoomph` takes generic/mpi.py's MPI branch. The wheel does
+# have the marker, hence neither docs/requirements.txt nor RTD needs mpi4py.
+#
+# Both builders run. The HTML build excludes latex_tutorial.rst (exclude_patterns in conf.py),
+# so the LaTeX build is the only thing that ever looks at the master document RTD turns into the
+# tutorial PDF -- and running xelatex on top of it is the only thing that catches what a caption
+# does to hyperref. A truncated PDF is not a build failure to LaTeX: it writes the pages it got
+# through and reports the error only in its exit status, which is why DOCS_PDF is worth having.
+#
+# Sphinx is not given -W. Its warnings are collected from the log and matched against
+# DOCS_IGNORE_WARNINGS instead, so that the one warning RTD also lives with (no preCICE) does not
+# have to turn the whole nightly red, while anything new still does.
+
+DOCS_RC=0
+DOCS_SECS=0
+DOCS_WARNINGS=""
+DOCS_IGNORED=""
+DOCS_SKIPPED=""
+DOCS_PDF_SKIPPED=""
+DOCS_VENV=""
+DOCS_DOCUMENTED=""
+if [ "$BUILD_RC" -ne 0 ]; then
+    step_line "docs" "skipped (build failed)"
+    DOCS_SKIPPED="the build failed"
+elif [ "${DOCS_ENABLED:-1}" = "0" ]; then
+    step_line "docs" "skipped (switched off)"
+    DOCS_SKIPPED="DOCS_ENABLED=0 switches the docs step off"
+else
+    DOCS_VENV="${NIGHTLY_TMPDIR:-${TMPDIR:-/tmp}}/docs-venv"
+    _docs_pdf_cmd=""
+    if [ "${DOCS_PDF:-1}" != "0" ]; then
+        if command -v latexmk >/dev/null 2>&1 && command -v xelatex >/dev/null 2>&1 &&
+           command -v make >/dev/null 2>&1; then
+            # The Makefile sphinx writes next to the .tex already knows the engine (xelatex, see
+            # latex_engine in conf.py) and the number of passes. -f is deliberately NOT passed:
+            # forcing latexmk past an error is exactly how a half-typeset PDF comes to look like a
+            # successful build.
+            _docs_pdf_cmd="echo '=== latexmk (xelatex) ==='
+make -C $(printf '%q' "$RUN_DIR/docs_latex") all-pdf"
+        else
+            DOCS_PDF_SKIPPED="latexmk, xelatex or make is not on PATH"
+        fi
+    else
+        DOCS_PDF_SKIPPED="DOCS_PDF=0 switches the PDF pass off"
+    fi
+
+    # LC_ALL=C: sphinx translates its own console output, and this log is both parsed and quoted
+    # into the report -- on this machine it otherwise ends with "build abgeschlossen" and the mail
+    # comes out in two languages. LANGUAGE=en, the usual way to ask for that, does nothing here:
+    # sphinx picks its catalogue from locale.getlocale() rather than through gettext's own
+    # environment search, and only LC_ALL/LANG reach that. PYTHONUTF8=1 comes with it because
+    # plain LC_ALL=C would otherwise make ASCII the default encoding for every file sphinx opens
+    # without saying so, and C.UTF-8 is not present everywhere.
+    #
+    # The venv lives under the per-run scratch rather than in the checkout: the next run wipes that
+    # directory anyway, and a stray directory inside REPO_DIR would make the following night abort
+    # on a dirty checkout.
+    run_step docs "$RUN_DIR/docs.log" "$TIMEOUT_DOCS" "
+set -o pipefail
+export LC_ALL=C PYTHONUTF8=1
+# The nightly exports the PYTHONPATH it read out of ~/.bashrc, and a virtualenv does not shadow
+# it -- entries on PYTHONPATH come before the venv's own site-packages. Leaving it in place makes
+# 'fresh environment' untrue: here it put the PETSc build's petsc4py and slepc4py in front of
+# everything, which pip duly resolved against ('slepc4py requires numpy<2'). Clear it, and set it
+# to the checkout alone once the installing is done.
+unset PYTHONPATH
+rm -rf $(printf '%q' "$DOCS_VENV") || exit 1
+$(printf '%q' "$PYTHON") -m venv $(printf '%q' "$DOCS_VENV") || exit 1
+echo '=== pip install -r docs/requirements.txt ==='
+$(printf '%q' "$DOCS_VENV/bin/python") -m pip install -r $(printf '%q' "$REPO_DIR/docs/requirements.txt") || exit 1
+echo '=== pip install mpi4py (the checkout is an MPI build; the wheel is not) ==='
+$(printf '%q' "$DOCS_VENV/bin/python") -m pip install mpi4py || exit 1
+export PYTHONPATH=$(printf '%q' "$REPO_DIR")
+echo '=== which pyoomph is being documented ==='
+$(printf '%q' "$DOCS_VENV/bin/python") -c 'import os,sys,pyoomph,pyoomph._version
+f=os.path.realpath(pyoomph.__file__); repo=os.path.realpath(sys.argv[1])
+print(\"documenting\", f, pyoomph._version.__version__)
+if not f.startswith(repo+os.sep):
+    sys.exit(\"NOT the checkout under \"+repo+\" -- PYTHONPATH did not win over the installed wheel, \"
+             \"so this would have documented the last release rather than the branch under test\")' $(printf '%q' "$REPO_DIR") || exit 1
+echo '=== sphinx -b html ==='
+$(printf '%q' "$DOCS_VENV/bin/python") -m sphinx -b html $(printf '%q' "$REPO_DIR/docs/source") $(printf '%q' "$RUN_DIR/docs_html") || exit 1
+echo '=== sphinx -b latex ==='
+$(printf '%q' "$DOCS_VENV/bin/python") -m sphinx -b latex $(printf '%q' "$REPO_DIR/docs/source") $(printf '%q' "$RUN_DIR/docs_latex") || exit 1
+$_docs_pdf_cmd"
+    DOCS_RC=$STEP_RC
+    DOCS_SECS=$STEP_SECS
+
+    DOCS_DOCUMENTED="$(grep -m1 '^documenting ' "$RUN_DIR/docs.log" 2>/dev/null)"
+    # Only from the first sphinx marker onwards, and only sphinx's own two shapes -- a bare
+    # "WARNING: ..." and a "<file>:<line>: WARNING: ...". pip writes WARNING: lines of its own
+    # (a new version of itself is available, a hash could not be checked), and those would
+    # otherwise fail the run for nothing. LaTeX writes "LaTeX Warning:", which does not match.
+    _docs_warn_all="$(sed -n '/^=== sphinx -b html ===$/,$p' "$RUN_DIR/docs.log" 2>/dev/null |
+                      grep -E '(^|: )WARNING:' | sort -u)"
+    # An empty DOCS_IGNORE_WARNINGS means "ignore nothing", which is not what an empty pattern
+    # does to grep -- that matches every line and would silence the whole step.
+    _docs_ignore="${DOCS_IGNORE_WARNINGS:-\$^}"
+    if [ -n "$_docs_warn_all" ]; then
+        DOCS_IGNORED="$(printf '%s\n' "$_docs_warn_all" | grep -E "$_docs_ignore")"
+        DOCS_WARNINGS="$(printf '%s\n' "$_docs_warn_all" | grep -vE "$_docs_ignore")"
+    fi
+
+    if [ "$DOCS_RC" -ne 0 ]; then
+        FAILED_STEPS+=("docs")
+        step_line "docs" "FAILED (rc=$DOCS_RC)" "$DOCS_SECS"
+    elif [ -n "$DOCS_WARNINGS" ]; then
+        FAILED_STEPS+=("docs")
+        step_line "docs" "FAILED ($(printf '%s\n' "$DOCS_WARNINGS" | wc -l) warnings)" "$DOCS_SECS"
+    else
+        step_line "docs" "ok" "$DOCS_SECS"
+        # Only on success -- a failed step is worth being able to look at and re-run by hand. The
+        # venv is 220 MB and the two output trees another 200 MB; kept for all KEEP_RUNS runs that
+        # would be several gigabytes of rendered HTML nobody reads, while docs.log, which is what
+        # the report quotes, is small and stays.
+        rm -rf "$DOCS_VENV" "$RUN_DIR/docs_html" "$RUN_DIR/docs_latex"
+    fi
+fi
+
 # ------------------------------------------------------------------ tutorials ---
 #
 # Two passes over the same set of scripts: serially, and -- unless TUTORIAL_MPI_RANKS is 0 or
@@ -797,6 +945,12 @@ if [ ${#FAILED_STEPS[@]} -eq 0 ]; then
     if [ -n "$MPI_TUTORIALS_SKIPPED" ] && [ "$BUILD_RC" -eq 0 ]; then
         SKIPNOTE="${SKIPNOTE:+$SKIPNOTE and }the MPI tutorial pass"
     fi
+    # The step not running at all, but not its PDF pass alone: TeX is a far less usual thing for a
+    # numerics machine to have than mpirun, and a permanent "but ... were SKIPPED" in every subject
+    # line teaches people to stop reading it. Coverage below names the PDF either way.
+    if [ -n "$DOCS_SKIPPED" ] && [ "$BUILD_RC" -eq 0 ]; then
+        SKIPNOTE="${SKIPNOTE:+$SKIPNOTE and }the docs build"
+    fi
     if [ -n "$TUT_SKIPS_ALL" ]; then
         SKIPNOTE="${SKIPNOTE:+$SKIPNOTE and }$(printf '%s\n' "$TUT_SKIPS_ALL" | wc -l) tutorial script(s)"
     fi
@@ -853,6 +1007,25 @@ if [ "$BUILD_RC" -eq 0 ]; then
     else
         say "  PETSc: real $PETSC_DIR/$PETSC_ARCH_REAL, complex $PETSC_DIR/$PETSC_ARCH_COMPLEX"
         say "         pytest ran against the complex build (PYTHONPATH=$PYTEST_PYTHONPATH)"
+    fi
+    if [ -n "$DOCS_SKIPPED" ]; then
+        say "  docs: NOT BUILT -- $DOCS_SKIPPED"
+    else
+        # Which pyoomph autodoc actually got hold of. The step refuses to continue when it is not
+        # the checkout, but the line is worth having in the report either way: "documented the last
+        # release" and "documented develop" produce the same green tick otherwise.
+        say "  docs: ${DOCS_DOCUMENTED:-(the build did not get as far as importing pyoomph)}"
+        say "        built in a fresh virtualenv from docs/requirements.txt (+ mpi4py), HTML and LaTeX"
+        if [ -n "$DOCS_PDF_SKIPPED" ]; then
+            say "        PDF: NOT RUN -- $DOCS_PDF_SKIPPED. Nothing then typesets latex_tutorial.rst,"
+            say "             which the HTML build excludes, so only its RST is checked."
+        else
+            say "        PDF: xelatex run over the generated tutorial as well"
+        fi
+        if [ -n "$DOCS_IGNORED" ]; then
+            say "        warnings ignored (DOCS_IGNORE_WARNINGS):"
+            printf '%s\n' "$DOCS_IGNORED" | sed 's/^/          /' >>"$REPORT"
+        fi
     fi
     if [ -n "$PYTEST_SKIPS" ]; then
         say "  skipped by pytest:"
@@ -928,6 +1101,9 @@ if [ "$VERDICT" = "PASS" ]; then
     else
         say "Tutorial pipeline: all scripts ran, serially and under mpirun -n $TUTORIAL_MPI_RANKS."
     fi
+    if [ -z "$DOCS_SKIPPED" ]; then
+        say "Documentation: built from docs/requirements.txt in a clean virtualenv, no new warnings."
+    fi
     say "(preCICE runs still need a manual check.)"
 else
     if [ "$BUILD_RC" -ne 0 ]; then
@@ -962,6 +1138,27 @@ else
             say "(no FAILED/ERROR lines -- pytest itself did not get that far)"
             quote_log "$RUN_DIR/pytest.log" "pytest"
         fi
+    fi
+
+    if [ "$DOCS_RC" -ne 0 ] || [ -n "$DOCS_WARNINGS" ]; then
+        say ""
+        say "DOCS FAILED"
+        say "==========="
+        if [ -n "$DOCS_WARNINGS" ]; then
+            say "Sphinx warnings that are not on the DOCS_IGNORE_WARNINGS list:"
+            say ""
+            printf '%s\n' "$DOCS_WARNINGS" >>"$REPORT"
+            say ""
+        fi
+        if [ "$DOCS_RC" -ne 0 ]; then
+            # pip needs the network, and a machine that has none fails here every night with a
+            # perfectly ordinary-looking error a long way up the log.
+            say "The step itself exited $DOCS_RC. If it died in the pip install, check that this"
+            say "machine can reach PyPI at all before looking at docs/requirements.txt."
+            quote_log "$RUN_DIR/docs.log" "docs"
+        fi
+        [ -n "$DOCS_VENV" ] && [ -d "$DOCS_VENV" ] &&
+            say "(the virtualenv is left at $DOCS_VENV until the next run, to re-run the build by hand)"
     fi
 
     for i in "${!PASS_LABELS[@]}"; do
