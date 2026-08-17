@@ -39,6 +39,26 @@ pitchfork the determinant flips while `dp/ds` stays at `+1.000` throughout. **A 
 would pass a pitchfork in silence**, which is why `quick_mode_detector="folds_only"` exists but is not
 the default.
 
+### Transcritical and pitchfork share one signature
+
+Both are a single real eigenvalue crossing zero on a branch that does **not** turn in the parameter, so
+the two test functions cannot tell them apart and both are reported as `"branch_point"`. That is a
+statement about the test functions, not a gap: refining the bracket with the ordinary
+`locate_bifurcation` and `classify_bifurcations=True` then names it, because `NormalFormCalculator`
+distinguishes fold / transcritical / pitchfork from the normal-form coefficients.
+
+Measured on `du/dt = mu*u - u^2` (branches `u=0` and `u=mu` crossing at `mu=0`): quick mode reports a
+`branch_point` in the bracket containing `mu=0` with `dp/ds` constant at `+1.000` throughout, the
+propagated unstable count steps 0 -> 1 across it, and refining lands at `mu = 0.000e+00` with the normal
+form naming it `transcritical`.
+
+### What a sign test cannot see
+
+**An EVEN number of crossings in one step.** The determinant's sign returns to where it started, so two
+bifurcations passed in a single step - or a pitchfork and a fold together - are reported as none at all.
+This is inherent to any sign-based test function and the remedy is the usual one: a smaller `ds` where
+the diagram looks suspicious, or a back-filled spectrum along the stretch in question.
+
 **A Hopf is invisible to both.** A complex pair crossing leaves the determinant's sign alone and does not
 turn the parameter. That is the price of not eigensolving, and it is the reason inferred stability is
 labelled inferred rather than drawn as fact.
