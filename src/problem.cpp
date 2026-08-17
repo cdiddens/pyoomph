@@ -1759,6 +1759,18 @@ namespace pyoomph
 				residuals[i] = info.residuals[i];
 
 			//       std::cout << "BUILD J  "<< info.residuals.size() << "  " << info.Jcolumn_index.size() << "  " << info.Jrow_start.size() << std::endl;
+			// The distribution has to be set up first, exactly like the residuals above: the build()
+			// overload below writes nrow_local() rows and takes that from the distribution, so an
+			// unbuilt one makes it write a full row_start array into a zero-row matrix. Every call
+			// coming out of a Newton solve hands in a matrix oomph-lib has already distributed, which
+			// is why this went unnoticed; _assemble_residual_jacobian(), i.e. Problem.assemble_jacobian()
+			// from Python, passes a fresh CRDoubleMatrix and segfaulted whenever a Python-side custom
+			// assembler (a CustomBifurcationTracker, deflation, ...) was installed.
+			if (!jacobian.distribution_built())
+			{
+				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
+				jacobian.build(&dist);
+			}
 			jacobian.build(info.residuals.size(), info.Jvals, info.Jcolumn_index, info.Jrow_start);
 			//       std::cout << "DONE BUILD J" << std::endl;
 			if (!this->dirichlets_by_removing_from_dof_vector)
