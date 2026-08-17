@@ -1255,6 +1255,12 @@ namespace oomph
     // Doc time for solve
     double t_factorise_start = TimingHelpers::timer();
 
+    //FOR PYOOMPH: read the size before factorising. On more than one process
+    // solve(Problem*) forces Dist_delete_matrix_data, so factorise_distributed()
+    // clear()s the Jacobian to free it before the solve; the timing line below then
+    // reported "ndof=0" for every distributed Newton step.
+    unsigned long n_row_before_factorise = matrix_pt->nrow();
+
     // Factorise the matrix
     factorise(matrix_pt);
 
@@ -1332,7 +1338,7 @@ namespace oomph
         << TimingHelpers::convert_secs_to_formatted_string(factorise_time)
         << "\nTime for back-substitution: "
         << TimingHelpers::convert_secs_to_formatted_string(backsub_time)
-        << "\nTime for LinearSolver solve (ndof=" << matrix_pt->nrow() << "): " //FOR PYOOMPH: Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
+        << "\nTime for LinearSolver solve (ndof=" << n_row_before_factorise << "): " //FOR PYOOMPH: Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
         << TimingHelpers::convert_secs_to_formatted_string(Solution_time)
         << std::endl;
     }
@@ -1738,6 +1744,9 @@ namespace oomph
     // Doc time for solve
     double t_factorise_start = TimingHelpers::timer();
 
+    //FOR PYOOMPH: read the size before factorising -- see the same guard in solve()
+    unsigned long n_row_before_factorise = matrix_pt->nrow();
+
     // Factorise the matrix
     factorise(matrix_pt);
 
@@ -1814,7 +1823,7 @@ namespace oomph
         << TimingHelpers::convert_secs_to_formatted_string(factorise_time)
         << "\nTime for back-substitution: "
         << TimingHelpers::convert_secs_to_formatted_string(backsub_time)
-        << "\nTime for LinearSolver solve (ndof=" << matrix_pt->nrow() << "): " //FOR PYOOMPH: Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
+        << "\nTime for LinearSolver solve (ndof=" << n_row_before_factorise << "): " //FOR PYOOMPH: Replaced SuperLUSolver by LinearSolver, since it is not always superlu doing the job
         << TimingHelpers::convert_secs_to_formatted_string(Solution_time)
         << std::endl;
     }

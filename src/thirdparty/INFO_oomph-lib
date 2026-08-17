@@ -642,3 +642,18 @@ It surfaced now because pyoomph's second spatial derivatives (grad(grad(...)), d
 partial_x(...,2)) are the first thing in the tree to call d2shape_local at all - the whole
 d2shape_* family is dead code in the vendored subset otherwise.
 Upstream equivalent: none yet; this is a genuine bug in oomph-lib and should be reported upstream.
+
+linear_solver.cc (Changed on 17th August 2026, "ndof=0" in the distributed solve timing line):
+SuperLUSolver::solve(DoubleMatrixBase*) and solve_transpose(DoubleMatrixBase*) print the size of the
+system they just solved as "matrix_pt->nrow()", read after factorise() has returned. On more than one
+process SuperLUSolver::solve(Problem*) forces Dist_delete_matrix_data to true, so
+factorise_distributed() caches ndof and first_row and then calls cr_matrix_pt->clear() to release the
+Jacobian before the (possibly memory-hungry) factorisation runs. nrow() therefore reads a cleared
+matrix and every Newton step of every mpirun'd script reported
+"Time for LinearSolver solve (ndof=0)" -- e.g. docs/source/tutorial/multidom/simple_fsi.py at 2 ranks,
+whose Problem::newton_solve line two lines further down correctly said ndof=17167. Purely a reporting
+artifact: the solve itself is handed the cached ndof and is unaffected. Serial runs go through
+factorise_serial(), which does not clear, and always printed the right number.
+The row count is now taken before factorise() and printed from that.
+Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one, but
+upstream only hits it on the SuperLU_DIST path.
