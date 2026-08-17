@@ -104,6 +104,7 @@ class PlotterPane:
         self._log=log
         self.frame=ttk.Frame(master)
         header=ttk.Frame(self.frame)
+        self._header=header
         header.pack(side=tk.TOP,fill=tk.X)
         ttk.Label(header,text=title,padding=(4,2)).pack(side=tk.LEFT)
         self.status_var=tk.StringVar(value="")
@@ -118,6 +119,106 @@ class PlotterPane:
         self.nav.update()
         self.nav.pack(side=tk.BOTTOM,fill=tk.X)
         self._drawn_once=False
+
+        #: The rectangle the user zoomed/panned to, imposed on every later render. None means "use
+        #: whatever the plot definition asks for".
+        self._locked_view:tuple[float,float,float,float] | None=None
+        self.canvas.mpl_connect("button_release_event",self._on_release)
+        # Home means "back to the plot's own view", so it also drops the lock.
+        self._nav_home=self.nav.home
+        self.nav.home=self._home   #type:ignore[method-assign]
+        self._wire_toolbar_buttons()
+
+    def _wire_toolbar_buttons(self):
+        """Point the toolbar's Home/Back/Forward at our own handlers.
+
+        Reassigning ``nav.home`` alone is not enough: matplotlib binds each button's command at
+        construction time, so the Home BUTTON keeps calling the original method. It would then reset
+        the axes while leaving the view lock in place, and the next replot would silently snap back to
+        the locked rectangle. Verified against matplotlib 3.10.
+        """
+        buttons=getattr(self.nav,"_buttons",None)
+        wired=False
+        if isinstance(buttons,dict):
+            home=buttons.get("Home")
+            if home is not None:
+                home.configure(command=self._home)
+                wired=True
+            for name in ("Back","Forward"):
+                btn=buttons.get(name)
+                original=getattr(self.nav,name.lower(),None)
+                if btn is not None and original is not None:
+                    btn.configure(command=lambda o=original: self._nav_history(o))
+        if not wired:
+            # Private API that has moved before; without it there must still be a way to unlock.
+            ttk.Button(self._header,text="Reset view",command=self._home).pack(side=tk.RIGHT,padx=2)
+
+    def _nav_history(self,original):
+        """Back/Forward step between the user's own views, so the new one becomes the locked one."""
+        original()
+        ax=self._main_axes()
+        if ax is not None:
+            xl,yl=ax.get_xlim(),ax.get_ylim()
+            self._locked_view=(float(xl[0]),float(xl[1]),float(yl[0]),float(yl[1]))
+            self.status_var.set("view locked")
+            self.refresh()
+
+    # ---------------------------------------------------------------- view locking
+
+    def _main_axes(self):
+        """The field axes: created first by the plotter, before any colorbar is added."""
+        return self.figure.axes[0] if self.figure.axes else None
+
+    def _on_release(self,_event):
+        # nav.mode is truthy only while zoom-rect or pan is armed, so this fires for a deliberate
+        # view change and not for an ordinary click.
+        if not self.nav.mode:
+            return
+        ax=self._main_axes()
+        if ax is None:
+            return
+        xl,yl=ax.get_xlim(),ax.get_ylim()
+        self._locked_view=(float(xl[0]),float(xl[1]),float(yl[0]),float(yl[1]))
+        self.status_var.set("view locked")
+
+    def _impose_locked_view(self)->Callable[[],None]:
+        """Make the plot definition's set_view() call return the user's rectangle instead.
+
+        Interception rather than pre-setting ``plotter.xmin..ymax``, because ``define_plot`` normally
+        calls ``set_view`` itself on every render and would overwrite anything set beforehand.
+
+        Doing it this way - rather than fixing up the axes limits afterwards - is what makes the colour
+        scale follow the zoom: the range of a colorbar is taken from the data *inside* the plotter's
+        view (``get_visible_data_range``), so imposing the view early means the range, the aspect
+        handling and the drawn field are all computed for the region actually on screen.
+        """
+        if self._locked_view is None:
+            return lambda: None
+        xmin,xmax,ymin,ymax=self._locked_view
+        original=self.plotter.set_view
+
+        def forced(*_args,**_kwargs):
+            return original(xmin=xmin,xmax=xmax,ymin=ymin,ymax=ymax)
+
+        self.plotter.set_view=forced   #type:ignore[method-assign]
+
+        def restore():
+            try:
+                del self.plotter.set_view
+            except AttributeError:
+                self.plotter.set_view=original   #type:ignore[method-assign]
+        return restore
+
+    def _home(self,*args,**kwargs):
+        """Toolbar Home: release the lock and re-render with the plot's own view.
+
+        Re-rendering rather than only resetting the axes, because the colour range is computed from
+        the data inside the view - going back to the full view has to recompute it.
+        """
+        self._locked_view=None
+        self.status_var.set("")
+        self._nav_home(*args,**kwargs)
+        self.refresh()
 
     def destroy(self):
         try:
@@ -156,10 +257,18 @@ class PlotterPane:
                 return False
 
         previous=plt.get_fignums()
+        restore_view=self._impose_locked_view()
         try:
             self.figure.clf()
             plt.figure(self._number)           # aim the plotter's plt.gcf()/plt.gca() at this figure
             self.plotter.plot_into_current_figure()
+            if self._locked_view is not None:
+                # Also applied directly, for a plot definition that never calls set_view at all and
+                # would otherwise autoscale back to the full data on each render.
+                ax=self._main_axes()
+                if ax is not None:
+                    ax.set_xlim(self._locked_view[0],self._locked_view[1])
+                    ax.set_ylim(self._locked_view[2],self._locked_view[3])
             if getattr(self.plotter,"_has_invalid_triangulation",False):
                 self._message("The mesh could not be triangulated for plotting")
                 self.status_var.set("invalid triangulation")
@@ -179,6 +288,7 @@ class PlotterPane:
                     self._log("    "+line)
             return False
         finally:
+            restore_view()
             # A plot definition may create figures of its own; anything it left behind would leak.
             for num in plt.get_fignums():
                 if num not in previous and num!=self._number:
