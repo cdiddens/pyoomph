@@ -50,7 +50,13 @@ The parts are separated so that everything except the window can be driven headl
 * :py:mod:`~pyoomph.utils.bifurcation_gui.controller` - continuation, bifurcation tracking, storage,
 * :py:mod:`~pyoomph.utils.bifurcation_gui.plotter` - the matplotlib rendering,
 * :py:mod:`~pyoomph.utils.bifurcation_gui.tkapp` - the tkinter/ttk user interface,
-* :py:mod:`~pyoomph.utils.bifurcation_gui.actions` - commands and their keyboard shortcuts.
+* :py:mod:`~pyoomph.utils.bifurcation_gui.actions` - commands and their keyboard shortcuts,
+* :py:mod:`~pyoomph.utils.bifurcation_gui.panes` - the problem's own field plots, shown live.
+
+If the problem carries a plotter (or a list of them, which ``Problem.plotter`` accepts), each one is
+rendered next to the diagram and re-drawn as you move along a branch, so there is no need to leave the
+window to see what the solution looks like. Eigenfunction views are derived from the same plot
+definition on demand under *View -> Field plots*.
 """
 
 from ...generic import Problem

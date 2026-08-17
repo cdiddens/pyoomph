@@ -469,6 +469,90 @@ def test_legacy_state_file_reports_the_slice_as_unknown():
     assert modern.describe_slice() == "no other parameters"
 
 
+def test_embedded_plot_hook_leaves_the_figure_open(tmp_path):
+    """MatplotlibPlotter.plot_into_current_figure must draw and then get out of the way.
+
+    Deliberately checked with a trivial plot definition and no display: the mechanics that can break
+    an embedded pane are the file write, the restoring of file_trunk, and above all the plt.close()
+    that _after_plot does for a plot written to file - a closed figure would leave every pane in the
+    GUI permanently blank. The real 2D render (mesh, colorbar, set_view) is covered by the GUI smoke
+    script, which needs a display.
+    """
+    import glob
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from pyoomph.output.plotting import MatplotlibPlotter
+
+    class LinePlotter(MatplotlibPlotter):
+        def define_plot(self):
+            plt.plot([0, 1, 2], [0, 1, 0])
+
+    with FoldProblem() as problem:
+        problem.set_output_directory(str(tmp_path))
+        problem.initialise()
+        pl = LinePlotter()
+        pl._problem = problem
+        pl._named_problems[""] = problem
+
+        fig = plt.figure(figsize=(3, 2))
+        num = fig.number
+        plt.figure(num)
+        trunk_before = pl.file_trunk
+        pl.plot_into_current_figure()
+
+        assert num in plt.get_fignums(), "the figure must NOT be closed - a pane would go blank"
+        assert plt.gcf() is fig, "the plot went into the figure we made current"
+        assert len(fig.axes) == 1 and len(fig.axes[0].lines) == 1
+        assert pl.file_trunk == trunk_before, "file_trunk is restored so normal output still works"
+        assert pl._embedded is False
+        assert glob.glob(os.path.join(str(tmp_path), "_plots", "*")) == [], "nothing may be written"
+
+        # Re-rendering into the same figure must not accumulate axes.
+        fig.clf()
+        plt.figure(num)
+        pl.plot_into_current_figure()
+        assert len(fig.axes) == 1
+
+        # And save() now refuses instead of raising an AttributeError on a None trunk.
+        pl.file_trunk = None
+        import pytest
+        with pytest.raises(RuntimeError):
+            pl.save()
+        plt.close(num)
+
+
+def test_eigenfunction_plotter_is_derived_from_the_source():
+    """An eigenfunction pane reuses the plot definition rather than asking for it twice."""
+    from pyoomph.output.plotting import MatplotlibPlotter
+    from pyoomph.utils.bifurcation_gui.panes import derive_eigenfunction_plotter
+
+    class Custom(MatplotlibPlotter):
+        # A user's plotter may take its own constructor arguments, which is why the clone is a copy
+        # rather than type(source)(...) - that would have to guess this signature.
+        def __init__(self, scale, **kwargs):
+            super().__init__(**kwargs)
+            self.scale = scale
+
+        def define_plot(self):
+            pass
+
+    src = Custom(2.5)
+    src._range_objects["h"] = object()
+    clone = derive_eigenfunction_plotter(src, eigenvector=0, eigenmode="imag")
+
+    assert isinstance(clone, Custom) and clone.scale == 2.5, "subclass and its own state survive"
+    assert (clone.eigenvector, clone.eigenmode) == (0, "imag")
+    assert clone.file_trunk is None, "a derived plotter never writes files"
+    assert clone._range_objects == {} and clone._range_objects is not src._range_objects, \
+        "sharing the range objects would tie the panes' colour scales together"
+    assert clone._added_parts is not src._added_parts
+    assert not clone._initialised
+    # The source must be left exactly as the script wrote it.
+    assert src.eigenvector is None and src.eigenmode == "abs"
+    assert src.file_trunk is not None and "h" in src._range_objects
+
+
 def test_branch_describes_itself():
     """A branch list has to say what each branch IS, not merely how many points it holds.
 

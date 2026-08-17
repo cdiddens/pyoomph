@@ -2426,8 +2426,10 @@ class MatplotlibPlotter(BasePlotter):
         self.ymax:float | None=None
         self.aspect_ratio=True
         self.fullscreen=True
-        #: A format string to save the plot to. The output step will be inserted into the format string
-        self.file_trunk=filetrunk
+        #: A format string to save the plot to. The output step will be inserted into the format string.
+        #: ``None`` means "do not write a file at all", which _after_plot has always honoured - the
+        #: annotation only records what the guard there already implied.
+        self.file_trunk:str | None=filetrunk
         #: File extension to save the plot. Can also be a list for multiple simultaneous file formats
         self.file_ext=fileext
         #: Size of the plot in pixels
@@ -2452,6 +2454,9 @@ class MatplotlibPlotter(BasePlotter):
         self.position_eigen_scale=position_eigen_scale
         self.eigenscale=eigenscale
         self._output_dir="_plots"
+        #: Set while :py:meth:`plot_into_current_figure` runs, so the figure is left open for the
+        #: caller's canvas rather than closed as it is after a plot written to file.
+        self._embedded=False
         self._eigenfactor_right=None # Optional complex values to scale the eigenvector for the eigendynamics animation
         self._eigenfactor_left=None 
         self._eigenvector_for_animation=None
@@ -2498,6 +2503,9 @@ class MatplotlibPlotter(BasePlotter):
             return
         pdir=os.path.join(self.get_problem().get_output_directory(),self._output_dir)
         if fname is None:
+            if self.file_trunk is None:
+                raise RuntimeError("Cannot save this plot: file_trunk is None, i.e. this plotter is "
+                                   "set up not to write files. Pass an explicit fname.")
             os.makedirs(pdir,exist_ok=True)
             file_exts=self.file_ext
             if not isinstance(file_exts,(list,tuple,set)):
@@ -2972,8 +2980,33 @@ class MatplotlibPlotter(BasePlotter):
         if self.file_trunk is not None:
             self.save()
         #print("PLOT SAVED")
-        plt.close() #type:ignore
+        if not self._embedded:
+            plt.close() #type:ignore
         #print("PLOT CLOSED")
+
+    def plot_into_current_figure(self):
+        """Render into the figure that is currently active, instead of writing it to a file.
+
+        This is what lets a plot be shown live in a window (the bifurcation GUI embeds one figure per
+        plotter): the caller makes its own figure current and gets the plot drawn into it, with no file
+        written and - crucially - the figure left open, since :py:meth:`_after_plot` otherwise closes
+        it and an embedded canvas would be emptied.
+
+        The plot definition itself is untouched, so a plotter written for file output needs no change.
+        Note that ``image_size``/``dpi`` only shape a saved image; on screen the geometry is kept by
+        the equal aspect ratio that is applied to the axes anyway, so the figure may be resized freely.
+        """
+        old_trunk=self.file_trunk
+        # file_trunk is None already suppresses save(); _embedded suppresses the close.
+        self.file_trunk=None
+        self._embedded=True
+        try:
+            # plot(), not _do_plot(): plot() is what wraps run_with_global_mesh_data, so a distributed
+            # problem still merges its mesh before anything is drawn.
+            self.plot()
+        finally:
+            self.file_trunk=old_trunk
+            self._embedded=False
 
     def ensure_spatial_nondim(self,x:ExpressionOrNum) -> float:
         if isinstance(x,Expression):

@@ -33,8 +33,11 @@ package on Linux), so the tool stays usable everywhere without adding a GUI tool
 dependencies. ``tk.Menu`` becomes the system menu bar on macOS and ttk widgets are natively themed
 on Windows and macOS.
 
-The matplotlib figure is embedded with ``FigureCanvasTkAgg`` and is created by the plotter through
-the object-oriented API, so no backend selection happens anywhere.
+The diagram's matplotlib figure is embedded with ``FigureCanvasTkAgg`` and is created through the
+object-oriented API, so no backend selection happens anywhere. The problem's own
+:py:class:`~pyoomph.output.plotting.MatplotlibPlotter` objects are shown live beside it - see
+:py:mod:`~pyoomph.utils.bifurcation_gui.panes`, which explains why those need pyplot-created figures
+while this one does not.
 
 Long solves run in the calling thread and the event loop is pumped where the old version called
 ``update_plot()``. The window is therefore frozen within a single Newton solve - exactly as before -
@@ -53,6 +56,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 
 from .actions import Action, KeyMap, event_to_accelerator, format_accelerator
 from .model import AXIS_PARAMETER
+from .panes import PlotterPaneSet
 
 from ...typings import *
 
@@ -80,6 +84,7 @@ class BifurcationTkApp:
         self._tree_items:dict[str,tuple[Any,Any]]={}
         self._tree_index:dict[int,str]={}
         self._branch_index:dict[int,str]={}
+        self._eigen_vars:dict[tuple[int,int,str],Any]={}
 
         self.root=tk.Tk()
         self.root.title(title if title is not None else "pyoomph bifurcation diagram")
@@ -90,6 +95,12 @@ class BifurcationTkApp:
         #: a label back into a (kind, name) pair.
         self._axis_choices:dict[str,Any]={}
         self._param_var=tk.StringVar()
+        self._graphs_pane=None
+        self._plot_panes_attached=False
+        #: Re-plot the fields when the current point has moved. A mesh plot is not free, so a
+        #: multistep sweep marks this once and re-plots when it finishes rather than per step.
+        self._plots_dirty=True
+        self.auto_update_plots=True
 
         self._build_actions()
         self._build_menus()
@@ -135,6 +146,11 @@ class BifurcationTkApp:
           tooltip="Start a new diagram continuing in the parameter selected in the Parameters tab")
         A("set_selected_parameter","Set the selected parameter's value...",self._dialog_set_parameter,
           is_solver_task=True,enabled_when=lambda: self._selected_parameter() is not None)
+        A("refresh_plots","Refresh field plots",self._refresh_plots,
+          enabled_when=lambda: self.plot_panes.has_any(),
+          tooltip="Re-render the problem's plotters from the current solution")
+        A("auto_update_plots","Update field plots automatically",self._toggle_auto_plots,kind="check",
+          getter=lambda: self.auto_update_plots)
         A("show_other_slices","Show branches from other slices",self._toggle_other_slices,kind="check",
           getter=lambda: self.plotter.show_other_slices)
         A("arclength_scaling_on","Scale arclength",lambda: c.set_arclength_scaling(True))
@@ -320,6 +336,10 @@ class BifurcationTkApp:
         self._add_menu_item(m,"toggle_logx")
         self._add_menu_item(m,"toggle_logy")
         m.add_separator()
+        m.add_separator()
+        self.fieldplot_menu=tk.Menu(m,tearoff=0)
+        m.add_cascade(label="Field plots",menu=self.fieldplot_menu)
+        m.add_separator()
         self._add_menu_item(m,"autoscale")
         self._add_menu_item(m,"reset_view")
         self._add_menu_item(m,"parameter_range")
@@ -453,14 +473,25 @@ class BifurcationTkApp:
         upper=ttk.PanedWindow(outer,orient=tk.HORIZONTAL)
         outer.add(upper,weight=4)
 
-        plotframe=ttk.Frame(upper)
-        upper.add(plotframe,weight=4)
+        # The diagram and the field plots share the left side through a paned window of their own, so
+        # every sash is draggable and the side notebook stays where it was.
+        graphs=ttk.PanedWindow(upper,orient=tk.HORIZONTAL)
+        upper.add(graphs,weight=4)
+
+        plotframe=ttk.Frame(graphs)
+        graphs.add(plotframe,weight=3)
         self.canvas=FigureCanvasTkAgg(self.plotter.figure,master=plotframe)
         self.canvas.get_tk_widget().pack(side=tk.TOP,fill=tk.BOTH,expand=True)
         self.nav=NavigationToolbar2Tk(self.canvas,plotframe,pack_toolbar=False)
         self.nav.update()
         self.nav.pack(side=tk.BOTTOM,fill=tk.X)
         self.canvas.mpl_connect("button_press_event",self._on_canvas_click)
+
+        # The problem's own plotters, rendered live. Nothing is added when the problem has none, so a
+        # script without a plotter gets exactly the window it got before.
+        self._graphs_pane=graphs
+        self.plot_panes=PlotterPaneSet(graphs,self.controller,log=self.log)
+        self._attach_plot_panes_if_needed()
 
         self.side=ttk.Notebook(upper,width=330)
         upper.add(self.side,weight=1)
@@ -656,8 +687,14 @@ class BifurcationTkApp:
         except Exception as e:
             self._report_error(action.label,e)
         finally:
+            if action.is_solver_task:
+                self._plots_dirty=True
             self.refresh()
             self._autosave()
+            # Deliberately AFTER refresh/autosave and only once the task is over: a multistep sweep
+            # marks the plots dirty on every step but must re-render the mesh only when it finishes.
+            if self._plots_dirty and self.auto_update_plots and not self._busy:
+                self._refresh_plots()
 
     def _autosave(self):
         """Persist after every command, as the key-driven version did after each of its handlers.
@@ -1006,6 +1043,54 @@ class BifurcationTkApp:
         if val is not None:
             self.controller.set_fixed_parameter(name,val)
 
+    def _refresh_plots(self):
+        """Re-render every field pane from the problem's current state."""
+        if not self.plot_panes.has_any():
+            return
+        self.plot_panes.refresh()
+        self._plots_dirty=False
+
+    def _toggle_auto_plots(self):
+        self.auto_update_plots=not self.auto_update_plots
+        if self.auto_update_plots and self._plots_dirty:
+            self._refresh_plots()
+
+    def _rebuild_fieldplot_menu(self):
+        """Field-plot entries: refresh, the auto toggle, and one eigenfunction toggle per plotter."""
+        self.fieldplot_menu.delete(0,"end")
+        self._menu_entries.pop("refresh_plots",None)
+        self._menu_entries.pop("auto_update_plots",None)
+        sources=self.plot_panes.source_plotters()
+        if not sources:
+            self.fieldplot_menu.add_command(label="(the problem defines no plotter)",state="disabled")
+            return
+        self._add_menu_item(self.fieldplot_menu,"refresh_plots")
+        self._add_menu_item(self.fieldplot_menu,"auto_update_plots")
+        self.fieldplot_menu.add_separator()
+        # An eigenfunction plot is the same plot with eigenvector/eigenmode set, so it is derived from
+        # the plotter the script already wrote rather than asked for again.
+        for si,src in enumerate(sources):
+            prefix=type(src).__name__+": " if len(sources)>1 else ""
+            for mode in ("real","imag"):
+                var=self._eigen_vars.setdefault((si,0,mode),tk.BooleanVar())
+                var.set(self.plot_panes.eigen_pane_shown(si,0,mode))
+                self.fieldplot_menu.add_checkbutton(
+                    label=prefix+"Eigenfunction 0 ({:s} part)".format(mode),variable=var,
+                    command=lambda si=si,mode=mode: self._toggle_eigen_pane(si,0,mode))
+
+    def _toggle_eigen_pane(self,source_index:int,eigenvector:int,eigenmode:str):
+        self.plot_panes.toggle_eigen_pane(source_index,eigenvector,eigenmode)
+        self._attach_plot_panes_if_needed()
+        self._rebuild_fieldplot_menu()
+
+    def _attach_plot_panes_if_needed(self):
+        """The pane column is only added to the layout once there is something in it."""
+        if self._plot_panes_attached or self._graphs_pane is None:
+            return
+        if self.plot_panes.has_any():
+            self._graphs_pane.add(self.plot_panes.paned,weight=2)
+            self._plot_panes_attached=True
+
     def _toggle_other_slices(self):
         self.plotter.show_other_slices=not self.plotter.show_other_slices
 
@@ -1179,7 +1264,10 @@ class BifurcationTkApp:
 
     def run(self):
         self._rebuild_axis_menus()
+        self._rebuild_fieldplot_menu()
         self.refresh()
+        if self.plot_panes.has_any() and self.auto_update_plots:
+            self._refresh_plots()
         self.root.mainloop()
 
 
