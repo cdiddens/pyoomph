@@ -166,7 +166,12 @@ class BifurcationController:
         #: Write all observable values to the output files
         self.output_all_observables=False
         self._initial_view=None
-        self.classify_bifurcations=False
+        #: Compute the normal form at each located bifurcation, which is what names it fold /
+        #: transcritical / pitchfork and what branch switching needs. On by default: it costs about as
+        #: much as locating the bifurcation did (~1 s at 7600 dofs) and runs once per bifurcation, not
+        #: per continuation step. Set False on a very large problem where that matters; branch switching
+        #: then computes it on demand for the one point it needs.
+        self.classify_bifurcations=True
         #: Continue without solving an eigenproblem at every point, spotting bifurcations from test
         #: functions instead. See dev_docs/quick_continuation.md for what it can and cannot see.
         self.quick_mode=False
@@ -738,8 +743,7 @@ class BifurcationController:
         # On a locus EVERY point has a zero real part, so classifying them all would run a normal-form
         # calculation per step for an answer already known: the tracked type.
         if p.eig_value_Re==0 and self.classify_bifurcations and branch.kind!="locus":
-            from ...generic.bifurcation_tools import NormalFormCalculator
-            p.bifurcation_info=NormalFormCalculator(self.problem).get_normal_form(self.get_bifurcation_parameter().get_name())
+            p.bifurcation_info=self._classify_current_point()
         if p.stability_source==STABILITY_EIGEN and p.eig_values:
             p.unstable_count=p.measured_unstable_count()
         self.problem.save_state(state_file)
@@ -1269,6 +1273,25 @@ class BifurcationController:
     #: own magnitude. Smaller is more faithful to the normal form but closer to the singular point.
     branch_switch_offset=0.02
 
+    def _classify_current_point(self)->dict | None:
+        """Normal form of the bifurcation the problem is sitting at, or None if it cannot be had.
+
+        Non-fatal on purpose. This is computed while a bifurcation is being recorded, and a normal-form
+        calculation that fails must not take the located point down with it - losing the bifurcation is a
+        worse outcome than not knowing which kind it is.
+        """
+        from ...generic.bifurcation_tools import NormalFormCalculator
+        try:
+            if self.problem.get_bifurcation_tracking_mode()=="":
+                # get_normal_form reads the critical eigenpair from the last eigensolve. While tracking
+                # is active that is already the critical one AND solve_eigenproblem would refuse, so this
+                # only runs when classifying after the fact.
+                self.problem.solve_eigenproblem(self.neigen,self.shift)
+            return NormalFormCalculator(self.problem).get_normal_form(self._get_paramname_str())
+        except Exception as e:
+            self.log("Could not compute the normal form of this bifurcation: "+repr(e))
+            return None
+
     def branch_switch(self,offset:float | None=None,direction:int=1):
         """Step from a bifurcation onto the OTHER branch through it.
 
@@ -1290,7 +1313,15 @@ class BifurcationController:
         if cp.eig_value_Re!=0:
             raise RuntimeError("Can only switch branches at bifurcations")
         if cp.bifurcation_info is None:
-            raise RuntimeError("No bifurcation info available. Please set gui.classify_bifurcations=True")
+            # Compute it here rather than sending the user away to set a flag and redo the run: the
+            # problem is sitting at the bifurcation, which is all the normal form needs. This is also
+            # what makes switching work at points loaded from a diagram recorded without classification.
+            self.log("This bifurcation was not classified; computing its normal form now")
+            cp.bifurcation_info=self._classify_current_point()
+        if cp.bifurcation_info is None:
+            raise RuntimeError("Cannot switch branches: the normal form of this bifurcation could not be "
+                               "computed, so there is no prediction for where the other branch goes. The "
+                               "reason is in the log above.")
         bi=cp.bifurcation_info
         if bi["type"]=="fold":
             # A fold has no second branch: the one branch turns around. Getting off it is leave_locus.

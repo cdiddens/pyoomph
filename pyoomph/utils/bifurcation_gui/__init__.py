@@ -115,7 +115,7 @@ class BifurcationGUI:
 
     neigen=_fwd("neigen","Number of eigenvalues computed at every solution point.")
     shift=_fwd("shift","Shift handed to the eigensolver.")
-    classify_bifurcations=_fwd("classify_bifurcations","Compute the normal form at each located bifurcation. Required for branch switching.")
+    classify_bifurcations=_fwd("classify_bifurcations","Compute the normal form at each located bifurcation, naming it fold/transcritical/pitchfork. On by default; branch switching computes it on demand if it is off.")
     interpolated_splines=_fwd("interpolated_splines","Draw and export spline-interpolated branches instead of the raw polylines.")
     output_all_observables=_fwd("output_all_observables","Write all observable values to the output files.")
     data_subdir=_fwd("data_subdir","Subdirectory of the problem's output directory holding states and curves.")

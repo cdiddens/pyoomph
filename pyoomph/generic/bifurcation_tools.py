@@ -1428,9 +1428,17 @@ class PerformCustomMultiAssembly(AugmentedAssemblyHandler):
         super().__init__()
         self.request=request
         self.problem=problem
+        previous=getattr(self.get_problem(),"_custom_assembler",None)
         self.get_problem().set_custom_assembler(self)
-        self.res=self.get_residuals_and_jacobian(require_jacobian=False)
-        self.get_problem().set_custom_assembler(None)
+        try:
+            self.res=self.get_residuals_and_jacobian(require_jacobian=False)
+        finally:
+            # In a finally, and restoring what was there rather than clearing to None. Without this an
+            # assembly that raises - a normal form asked of a problem built without an analytic Hessian
+            # is the easy way to trigger it - left this handler installed on the Problem, and every
+            # later assembly in the run went through it. The symptom was the Hessian complaint
+            # reappearing from an unrelated arclength step, long after the call that caused it.
+            self.get_problem().set_custom_assembler(previous)
         
     def result(self)->Any:
         return self.res
