@@ -528,10 +528,14 @@ class BaseEquations(_pyoomph.Equations):
         that is a real mistake (a 3-component condition on a 2-component field) and it would otherwise
         be dropped in silence.
 
-        The field list is only looked up when at least one entry is vectorial, so the ordinary scalar
-        case costs nothing. Call it once the equations are attached to a domain (from
-        ``define_residuals`` onwards): a condition stated on an interface finds its vector fields on the
-        PARENT domain, which is not known before that.
+        The value does not have to be an explicit ``vector(...)``. ``var("lagrangian")`` and friends are
+        deferred field symbols that only become a matrix once the code generator resolves them, so an
+        entry naming a vector field whose value is not a matrix yet is resolved here before it is split
+        -- which is what makes ``DirichletBC(mesh=var("lagrangian"))`` work.
+
+        Call it once the equations are attached to a domain (from ``define_residuals`` onwards): a
+        condition stated on an interface finds its vector fields on the PARENT domain, and nothing can
+        be resolved, before that.
 
         Args:
             entries: field name -> value, as the equation received them.
@@ -543,8 +547,7 @@ class BaseEquations(_pyoomph.Equations):
         def _is_vectorial(v:"ExpressionOrNum")->bool:
             return isinstance(v,_pyoomph.Expression) and _pyoomph.GiNaC_is_a_matrix(v)
 
-        if not any(_is_vectorial(v) for v in entries.values()):
-            return entries
+        cg0=self.get_current_code_generator()
 
         # Walk the code generators rather than asking the combined element for its list: when this
         # condition is the ONLY equation on its boundary there is nothing to combine it with, so the
@@ -553,24 +556,52 @@ class BaseEquations(_pyoomph.Equations):
         known:dict[str,list[str]]={}
         # Typed as the C++ base, which is what _get_parent_domain hands back; only get_equations and
         # the parent link are used here, and both live there.
-        cg:"_pyoomph.FiniteElementCode | None"=self.get_current_code_generator()
+        cg:"_pyoomph.FiniteElementCode | None"=cg0
         while cg is not None:
             vfs=getattr(cg.get_equations(),"_vectorfields",None)
             if vfs:
                 for name,comps in vfs.items():
                     known.setdefault(name,comps) # the most local definition wins over the parent domains'
             cg=cg._get_parent_domain()
+        # The position fields are vectors in exactly the same sense -- var("mesh") resolves to a vector
+        # just as var("velocity") does -- but the element gets them from the C++ side instead of from
+        # define_vector_field, so they appear in no _vectorfields dict and would be rejected below.
+        # Added last, so a user-defined vector field of the same name keeps precedence, and only where
+        # there are nodes at all (an ODE domain has no position fields).
+        nodal_dim=cg0.get_nodal_dimension()
+        if nodal_dim>0:
+            for posname in ("mesh","coordinate","lagrangian"):
+                known.setdefault(posname,[posname+"_"+c for c in ("x","y","z")[:nodal_dim]])
+
+        if not any(_is_vectorial(v) or (n in known) for n,v in entries.items()):
+            return entries
 
         res:dict[str,"ExpressionOrNum"]={}
         for name,val in entries.items():
-            if not _is_vectorial(val):
-                res[name]=val
-                continue
-            assert isinstance(val,_pyoomph.Expression)
             comps=known.get(name)
+            if not _is_vectorial(val):
+                if comps is None or not isinstance(val,_pyoomph.Expression):
+                    # A number is never a vector, and a name we know nothing about is left to the code
+                    # generator, which reports it along with the fields it does have.
+                    res[name]=val
+                    continue
+                # Resolve with the very call the code generator itself makes on this expression a few
+                # steps later (expand_initial_or_Dirichlet), so the two cannot disagree about what
+                # var("lagrangian") means here. raise_error=False: an expression that stays unresolved
+                # is passed on untouched and fails where it would have failed before this existed.
+                try:
+                    resolved=cg0.expand_placeholders(val,False)
+                except Exception:
+                    res[name]=val
+                    continue
+                if not _is_vectorial(resolved):
+                    res[name]=val
+                    continue
+                val=resolved
+            assert isinstance(val,_pyoomph.Expression)
             if comps is None:
                 raise RuntimeError("Got a vectorial "+what+" for '"+name+"', but '"+name+
-                                   "' is not a vector field on domain "+str(self.get_current_code_generator().get_full_name())+
+                                   "' is not a vector field on domain "+str(cg0.get_full_name())+
                                    ". Vector fields here: "+(", ".join(sorted(known.keys())) if known else "(none)")+
                                    ". For a scalar field, pass a scalar; for a single component, name it explicitly (e.g. '"+name+"_x').")
             ncomp=val.nops()

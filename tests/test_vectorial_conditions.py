@@ -38,6 +38,12 @@
 # assuming: there the components are not x/y, and nothing in the expansion knows about coordinate
 # systems -- it relies on the field's own component order being the order var("velocity") is built
 # with.
+#
+# The position fields ("mesh", "coordinate", "lagrangian") are vectors in the same sense, but the
+# element gets them from the C++ side rather than from define_vector_field(), so they are in no
+# _vectorfields dict and need their own registration -- and their natural value, var("lagrangian"),
+# is a deferred symbol that is not a matrix until the code generator resolves it. Both halves are
+# needed before DirichletBC(mesh=var("lagrangian")) works, and each is tested separately below.
 
 import numpy
 import pytest
@@ -46,9 +52,10 @@ from pyoomph import Problem, DirichletBC, InitialCondition
 from pyoomph.expressions import vector, var
 from pyoomph.equations.navier_stokes import NavierStokesEquations
 from pyoomph.equations.poisson import PoissonEquation
-from pyoomph.equations.generic import AxisymmetryBC
+from pyoomph.equations.generic import AxisymmetryBC, ElementSpace
+from pyoomph.equations.ALE import PseudoElasticMesh
 from pyoomph.equations.additional import InactiveDirichletBC
-from pyoomph.meshes.simplemeshes import RectangularQuadMesh
+from pyoomph.meshes.simplemeshes import RectangularQuadMesh, CuboidBrickMesh
 
 
 class _Cavity(Problem):
@@ -128,6 +135,89 @@ def test_a_vector_for_a_scalar_field_is_reported(tmp_path):
         with P() as p:
             p.set_output_directory(str(tmp_path / "scalar"))
             p.initialise()
+
+
+class _MovingMesh(Problem):
+    """A pseudo-elastic mesh whose position is prescribed either as a vector or component-wise.
+
+    The top boundary is sheared by ``shift`` times the first Lagrangian coordinate, so which slot each
+    component ends up in decides where the interior nodes go; ``shift=0`` leaves the mesh undeformed
+    and is only there to show that a non-zero one moves it at all.
+    """
+
+    def __init__(self, vectorial, axisymmetric=False, threed=False, value="lagrangian", shift=1.0, N=3):
+        super().__init__()
+        self.vectorial, self.axisymmetric, self.threed = vectorial, axisymmetric, threed
+        self.value, self.shift, self.N = value, shift, N
+
+    def define_problem(self):
+        if self.axisymmetric:
+            self.set_coordinate_system("axisymmetric")
+        self += CuboidBrickMesh(N=self.N) if self.threed else RectangularQuadMesh(N=self.N)
+        comps = ["x", "y", "z"] if self.threed else ["x", "y"]
+        X = [var(self.value + "_" + c) for c in comps]
+        off = [self.shift * f for f in (0.1, 0.2, 0.3)[:len(comps)]]
+        # PseudoElasticMesh defines no field of its own, so the coordinate space has to be named.
+        eqs = PseudoElasticMesh() + ElementSpace("C2")
+        if self.vectorial:
+            eqs += DirichletBC(mesh=var(self.value) + vector(*off) * X[0]) @ "top"
+            eqs += DirichletBC(mesh=var(self.value)) @ "bottom"
+            eqs += InitialCondition(mesh=var(self.value))
+        else:
+            eqs += DirichletBC(**{"mesh_" + c: X[i] + off[i] * X[0] for i, c in enumerate(comps)}) @ "top" #type:ignore
+            eqs += DirichletBC(**{"mesh_" + c: X[i] for i, c in enumerate(comps)}) @ "bottom" #type:ignore
+            eqs += InitialCondition(**{"mesh_" + c: X[i] for i, c in enumerate(comps)}) #type:ignore
+        self += eqs @ "domain"
+
+
+def _solve_positions(tmp_path, **kw):
+    with _MovingMesh(**kw) as p:
+        p.set_output_directory(str(tmp_path))
+        p.solve()
+        m = p.get_mesh("domain")
+        return p.ndof(), numpy.array([[n.x(i) for i in range(n.ndim())] for n in m.nodes()])
+
+
+@pytest.mark.parametrize("case", ["cartesian", "axisymmetric", "threed", "coordinate"])
+def test_position_field_as_a_vector_matches_the_component_form(case, tmp_path):
+    # "mesh" is not registered by define_vector_field(), and var("lagrangian") is not a matrix when the
+    # condition is built -- so this whole family used to fail with "is not defined in the element".
+    # As above, the oracle is that the two spellings give bit-identical node positions.
+    kw = {"axisymmetric": case == "axisymmetric", "threed": case == "threed",
+          "value": "coordinate" if case == "coordinate" else "lagrangian"}
+    ndof_v, pos_v = _solve_positions(tmp_path / "vec", vectorial=True, **kw)
+    ndof_s, pos_s = _solve_positions(tmp_path / "scal", vectorial=False, **kw)
+    _, pos_flat = _solve_positions(tmp_path / "flat", vectorial=False, shift=0.0, **kw)
+    assert ndof_v == ndof_s, "vector form pinned a different number of dofs (%d vs %d)" % (ndof_v, ndof_s)
+    assert pos_v.shape == pos_s.shape
+    # Guards against a vacuous comparison: if the condition moved nothing, every mix-up matches.
+    assert numpy.max(numpy.abs(pos_s - pos_flat)) > 1e-3
+    assert numpy.max(numpy.abs(pos_v - pos_s)) == 0.0, "the vector-valued condition moved the mesh differently"
+
+
+def test_a_deferred_symbol_is_resolved_before_it_is_split(tmp_path):
+    # The value need not be an explicit vector(): anything that resolves to one has to be split too,
+    # including an expression built around a deferred var(). Splitting the unresolved symbol instead
+    # would put the whole vector into mesh_x.
+    class _Split(PseudoElasticMesh):
+        def define_residuals(self):
+            super().define_residuals()
+            got = self.expand_vectorial_entries({"mesh": 2 * var("lagrangian")}, "test")
+            assert set(got.keys()) == {"mesh_x", "mesh_y"}, got
+            assert "lagrangian_x" in str(got["mesh_x"]) and "lagrangian_y" not in str(got["mesh_x"])
+            assert "lagrangian_y" in str(got["mesh_y"]) and "lagrangian_x" not in str(got["mesh_y"])
+            # A plain scalar is not a vector, whatever the field is called: left untouched, so the code
+            # generator reports it along with the fields it does have.
+            assert self.expand_vectorial_entries({"mesh": 0}, "test") == {"mesh": 0}
+
+    class P(Problem):
+        def define_problem(self):
+            self += RectangularQuadMesh(N=2)
+            self += (_Split() + ElementSpace("C2")) @ "domain"
+
+    with P() as p:
+        p.set_output_directory(str(tmp_path / "split"))
+        p.initialise()
 
 
 def test_too_many_components_is_reported(tmp_path):

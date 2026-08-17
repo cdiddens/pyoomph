@@ -606,7 +606,8 @@ class InitialCondition(BaseEquations):
     A vector field may be given as a whole, i.e. ``InitialCondition(velocity=vector(0,1))`` instead of
     ``InitialCondition(velocity_x=0, velocity_y=1)``. The value is split component by component onto
     the field's components in their own order, so this is also correct in e.g. an axisymmetric
-    coordinate system. See
+    coordinate system. This includes the position fields and values that are not written as an explicit
+    ``vector(...)``, i.e. ``InitialCondition(mesh=var("lagrangian"))``. See
     :py:meth:`~pyoomph.generic.codegen.BaseEquations.expand_vectorial_entries`.
     """
 
@@ -1581,7 +1582,9 @@ class DirichletBC(BaseEquations):
     A vector field may be given as a whole, i.e. ``DirichletBC(velocity=vector(0,1))`` instead of
     ``DirichletBC(velocity_x=0, velocity_y=1)``. The value is split component by component onto the
     field's components in their own order, so this is also correct in e.g. an axisymmetric coordinate
-    system. See :py:meth:`~pyoomph.generic.codegen.BaseEquations.expand_vectorial_entries`.
+    system. This includes the position fields and values that are not written as an explicit
+    ``vector(...)``, i.e. ``DirichletBC(mesh=var("lagrangian"))`` to hold the mesh at its undeformed
+    position. See :py:meth:`~pyoomph.generic.codegen.BaseEquations.expand_vectorial_entries`.
     """
 
     def __init__(self, *, prefer_weak_for_DG: bool = True, **kwargs: ExpressionOrNum):
