@@ -36,6 +36,7 @@ from .. import _pyoomph_core as _pyoomph
 import numpy 
 
 from ..typings import *
+import math
 
 from .generic import ExpressionOrNum,Expression
 
@@ -130,6 +131,10 @@ class CelsiusClass:
 
 celsius = CelsiusClass()
 
+#: Written between the symbols of a compound unit, e.g. "kg m^2/s^3". Output headers are tab-joined,
+#: so a space here cannot break a column.
+UNIT_SEPARATOR=" "
+
 __simplified_units:dict[str,dict[str,tuple[int,int]]] = {}
 
 @overload
@@ -139,7 +144,8 @@ def unit_to_string(inp:ExpressionOrNum,estimate_prefix:Literal[True]=...)->tuple
 def unit_to_string(inp:ExpressionOrNum,estimate_prefix:Literal[False])->str: ...
 
 def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> str | tuple[str, float, float]:
-    __prefixes:dict[float,str]={1e-9:"n",1e-6:"u",1e-3:"m",1:"",1e3:"k",1e6:"M",1e9:"G"}
+    __prefixes:dict[float,str]={1e-18:"a",1e-15:"f",1e-12:"p",1e-9:"n",1e-6:"u",1e-3:"m",1:"",
+                                1e3:"k",1e6:"M",1e9:"G",1e12:"T",1e15:"P",1e18:"E"}
     __shorts = {"meter": "m", "second": "s", "kilogram": "kg", "kelvin": "K", "mol": "mol", "ampere": "A"}
     __sort_numer=["kilogram","mol","kelvin","second","ampere","meter"] # meter must be at the end!
     __sort_denom = ["kilogram", "mol", "meter","kelvin", "second", "ampere" ]
@@ -158,20 +164,64 @@ def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> str | tuple
 
     prefix_factor=1.0 # a __prefixes key, i.e. a power of ten
     factor_bound_factor=10
-    if estimate_prefix:
-        for k in sorted(__prefixes.keys()):
-            #print("IN",inp,estimate_prefix, k,__prefixes[k],factorf,factor_bound_factor,prefix_factor)
-            if factorf <= factor_bound_factor * k:
-                prefix = __prefixes[k]
-                prefix_factor=k
+
+    # The prefix is written in front of the whole numerator ("m"+"m^2" -> "mm^2"), so it binds to the
+    # first unit TOGETHER WITH ITS EXPONENT: mm^2 is (mm)^2 = 1e-6 m^2, not 1e-3 m^2. Treating the
+    # exponent as 1 made the printed quantity differ from the input - 1e-6 m^2 came out as "1 um^2",
+    # which is 1e-12 m^2, wrong by six orders of magnitude. So the prefix p has to be chosen from
+    # magnitude^(1/n) and the value divided by p^n.
+    # A derived name is a single symbol, so a prefix on it always has exponent 1: "pF" is (pF)^1. Look
+    # the name up FIRST, because deriving the exponent from the base units gives the wrong answer for
+    # any derived unit whose leading base exponent is not 1 - farad is s^4*A^2/(kg*m^2), so 1e-12 F came
+    # out as "1 mF", a billion times too large. The units registered before farad all happened to lead
+    # with kilogram^1, which is why this never showed.
+    simplified_name=None
+    for _rep,_sig in __simplified_units.items():
+        if _sig==contribs:
+            simplified_name=_rep
+            break
+
+    prefix_exponent=1.0
+    for _un in ([] if simplified_name is not None else __sort_numer):
+        _c=contribs.get(_un)
+        if _c is not None and _c[0]>0:
+            prefix_exponent=float(_c[0])/float(_c[1])
+            break
+    else:
+        # No numerator at all: the prefix moves into the denominator (1/Mm), where the exponent as
+        # PRINTED is the positive one.
+        for _un in ([] if simplified_name is not None else __sort_denom):
+            _c=contribs.get(_un)
+            if _c is not None and _c[0]<0:
+                prefix_exponent=-float(_c[0])/float(_c[1])
                 break
 
-    for rep,s in __simplified_units.items():
-        if s==contribs:
-            if estimate_prefix:
-                return prefix+rep,factorf,1/prefix_factor
-            else:
-                return prefix+rep
+    def _choose_prefix(magnitude:float,exponent:float)->"tuple[str,float]":
+        """The prefix p and its numeric value, such that magnitude/p^exponent reads nicely."""
+        if magnitude<=0 or exponent==0 or not math.isfinite(magnitude):
+            return "",1.0
+        # Compare in the unit's own root, since it is p^exponent that has to absorb the magnitude.
+        root=magnitude**(1.0/exponent)
+        # A hair of slack, because the root of an exact power is not exact in binary: (1e-6)^(1/3) comes
+        # out just above 0.01 and a cubic metre volume would miss "mm^3" by one ulp.
+        for k in sorted(__prefixes.keys()):
+            if root <= factor_bound_factor * k * (1.0+1e-9):
+                return __prefixes[k],k
+        return "",1.0
+
+    # The prefix follows the MAGNITUDE. Comparing the signed value made every negative quantity match
+    # the smallest prefix on the first iteration, so -0.5/second came out as "1/Gs" (numerically right,
+    # -5e8/Gs, but unreadable) - and eigenvalues of stable modes are exactly the negative case. Zero has
+    # no meaningful prefix either; it matched "n" for the same reason.
+    magnitude=abs(factorf)
+    if estimate_prefix:
+        prefix,prefix_factor=_choose_prefix(magnitude,prefix_exponent)
+
+    if simplified_name is not None:
+        if estimate_prefix:
+            return prefix+simplified_name,factorf,prefix_factor**(-prefix_exponent)
+        else:
+            return simplified_name
 
     if estimate_prefix:
         if prefix!="":
@@ -179,16 +229,13 @@ def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> str | tuple
                 if contribs["kilogram"][0]>0:
                     factor*=kilo
                     factorf=float(factor)
-                    for k in sorted(__prefixes.keys()):
-                        if factorf <= factor_bound_factor * k:
-                            prefix = __prefixes[k]
-                            prefix_factor = k
-                            break
+                    prefix,prefix_factor=_choose_prefix(abs(factorf),prefix_exponent)
                     numer_mass="g"
 
 
-    def contrib_part(sign:int) -> str:
-        resstr = ""
+    def contrib_part(sign:int) -> "list[str]":
+        """The symbols on one side of the fraction, e.g. ``["kg", "m^2"]``, in a fixed order."""
+        parts:list[str]=[]
         sort=__sort_numer if sign==1 else __sort_denom
         for un in sort:
             if not (un in contribs.keys()):
@@ -200,25 +247,39 @@ def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> str | tuple
                 ustr=__shorts[un]
                 if sign>0 and un=="kilogram":
                     ustr=numer_mass
-                resstr += ustr
                 if c[0]*sign != 1 or c[1] != 1:
-                    resstr += "^"
+                    ustr += "^"
                     if c[1] != 1:
-                        resstr += "(" + str(c[0]*sign) + "/" + str(c[1]) + ")"
+                        ustr += "(" + str(c[0]*sign) + "/" + str(c[1]) + ")"
                     else:
-                        resstr += str(c[0]*sign)
-        return resstr
+                        ustr += str(c[0]*sign)
+                parts.append(ustr)
+        return parts
 
-    numer=contrib_part(1)
-    denom = contrib_part(-1)
+    numer_parts=contrib_part(1)
+    denom_parts=contrib_part(-1)
+    numer=UNIT_SEPARATOR.join(numer_parts)
+    denom=UNIT_SEPARATOR.join(denom_parts)
+
+    def with_denominator(head:str,den:str)->str:
+        """``head/den``, bracketing a denominator of several factors.
+
+        Without the brackets "kg/m s^2" reads as kg*s^2/m, i.e. the opposite of what it means - and run
+        together as it used to be, "kg/ms^2" looks like kg per millisecond squared.
+        """
+        return head+"/"+(("("+den+")") if len(denom_parts)>1 else den)
 
     if denom!="":
         if numer=="":
             numer="1"
-            __invprefix:dict[str,str]={"":"", "n":"G","u":"M","m":"k","k":"m","M":"u","G":"p"}
-            resstr=numer+"/"+__invprefix[prefix]+denom
+            # The prefix moves into the denominator, so it has to be inverted: 1/(nm) is 1 Gm^-1.
+            # Every entry of __prefixes needs one here, or a value that picks an unlisted prefix
+            # raises a KeyError instead of being printed.
+            __invprefix:dict[str,str]={"":"", "a":"E","f":"P","p":"T","n":"G","u":"M","m":"k",
+                                       "k":"m","M":"u","G":"n","T":"p","P":"f","E":"a"}
+            resstr=with_denominator(numer,__invprefix[prefix]+denom)
         else:
-            resstr=prefix+numer+"/"+denom
+            resstr=with_denominator(prefix+numer,denom)
     else:
         if numer=="":
             resstr=""
@@ -227,7 +288,7 @@ def unit_to_string(inp:ExpressionOrNum,estimate_prefix:bool=True) -> str | tuple
             resstr=prefix+numer
 
     if estimate_prefix:
-        return resstr,factorf,1/prefix_factor
+        return resstr,factorf,prefix_factor**(-prefix_exponent)
     else:
         return resstr
 
@@ -237,6 +298,13 @@ __simplified_units["Pas"] = _pyoomph.GiNaC_sep_base_units(pascal*second)
 __simplified_units["N"] = _pyoomph.GiNaC_sep_base_units(newton)
 __simplified_units["N/m"] = _pyoomph.GiNaC_sep_base_units(newton/meter)
 __simplified_units["Nm"] = _pyoomph.GiNaC_sep_base_units(newton*meter)
+# W, V and F share no base-unit signature with anything above, so the order they are added in does not
+# matter. Two that are NOT here on purpose: "Hz" has the same base units as any rate, so it would
+# relabel every growth rate and eigenvalue as a frequency; and "J" is dimensionally identical to "Nm",
+# which is already registered, so energy and torque cannot be told apart by units at all.
+__simplified_units["W"] = _pyoomph.GiNaC_sep_base_units(watt)
+__simplified_units["V"] = _pyoomph.GiNaC_sep_base_units(volt)
+__simplified_units["F"] = _pyoomph.GiNaC_sep_base_units(farad)
 
 
 
