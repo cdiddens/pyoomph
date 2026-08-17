@@ -60,6 +60,7 @@ Another catch is in :math:`eqviscoelastic` itself, since it has no diffusion wha
 
 :numref:`figpdeviscoelasticstress` reproduces Fig. 6 of :cite:`Claus2013`: the polymer stress :math:`\tau_{xx}` along a path that runs up the centreline, over the cylinder surface and away down the wake, one curve per Weissenberg number. The axes are theirs, so the two can be laid side by side.
 
+
 ..  figure:: viscoelastic_stress.*
 	:name: figpdeviscoelasticstress
 	:align: center
@@ -67,7 +68,7 @@ Another catch is in :math:`eqviscoelastic` itself, since it has no diffusion wha
 	:class: with-shadow
 	:width: 80%
 
-	:math:`\tau_{xx}` along the centreline and around the cylinder, for :math:`\mathrm{Wi}=0.1` to :math:`0.9`; compare Fig. 6 of :cite:`Claus2013`. The large peak at :math:`X=0` is the top of the cylinder, where the fluid is sheared hardest, and it grows from about 18 to about 127 over this range, matching theirs closely. The second peak just downstream of :math:`X=1` is the *birefringent strand* in the wake; it comes out higher and less resolved here than in their figure. Drecreasing the mesh size factors would yield better agreement, but also longer simulation time.
+	:math:`\tau_{xx}` along the centreline and around the cylinder, for :math:`\mathrm{Wi}=0.1` to :math:`0.9`; compare Fig. 6 of Claus and Phillips. The large peak at :math:`X=0` is the top of the cylinder, where the fluid is sheared hardest, and it grows from about 18 to about 127 over this range, matching theirs closely. The second peak just downstream of :math:`X=1` is the *birefringent strand* in the wake; it comes out higher and less resolved here than in their figure. Decreasing the mesh size factors would yield better agreement, but also longer simulation time.
 
 Their Fig. 12 shows a different decomposition: the Cauchy stress is made traceless and then projected onto the streamline direction and its normal, giving a flow-directed shear stress :math:`S_1` and normal stress :math:`S_2`. Note that the pressure drops out of the traceless part identically, so only the solvent rate of strain and the polymer stress contribute.
 
@@ -80,7 +81,7 @@ Both are obtained with :py:class:`~pyoomph.equations.generic.ProjectExpression`,
 	:class: with-shadow
 	:width: 90%
 
-	The flow-directed stresses :math:`S_1` and :math:`S_2`; compare Fig. 12 of :cite:`Claus2013`.
+	The flow-directed stresses :math:`S_1` and :math:`S_2`; compare Fig. 12 of Claus and Phillips.
 
 
 The quantity everyone reports is the dimensionless drag on the cylinder, :math:`K=F_x/(\eta_0\langle u\rangle)`, obtained here by integrating the total traction over the cylinder surface. The script walks up in :math:`\mathrm{Wi}` with :py:meth:`~pyoomph.generic.problem.Problem.go_to_param`, which halves its step whenever Newton fails, and prints the drag next to the values of Claus and Phillips :cite:`Claus2013`:
