@@ -43,6 +43,9 @@
 
 import json
 import os
+import sys
+
+import pytest
 
 import numpy
 
@@ -618,6 +621,62 @@ def test_eigenfunction_plotter_is_derived_from_the_source():
     # The source must be left exactly as the script wrote it.
     assert src.eigenvector is None and src.eigenmode == "abs"
     assert src.file_trunk is not None and "h" in src._range_objects
+
+
+@pytest.mark.parametrize("kind", ["transcritical", "pitchfork"])
+def test_branch_switching_lands_on_the_other_branch(kind, tmp_path):
+    """Switching must reach the OTHER branch and stay on it, checked against closed-form branches.
+
+    Out of process because each bifurcation type needs its own Problem, following the worker pattern the
+    rest of the suite uses. The trivial branch u = 0 exists for every mu in both problems, so a switch
+    that does not work fails silently by staying on it - which is exactly how the old implementation
+    failed. It seeded oomph's arclength state with INCREMENTS where the two setters take derivatives, so
+    the tangent had norm ~ds instead of 1 and the arclength constraint asked for a step inflated by 1/ds.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "branch_switch_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--kind", kind,
+                           "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "kind=" + kind in out
+
+
+def test_branch_switch_refuses_a_fold():
+    """A fold has one branch through it, so there is nothing to switch to.
+
+    Checked on a stub, since the refusal happens before the problem is touched at all - and this is the
+    branch of branch_switch that must NOT go wandering off looking for a second branch.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint)
+
+    logged: list = []
+    c = BifurcationController.__new__(BifurcationController)
+    c._on_log = logged.append
+    c._on_changed = None
+    c._on_status = None
+    c._on_busy = None
+    branch = BifurcationGUISolutionBranch(kind="solution", continuation_parameter="mu")
+    fold = BifurcationGUISolutionPoint(0.0, {"u": 0.0}, 0 + 0j, None, 0)
+    fold.bifurcation_info = {"type": "fold"}
+    branch.append(fold)
+    c.branches = [branch]
+    c.current_branch = branch
+    c.current_point = fold
+
+    assert c.branch_switch() is False
+    assert any("fold" in m for m in logged), "it has to say why"
+
+    # And a bifurcation whose normal form was never computed cannot be switched from either.
+    fold.bifurcation_info = None
+    with pytest.raises(RuntimeError):
+        c.branch_switch()
 
 
 def test_test_functions_discriminate_fold_from_branch_point():
