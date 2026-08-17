@@ -113,8 +113,15 @@ class PlotterPane:
         # Created through pyplot so it can be made current later - see the module docstring.
         self.figure=plt.figure(figsize=(4.0,3.0))
         self._number=self.figure.number
-        self.canvas=FigureCanvasTkAgg(self.figure,master=self.frame)
-        self.canvas.get_tk_widget().pack(side=tk.TOP,fill=tk.BOTH,expand=True)
+        # The canvas lives inside a holder and is sized by _apply_letterbox rather than simply filling
+        # it, so the figure never gets a shape the plot definition did not ask for - see there.
+        self._holder=ttk.Frame(self.frame)
+        self._holder.pack(side=tk.TOP,fill=tk.BOTH,expand=True)
+        self.canvas=FigureCanvasTkAgg(self.figure,master=self._holder)
+        self._canvas_widget=self.canvas.get_tk_widget()
+        self._desired_aspect:float | None=None
+        self._canvas_widget.place(x=0,y=0,relwidth=1.0,relheight=1.0)
+        self._holder.bind("<Configure>",lambda _e: self._apply_letterbox())
         self.nav=NavigationToolbar2Tk(self.canvas,self.frame,pack_toolbar=False)
         self.nav.update()
         self.nav.pack(side=tk.BOTTOM,fill=tk.X)
@@ -162,6 +169,55 @@ class PlotterPane:
             self._locked_view=(float(xl[0]),float(xl[1]),float(yl[0]),float(yl[1]))
             self.status_var.set("view locked")
             self.refresh()
+
+    # ---------------------------------------------------------------- keeping the plot's own shape
+
+    def _plotter_figure_aspect(self)->float | None:
+        """Width/height the plot definition wants for its figure, or None if it does not care.
+
+        A plotter that fixes an aspect ratio ends set_view() with
+        ``set_size_inches(wW, hH*ar)``, and in both of its branches ``wW/hH`` is ``dx/dy``, so the
+        figure aspect it asks for is ``(dx/dy)/ar``. Recomputed after every render because a locked
+        (zoomed) view changes dx/dy.
+        """
+        p=self.plotter
+        if not getattr(p,"aspect_ratio",False) or not getattr(p,"fullscreen",False):
+            return None
+        xmin,xmax,ymin,ymax=p.xmin,p.xmax,p.ymin,p.ymax
+        if None in (xmin,xmax,ymin,ymax):
+            return None
+        dx,dy=float(xmax)-float(xmin),float(ymax)-float(ymin)   #type:ignore[arg-type]
+        if dx<=0 or dy<=0:
+            return None
+        ar=1.0 if p.aspect_ratio is True else float(p.aspect_ratio)
+        if ar<=0:
+            return None
+        return (dx/dy)/ar
+
+    def _apply_letterbox(self):
+        """Size the canvas to the aspect the plot definition asked for, centred in the pane.
+
+        Without this, resizing the window broke the layout: the Tk canvas overwrites the figure size
+        with the widget's on every resize (verified - an 8x2 figure in a 900x300 widget becomes
+        10.7x3.6), so the figure ends up with the pane's aspect instead of the plot's. The field axes
+        keeps its true shape because of set_aspect("equal") and is letterboxed INSIDE the axes, while
+        colorbars and other overlays are positioned in figure fractions and so do not follow - which
+        is why a "top center" colorbar drifted out of alignment.
+
+        Letterboxing the widget instead keeps the figure at the plot's own aspect, so everything the
+        plot definition positioned stays put, and the pane shows what the saved image would show.
+        """
+        aspect=self._desired_aspect
+        w,h=self._holder.winfo_width(),self._holder.winfo_height()
+        self._canvas_widget.place_forget()
+        if aspect is None or w<=1 or h<=1:
+            self._canvas_widget.place(x=0,y=0,relwidth=1.0,relheight=1.0)
+            return
+        if w/h>aspect:
+            cw,ch=max(1,int(round(h*aspect))),h
+        else:
+            cw,ch=w,max(1,int(round(w/aspect)))
+        self._canvas_widget.place(relx=0.5,rely=0.5,anchor=tk.CENTER,width=cw,height=ch)
 
     # ---------------------------------------------------------------- view locking
 
@@ -273,6 +329,8 @@ class PlotterPane:
                 self._message("The mesh could not be triangulated for plotting")
                 self.status_var.set("invalid triangulation")
                 return False
+            self._desired_aspect=self._plotter_figure_aspect()
+            self._apply_letterbox()
             self.canvas.draw()
             self._drawn_once=True
             if self._log is not None:
