@@ -775,13 +775,17 @@ class GenericEigenSolver:
 	def get_eigen_row_layout(self)->tuple[int,int,int,bool]:
 		"""Row layout ``(n, nrow_local, first_row, distributed)`` of the eigenproblem matrices.
 
-		They are assembled on the problem's dof distribution, which is row-partitioned once the problem
-		has been distributed: each rank then holds only rows ``first_row .. first_row+nrow_local-1``,
+		They are assembled on the problem's BASE dof distribution, which is row-partitioned once the
+		problem has been distributed: each rank then holds only rows ``first_row .. first_row+nrow_local-1``,
 		with GLOBAL column indices. Serially, and under MPI without ``--distribute`` (where oomph-lib
 		redistributes the assembled matrices back to a globally replicated form), ``nrow_local == n``,
 		``first_row == 0`` and ``distributed`` is False.
+
+		"Base" matters while a bifurcation tracker is installed: the problem's own dof distribution is
+		then the augmented one (base dofs plus the eigenvector blocks and the scalars), but the
+		eigenproblem assembled is the base state's -- see Problem::BaseDofDistributionScope.
 		"""
-		return self.problem._get_dof_distribution_info() #type:ignore
+		return self.problem._get_base_dof_distribution_info() #type:ignore
 
 	def get_J_M_n_and_type(self)->tuple[DefaultMatrixType,DefaultMatrixType,int,bool]:
 		"""Assemble the eigenproblem's J and M and report the global size and whether they are complex.

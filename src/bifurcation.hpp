@@ -116,6 +116,8 @@ namespace pyoomph
     const std::vector<Term> &terms_at(unsigned r, unsigned c) const { return block_terms[(size_t)r * n_groups() + c]; }
   };
 
+  class AugmentedDofDistributionHelper; // Forward decl. for dof_distribution_helper() below
+
   // Mixin giving an assembly handler the chance to describe its augmented block. The default says
   // "cannot describe it", so a handler that does not override behaves exactly as before.
   class AugmentedSparsityProvider
@@ -123,6 +125,11 @@ namespace pyoomph
   public:
     virtual ~AugmentedSparsityProvider() {}
     virtual bool get_sparsity_pattern(oomph::GeneralisedElement *const &elem_pt, AugmentedBlockSpec &spec) const { return false; }
+    // The handler's dof bookkeeping, or NULL if it does not use AugmentedDofDistributionHelper.
+    // Problem::BaseDofDistributionScope needs it to present the BASE dof distribution during an
+    // eigenproblem assembly, so a handler answering NULL (PeriodicOrbitHandler, which manages
+    // GetDofPtr() itself) keeps eigensolving refused while it is installed.
+    virtual AugmentedDofDistributionHelper *dof_distribution_helper() { return NULL; }
   };
 
   // The dof-bookkeeping half of a bifurcation-tracking handler, shared by all of them. A handler
@@ -203,6 +210,14 @@ namespace pyoomph
     // distribution (in-place rebuild when replicated, pointer swap-back when distributed).
     void restore_base_distribution();
 
+    // Reversible version of the above, for the eigenproblem assembly: present the BASE distribution
+    // to the problem while the handler stays installed, then put the augmented one back. Unlike
+    // restore_base_distribution() these do NOT touch Dof_pt -- the eigen assembly reads element and
+    // node data rather than the dof vector, and leaving it alone keeps every handler dof pointer
+    // (and hence the tracked state) valid across the eigensolve.
+    void install_base_distribution();
+    void restore_augmented_distribution();
+
     // Global reductions over per-rank partial results (identity unless distributed), used by the
     // eigenvector rescaling below.
     double allreduce_max(double local) const;
@@ -222,6 +237,7 @@ namespace pyoomph
     oomph::LinearAlgebraDistribution Base_distribution_copy;
     oomph::LinearAlgebraDistribution *Base_distribution_pt = NULL;
     oomph::LinearAlgebraDistribution *Augmented_distribution_pt = NULL; // owned, distributed mode only
+    unsigned long Augmented_nrow = 0;                                   // total augmented rows, to rebuild the replicated distribution
     std::vector<unsigned long> Global_eqn_number;                       // empty unless distributed
   };
 
@@ -259,6 +275,9 @@ namespace pyoomph
     // unless apply_maxabs_normalization() replaced it.
     double Normalization_rhs = 1.0;
     AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
+  public:
+    AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
+  protected:
 
   public:
     bool call_param_change_handler;
@@ -419,6 +438,9 @@ namespace pyoomph
     // unless apply_maxabs_normalization() replaced it.
     double Normalization_rhs = 1.0;
     AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
+  public:
+    AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
+  protected:
     // Per generated-code lookup of which residual-assembly variant is the base state vs. mass matrix
     std::map<const pyoomph::DynamicBulkElementCode *, PitchForkResidualContributionList> residual_contribution_indices;
     // Builds residual_contribution_indices by inspecting all generated element codes once up front.
@@ -512,6 +534,7 @@ namespace pyoomph
     // i.e. the historical behaviour, unless apply_maxabs_normalization() replaced it; see there.
     double Normalization_rhs = 1.0;
     AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
+    AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
 
   public:
     unsigned get_problem_ndof() { return Ndof; }
@@ -611,6 +634,7 @@ namespace pyoomph
     double Omega;         // Imaginary part of the eigenvalue to be determined
     double *Parameter_pt; // Pointer to the critical parameter to find by this bifurcation analysis
     AugmentedDofDistributionHelper Dist_helper; // Dof bookkeeping shared by all trackers (see its comment)
+    AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
 
     // Each generated C code has three residual forms: These are stored in this mapping
     std::map<const pyoomph::DynamicBulkElementCode *, AzimuthalSymmetryBreakingResidualContributionList>

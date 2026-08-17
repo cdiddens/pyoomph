@@ -303,6 +303,9 @@ namespace pyoomph
 		virtual void setup_Dirichlet_conditions(bool only_update_vals);
 		virtual void set_dirichlet_active(std::string name, bool active);
 		virtual bool get_dirichlet_active(std::string name);
+		// Whole-vector snapshot/restore of the activation flags, see mesh.cpp for why it exists.
+		std::vector<bool> get_dirichlet_active_flags() const;
+		void set_dirichlet_active_flags(const std::vector<bool> &flags);
 		// Ensure the intrinsic boundary coordinate (arclength/zeta along boundary_index) has been set up on all its nodes.
 		virtual void boundary_coordinates_bool(unsigned boundary_index);
 		virtual bool is_boundary_coordinate_defined(unsigned boundary_index);

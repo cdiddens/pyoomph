@@ -240,6 +240,32 @@ Bifurcation *tracking* itself is no longer on this list — see
 `dev_docs/mpi_augmented_systems.md`. What is still refused inside it: `blocksolve=True`,
 and `adapt()` / arclength continuation while tracking, both for the history-dof reason in §3.
 
+### 5a. Solving an eigenproblem *while* a bifurcation tracker is installed
+
+Also no longer refused, serially or under MPI. It is the **base state's** eigenproblem — what tells
+you a codim-2 point is coming along a bifurcation locus — and the assembly needed only its row layout
+put back, because oomph's `get_eigenproblem_matrices` installs its own `EigenProblemHandler` anyway.
+`Problem::BaseDofDistributionScope`, `dev_docs/mpi_augmented_systems.md` §6c for the mechanism and
+`dev_docs/bifurcation_loci.md` §6 for the mode policy.
+
+Three consequences for this document:
+
+- **`get_eigen_row_layout()` now asks `_get_base_dof_distribution_info()`**, not
+  `_get_dof_distribution_info()`. The two differ only while a tracker is installed, where the latter
+  is the augmented layout — which is still what `tests/mpi_bifurcation_worker.py` wants from it.
+  `rotate_eigenvectors` (§4.3) moved to the base layout for the same reason: an eigenvector has base
+  length whatever the dof vector is doing.
+- **The shift may not be zero while tracking**, and a zero one is refused by name. `petsc.py`'s
+  `if self.spectral_transformation and shift` would otherwise leave `ST` at its default and ask MUMPS
+  to factorise a matrix the tracker has just made exactly singular.
+- **`set_eigenfunction_as_dofs` and `refine_eigenfunction` now refuse while tracking**, by name. The
+  first would zero-pad a base-length eigenvector into the augmented dof vector — over the tracker's
+  own unknowns — which the `numpy.pad` at its top did silently; the second adapts.
+
+Periodic orbit tracking is now refused *by name* rather than falling through: the old guard tested
+`get_bifurcation_tracking_mode() != ""`, which is `""` for orbits, so an eigensolve there would have
+assembled on the `nT*Ndof+1` distribution.
+
 ## 6. Testing
 
 `tests/mpi_eigen_worker.py` + `tests/test_mpi_eigenvalues.py`, following the pattern of the

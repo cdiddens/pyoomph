@@ -377,9 +377,27 @@ def test_bifurcation_gui_controller(tmp_path):
             # The whole point: every locus point is the analytic fold for its own b.
             assert numpy.isclose(p.param_values["mu"], mu_c, atol=1e-6), (b_here, p.param_values)
             assert numpy.isclose(p.obs_values["ode/u"], u_c, atol=1e-4)
-            # Tracked continuation reports the critical eigenvalue as the synthetic 0 + i*omega; a
-            # real eigensolve is impossible here (solve_eigenproblem refuses while tracking is on).
+            # The CRITICAL eigenvalue stays the synthetic 0 + i*omega that tracked continuation
+            # reports: re-solving it would turn the exact zero into a small nonzero value and the
+            # point would stop reading as a bifurcation.
             assert p.eig_value_Re == 0
+            # The rest of the spectrum IS solved for now (the base state's eigenproblem is available
+            # while tracking), which is what makes a codim-2 point along a locus visible at all. On
+            # this one-dof problem the single eigenvalue is the fold's own, so it must come back at
+            # zero -- the certificate that the base state really is at the fold and that the
+            # eigenproblem was assembled on the BASE, not the augmented, dof layout.
+            assert len(p.eig_values) == c.neigen, p.eig_values
+            assert numpy.isclose(numpy.real(p.eig_values[0]), 0.0, atol=1e-6), p.eig_values
+        # ...and the eigensolve really ran. Both ways of not running it -- the deliberately non-fatal
+        # except (a failed shift-invert must not abort a long two-parameter sweep) and
+        # locus_eigen_shift=None -- fall back to recording the synthetic critical value alone, which
+        # on this fold is exactly 0 with neigen == 1 and would satisfy both assertions above without
+        # a single eigenproblem having been solved. A solved fold eigenvalue is a rounding-error-sized
+        # number rather than an exact zero, so at least one point has to differ from its own critical
+        # value; the log is checked as well, so a failure says which of the two happened.
+        assert not any("Could not solve the eigenproblem" in str(m) for m in logged), logged
+        assert any(complex(p.eig_values[0]) != complex(p.eig_value_Re, p.eig_value_Im) for p in locus), \
+            [(p.eig_values[0], p.eig_value_Re) for p in locus]
         assert len({round(p.param_values["b"], 6) for p in locus}) == len(locus), "b really moved"
         # No normal form is computed per locus point even with classification on: the type is known.
         assert all(p.bifurcation_info is None for p in locus)

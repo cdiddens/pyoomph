@@ -1465,8 +1465,20 @@ void PyReg_Problem(nb::module_ &m)
 									   (unsigned)dist->first_row(), (bool)dist->distributed());
 			},
 			"Row layout of the problem's dof distribution as (nrow, nrow_local, first_row, distributed). "
-			"This is the distribution the eigenproblem matrices are assembled on, so it gives the ownership "
-			"range needed to hand their local CSR blocks to a distributed linear algebra backend.")
+			"While a bifurcation tracker is active this is the AUGMENTED layout; use "
+			"_get_base_dof_distribution_info() for the one the eigenproblem matrices are assembled on.")
+		.def(
+			"_get_base_dof_distribution_info", [](pyoomph::Problem *self)
+			{
+				unsigned nrow, nrow_local, first_row;
+				bool distributed;
+				self->get_base_dof_distribution_info(nrow, nrow_local, first_row, distributed);
+				return std::make_tuple(nrow, nrow_local, first_row, distributed);
+			},
+			"Row layout of the BASE (unaugmented) dof distribution as (nrow, nrow_local, first_row, distributed). "
+			"This is the distribution the eigenproblem matrices are assembled on -- also while a bifurcation "
+			"tracker is installed, where the problem's own dof distribution is the larger augmented one -- so it "
+			"gives the ownership range needed to hand their local CSR blocks to a distributed linear algebra backend.")
 		.def(
 			"_redistribute_local_to_global_double_vector", [](pyoomph::Problem *self, const nb::ndarray<nb::numpy, double> &local_v)
 			{

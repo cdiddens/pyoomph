@@ -61,6 +61,7 @@ import shutil
 import subprocess
 import sys
 
+import numpy
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -108,16 +109,25 @@ _OBS_RTOL = 1e-8
 # Between ranks of ONE run there is nothing left to differ -- every rank reads the same converged
 # augmented state, and the scalars are broadcast from rank 0.
 _RANK_RTOL = 1e-12
+# The base state's eigenvalues, compared both across serial/distributed and against the same state
+# with the tracker removed. Looser than _RANK_RTOL because shift-invert Krylov-Schur stops at its own
+# tolerance and a different MUMPS ordering moves the result within it; the same 6e-9-ish spread the
+# plain MPI eigenvalue suite records. A base-vs-augmented layout mix-up does not move an eigenvalue
+# by 1e-7 -- it solves a different problem.
+_EIG_RTOL = 1e-7
+_EIG_ATOL = 1e-7
 
 
 def _run_mpi(nproc, tmpdir, distribute, case="fold", size=8, timeout=1200,
-             eigenvector_scaling="unit"):
+             eigenvector_scaling="unit", eigen_during_tracking=False):
     """Launch the worker under mpirun and return the list of per-rank result dicts."""
     # No --oversubscribe: an oversubscribed run makes the timings meaningless and, on this project's
     # machines, is explicitly not wanted. nproc stays small enough to fit real cores.
     cmd = ["mpirun", "-n", str(nproc), sys.executable, _WORKER,
            "--outdir", str(tmpdir), "--case", case, "--size", str(size),
            "--eigenvector-scaling", eigenvector_scaling]
+    if eigen_during_tracking:
+        cmd += ["--eigen-during-tracking"]
     if distribute:
         cmd += ["--distribute"]
     # Importing pyoomph calls MPI_Init, so THIS pytest process is already a (singleton) MPI job and
@@ -268,6 +278,82 @@ def test_replicated_mpirun_fold_without_eigenvector_guess(tmp_path):
     _check_no_errors(per_rank)
     _assert_ranks_agree(per_rank)
     _assert_matches_serial("fold without guess, replicated np=2", serial, per_rank, False)
+
+
+def _assert_eigen_during_tracking(what, serial, per_rank, distributed):
+    """The base state's eigenproblem, solved with the tracker still installed.
+
+    Three things have to hold, and they fail in different ways:
+
+      - the spectrum matches the SAME state with the tracker removed (the A/B inside each run). Both
+        assemble the identical element contributions -- oomph's get_eigenproblem_matrices installs
+        its own EigenProblemHandler either way -- so a difference can only come from the row layout,
+        which is what Problem::BaseDofDistributionScope restores.
+      - it matches the SERIAL spectrum. Eigenvalues are computed collectively, so every rank
+        necessarily agrees with its peers whether or not it was handed the right rows; only the
+        comparison against serial constrains WHICH eigenproblem was solved.
+      - the row blocks tile [0, base_ndof) exactly. This is the one assertion that says the
+        eigensolver was handed the BASE distribution rather than the augmented one, and that the
+        blocks are the partitioned ones rather than nproc copies of the whole thing.
+    """
+    for r in per_rank:
+        tracked = numpy.array(r["track_eig_re"]) + 1j * numpy.array(r["track_eig_im"])
+        plain = numpy.array(r["plain_eig_re"]) + 1j * numpy.array(r["plain_eig_im"])
+        assert len(tracked) == len(plain) and len(tracked) > 0, (what, r["rank"], tracked, plain)
+        assert numpy.allclose(tracked, plain, rtol=_EIG_RTOL, atol=_EIG_ATOL), \
+            "%s rank %d: tracked %r vs untracked %r" % (what, r["rank"], tracked, plain)
+        ref = numpy.array(serial["track_eig_re"]) + 1j * numpy.array(serial["track_eig_im"])
+        assert numpy.allclose(tracked, ref, rtol=_EIG_RTOL, atol=_EIG_ATOL), \
+            "%s rank %d: %r, serial %r" % (what, r["rank"], tracked, ref)
+        # Not the augmented count, which is what res["ndof"] is while tracking.
+        assert r["eig_nrow"] == serial["eig_nrow"] < r["ndof"], (what, r["rank"], r["eig_nrow"], r["ndof"])
+        assert r["eig_row_distributed"] is distributed, (what, r["rank"])
+
+    blocks = sorted((r["eig_first_row"], r["eig_nrow_local"]) for r in per_rank)
+    if distributed:
+        at = 0
+        for first, n in blocks:
+            assert first == at, "%s: eigen row blocks do not tile [0, %d): %r" % (
+                what, serial["eig_nrow"], blocks)
+            at += n
+        assert at == serial["eig_nrow"], "%s: eigen row blocks cover %d of %d rows: %r" % (
+            what, at, serial["eig_nrow"], blocks)
+    else:
+        # Replicated: oomph redistributes the assembled matrices back to a globally replicated form,
+        # so every rank holds all of them and the eigensolver imposes its own split further down.
+        for first, n in blocks:
+            assert (first, n) == (0, serial["eig_nrow"]), "%s: %r" % (what, blocks)
+
+
+@pytest.mark.parametrize("case", _CASES)
+@pytest.mark.parametrize("nproc", [2, 3])
+def test_eigen_during_tracking_distributed(tmp_path, case, nproc):
+    """Solve the base state's eigenproblem while the tracker is installed, under --distribute.
+
+    For "azimuthal" the eigensolve is taken at m=0 while an m=1 bifurcation is tracked, i.e. the
+    mode of the eigenproblem differs from the tracked one -- see the worker.
+    """
+    serial = _serial_reference(tmp_path, case=case, with_eigen=True)
+    per_rank = _run_mpi(nproc, tmp_path, distribute=True, case=case, eigen_during_tracking=True)
+    _check_no_errors(per_rank)
+    _assert_ranks_agree(per_rank)
+    _assert_matches_serial("%s eigen-while-tracking distributed np=%d" % (case, nproc),
+                           serial, per_rank, True)
+    _assert_eigen_during_tracking("%s eigen-while-tracking distributed np=%d" % (case, nproc),
+                                  serial, per_rank, True)
+
+
+@pytest.mark.parametrize("case", _CASES)
+def test_eigen_during_tracking_replicated(tmp_path, case):
+    """The same, under a plain mpirun: the replicated augmented distribution is rebuilt in place
+    rather than pointer-swapped, so it is a genuinely different path through the scope."""
+    serial = _serial_reference(tmp_path, case=case, with_eigen=True)
+    per_rank = _run_mpi(2, tmp_path, distribute=False, case=case, eigen_during_tracking=True)
+    _check_no_errors(per_rank)
+    _assert_ranks_agree(per_rank)
+    _assert_matches_serial("%s eigen-while-tracking replicated np=2" % case, serial, per_rank, False)
+    _assert_eigen_during_tracking("%s eigen-while-tracking replicated np=2" % case,
+                                  serial, per_rank, False)
 
 
 def test_maxabs_eigenvector_scaling_distributed(tmp_path):

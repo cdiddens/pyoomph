@@ -226,6 +226,44 @@ which would settle it without touching the handlers.
 Until that is understood, treat moving-mesh problems with remeshing as unvalidated here. The four handler
 cases above use fixed meshes.
 
+## 6c. Eigensolving the base state while a handler is installed
+
+Added later, and it needed almost nothing from the handlers themselves. oomph-lib's
+`Problem::get_eigenproblem_matrices` installs its **own** `EigenProblemHandler` for the duration of
+the assembly, whose `ndof`/`eqn_number` delegate straight to the element, so the elemental assembly
+was already the base one and the base state still sits in the node data. What was augmented is the
+row layout the matrices are built on — `new CRDoubleMatrix(dof_distribution_pt())` — and `ndof()`,
+which oomph's own PARANOID block compares them against.
+
+`Problem::BaseDofDistributionScope` wraps `assemble_eigenproblem_matrices` and presents the base
+layout for its duration, through a reversible form of §2's swap:
+`AugmentedDofDistributionHelper::install_base_distribution()` / `restore_augmented_distribution()`.
+Replicated it rebuilds the distribution in place (base, then back to `Augmented_nrow`); distributed it
+pointer-swaps, exactly as `build_augmented_dofs`/`restore_base_distribution` do. It is a no-op unless
+the installed handler answers `dof_distribution_helper()` — `AugmentedSparsityProvider`'s new virtual
+— so `PeriodicOrbitHandler`, which manages `Dof_pt` itself, keeps eigensolving refused.
+
+Two things it deliberately does **not** do:
+
+- **resize `Dof_pt`.** The eigen assembly reads element and node data, not the dof vector, so leaving
+  it alone keeps every handler dof pointer, and hence the tracked state, valid across the eigensolve.
+  Measured: the tracked critical parameter moves by 7e-15 after three eigensolves.
+- **skip the allocation-cache reset.** Both transitions do
+  `GetSparcseAssembleWithArraysPA().resize(0)`, for the same reason the two existing transitions do:
+  it is a per-row nnz table sized to the ndof that was current when it was filled.
+
+`_get_base_dof_distribution_info()` exposes that layout to Python (`get_eigen_row_layout()`,
+`rotate_eigenvectors`); `_get_dof_distribution_info()` keeps meaning the augmented one, which is what
+`tests/mpi_bifurcation_worker.py` reads.
+
+The mode policy, the mandatory non-zero shift and what is still refused are in
+[bifurcation_loci.md](bifurcation_loci.md) §6. Distributed coverage is
+`test_eigen_during_tracking_distributed` / `_replicated` in `tests/test_mpi_bifurcation_tracking.py`
+(the four handlers x `np=2 --distribute`, `np=3 --distribute`, `np=2` plain), which asserts the
+spectrum against the serial run **and** against the same state with the handler removed, and requires
+the eigen row blocks to tile `[0, base_ndof)` — the one number that says the base distribution, not
+the augmented one, reached SLEPc.
+
 ---
 
 # Part II — the Python custom assembler (plan only)

@@ -1611,6 +1611,9 @@ class Problem(_pyoomph.Problem):
     def set_eigenfunction_as_dofs(self,n:int,*,mode:"MeshDataEigenModes"="abs",additive_mesh_positions:bool=True,eigenvector_position_scale:float | None=None,perturb_amplitude:float | None=None)->tuple[NPFloatArray, NPFloatArray, float] | tuple[NPFloatArray, NPFloatArray]:
         if n>=len(self._last_eigenvectors):
             raise RuntimeError("Cannot set eigenfunction "+str(n)+" as dofs, since we have calculated only "+str(len(self._last_eigenvectors))+" eigenfunctions")
+        # A base-length eigenvector would otherwise be silently zero-padded to the augmented length by
+        # the numpy.pad below, i.e. written over the base dofs AND over the tracker's own unknowns.
+        self._require_no_bifurcation_tracking("Pushing an eigenfunction into the dofs (set_eigenfunction_as_dofs)")
         with_pos=not additive_mesh_positions
         actual_dofs,positional_dofs,pinned_values=self.get_all_values_at_current_time(with_pos)
         if eigenvector_position_scale is None:
@@ -1841,6 +1844,48 @@ class Problem(_pyoomph.Problem):
         """
         if self.is_distributed():
             raise RuntimeError(what+" is not supported on a distributed (--distribute) problem yet. Run it without --distribute (plain eigenvalue solving via SLEPc does work distributed).")
+
+    def _require_no_bifurcation_tracking(self,what:str)->None:
+        """Stop with a clear message if ``what`` is being attempted while a tracker is installed.
+
+        For the callers that reach the dof vector by global equation number: while tracking, the dofs
+        are the augmented ones (base dofs, then the eigenvector blocks and the scalars), so a
+        base-length vector written into them lands partly in the eigenvector block. Solving the
+        *eigenproblem* itself is fine and no longer refused -- see solve_eigenproblem().
+        """
+        if self.get_bifurcation_tracking_mode()!="":
+            raise RuntimeError(what+" is not possible while bifurcation tracking is active, since the dof vector is then the augmented one (base dofs plus the eigenvector and the scalar unknowns). Call deactivate_bifurcation_tracking() first.")
+
+    def _dirichlet_activation_snapshot(self)->list[tuple["AnyMesh",list[bool]]]:
+        """Per-mesh snapshot of which Dirichlet conditions are currently active.
+
+        Needed because ``_before_eigen_solve`` both *reports* that the equations must be renumbered
+        and *has already flipped the flags* by the time it returns (AxisymmetryBC deactivates the
+        strong axis conditions at m != 0). While a tracker is installed a renumbering is not allowed,
+        so the flags have to be put back before refusing -- otherwise the problem is left describing
+        boundary conditions that its equation numbering does not have.
+        """
+        res:list[tuple["AnyMesh",list[bool]]]=[]
+        for mesh in self._iterate_all_meshes():
+            res.append((mesh,list(mesh._get_dirichlet_active_flags()))) #type:ignore
+        return res
+
+    def _iterate_all_meshes(self)->Iterable["AnyMesh"]:
+        """All bulk meshes and, recursively, the interface meshes hanging off them.
+
+        _meshdict holds only the bulk meshes, but a Dirichlet condition (and hence a mode-dependent
+        activation flag) can live on an interface just as well.
+        """
+        def _walk(m:"AnyMesh")->Iterable["AnyMesh"]:
+            yield m
+            for imesh in getattr(m,"_interfacemeshes",{}).values():
+                yield from _walk(imesh)
+        for topmesh in list(self._meshdict.values()):
+            yield from _walk(topmesh)
+
+    def _restore_dirichlet_activation(self,snapshot:list[tuple["AnyMesh",list[bool]]])->None:
+        for mesh,flags in snapshot:
+            mesh._set_dirichlet_active_flags(flags) #type:ignore
 
     def get_la_solver(self)->"GenericLinearSystemSolver":
 
@@ -5144,9 +5189,30 @@ class Problem(_pyoomph.Problem):
         for the normal-mode variants selected by ``azimuthal_m`` or ``normal_mode_k``, and for the
         eigenvalue reported while a bifurcation or eigenbranch tracker is active.
 
+        **While a bifurcation tracker is active** this solves the eigenproblem of the BASE state, i.e.
+        of the first ``ndof`` entries of the augmented dof vector, which is how a secondary (codim-2)
+        bifurcation is detected along a bifurcation locus. Nothing is renumbered and the tracked state
+        is left untouched. Three things differ from an ordinary call:
+
+        * ``shift`` must be non-zero. The tracker has converged the base state onto the bifurcation,
+          so ``lambda = 0`` (fold, pitchfork) or ``+-i*omega`` (Hopf, azimuthal) is an exact
+          eigenvalue -- exactly where the shift-invert transform would be asked to factorise. A zero
+          (or ``None``) shift raises rather than handing the solver a singular operator.
+        * without ``azimuthal_m``/``normal_mode_k`` the mode is whatever the corresponding global
+          parameter currently holds, i.e. **the tracked mode** during azimuthal or normal-mode
+          tracking. Pass ``azimuthal_m=0`` for the axisymmetric base-state spectrum.
+        * a mode that would require the equations to be renumbered is refused. In practice that means
+          ``azimuthal_m != 0`` while tracking a fold, Hopf or pitchfork, where the strong axis
+          conditions are still active; while tracking an azimuthal or Cartesian normal-mode
+          bifurcation they are already released and every mode is available.
+
+        The results replace :py:meth:`get_last_eigenvalues`/:py:meth:`get_last_eigenvectors`, so they
+        no longer hold the tracked critical eigenpair -- ask the handler through
+        ``_get_bifurcation_eigenvector()`` if you need that afterwards.
+
         Args:
             n (int): The number of eigenvalues and eigenvectors to compute.
-            shift (Union[float, complex, None], optional): The shift applied for shift-inverted approaches to solve the eigenproblem. Defaults to 0.
+            shift (Union[float, complex, None], optional): The shift applied for shift-inverted approaches to solve the eigenproblem. Defaults to 0. Must be non-zero while bifurcation tracking is active, see above.
             quiet (bool, optional): If True, suppresses the output. Defaults to False.
             azimuthal_m (Optional[Union[int, List[int]]], optional): The azimuthal mode number(s) for axial symmetry breaking. Defaults to None, i.e. the axisymmetric mode.
             normal_mode_k: The wave number(s) for an additional direction in Cartesian coordinates. Defaults to None, i.e. the base mode.            
@@ -5166,6 +5232,45 @@ class Problem(_pyoomph.Problem):
         self._solve_eigenproblem_helper(n,shift,quiet,azimuthal_m,normal_mode_k,normal_mode_L,report_accuracy,sort,which,OPpart,v0,filter,target,ncv)
         self._last_eigenvectors=self.process_eigenvectors(self._last_eigenvectors)
         return self._last_eigenvalues,self._last_eigenvectors
+
+    def _check_eigensolve_during_augmentation(self,shift:float | complex | None)->bool:
+        """Decide whether an eigensolve may run with the current augmented system, and say so.
+
+        Returns True when a bifurcation tracker is installed (so the caller knows not to renumber),
+        False when the dof vector is the plain one. Raises for the augmentations that cannot serve a
+        base-state eigenproblem, and for a shift that would factorise a matrix the tracker has just
+        made singular.
+
+        What makes tracking workable at all: oomph's get_eigenproblem_matrices() installs its own
+        EigenProblemHandler, whose ndof/eqn_number delegate to the element, so the assembly is already
+        the BASE one and the base state still sits in the node data. Only the row layout had to be put
+        back, which Problem::BaseDofDistributionScope does in C++.
+        """
+        # Periodic orbits: the augmented dofs are nT copies of the base ones held in the handler, and
+        # unlike the trackers there is no base distribution kept alive to fall back to. Note this used
+        # to fall through the old guard entirely (get_bifurcation_tracking_mode() is "" for orbits) and
+        # would assemble on the nT*Ndof+1 distribution.
+        if isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler):
+            raise RuntimeError("Cannot solve an eigenproblem while periodic orbit tracking is active. Use the Floquet multipliers of the orbit instead, or deactivate the orbit handler first.")
+        # The Python-side custom augmentation (Problem.add_augmented_dofs / bifurcation_tools.py):
+        # its dofs are appended to Dof_pt directly and the C++ scope knows nothing about them.
+        if self._get_n_unaugmented_dofs()!=0: #type:ignore
+            raise RuntimeError("Cannot solve an eigenproblem while a custom augmented system (add_augmented_dofs / a CustomBifurcationTracker) is active. Remove the augmentation first.")
+
+        if self.get_bifurcation_tracking_mode()=="":
+            return False
+
+        # A zero shift is the default of solve_eigenproblem(), and it is exactly the one value that
+        # cannot work here: the tracker has converged the base state onto a bifurcation, so lambda=0
+        # (fold/pitchfork) or lambda=+-i*omega (Hopf/azimuthal) is an EXACT eigenvalue and the
+        # shift-invert transform factorises J-sigma*M right at the singularity. SLEPc reports it as a
+        # MUMPS zero pivot several frames away from the cause. shift=None is refused for the same
+        # reason: SLEPc then targets 0 and still factorises there.
+        if not shift:
+            omega=self._get_bifurcation_omega()
+            at="0" if not omega else "0 and +-"+str(abs(omega))+"j"
+            raise RuntimeError("An eigensolve while bifurcation tracking is active needs a NON-ZERO shift: the tracked bifurcation puts an eigenvalue exactly at "+at+", which is where a zero shift asks the shift-invert transform to factorise. Pass e.g. shift=0.1 (or a value near the part of the spectrum you are looking for).")
+        return True
 
     def _solve_eigenproblem_helper(self, n:int, shift:float | complex | None=0, quiet:bool=False, azimuthal_m:int | list[int] | None=None,normal_mode_k:ExpressionOrNum | list[ExpressionOrNum] | None=None,normal_mode_L:ExpressionOrNum | list[ExpressionOrNum] | None=None,report_accuracy:bool=False,sort:bool=True,which:"EigenSolverWhich"="LM",OPpart:Literal["r", "i"] | None=None,v0:NPFloatArray | NPComplexArray | None=None,filter:Callable[[complex], bool] | None=None,target:complex | None=None,ncv:int | None=None)->tuple[NPComplexArray,NPComplexArray]:
         """
@@ -5201,18 +5306,19 @@ class Problem(_pyoomph.Problem):
             else:
                 normal_mode_k_nd=float(normal_mode_k*self.get_scaling("spatial"))
             return self._solve_normal_mode_eigenproblem(n, cartesian_k=normal_mode_k_nd, shift=shift, quiet=quiet,filter=filter,report_accuracy=report_accuracy,v0=v0,target=target,sort=sort,ncv=ncv)
-        if self._dof_selector_used is not self._dof_selector:
+        tracking=self._check_eigensolve_during_augmentation(shift)
+        if not tracking and self._dof_selector_used is not self._dof_selector:
+            # Renumbers, so it is skipped while tracking -- where _check_eigensolve_during_augmentation
+            # has already refused anything that would need a renumbering.
             self.reapply_boundary_conditions()
             self.reapply_boundary_conditions() # Must be done twice to correctly setup the equation remapping
-        if self.get_bifurcation_tracking_mode()!="":
-            raise RuntimeError("Cannot calculate eigenvalues/vectors when bifurcation tracking is active. You can access the critical eigenvector(s) by get_last_eigenvectors()")
         ntstep=self.ntime_stepper()
         was_steady=[False]*ntstep
         for i in range(ntstep):
             ts=self.time_stepper_pt(i)
             was_steady[i]=ts.is_steady()
             ts.make_steady()
-        self.actions_before_eigen_solve()
+        self.actions_before_eigen_solve(must_not_renumber=tracking)
         self.invalidate_cached_mesh_data(only_eigens=True)
         self.setup_forced_zero_dof_list_for_eigenproblems()
         eigen_solver=self.get_eigen_solver()
@@ -5284,6 +5390,8 @@ class Problem(_pyoomph.Problem):
         # only this rank's rows -- see Problem::get_dofs(t,...) in src/problem.cpp). Raising here names
         # the feature instead of failing several frames into adapt().
         self._require_non_distributed("Mesh adaptation to an eigenfunction (refine_eigenfunction)")
+        # adapt() renumbers, which pulls the augmented dof vector out from under the tracker.
+        self._require_no_bifurcation_tracking("Mesh adaptation to an eigenfunction (refine_eigenfunction)")
         if eigenindex<0:
             raise ValueError("Eigenindex must be non-negative")
         elif eigenindex>=len(self.get_last_eigenvalues()):
@@ -6617,7 +6725,9 @@ class Problem(_pyoomph.Problem):
         # which also keeps the result bit-identical to the serial run. Under --distribute a solver may
         # instead hand back only the locally owned row block, and then the reduction has to span the
         # ranks.
-        n_global,nrow_local,first_row,_row_distributed=self._get_dof_distribution_info()
+        # The BASE layout: an eigenvector has base length even while a bifurcation tracker makes the
+        # problem's own dof distribution the larger augmented one.
+        n_global,nrow_local,first_row,_row_distributed=self._get_base_dof_distribution_info()
         for ev in eigenvectors:
             if get_mpi_nproc()>1 and len(ev)!=n_global:
                 if len(ev)!=nrow_local:
@@ -6738,7 +6848,18 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("Must specify either azimuthal_m or cartesian_k")
         assert param is not None
 
-        
+        tracking=self._check_eigensolve_during_augmentation(shift)
+        # The mode parameter used to be reset to 0 when done. That is wrong while tracking: the
+        # azimuthal/normal-mode tracker reads the very same global parameter when it assembles its
+        # eigen rows, so hard-coding 0 here would silently retune the tracked bifurcation to m=0.
+        # Restore what was set on entry instead (which is 0 in the untracked case, as before).
+        mode_value_on_entry=param.value
+        try:
+            return self._solve_normal_mode_eigenproblem_impl(n,param,vlist,azimuthal_m,shift,quiet,filter,report_accuracy,target,v0,sort,ncv,tracking)
+        finally:
+            param.value=mode_value_on_entry
+
+    def _solve_normal_mode_eigenproblem_impl(self,n:int,param:"_pyoomph.GiNaC_GlobalParam",vlist:"list[int] | tuple[int] | int | list[float] | tuple[float] | float",azimuthal_m:list[int] | tuple[int] | int | None,shift:float | complex | None,quiet:bool,filter:Callable[[complex], bool] | None,report_accuracy:bool,target:complex | None,v0:NPFloatArray | NPComplexArray | None,sort:bool,ncv:int | None,tracking:bool)->tuple[NPComplexArray,NPComplexArray]:
         if isinstance(vlist,(list,tuple)):
             if report_accuracy:
                 raise RuntimeError("report_accuracy=True for normal mode eigenproblems only works if you select a single mode, not a list like "+str(vlist))
@@ -6747,7 +6868,7 @@ class Problem(_pyoomph.Problem):
             minfoL:list[int | float]=[]
             for ms in vlist:
                 param.value = ms
-                self.actions_before_eigen_solve()
+                self.actions_before_eigen_solve(must_not_renumber=tracking)
                 self._solve_eigenproblem_helper(n, shift,quiet=True,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort,ncv=ncv)
                 if len(alleigenvals)==0:
                     alleigenvals=self.get_last_eigenvalues().copy()
@@ -6780,12 +6901,10 @@ class Problem(_pyoomph.Problem):
                 for i, l in enumerate(self._last_eigenvalues):
                     m=minfo[i]
                     print("Eigenvalue [m="+str(m)+"]", i, ":", l)
-            param.value = 0
         else:
             param.value = vlist
-            self.actions_before_eigen_solve()
+            self.actions_before_eigen_solve(must_not_renumber=tracking)
             self._solve_eigenproblem_helper(n, shift,filter=filter,report_accuracy=report_accuracy,target=target,v0=v0,sort=sort,ncv=ncv)
-            param.value = 0
             if azimuthal_m is not None:
                 self._last_eigenvalues_m=numpy.array([vlist]*len(self.get_last_eigenvalues()),dtype=numpy.int32) #type:ignore
             else:
@@ -6812,7 +6931,14 @@ class Problem(_pyoomph.Problem):
             self._last_bc_setting="transient"
 
     # will be called when an eigenproblem is about to be solved
-    def actions_before_eigen_solve(self,force_reassign_eqs:bool=False): 
+    def actions_before_eigen_solve(self,force_reassign_eqs:bool=False,must_not_renumber:bool=False):
+        """Prepare the mode-dependent state of an eigensolve.
+
+        ``must_not_renumber`` is set while a bifurcation tracker is installed: the tracker cached the
+        base equation count and pushed dof pointers built against the current numbering, so a
+        reapply_boundary_conditions() here would leave it describing a problem that no longer exists.
+        The mode is then refused rather than accommodated -- see the snapshot dance below.
+        """
         eigen_m,eigen_k=None,None
         if self._azimuthal_mode_param_m is not None:
             if self._normal_mode_param_k is not None:
@@ -6824,10 +6950,25 @@ class Problem(_pyoomph.Problem):
         if self._normal_mode_param_k is not None:
             kv=self._normal_mode_param_k.value
             eigen_k=kv
-            
-        must_reassign_eqs = self._equation_system._before_eigen_solve(self.get_eigen_solver(),eigen_m,eigen_k) 
+
+        # _before_eigen_solve does not merely REPORT that a renumbering is needed: AxisymmetryBC has
+        # already deactivated the strong axis conditions by the time it answers. When we are not
+        # allowed to renumber we therefore have to put the flags back before refusing. This is not
+        # tidiness: without it the problem is left with axis conditions released while the equation
+        # numbering still has them pinned, and the NEXT eigensolve aborts (SIGABRT) rather than
+        # returning anything wrong. Removing the restore below fails tests/test_eigen_during_tracking.py
+        # ::test_refusals with exactly that crash.
+        snapshot=self._dirichlet_activation_snapshot() if must_not_renumber else None
+        must_reassign_eqs = self._equation_system._before_eigen_solve(self.get_eigen_solver(),eigen_m,eigen_k)
         #print("MUST REASSIGN IS",must_reassign_eqs,eigen_m,eigen_k)
         #exit()
+        if must_not_renumber and (must_reassign_eqs or force_reassign_eqs):
+            assert snapshot is not None
+            self._restore_dirichlet_activation(snapshot)
+            mode="m="+str(eigen_m) if eigen_m is not None else ("k="+str(eigen_k) if eigen_k is not None else "the base mode")
+            raise RuntimeError("The eigenproblem for "+mode+" needs the equations to be renumbered (it changes which boundary conditions are strongly enforced), which is not possible while bifurcation tracking is active -- the tracker's augmented dof vector is built against the current numbering. "
+                               "A non-axisymmetric (m!=0 or k!=0) eigenproblem is available while tracking an azimuthal or cartesian_normal_mode bifurcation, where the axis conditions are already released; while tracking a fold, Hopf or pitchfork they are not. "
+                               "Currently tracking: '"+self.get_bifurcation_tracking_mode()+"'. Deactivate the tracking to solve this eigenproblem.")
         if must_reassign_eqs or force_reassign_eqs:
 
             self.reapply_boundary_conditions()

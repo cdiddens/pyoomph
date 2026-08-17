@@ -149,6 +149,57 @@ def _eigenvector_norms(p, index=0):
             "evect_absmax": float(numpy.amax(numpy.absolute(ev)))}
 
 
+def _sorted_spectrum(evals):
+    """Eigenvalues in a comparable order. Numbering-independent, so it survives distribute()."""
+    ev = numpy.array(sorted(evals, key=lambda z: (round(numpy.real(z), 9), round(numpy.imag(z), 9))))
+    return [float(numpy.real(z)) for z in ev], [float(abs(numpy.imag(z))) for z in ev]
+
+
+def _eigen_during_tracking(p, neigen, shift, azimuthal_m=None):
+    """The BASE state's eigenproblem, solved once with the tracker installed and once without it.
+
+    This is the whole point of the feature: while a locus is being followed, the base state's
+    remaining spectrum is what tells you a codim-2 point is coming. The A/B against the same state
+    with the tracker removed is the assertion that matters -- the elemental assembly is the same
+    either way (oomph's get_eigenproblem_matrices installs its own EigenProblemHandler), so anything
+    that differs can only have come from the row layout, which is what
+    Problem::BaseDofDistributionScope puts back.
+
+    A NON-ZERO shift is mandatory here and pyoomph refuses a zero one: the tracker has converged the
+    base state onto the bifurcation, so lambda = 0 (fold/pitchfork) or +-i*omega (Hopf/azimuthal) is
+    an exact eigenvalue and that is exactly where shift-invert would factorise.
+    """
+    kw = {} if azimuthal_m is None else {"azimuthal_m": azimuthal_m}
+    # solve_eigenproblem overwrites the last eigenvalues/vectors, and everything below this in the
+    # worker still wants the TRACKED ones (_eigenvector_norms, _eigenfunction_observables). The
+    # handler's own vector is reachable through _get_bifurcation_eigenvector(), but restoring what
+    # was there keeps the rest of the worker reading exactly as it did.
+    saved_vals, saved_vects = p.get_last_eigenvalues().copy(), p.get_last_eigenvectors().copy()
+    res = {}
+    try:
+        tracked, _ = p.solve_eigenproblem(neigen, shift=shift, quiet=True, **kw)
+        res["track_eig_re"], res["track_eig_im"] = _sorted_spectrum(tracked)
+        # The row block the eigenproblem was actually assembled on. Under --distribute these must
+        # tile [0, base_ndof) across the ranks; if the augmented layout had leaked through, nrow
+        # would be the augmented count instead.
+        nrow, nrow_local, first_row, distributed = p._get_base_dof_distribution_info()
+        res["eig_nrow"] = int(nrow)
+        res["eig_nrow_local"] = int(nrow_local)
+        res["eig_first_row"] = int(first_row)
+        res["eig_row_distributed"] = bool(distributed)
+    finally:
+        p._last_eigenvalues, p._last_eigenvectors = saved_vals, saved_vects
+    return res
+
+
+def _eigen_after_deactivation(p, neigen, shift, azimuthal_m=None):
+    """The same eigenproblem once the tracker is gone -- the B half of the A/B above."""
+    kw = {} if azimuthal_m is None else {"azimuthal_m": azimuthal_m}
+    plain, _ = p.solve_eigenproblem(neigen, shift=shift, quiet=True, **kw)
+    re, im = _sorted_spectrum(plain)
+    return {"plain_eig_re": re, "plain_eig_im": im}
+
+
 def _eigenfunction_observables(p, index=0):
     """Integral observables of the TRACKED eigenfunction, with the dofs restored afterwards.
 
@@ -165,7 +216,7 @@ def _eigenfunction_observables(p, index=0):
         p.set_all_values_at_current_time(backup_dofs, backup_pinned, False)
 
 
-def fold_case(N=8, lam0=4.0, outdir=None, eigenvector_scaling="unit", with_guess=True):
+def fold_case(N=8, lam0=4.0, outdir=None, eigenvector_scaling="unit", with_guess=True, with_eigen=False):
     """Locate the Bratu fold in lam by eigen-solve + fold tracking."""
     prob = BratuProblem(N=N)
     with prob as p:
@@ -195,6 +246,8 @@ def fold_case(N=8, lam0=4.0, outdir=None, eigenvector_scaling="unit", with_guess
             "max_residual": float(numpy.amax(numpy.absolute(p.get_residuals()))),
         }
         res.update(_eigenvector_norms(p))
+        if with_eigen:
+            res.update(_eigen_during_tracking(p, 4, shift=0.5))
         p.deactivate_bifurcation_tracking()
         # Deactivation must put the problem back exactly as it was -- under --distribute that means
         # the LOCAL dof count, since the base distribution is a partitioned one.
@@ -206,10 +259,12 @@ def fold_case(N=8, lam0=4.0, outdir=None, eigenvector_scaling="unit", with_guess
         # differ between serial and distributed, and padding a base-length eigenvector into them
         # measures the padding rather than the eigenfunction.
         res.update(_eigenfunction_observables(p, 0))
+        if with_eigen:
+            res.update(_eigen_after_deactivation(p, 4, shift=0.5))
         return res
 
 
-def hopf_case(N=20, B0=2.5, outdir=None):
+def hopf_case(N=20, B0=2.5, outdir=None, with_eigen=False):
     """Locate the Brusselator Hopf in B by eigen-solve + Hopf tracking."""
     prob = BrusselatorProblem(N=N)
     with prob as p:
@@ -235,12 +290,18 @@ def hopf_case(N=20, B0=2.5, outdir=None):
             "max_residual": float(numpy.amax(numpy.absolute(p.get_residuals()))),
         }
         res.update(_eigenvector_norms(p))
+        if with_eigen:
+            # A Hopf sits at +-i*omega, not at 0, so the shift is placed near the real axis and away
+            # from both: what has to come back is a complex pair at |Im| = omega.
+            res.update(_eigen_during_tracking(p, 6, shift=0.5))
         p.deactivate_bifurcation_tracking()
         n_global, nrow_local, first_row, distributed = p._get_dof_distribution_info()
         res["ndof_after_deactivate"] = int(p.ndof())
         res["nrow_local_after_deactivate"] = int(nrow_local)
         # After deactivating, for the reason given in fold_case().
         res.update(_eigenfunction_observables(p, 0))
+        if with_eigen:
+            res.update(_eigen_after_deactivation(p, 6, shift=0.5))
         return res
 
 
@@ -306,7 +367,7 @@ class AzimuthalReactionProblem(Problem):
         self += eqs @ "domain"
 
 
-def _reaction_case(prob, bifurcation_type, lam_start, lam_step, azimuthal_m, outdir):
+def _reaction_case(prob, bifurcation_type, lam_start, lam_step, azimuthal_m, outdir, with_eigen=False):
     """Shared body of the pitchfork and azimuthal reaction-diffusion cases."""
     with prob as p:
         if outdir is not None:
@@ -336,32 +397,159 @@ def _reaction_case(prob, bifurcation_type, lam_start, lam_step, azimuthal_m, out
             "max_residual": float(numpy.amax(numpy.absolute(p.get_residuals()))),
         }
         res.update(_eigenvector_norms(p))
+        if with_eigen:
+            # The azimuthal case asks for the AXISYMMETRIC (m=0) spectrum while an m=1 bifurcation is
+            # being tracked -- the check "does the base state itself fold underneath this locus?",
+            # and the case where the mode of the eigensolve differs from the tracked one. It works
+            # here precisely because azimuthal tracking has already released the strong axis
+            # conditions, so no renumbering is needed; the m=0 axis conditions come back as an
+            # EigenMatrixSetDofsToZero manipulator instead.
+            res.update(_eigen_during_tracking(p, 4, shift=0.5,
+                                              azimuthal_m=0 if azimuthal_m is not None else None))
+            # The tracked mode must survive an eigensolve at another one: the tracker reads the same
+            # global "azimuthal_m" parameter when it assembles its eigen rows.
+            if azimuthal_m is not None:
+                res["m_after_eigen"] = float(p._azimuthal_mode_param_m.value)
+            # ...and so must the tracked state itself. Re-converging has to land back on the same
+            # critical parameter; a corrupted augmented system moves it.
+            p.solve()
+            res["param_after_eigen"] = float(p.lam.value)
         p.deactivate_bifurcation_tracking()
         n_global, nrow_local, first_row, distributed = p._get_dof_distribution_info()
         res["ndof_after_deactivate"] = int(p.ndof())
         res["nrow_local_after_deactivate"] = int(nrow_local)
         # After deactivating, for the reason given in fold_case().
         res.update(_eigenfunction_observables(p, 0))
+        if with_eigen:
+            res.update(_eigen_after_deactivation(p, 4, shift=0.5,
+                                                 azimuthal_m=0 if azimuthal_m is not None else None))
         return res
 
 
-def pitchfork_case(N=8, outdir=None):
+def pitchfork_case(N=8, outdir=None, with_eigen=False):
     """Symmetry-breaking onset of u=0 in the reaction-diffusion square: MyPitchForkHandler."""
-    return _reaction_case(PitchforkProblem(N=N), "pitchfork", 10.0, 4.0, None, outdir)
+    return _reaction_case(PitchforkProblem(N=N), "pitchfork", 10.0, 4.0, None, outdir, with_eigen)
 
 
-def azimuthal_case(N=8, outdir=None):
+def azimuthal_case(N=8, outdir=None, with_eigen=False):
     """m=1 onset of u=0 in the axisymmetric reaction-diffusion: AzimuthalSymmetryBreakingHandler."""
-    return _reaction_case(AzimuthalReactionProblem(N=N), "azimuthal", 10.0, 4.0, 1, outdir)
+    return _reaction_case(AzimuthalReactionProblem(N=N), "azimuthal", 10.0, 4.0, 1, outdir, with_eigen)
 
 
-def fold_noguess_case(N=8, lam0=4.0, outdir=None):
+def fold_noguess_case(N=8, lam0=4.0, outdir=None, with_eigen=False):
     """The same fold, but found without ever solving an eigenproblem: see fold_case(with_guess)."""
-    return fold_case(N=N, lam0=lam0, outdir=outdir, with_guess=False)
+    return fold_case(N=N, lam0=lam0, outdir=outdir, with_guess=False, with_eigen=with_eigen)
+
+
+class AxisVectorEquations(Equations):
+    """A vector field on an axisymmetric domain, so that AxisymmetryBC has something to pin.
+
+    A SCALAR field is regular at r=0 for m=0 and needs no axis condition at all; it takes a vector,
+    whose radial and azimuthal components must vanish there at m=0, for the mode-dependent Dirichlet
+    machinery to exist. That machinery is what makes an m!=0 eigenproblem need a renumbering.
+    """
+
+    def __init__(self, lam):
+        super().__init__()
+        self.lam = lam
+
+    def define_fields(self):
+        self.define_vector_field("v", "C2")
+
+    def define_residuals(self):
+        v, w = var_and_test("v")
+        self.add_residual(weak(partial_t(v), w) + weak(grad(v), grad(w))
+                          - weak(self.lam * v - dot(v, v) * v, w))
+
+
+class AxisVectorProblem(Problem):
+    def __init__(self, N=6):
+        super().__init__()
+        self.N = N
+        self.lam = self.define_global_parameter(lam=1)
+
+    def define_problem(self):
+        from pyoomph.equations.generic import AxisymmetryBC
+        self.set_coordinate_system(axisymmetric)
+        self += RectangularQuadMesh(N=self.N)
+        eqs = AxisVectorEquations(self.lam)
+        eqs += DirichletBC(v_x=0, v_y=0, v_phi=0) @ ["right", "top", "bottom"]
+        eqs += AxisymmetryBC() @ "left"
+        self += eqs @ "domain"
+
+
+def _dirichlet_flags(p):
+    """The activation state of every Dirichlet condition on every mesh, as a comparable snapshot."""
+    return [list(m._get_dirichlet_active_flags()) for m in p._iterate_all_meshes()]
+
+
+def eigen_refusals_case(N=6, outdir=None, with_eigen=True):
+    """The eigensolve-while-tracking refusals, and that a refusal leaves nothing behind.
+
+    Serial only -- it asserts on error messages, not on numbers, so there is nothing for a
+    distributed run to compare against. It lives here because it needs its own process anyway (a
+    second Problem in one interpreter segfaults in the JIT loader).
+    """
+    res = {}
+    with AxisVectorProblem(N=N) as p:
+        if outdir is not None:
+            p.set_output_directory(outdir)
+        p.quiet()
+        p.set_linear_solver("petsc_mumps")
+        p.set_eigensolver("slepc")
+        p.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=True)
+        p.initialise()
+        p.lam.value = 5.0
+        p.solve()
+        p.solve_eigenproblem(3, quiet=True)
+        p.activate_bifurcation_tracking("lam", "fold")
+
+        # A zero shift is the DEFAULT of solve_eigenproblem and is exactly the one value that cannot
+        # work while tracking: lambda=0 is an exact eigenvalue of the state the tracker converged to.
+        try:
+            p.solve_eigenproblem(3, quiet=True)
+            res["zero_shift_refused"] = False
+        except RuntimeError as e:
+            res["zero_shift_refused"] = True
+            res["zero_shift_message"] = str(e)
+        # shift=None is refused for the same reason: SLEPc then targets 0 and factorises there.
+        try:
+            p.solve_eigenproblem(3, shift=None, quiet=True)
+            res["none_shift_refused"] = False
+        except RuntimeError:
+            res["none_shift_refused"] = True
+
+        # m != 0 while tracking a FOLD: the strong axis conditions are still on and releasing them
+        # renumbers, which would pull the augmented dof vector out from under the handler.
+        before = _dirichlet_flags(p)
+        try:
+            p.solve_eigenproblem(3, shift=0.5, azimuthal_m=1, quiet=True)
+            res["m1_refused"] = False
+        except RuntimeError as e:
+            res["m1_refused"] = True
+            res["m1_message"] = str(e)
+        # And the refusal must leave nothing behind: _before_eigen_solve has ALREADY deactivated the
+        # axis conditions by the time it reports that a renumbering is needed, so they have to be put
+        # back. A problem describing boundary conditions its numbering does not have is worse than
+        # the missing feature.
+        res["dirichlet_flags_restored"] = (_dirichlet_flags(p) == before)
+
+        # m = 0 still works, and the tracker is unharmed by the two refusals.
+        evals, _ = p.solve_eigenproblem(3, shift=0.5, quiet=True)
+        res["m0_eig_re"], res["m0_eig_im"] = _sorted_spectrum(evals)
+        nrow, _nrow_local, _first, _dist = p._get_base_dof_distribution_info()
+        res["eig_nrow"] = int(nrow)
+        res["ndof"] = int(p.ndof())
+        p.solve()
+        res["param_after_refusals"] = float(p.lam.value)
+        p.deactivate_bifurcation_tracking()
+        res["ndof_after_deactivate"] = int(p.ndof())
+    return res
 
 
 _CASES = {"fold": fold_case, "hopf": hopf_case, "azimuthal": azimuthal_case,
-          "pitchfork": pitchfork_case, "fold_noguess": fold_noguess_case}
+          "pitchfork": pitchfork_case, "fold_noguess": fold_noguess_case,
+          "eigen_refusals": eigen_refusals_case}
 
 
 def main():
@@ -369,13 +557,18 @@ def main():
     ap.add_argument("--size", type=int, default=8)
     ap.add_argument("--case", default="fold", choices=sorted(_CASES))
     ap.add_argument("--eigenvector-scaling", default="unit", choices=["unit", "auto"])
+    # Off by default so the existing tracking assertions keep measuring exactly what they did: the
+    # extra eigensolves are harmless but they do run the tracker through more code.
+    ap.add_argument("--eigen-during-tracking", action="store_true",
+                    help="also solve the base state's eigenproblem with the tracker installed, and "
+                         "again once it is removed, and report both spectra")
     ap.add_argument("--outdir", required=True)
     args, _ = ap.parse_known_args()
 
     payload = {"rank": get_mpi_rank(), "nproc": get_mpi_nproc(),
                "case": "%s_N%d" % (args.case, args.size)}
     try:
-        kwargs = {}
+        kwargs = {"with_eigen": args.eigen_during_tracking}
         if args.eigenvector_scaling != "unit":
             # Only the fold case takes it; the others would reject an unexpected keyword.
             kwargs["eigenvector_scaling"] = args.eigenvector_scaling

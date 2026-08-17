@@ -355,6 +355,7 @@ namespace pyoomph
       Augmented_distribution_pt = new oomph::LinearAlgebraDistribution(
           Problem_pt->communicator_pt(), (unsigned)augmented_first_row, (unsigned)augmented_n_row_local, (unsigned)total);
       Problem_pt->SetDofDistributionPt(Augmented_distribution_pt);
+      Augmented_nrow = total;
     }
     else
 #endif
@@ -379,6 +380,7 @@ namespace pyoomph
         }
       }
       Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(), (unsigned)total, false);
+      Augmented_nrow = total;
     }
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
   }
@@ -438,6 +440,38 @@ namespace pyoomph
 #endif
     Problem_pt->GetDofPtr().resize(Base_distribution_copy.nrow());
     Problem_pt->GetDofDistributionPt()->build(Base_distribution_copy);
+    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+  }
+
+  // The two below are the reversible pair used by Problem::BaseDofDistributionScope around an
+  // eigenproblem assembly. Both drop the sparse-assembly allocation cache, which is a per-row nnz
+  // table sized to the ndof that was current when it was filled -- the same reason
+  // build_augmented_dofs() and restore_base_distribution() do it.
+  void AugmentedDofDistributionHelper::install_base_distribution()
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Distributed)
+    {
+      Problem_pt->SetDofDistributionPt(Base_distribution_pt);
+      Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+      return;
+    }
+#endif
+    Problem_pt->GetDofDistributionPt()->build(Base_distribution_copy);
+    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+  }
+
+  void AugmentedDofDistributionHelper::restore_augmented_distribution()
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Distributed)
+    {
+      Problem_pt->SetDofDistributionPt(Augmented_distribution_pt);
+      Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+      return;
+    }
+#endif
+    Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(), (unsigned)Augmented_nrow, false);
     Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
   }
 

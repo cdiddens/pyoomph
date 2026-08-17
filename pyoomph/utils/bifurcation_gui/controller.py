@@ -133,6 +133,12 @@ class BifurcationController:
         self.data_subdir="_bifurcation_gui_data"
         self.neigen=10
         self.shift=0
+        # A separate shift for the eigensolves taken ON A LOCUS, because self.shift's default of 0 is
+        # the one value that cannot work there: the tracker has put an eigenvalue exactly at 0 (fold,
+        # pitchfork) or +-i*omega (Hopf, azimuthal), which is precisely where a zero shift asks the
+        # shift-invert transform to factorise. Set to None to skip the locus eigensolve entirely and
+        # keep the historical single synthetic value per locus point.
+        self.locus_eigen_shift:float | complex | None=0.1
         self.branches:list[BifurcationGUISolutionBranch]=[]
         self.current_branch:BifurcationGUISolutionBranch | None=None
         self.current_point:BifurcationGUISolutionPoint | None=None
@@ -534,10 +540,19 @@ class BifurcationController:
             assert branch is not None
             if branch.tracked_parameter is None:
                 raise RuntimeError("Locus branch has no tracked parameter recorded")
+            # Take the guess from the handler BEFORE deactivating, when there is one. Since a locus
+            # step now also solves the base state's eigenproblem to record its spectrum,
+            # get_last_eigenvectors()[0] is whatever that secondary solve returned, not the tracked
+            # critical vector -- reactivating from it would restart the tracker on the wrong mode.
+            guess=None
             if active:
+                tracked=numpy.array(self.problem._get_bifurcation_eigenvector(),dtype=numpy.complex128) #type:ignore
+                if len(tracked)>0:
+                    guess=tracked
                 self.problem.deactivate_bifurcation_tracking()
-            evs=self.problem.get_last_eigenvectors()
-            guess=evs[0] if evs is not None and len(evs)>0 else None
+            if guess is None:
+                evs=self.problem.get_last_eigenvectors()
+                guess=evs[0] if evs is not None and len(evs)>0 else None
             self.problem.activate_bifurcation_tracking(branch.tracked_parameter,
                                                        _as_tracking_type(branch.bifurcation_type),
                                                        eigenvector=guess)
@@ -580,10 +595,7 @@ class BifurcationController:
         # Both parameters vary along a locus, so that plane is what it should be drawn in.
         self._x_axis=parameter_axis(continue_in)
         self._y_axis=parameter_axis(tracked)
-        # Every point of a locus IS the bifurcation, which is what the synthetic 0 + i*omega that
-        # tracked continuation reports says; recorded rather than re-solved, since solve_eigenproblem
-        # refuses to run while tracking is active.
-        self._add_current_state(eig_value=0+1j*self.problem._get_bifurcation_omega())
+        self._add_locus_state()
         self.log("Following the "+mode+" in "+tracked+", continuing in "+continue_in)
         self._changed()
 
@@ -665,6 +677,31 @@ class BifurcationController:
         self._add_current_state()
         self._update_tangents()
         self._changed()
+
+    def _add_locus_state(self):
+        """Record the current point of a bifurcation locus, spectrum included.
+
+        The critical eigenvalue is NOT re-solved: every point of a locus IS the bifurcation, and that
+        is what the synthetic 0 + i*omega the tracker reports says. Re-solving would turn the exact
+        zero into a small nonzero value and the point would stop reading as a bifurcation.
+
+        The REST of the spectrum is solved for, though, since that is the only way to see a codim-2
+        point coming (a second eigenvalue reaching zero, a pair crossing) - the base state's
+        eigenproblem is available while tracking, see Problem.solve_eigenproblem. It needs a nonzero
+        shift; see self.locus_eigen_shift, which is also how the eigensolve is switched off.
+
+        Non-fatal on purpose: a shift-invert factorisation that fails should cost this point its
+        spectrum, not abort a two-parameter sweep that may have been running for hours.
+        """
+        crit=0+1j*self.problem._get_bifurcation_omega() #type:ignore
+        spectrum=None
+        if self.locus_eigen_shift:
+            try:
+                evs,_=self.problem.solve_eigenproblem(self.neigen,self.locus_eigen_shift,quiet=True)
+                spectrum=list(evs)
+            except Exception as e:
+                self.log("Could not solve the eigenproblem on the locus ("+str(e).split("\n")[0]+"); recording the critical eigenvalue only")
+        self._add_current_state(eig_value=crit,eig_values=spectrum)
 
     def _add_current_state(self,eig_value=None,eig_values=None):
         """Record the problem's current state as a new point of the current branch.
@@ -1286,9 +1323,7 @@ class BifurcationController:
         self._status("FOLLOWING THE BIFURCATION" if locus else "ARCLENGTH STEPPING")
         ds=self.problem.arclength_continuation(self.get_bifurcation_parameter(),ds)
         if locus:
-            # solve_eigenproblem raises while bifurcation tracking is active, and there is nothing to
-            # solve: tracked continuation already reports the critical eigenvalue as 0 + i*omega.
-            self._add_current_state(eig_value=0+1j*self.problem._get_bifurcation_omega())
+            self._add_locus_state()
         else:
             self.problem.solve_eigenproblem(self.neigen,self.shift)
             self._add_current_state()

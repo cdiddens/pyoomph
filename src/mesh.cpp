@@ -5193,8 +5193,28 @@ namespace pyoomph
     }
     if (index == -1)
       throw_runtime_error("Cannot set a Dirichlet condition active or not for an unknown field " + name);
-    std::cout << "TOGGLING DIRICHLET ACTIVE AT INDEX " << index << " TO " << active << " CORESPONDING TO " << name <<std::endl;
+    // Was an unconditional cout. Harmless when this was only reached once per azimuthal eigensolve,
+    // but the mode gate of an eigensolve during bifurcation tracking toggles these per solve.
+    if (pyoomph_verbose)
+      std::cout << "TOGGLING DIRICHLET ACTIVE AT INDEX " << index << " TO " << active << " CORESPONDING TO " << name << std::endl;
     dirichlet_active[index] = active;
+  }
+
+  // Whole-vector accessors for dirichlet_active, used to snapshot and restore the activation state
+  // around a probe that mutates it: Problem's mode gate for an eigensolve during bifurcation tracking
+  // must call the equations' _before_eigen_solve hooks to learn whether they would need a renumbering,
+  // and those hooks have already flipped the flags by the time they answer. Index-based rather than
+  // name-based, so no name resolution (and no Dirichlet_names table) is needed to put them back.
+  std::vector<bool> Mesh::get_dirichlet_active_flags() const
+  {
+    return dirichlet_active;
+  }
+
+  void Mesh::set_dirichlet_active_flags(const std::vector<bool> &flags)
+  {
+    if (flags.size() != dirichlet_active.size())
+      throw_runtime_error("Cannot restore the Dirichlet activation flags: got " + std::to_string(flags.size()) + " entries for a mesh that has " + std::to_string(dirichlet_active.size()));
+    dirichlet_active = flags;
   }
 
   // Query whether the named Dirichlet condition is currently active; see set_dirichlet_active for the

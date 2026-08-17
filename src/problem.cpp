@@ -1137,11 +1137,43 @@ namespace pyoomph
 		oomph::Problem::set_initial_condition();
 	}
 
+	// See the class comment in problem.hpp. The dynamic_cast is on the AssemblyHandler, which every
+	// tracker derives from alongside AugmentedSparsityProvider.
+	Problem::BaseDofDistributionScope::BaseDofDistributionScope(Problem *problem)
+	{
+		AugmentedSparsityProvider *prov = dynamic_cast<AugmentedSparsityProvider *>(problem->assembly_handler_pt());
+		if (prov) Helper = prov->dof_distribution_helper();
+		if (Helper) Helper->install_base_distribution();
+	}
+
+	Problem::BaseDofDistributionScope::~BaseDofDistributionScope()
+	{
+		if (Helper) Helper->restore_augmented_distribution();
+	}
+
+	void Problem::get_base_dof_distribution_info(unsigned &nrow, unsigned &nrow_local, unsigned &first_row, bool &distributed)
+	{
+		BaseDofDistributionScope base_scope(this);
+		oomph::LinearAlgebraDistribution *dist = this->dof_distribution_pt();
+		if (dist == 0)
+			throw_runtime_error("The problem has no dof distribution yet, so it has no row layout. Build/initialise the problem first.");
+		nrow = dist->nrow();
+		nrow_local = dist->nrow_local();
+		first_row = dist->first_row();
+		distributed = dist->distributed();
+	}
+
 	// Assembles (or reuses/reallocates the cached eigen_MassMatrixPt/eigen_JacobianMatrixPt) the mass
 	// matrix M and Jacobian J for the generalized eigenproblem J*v = sigma*M*v around the shift sigma_r.
 	// Note: Dirichlet-by-matrix-manipulation is not yet supported here (see thrown error below).
+	//
+	// The BaseDofDistributionScope makes this work while a bifurcation tracker is installed: it is the
+	// BASE state's eigenproblem that is wanted then (used to look for secondary/codim-2 bifurcations
+	// along a locus), and the base state is exactly what oomph's EigenProblemHandler assembles -- only
+	// the row layout had to be put back. Nothing is renumbered and Dof_pt is untouched.
 	void Problem::assemble_eigenproblem_matrices(oomph::CRDoubleMatrix *&M, oomph::CRDoubleMatrix *&J, double sigma_r)
 	{
+		BaseDofDistributionScope base_scope(this);
 		if (!M)
 		{
 			if (eigen_MassMatrixPt)
