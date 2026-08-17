@@ -722,7 +722,7 @@ class BaseEquations(_pyoomph.Equations):
     def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:int | None=None,normal_k:float | None=None)->bool:
         return False # Return whether the equations have to be renumbered
 
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree",eigensolver:"GenericEigenSolver", angular_mode:int | None,normal_k:float | None)->set[str | int]:
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree",eigensolver:"GenericEigenSolver", angular_mode:int | float | None,normal_k:float | None)->set[str | int]:
         return set()
 
     def _init_output(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,rank:int):
@@ -1983,7 +1983,7 @@ class EquationTree:
             must_reapply = child._before_eigen_solve(eigensolver,angular_m,normal_k) or must_reapply
         return must_reapply
 
-    def _get_forced_zero_dofs_for_eigenproblem(self,eigensolver:"GenericEigenSolver",angular_mode:int | None,normal_k:float | None)->set[str | int]:
+    def _get_forced_zero_dofs_for_eigenproblem(self,eigensolver:"GenericEigenSolver",angular_mode:int | float | None,normal_k:float | None)->set[str | int]:
         res:set[str | int]=set()
         if self._equations:
             oldcg = self._equations._get_current_codegen()
@@ -3003,7 +3003,7 @@ class CombinedEquations(Equations):
                 must_reapply=must_reapply or e._before_eigen_solve(eqtree, eigensolver,angular_m,normal_k)
         return must_reapply
 
-    def _get_forced_zero_dofs_for_eigenproblem(self,eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_mode:int | None,normal_k:float | None)->set[str | int]:
+    def _get_forced_zero_dofs_for_eigenproblem(self,eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_mode:int | float | None,normal_k:float | None)->set[str | int]:
         res:set[str | int] = set()
         for e in self._subelements:
             if isinstance(e, BaseEquations): #type:ignore

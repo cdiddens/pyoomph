@@ -1177,7 +1177,7 @@ class GlobalLagrangeMultiplier(ODEEquations):
                     must_reapply=True
         return must_reapply
 
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | None,normal_k:float | None)->set[str | int]:
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | float | None,normal_k:float | None)->set[str | int]:
         if (not self.set_zero_on_normal_mode_eigensolve) or (angular_mode is None and normal_k is None):
             return set()
         elif angular_mode is not None:
@@ -1379,7 +1379,7 @@ class EnforcedBC(InterfaceEquations):
                     must_reapply=True
         return must_reapply
     
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | None,normal_k:float | None)->set[str | int]:
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | float | None,normal_k:float | None)->set[str | int]:
         if (not self.set_zero_on_normal_mode_eigensolve) or (angular_mode is None and normal_k is None):
             return cast("set[str | int]",set())
         else:
@@ -1445,7 +1445,7 @@ class ForceZeroOnEigenSolve(BaseEquations):
         self.default=default
         self.for_nonzero_angular=for_nonzero_angular
 
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:EquationTree,eigensolver:"GenericEigenSolver", angular_mode:int | None,normal_k:float | None)->set[str | int]:
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:EquationTree,eigensolver:"GenericEigenSolver", angular_mode:int | float | None,normal_k:float | None)->set[str | int]:
         if angular_mode is not None:
             if normal_k is not None:
                 raise RuntimeError("Cannot set both angular_mode and normal_k")
@@ -1748,7 +1748,7 @@ class AxisymmetryBC(InterfaceEquations):
             print("AxisymmetryBC: Deactivating strong zero DirichletBCs at",self.get_current_code_generator().get_full_name(),"for",deactivated_bcs)
         return must_reapply    
                         
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | None,normal_k:float | None)->set[str | int]:
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver", angular_mode:int | float | None,normal_k:float | None)->set[str | int]:
         if angular_mode is None:
             return set()
 

@@ -952,7 +952,10 @@ class HopfTracker(CustomBifurcationTracker):
 class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
     parameter:str | None # Set by concrete subclasses: a parameter name, or None for eigenbranch tracking
 
-    def __init__(self, problem:Problem,eigenvector:int=0,azimuthal_m:int | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
+    # azimuthal_m may be a non-integer: nothing on the tracking path needs it to be one (only an
+    # eigensolve does), and CriticalWavenumberTracker makes it an unknown of the augmented system.
+    # It still selects the axis conditions, which are a step function of it - see that class.
+    def __init__(self, problem:Problem,eigenvector:int=0,azimuthal_m:float | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
         super().__init__(problem)
         self.eigenscale=eigenscale
         self.nonlinear_length_constraint=nonlinear_length_constraint
@@ -1079,7 +1082,7 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
 class NormalModeBifurcationTracker(_NormalModeBifurcationTrackerBase):
     parameter:str # always a real parameter name in this subclass (never None, unlike the base class)
 
-    def __init__(self, problem:Problem,parameter:str,eigenvector:int=0,azimuthal_m:int | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
+    def __init__(self, problem:Problem,parameter:str,eigenvector:int=0,azimuthal_m:float | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
         super().__init__(problem,eigenvector,azimuthal_m,cartesian_k,eigenscale,nonlinear_length_constraint)
         self.parameter=parameter #type:ignore
         
@@ -1187,8 +1190,506 @@ class NormalModeBifurcationTracker(_NormalModeBifurcationTrackerBase):
                     [None,row(Vi) if nl else None,row(Vr if nl else self.V0),None,None]
                 ]).tocsr()
                 return Raug,Jaug         #type:ignore
-        
-        
+
+
+class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
+    """
+    Co-dimension-2 tracker for the *critical* wavenumber of a normal mode instability, either a
+    Cartesian mode ~exp(I*k*z) or an azimuthal mode ~exp(I*m*phi).
+
+    :py:class:`NormalModeBifurcationTracker` finds, for a FIXED wavenumber, the parameter value at
+    which Re(lambda)=0. The neutral curve gamma_c(k) traced out that way is a one-parameter family;
+    this class instead finds its minimum, i.e. the point where in addition dRe(lambda)/dk=0, by making
+    the wavenumber a second unknown. That is the wavenumber at which the instability actually sets in.
+
+    Below, k stands for whichever of the two mode parameters is in play: the Cartesian wavenumber
+    ``normal_mode_k`` or the azimuthal mode number ``azimuthal_m``. Both are ordinary global
+    parameters occurring in the generated eigen contributions, which is what makes either of them
+    usable as an unknown; for the azimuthal case this means m is treated as a REAL number (see the
+    note below).
+
+    The extra equation is obtained by differentiating the eigenproblem (J_c+lambda*M_c)V=0 with
+    respect to k at fixed base state and fixed parameter -- legitimate because the base residual has
+    k substituted to zero, so the base state does not depend on k at all::
+
+        (dJ_c/dk + lambda*dM_c/dk)V + (dlambda/dk)*M_c*V + (J_c + lambda*M_c)*dV/dk = 0
+
+    dV/dk enters as a further vector of unknowns. Criticality is imposed the same way the other
+    trackers impose Re(lambda)=0: by simply not introducing Re(lambda) and Re(dlambda/dk) as unknowns,
+    so lambda=I*omega and dlambda/dk=I*mu. The augmented system therefore has 5N+4 unknowns for an
+    oscillatory neutral mode and 3N+2 for a stationary one, and it is square in both cases.
+
+    Once converged, the critical point can be arclength-continued in a FURTHER parameter, giving a
+    curve of critical points in a two-parameter plane.
+
+    Args:
+        problem: The problem, set up with ``setup_for_stability_analysis`` and either
+            ``additional_cartesian_mode=True`` or ``azimuthal_stability=True``
+        parameter: Name of the parameter to adjust along with the wavenumber
+        eigenvector: Index into the previously solved eigenvalues
+        azimuthal_m: Starting azimuthal mode number, real-valued. Defaults to the m of the selected
+            eigenvalue. Only for a problem set up for azimuthal stability.
+        cartesian_k: Starting wavenumber. Defaults to the k of the selected eigenvalue. Only for a
+            problem set up for an additional Cartesian mode.
+        eigenscale: Internal magnitude of the eigenvector, as in the other trackers
+        k_fd_step: Relative step of the finite difference in the mode parameter used for the
+            Jacobian (see below)
+        exact_k_derivative_jacobian: If False, the finite-differenced blocks are dropped entirely.
+            The converged answer is unchanged (they only enter the Jacobian), but Newton will need
+            more steps. Mostly useful to test the analytic blocks in isolation.
+
+    Note:
+        The Jacobian of the extra equations needs d2J/dU dk, d2J/dgamma dk and d2J/dk2, none of which
+        pyoomph generates. They are obtained by finite-differencing the corresponding first-derivative
+        blocks in k. The RESIDUAL stays exact -- it is built from the analytic dJ/dk and dM/dk -- so
+        Newton still converges to the exact critical point; only the convergence rate suffers.
+
+    Note:
+        For an azimuthal mode, m becomes a REAL unknown. Physically only integer m are admissible, so
+        the answer is a critical m to be read as "the instability sets in between these two integer
+        modes"; the usual next step is to run the ordinary tracker at the neighbouring integers.
+        Numerically the awkward part is that the axis conditions are a DISCRETE function of m (m==0,
+        |m|==1, |m|>1 give different pinned dofs), which a continuous m cannot express. This class
+        therefore assumes the |m|>1 regime throughout: the mask is frozen at m=2 when the tracker is
+        created and is not revisited, and starting at |m|<=1 is refused. It follows that an eigensolve
+        after such a run needs m to be put back to an integer, since
+        ``Problem.setup_forced_zero_dof_list_for_eigenproblems`` refuses a non-integer one.
+
+    Note:
+        On a problem whose residual has terms of odd order in k (so that the imaginary contribution
+        exists), the multi-assembly may be refused by the frozen sparsity path -- the Hessian
+        products of that contribution reach entries outside the Jacobian's symbolic pattern. Set
+        ``problem.use_frozen_sparsity=False``. This is not specific to this class;
+        :py:class:`NormalModeBifurcationTracker` is refused in exactly the same situation.
+    """
+
+    # The mask of dofs pinned at the axis is a discrete function of m; a real m is taken to mean the
+    # |m|>1 regime, which this integer stands for when the mask is computed.
+    HIGH_AZIMUTHAL_MODE_REGIME=2
+    parameter:str # always a real parameter name in this subclass (never None, unlike the base class)
+
+    def __init__(self, problem:Problem,parameter:str,eigenvector:int=0,azimuthal_m:float | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,k_fd_step:float=1e-6,exact_k_derivative_jacobian:bool=True):
+        super().__init__(problem,eigenvector,azimuthal_m,cartesian_k,eigenscale,nonlinear_length_constraint=False) #type:ignore[arg-type] # m is real here, see the class docstring
+        self.parameter=parameter
+        # The mode number IS a global parameter, which is the whole reason it can be made an unknown:
+        # add_parameter pushes its value pointer into the dof vector, and the generated eigen
+        # contributions read it from there.
+        if self.azimuthal:
+            assert problem._azimuthal_stability is not None and problem._azimuthal_mode_param_m is not None
+            self.mode_parameter=problem._azimuthal_stability.azimuthal_param_m_name
+            self._mode_param=problem._azimuthal_mode_param_m
+            if abs(float(self._mode_param.value))<=1+1e-10:
+                # The axis conditions differ between m==0, |m|==1 and |m|>1, and the mask is frozen at
+                # the |m|>1 one when the tracker is created (see get_forced_to_zero_dofs), so the low
+                # modes cannot be represented at all.
+                raise RuntimeError("Cannot track a critical azimuthal mode at |m|<=1: this tracker treats m as real and assumes the |m|>1 axis regime throughout, which the low modes do not fall into. Got m="+str(float(self._mode_param.value))+".")
+        else:
+            assert problem._cartesian_normal_mode_stability is not None and problem._normal_mode_param_k is not None
+            self.mode_parameter=problem._cartesian_normal_mode_stability.normal_mode_param_k_name
+            self._mode_param=problem._normal_mode_param_k
+            if abs(float(self._mode_param.value))<1e-10:
+                # The forced-zero dof masks are taken once, from _get_forced_zero_dofs_for_eigenproblem,
+                # which returns a DIFFERENT set for k==0 than for k!=0. Starting there (or passing through
+                # zero) would silently keep the wrong mask.
+                raise RuntimeError("Cannot start the critical wavenumber search at k=0: the set of dofs forced to zero in the eigenproblem is different at k=0 than for k!=0, and it is frozen when the tracker is created.")
+        self.k_fd_step=k_fd_step
+        self.exact_k_derivative_jacobian=exact_k_derivative_jacobian
+        # A complex eigenvalue does NOT imply a complex J_c: the imaginary contribution only exists
+        # when the residual has terms of odd order in k (a single derivative along the extra
+        # direction). A problem with only Laplacians has an oscillatory mode and no imaginary
+        # contribution at all, and asking the multi-assembly for a contribution the problem does not
+        # have is a hard error, so every request for it is guarded and replaced by a zero matrix.
+        self.has_imag_contribution=bool(problem._set_solved_residual(self.imag_contribution,False,False))
+        problem._set_solved_residual("",False,False)
+        self.dVdk,dlambda_dk=self._guess_k_derivative()
+        self.mu=float(numpy.imag(dlambda_dk))
+        print("Starting critical wavenumber tracking at",self.mode_parameter,"=",float(self._mode_param.value),
+              "with dlambda/d("+self.mode_parameter+") =",dlambda_dk,"(its real part is the tangency residual to be driven to zero)")
+
+    def get_forced_to_zero_dofs(self):
+        """Which dofs the eigenproblem pins, frozen once when the tracker is created.
+
+        For a Cartesian mode this is the base class's answer. For an azimuthal one it is not: m is a
+        real unknown here, but the axis conditions are a DISCRETE function of it and
+        _get_forced_zero_dofs_for_eigenproblem truncates m towards zero before branching, so the mask
+        would silently change under the solver as m wandered across an integer. It is therefore taken
+        at the |m|>1 regime, which this class documents itself as assuming.
+        """
+        if not self.azimuthal:
+            return super().get_forced_to_zero_dofs()
+        prob=self.get_problem()
+        base=prob._equation_system._get_forced_zero_dofs_for_eigenproblem(prob.get_eigen_solver(),0,None)
+        eigen=prob._equation_system._get_forced_zero_dofs_for_eigenproblem(prob.get_eigen_solver(),self.HIGH_AZIMUTHAL_MODE_REGIME,None)
+        return prob.dof_strings_to_global_equations(base),prob.dof_strings_to_global_equations(eigen)
+
+    def _guess_k_derivative(self)->tuple[NPAnyArray,complex]:
+        """Initial guess for dV/dk and dlambda/dk, from one bordered solve on the converged eigenpair.
+
+        Cannot use an eigensolve: solve_eigenproblem is refused once a Python augmentation is
+        installed, and by the time this runs the tracker is about to become one. Differentiating
+        (J_c+lambda*M_c)V=0 in k at fixed base state gives a bordered system whose border is exactly
+        the normalisation constraint <V0,V>=const differentiated, i.e. <V0,dV/dk>=0.
+        """
+        prob=self.get_problem()
+        rc,ic,kn=self.real_contribution,self.imag_contribution,self.mode_parameter
+        V=self.eigenvector*self.eigenscale
+        try:
+            if self.has_imag:
+                def req(a):
+                    a.J(rc).M(rc).dJdp(kn,rc).dMdp(kn,rc)
+                    if self.has_imag_contribution:
+                        a.J(ic).M(ic).dJdp(kn,ic).dMdp(kn,ic)
+                res=list(PerformCustomMultiAssembly(prob,req).result())
+                JR,MR,dJRdk,dMRdk=res[:4]
+                if self.has_imag_contribution:
+                    JI,MI,dJIdk,dMIdk=res[4:]
+                else:
+                    Z=self._zero_matrix()
+                    JI,MI,dJIdk,dMIdk=Z,Z,Z,Z
+                JR,JI,MR,MI,dJRdk,dJIdk,dMRdk,dMIdk=self.patch_matrices(eigen=True,J=[JR,JI],M=[MR,MI,dJRdk,dJIdk,dMRdk,dMIdk])
+                Jc,Mc=JR+1j*JI,MR+1j*MI
+                Jck,Mck=dJRdk+1j*dJIdk,dMRdk+1j*dMIdk
+                lam=1j*self.omega
+            else:
+                assm=PerformCustomMultiAssembly(prob,lambda a:a.J(rc).M(rc).dJdp(kn,rc))
+                JR,MR,dJRdk=assm.result()
+                JR,MR,dJRdk=self.patch_matrices(eigen=True,J=[JR],M=[MR,dJRdk])
+                Jc,Mc,Jck,Mck=JR,MR,dJRdk,None
+                lam=0.0
+            N=Jc.shape[0]
+            A=Jc+lam*Mc
+            rhs=-(Jck@V+(lam*(Mck@V) if Mck is not None else 0))
+            border=Mc@V # dlambda/dk multiplies M_c*V
+            Abord=scipy.sparse.vstack([
+                scipy.sparse.hstack([A,self.as_matrix_column(border)]),
+                scipy.sparse.hstack([self.as_matrix_row(self.V0),scipy.sparse.csr_matrix((1,1),dtype=A.dtype)])]).tocsc()
+            sol=numpy.asarray(scipy.sparse.linalg.spsolve(Abord,numpy.hstack([rhs,0]).astype(Abord.dtype))).ravel()
+            if not numpy.all(numpy.isfinite(sol)):
+                raise RuntimeError("non-finite solution of the bordered system")
+            return sol[:N],complex(sol[N])
+        except Exception as e:
+            print("Could not compute an initial guess for dV/dk ("+str(e)+"), starting from zero instead")
+            return numpy.zeros_like(V),0j
+
+    def define_augmented_dofs(self, dofs):
+        # dV/dk is stored already at the eigenscale (the bordered solve above was fed V*eigenscale),
+        # hence no further scaling here, unlike the eigenvector itself.
+        dofs.add_vector(numpy.real(self.eigenvector)*self.eigenscale)
+        if self.has_imag:
+            dofs.add_vector(numpy.imag(self.eigenvector)*self.eigenscale)
+        dofs.add_vector(numpy.real(self.dVdk))
+        if self.has_imag:
+            dofs.add_vector(numpy.imag(self.dVdk))
+        dofs.add_parameter(self.parameter)
+        if self.has_imag:
+            dofs.add_scalar(self.omega)
+        dofs.add_parameter(self.mode_parameter)
+        if self.has_imag:
+            dofs.add_scalar(self.mu)
+
+    # ---------------------------------------------------------------------------------------------
+    # small algebra helpers. (J_c+I*omega*M_c) applied to a complex pair shows up in four guises
+    # here -- as the eigen rows themselves, as their derivative w.r.t. the base dofs (Hessian
+    # blocks), and with the k- or parameter-derivatives of the matrices in place of the matrices --
+    # so the combination is written once and fed different operands.
+    # ---------------------------------------------------------------------------------------------
+    @staticmethod
+    def _cplx_rows(ops:Any,omega:float):
+        """Real and imaginary part of (J_c+I*omega*M_c) acting on a complex pair. ops is (JR,JI,MR,MI)
+        as callables mapping "re"/"im" to that matrix's product with the real/imaginary component."""
+        Jr,Ji,Mr,Mi=ops
+        re=Jr("re")-Ji("im")-omega*(Mr("im")+Mi("re"))
+        im=Ji("re")+Jr("im")+omega*(Mr("re")-Mi("im"))
+        return re,im
+
+    @staticmethod
+    def _matvec(mats:Any,ar:Any,ai:Any)->Any:
+        """Operand set for _cplx_rows built from four matrices and one complex pair."""
+        return tuple((lambda A: (lambda s:A@(ar if s=="re" else ai)))(A) for A in mats)
+
+    @staticmethod
+    def _pairs(products:Any)->Any:
+        """Operand set for _cplx_rows built from eight already-contracted products, given as
+        (JR_re,JR_im, JI_re,JI_im, MR_re,MR_im, MI_re,MI_im)."""
+        return tuple((lambda a,b: (lambda s:a if s=="re" else b))(products[2*i],products[2*i+1]) for i in range(4))
+
+    @staticmethod
+    def _omega_rows(MR:Any,MI:Any,ar:Any,ai:Any):
+        """d/d(omega) of the eigen rows: I*M_c applied to the complex pair."""
+        return -(MR@ai+MI@ar),MR@ar-MI@ai
+
+    def _pairs_assemble(self,add:Callable[[Any,str],Any],extra:Callable[[Any],Any] | None=None)->Any:
+        """One multi-assembly asking `add(request,contribution)` for the real and, if the problem has
+        one, the imaginary contribution. Returns (extras, real results, imaginary results), the last
+        one filled with zero matrices when there is no imaginary contribution.
+
+        `extra` adds contribution-independent requests (the base residual and its parameter
+        derivative), which must not be issued twice."""
+        a=self.start_multiassembly()
+        nextra=0
+        if extra is not None:
+            extra(a)
+            nextra=len(a._what)
+        add(a,self.real_contribution)
+        npair=len(a._what)-nextra
+        if self.has_imag_contribution:
+            add(a,self.imag_contribution)
+            res=list(a.assemble())
+            return res[:nextra],res[nextra:nextra+npair],res[nextra+npair:]
+        res=list(a.assemble())
+        Z=self._zero_matrix()
+        return res[:nextra],res[nextra:],[Z]*npair
+
+    def _zero_matrix(self)->DefaultMatrixType:
+        n=self.get_problem()._get_n_unaugmented_dofs() or self.get_problem().ndof()
+        return scipy.sparse.csr_matrix((n,n))
+
+    def _kfd_delta(self)->float:
+        return self.k_fd_step*max(abs(float(self._mode_param.value)),1.0)
+
+    def _at_k_offset(self,offset:float,build:Callable[[],Any])->Any:
+        """Run build() with the mode parameter shifted. It is one of the augmented dofs, i.e. a raw
+        pointer into the global parameter's value, so it must be put back exactly even if the
+        assembly throws."""
+        kp=self._mode_param
+        k0=kp.value
+        try:
+            kp.value=k0+offset
+            return build()
+        finally:
+            kp.value=k0
+
+    def get_residuals_and_jacobian(self,require_jacobian:bool,dparameter:str | None=None)->NPFloatArray | tuple[NPFloatArray, DefaultMatrixType]: # type: ignore[override] # see the other implementations
+        # The imaginary contribution is never named here: every request for it goes through
+        # _pairs_assemble, which knows whether the problem has one.
+        rc,kn=self.real_contribution,self.mode_parameter
+        col=lambda C:self.as_matrix_column(C)
+        row=lambda R:self.as_matrix_row(R)
+        # Derivative matrices are patched like a mass matrix (rows of forced-zero eigen dofs simply
+        # zeroed), NOT like a Jacobian (which additionally gets a 1 on the diagonal). The Jacobian
+        # patch turns the eigen row of such a dof into the equation V_j=0; the k- or parameter-
+        # derivative of that equation is zero, so putting the identity back there would contradict it.
+        if not self.has_imag:
+            Vr,Wr,p,k=self.get_augmented_dofs().split(startindex=1)
+            if not require_jacobian and dparameter is None:
+                R,JR,dJRdk=self.start_multiassembly().R().J(rc).dJdp(kn,rc).assemble()
+                R,=self.patch_residuals(eigen=False,R=[R])
+                JR,dJRdk=self.patch_matrices(eigen=True,J=[JR],M=[dJRdk])
+                return numpy.hstack([R,JR@Vr,dJRdk@Vr+JR@Wr,
+                                     numpy.dot(Vr,self.V0)-self.eigenscale,numpy.dot(Wr,self.V0)])
+            if not require_jacobian:
+                assert dparameter is not None
+                def _dp_real():
+                    dRdp,dJRdp=self.start_multiassembly().dRdp(dparameter).dJdp(dparameter,rc).assemble()
+                    dRdp,=self.patch_residuals(eigen=False,R=[dRdp])
+                    # patch_matrices needs one J just to size itself; the parameter derivative goes
+                    # through the M slot (zeroed rows, no identity) and the J output is discarded.
+                    _,dJRdp=self.patch_matrices(eigen=True,J=[dJRdp],M=[dJRdp])
+                    return dRdp,dJRdp
+                dRdp,dJRdp=_dp_real()
+                # d/dsigma of the eigen rows is analytic; d/dsigma of the tangency rows also needs
+                # d2J/dsigma dk, which is not, hence the second pass at a shifted k.
+                dEdp=dJRdp@Vr
+                delta=self._kfd_delta()
+                _,dJRdp_s=self._at_k_offset(delta,_dp_real)
+                dFdp=(dJRdp_s@Vr-dEdp)/delta+dJRdp@Wr
+                return numpy.hstack([dRdp,dEdp,dFdp,0.0,0.0])
+            assert dparameter is None, "dparameter not supported for require_jacobian=True"
+            assm=self.start_multiassembly().R().J().dRdp(self.parameter)
+            assm.J(rc).dJdp(self.parameter,rc).dJdp(kn,rc).dJdU(Vr,rc).dJdU(Wr,rc)
+            R,J,dRdp,JR,dJRdp,dJRdk,HVr,HWr=assm.assemble()
+            R,=self.patch_residuals(eigen=False,R=[R])
+            J,=self.patch_matrices(eigen=False,J=[J])
+            JR,dJRdp,dJRdk,HVr,HWr=self.patch_matrices(eigen=True,J=[JR],M=[dJRdp,dJRdk,HVr,HWr])
+            dEdU,dEdp,dEdk=HVr,dJRdp@Vr,dJRdk@Vr
+            if self.exact_k_derivative_jacobian:
+                def _shifted_real():
+                    a=self.start_multiassembly().dJdp(self.parameter,rc).dJdp(kn,rc).dJdU(Vr,rc)
+                    s_dJRdp,s_dJRdk,s_HVr=a.assemble()
+                    s_dJRdp,s_dJRdk,s_HVr=self.patch_matrices(eigen=True,J=[JR],M=[s_dJRdp,s_dJRdk,s_HVr])[1:]
+                    return s_HVr,s_dJRdp@Vr,s_dJRdk@Vr
+                delta=self._kfd_delta()
+                s_dEdU,s_dEdp,s_dEdk=self._at_k_offset(delta,_shifted_real)
+                dkdEdU,dkdEdp,dkdEdk=(s_dEdU-dEdU)/delta,(s_dEdp-dEdp)/delta,(s_dEdk-dEdk)/delta
+            else:
+                dkdEdU,dkdEdp,dkdEdk=0*dEdU,0*dEdp,0*dEdk
+            Raug=numpy.hstack([R,JR@Vr,dJRdk@Vr+JR@Wr,
+                               numpy.dot(Vr,self.V0)-self.eigenscale,numpy.dot(Wr,self.V0)])
+            Jaug=scipy.sparse.block_array([
+                [J,        None,   None, col(dRdp),  None],
+                [dEdU,     JR,     None, col(dEdp),  col(dEdk)],
+                [dkdEdU+HWr,dJRdk, JR,   col(dkdEdp+dJRdp@Wr),col(dkdEdk+dJRdk@Wr)],
+                [None,     row(self.V0),None,None,   None],
+                [None,     None,   row(self.V0),None,None]]).tocsr()
+            return Raug,Jaug #type:ignore
+        else:
+            Vr,Vi,Wr,Wi,p,omega,k,mu=self.get_augmented_dofs().split(startindex=1)
+            omega,mu=omega[0],mu[0]
+            def _plain():
+                _,re_,im_=self._pairs_assemble(lambda a,c:a.J(c).M(c).dJdp(kn,c).dMdp(kn,c))
+                JR,MR,dJRdk,dMRdk=re_
+                JI,MI,dJIdk,dMIdk=im_
+                return self.patch_matrices(eigen=True,J=[JR,JI],M=[MR,MI,dJRdk,dJIdk,dMRdk,dMIdk])
+            if not require_jacobian and dparameter is None:
+                R,=self.start_multiassembly().R().assemble()
+                R,=self.patch_residuals(eigen=False,R=[R])
+                JR,JI,MR,MI,dJRdk,dJIdk,dMRdk,dMIdk=_plain()
+                Er,Ei=self._cplx_rows(self._matvec((JR,JI,MR,MI),Vr,Vi),omega)
+                Pr,Pi=self._cplx_rows(self._matvec((dJRdk,dJIdk,dMRdk,dMIdk),Vr,Vi),omega)
+                Qr,Qi=self._cplx_rows(self._matvec((JR,JI,MR,MI),Wr,Wi),omega)
+                Owr,Owi=self._omega_rows(MR,MI,Vr,Vi)
+                return numpy.hstack([R,Er,Ei,Pr+Qr+mu*Owr,Pi+Qi+mu*Owi,
+                                     numpy.dot(Vr,self.V0)-self.eigenscale,numpy.dot(Vi,self.V0),
+                                     numpy.dot(Wr,self.V0),numpy.dot(Wi,self.V0)])
+            if not require_jacobian:
+                assert dparameter is not None
+                def _dp():
+                    ex,re_,im_=self._pairs_assemble(lambda a,c:a.dJdp(dparameter,c).dMdp(dparameter,c),
+                                                    lambda a:a.dRdp(dparameter))
+                    dRdp,=self.patch_residuals(eigen=False,R=[ex[0]])
+                    # patch_matrices needs one J just to size itself; every parameter derivative goes
+                    # through the M slot (zeroed rows, no identity) and the J output is discarded.
+                    _,dJRdp,dJIdp,dMRdp,dMIdp=self.patch_matrices(eigen=True,J=[re_[0]],M=[re_[0],im_[0],re_[1],im_[1]])
+                    return dRdp,(dJRdp,dJIdp,dMRdp,dMIdp)
+                dRdp,dmats=_dp()
+                dEr,dEi=self._cplx_rows(self._matvec(dmats,Vr,Vi),omega)
+                dQr,dQi=self._cplx_rows(self._matvec(dmats,Wr,Wi),omega)
+                dOwr,dOwi=self._omega_rows(dmats[2],dmats[3],Vr,Vi)
+                delta=self._kfd_delta()
+                _,smats=self._at_k_offset(delta,_dp)
+                sEr,sEi=self._cplx_rows(self._matvec(smats,Vr,Vi),omega)
+                dFr=(sEr-dEr)/delta+dQr+mu*dOwr
+                dFi=(sEi-dEi)/delta+dQi+mu*dOwi
+                return numpy.hstack([dRdp,dEr,dEi,dFr,dFi,0,0,0,0])
+            assert dparameter is None, "dparameter not supported for require_jacobian=True"
+            R,J,dRdp=self.start_multiassembly().R().J().dRdp(self.parameter).assemble()
+            R,=self.patch_residuals(eigen=False,R=[R])
+            J,=self.patch_matrices(eigen=False,J=[J])
+            JR,JI,MR,MI,dJRdk,dJIdk,dMRdk,dMIdk=_plain()
+            def _add_param_and_hessians(a,c):
+                a.dJdp(self.parameter,c).dMdp(self.parameter,c)
+                a.dJdU(Vr,c).dJdU(Vi,c).dMdU(Vr,c).dMdU(Vi,c)
+                a.dJdU(Wr,c).dJdU(Wi,c).dMdU(Wr,c).dMdU(Wi,c)
+            _,gr,gi=self._pairs_assemble(_add_param_and_hessians)
+            gr=self.patch_matrices(eigen=True,J=[JR],M=list(gr))[1:]
+            gi=self.patch_matrices(eigen=True,J=[JR],M=list(gi))[1:]
+            dJRdp,dMRdp=gr[0],gr[1]
+            dJIdp,dMIdp=gi[0],gi[1]
+            # _pairs takes (JR_re,JR_im, JI_re,JI_im, MR_re,MR_im, MI_re,MI_im), i.e. the eight
+            # Hessian-vector products interleaved by contribution.
+            HV=[gr[2],gr[3],gi[2],gi[3],gr[4],gr[5],gi[4],gi[5]]
+            HW=[gr[6],gr[7],gi[6],gi[7],gr[8],gr[9],gi[8],gi[9]]
+            hess=lambda H:self._pairs(H)
+            dEdU_re,dEdU_im=self._cplx_rows(hess(HV),omega)
+            dEdp_re,dEdp_im=self._cplx_rows(self._matvec((dJRdp,dJIdp,dMRdp,dMIdp),Vr,Vi),omega)
+            Pr,Pi=self._cplx_rows(self._matvec((dJRdk,dJIdk,dMRdk,dMIdk),Vr,Vi),omega)
+            if self.exact_k_derivative_jacobian:
+                delta=self._kfd_delta()
+                def _add_shifted(s,c):
+                    s.dJdp(kn,c).dMdp(kn,c).dJdp(self.parameter,c).dMdp(self.parameter,c)
+                    s.dJdU(Vr,c).dJdU(Vi,c).dMdU(Vr,c).dMdU(Vi,c)
+                def _shifted():
+                    _,sr,si=self._pairs_assemble(_add_shifted)
+                    sr=self.patch_matrices(eigen=True,J=[JR],M=list(sr))[1:]
+                    si=self.patch_matrices(eigen=True,J=[JR],M=list(si))[1:]
+                    sP=self._cplx_rows(self._matvec((sr[0],si[0],sr[1],si[1]),Vr,Vi),omega)
+                    sdEdp=self._cplx_rows(self._matvec((sr[2],si[2],sr[3],si[3]),Vr,Vi),omega)
+                    sdEdU=self._cplx_rows(hess([sr[4],sr[5],si[4],si[5],sr[6],sr[7],si[6],si[7]]),omega)
+                    return sP,sdEdp,sdEdU
+                sP,sdEdp,sdEdU=self._at_k_offset(delta,_shifted)
+                dkP=((sP[0]-Pr)/delta,(sP[1]-Pi)/delta)
+                dkdEdp=((sdEdp[0]-dEdp_re)/delta,(sdEdp[1]-dEdp_im)/delta)
+                dkdEdU=((sdEdU[0]-dEdU_re)/delta,(sdEdU[1]-dEdU_im)/delta)
+            else:
+                dkP=(0*Pr,0*Pi)
+                dkdEdp=(0*dEdp_re,0*dEdp_im)
+                dkdEdU=(0*dEdU_re,0*dEdU_im)
+            # Everything below is analytic.
+            Qr,Qi=self._cplx_rows(self._matvec((JR,JI,MR,MI),Wr,Wi),omega)
+            Er,Ei=self._cplx_rows(self._matvec((JR,JI,MR,MI),Vr,Vi),omega)
+            Owr,Owi=self._omega_rows(MR,MI,Vr,Vi)               # dE/domega, and dF/dmu
+            Owr_W,Owi_W=self._omega_rows(MR,MI,Wr,Wi)           # dE/domega with V->W
+            Owr_k,Owi_k=self._omega_rows(dMRdk,dMIdk,Vr,Vi)     # d/dk of dE/domega (analytic)
+            Owr_p,Owi_p=self._omega_rows(dMRdp,dMIdp,Vr,Vi)     # d/dparameter of dE/domega
+            dEdU_W_re,dEdU_W_im=self._cplx_rows(hess(HW),omega)
+            dEdp_W_re,dEdp_W_im=self._cplx_rows(self._matvec((dJRdp,dJIdp,dMRdp,dMIdp),Wr,Wi),omega)
+            P_W_re,P_W_im=self._cplx_rows(self._matvec((dJRdk,dJIdk,dMRdk,dMIdk),Wr,Wi),omega)
+            # d/du of dE/domega, i.e. the mass-matrix half of the Hessian combination
+            OwU_re,OwU_im=-(HV[5]+HV[6]),HV[4]-HV[7]
+            # dE/dV blocks, and their k-derivative, which IS analytic (the primed matrices)
+            EVr_re,EVr_im=JR-omega*MI,JI+omega*MR
+            EVi_re,EVi_im=-JI-omega*MR,JR-omega*MI
+            kEVr_re,kEVr_im=dJRdk-omega*dMIdk,dJIdk+omega*dMRdk
+            kEVi_re,kEVi_im=-dJIdk-omega*dMRdk,dJRdk-omega*dMIdk
+            Raug=numpy.hstack([R,Er,Ei,Pr+Qr+mu*Owr,Pi+Qi+mu*Owi,
+                               numpy.dot(Vr,self.V0)-self.eigenscale,numpy.dot(Vi,self.V0),
+                               numpy.dot(Wr,self.V0),numpy.dot(Wi,self.V0)])
+            Jaug=scipy.sparse.block_array([
+                # u                        Vr                   Vi                   Wr        Wi        gamma                            omega                    k                          mu
+                [J,                        None,                None,                None,     None,     col(dRdp),                       None,                    None,                      None],
+                [dEdU_re,                  EVr_re,              EVi_re,              None,     None,     col(dEdp_re),                    col(Owr),                col(Pr),                   None],
+                [dEdU_im,                  EVr_im,              EVi_im,              None,     None,     col(dEdp_im),                    col(Owi),                col(Pi),                   None],
+                [dkdEdU[0]+dEdU_W_re+mu*OwU_re, kEVr_re-mu*MI,  kEVi_re-mu*MR,       EVr_re,   EVi_re,   col(dkdEdp[0]+dEdp_W_re+mu*Owr_p),col(Owr_k+Owr_W),       col(dkP[0]+P_W_re+mu*Owr_k),col(Owr)],
+                [dkdEdU[1]+dEdU_W_im+mu*OwU_im, kEVr_im+mu*MR,  kEVi_im-mu*MI,       EVr_im,   EVi_im,   col(dkdEdp[1]+dEdp_W_im+mu*Owi_p),col(Owi_k+Owi_W),       col(dkP[1]+P_W_im+mu*Owi_k),col(Owi)],
+                [None,row(self.V0),None,None,None,None,None,None,None],
+                [None,None,row(self.V0),None,None,None,None,None,None],
+                [None,None,None,row(self.V0),None,None,None,None,None],
+                [None,None,None,None,row(self.V0),None,None,None,None]]).tocsr()
+            return Raug,Jaug #type:ignore
+
+    def actions_after_successful_newton_solve(self):
+        prob=self.get_problem()
+        if self.has_imag:
+            Vr,Vi,Wr,Wi,p,omega,k,mu=self.get_augmented_dofs().split(startindex=1)
+            self.store_eigenvector({(1j*omega[0]):(numpy.array(Vr)+numpy.array(Vi)*1j)})
+        else:
+            Vr,Wr,p,k=self.get_augmented_dofs().split(startindex=1)
+            self.store_eigenvector({0.0:numpy.array(Vr)})
+        # store_eigenvector clears the mode bookkeeping; put the wavenumber we just found back, so
+        # that get_last_eigenmodes_k()/get_last_eigenmodes_m() still describes the stored
+        # eigenvector. The azimuthal one is deliberately NOT cast to an integer here: it is a real
+        # unknown of this system, and rounding it would report something that was never solved for.
+        if self.azimuthal:
+            prob._last_eigenvalues_m=numpy.array([k[0]])
+        else:
+            prob._last_eigenvalues_k=numpy.array([k[0]])
+
+    def get_critical_mode(self)->float:
+        """The converged mode unknown: the Cartesian wavenumber k or the (real) azimuthal mode m."""
+        return float(self.get_augmented_dofs().split(startindex=1)[-2 if self.has_imag else -1][0])
+
+    def get_critical_wavenumber(self)->float:
+        """The critical Cartesian wavenumber k, non-dimensional -- divide by the spatial scaling for
+        a dimensional one, as Problem.get_current_normal_mode_k does."""
+        if self.azimuthal:
+            raise RuntimeError("This tracker follows an azimuthal mode; use get_critical_azimuthal_m().")
+        return self.get_critical_mode()
+
+    def get_critical_azimuthal_m(self)->float:
+        """The critical azimuthal mode number, as a REAL number. Only integers are physical, so read
+        it as "the instability sets in between the neighbouring integer modes"."""
+        if not self.azimuthal:
+            raise RuntimeError("This tracker follows a Cartesian mode; use get_critical_wavenumber().")
+        return self.get_critical_mode()
+
+    def get_critical_omega(self)->float:
+        """Imaginary part of the neutral eigenvalue; zero for a stationary instability."""
+        if not self.has_imag:
+            return 0.0
+        return float(self.get_augmented_dofs().split(startindex=1)[-3][0])
+
+    def get_dlambda_dmode(self)->complex:
+        """dlambda/dk (or dlambda/dm) at the critical point. Its real part is zero by construction --
+        that is the equation this tracker adds -- so only the imaginary part carries information."""
+        if not self.has_imag:
+            return 0j
+        return 1j*float(self.get_augmented_dofs().split(startindex=1)[-1][0])
+
+    def get_dlambda_dk(self)->complex:
+        """Alias of :py:meth:`get_dlambda_dmode`, for the Cartesian case."""
+        return self.get_dlambda_dmode()
+
+
 class RealEigenbranchTracker(CustomBifurcationTracker):
     """
     Follows a real eigenbranch along a parameter
@@ -1301,7 +1802,7 @@ class ComplexEigenbranchTracker(CustomBifurcationTracker):
 
 
 class NormalModeEigenbranchTracker(_NormalModeBifurcationTrackerBase):
-    def __init__(self, problem,eigenvector:int,azimuthal_m:int | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
+    def __init__(self, problem,eigenvector:int,azimuthal_m:float | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
         super().__init__(problem,eigenvector,azimuthal_m,cartesian_k,eigenscale,nonlinear_length_constraint)
         self.parameter=None # No parameter means essentially take the real part as adjustable parameter
                 

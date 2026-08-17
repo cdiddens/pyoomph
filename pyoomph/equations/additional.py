@@ -347,7 +347,7 @@ class AxisymmetryBCForScalarD0Field(InterfaceEquations):
         super().__init__()
         self.fields=[f for f in fields]
 
-    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree: "EquationTree", eigensolver: "GenericEigenSolver", angular_mode: int | None,normal_k:float | None) -> set[str | int]:
+    def _get_forced_zero_dofs_for_eigenproblem(self, eqtree: "EquationTree", eigensolver: "GenericEigenSolver", angular_mode: int | float | None,normal_k:float | None) -> set[str | int]:
         eqs:set[str | int]=set()
         if angular_mode!=0:
             assert eqtree._mesh is not None
