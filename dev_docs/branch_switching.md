@@ -75,10 +75,34 @@ conditioned, and a step of the size the old branch had reached (`ds = 0.1125` ag
 `0.02`) overshoots. `branch_switch` therefore sets `ds` to the offset it just took. The arclength step
 grows it again by itself once the branch is well separated.
 
+## Where it lives
+
+The numerics are on `Problem`, so a plain script can use them without the bifurcation GUI:
+
+```python
+problem.solve_eigenproblem(1)
+problem.activate_bifurcation_tracking("gamma")
+problem.solve()                              # now AT the bifurcation
+nf = problem.classify_bifurcation("gamma")   # "fold" / "transcritical" / "pitchfork" / "Hopf"
+ds = problem.switch_branch("gamma")          # now on the other branch; None if none was reachable
+while ...:
+    ds = problem.arclength_continuation("gamma", ds)
+```
+
+`switch_branch` deactivates bifurcation tracking (the switch needs the plain system), tries both sides
+and a few offset magnitudes, verifies where it landed, and returns a step size for carrying on - the
+offset it took. It raises for a fold rather than returning None, since that is a statement about the
+bifurcation and not a failure to converge. `classify_bifurcation` warns when the critical eigenvalue is
+not near zero: the calculation returns "fold" for a regular point, and saying nothing would make that
+look like an answer.
+
+`BifurcationController.branch_switch` is now only the diagram half - which point we are at, opening a
+branch for the result, and the step size to carry on with.
+
 ## Verified
 
-`tests/branch_switch_worker.py`, one process per bifurcation type (a second `Problem` in one process
-segfaults in the JIT loader):
+`tests/branch_switch_worker.py`, one process per bifurcation type and per API (a second `Problem` in one
+process segfaults in the JIT loader), through the GUI and through `Problem.switch_branch` directly:
 
 - transcritical: lands on and stays on `u = mu` - `(0.020, 0.020), (0.033, 0.033), (0.047, 0.047), ...`,
   max error against the closed form **7.7e-8**

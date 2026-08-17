@@ -1293,19 +1293,11 @@ class BifurcationController:
             return None
 
     def branch_switch(self,offset:float | None=None,direction:int=1):
-        """Step from a bifurcation onto the OTHER branch through it.
+        """Step onto the other branch through the current bifurcation and record it as a new branch.
 
-        Done by predicting a point on the new branch from the normal form and then doing a regular
-        Newton solve there, not by seeding oomph's arclength state. Seeding is what this used to do and
-        it does not work: the two setters take DERIVATIVES (Dof_derivative, Parameter_derivative) while
-        increments were passed, so the seeded tangent had norm ~ds instead of 1. oomph normalises its
-        own tangent to (dp/ds)^2 + theta^2*|dU/ds|^2 = 1, and its arclength constraint then asks for a
-        step inflated by 1/ds - which overshot so far that Newton fell back onto the branch it started
-        on. See dev_docs/branch_switching.md.
-
-        A short distance off the bifurcation the Jacobian is regular again, so a plain solve converges,
-        and the normal-form prediction is what decides WHICH branch it converges to. The same manoeuvre
-        gets off a fold in leave_locus.
+        The numerics live on :py:meth:`~pyoomph.generic.problem.Problem.switch_branch`, so the same
+        manoeuvre is available to a plain script; what is here is the part that is about the diagram -
+        which point we are at, opening a branch for the result, and the step size to carry on with.
         """
         if self.on_locus():
             raise RuntimeError("Branch switching applies to an ordinary branch, not to a bifurcation locus")
@@ -1313,86 +1305,33 @@ class BifurcationController:
         if cp.eig_value_Re!=0:
             raise RuntimeError("Can only switch branches at bifurcations")
         if cp.bifurcation_info is None:
-            # Compute it here rather than sending the user away to set a flag and redo the run: the
-            # problem is sitting at the bifurcation, which is all the normal form needs. This is also
-            # what makes switching work at points loaded from a diagram recorded without classification.
+            # Computed here rather than sending the user away to set a flag and redo the run: the problem
+            # is sitting at the bifurcation, which is all the normal form needs. This is also what makes
+            # switching work at a point loaded from a diagram recorded without classification.
             self.log("This bifurcation was not classified; computing its normal form now")
             cp.bifurcation_info=self._classify_current_point()
         if cp.bifurcation_info is None:
             raise RuntimeError("Cannot switch branches: the normal form of this bifurcation could not be "
                                "computed, so there is no prediction for where the other branch goes. The "
                                "reason is in the log above.")
-        bi=cp.bifurcation_info
-        if bi["type"]=="fold":
-            # A fold has no second branch: the one branch turns around. Getting off it is leave_locus.
+        if cp.bifurcation_info.get("type")=="fold":
             self.log("A fold has only one branch through it - there is nothing to switch to")
             return False
-        param_predictor=bi.get("param_predictor")
-        perturbation_predictor=bi.get("perturbation_predictor")
-        if param_predictor is None or perturbation_predictor is None:
-            raise RuntimeError("The normal form for this "+str(bi.get("type"))+
-                               " bifurcation carries no branch predictor")
 
         self._status("BRANCH SWITCHING")
-        param=self.get_bifurcation_parameter()
-        p0=float(param.value)
-        base=numpy.array(self.problem.get_current_dofs()[0]).copy()
-        # The tangent of the branch we are ON, to tell "landed on the other branch" from "came back".
-        old_dir=numpy.array(self.problem.get_arclength_dof_derivative_vector())
-        if old_dir.size!=base.size:
-            old_dir=None
-        self.problem.deactivate_bifurcation_tracking()
-        self.problem.reset_arc_length_parameters()
-
-        base_offset=offset if offset is not None else self.branch_switch_offset*max(abs(p0),1.0)
-        landed=None
-        for eps in (base_offset,base_offset/10,base_offset*10):
-            for sgn in (direction,-direction):
-                dp=float(param_predictor(sgn*eps))
-                du=numpy.asarray(perturbation_predictor(sgn*eps),dtype=float)
-                if du.size!=base.size:
-                    raise RuntimeError("The branch predictor returned {:d} values for {:d} dofs".format(
-                        du.size,base.size))
-                param.value=p0+dp
-                self.problem.set_current_dofs(base+du)
-                try:
-                    self.problem.solve(max_newton_iterations=15)
-                except Exception:
-                    continue
-                got=numpy.array(self.problem.get_current_dofs()[0])
-                moved=got-base
-                if numpy.linalg.norm(moved)<=1e-9:
-                    continue        # did not leave the bifurcation at all
-                # It must be explained by the NEW branch's prediction rather than by the old branch's
-                # tangent, or Newton has simply walked back to where it came from.
-                if numpy.linalg.norm(moved-du)>0.5*max(numpy.linalg.norm(du),1e-30):
-                    if old_dir is not None and numpy.linalg.norm(old_dir)>0:
-                        along_old=abs(float(numpy.dot(moved,old_dir))/numpy.linalg.norm(old_dir))
-                        if along_old>0.9*float(numpy.linalg.norm(moved)):
-                            continue    # it is the old branch
-                    else:
-                        continue
-                landed=(dp,sgn,eps)
-                break
-            if landed:
-                break
-        if landed is None:
-            param.value=p0
-            self.problem.set_current_dofs(base)
+        ds=self.problem.switch_branch(self.get_bifurcation_parameter(),normal_form=cp.bifurcation_info,
+                                      offset=offset,direction=direction,
+                                      relative_offset=self.branch_switch_offset,quiet=True)
+        if ds is None:
             self.log("Could not step onto the other branch. Try a different offset "
                      "(gui.controller.branch_switch_offset) or the other direction.")
             return False
-
-        dp,sgn,eps=landed
-        # Continue at the scale of the jump just taken, not at whatever ds the old branch had reached.
-        # Just off the bifurcation the Jacobian is still nearly singular, so dU/dparameter is large and
-        # badly conditioned; a step of the old size overshoots and Newton lands back on the branch that
-        # exists everywhere - which is what made the switch look as though it had not worked at all.
-        # The arclength step grows it again by itself once the branch is well separated.
-        if dp!=0.0:
-            self._last_ds=dp
-        self.log("Switched onto the other {:s} branch at {:s} = {:.6g} (offset {:+.3g}); ds set to {:.3g}".format(
-            str(bi.get("type")),self._get_paramname_str(),p0+dp,dp,self._last_ds))
+        # Continue at the scale of the jump just taken, not at whatever ds the old branch had reached:
+        # just off the bifurcation dU/dparameter is badly conditioned and a larger step overshoots back
+        # onto the branch we came from. arclength_continuation grows it again by itself.
+        self._last_ds=ds
+        self.log("Switched onto the other {:s} branch; ds set to {:.3g}".format(
+            str(cp.bifurcation_info.get("type")),self._last_ds))
         self.problem.solve_eigenproblem(self.neigen,self.shift)
         self._new_branch()
         self._tangs={}

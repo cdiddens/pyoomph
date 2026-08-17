@@ -6003,6 +6003,167 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("Cannot find out whether a solution is stable when bifurcation tracking is active")
         return numpy.real(self._last_eigenvalues[0])<=0 #type:ignore
 
+    def classify_bifurcation(self,parameter:"str | _pyoomph.GiNaC_GlobalParam | None"=None,eigenindex:int=0)->dict[str,Any]:
+        """Normal form of the bifurcation the problem is currently sitting at.
+
+        The returned dict names the bifurcation in ``["type"]`` - ``"fold"``, ``"transcritical"``,
+        ``"pitchfork"`` or ``"Hopf"`` - and, for the ones that have a second branch, carries the
+        predictors :py:meth:`switch_branch` uses to step onto it.
+
+        Call it at a located bifurcation, i.e. after
+        :py:meth:`activate_bifurcation_tracking` and a :py:meth:`solve`, or wherever the last computed
+        eigenvalue is the critical one. With bifurcation tracking still active the critical eigenpair is
+        already to hand; without it the eigenproblem is solved here first.
+
+        Needs an analytic Hessian, so the problem must have been set up with
+        ``setup_for_stability_analysis(analytic_hessian=True)``.
+
+        Args:
+            parameter: The parameter the bifurcation is in. Defaults to the one being tracked.
+            eigenindex: Which computed eigenpair is the critical one. Defaults to the first.
+
+        Returns:
+            The normal-form dictionary.
+        """
+        from .bifurcation_tools import NormalFormCalculator
+        if isinstance(parameter,_pyoomph.GiNaC_GlobalParam):
+            parameter=parameter.get_name()
+        if self.get_bifurcation_tracking_mode()=="":
+            # get_normal_form reads the critical eigenpair from the last eigensolve. While tracking is
+            # active that already IS the critical one and solve_eigenproblem would refuse to run.
+            self.solve_eigenproblem(max(1,eigenindex+1))
+        eigenvalues=self.get_last_eigenvalues()
+        if eigenvalues is not None and len(eigenvalues)>eigenindex:
+            critical=abs(numpy.real(eigenvalues[eigenindex]))
+            if critical>1e-5:
+                # A normal form is only about a bifurcation. At a regular point the calculation still
+                # returns something - "fold", as it happens - and saying nothing would make that look
+                # like an answer.
+                print("Warning: classifying a bifurcation where the critical eigenvalue has real part "+
+                      "{:.3g}, which is not zero. This does not look like a bifurcation, and the normal ".format(critical)+
+                      "form of a regular point is meaningless.")
+        return NormalFormCalculator(self).get_normal_form(parameter,eigenindex=eigenindex)
+
+    def switch_branch(self,parameter:"str | _pyoomph.GiNaC_GlobalParam",normal_form:dict[str,Any] | None=None,
+                      offset:float | None=None,direction:int=1,relative_offset:float=0.02,
+                      max_newton_iterations:int=15,quiet:bool=False)->float | None:
+        """Step from a bifurcation onto the OTHER branch that passes through it.
+
+        Usable on its own, without the bifurcation GUI::
+
+            problem.solve_eigenproblem(1)
+            problem.activate_bifurcation_tracking("gamma")
+            problem.solve()                       # now AT the bifurcation
+            ds = problem.switch_branch("gamma")   # now on the other branch
+            while ...:
+                ds = problem.arclength_continuation("gamma", ds)
+
+        The switch is done by predicting a point on the new branch from the normal form and then doing an
+        ordinary Newton solve there - **not** by seeding the arclength state. Seeding does not work: the
+        continuation setters take derivatives while the normal form gives increments, and oomph
+        normalises its own tangent to ``(dparameter/ds)^2 + theta^2*|dU/ds|^2 = 1``, so a mis-scaled seed
+        makes the arclength constraint ask for a wildly inflated step and Newton falls back onto the
+        branch it started from. A short way off the bifurcation the Jacobian is regular again, so a plain
+        solve converges, and the prediction is what decides which branch it converges to. See
+        dev_docs/branch_switching.md.
+
+        Bifurcation tracking is deactivated here: the switch needs the plain system.
+
+        Args:
+            parameter: The parameter the bifurcation is in.
+            normal_form: The result of :py:meth:`classify_bifurcation`. Computed here if not given.
+            offset: Parameter offset to step off the bifurcation by. Defaults to ``relative_offset``
+                times the parameter's own magnitude; smaller is truer to the normal form but closer to
+                the singular point.
+            direction: ``+1`` or ``-1`` to prefer one side of the bifurcation. Both are tried either way,
+                since for a pitchfork only one side has a branch at all.
+            relative_offset: Used when ``offset`` is not given.
+            max_newton_iterations: For the solve onto the new branch.
+            quiet: Suppress the progress messages.
+
+        Returns:
+            A step size for continuing along the new branch - the offset actually taken, signed. It is
+            deliberately that small: just off the bifurcation ``dU/dparameter`` is still badly
+            conditioned and a larger step overshoots back onto the old branch, and
+            :py:meth:`arclength_continuation` grows it again by itself. ``None`` if no side of the
+            bifurcation could be reached, in which case the problem is left where it was.
+
+        Raises:
+            RuntimeError: If the bifurcation is a fold (one branch, which turns around - there is
+                nothing to switch to), or if its normal form carries no branch predictor.
+        """
+        if isinstance(parameter,str):
+            param=self.get_global_parameter(parameter)
+        else:
+            param=parameter
+        if normal_form is None:
+            normal_form=self.classify_bifurcation(param)
+        kind=normal_form.get("type")
+        if kind=="fold":
+            raise RuntimeError("A fold has only one branch through it, which turns around - there is "
+                               "nothing to switch to. Arclength continuation passes around a fold by "
+                               "itself.")
+        param_predictor=normal_form.get("param_predictor")
+        perturbation_predictor=normal_form.get("perturbation_predictor")
+        if param_predictor is None or perturbation_predictor is None:
+            raise RuntimeError("The normal form of this "+str(kind)+" bifurcation carries no branch "
+                               "predictor, so there is no prediction for where the other branch goes")
+
+        p0=float(param.value)
+        # The tangent of the branch we are ON, to tell "reached the other branch" from "came back to
+        # this one". Taken before deactivating, while it still refers to this branch.
+        old_dir=numpy.array(self.get_arclength_dof_derivative_vector())
+        self.deactivate_bifurcation_tracking()
+        self.reset_arc_length_parameters()
+        # AFTER deactivating: while tracking is active the dof vector is the augmented one and could not
+        # be written back to the plain problem.
+        base=numpy.array(self.get_current_dofs()[0]).copy()
+        if old_dir.size!=base.size:
+            old_dir=None #type:ignore[assignment]
+
+        base_offset=abs(offset) if offset is not None else relative_offset*max(abs(p0),1.0)
+        landed=None
+        for eps in (base_offset,base_offset/10,base_offset*10):
+            for sgn in (direction,-direction):
+                dp=float(param_predictor(sgn*eps))
+                du=numpy.asarray(perturbation_predictor(sgn*eps),dtype=float)
+                if du.size!=base.size:
+                    raise RuntimeError("The branch predictor returned {:d} values for {:d} degrees of "
+                                       "freedom".format(du.size,base.size))
+                param.value=p0+dp
+                self.set_current_dofs(base+du)
+                try:
+                    self.solve(max_newton_iterations=max_newton_iterations)
+                except Exception:
+                    continue
+                moved=numpy.array(self.get_current_dofs()[0])-base
+                if numpy.linalg.norm(moved)<=1e-9:
+                    continue          # did not leave the bifurcation at all
+                # It has to be explained by the NEW branch's prediction rather than by the old branch's
+                # tangent, or Newton has simply walked back to where it came from.
+                if numpy.linalg.norm(moved-du)>0.5*max(numpy.linalg.norm(du),1e-30):
+                    if old_dir is not None and numpy.linalg.norm(old_dir)>0:
+                        along_old=abs(float(numpy.dot(moved,old_dir))/numpy.linalg.norm(old_dir))
+                        if along_old>0.9*float(numpy.linalg.norm(moved)):
+                            continue  # it is the old branch
+                    else:
+                        continue
+                landed=dp
+                break
+            if landed is not None:
+                break
+
+        if landed is None:
+            param.value=p0
+            self.set_current_dofs(base)
+            if not quiet:
+                print("Could not step onto the other branch. Try a different offset or direction.")
+            return None
+        if not quiet:
+            print("Switched onto the other "+str(kind)+" branch at "+param.get_name()+
+                  " = {:.6g} (offset {:+.3g})".format(p0+landed,landed))
+        return landed if landed!=0.0 else base_offset
+
     def guess_nearest_bifurcation_type(self,eigenvector:int=0)->Literal["hopf","fold","pitchfork","azimuthal","cartesian_normal_mode"]:
         """
         Guesses the nearest bifurcation type based on the last computed eigenvalues. This is only possible after calling solve_eigenproblem(...).

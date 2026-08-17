@@ -623,21 +623,23 @@ def test_eigenfunction_plotter_is_derived_from_the_source():
     assert src.file_trunk is not None and "h" in src._range_objects
 
 
+@pytest.mark.parametrize("api", ["gui", "problem"])
 @pytest.mark.parametrize("kind", ["transcritical", "pitchfork"])
-def test_branch_switching_lands_on_the_other_branch(kind, tmp_path):
+def test_branch_switching_lands_on_the_other_branch(kind, api, tmp_path):
     """Switching must reach the OTHER branch and stay on it, checked against closed-form branches.
 
     Out of process because each bifurcation type needs its own Problem, following the worker pattern the
-    rest of the suite uses. The trivial branch u = 0 exists for every mu in both problems, so a switch
-    that does not work fails silently by staying on it - which is exactly how the old implementation
-    failed. It seeded oomph's arclength state with INCREMENTS where the two setters take derivatives, so
+    rest of the suite uses. Run through the GUI and through Problem.switch_branch on its own, since the
+    numerics live on Problem so that a plain script can use them. The trivial branch u = 0 exists for
+    every mu in both problems, so a switch that does not work fails silently by staying on it - which is
+    exactly how the old implementation failed. It seeded oomph's arclength state with INCREMENTS where the two setters take derivatives, so
     the tangent had norm ~ds instead of 1 and the arclength constraint asked for a step inflated by 1/ds.
     """
     import subprocess
 
     here = os.path.dirname(os.path.abspath(__file__))
     worker = os.path.join(here, "branch_switch_worker.py")
-    proc = subprocess.run([sys.executable, worker, "--kind", kind,
+    proc = subprocess.run([sys.executable, worker, "--kind", kind, "--api", api,
                            "--outdir", os.path.join(str(tmp_path), "out")],
                           cwd=here, capture_output=True, text=True, timeout=900)
     out = (proc.stdout or "") + (proc.stderr or "")

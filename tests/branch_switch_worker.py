@@ -80,6 +80,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kind", required=True, choices=["transcritical", "pitchfork"])
     ap.add_argument("--outdir", required=True)
+    ap.add_argument("--api", default="gui", choices=["gui", "problem"],
+                    help="gui: through BifurcationGUI; problem: Problem.switch_branch on its own")
     args = ap.parse_args()
 
     with build(args.kind) as problem:
@@ -87,6 +89,34 @@ def main() -> int:
         problem.set_linear_solver("superlu")
         problem.setup_for_stability_analysis(analytic_hessian=True)
         problem.get_global_parameter("mu").value = -0.2
+
+        if args.api == "problem":
+            # No GUI anywhere: this is the path a plain script takes.
+            problem.solve()
+            problem.solve_eigenproblem(1)
+            problem.activate_bifurcation_tracking("mu")
+            problem.solve()
+            assert abs(problem.get_global_parameter("mu").value) < 1e-7, "the bifurcation is at mu = 0"
+            nf = problem.classify_bifurcation("mu")
+            assert nf.get("type") == args.kind, "expected " + args.kind + ", got " + str(nf.get("type"))
+            ds = problem.switch_branch("mu", normal_form=nf, quiet=True)
+            assert ds is not None, "switch_branch could not reach the other branch"
+            assert problem.get_bifurcation_tracking_mode() == "", "tracking must be off afterwards"
+            worst = 0.0
+            for _ in range(4):
+                ds = problem.arclength_continuation("mu", ds)
+                mu = problem.get_global_parameter("mu").value
+                u = problem.get_ode("ode").get_value("u", as_float=True)
+                expect = other_branch(args.kind, mu)
+                if expect is None or abs(mu) < 1e-4:
+                    continue
+                assert abs(u) > 1e-6, "fell back onto the trivial branch at mu = {:.4g}".format(mu)
+                worst = max(worst, abs(abs(u) - expect))
+            print("kind={:s} api=problem max_error={:.3e}".format(args.kind, worst))
+            assert worst < 1e-6, "not on the analytic other branch: {:.3e}".format(worst)
+            # A fold has nothing to switch to and must say so rather than wander off.
+            print("PYOOMPH_WORKER_DONE")
+            return 0
 
         gui = BifurcationGUI(problem, "mu")
         gui.neigen = 1
