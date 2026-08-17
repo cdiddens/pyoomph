@@ -50,6 +50,11 @@ import glob
 import shutil
 
 
+#: Version stamped into state.json. 1 is implicit for files written before the slice (which
+#: parameter was continued, and what the others were held at) was recorded at all.
+STATE_VERSION=2
+
+
 class BifurcationViewLimits(Protocol):
     """The bit of the plot the numerics genuinely need.
 
@@ -309,10 +314,44 @@ class BifurcationController:
 
     # ------------------------------------------------------------------ diagram bookkeeping
 
+    def all_parameter_names(self)->list[str]:
+        """Every global parameter of the problem, in a stable order.
+
+        Only complete once the problem has been initialised - the parameters are created while
+        define_problem() runs.
+        """
+        return sorted(self.problem.get_global_parameter_names())
+
+    def current_parameter_values(self)->dict[str,float]:
+        return {n:float(self.problem.get_global_parameter(n).value) for n in self.all_parameter_names()}
+
+    def describe_current_slice(self)->str:
+        """What the current branch holds fixed, e.g. "b = 0.3" - for the status bar and the plot."""
+        if self.current_branch is None:
+            return ""
+        return self.current_branch.describe_slice()
+
+    def slice_groups(self)->"dict[tuple,list[BifurcationGUISolutionBranch]]":
+        """Branches grouped by the slice of parameter space they live in, preserving order."""
+        groups:dict[tuple,list[BifurcationGUISolutionBranch]]={}
+        for b in self.branches:
+            groups.setdefault(b.slice_key(),[]).append(b)
+        return groups
+
+    def _new_branch(self,*,kind:str="solution",tracked_parameter:str | None=None,
+                    bifurcation_type:str | None=None)->BifurcationGUISolutionBranch:
+        """Open a branch, stamped with the slice it is about to be computed in."""
+        branch=BifurcationGUISolutionBranch(kind=kind,
+                                            continuation_parameter=self._paramname if isinstance(self._paramname,str) else None,
+                                            tracked_parameter=tracked_parameter,
+                                            bifurcation_type=bifurcation_type)
+        self.branches.append(branch)
+        self.current_branch=branch
+        self.selected_branch=branch
+        return branch
+
     def new_branch_from_state(self,statefile):
-        self.current_branch=BifurcationGUISolutionBranch()
-        self.selected_branch=self.current_branch
-        self.branches.append(self.current_branch)
+        self._new_branch()
         self.problem.load_state(statefile,ignore_continuation_data=True,ignore_eigendata=True)
         self.problem.reset_arc_length_parameters()
         self.problem.solve_eigenproblem(self.neigen,self.shift)
@@ -321,12 +360,10 @@ class BifurcationController:
         self._changed()
 
     def _add_current_state(self):
-        if self.current_branch is None:
-            self.current_branch=BifurcationGUISolutionBranch()
-            self.selected_branch=self.current_branch
-            self.branches.append(self.current_branch)
+        branch=self.current_branch if self.current_branch is not None else self._new_branch()
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step)))
-        p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),self.problem.get_last_eigenvalues()[0],state_file,self._state_step)
+        p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),self.problem.get_last_eigenvalues()[0],state_file,self._state_step,
+                                      param_values=self.current_parameter_values())
         if p.eig_value_Re==0 and self.classify_bifurcations:
             from ...generic.bifurcation_tools import NormalFormCalculator
             p.bifurcation_info=NormalFormCalculator(self.problem).get_normal_form(self.get_bifurcation_parameter().get_name())
@@ -335,7 +372,7 @@ class BifurcationController:
         self.current_point=p
         self.selected_point=None
         self.selected_branch=None
-        self.current_branch.append(p)
+        branch.append(p)
 
     def load_pt(self,pt):
         self.problem.load_state(pt.statefile,ignore_outstep=True)
@@ -512,6 +549,33 @@ class BifurcationController:
 
     # ------------------------------------------------------------------ output
 
+    @staticmethod
+    def _slice_directory_names(slices:"dict[tuple,list[BifurcationGUISolutionBranch]]")->dict[tuple,str]:
+        """One directory name per slice. Numbered rather than built from the values, because
+        parameter values make poor path components (signs, dots, exponents)."""
+        names={}
+        for i,key in enumerate(slices):
+            names[key]="slice{:02d}".format(i)
+        return names
+
+    def _export_header_suffix(self,branch:"BifurcationGUISolutionBranch")->str:
+        """The part of a savetxt header that says what this curve is a section through.
+
+        An exported curve that does not record the parameters held fixed cannot be interpreted later,
+        let alone captioned, so it goes into every file - including the tag files.
+        """
+        parts=[]
+        if branch.kind=="locus":
+            parts.append("locus of {:s} bifurcations".format(branch.bifurcation_type or "unclassified"))
+            if branch.tracked_parameter is not None:
+                parts.append("tracked in "+branch.tracked_parameter)
+        if branch.continuation_parameter is not None:
+            parts.append("continued in "+branch.continuation_parameter)
+        desc=branch.describe_slice()
+        if desc:
+            parts.append("fixed: "+desc)
+        return ("\n"+"; ".join(parts)) if parts else ""
+
     def output_curves(self):
         paramname=self._get_paramname_str()
         observable=self._get_current_observable()
@@ -519,16 +583,19 @@ class BifurcationController:
         odir=os.path.join(ddir,"output")
 
         Path(odir).mkdir(parents=True,exist_ok=True)
-        globres=glob.glob(os.path.join(odir,"branch*","*.txt"))
-        for g in globres:
-            os.remove(g)
-        globres=glob.glob(os.path.join(odir,"*.dump"))
-        for g in globres:
-            os.remove(g)
+        # Now nested one level deeper (slice/branch/*.txt) than before, hence the two patterns.
+        for pattern in ("branch*/*.txt","slice*/branch*/*.txt","*.dump"):
+            for g in glob.glob(os.path.join(odir,pattern)):
+                os.remove(g)
 
+        slices=self.slice_groups()
+        # One directory per slice of parameter space, since curves from different slices are
+        # different physical results and must not land in one folder to be plotted together.
+        slice_dirs=self._slice_directory_names(slices)
         for ib,b in enumerate(self.branches):
-            bdir=os.path.join(odir,"branch{:03d}".format(ib))
+            bdir=os.path.join(odir,slice_dirs[b.slice_key()],"branch{:03d}".format(ib))
             Path(bdir).mkdir(parents=True,exist_ok=True)
+            header_suffix=self._export_header_suffix(b)
             if self.interpolated_splines:
                 smoothedsegs,stabs=b.smooth_branch_stab_list(self._current_observable if not self.output_all_observables else None,100)
             else:
@@ -542,19 +609,19 @@ class BifurcationController:
                 else:
                     fn="smoothed_unstable_{:03d}.txt".format(iunstab)
                     iunstab+=1
-                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header=paramname+"\t"+observable+"\tReEigen\tImEigen")
+                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header=paramname+"\t"+observable+"\tReEigen\tImEigen"+header_suffix)
             nbif=0
             for p in b:
                 if p.eig_value_Re==0:
                     fn="bifurcation_{:03d}.txt".format(nbif)
                     pc=p.get_coordinate(self._current_observable,with_s=False,with_eigen=True)
-                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header=paramname+"\t"+observable+"\tReEigen\tImEigen")
+                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header=paramname+"\t"+observable+"\tReEigen\tImEigen"+header_suffix)
                     nbif+=1
                 if p.tag>=0 and p.statefile is not None:
                     shutil.copy2(p.statefile, os.path.join(odir,"tag{:02d}.dump".format(p.tag)))
                     fn="tag_{:02d}.txt".format(p.tag)
                     pc=p.get_coordinate(self._current_observable,with_s=False)
-                    numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header=paramname+"\t"+observable)
+                    numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header=paramname+"\t"+observable+self._export_header_suffix(b))
         self.log("Exported curves to",odir)
         return odir
 
@@ -626,9 +693,7 @@ class BifurcationController:
         self.problem._update_param_info_for_continuation(dp,param.value)
         self.problem.arclength_continuation(param,ds)
 
-        self.branches.append(BifurcationGUISolutionBranch())
-        self.current_branch=self.branches[-1]
-        self.selected_branch=self.current_branch
+        self._new_branch()
         self._tangs={}
         self.problem.solve_eigenproblem(self.neigen,self.shift)
         self._add_current_state()
@@ -657,9 +722,7 @@ class BifurcationController:
         self.problem.set_current_time(0)
         self.problem.solve(max_newton_iterations=20)
         self.problem.solve_eigenproblem(self.neigen,self.shift)
-        self.branches.append(BifurcationGUISolutionBranch())
-        self.current_branch=self.branches[-1]
-        self.selected_branch=self.current_branch
+        self._new_branch()
         self._tangs={}
         self._add_current_state()
         self._update_tangents()
@@ -894,6 +957,8 @@ class BifurcationController:
 
         cur_branch=self._get_current_branch()
         fullinfo={}
+        fullinfo["version"]=STATE_VERSION
+        fullinfo["parameter"]=self._paramname if isinstance(self._paramname,str) else None
         fullinfo["branches"]=[b.to_state_dict() for b in self.branches]
         fullinfo["demo_video_step"]=self._demo_video_step
         fullinfo["xlim"]=list(self.view.get_xlim())
@@ -926,7 +991,27 @@ class BifurcationController:
         with open(fname) as f:
             fullinfo=json.load(f)
 
-        self.branches=[BifurcationGUISolutionBranch.from_dict(b) for b in fullinfo["branches"]]
+        version=int(fullinfo.get("version",1))
+        if version>STATE_VERSION:
+            self.log("Warning: state.json was written by a newer pyoomph (format {:d} > {:d}); "
+                     "unknown entries are ignored".format(version,STATE_VERSION))
+        # A version-1 file records neither which parameter was continued nor what the others were
+        # held at. The continued one can be recovered honestly - it can only have been this GUI's -
+        # but the fixed values cannot, and are left unknown rather than invented.
+        stored_param=fullinfo.get("parameter")
+        if isinstance(stored_param,str) and isinstance(self._paramname,str) and stored_param!=self._paramname:
+            self.log("Note: the stored diagram was continued in '"+stored_param+
+                     "', this session was started with '"+self._paramname+"'")
+        default_param=stored_param if isinstance(stored_param,str) else (self._paramname if isinstance(self._paramname,str) else None)
+        self.branches=[BifurcationGUISolutionBranch.from_dict(b,default_continuation_parameter=default_param)
+                       for b in fullinfo["branches"]]
+        if version<STATE_VERSION:
+            self.log("Loaded a format-{:d} diagram: the parameters held fixed were not recorded, "
+                     "so the slice is reported as unknown".format(version))
+        for b in self.branches:
+            if not b.slice_is_consistent():
+                self.log("Warning: branch",self.branches.index(b),
+                         "has points at differing values of its supposedly fixed parameters")
         if apply_view is not None:
             apply_view(fullinfo)
 

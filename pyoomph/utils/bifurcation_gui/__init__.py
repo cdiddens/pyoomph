@@ -131,6 +131,22 @@ class BifurcationGUI:
     def get_bifurcation_parameter(self)->"_pyoomph.GiNaC_GlobalParam":
         return self.controller.get_bifurcation_parameter()
 
+    @property
+    def continuation_parameter(self)->str:
+        """Name of the parameter being continued."""
+        return self.controller._get_paramname_str()
+
+    def all_parameter_names(self)->list[str]:
+        """Every global parameter of the problem (only complete after :py:meth:`start`)."""
+        return self.controller.all_parameter_names()
+
+    def describe_slice(self)->str:
+        """The parameters the current diagram holds fixed, e.g. ``"b = 0.3"``.
+
+        A diagram is a section through parameter space and is only valid at these values.
+        """
+        return self.controller.describe_current_slice()
+
     def evaluate_observables(self)->dict[str,float]:
         return self.controller.evaluate_observables()
 

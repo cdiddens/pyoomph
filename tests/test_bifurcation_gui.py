@@ -28,10 +28,15 @@
 # round-trip without a display. They now sit in BifurcationController, which knows nothing about
 # matplotlib or tkinter, so the whole workflow can be driven from here.
 #
-# The test problem is the textbook saddle-node, du/dt = mu - u^2: two stationary branches
-# u = +-sqrt(mu) meeting at a fold at mu = 0, with eigenvalue -2u, so the analytic answer for every
-# assertion below is known in closed form. That matters most for locate_bifurcation(), which is
-# checked against mu = 0 rather than against itself.
+# The test problem is du/dt = mu - u^2 - b*u, with TWO global parameters. At b = 0 it is the
+# textbook saddle-node: branches u = +-sqrt(mu) meeting at a fold at mu = 0, eigenvalue -2u. In
+# general the stationary states are mu = u^2 + b*u and the fold sits where d(mu)/du = 2u + b = 0,
+# i.e. at u_c = -b/2 and mu_c(b) = -b^2/4 - a parabolic fold locus, known in closed form. Every
+# assertion below is therefore checked against theory rather than against the code's own output,
+# which is what makes locate_bifurcation() and (later) the fold-locus continuation testable at all.
+#
+# The second parameter also exists to pin the slice bookkeeping: a diagram continued in mu is only
+# valid at one value of b, and that has to be recorded.
 #
 # Only ONE Problem is constructed per process: a second one segfaults in the JIT loader, which is
 # why the module has a single test function rather than one per aspect.
@@ -44,28 +49,33 @@ import numpy
 from pyoomph import Problem, ODEEquations, InitialCondition
 from pyoomph.expressions import var_and_test, partial_t
 from pyoomph.utils.bifurcation_gui import BifurcationGUI
-from pyoomph.utils.bifurcation_gui.controller import BifurcationController, _FixedViewLimits
+from pyoomph.utils.bifurcation_gui.controller import (STATE_VERSION, BifurcationController,
+                                                     _FixedViewLimits)
+
+
+def fold_location(b: float) -> tuple[float, float]:
+    """Analytic fold of du/dt = mu - u^2 - b*u : (mu_c, u_c) = (-b^2/4, -b/2)."""
+    return -b * b / 4.0, -b / 2.0
 
 
 class FoldEquations(ODEEquations):
-    """du/dt = mu - u^2 : a saddle-node at mu=0, stable branch u=+sqrt(mu)."""
+    """du/dt = mu - u^2 - b*u."""
 
-    def __init__(self, mu):
+    def __init__(self, mu, b):
         super().__init__()
-        self.mu = mu
+        self.mu, self.b = mu, b
 
     def define_fields(self):
         self.define_ode_variable("u")
 
     def define_residuals(self):
         u, u_test = var_and_test("u")
-        self.add_weak(partial_t(u) - (self.mu - u**2), u_test)
+        self.add_weak(partial_t(u) - (self.mu - u**2 - self.b * u), u_test)
 
 
 class FoldProblem(Problem):
     def define_problem(self):
-        mu = self.get_global_parameter("mu")
-        eqs = FoldEquations(mu)
+        eqs = FoldEquations(self.get_global_parameter("mu"), self.get_global_parameter("b"))
         eqs += InitialCondition(u=1.0)
         self += eqs @ "ode"
 
@@ -74,6 +84,7 @@ def test_bifurcation_gui_controller(tmp_path):
     with FoldProblem() as problem:
         problem.set_output_directory(str(tmp_path))
         problem.get_global_parameter("mu").value = 1.0
+        problem.get_global_parameter("b").value = 1.0
 
         gui = BifurcationGUI(problem, "mu")
         c: BifurcationController = gui.controller
@@ -93,16 +104,19 @@ def test_bifurcation_gui_controller(tmp_path):
         p0 = c.current_point
         assert p0 is not None
         assert numpy.isclose(p0.param_value, 1.0)
-        assert numpy.isclose(p0.obs_values["ode/u"], 1.0, atol=1e-8)
-        # The stable branch: eigenvalue -2u = -2
-        assert numpy.isclose(p0.eig_value_Re, -2.0, atol=1e-6)
+        # mu = u^2 + b*u with mu = b = 1 gives the golden-ratio root u = (sqrt(5)-1)/2
+        u0 = (numpy.sqrt(5.0) - 1.0) / 2.0
+        assert numpy.isclose(p0.obs_values["ode/u"], u0, atol=1e-8)
+        # The stable branch: eigenvalue -(2u + b) = -sqrt(5)
+        assert numpy.isclose(p0.eig_value_Re, -numpy.sqrt(5.0), atol=1e-6)
         assert os.path.isfile(p0.statefile)
+        assert p0.param_values == {"mu": 1.0, "b": 1.0}, "all parameters are recorded, not just mu"
 
         # ---------------------------------------------------------- multistep on a fresh diagram
         # Regression: multistep read the continuation tangent that only step() ever fills in, so on
         # a diagram that had not been stepped yet it raised KeyError - and once that was fixed, a
         # zero-length tangent scaled ds down to nothing and the sweep never terminated.
-        c.view = _FixedViewLimits(xlim=(0.99, 1.01), ylim=(0.99, 1.01))  # left by the first step
+        c.view = _FixedViewLimits(xlim=(0.99, 1.01), ylim=(0.5, 0.7))  # left by the first step in mu
         c.multistep()
         assert len(c.branches[0]) == 2
         assert c.ds != 0.0
@@ -113,8 +127,9 @@ def test_bifurcation_gui_controller(tmp_path):
             c.step()
         assert len(c.branches[0]) == 8
         for p in c.branches[0]:
-            # every point must sit on u = +sqrt(mu)
-            assert numpy.isclose(p.obs_values["ode/u"], numpy.sqrt(p.param_value), atol=1e-7)
+            # every point must satisfy the stationary relation mu = u^2 + b*u
+            u = p.obs_values["ode/u"]
+            assert numpy.isclose(p.param_value, u * u + p.param_values["b"] * u, atol=1e-7)
         # stepping with a negative ds walks towards the fold
         assert c.branches[0][-1].param_value < 1.0 or c.branches[0][0].param_value < 1.0
         # scoords are normalized and ordered by the insertion heuristic
@@ -125,8 +140,9 @@ def test_bifurcation_gui_controller(tmp_path):
         c.locate_bifurcation()
         fold = c.current_point
         assert fold is not None
-        assert numpy.isclose(fold.param_value, 0.0, atol=1e-7), "fold should be at mu=0"
-        assert numpy.isclose(fold.obs_values["ode/u"], 0.0, atol=1e-5)
+        mu_c, u_c = fold_location(1.0)
+        assert numpy.isclose(fold.param_value, mu_c, atol=1e-7), "fold should be at mu=-b^2/4"
+        assert numpy.isclose(fold.obs_values["ode/u"], u_c, atol=1e-5)
         assert fold.eig_value_Re == 0, "a located bifurcation is flagged by a zero real part"
         # Bifurcation tracking must not stay active afterwards, or every later solve would be
         # augmented.
@@ -136,15 +152,35 @@ def test_bifurcation_gui_controller(tmp_path):
         segs, stabs = c.branches[0].to_branch_stab_list("ode/u")
         assert len(segs) == len(stabs) and len(segs) >= 1
 
+        # ---------------------------------------------------------- the slice this diagram is in
+        branch = c.branches[0]
+        assert branch.kind == "solution"
+        assert branch.continuation_parameter == "mu"
+        assert branch.slice_is_known(), "every point records all global parameters"
+        assert branch.fixed_parameters() == {"b": 1.0}, "b is held fixed along a continuation in mu"
+        assert branch.slice_is_consistent()
+        assert branch.describe_slice() == "b = 1"
+        assert c.describe_current_slice() == "b = 1"
+        assert set(c.all_parameter_names()) == {"mu", "b"}
+
         # ---------------------------------------------------------- tags and export
-        c.toggle_point_tag(c.branches[0][0], 3)
-        assert c.branches[0][0].tag == 3
+        c.toggle_point_tag(branch[0], 3)
+        assert branch[0].tag == 3
         outdir = c.output_curves()
         assert os.path.isfile(os.path.join(outdir, "tag_03.txt"))
         assert os.path.isfile(os.path.join(outdir, "tag03.dump"))
-        bdir = os.path.join(outdir, "branch000")
+        # One directory per slice of parameter space, so curves computed at different fixed values
+        # cannot land in one folder and be plotted together by accident.
+        bdir = os.path.join(outdir, "slice00", "branch000")
         assert any(f.startswith("smoothed_") for f in os.listdir(bdir))
         assert any(f.startswith("bifurcation_") for f in os.listdir(bdir))
+        # An exported curve must say what was held fixed, or it cannot be interpreted later.
+        exported = next(f for f in os.listdir(bdir) if f.startswith("smoothed_"))
+        with open(os.path.join(bdir, exported)) as f:
+            head = "".join(line for line in f if line.startswith("#"))
+        assert "continued in mu" in head and "fixed: b = 1" in head
+        with open(os.path.join(outdir, "tag_03.txt")) as f:
+            assert "fixed: b = 1" in f.read()
 
         # ---------------------------------------------------------- save / load round trip
         c.save_all()
@@ -154,6 +190,11 @@ def test_bifurcation_gui_controller(tmp_path):
             stored = json.load(f)
         assert stored["current_observable"] == "ode/u"
         assert stored["xlim"] == [-1.0, 2.0]
+        assert stored["version"] == STATE_VERSION
+        assert stored["parameter"] == "mu"
+        assert stored["branches"][0]["kind"] == "solution"
+        assert stored["branches"][0]["continuation_parameter"] == "mu"
+        assert stored["branches"][0]["points"][0]["param_values"] == {"mu": 1.0, "b": 1.0}
 
         before = [(p.param_value, p.obs_values["ode/u"], p.eig_value_Re, p.scoord, p.tag)
                   for b in c.branches for p in b]
@@ -195,6 +236,58 @@ def test_bifurcation_gui_controller(tmp_path):
         c.clear_abort()
 
         assert logged, "the controller must route its progress messages to the observer"
+
+
+def test_legacy_state_file_reports_the_slice_as_unknown():
+    """A state.json written before the parameters were recorded must still load.
+
+    The parameter that was continued is recoverable - it can only have been the one the GUI was
+    constructed with - but what the others were held at is not, and must be reported as unknown
+    rather than invented. This is the whole reason for the format version.
+    """
+    from pyoomph.utils.bifurcation_gui.model import BifurcationGUISolutionBranch
+
+    legacy = {
+        "points": [
+            {"param_value": 1.0, "obs_value": {"ode/u": 0.5}, "eig_value_Re": -2.0,
+             "eig_value_Im": 0.0, "statefile": None, "outstep": 0, "scoord": 0.0, "tangs": {}},
+            {"param_value": 0.8, "obs_value": {"ode/u": 0.4}, "eig_value_Re": -1.5,
+             "eig_value_Im": 0.0, "statefile": None, "outstep": 1, "scoord": 1.0, "tangs": {}},
+        ]
+    }
+    b = BifurcationGUISolutionBranch.from_dict(legacy, default_continuation_parameter="mu")
+    assert b.kind == "solution"
+    assert b.continuation_parameter == "mu", "recoverable, so recovered"
+    assert not b.slice_is_known(), "the fixed values were never written down"
+    assert b.fixed_parameters() == {}
+    assert b.describe_slice() == "slice unknown"
+    # An empty fixed-parameter dict must not be read as "nothing was held fixed": a diagram that
+    # genuinely has no other parameters says so differently.
+    modern = BifurcationGUISolutionBranch.from_dict(
+        {"points": [dict(legacy["points"][0], param_values={"mu": 1.0})], "kind": "solution",
+         "continuation_parameter": "mu"})
+    assert modern.slice_is_known()
+    assert modern.fixed_parameters() == {}
+    assert modern.describe_slice() == "no other parameters"
+
+
+def test_slice_detects_a_parameter_that_moved():
+    """A branch whose supposedly fixed parameters drift must be flagged, not averaged.
+
+    go_to_param() called from a custom key function mid-branch is exactly how this happens.
+    """
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint)
+
+    b = BifurcationGUISolutionBranch(kind="solution", continuation_parameter="mu")
+    b.append(BifurcationGUISolutionPoint(1.0, {"u": 1.0}, -1.0, None, 0,
+                                         param_values={"mu": 1.0, "b": 0.5}))
+    b.append(BifurcationGUISolutionPoint(0.9, {"u": 0.9}, -1.0, None, 1,
+                                         param_values={"mu": 0.9, "b": 0.5}))
+    assert b.slice_is_consistent()
+    b.append(BifurcationGUISolutionPoint(0.8, {"u": 0.8}, -1.0, None, 2,
+                                         param_values={"mu": 0.8, "b": 0.9}))
+    assert not b.slice_is_consistent(), "b moved along a branch that claims to hold it fixed"
 
 
 def test_keymap_defaults_and_rebinding(tmp_path):

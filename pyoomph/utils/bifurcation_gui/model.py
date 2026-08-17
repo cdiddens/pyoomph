@@ -41,11 +41,15 @@ from ...typings import *
 
 
 class BifurcationGUISolutionPoint:
-    """One computed solution: the parameter value, all observables, the leading eigenvalue and the
-    state file it was dumped to."""
+    """One computed solution: every global parameter, all observables, the leading eigenvalue and
+    the state file it was dumped to."""
 
-    def __init__(self,param_value,obs_values,eig_value,statefile,outstep) -> None:
+    def __init__(self,param_value,obs_values,eig_value,statefile,outstep,param_values:dict[str,float] | None=None) -> None:
         self.param_value=param_value
+        #: Every global parameter at this point, not just the continued one. The state dump restores
+        #: all of them, so without this the diagram could not say which slice of parameter space it
+        #: is a section through - and reloading a point silently moves the others.
+        self.param_values:dict[str,float]=dict(param_values) if param_values else {}
         self.obs_values=obs_values
         self.eig_value_Re=numpy.real(eig_value)
         self.eig_value_Im=numpy.imag(eig_value)
@@ -62,6 +66,10 @@ class BifurcationGUISolutionPoint:
         inst=BifurcationGUISolutionPoint(res["param_value"],res["obs_value"],res["eig_value_Re"]+1j*res["eig_value_Im"],res["statefile"],res["outstep"])
         inst.scoord=res["scoord"]
         inst.tag=res.get("tag",-1)
+        # Absent in files written before the slice was recorded. Left empty rather than filled with
+        # the continued parameter alone, so "unknown slice" stays distinguishable from "no other
+        # parameters exist".
+        inst.param_values=dict(res.get("param_values",{}))
         for k,v in res["tangs"].items():
             inst._tangs[k]=numpy.array(v)
         return inst
@@ -77,10 +85,17 @@ class BifurcationGUISolutionPoint:
         res["scoord"]=self.scoord
         if self.tag>=0:
             res["tag"]=self.tag
+        if self.param_values:
+            res["param_values"]=dict(self.param_values)
         res["tangs"]={}
         for k,v in self._tangs.items():
             res["tangs"][k]=list(v)
         return res
+
+    def fixed_parameters(self,varying:Iterable[str])->dict[str,float]:
+        """The parameters this point holds fixed, i.e. all of them except the ones being varied."""
+        varying=set(varying)
+        return {n:v for n,v in self.param_values.items() if n not in varying}
 
 
     def get_coordinate(self,obs,with_s=False,with_eigen=False):
@@ -112,17 +127,109 @@ class BifurcationGUISolutionPoint:
 
 
 
+#: Relative tolerance for deciding whether two parameter values are "the same" fixed value.
+#: The parameters that are not being continued stay bit-identical through an arclength step, so this
+#: only has to absorb values the user typed in or reached via go_to_param.
+SLICE_RTOL=1e-9
+
+
+def same_parameter_value(a:float,b:float,rtol:float=SLICE_RTOL)->bool:
+    return abs(a-b)<=rtol*max(1.0,abs(a),abs(b))
+
+
 class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
-    """A list of solution points forming one branch, ordered by their arclength coordinate."""
+    """A list of solution points forming one branch, ordered by their arclength coordinate.
+
+    A branch is produced by one continuation, so it belongs to one *slice* of parameter space: one
+    or two parameters vary along it and every other one is held fixed. Which is which is recorded
+    here, because a diagram that does not say what was held fixed cannot be interpreted - let alone
+    published - once the problem has more than one global parameter.
+    """
+
+    def __init__(self,initlist=None,*,kind:str="solution",continuation_parameter:str | None=None,
+                 tracked_parameter:str | None=None,bifurcation_type:str | None=None) -> None:
+        super().__init__(initlist or [])
+        #: "solution" - an ordinary branch of stationary states, continued in one parameter.
+        #: "locus"    - a curve of bifurcation points, tracked in `tracked_parameter` while being
+        #:              continued in `continuation_parameter`; two parameters vary along it.
+        self.kind=kind
+        self.continuation_parameter=continuation_parameter
+        self.tracked_parameter=tracked_parameter
+        self.bifurcation_type=bifurcation_type
+
+    @property
+    def varying_parameters(self)->list[str]:
+        res=[n for n in (self.continuation_parameter,self.tracked_parameter) if n is not None]
+        return res
+
+    def fixed_parameters(self)->dict[str,float]:
+        """The slice this branch sits in, derived from its points rather than assumed.
+
+        Deriving it matters: a custom key function calling go_to_param mid-branch would otherwise
+        leave the branch labelled with a slice it has since left. See :py:meth:`slice_is_consistent`.
+        """
+        for p in self:
+            if p.param_values:
+                return p.fixed_parameters(self.varying_parameters)
+        return {}
+
+    def slice_is_consistent(self)->bool:
+        """False if the supposedly fixed parameters actually move along this branch."""
+        ref=None
+        for p in self:
+            if not p.param_values:
+                continue
+            fixed=p.fixed_parameters(self.varying_parameters)
+            if ref is None:
+                ref=fixed
+            elif set(fixed)!=set(ref) or any(not same_parameter_value(fixed[n],ref[n]) for n in fixed):
+                return False
+        return True
+
+    def slice_key(self)->tuple:
+        """Hashable identity of the slice, for grouping branches and for the export directories."""
+        fixed=self.fixed_parameters()
+        return (self.kind,self.continuation_parameter,self.tracked_parameter,
+                tuple(sorted((n,float(v)) for n,v in fixed.items())))
+
+    def slice_is_known(self)->bool:
+        """False for branches read from a file written before parameters were recorded.
+
+        Distinguishing this from "there are no other parameters" is the whole point: an unknown
+        slice must be reported as unknown, never silently drawn as if nothing were held fixed.
+        """
+        return any(p.param_values for p in self)
+
+    def describe_slice(self)->str:
+        """Human-readable "b = 0.3, c = 2" for the status bar, the plot and file headers."""
+        if not self.slice_is_known():
+            return "slice unknown"
+        fixed=self.fixed_parameters()
+        if not fixed:
+            return "no other parameters"
+        return ", ".join("{:s} = {:.6g}".format(n,v) for n,v in sorted(fixed.items()))
 
     def to_state_dict(self):
         res={}
         res["points"]=[p.to_state_dict() for p in self]
+        res["kind"]=self.kind
+        if self.continuation_parameter is not None:
+            res["continuation_parameter"]=self.continuation_parameter
+        if self.tracked_parameter is not None:
+            res["tracked_parameter"]=self.tracked_parameter
+        if self.bifurcation_type is not None:
+            res["bifurcation_type"]=self.bifurcation_type
         return res
 
     @staticmethod
-    def from_dict(res):
-        inst=BifurcationGUISolutionBranch()
+    def from_dict(res,default_continuation_parameter:str | None=None):
+        inst=BifurcationGUISolutionBranch(
+            kind=res.get("kind","solution"),
+            # A file written before the slice was recorded has only ever been continued in the
+            # parameter the GUI was constructed with, so that is the honest default here.
+            continuation_parameter=res.get("continuation_parameter",default_continuation_parameter),
+            tracked_parameter=res.get("tracked_parameter"),
+            bifurcation_type=res.get("bifurcation_type"))
         for p in res["points"]:
             inst.append(BifurcationGUISolutionPoint.from_dict(p))
         return inst

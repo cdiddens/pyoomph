@@ -361,6 +361,7 @@ class BifurcationTkApp:
         self.side=ttk.Notebook(upper,width=330)
         upper.add(self.side,weight=1)
         self._build_continuation_tab()
+        self._build_parameters_tab()
         self._build_pointinfo_tab()
         self._build_branches_tab()
 
@@ -449,6 +450,27 @@ class BifurcationTkApp:
         self.movepoint_check.grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
 
         tab.columnconfigure(1,weight=1)
+
+    def _build_parameters_tab(self):
+        """One row per global parameter, marking which one is being continued.
+
+        A bifurcation diagram is a section through parameter space, so which parameter varies and
+        what the others are held at is part of the result, not a setting - hence a permanent table
+        rather than a dialog.
+        """
+        tab=ttk.Frame(self.side,padding=4)
+        self.side.add(tab,text="Parameters")
+        self.param_tree=ttk.Treeview(tab,columns=("value","role"),show="tree headings",selectmode="browse")
+        self.param_tree.heading("#0",text="Parameter")
+        self.param_tree.heading("value",text="Value")
+        self.param_tree.heading("role",text="Role")
+        self.param_tree.column("#0",width=110,minwidth=70)
+        self.param_tree.column("value",width=110,minwidth=70)
+        self.param_tree.column("role",width=90,minwidth=60)
+        self.param_tree.pack(side=tk.TOP,fill=tk.BOTH,expand=True)
+
+        self.slice_label=ttk.Label(tab,text="",wraplength=300,justify=tk.LEFT,padding=(2,6))
+        self.slice_label.pack(side=tk.TOP,fill=tk.X)
 
     def _build_pointinfo_tab(self):
         tab=ttk.Frame(self.side,padding=8)
@@ -648,11 +670,57 @@ class BifurcationTkApp:
         self._fill_info(self.current_info,c.current_point,"current")
         self._fill_info(self.selected_info,c.selected_point,"selected")
         self._update_tree()
+        self._update_parameter_table()
 
         npts=sum(len(b) for b in c.branches)
-        self.summary_var.set("{:d} branch{:s}, {:d} points | ds = {:.4g} | {:s}".format(
+        summary="{:d} branch{:s}, {:d} points | ds = {:.4g} | {:s}".format(
             len(c.branches),"" if len(c.branches)==1 else "es",npts,c.ds,
-            "arclength" if c.mode=="al" else "move point"))
+            "arclength" if c.mode=="al" else "move point")
+        # The slice belongs in the status bar, not only in a panel: a diagram read off the screen
+        # without it cannot be interpreted once there is more than one parameter.
+        slice_desc=c.describe_current_slice()
+        if slice_desc:
+            summary+=" | fixed: "+slice_desc
+        self.summary_var.set(summary)
+
+    def _update_parameter_table(self):
+        c=self.controller
+        try:
+            names=c.all_parameter_names()
+            values=c.current_parameter_values()
+        except Exception:
+            return   # not initialised yet; the parameters do not exist until define_problem() ran
+        branch=c.current_branch
+        varying=set(branch.varying_parameters) if branch is not None else set()
+        continued=branch.continuation_parameter if branch is not None else None
+        tracked=branch.tracked_parameter if branch is not None else None
+
+        existing=set(self.param_tree.get_children())
+        for name in names:
+            if name not in existing:
+                self.param_tree.insert("","end",iid=name,text=name)
+            if name==continued:
+                role="continued"
+            elif name==tracked:
+                role="tracked"
+            elif name in varying:
+                role="varying"
+            else:
+                role="fixed"
+            self.param_tree.item(name,values=("{:.10g}".format(values[name]),role))
+        for stale in existing-set(names):
+            self.param_tree.delete(stale)
+
+        desc=c.describe_current_slice()
+        if branch is None:
+            self.slice_label.configure(text="")
+        elif branch.kind=="locus":
+            self.slice_label.configure(text="Locus of {:s} bifurcations in ({:s}, {:s}).\nFixed: {:s}".format(
+                branch.bifurcation_type or "unclassified",str(branch.continuation_parameter),
+                str(branch.tracked_parameter),desc or "-"))
+        else:
+            self.slice_label.configure(text="Diagram continued in {:s}.\nFixed: {:s}".format(
+                str(branch.continuation_parameter),desc or "-"))
 
     def _fill_info(self,widget:tk.Text,point,which:str):
         c=self.controller

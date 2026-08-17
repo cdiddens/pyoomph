@@ -228,6 +228,10 @@ class BifurcationDiagramPlotter:
 
         gca.set_xlabel(controller.get_bifurcation_parameter().get_name())
         gca.set_ylabel(observable)
+        # The parameters held fixed are part of the result, so they go on the figure itself - a saved
+        # PDF of a diagram that does not say what slice it is a section through cannot be captioned.
+        slice_desc=controller.describe_current_slice()
+        gca.set_title(slice_desc if slice_desc else "",fontsize="small",loc="right")
         gca.set_xlim(xlim[0],xlim[1])
         gca.set_ylim(ylim[0],ylim[1])
         gca.set_xscale(xscal)
