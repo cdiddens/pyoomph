@@ -245,15 +245,19 @@ class BifurcationGUISolutionPoint:
             res=res+[self.scoord]
         return res
 
-    def describe(self,obs=None)->str:
-        """One-line human-readable summary, used by the point-info panel and the branch tree."""
+    def describe(self,obs=None,obs_unit:str="",eig_unit:str="")->str:
+        """One-line human-readable summary, used by the point-info panel and the branch tree.
+
+        The units are passed in rather than looked up: a point knows its numbers, the controller knows
+        what they are measured in.
+        """
         res="{:.6g}".format(self.param_value)
         if obs is not None:
             try:
-                res+=" | {:.6g}".format(self.value_of(obs))
+                res+=" | {:.6g}".format(self.value_of(obs))+(" "+obs_unit if obs_unit else "")
             except KeyError:
                 pass
-        res+=" | eig {:.3g}{:+.3g}i".format(self.eig_value_Re,self.eig_value_Im)
+        res+=" | eig {:.3g}{:+.3g}i".format(self.eig_value_Re,self.eig_value_Im)+(" "+eig_unit if eig_unit else "")
         if self.eig_value_Re==0:
             kind="bifurcation"
             if self.bifurcation_info is not None:

@@ -402,6 +402,11 @@ class BifurcationTkApp:
         menubar.add_cascade(label="Help",menu=m)
         self._add_menu_item(m,"help")
 
+    def _y_unit(self)->str:
+        """Unit of whatever the y axis currently shows, for the one-line point summaries."""
+        c=self.controller
+        return c.observable_unit(c._current_observable) if c._current_observable else ""
+
     def _axis_display(self,spec)->str:
         """Unambiguous label for a menu or combo: a parameter and an observable may share a name.
 
@@ -770,7 +775,7 @@ class BifurcationTkApp:
                 self.controller.run_task(action.label,action.callback)
                 if self.controller.current_point is not None:
                     self.log("  now at "+self.controller.current_point.describe(
-                        self.controller._current_observable))
+                        self.controller._current_observable,self._y_unit(),self.controller.eigen_unit))
             else:
                 action.callback()
         except Exception as e:
@@ -1064,7 +1069,7 @@ class BifurcationTkApp:
                     self._branch_index[id(b)]=node
                     for ip,p in enumerate(b):
                         child=self.tree.insert(node,"end",text="  {:d}".format(ip),
-                                               values=(p.describe(c.y_axis),))
+                                               values=(p.describe(c.y_axis,self._y_unit(),c.eigen_unit),))
                         self._tree_items[child]=(b,p)
                         self._tree_index[id(p)]=child
             finally:
@@ -1080,7 +1085,7 @@ class BifurcationTkApp:
                 for p in b:
                     item=self._tree_index.get(id(p))
                     if item is not None:
-                        self.tree.item(item,values=(p.describe(c.y_axis),))
+                        self.tree.item(item,values=(p.describe(c.y_axis,self._y_unit(),c.eigen_unit),))
 
         target=c.selected_point if c.selected_point is not None else c.current_point
         item=self._tree_index.get(id(target)) if target is not None else None

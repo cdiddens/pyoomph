@@ -38,6 +38,7 @@ from ...generic.codegen import EquationTree
 from ...generic import Problem
 from ... import _pyoomph_core as _pyoomph
 from ...typings import *
+from ...expressions.units import unit_to_string
 
 from .model import (BifurcationGUISolutionPoint, BifurcationGUISolutionBranch, AxisSpec,
                     AXIS_OBSERVABLE, AXIS_PARAMETER, as_axis, observable_axis, parameter_axis,
@@ -117,6 +118,39 @@ class InlineExecutor:
         return fn()
 
 
+def _eigen_columns(unit:str)->"list[str]":
+    """Header names for the two eigenvalue columns, carrying the rate unit when there is one."""
+    suffix=" ["+unit+"]" if unit else ""
+    return ["ReEigen"+suffix,"ImEigen"+suffix]
+
+
+def _si_value(value)->float:
+    """The plain number of a possibly dimensional value, in SI base units.
+
+    ``float()`` on an expression that still carries a unit throws, and in a problem with a spatial
+    scaling EVERY integral observable carries one, because the integration measure dx has length -
+    which is why the GUI could not even start on a dimensional problem.
+    """
+    if isinstance(value,_pyoomph.Expression):
+        factor,_unit,_rest,success=_pyoomph.GiNaC_collect_units(value)
+        if not success:
+            raise ValueError("Cannot separate the unit from "+str(value))
+        return float(factor)
+    return float(value)
+
+
+def _unit_and_multiplier(value)->"tuple[str,float]":
+    """``(unit string, SI -> that unit multiplier)`` for a dimensional value, e.g. ``("mm", 1000.0)``.
+
+    The prefix follows the magnitude of the value handed in, which is why this is done once with a
+    representative value rather than per point.
+    """
+    if not isinstance(value,_pyoomph.Expression):
+        return "",1.0
+    unit,_factor,mult=unit_to_string(value)   #type:ignore[misc]
+    return str(unit),float(mult)
+
+
 class BifurcationController:
     """Drives a :py:class:`~pyoomph.generic.problem.Problem` along its solution branches.
 
@@ -161,6 +195,15 @@ class BifurcationController:
         self._extremum_cache:dict[tuple[str,str,int],tuple[float,list[float]]]={}
         #: Observable names that came from an ExtremumObservables and already carry their own tag.
         self._extremum_axes:set[str]=set()
+        #: Unit of each observable ("mm", "1/s", "" when dimensionless), and the multiplier taking the
+        #: SI value into it. Resolved once, see :py:meth:`_resolve_observable_units`.
+        self._observable_units:dict[str,str]={}
+        self._observable_mults:dict[str,float]={}
+        #: Callables returning one DIMENSIONAL value per observable, used only to read off the unit.
+        self._observable_unit_probes:dict[str,Callable[[],Any]]={}
+        #: Eigenvalues are stored as physical rates; see :py:meth:`_resolve_eigen_unit`.
+        self._eigen_mult=1.0
+        self._eigen_unit=""
         self._mode="al"
         self._move_point=False
         self.interpolated_splines=False
@@ -369,9 +412,15 @@ class BifurcationController:
         return res
 
     def axis_label(self,spec:"AxisSpec")->str:
-        """Label for the figure: just the name. The parameter/observable distinction only has to be
-        spelled out where a choice is being made (the menus and combos), not on the plot."""
-        return as_axis(spec)[1]
+        """Label for the figure: the name, plus the unit when the quantity has one.
+
+        The parameter/observable distinction only has to be spelled out where a choice is being made
+        (the menus and combos), not on the plot. Global parameters are plain numbers in pyoomph, so only
+        observables can carry a unit.
+        """
+        kind,name=as_axis(spec)
+        unit=self.observable_unit(name) if kind==AXIS_OBSERVABLE else ""
+        return name+" ["+unit+"]" if unit else name
 
     def branch_can_be_plotted(self,branch:"BifurcationGUISolutionBranch")->bool:
         """False when a branch has no value to show on one of the current axes.
@@ -408,6 +457,7 @@ class BifurcationController:
     def evaluate_observables(self)->dict[str,float]:
         if self._observable_funcs is None:
             obs:dict[str,Callable[...,float]]={}
+            self._observable_unit_probes={}
             def recursive_add_spatial_domains(eqtree:EquationTree):
                 if eqtree._equations is not None and eqtree.get_equations()._is_ode()==False:
                     ifuncs_list=eqtree.get_mesh().list_integral_functions()
@@ -421,7 +471,9 @@ class BifurcationController:
                     # which observable the diagram opens on from changing between runs.
                     for valn in sorted(ifuncs):
                         if not valn.startswith("_"):
-                            obs[bn+"/"+valn]=lambda domname=bn,valn=valn: float(self.problem.get_mesh(domname).evaluate_observable(valn))
+                            key=bn+"/"+valn
+                            obs[key]=lambda domname=bn,valn=valn: _si_value(self.problem.get_mesh(domname).evaluate_observable(valn))
+                            self._observable_unit_probes[key]=lambda domname=bn,valn=valn: self.problem.get_mesh(domname).evaluate_observable(valn)
                     # ExtremumObservables are not integral functions, so they need their own listing.
                     # Each becomes several axis choices: the minimum and the maximum, and where each of
                     # them sits - "h_extreme  [max, val]", "h_extreme  [max, x]", ... The position is
@@ -433,13 +485,20 @@ class BifurcationController:
                         if exname.startswith("_"):
                             continue
                         for sign,tag in ((1,"max"),(-1,"min")):
-                            def add(what:str,func:Callable[...,float]):
+                            def add(what:str,func:Callable[...,float],unit_probe:Callable[[],Any]):
                                 key=bn+"/"+exname+"  ["+tag+", "+what+"]"
                                 obs[key]=func
+                                self._observable_unit_probes[key]=unit_probe
                                 self._extremum_axes.add(key)
-                            add("val",lambda domname=bn,exname=exname,sign=sign: self._extremum(domname,exname,sign)[0])
+                            add("val",lambda domname=bn,exname=exname,sign=sign: self._extremum(domname,exname,sign)[0],
+                                lambda domname=bn,exname=exname,sign=sign:
+                                    self.problem.get_mesh(domname).get_code_gen()._get_extremum_expression_unit_factor(exname)
+                                    *self._extremum(domname,exname,sign)[0])
                             for i,coord in enumerate(coords):
-                                add(coord,lambda domname=bn,exname=exname,sign=sign,i=i: self._extremum(domname,exname,sign)[1][i])
+                                add(coord,lambda domname=bn,exname=exname,sign=sign,i=i: self._extremum(domname,exname,sign)[1][i],
+                                    lambda domname=bn,exname=exname,sign=sign,i=i:
+                                        self.problem.get_scaling("spatial")*self._extremum(domname,exname,sign)[1][i]
+                                        /_si_value(self.problem.get_scaling("spatial")))
                 for child in eqtree.get_children().values():
                     recursive_add_spatial_domains(child)
 
@@ -449,13 +508,85 @@ class BifurcationController:
                     _vals, inds = ode.get_element()._ode_elem_to_numpy()
                     for valn in inds.keys():
                         if not valn.startswith("_"):
-                            obs[name+"/"+valn]=lambda domname=name,valn=valn: self.problem.get_ode(domname).get_value(valn,dimensional=True,as_float=True)
+                            key=name+"/"+valn
+                            obs[key]=lambda domname=name,valn=valn: self.problem.get_ode(domname).get_value(valn,dimensional=True,as_float=True)
+                            self._observable_unit_probes[key]=lambda domname=name,valn=valn: self.problem.get_ode(domname).get_value(valn,dimensional=True)
             recursive_add_spatial_domains(self.problem._equation_system)
             if len(obs)==0:
                 raise RuntimeError("Could not identify an observable. Add ODEs or IntegralObservables to find them")
             self._observable_funcs=obs.copy()
+            self._resolve_observable_units()
         self._extremum_cache={}
-        return {n:func() for n,func in self._observable_funcs.items()}
+        mults=self._observable_mults
+        return {n:func()*mults.get(n,1.0) for n,func in self._observable_funcs.items()}
+
+    def _resolve_observable_units(self):
+        """Fix each observable's unit ONCE, from the values at the starting point.
+
+        Once, not per point: an estimated SI prefix follows the magnitude, so re-deriving it every step
+        would silently switch a branch from mm to m half way along and the stored numbers would stop
+        meaning the same thing. The multiplier is applied to every later evaluation instead.
+
+        A value that happens to be exactly zero here carries no unit at all - GiNaC simplifies 0*meter
+        to 0 - so such an observable stays unlabelled rather than being guessed at.
+        """
+        self._observable_units={}
+        self._observable_mults={}
+        self._extremum_cache={}
+        assert self._observable_funcs is not None
+        for name in self._observable_funcs:
+            unit,mult="",1.0
+            probe=self._observable_unit_probes.get(name)
+            if probe is not None:
+                try:
+                    unit,mult=_unit_and_multiplier(probe())
+                except Exception as e:
+                    self.log("Could not determine the unit of",name+":",repr(e))
+            self._observable_units[name]=unit
+            self._observable_mults[name]=mult
+
+    def _resolve_eigen_unit(self):
+        """Express eigenvalues as rates in the problem's time unit rather than per time SCALE.
+
+        An eigenvalue out of the eigensolver is nondimensional, i.e. in units of 1/(temporal scale):
+        with ``set_scaling(temporal=10*second)`` a true rate of -0.5 1/s is reported as -5. Dividing by
+        the scale turns it into a rate in 1/s.
+
+        Deliberately NOT prefix-estimated from a representative value, the way observables are: the
+        spectrum spans decades, so a prefix chosen from one eigenvalue would misrepresent the rest. The
+        unit is whatever the temporal scale is stated in, and stays put. A problem without scalings has
+        a dimensionless temporal scale of 1, so this is the identity and nothing changes.
+        """
+        self._eigen_mult=1.0
+        self._eigen_unit=""
+        try:
+            ts=self.problem.get_scaling("temporal")
+            ts_si=_si_value(ts)
+            if ts_si!=0:
+                self._eigen_mult=1.0/ts_si
+            if isinstance(ts,_pyoomph.Expression):
+                unit=str(unit_to_string(ts,estimate_prefix=False))
+                if unit:
+                    self._eigen_unit="1/"+unit
+        except Exception as e:
+            self.log("Could not determine the unit of the eigenvalues:",repr(e))
+
+    def _phys_eig(self,value):
+        """One eigenvalue, or a sequence of them, as a physical rate."""
+        if value is None:
+            return None
+        if isinstance(value,(list,tuple,numpy.ndarray)):
+            return [complex(v)*self._eigen_mult for v in value]
+        return complex(value)*self._eigen_mult
+
+    @property
+    def eigen_unit(self)->str:
+        """Unit the recorded eigenvalues are in, e.g. "1/s"; empty for a nondimensional problem."""
+        return self._eigen_unit
+
+    def observable_unit(self,name:str)->str:
+        """Unit string of an observable, e.g. "mm"; empty when it is dimensionless or unknown."""
+        return self._observable_units.get(name,"")
 
     # ------------------------------------------------------------------ diagram bookkeeping
 
@@ -752,12 +883,14 @@ class BifurcationController:
         Non-fatal on purpose: a shift-invert factorisation that fails should cost this point its
         spectrum, not abort a two-parameter sweep that may have been running for hours.
         """
-        crit=0+1j*self.problem._get_bifurcation_omega() #type:ignore
+        # omega comes out of the tracker in the same nondimensional units as any eigenvalue, so it
+        # needs the same conversion as everything else that reaches a point.
+        crit=self._phys_eig(0+1j*self.problem._get_bifurcation_omega()) #type:ignore
         spectrum=None
         if self.locus_eigen_shift:
             try:
                 evs,_=self.problem.solve_eigenproblem(self.neigen,self.locus_eigen_shift,quiet=True)
-                spectrum=list(evs)
+                spectrum=self._phys_eig(list(evs))
             except Exception as e:
                 self.log("Could not solve the eigenproblem on the locus ("+str(e).split("\n")[0]+"); recording the critical eigenvalue only")
         self._add_current_state(eig_value=crit,eig_values=spectrum)
@@ -786,6 +919,7 @@ class BifurcationController:
                          "spectrum. Its stability is unknown; a nonzero shift usually helps.")
                 eig_values=[]
             else:
+                spectrum=self._phys_eig(spectrum)
                 eig_value=spectrum[0]
                 if eig_values is None:
                     eig_values=list(spectrum)
@@ -1079,7 +1213,8 @@ class BifurcationController:
             # observables. Exporting everything in the current view produced a locus labelled with
             # the parameter it does not even vary.
             export_x,export_y=self._export_axes(b,obs_cols)
-            column_names=[sp[1] for sp in export_y]
+            # The exported numbers are in the observable's own unit, so the header has to say which.
+            column_names=[self.axis_label(sp) for sp in export_y]
             if self.interpolated_splines:
                 smoothedsegs,stabs=b.smooth_branch_stab_list(export_y,100,xspec=export_x,
                                                              trust_inferred=self.trust_inferred_stability)
@@ -1095,13 +1230,13 @@ class BifurcationController:
                 else:
                     fn="smoothed_unstable_{:03d}.txt".format(iunstab)
                     iunstab+=1
-                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header="\t".join([export_x[1]]+column_names+["ReEigen","ImEigen"])+header_suffix)
+                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header="\t".join([self.axis_label(export_x)]+column_names+_eigen_columns(self._eigen_unit))+header_suffix)
             nbif=0
             for p in b:
                 if p.eig_value_Re==0:
                     fn="bifurcation_{:03d}.txt".format(nbif)
                     pc=p.get_coordinate(export_y,with_s=False,with_eigen=True,xspec=export_x)
-                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header="\t".join([export_x[1]]+column_names+["ReEigen","ImEigen"])+header_suffix)
+                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header="\t".join([self.axis_label(export_x)]+column_names+_eigen_columns(self._eigen_unit))+header_suffix)
                     nbif+=1
                 if p.tag>=0 and p.statefile is not None:
                     shutil.copy2(p.statefile, os.path.join(odir,"tag{:02d}.dump".format(p.tag)))
@@ -1286,7 +1421,8 @@ class BifurcationController:
         try:
             self.load_pt(point)
             self.problem.solve_eigenproblem(self.neigen,self.shift)
-            spectrum=list(self.problem.get_last_eigenvalues())
+            # Back-filled spectra have to land in the same units as the ones recorded during the sweep.
+            spectrum=self._phys_eig(list(self.problem.get_last_eigenvalues()))
             point.eig_values=[complex(v) for v in spectrum]
             point.eig_value_Re=numpy.real(spectrum[0])
             point.eig_value_Im=numpy.imag(spectrum[0])
@@ -1802,6 +1938,7 @@ class BifurcationController:
             self._paramname=avail_params[0]
         elif not isinstance(self._paramname,str):
             self._paramname=self._paramname.get_name()
+        self._resolve_eigen_unit()
         datadir=self.problem.get_output_directory(self.data_subdir)
         Path(datadir).mkdir(parents=True, exist_ok=True)
         Path(os.path.join(datadir,"_states")).mkdir(parents=True, exist_ok=True)
@@ -1865,6 +2002,10 @@ class BifurcationController:
         fullinfo["current_observable"]=self._current_observable
         fullinfo["mode"]=self._mode
         fullinfo["interpolated_splines"]=self.interpolated_splines
+        # The values are stored IN these units, so a reloaded diagram can label itself without having to
+        # re-derive them - and a file written before units existed simply has none.
+        fullinfo["observable_units"]=dict(self._observable_units)
+        fullinfo["eigen_unit"]=self._eigen_unit
         with open(os.path.join(outdir,"state.json"), 'w') as f:
             json.dump(fullinfo, f, indent=4)
 
@@ -1921,6 +2062,11 @@ class BifurcationController:
         self._current_observable=fullinfo["current_observable"]
         self._mode=fullinfo["mode"]
         self.interpolated_splines=fullinfo.get("interpolated_splines",self.interpolated_splines)
+        # Only for labelling: the stored values are already in these units. A file that predates units
+        # has none, and the units resolved from this run's own problem are kept instead.
+        stored_units=fullinfo.get("observable_units")
+        if stored_units:
+            self._observable_units.update({str(k):str(v) for k,v in stored_units.items()})
         self._status("LOADING")
         self.load_pt(self.current_point)
         self._update_tangents()

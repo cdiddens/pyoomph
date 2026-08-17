@@ -816,6 +816,140 @@ def test_arclength_proportion_must_be_a_proper_fraction():
     assert c.arclength_proportion == 0.9, "a rejected value must not be kept"
 
 
+def test_arclength_inner_product_is_mesh_independent(tmp_path):
+    """A proper inner product must make ds mean the same thing on every mesh.
+
+    oomph's arclength constraint measures the solution part with the plain Euclidean norm of the dof
+    vector - a SUM over unknowns, not an integral, so it has no continuum limit. Measured on Bratu, the
+    parameter movement per unit ds under that metric drifts 0.639 -> 0.106 over 65x refinement, i.e. a
+    tuned ds silently means something else after a remesh. Both normalised metrics hold it to four
+    digits.
+
+    Two resolutions, one process each (a second Problem segfaults in the JIT loader). The worker also
+    asserts, per mesh, that theta^2 is exactly 1/ndof for "ndof", that the mass-matrix norm lands on the
+    same scaling WITHOUT being told about ndof, and that the constraint
+    (dp/ds)^2 + theta^2*|dU/ds|^2 == 1 still holds after every retune - retuning theta^2 without
+    renormalising the tangent would break that silently and rob ds of its meaning as a step length.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "arclength_inner_product_worker.py")
+
+    def run(N):
+        proc = subprocess.run([sys.executable, worker, "--N", str(N),
+                               "--outdir", os.path.join(str(tmp_path), "N" + str(N))],
+                              cwd=here, capture_output=True, text=True, timeout=900)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        assert proc.returncode == 0, "worker N=" + str(N) + " failed:\n" + out[-3000:]
+        assert "PYOOMPH_WORKER_DONE" in out, "worker N=" + str(N) + " did not finish:\n" + out[-3000:]
+        strides = {}
+        for line in out.splitlines():
+            if line.startswith("IP "):
+                label = line.split("theta2")[0].split(None, 2)[2].strip()
+                strides[label] = float(line.split("dlam/ds")[1].split()[0])
+        return strides, out
+
+    coarse, out_c = run(50)
+    fine, out_f = run(200)
+    assert coarse and fine, "no IP lines parsed"
+
+    for label in ("ndof", "l2 (mass matrix)"):
+        rel = abs(fine[label] - coarse[label])/abs(coarse[label])
+        assert rel < 1e-3, ("{:s} is not mesh-independent: {:.6f} vs {:.6f} ({:.2%})"
+                            .format(label, coarse[label], fine[label], rel))
+    # And the point of the exercise: the metric it replaces IS mesh-dependent, so the test would pass
+    # vacuously if the two resolutions happened to agree anyway.
+    plain = abs(fine["plain dof sum"] - coarse["plain dof sum"])/abs(coarse["plain dof sum"])
+    assert plain > 0.3, "the dof-sum metric was expected to drift with ndof, but moved only {:.2%}".format(plain)
+
+    # The fold still has to be traversable in the new metric - a norm change must not cost that.
+    for out in (out_c, out_f):
+        for line in out.splitlines():
+            if line.startswith("FOLD "):
+                assert " steps x" not in line, "a fold traversal failed: " + line
+
+
+def test_arclength_retune_steps_aside_on_an_inconsistent_continuation_state():
+    """The retune must not touch a continuation state whose two vectors disagree in size.
+
+    oomph keeps Dof_derivative and Dof_current as independent vectors and does not always resize them
+    together (calculate_continuation_derivatives_helper resizes only the derivative), so they can
+    legitimately disagree - measured right after locate_bifurcation and after load_pt, the pair is
+    (0, 1). Writing back from such a pair throws "Mismatch in size of ddof and curr" out of
+    update_dof_vectors_for_continuation, which is how this reached a user: a step taken after locating a
+    bifurcation with an inner product active died in the middle of a session.
+
+    A stub, because the whole content is which states are refused; the unbound method is called directly
+    so no Problem has to be built.
+    """
+    from pyoomph.generic.problem import Problem
+
+    class Stub:
+        def __init__(self, ddof, cur, n):
+            self._arclength_inner_product = "ndof"
+            self.ddof, self.cur, self.n = ddof, cur, n
+            self.written = []
+        def _get_n_unaugmented_dofs(self): return 0
+        def is_distributed(self): return False
+        def ndof(self): return self.n
+        def get_arclength_dof_derivative_vector(self): return numpy.array(self.ddof, dtype=float)
+        def get_arclength_dof_current_vector(self): return numpy.array(self.cur, dtype=float)
+        def get_arc_length_parameter_derivative(self): return 0.8
+        def get_arc_length_theta_sqr(self): return 1.0
+        def _update_dof_vectors_for_continuation(self, ddof, cur): self.written.append(("dofs", len(ddof)))
+        def _set_arc_length_parameter_derivative(self, dp): self.written.append(("dp", dp))
+        def _set_arc_length_theta_sqr(self, th): self.written.append(("theta", th))
+        _arclength_weighted_square_norm = Problem._arclength_weighted_square_norm
+
+    # The states that used to crash: one vector empty, or the two of different length.
+    for ddof, cur, n in (([], [1.0], 1), ([1.0], [], 1), ([1.0, 2.0], [1.0], 2), ([1.0], [1.0], 5)):
+        stub = Stub(ddof, cur, n)
+        assert Problem._retune_arclength_theta(stub) == 1.0, str((ddof, cur, n))
+        assert not stub.written, "nothing may be written back from an inconsistent state: " + str(stub.written)
+
+    # A consistent state must still be retuned, or the guard would have disabled the feature.
+    stub = Stub([3.0, 4.0], [0.0, 0.0], 2)
+    factor = Problem._retune_arclength_theta(stub)
+    kinds = [w[0] for w in stub.written]
+    assert kinds == ["dofs", "dp", "theta"], kinds
+    assert factor != 1.0, "a real retune has to recast ds"
+    assert abs(dict(stub.written[1:])["theta"] - 0.5) < 1e-12, "'ndof' means theta^2 = 1/ndof exactly"
+
+    # And under MPI it must refuse loudly rather than weight by each rank's share of the dofs.
+    stub = Stub([3.0, 4.0], [0.0, 0.0], 2)
+    stub.is_distributed = lambda: True
+    with pytest.raises(RuntimeError, match="distributed"):
+        Problem._retune_arclength_theta(stub)
+
+
+def test_the_gui_reports_physical_units(tmp_path):
+    """A problem with real units must work, and its numbers must say what they are.
+
+    Three things were wrong. The GUI could not START: float() of an observable that still carries a unit
+    throws, and since the integration measure dx has length, EVERY spatial integral observable in a
+    scaled problem has one. Eigenvalues were nondimensional - with set_scaling(temporal=10*second) a
+    true rate of -0.5 1/s was reported as -5. And the two observable paths disagreed: ODE values came
+    out in SI base units (0.0007) while spatial ones had to be hand-nondimensionalised, with nothing
+    recording either.
+
+    The worker checks against a problem whose answers are known exactly (eigenvalue -1/tau = -0.5 1/s,
+    w = 0.7 mm), with the temporal scale deliberately 10 s so nondimensional and physical values cannot
+    be confused. Out of process, since it needs its own Problem.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "units_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "EIGEN -0.5 1/s" in out, "the eigenvalue must be a rate in 1/s:\n" + out[-2000:]
+    assert "LABEL ode/w [mm]" in out, "axis labels must carry the unit:\n" + out[-2000:]
+
+
 def test_branch_switch_refuses_a_fold():
     """A fold has one branch through it, so there is nothing to switch to.
 
