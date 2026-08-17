@@ -1,0 +1,215 @@
+from __future__ import annotations
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
+
+"""Interactive construction of bifurcation diagrams.
+
+Typical use is unchanged from the earlier, purely key-driven version::
+
+    from pyoomph.utils.bifurcation_gui import BifurcationGUI
+
+    with MyProblem() as problem:
+        problem.setup_for_stability_analysis()
+        problem.solve()
+        gui=BifurcationGUI(problem,"my_parameter")
+        gui.neigen=30
+        gui.classify_bifurcations=True
+        gui.start(0.001)
+
+:py:meth:`BifurcationGUI.start` now opens a window with menus, a toolbar and side panels instead of
+a bare matplotlib figure; all the old keys still work and are listed next to their menu entries.
+They can be rebound under Settings -> Keyboard shortcuts.
+
+The parts are separated so that everything except the window can be driven headlessly:
+
+* :py:mod:`~pyoomph.utils.bifurcation_gui.model` - solution points and branches,
+* :py:mod:`~pyoomph.utils.bifurcation_gui.controller` - continuation, bifurcation tracking, storage,
+* :py:mod:`~pyoomph.utils.bifurcation_gui.plotter` - the matplotlib rendering,
+* :py:mod:`~pyoomph.utils.bifurcation_gui.tkapp` - the tkinter/ttk user interface,
+* :py:mod:`~pyoomph.utils.bifurcation_gui.actions` - commands and their keyboard shortcuts.
+"""
+
+from ...generic import Problem
+from ... import _pyoomph_core as _pyoomph
+from ...typings import *
+
+from .model import BifurcationGUISolutionPoint, BifurcationGUISolutionBranch
+from .controller import BifurcationController
+from .plotter import BifurcationDiagramPlotter
+
+
+class BifurcationGUI:
+    """Builds a bifurcation diagram of ``problem`` in ``parameter``, interactively.
+
+    Attributes that user scripts customize before :py:meth:`start` (``neigen``, ``shift``,
+    ``classify_bifurcations``, ``custom_key_functions``, ...) are forwarded to the underlying
+    :py:class:`~pyoomph.utils.bifurcation_gui.controller.BifurcationController`.
+    """
+
+    def __init__(self,problem:Problem,parameter:"str | _pyoomph.GiNaC_GlobalParam | None"=None) -> None:
+        self.controller=BifurcationController(problem,parameter)
+        self.plotter=BifurcationDiagramPlotter()
+        self.controller.view=self.plotter
+        self.app=None
+        #: Extra commands, keyed by the shortcut that triggers them. Each is called with this GUI
+        #: and also shows up in the "Custom" menu.
+        self.custom_key_functions:dict[str,Callable[[BifurcationGUI],None]]={}
+        #: Window title; ``None`` picks a default naming the problem's parameter.
+        self.title:str | None=None
+        #: Reserved for the background-solver executor; the inline one is the only one implemented.
+        self.use_solver_thread=False
+
+    # ---------------------------------------------------------------- forwarded state
+
+    @property
+    def problem(self)->Problem:
+        return self.controller.problem
+
+    @property
+    def branches(self)->list[BifurcationGUISolutionBranch]:
+        return self.controller.branches
+
+    @property
+    def current_branch(self): return self.controller.current_branch
+    @property
+    def current_point(self): return self.controller.current_point
+    @property
+    def selected_branch(self): return self.controller.selected_branch
+    @property
+    def selected_point(self): return self.controller.selected_point
+
+    def _fwd(name:str,doc:str=""):  #type:ignore[misc] # noqa: N805 - a property factory, not a method
+        def getter(self): return getattr(self.controller,name)
+        def setter(self,value): setattr(self.controller,name,value)
+        return property(getter,setter,doc=doc)
+
+    neigen=_fwd("neigen","Number of eigenvalues computed at every solution point.")
+    shift=_fwd("shift","Shift handed to the eigensolver.")
+    classify_bifurcations=_fwd("classify_bifurcations","Compute the normal form at each located bifurcation. Required for branch switching.")
+    interpolated_splines=_fwd("interpolated_splines","Draw and export spline-interpolated branches instead of the raw polylines.")
+    output_all_observables=_fwd("output_all_observables","Write all observable values to the output files.")
+    data_subdir=_fwd("data_subdir","Subdirectory of the problem's output directory holding states and curves.")
+    parameter_range=_fwd("parameter_range","Two values pinning the parameter axis, or an empty list.")
+    _out_demo_video=_fwd("_out_demo_video","Save a PNG of every redraw, for making a screencast of the session.")
+    _last_ds=_fwd("_last_ds")
+    _current_observable=_fwd("_current_observable")
+    _avail_observables=_fwd("_avail_observables")
+    _mode=_fwd("_mode")
+    _state_step=_fwd("_state_step")
+    del _fwd
+
+    # ---------------------------------------------------------------- forwarded commands
+
+    def set_initial_view(self,xmin,xmax,ymin,ymax):
+        """Window shown when a diagram is started from scratch."""
+        self.controller.set_initial_view(xmin,xmax,ymin,ymax)
+
+    def get_bifurcation_parameter(self)->"_pyoomph.GiNaC_GlobalParam":
+        return self.controller.get_bifurcation_parameter()
+
+    def evaluate_observables(self)->dict[str,float]:
+        return self.controller.evaluate_observables()
+
+    def new_branch_from_state(self,statefile):
+        self.controller.new_branch_from_state(statefile)
+
+    def load_pt(self,pt):
+        self.controller.load_pt(pt)
+
+    def output_curves(self):
+        return self.controller.output_curves()
+
+    def toggle_point_tag(self,pt,tag):
+        self.controller.toggle_point_tag(pt,tag)
+
+    def step(self,ds=None):
+        return self.controller.step(ds)
+
+    def multistep(self):
+        self.controller.multistep()
+
+    def locate_bifurcation(self,pitchfork:bool=False):
+        self.controller.locate_bifurcation(pitchfork)
+
+    def branch_switch(self):
+        self.controller.branch_switch()
+
+    def transient_leave_branch(self,eigenindex=0):
+        self.controller.transient_leave_branch(eigenindex)
+
+    def save_all(self):
+        self.controller.save_all()
+
+    def load_all(self):
+        self.controller.load_all(apply_view=self.plotter.apply_saved_view)
+
+    def update_plot(self,infotext:str | None=None):
+        """Redraw. Kept for scripts and custom key functions that called it directly."""
+        if self.app is not None:
+            self.app.refresh(infotext)
+        else:
+            self.plotter.draw(self.controller,infotext)
+
+    # ---------------------------------------------------------------- lifecycle
+
+    def start(self,init_ds,initial_max_newton_iterations=10):
+        """Solve the starting point, open the window and enter the event loop.
+
+        Returns when the window is closed. An existing diagram in the problem's output directory is
+        reloaded, so a session can be resumed.
+        """
+        self.controller.start(init_ds,initial_max_newton_iterations)
+        self.plotter.initialise_view(self.controller)
+
+        app=self._create_app()
+        self.app=app
+
+        if self.controller.has_saved_state():
+            try:
+                self.controller.load_all(apply_view=self.plotter.apply_saved_view)
+            except Exception as e:
+                app.log("Could not reload the stored diagram: "+repr(e))
+
+        app.run()
+
+    def _create_app(self):
+        try:
+            from .tkapp import BifurcationTkApp
+        except ImportError as e:
+            raise RuntimeError(
+                "The bifurcation GUI needs tkinter, which is not available in this Python "
+                "installation.\nOn Debian/Ubuntu install it with 'sudo apt install python3-tk', on "
+                "Fedora with 'sudo dnf install python3-tkinter'.\nWindows and macOS ship it with "
+                "the official Python installers.\nOriginal error: "+str(e)) from e
+        title=self.title
+        if title is None:
+            title="pyoomph bifurcation diagram - "+self.controller._get_paramname_str()
+        return BifurcationTkApp(self.controller,self.plotter,facade=self,title=title)
+
+
+from ...typings import _set_public_api
+_set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

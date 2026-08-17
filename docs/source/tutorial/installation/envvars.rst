@@ -41,7 +41,7 @@ Plotting
 ~~~~~~~~
 
 ``PYOOMPH_MPLBACKEND``
-      Overrides the matplotlib backend used by pyoomph's plotting utilities and the bifurcation GUI (e.g. ``Agg``, ``TkAgg``, ``Qt5Agg``). If unset, matplotlib's own auto-detected backend is used.
+      Overrides the matplotlib backend used by pyoomph's plotting utilities (e.g. ``Agg``, ``TkAgg``, ``Qt5Agg``). If unset, ``Agg`` is used, since these utilities render to files rather than to a window. This does not affect the bifurcation GUI, which embeds its figure in its own tkinter window and therefore selects no backend at all.
 
 Alternative solver libraries
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
