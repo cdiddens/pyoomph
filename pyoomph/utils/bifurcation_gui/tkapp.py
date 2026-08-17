@@ -628,7 +628,31 @@ class BifurcationTkApp:
         self.current_info=self._info_box(tab,"Current point")
         self.selected_info=self._info_box(tab,"Selected point")
         ttk.Button(tab,text="Go to selected point",
-                   command=lambda: self._invoke(self._actions["goto_selected"])).pack(side=tk.TOP,fill=tk.X,pady=(8,0))
+                   command=lambda: self._invoke(self._actions["goto_selected"])).pack(side=tk.TOP,fill=tk.X,pady=(4,6))
+
+        # The whole spectrum, not just the leading eigenvalue: watching where the others sit is how a
+        # Hopf pair coming towards the axis is spotted before it crosses. Its own widget rather than
+        # more lines in the boxes above, because neigen is routinely 30-50.
+        frame=ttk.LabelFrame(tab,text="Eigenvalues",padding=4)
+        frame.pack(side=tk.TOP,fill=tk.BOTH,expand=True)
+        self.eigen_label_var=tk.StringVar(value="")
+        ttk.Label(frame,textvariable=self.eigen_label_var).pack(side=tk.TOP,anchor=tk.W)
+        self.eigen_tree=ttk.Treeview(frame,columns=("re","im"),show="tree headings",
+                                     selectmode="none",height=8)
+        self.eigen_tree.heading("#0",text="#")
+        self.eigen_tree.heading("re",text="Re")
+        self.eigen_tree.heading("im",text="Im")
+        self.eigen_tree.column("#0",width=34,minwidth=28,stretch=False,anchor=tk.E)
+        self.eigen_tree.column("re",width=110,minwidth=70,anchor=tk.E)
+        self.eigen_tree.column("im",width=110,minwidth=70,anchor=tk.E)
+        escroll=ttk.Scrollbar(frame,orient=tk.VERTICAL,command=self.eigen_tree.yview)
+        self.eigen_tree.configure(yscrollcommand=escroll.set)
+        escroll.pack(side=tk.RIGHT,fill=tk.Y)
+        self.eigen_tree.pack(side=tk.LEFT,fill=tk.BOTH,expand=True)
+        # An eigenvalue with a positive real part is the whole point of looking, so it is marked.
+        self.eigen_tree.tag_configure("unstable",foreground="#b00000")
+        self.eigen_tree.tag_configure("critical",foreground="#804000")
+        self._eigen_signature=None
 
     def _info_box(self,parent,title:str)->tk.Text:
         frame=ttk.LabelFrame(parent,text=title,padding=4)
@@ -823,6 +847,7 @@ class BifurcationTkApp:
 
         self._fill_info(self.current_info,c.current_point,"current")
         self._fill_info(self.selected_info,c.selected_point,"selected")
+        self._update_eigen_list()
         self._update_tree()
         self._update_parameter_table()
 
@@ -917,6 +942,37 @@ class BifurcationTkApp:
             # Its supposedly fixed parameters move along it, so it is not a section of anything.
             info+="  [slice drifts!]"
         return info
+
+    def _update_eigen_list(self):
+        """Show the spectrum of the selected point, or of the current one when nothing is selected."""
+        c=self.controller
+        point=c.selected_point if c.selected_point is not None else c.current_point
+        which="selected" if c.selected_point is not None else "current"
+        if point is None:
+            self.eigen_label_var.set("(no point)")
+            self.eigen_tree.delete(*self.eigen_tree.get_children())
+            self._eigen_signature=None
+            return
+        values=list(point.eig_values)
+        signature=(id(point),len(values),which)
+        if signature==self._eigen_signature:
+            return                      # nothing to redo on every redraw
+        self._eigen_signature=signature
+        if not values:
+            # A point from a state file written before the spectrum was recorded. Saying so beats
+            # showing only the leading eigenvalue as if it were the whole spectrum.
+            self.eigen_label_var.set("{:s} point: only the leading eigenvalue was recorded".format(which))
+        else:
+            nunstable=point.unstable_count()
+            self.eigen_label_var.set("{:s} point: {:d} eigenvalue{:s}, {:d} unstable".format(
+                which,len(values),"" if len(values)==1 else "s",nunstable))
+        self.eigen_tree.delete(*self.eigen_tree.get_children())
+        shown=values if values else [complex(point.eig_value_Re,point.eig_value_Im)]
+        for i,v in enumerate(shown):
+            re,im=float(v.real),float(v.imag)
+            tags=("unstable",) if re>0 else (("critical",) if re==0 else ())
+            self.eigen_tree.insert("","end",text=str(i),
+                                   values=("{:+.6g}".format(re),"{:+.6g}".format(im)),tags=tags)
 
     def _update_tree(self):
         c=self.controller

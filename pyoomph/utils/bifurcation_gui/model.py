@@ -71,7 +71,8 @@ class BifurcationGUISolutionPoint:
     """One computed solution: every global parameter, all observables, the leading eigenvalue and
     the state file it was dumped to."""
 
-    def __init__(self,param_value,obs_values,eig_value,statefile,outstep,param_values:dict[str,float] | None=None) -> None:
+    def __init__(self,param_value,obs_values,eig_value,statefile,outstep,param_values:dict[str,float] | None=None,
+                 eig_values:"Sequence[complex] | None"=None) -> None:
         self.param_value=param_value
         #: Every global parameter at this point, not just the continued one. The state dump restores
         #: all of them, so without this the diagram could not say which slice of parameter space it
@@ -82,8 +83,14 @@ class BifurcationGUISolutionPoint:
         #: "empty param_values" cannot be used to mean "the slice was never recorded".
         self.param_values_complete=bool(param_values)
         self.obs_values=obs_values
+        # The leading eigenvalue stays the primary field: every stability decision keys off it, and
+        # a located bifurcation is flagged by its real part being exactly zero.
         self.eig_value_Re=numpy.real(eig_value)
         self.eig_value_Im=numpy.imag(eig_value)
+        #: The whole computed spectrum, for the eigenvalue list in the Points tab. Empty for points
+        #: read from a state file written before it was recorded - which is why this cannot simply be
+        #: assumed to start with the leading eigenvalue above.
+        self.eig_values:list[complex]=[complex(v) for v in eig_values] if eig_values is not None else []
         self.statefile=statefile
         self.outstep=outstep
         self.scoord:float=0
@@ -102,6 +109,9 @@ class BifurcationGUISolutionPoint:
         # parameters exist".
         inst.param_values=dict(res.get("param_values",{}))
         inst.param_values_complete="param_values" in res
+        re_list,im_list=res.get("eig_values_Re"),res.get("eig_values_Im")
+        if re_list is not None and im_list is not None:
+            inst.eig_values=[complex(r,i) for r,i in zip(re_list,im_list)]
         for k,v in res["tangs"].items():
             inst._tangs[k]=numpy.array(v)
         return inst
@@ -119,10 +129,19 @@ class BifurcationGUISolutionPoint:
             res["tag"]=self.tag
         if self.param_values:
             res["param_values"]=dict(self.param_values)
+        if self.eig_values:
+            # Two flat lists rather than pairs: shorter in the file and json-native. Note this is the
+            # entry that makes state.json grow with neigen - see the comment in save_all.
+            res["eig_values_Re"]=[float(numpy.real(v)) for v in self.eig_values]
+            res["eig_values_Im"]=[float(numpy.imag(v)) for v in self.eig_values]
         res["tangs"]={}
         for k,v in self._tangs.items():
             res["tangs"][k]=list(v)
         return res
+
+    def unstable_count(self)->int:
+        """How many of the recorded eigenvalues have a positive real part."""
+        return sum(1 for v in self.eig_values if numpy.real(v)>0)
 
     def fixed_parameters(self,varying:Iterable[str])->dict[str,float]:
         """The parameters this point holds fixed, i.e. all of them except the ones being varied."""

@@ -163,6 +163,12 @@ def test_bifurcation_gui_controller(tmp_path):
         assert c.describe_current_slice() == "b = 1"
         assert set(c.all_parameter_names()) == {"mu", "b"}
 
+        # ---------------------------------------------------------- the whole spectrum is recorded
+        assert len(p0.eig_values) == c.neigen, "every computed eigenvalue is kept, not just the leading one"
+        assert numpy.isclose(p0.eig_values[0].real, p0.eig_value_Re), "the leading one comes first"
+        assert p0.unstable_count() == 0, "the starting point is stable"
+        spectra_before = [[complex(v) for v in p.eig_values] for b in c.branches for p in b]
+
         # ---------------------------------------------------------- axes: either can be anything
         from pyoomph.utils.bifurcation_gui.model import observable_axis, parameter_axis
 
@@ -242,6 +248,11 @@ def test_bifurcation_gui_controller(tmp_path):
         assert stored["branches"][0]["kind"] == "solution"
         assert stored["branches"][0]["continuation_parameter"] == "mu"
         assert stored["branches"][0]["points"][0]["param_values"] == {"mu": 1.0, "b": 1.0}
+        # The spectrum goes into the file as two flat lists, which is what makes it available in the
+        # Points tab without reloading a point's state dump.
+        first = stored["branches"][0]["points"][0]
+        assert len(first["eig_values_Re"]) == c.neigen
+        assert len(first["eig_values_Im"]) == c.neigen
 
         before = [(p.param_value, p.obs_values["ode/u"], p.eig_value_Re, p.scoord, p.tag)
                   for b in c.branches for p in b]
@@ -252,6 +263,8 @@ def test_bifurcation_gui_controller(tmp_path):
         after = [(p.param_value, p.obs_values["ode/u"], p.eig_value_Re, p.scoord, p.tag)
                  for b in c.branches for p in b]
         assert before == after, "reloading must reproduce the diagram exactly"
+        assert [[complex(v) for v in p.eig_values] for b in c.branches for p in b] == spectra_before, \
+            "the recorded spectra survive the round trip"
         assert c.current_point is not None
         assert numpy.isclose(c.get_bifurcation_parameter().value, c.current_point.param_value)
 
@@ -551,6 +564,30 @@ def test_eigenfunction_plotter_is_derived_from_the_source():
     # The source must be left exactly as the script wrote it.
     assert src.eigenvector is None and src.eigenmode == "abs"
     assert src.file_trunk is not None and "h" in src._range_objects
+
+
+def test_legacy_point_has_no_recorded_spectrum():
+    """A state file written before the spectrum was recorded must not look as if it had one.
+
+    Reporting an empty list lets the Points tab say "only the leading eigenvalue was recorded" instead
+    of presenting that single value as though it were the whole spectrum.
+    """
+    from pyoomph.utils.bifurcation_gui.model import BifurcationGUISolutionPoint
+
+    legacy = {"param_value": 1.0, "obs_value": {"u": 0.5}, "eig_value_Re": -2.0, "eig_value_Im": 0.5,
+              "statefile": None, "outstep": 0, "scoord": 0.0, "tangs": {}}
+    p = BifurcationGUISolutionPoint.from_dict(legacy)
+    assert p.eig_values == []
+    assert p.unstable_count() == 0
+    assert (p.eig_value_Re, p.eig_value_Im) == (-2.0, 0.5), "the leading one is still there"
+
+    # A point that really did record its spectrum round-trips it, unstable count included.
+    full = BifurcationGUISolutionPoint(1.0, {"u": 0.5}, -2 + 0.5j, None, 0,
+                                       eig_values=[-2 + 0.5j, -2 - 0.5j, 0.3 + 0j])
+    assert full.unstable_count() == 1
+    back = BifurcationGUISolutionPoint.from_dict(full.to_state_dict())
+    assert back.eig_values == [-2 + 0.5j, -2 - 0.5j, 0.3 + 0j]
+    assert back.unstable_count() == 1
 
 
 def test_branch_describes_itself():

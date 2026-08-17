@@ -476,7 +476,8 @@ class BifurcationController:
         self.problem.reset_arc_length_parameters()
         self._x_axis=None    # follow the new parameter unless the user pinned an axis
         self._new_branch()
-        self._add_current_state(eig_value=None if cp is None else (cp.eig_value_Re+1j*cp.eig_value_Im))
+        self._add_current_state(eig_value=None if cp is None else (cp.eig_value_Re+1j*cp.eig_value_Im),
+                                eig_values=None if cp is None else list(cp.eig_values))
         self.log("Now continuing in '"+name+"' instead of '"+str(old)+"'; the previous branches stay as the "+
                  str(old)+" section at "+(self.describe_current_slice() or "their own values"))
         self._changed()
@@ -665,20 +666,27 @@ class BifurcationController:
         self._update_tangents()
         self._changed()
 
-    def _add_current_state(self,eig_value=None):
+    def _add_current_state(self,eig_value=None,eig_values=None):
         """Record the problem's current state as a new point of the current branch.
 
         ``eig_value`` overrides the eigenvalue that would be read from the problem, which is what
         re-recording an existing solution under a new branch needs: re-solving the eigenproblem there
         would turn an exact zero into a small nonzero value and the point would stop being a
-        bifurcation.
+        bifurcation. ``eig_values`` likewise overrides the recorded spectrum; when only ``eig_value``
+        is given the spectrum is just that one value, since whatever the problem still holds belongs
+        to a different solve.
         """
         branch=self.current_branch if self.current_branch is not None else self._new_branch()
         if eig_value is None:
-            eig_value=self.problem.get_last_eigenvalues()[0]
+            spectrum=self.problem.get_last_eigenvalues()
+            eig_value=spectrum[0]
+            if eig_values is None:
+                eig_values=list(spectrum)
+        elif eig_values is None:
+            eig_values=[eig_value]
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step)))
         p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),eig_value,state_file,self._state_step,
-                                      param_values=self.current_parameter_values())
+                                      param_values=self.current_parameter_values(),eig_values=eig_values)
         # On a locus EVERY point has a zero real part, so classifying them all would run a normal-form
         # calculation per step for an answer already known: the tracked type.
         if p.eig_value_Re==0 and self.classify_bifurcations and branch.kind!="locus":
@@ -1366,6 +1374,9 @@ class BifurcationController:
 
         cur_branch=self._get_current_branch()
         fullinfo={}
+        # Note on size: every point carries its whole spectrum, so this file grows with neigen times
+        # the number of points (a few MB for neigen=50 over some hundreds of points). That is the price
+        # of being able to inspect the eigenvalues of a point without reloading its state dump.
         fullinfo["version"]=STATE_VERSION
         fullinfo["parameter"]=self._paramname if isinstance(self._paramname,str) else None
         fullinfo["branches"]=[b.to_state_dict() for b in self.branches]
