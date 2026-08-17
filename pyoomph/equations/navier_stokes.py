@@ -41,7 +41,7 @@ from ..expressions.units import degree
 if TYPE_CHECKING:
     from .._pyoomph_core import Node
     from ..solvers.generic import GenericEigenSolver
-    from ..generic.codegen import EquationTree
+    from ..generic.codegen import EquationTree,FiniteElementCodeGenerator
     from ..materials.generic import AnyFluidProperties
     from ..generic.problem import Problem
     from ..meshes import AnySpatialMesh
