@@ -1649,9 +1649,26 @@ class BifurcationController:
 
     # ------------------------------------------------------------------ start / persistence
 
-    def start(self,init_ds,initial_max_newton_iterations=10):
-        """Solve the initial state, discover the observables and reload an existing diagram."""
-        self._last_ds=init_ds
+    def prepare(self,init_ds:float | None=None):
+        """Get the problem ready for a diagram without solving anything.
+
+        Split out of :py:meth:`start` because the *order* decides whether a stored diagram survives.
+        The constructor already sets ``_runmode="overwrite"``, but that only helps if it happens before
+        the problem is initialised: under the default "delete" runmode, ``initialise()`` strips every
+        file from every subdirectory of the output directory (the ``for s in subdirs`` loop in
+        ``Problem._do_initialise``), and the diagram lives in one of those. A script that solves - and
+        so initialises - before building the GUI therefore threw its diagram away on every run.
+
+        Idempotent; :py:meth:`start` and :py:meth:`BifurcationGUI.must_init` both call it.
+        """
+        if init_ds is not None:
+            self._last_ds=init_ds
+        # Re-assert what the constructor set, in case the problem was reconfigured in between. A
+        # --runmode on the command line still wins, since parse_cmd_line runs inside initialise():
+        # asking for "delete" explicitly is a request to start over, not something to override.
+        self.problem._runmode="overwrite"
+        self.problem.write_states=True
+        self.problem.continuation_data_in_states=True
         if not self.problem.is_initialised():
             self.problem.initialise()
         if self._paramname is None:
@@ -1665,14 +1682,32 @@ class BifurcationController:
         Path(datadir).mkdir(parents=True, exist_ok=True)
         Path(os.path.join(datadir,"_states")).mkdir(parents=True, exist_ok=True)
 
+    def start(self,init_ds,initial_max_newton_iterations=10,ignore_saved:bool=False)->bool:
+        """Discover the observables and solve the first point of a fresh diagram.
+
+        Returns whether a starting point was computed. With a stored diagram present nothing is solved:
+        its state dumps are converged solutions that :py:meth:`load_all` restores anyway, and the
+        problem need not have a usable initial guess at all - :py:meth:`BifurcationGUI.must_init`
+        returns False and the script skips its setup in exactly that case, so solving here would fail on the raw initial
+        condition rather than save any work.
+
+        ``ignore_saved`` starts fresh even though a diagram is stored, which is what a *failed* reload
+        needs: the file being there says nothing about it being readable.
+        """
+        self.prepare(init_ds)
+        self._avail_observables=[k for k in self.evaluate_observables().keys()]
+        if self._current_observable is None or self._current_observable not in self._avail_observables:
+            self._current_observable=self._avail_observables[0]
+        if self.has_saved_state() and not ignore_saved:
+            return False
+
         try:
             self.problem.solve(max_newton_iterations=initial_max_newton_iterations)
         except Exception as e:
             raise RuntimeError("Make sure the problem starts where it has a stationary solution") from e
         self.problem.solve_eigenproblem(self.neigen,self.shift)
-        self._avail_observables=[k for k in self.evaluate_observables().keys()]
-        self._current_observable=self._avail_observables[0]
         self._add_current_state()
+        return True
 
     def has_saved_state(self)->bool:
         outdir=self.problem.get_output_directory(self.data_subdir)

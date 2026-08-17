@@ -648,6 +648,59 @@ def test_branch_switching_lands_on_the_other_branch(kind, api, tmp_path):
     assert "kind=" + kind in out
 
 
+def test_must_init_keeps_the_diagram_and_skips_the_setup(tmp_path):
+    """A second run must find its diagram, not redo the walk to the starting solution, and open itself.
+
+    Four invocations, the first two against the same output directory since surviving from one run to
+    the next is the entire question. Without must_init the second run loses everything: a script that
+    solves before building the GUI has already initialised the problem under the default "delete"
+    runmode, and initialising strips every file from every subdirectory of the output directory -
+    state.json included, which is the index that references the state dumps.
+
+    The reload run is also required to solve *nothing at all*. That is not just economy: with the setup
+    block skipped the problem sits at its raw initial condition, so the initial solve that start() used
+    to do unconditionally would be working from a guess the script never intended.
+
+    A plain "if" has no closing hook, so the window is opened from Problem.release() - which is also
+    reached when the block exits through an exception, because Problem.__exit__'s
+    isinstance(type,Exception) test compares a class against Exception and never holds. The "raises"
+    phase pins that a failing script gets its traceback rather than a window, and "nowith" pins the
+    atexit fallback for scripts that never use "with SomeProblem() as problem".
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "must_init_worker.py")
+    outdir = os.path.join(str(tmp_path), "out")
+
+    def run(phase, out_sub="out", expect_mu=None):
+        env = dict(os.environ)
+        if expect_mu is not None:
+            env["PYOOMPH_EXPECT_MU"] = repr(expect_mu)
+        proc = subprocess.run([sys.executable, worker, "--phase", phase,
+                               "--outdir", os.path.join(str(tmp_path), out_sub)],
+                              cwd=here, capture_output=True, text=True, timeout=900, env=env)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        assert proc.returncode == 0, phase + " failed:\n" + out[-3000:]
+        assert "PYOOMPH_WORKER_DONE" in out, phase + " did not finish:\n" + out[-3000:]
+        return out
+
+    first = run("init")
+    mu = float([ln for ln in first.splitlines() if ln.startswith("WINDOW_OPENED")][0].split("mu=")[1])
+    second = run("reload", expect_mu=mu)
+
+    # The problem announces every solve it does, so this is a direct check and not a proxy.
+    assert "STATIONARY SOLVE" in first, "the first run has to solve:\n" + first[-2000:]
+    assert "STATIONARY SOLVE" not in second, "the reload must not solve:\n" + second[-2000:]
+    assert "Continuation Step" not in second, "the reload must not continue:\n" + second[-2000:]
+
+    raised = run("raises", out_sub="raises")
+    assert "WINDOW_OPENED" not in raised, "a raising script must not get a window:\n" + raised[-2000:]
+
+    nowith = run("nowith", out_sub="nowith")
+    assert "NOWITH opened=True" in nowith, "atexit must open the window:\n" + nowith[-2000:]
+
+
 def test_branch_switch_refuses_a_fold():
     """A fold has one branch through it, so there is nothing to switch to.
 

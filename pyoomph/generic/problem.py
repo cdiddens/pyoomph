@@ -4191,6 +4191,8 @@ class Problem(_pyoomph.Problem):
             ic_name (str, optional): Name of the initial condition. Multiple initial conditions can be defined in the problem definition by using the optional argument InitialConditions. Defaults to "".
             all_unset_dofs_to_zero (bool, optional): Flag indicating whether to set all unset degrees of freedom, i.e. without any InitialCondition with this ic_name, to zero. Defaults to False.
         """
+        if not self.is_initialised() and not self._during_initialization:
+            self.initialise()
         if numadapt is None:
             numadapt=0
         if all_unset_dofs_to_zero:
