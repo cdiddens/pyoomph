@@ -172,6 +172,7 @@ class BifurcationTkApp:
           getter=lambda: self.plotter.show_other_slices)
         A("arclength_scaling_on","Scale arclength",lambda: c.set_arclength_scaling(True))
         A("arclength_scaling_off","Do not scale arclength",lambda: c.set_arclength_scaling(False))
+        A("arclength_proportion","Parameter fraction of the arclength...",self._dialog_arclength_proportion)
 
         # --- bifurcations
         A("locate_bifurcation","Locate bifurcation / switch branch",c.locate_bifurcation_or_switch,
@@ -313,6 +314,7 @@ class BifurcationTkApp:
         m.add_separator()
         self._add_menu_item(m,"arclength_scaling_on")
         self._add_menu_item(m,"arclength_scaling_off")
+        self._add_menu_item(m,"arclength_proportion")
 
         m=tk.Menu(menubar,tearoff=0)
         menubar.add_cascade(label="Bifurcation",menu=m)
@@ -389,9 +391,15 @@ class BifurcationTkApp:
         menubar.add_cascade(label="Help",menu=m)
         self._add_menu_item(m,"help")
 
-    @staticmethod
-    def _axis_display(spec)->str:
-        """Unambiguous label for a menu or combo: a parameter and an observable may share a name."""
+    def _axis_display(self,spec)->str:
+        """Unambiguous label for a menu or combo: a parameter and an observable may share a name.
+
+        An extremum observable brings its own tag - "h_extreme  [max, val]", "h_extreme  [max, x]" -
+        which says more than "[obs]" would and takes its place; there is no parameter it could be
+        confused with, since parameter names carry no domain path.
+        """
+        if spec[0]!=AXIS_PARAMETER and spec[1] in self.controller._extremum_axes:
+            return spec[1]
         return "{:s}  [{:s}]".format(spec[1],"param" if spec[0]==AXIS_PARAMETER else "obs")
 
     def _rebuild_axis_menus(self):
@@ -599,6 +607,16 @@ class BifurcationTkApp:
         ttk.Checkbutton(tab,text="Scale arclength",variable=self.scale_al_var,
                         command=lambda: self.controller.set_arclength_scaling(self.scale_al_var.get())).grid(
                         row=row,column=0,columnspan=2,sticky=tk.W,pady=(6,2))
+        row+=1
+
+        # D: how much of one step goes into the parameter rather than the solution. Only meaningful
+        # while the scaling is on, which is why it sits directly under that checkbox.
+        ttk.Label(tab,text="Param. fraction").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.arc_prop_var=tk.StringVar()
+        self.arc_prop_entry=ttk.Entry(tab,textvariable=self.arc_prop_var,width=14)
+        self.arc_prop_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.arc_prop_entry.bind("<Return>",lambda *_: self._commit_arclength_proportion())
+        self.arc_prop_entry.bind("<FocusOut>",lambda *_: self._commit_arclength_proportion())
         row+=1
 
         self.splines_var=tk.BooleanVar()
@@ -864,6 +882,9 @@ class BifurcationTkApp:
         self.neigen_var.set(str(c.neigen))
         self.shift_var.set("{:g}".format(c.shift) if not isinstance(c.shift,complex) else str(c.shift))
         self.scale_al_var.set(bool(c.scale_arc_length))
+        if self.arc_prop_entry.focus_get() is not self.arc_prop_entry:
+            self.arc_prop_var.set("{:g}".format(c.arclength_proportion))
+        self.arc_prop_entry.configure(state="normal" if c.scale_arc_length else "disabled")
         self.splines_var.set(bool(c.interpolated_splines))
         self.mode_var.set(c.mode)
         self.movepoint_var.set(bool(c.move_point_active))
@@ -1098,6 +1119,23 @@ class BifurcationTkApp:
             self.controller.shift=complex(self.shift_var.get()).real if "j" not in self.shift_var.get() else complex(self.shift_var.get())
         except ValueError:
             pass
+        self._update_panels()
+
+    def _commit_arclength_proportion(self):
+        try:
+            value=float(self.arc_prop_var.get())
+        except ValueError:
+            self.arc_prop_var.set("{:g}".format(self.controller.arclength_proportion))
+            return
+        if value==self.controller.arclength_proportion:
+            return
+        try:
+            self.controller.set_arclength_proportion(value)
+        except ValueError as e:
+            # A fraction outside (0,1) is not a typo to swallow silently: it would make oomph divide by
+            # zero the next time it retunes theta^2.
+            self.log(str(e))
+            self.arc_prop_var.set("{:g}".format(self.controller.arclength_proportion))
         self._update_panels()
 
     def _commit_mode(self):
@@ -1356,6 +1394,19 @@ class BifurcationTkApp:
             "continued along it?",exclude=(tracked,))
         if other is not None:
             c.start_locus(tracked=tracked,continue_in=other)
+
+    def _dialog_arclength_proportion(self):
+        c=self.controller
+        val=simpledialog.askfloat(
+            "Arclength scaling",
+            "Fraction of the arclength given to the continuation parameter,\n"
+            "i.e. (dparameter/ds)^2 after every step. Strictly between 0 and 1.\n"
+            "Larger marches through the parameter faster; smaller resolves a\n"
+            "rapidly changing solution better. Only acts while scaling is on.",
+            parent=self.root,initialvalue=c.arclength_proportion,minvalue=1e-6,maxvalue=1-1e-6)
+        if val is not None:
+            c.set_arclength_proportion(val)
+            self._update_panels()
 
     def _dialog_leave_locus(self):
         c=self.controller

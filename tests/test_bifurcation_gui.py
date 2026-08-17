@@ -701,6 +701,112 @@ def test_must_init_keeps_the_diagram_and_skips_the_setup(tmp_path):
     assert "NOWITH opened=True" in nowith, "atexit must open the window:\n" + nowith[-2000:]
 
 
+def test_extremum_observables_become_axis_choices(tmp_path):
+    """Each ExtremumObservables entry offers its minimum, its maximum, and where each of them sits.
+
+    Checked against a field whose extrema are unique and known in closed form, with a phase that moves
+    with the parameter so the position is a curve rather than a constant. Uniqueness is the whole
+    difficulty in testing a position: cos(2pi*x/Lx)*cos(2pi*y/Ly) has five maxima of equal height, so a
+    correct implementation reports a position other than the one written down.
+
+    Out of process, since it needs its own Problem. The worker also pins that six axis choices cost two
+    mesh sweeps rather than six, that the "[max, x]" tag replaces the "[obs]" one instead of stacking
+    with it, and that a name containing spaces, a comma and brackets survives the CSV export and a
+    save/load round trip.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "extremum_observable_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "domain/h_extreme  [max, x]" in out
+
+
+def test_ds_is_recast_when_the_arclength_metric_changes():
+    """Toggling the arclength scaling must not silently change the stride.
+
+    The constraint is ds = (dp/ds)*dp + theta^2*(dU/ds).dU, so along the tangent ds = dp/(dp/ds) and a
+    given ds buys a parameter increment of ds*|dp/ds|. Retuning theta^2 changes |dp/ds| and therefore
+    what the same number buys; oomph compensates only on the very first step (problem.cc:11176-11181,
+    guarded by !Arc_length_step_taken). Measured on the real solver with a fixed ds either side of the
+    toggle, the stride dropped 20% (ratio 0.8016) without this and stays within 0.4% with it.
+
+    A stub, because the arithmetic is the whole content and it must hold exactly.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+
+    class StubProblem:
+        def __init__(self):
+            self.theta = 1.0
+            self.dpds = 0.88
+        def get_arc_length_theta_sqr(self):
+            return self.theta
+        def get_arc_length_parameter_derivative(self):
+            return self.dpds
+
+    logged: list = []
+    c = BifurcationController.__new__(BifurcationController)
+    c._on_log = logged.append
+    c._on_changed = None
+    c._on_status = None
+    c._on_busy = None
+    stub = StubProblem()
+    c.problem = stub  # type: ignore[assignment]
+
+    # theta^2 untouched: nothing to compensate, whatever dp/ds does.
+    stub.dpds = 0.5
+    assert c._recast_ds_after_metric_change(-0.05, 1.0, 0.88) == -0.05
+
+    # Scaling switched on: dp/ds is pinned at sqrt(D)=sqrt(0.5), so ds must grow by 0.88/0.7071.
+    stub.theta, stub.dpds = 3.252, 0.7071067811865476
+    got = c._recast_ds_after_metric_change(-0.05, 1.0, 0.88)
+    assert abs(got - (-0.05*0.88/0.7071067811865476)) < 1e-12, got
+    # Sign is the direction of travel and must survive.
+    assert got < 0
+    assert any("recast" in m for m in logged), "a metric change worth 24% has to be reported"
+
+    # A settled scaled sweep retunes theta^2 every step with dp/ds pinned, so nothing may happen.
+    stub.theta, stub.dpds = 2.9, 0.7071067811865476
+    assert c._recast_ds_after_metric_change(-0.05, 3.252, 0.7071067811865476) == -0.05
+
+    # A vanishing dp/ds (right at a fold) would divide by zero; leave ds alone instead.
+    stub.theta, stub.dpds = 1e-9, 0.0
+    assert c._recast_ds_after_metric_change(-0.05, 1.0, 0.88) == -0.05
+
+
+def test_arclength_proportion_must_be_a_proper_fraction():
+    """D outside (0,1) would make oomph divide by D or by 1-D when it retunes theta^2."""
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+
+    c = BifurcationController.__new__(BifurcationController)
+    c._on_log = lambda *a: None
+    c._on_changed = None
+    c._on_status = None
+    c._on_busy = None
+    c.arclength_proportion = 0.5
+    c.scale_arc_length = True
+
+    class StubProblem:
+        def __init__(self):
+            self.seen = None
+        def set_arc_length_parameter(self, **kwargs):
+            self.seen = kwargs
+
+    c.problem = StubProblem()  # type: ignore[assignment]
+    c.set_arclength_proportion(0.9)
+    assert c.arclength_proportion == 0.9
+    assert c.problem.seen == {"desired_proportion_of_arc_length": 0.9}, "it has to reach the problem"
+
+    for bad in (0.0, 1.0, -0.1, 1.5):
+        with pytest.raises(ValueError):
+            c.set_arclength_proportion(bad)
+    assert c.arclength_proportion == 0.9, "a rejected value must not be kept"
+
+
 def test_branch_switch_refuses_a_fold():
     """A fold has one branch through it, so there is nothing to switch to.
 

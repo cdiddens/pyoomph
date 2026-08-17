@@ -311,6 +311,8 @@ void PyReg_CodeGen(nb::module_ &m)
              "Register ``expression`` as a local (per-point, non-integrated) named output field ``name``.")
         .def("_register_extremum_function", &pyoomph::FiniteElementCode::register_extremum_expression, nb::arg("name"), nb::arg("expression"),
              "Register ``expression`` as an extremum observable named ``name`` (its minimum/maximum over the domain is tracked).")
+        .def("_list_extremum_functions", &pyoomph::FiniteElementCode::get_extremum_expressions,
+             "Returns the names of all extremum observables registered via _register_extremum_function(), in a deterministic (sorted) order. Evaluate them with the mesh's evaluate_minimum()/evaluate_maximum().")
         .def("_get_integral_function_unit_factor", &pyoomph::FiniteElementCode::get_integral_expression_unit_factor, nb::arg("name"),
              "Return the physical unit (dimensional scaling factor) of the integral observable ``name`` registered via _register_integral_function().")
         .def("_get_local_expression_unit_factor", &pyoomph::FiniteElementCode::get_local_expression_unit_factor, nb::arg("name"),

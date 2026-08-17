@@ -157,10 +157,17 @@ class BifurcationController:
         self._x_axis:"AxisSpec | None"=None
         self._y_axis:"AxisSpec | None"=None
         self._observable_funcs:dict[str,Callable[...,float]] | None=None
+        #: Memo for one observable sweep, see :py:meth:`_extremum`; keyed by (domain, name, sign).
+        self._extremum_cache:dict[tuple[str,str,int],tuple[float,list[float]]]={}
+        #: Observable names that came from an ExtremumObservables and already carry their own tag.
+        self._extremum_axes:set[str]=set()
         self._mode="al"
         self._move_point=False
         self.interpolated_splines=False
         self.scale_arc_length=True
+        #: D, the fraction of the arclength the continued parameter is given while the scaling is on:
+        #: theta^2 is retuned after every step so that (dparameter/ds)^2 == D. oomph's own default.
+        self.arclength_proportion=0.5
         self._state_step=0
         self._abort_requested=False
         #: Write all observable values to the output files
@@ -383,6 +390,21 @@ class BifurcationController:
     # ------------------------------------------------------------------ observables
 
     # By default, we allow to access all integral observables (not beginning with _) and all ODE dofs
+    def _extremum(self,domname:str,name:str,sign:int)->"tuple[float,list[float]]":
+        """Value and position of one extremum, computed at most once per observable sweep.
+
+        An ``ExtremumObservables`` entry yields up to eight axis choices (min/max times value and up to
+        three coordinates), and each of those is an independent lambda in the observable table - so
+        without this memo one sweep of the mesh would be paid for per *choice* instead of per extremum.
+        """
+        key=(domname,name,sign)
+        if key not in self._extremum_cache:
+            mesh=self.problem.get_mesh(domname)
+            evaluate=mesh.evaluate_maximum if sign>0 else mesh.evaluate_minimum
+            val,pos=evaluate(name,as_float=True,return_x=True) #type:ignore[misc]
+            self._extremum_cache[key]=(float(val),[float(p) for p in pos]) #type:ignore[arg-type]
+        return self._extremum_cache[key]
+
     def evaluate_observables(self)->dict[str,float]:
         if self._observable_funcs is None:
             obs:dict[str,Callable[...,float]]={}
@@ -393,9 +415,31 @@ class BifurcationController:
                     ifuncs: set[str] = set(ifuncs_list)
                     ifuncs.update(deps.keys())
                     bn=eqtree.get_full_path().lstrip("/")
-                    for valn in ifuncs:
+                    # Sorted, not in set order: a set of strings iterates differently from process to
+                    # process (string hashing is salted), and evaluate_observable is collective on a
+                    # distributed mesh, so ranks disagreeing on the order would deadlock. It also keeps
+                    # which observable the diagram opens on from changing between runs.
+                    for valn in sorted(ifuncs):
                         if not valn.startswith("_"):
                             obs[bn+"/"+valn]=lambda domname=bn,valn=valn: float(self.problem.get_mesh(domname).evaluate_observable(valn))
+                    # ExtremumObservables are not integral functions, so they need their own listing.
+                    # Each becomes several axis choices: the minimum and the maximum, and where each of
+                    # them sits - "h_extreme  [max, val]", "h_extreme  [max, x]", ... The position is
+                    # frequently the interesting one, e.g. to watch a pattern drift as a parameter moves.
+                    # The tag is part of the name (two spaces, so it lines up with the "[obs]"/"[param]"
+                    # tag the axis menus add) and _extremum_axes tells those menus not to add one.
+                    coords=["x","y","z"][:max(1,eqtree.get_code_gen().get_nodal_dimension())]
+                    for exname in eqtree.get_code_gen()._list_extremum_functions():
+                        if exname.startswith("_"):
+                            continue
+                        for sign,tag in ((1,"max"),(-1,"min")):
+                            def add(what:str,func:Callable[...,float]):
+                                key=bn+"/"+exname+"  ["+tag+", "+what+"]"
+                                obs[key]=func
+                                self._extremum_axes.add(key)
+                            add("val",lambda domname=bn,exname=exname,sign=sign: self._extremum(domname,exname,sign)[0])
+                            for i,coord in enumerate(coords):
+                                add(coord,lambda domname=bn,exname=exname,sign=sign,i=i: self._extremum(domname,exname,sign)[1][i])
                 for child in eqtree.get_children().values():
                     recursive_add_spatial_domains(child)
 
@@ -410,6 +454,7 @@ class BifurcationController:
             if len(obs)==0:
                 raise RuntimeError("Could not identify an observable. Add ODEs or IntegralObservables to find them")
             self._observable_funcs=obs.copy()
+        self._extremum_cache={}
         return {n:func() for n,func in self._observable_funcs.items()}
 
     # ------------------------------------------------------------------ diagram bookkeeping
@@ -1559,7 +1604,10 @@ class BifurcationController:
         quick=self.quick_mode and not locus
         self._status("FOLLOWING THE BIFURCATION" if locus else
                      ("QUICK STEPPING (no eigensolve)" if quick else "ARCLENGTH STEPPING"))
+        theta_before=self.problem.get_arc_length_theta_sqr()
+        dparam_ds_before=self.problem.get_arc_length_parameter_derivative()
         ds=self.problem.arclength_continuation(self.get_bifurcation_parameter(),ds)
+        ds=self._recast_ds_after_metric_change(ds,theta_before,dparam_ds_before)
         if quick:
             # The whole point: no eigensolve. Two test functions are recorded instead, read from work
             # the step has already done - the factorisation the Newton solve produced, and the
@@ -1645,7 +1693,60 @@ class BifurcationController:
     def set_arclength_scaling(self,scale:bool):
         self.scale_arc_length=scale
         self.problem.set_arc_length_parameter(scale_arc_length=scale)
-        self.log("Scale arclength is set to",scale)
+        theta=self.problem.get_arc_length_theta_sqr()
+        if scale:
+            self.log("Scale arclength is on: theta^2 will be retuned each step so the parameter takes",
+                     "{:.3g}".format(self.arclength_proportion),"of the arclength (theta^2 is now {:.4g})".format(theta))
+        else:
+            # Switching off FREEZES theta^2 wherever the last scaled step left it - which near a fold
+            # is a very small number, since scaling drives theta^2 down as |dU/dparameter| grows. Worth
+            # saying out loud, because it silently decides what ds means from here on.
+            self.log("Scale arclength is off: theta^2 stays at its current value {:.4g}".format(theta))
+
+    def set_arclength_proportion(self,proportion:float):
+        """Set D, the share of the arclength the continuation parameter is given.
+
+        Only has an effect while the scaling is on, where it makes ``(dparameter/ds)^2 == D`` hold after
+        every step. Larger D spends more of a step on the parameter and less on the solution, so the
+        sweep marches through the parameter faster but resolves a rapidly changing solution less well.
+        """
+        if not (0.0<proportion<1.0):
+            raise ValueError("The arclength proportion is a fraction and must lie strictly between 0 "
+                             "and 1 (oomph divides by both D and 1-D when it retunes theta^2), got "+str(proportion))
+        self.arclength_proportion=proportion
+        self.problem.set_arc_length_parameter(desired_proportion_of_arc_length=proportion)
+        self.log("The parameter now takes {:.3g} of the arclength".format(proportion),
+                 "" if self.scale_arc_length else "(no effect until arclength scaling is switched on)")
+
+    def _recast_ds_after_metric_change(self,ds:float,theta_before:float,dparam_ds_before:float)->float:
+        """Keep ds meaning the same physical step when theta^2 changed underneath it.
+
+        The arclength constraint is ``ds = (dp/ds)*dp + theta^2 * (dU/ds).dU``, which along the tangent
+        collapses to ``ds = dp/(dp/ds)`` - oomph re-derives exactly that at problem.cc:11029. So a given
+        ds buys a parameter increment of ``ds*|dp/ds|``, and since ``|dp/ds| = 1/sqrt(1+theta^2*chi)``,
+        changing theta^2 changes what the same number buys. oomph compensates only on the very FIRST
+        step (problem.cc:11176-11181, guarded by ``!Arc_length_step_taken``) - after that the sweep just
+        changes its stride.
+
+        Toggling the scaling is where that shows: off at a fold, |dp/ds| can be 0.05, and switching on
+        pins it at sqrt(D) = 0.71, so the next step covers fourteen times as much parameter for the same
+        ds. Rescaling by ``|dp/ds|_before / |dp/ds|_after`` preserves the parameter increment, which
+        preserves the whole step, the tangent direction being unchanged by theta^2.
+
+        In a settled scaled sweep theta^2 moves every step while |dp/ds| stays pinned at sqrt(D), so the
+        factor is 1 and this does nothing - it only acts where the metric really shifted.
+        """
+        theta_after=self.problem.get_arc_length_theta_sqr()
+        if theta_after==theta_before:
+            return ds
+        dparam_ds_after=self.problem.get_arc_length_parameter_derivative()
+        if abs(dparam_ds_after)<1e-30 or abs(dparam_ds_before)<1e-30:
+            return ds
+        factor=abs(dparam_ds_before)/abs(dparam_ds_after)
+        if abs(factor-1.0)>0.01:
+            self.log("theta^2 changed {:.4g} -> {:.4g}, so ds is recast by {:.4g} to keep the same "
+                     "parameter step".format(theta_before,theta_after,factor))
+        return ds*factor
 
     # ------------------------------------------------------------------ start / persistence
 

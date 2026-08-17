@@ -124,6 +124,7 @@ class BifurcationGUI:
     shift=_fwd("shift","Shift handed to the eigensolver.")
     classify_bifurcations=_fwd("classify_bifurcations","Compute the normal form at each located bifurcation, naming it fold/transcritical/pitchfork. On by default; branch switching computes it on demand if it is off.")
     interpolated_splines=_fwd("interpolated_splines","Draw and export spline-interpolated branches instead of the raw polylines.")
+    arclength_proportion=_fwd("arclength_proportion","Fraction D of the arclength given to the continued parameter while the scaling is on, i.e. (dparameter/ds)^2 == D after every step. Set it through set_arclength_proportion() to have it reach the problem.")
     output_all_observables=_fwd("output_all_observables","Write all observable values to the output files.")
     data_subdir=_fwd("data_subdir","Subdirectory of the problem's output directory holding states and curves.")
     parameter_range=_fwd("parameter_range","Two values pinning the parameter axis, or an empty list.")
@@ -164,6 +165,14 @@ class BifurcationGUI:
     def set_fixed_parameter(self,name:str,value:float):
         """Move a parameter that is being held fixed, which begins a new slice."""
         self.controller.set_fixed_parameter(name,value)
+
+    def set_arclength_scaling(self,scale:bool):
+        """Retune theta^2 after every step so the parameter keeps a fixed share of the arclength."""
+        self.controller.set_arclength_scaling(scale)
+
+    def set_arclength_proportion(self,proportion:float):
+        """That share: ``(dparameter/ds)^2 == proportion`` after every step. Strictly between 0 and 1."""
+        self.controller.set_arclength_proportion(proportion)
 
     def start_locus(self,tracked:str,continue_in:str,bifurcation_type:str | None=None):
         """From a located bifurcation, follow it through parameter space.
