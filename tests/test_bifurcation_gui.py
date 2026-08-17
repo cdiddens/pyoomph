@@ -276,6 +276,63 @@ def test_bifurcation_gui_controller(tmp_path):
         assert c.selected_point is c.branches[0][-1]
         assert c.current_point is loaded
 
+        # ---------------------------------------------------------- switching the continuation parameter
+        # Step back onto a regular point first: a fold is a fold of the Jacobian, not of one
+        # parameter, so continuing in ANY parameter from exactly there has no regular tangent.
+        regular = next(p for p in c.branches[0] if p.eig_value_Re != 0)
+        c.select_point(c.branches[0], regular)
+        c.goto_selected_point()
+        assert c.current_point is regular
+
+        n_branches = len(c.branches)
+        first = c.branches[0]
+        assert c.set_continuation_parameter("b")
+        assert c._paramname == "b"
+        assert len(c.branches) == n_branches + 1, "a different parameter is a new diagram"
+        assert c.x_axis == parameter_axis("b"), "the x axis follows the continued parameter"
+        assert c._tangs == {}, "a (dparam, dobs) tangent says nothing about a different parameter"
+        new = c.branches[-1]
+        assert new.continuation_parameter == "b"
+        assert set(new.fixed_parameters()) == {"mu"}, "mu is what is held fixed now"
+        # The old branch is a section at a fixed b, so it is not part of the diagram being built now.
+        assert not c.branch_is_on_current_slice(first)
+        assert c.branch_is_on_current_slice(new)
+        assert not c.set_continuation_parameter("b"), "switching to the same parameter is a no-op"
+
+        # Continuing in b must leave mu alone, and the points must still solve the problem.
+        mu_before = problem.get_global_parameter("mu").value
+        for _ in range(3):
+            c.step()
+        assert numpy.isclose(problem.get_global_parameter("mu").value, mu_before), "mu is fixed now"
+        for p in new:
+            u = p.obs_values["ode/u"]
+            assert numpy.isclose(p.param_values["mu"], u * u + p.param_values["b"] * u, atol=1e-7)
+
+        # Clicking must never select a point from another slice: loading it would move mu.
+        for p in first:
+            if c.select_nearest_point(p.param_values["b"], p.obs_values["ode/u"]):
+                assert c.branch_is_on_current_slice(c.selected_branch)
+
+        # Moving a parameter that is being held fixed is likewise a new slice.
+        c.set_continuation_parameter("mu")
+        n_branches = len(c.branches)
+        c.set_fixed_parameter("b", 2.0)
+        assert len(c.branches) == n_branches + 1
+        assert numpy.isclose(problem.get_global_parameter("b").value, 2.0)
+        assert c.branches[-1].fixed_parameters() == {"b": 2.0}
+        # The fold moved with b, which is the whole point of tracking the slice.
+        mu_c2, u_c2 = fold_location(2.0)
+        c.locate_bifurcation()
+        assert c.current_point is not None
+        assert numpy.isclose(c.current_point.param_value, mu_c2, atol=1e-6)
+        assert numpy.isclose(c.current_point.obs_values["ode/u"], u_c2, atol=1e-4)
+
+        import pytest
+        with pytest.raises(ValueError):
+            c.set_fixed_parameter("mu", 0.0)      # that is the continuation parameter
+        with pytest.raises(ValueError):
+            c.set_continuation_parameter("nope")
+
         # ---------------------------------------------------------- abort flag
         c.request_abort()
         assert c.abort_requested

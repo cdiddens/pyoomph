@@ -40,7 +40,8 @@ from ... import _pyoomph_core as _pyoomph
 from ...typings import *
 
 from .model import (BifurcationGUISolutionPoint, BifurcationGUISolutionBranch, AxisSpec,
-                    AXIS_OBSERVABLE, AXIS_PARAMETER, as_axis, observable_axis, parameter_axis)
+                    AXIS_OBSERVABLE, AXIS_PARAMETER, as_axis, observable_axis, parameter_axis,
+                    same_parameter_value)
 
 from typing import Protocol
 from pathlib import Path
@@ -413,6 +414,82 @@ class BifurcationController:
         self.selected_branch=branch
         return branch
 
+    # ------------------------------------------------------------------ slices
+
+    def branch_is_on_current_slice(self,branch:"BifurcationGUISolutionBranch")->bool:
+        """Whether a branch holds the same parameters at the same values as the current one.
+
+        A diagram is only a valid section of parameter space for one such setting, so branches that
+        answer False here belong to a different physical result and must not be drawn as though they
+        were part of this one. Branches whose slice was never recorded (a pre-slice state file) are
+        not accused of being elsewhere.
+        """
+        cur=self.current_branch
+        if cur is None or branch is cur:
+            return True
+        if not (branch.slice_is_known() and cur.slice_is_known()):
+            return True
+        mine=branch.fixed_parameters()
+        theirs=cur.fixed_parameters()
+        if set(mine)!=set(theirs):
+            return False
+        return all(same_parameter_value(mine[n],theirs[n]) for n in mine)
+
+    def set_continuation_parameter(self,name:str):
+        """Continue in a different parameter from here on.
+
+        This starts a new diagram, not a continuation of the old one: the existing branches are
+        sections at a fixed value of the parameter now being varied, so they stay as they are and a
+        new branch is opened at the current solution.
+        """
+        if name not in self.all_parameter_names():
+            raise ValueError("'"+str(name)+"' is not a global parameter of this problem")
+        if name==self._paramname:
+            return False
+        old=self._paramname
+        cp=self.current_point
+        # A fold is a fold of the Jacobian, not of one particular parameter, so continuing in ANY
+        # parameter from exactly there has no regular tangent to start from and the first step fails
+        # (see dev_docs/bifurcation_loci.md). Say so up front rather than let the solver report it.
+        if cp is not None and cp.eig_value_Re==0:
+            self.log("Warning: the current point is a bifurcation. Continuing from exactly there "
+                     "usually fails - step back onto a regular point of the branch first.")
+        self._paramname=name
+        # A tangent is (dparameter, dobservable) - it says nothing about a different parameter.
+        self._tangs={}
+        self.problem.reset_arc_length_parameters()
+        self._x_axis=None    # follow the new parameter unless the user pinned an axis
+        self._new_branch()
+        self._add_current_state(eig_value=None if cp is None else (cp.eig_value_Re+1j*cp.eig_value_Im))
+        self.log("Now continuing in '"+name+"' instead of '"+str(old)+"'; the previous branches stay as the "+
+                 str(old)+" section at "+(self.describe_current_slice() or "their own values"))
+        self._changed()
+        return True
+
+    def set_fixed_parameter(self,name:str,value:float):
+        """Move a parameter that is being held fixed, which starts a new slice.
+
+        Uses go_to_param, i.e. it continues there rather than jumping, so a large move still lands on
+        a solution.
+        """
+        if name==self._paramname:
+            raise ValueError("'"+name+"' is the continuation parameter; step in it instead of setting it")
+        if name not in self.all_parameter_names():
+            raise ValueError("'"+str(name)+"' is not a global parameter of this problem")
+        self._status("MOVING "+name)
+        # The dict form, not **kwargs: go_to_param has keyword options of its own (reset_pars,
+        # epsilon, max_step, ...) and a parameter that happened to share one of those names would be
+        # swallowed as an option instead of being moved.
+        self.problem.go_to_param({name:float(value)})
+        self.problem.solve_eigenproblem(self.neigen,self.shift)
+        self._tangs={}
+        self.problem.reset_arc_length_parameters()
+        self._new_branch()
+        self._add_current_state()
+        self._update_tangents()
+        self.log("Moved "+name+" to",value,"- this is a new slice, so a new branch was started")
+        self._changed()
+
     def new_branch_from_state(self,statefile):
         self._new_branch()
         self.problem.load_state(statefile,ignore_continuation_data=True,ignore_eigendata=True)
@@ -422,10 +499,19 @@ class BifurcationController:
         self._update_tangents()
         self._changed()
 
-    def _add_current_state(self):
+    def _add_current_state(self,eig_value=None):
+        """Record the problem's current state as a new point of the current branch.
+
+        ``eig_value`` overrides the eigenvalue that would be read from the problem, which is what
+        re-recording an existing solution under a new branch needs: re-solving the eigenproblem there
+        would turn an exact zero into a small nonzero value and the point would stop being a
+        bifurcation.
+        """
         branch=self.current_branch if self.current_branch is not None else self._new_branch()
+        if eig_value is None:
+            eig_value=self.problem.get_last_eigenvalues()[0]
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step)))
-        p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),self.problem.get_last_eigenvalues()[0],state_file,self._state_step,
+        p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),eig_value,state_file,self._state_step,
                                       param_values=self.current_parameter_values())
         if p.eig_value_Re==0 and self.classify_bifurcations:
             from ...generic.bifurcation_tools import NormalFormCalculator
@@ -438,7 +524,17 @@ class BifurcationController:
         branch.append(p)
 
     def load_pt(self,pt):
+        # The dump restores EVERY global parameter, not just the continued one, so this can silently
+        # move the user off the slice they were working on. Report it rather than let them believe the
+        # value they last typed is still in force.
+        before=self.current_parameter_values() if self.problem.is_initialised() else {}
         self.problem.load_state(pt.statefile,ignore_outstep=True)
+        after=self.current_parameter_values()
+        moved={n:(before[n],after[n]) for n in after
+               if n in before and n!=self._paramname and not same_parameter_value(before[n],after[n])}
+        if moved:
+            self.log("Loading this point moved "+", ".join(
+                "{:s} {:.6g} -> {:.6g}".format(n,a,b) for n,(a,b) in sorted(moved.items())))
         self.current_point=pt
         if len(self.problem.get_arclength_dof_derivative_vector())==0:
             self.problem.reset_arc_length_parameters()
@@ -474,6 +570,10 @@ class BifurcationController:
         bestbranch,bestpoint=None,None
         bestdist=1e30
         for b in self.branches:
+            # Off-slice branches are drawn faint and are deliberately not selectable: loading one of
+            # their points would move the fixed parameters underneath the user.
+            if not (self.branch_is_on_current_slice(b) and self.branch_can_be_plotted(b)):
+                continue
             for p in b:
                 c=p.get_coordinate(self.y_axis,xspec=self.x_axis)
                 dist=((c[0]-x)/dx)**2+((c[1]-y)/dy)**2

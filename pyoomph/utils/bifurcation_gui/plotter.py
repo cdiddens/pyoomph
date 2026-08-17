@@ -61,6 +61,9 @@ class BifurcationDiagramPlotter:
         self.axes=self.figure.add_subplot(1,1,1)
         self.figure.set_layout_engine("constrained")
         self._view_initialised=False
+        #: Draw branches from other slices of parameter space, faintly, for context. Turning this off
+        #: hides them entirely; they are never drawn in the current diagram's colours either way.
+        self.show_other_slices=True
         #: Called after each draw so an embedding canvas can blit; set by the user interface.
         self.on_drawn:Callable[[],None] | None=None
 
@@ -131,6 +134,15 @@ class BifurcationDiagramPlotter:
             except Exception:
                 pass
 
+    def _draw_faint_branch(self,controller,branch,xaxis,yaxis):
+        """A branch from another slice: one washed-out line, no markers, no stability coding.
+
+        Deliberately featureless - it is context, not data being read off.
+        """
+        segs,_stabs=branch.to_branch_stab_list(yaxis,xspec=xaxis)
+        for seg in segs:
+            self.axes.plot(seg[:,0],seg[:,1],linestyle="-",color="0.82",linewidth=0.8,zorder=0)
+
     def draw(self,controller,infotext:str | None=None):
         """Redraw the whole diagram. ``infotext`` is the centred "busy" box."""
         if controller.current_point is None or controller._current_observable is None:
@@ -159,6 +171,15 @@ class BifurcationDiagramPlotter:
             # A branch continued in a different parameter, or one from a file that never recorded the
             # parameter now on an axis, has nothing to show here. Skipped rather than drawn wrong.
             if not controller.branch_can_be_plotted(b):
+                continue
+            # A branch from another slice of parameter space is a different physical result. It is
+            # kept on screen for context but never in the current diagram's colours, and it is not
+            # selectable - see BifurcationController.select_nearest_point.
+            on_slice=controller.branch_is_on_current_slice(b)
+            if not on_slice:
+                if not self.show_other_slices:
+                    continue
+                self._draw_faint_branch(controller,b,xaxis,yaxis)
                 continue
             color="red" if b == controller.current_branch else "grey"
 

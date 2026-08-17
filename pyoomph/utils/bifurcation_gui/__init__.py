@@ -140,6 +140,18 @@ class BifurcationGUI:
         """Every global parameter of the problem (only complete after :py:meth:`start`)."""
         return self.controller.all_parameter_names()
 
+    def set_continuation_parameter(self,name:str):
+        """Continue in a different parameter from here on, starting a new diagram.
+
+        The existing branches are sections at a fixed value of the parameter now being varied, so
+        they are kept as they are and a new branch is opened at the current solution.
+        """
+        return self.controller.set_continuation_parameter(name)
+
+    def set_fixed_parameter(self,name:str,value:float):
+        """Move a parameter that is being held fixed, which begins a new slice."""
+        self.controller.set_fixed_parameter(name,value)
+
     def describe_slice(self)->str:
         """The parameters the current diagram holds fixed, e.g. ``"b = 0.3"``.
 

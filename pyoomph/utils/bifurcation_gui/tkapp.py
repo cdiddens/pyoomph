@@ -88,6 +88,7 @@ class BifurcationTkApp:
         #: Display string -> axis spec, so the combo boxes and the View submenus never have to parse
         #: a label back into a (kind, name) pair.
         self._axis_choices:dict[str,Any]={}
+        self._param_var=tk.StringVar()
 
         self._build_actions()
         self._build_menus()
@@ -128,6 +129,13 @@ class BifurcationTkApp:
         A("ds_decrease","Decrease ds",lambda: self._scale_ds(1/1.25),toolbar="ds -")
         A("ds_reverse","Reverse direction",lambda: self._scale_ds(-1),toolbar="Reverse")
         A("set_ds","Set ds...",self._dialog_set_ds)
+        A("continue_in_selected","Continue in the selected parameter",self._continue_in_selected_parameter,
+          is_solver_task=True,enabled_when=lambda: self._selected_parameter() not in (None,c._paramname),
+          tooltip="Start a new diagram continuing in the parameter selected in the Parameters tab")
+        A("set_selected_parameter","Set the selected parameter's value...",self._dialog_set_parameter,
+          is_solver_task=True,enabled_when=lambda: self._selected_parameter() is not None)
+        A("show_other_slices","Show branches from other slices",self._toggle_other_slices,kind="check",
+          getter=lambda: self.plotter.show_other_slices)
         A("arclength_scaling_on","Scale arclength",lambda: c.set_arclength_scaling(True))
         A("arclength_scaling_off","Do not scale arclength",lambda: c.set_arclength_scaling(False))
 
@@ -240,6 +248,9 @@ class BifurcationTkApp:
 
         m=tk.Menu(menubar,tearoff=0)
         menubar.add_cascade(label="Continuation",menu=m)
+        self.param_menu=tk.Menu(m,tearoff=0)
+        m.add_cascade(label="Continuation parameter",menu=self.param_menu)
+        m.add_separator()
         self._add_menu_item(m,"step")
         self._add_menu_item(m,"multistep")
         self._add_menu_item(m,"step_shrink")
@@ -248,6 +259,9 @@ class BifurcationTkApp:
         self._add_menu_item(m,"ds_decrease")
         self._add_menu_item(m,"ds_reverse")
         self._add_menu_item(m,"set_ds")
+        m.add_separator()
+        self._add_menu_item(m,"continue_in_selected")
+        self._add_menu_item(m,"set_selected_parameter")
         m.add_separator()
         self._add_menu_item(m,"arclength_scaling_on")
         self._add_menu_item(m,"arclength_scaling_off")
@@ -290,6 +304,7 @@ class BifurcationTkApp:
         self._add_menu_item(m,"cycle_observable")
         m.add_separator()
         self._add_menu_item(m,"toggle_splines")
+        self._add_menu_item(m,"show_other_slices")
         self._add_menu_item(m,"toggle_logx")
         self._add_menu_item(m,"toggle_logy")
         m.add_separator()
@@ -331,7 +346,29 @@ class BifurcationTkApp:
         for combo in (self.xaxis_combo,self.obs_combo):
             if list(combo["values"])!=displays:
                 combo["values"]=displays
+        self._rebuild_parameter_menu()
         self._sync_axis_selectors()
+
+    def _rebuild_parameter_menu(self):
+        """Radio list of every global parameter, marking the one being continued."""
+        self.param_menu.delete(0,"end")
+        self._param_var.set(self.controller._paramname if isinstance(self.controller._paramname,str) else "")
+        for name in self.controller.all_parameter_names():
+            self.param_menu.add_radiobutton(label=name,value=name,variable=self._param_var,
+                                            command=lambda n=name: self._switch_continuation_parameter(n))
+
+    def _switch_continuation_parameter(self,name:str):
+        c=self.controller
+        if name==c._paramname:
+            return
+        self.log("> Continue in "+name)
+        try:
+            c.run_task("Switching to "+name,lambda: c.set_continuation_parameter(name))
+        except Exception as e:
+            self._report_error("Switching the continuation parameter",e)
+        finally:
+            self._autosave()
+            self.refresh()
 
     def _sync_axis_selectors(self):
         xd=self._axis_display(self.controller.x_axis)
@@ -532,6 +569,13 @@ class BifurcationTkApp:
         self.param_tree.column("role",width=90,minwidth=60)
         self.param_tree.pack(side=tk.TOP,fill=tk.BOTH,expand=True)
 
+        buttons=ttk.Frame(tab,padding=(0,4))
+        buttons.pack(side=tk.TOP,fill=tk.X)
+        ttk.Button(buttons,text="Continue in this",
+                   command=lambda: self._invoke(self._actions["continue_in_selected"])).pack(side=tk.LEFT)
+        ttk.Button(buttons,text="Set value...",
+                   command=lambda: self._invoke(self._actions["set_selected_parameter"])).pack(side=tk.LEFT,padx=4)
+
         self.slice_label=ttk.Label(tab,text="",wraplength=300,justify=tk.LEFT,padding=(2,6))
         self.slice_label.pack(side=tk.TOP,fill=tk.X)
 
@@ -720,6 +764,8 @@ class BifurcationTkApp:
             self._rebuild_axis_menus()
         else:
             self._sync_axis_selectors()
+            if isinstance(c._paramname,str):
+                self._param_var.set(c._paramname)
 
         for aid,var in self._check_vars.items():
             act=self._actions[aid]
@@ -896,6 +942,36 @@ class BifurcationTkApp:
 
     def _toggle_mode(self):
         self.controller.mode="mp" if self.controller.mode=="al" else "al"
+
+    def _selected_parameter(self)->str | None:
+        """The parameter highlighted in the Parameters tab, if any (its row id IS its name)."""
+        sel=self.param_tree.selection() if hasattr(self,"param_tree") else ()
+        return sel[0] if sel else None
+
+    def _continue_in_selected_parameter(self):
+        name=self._selected_parameter()
+        if name is not None:
+            self.controller.set_continuation_parameter(name)
+
+    def _dialog_set_parameter(self):
+        """Move a fixed parameter, which starts a new slice."""
+        name=self._selected_parameter()
+        if name is None:
+            return
+        if name==self.controller._paramname:
+            messagebox.showinfo("Continuation parameter",
+                                "'"+name+"' is the parameter being continued. Step in it, or pick a "
+                                "different parameter to continue in first.",parent=self.root)
+            return
+        current=self.controller.current_parameter_values().get(name,0.0)
+        val=simpledialog.askfloat("Set "+name,"New value for "+name+" (the diagram continues there,\n"
+                                  "and a new branch is started because it is a different slice):",
+                                  parent=self.root,initialvalue=current)
+        if val is not None:
+            self.controller.set_fixed_parameter(name,val)
+
+    def _toggle_other_slices(self):
+        self.plotter.show_other_slices=not self.plotter.show_other_slices
 
     def _toggle_splines(self):
         self.controller.interpolated_splines=not self.controller.interpolated_splines
