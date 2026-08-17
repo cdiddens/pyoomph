@@ -32,6 +32,10 @@ The result, i.e. the location of the fold bifurcation, is depicted in :numref:`f
 
 Similarly, we can set the other :py:class:`~pyoomph.equations.generic.InitialCondition` to start with hexagonal holes or stripe patterns and find the bifurcations.
 
+.. note::
+
+	The same two-parameter continuation can be done interactively with :py:class:`~pyoomph.utils.bifurcation_gui.BifurcationGUI`, which saves writing the sweep by hand. There, one locates the fold in :math:`\gamma` with a single command and then selects *Bifurcation* :math:`\to` *Follow this bifurcation in...* to pick :math:`\delta`; the curve :math:`\gamma_\text{fold}(\delta)` is then traced step by step and drawn directly in the :math:`(\delta,\gamma)` plane, since either plot axis may show a parameter instead of an observable. It can also be left again at any point, to continue an ordinary branch at the value of :math:`\delta` reached.
+
 
 .. only:: html
 
