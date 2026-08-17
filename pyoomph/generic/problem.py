@@ -712,6 +712,9 @@ class Problem(_pyoomph.Problem):
         #: Inner product in which the arclength constraint measures the solution part of a step; see
         #: :py:meth:`set_arclength_inner_product`. None keeps oomph's plain dof-sum metric.
         self._arclength_inner_product:"str | Callable[[NPFloatArray],float] | None"=None
+        #: Continuation data read from a state file, applied once the equations are renumbered; see
+        #: _apply_parked_continuation_data.
+        self._parked_continuation_data=None
         self._continue_initialized=False
         #: When resuming with ``--runmode continue``, carry on with the time step stored in the state
         #: file instead of the ``startstep`` (or any other initial dt) requested by the run statement
@@ -2505,20 +2508,7 @@ class Problem(_pyoomph.Problem):
             dof_deriv=self.get_history_dofs(5)
             dof_current=self.get_history_dofs(6)
             self._update_dof_vectors_for_continuation(dof_deriv,dof_current)
-            # Carrying the tangent through the history slots preserves its DIRECTION - measured against
-            # a freshly computed one, cos = 0.999999 - but not its length, because |dU/ds|^2 is a sum
-            # over degrees of freedom: refining 39 -> 79 dofs grew it by sqrt(2). The arclength
-            # constraint (dparameter/ds)^2 + theta^2*|dU/ds|^2 = 1 is what gives ds its meaning as a
-            # step length, so an unnormalised tangent silently changes the stride - measured 29% short
-            # on the first step after an adapt. oomph renormalises at the END of every step, so it
-            # healed itself after that one wrong step; renormalise here instead, which costs nothing and
-            # keeps the direction (both components are scaled by the same factor).
-            dparam_ds=self.get_arc_length_parameter_derivative()
-            theta_sqr=self.get_arc_length_theta_sqr()
-            tangent_norm=numpy.sqrt(dparam_ds*dparam_ds+theta_sqr*float(numpy.dot(dof_deriv,dof_deriv)))
-            if numpy.isfinite(tangent_norm) and tangent_norm>0.0:
-                self._update_dof_vectors_for_continuation(dof_deriv/tangent_norm,dof_current)
-                self._set_arc_length_parameter_derivative(float(dparam_ds/tangent_norm))
+            self._renormalise_continuation_tangent(dof_deriv,dof_current)
             
         if self._adapt_eigenindex is not None:
             eigfunc=self.get_history_dofs(3)+1j*self.get_history_dofs(4)
@@ -3458,6 +3448,29 @@ class Problem(_pyoomph.Problem):
     
 
     # Can be used for go_to_param or 
+    def _renormalise_continuation_tangent(self,dof_deriv,dof_current):
+        """Put the carried continuation tangent back on the arclength constraint after a remesh.
+
+        Carrying it through the history slots preserves its DIRECTION - measured against a freshly
+        computed one on the new mesh, cos = 0.999998 - but not its length, because |dU/ds|^2 is a sum
+        over degrees of freedom: refining 39 -> 79 dofs grew it by sqrt(2). The constraint
+
+            (dparameter/ds)^2 + theta^2*|dU/ds|^2 = 1
+
+        is what gives ds its meaning as a step length, so an unnormalised tangent silently changes the
+        stride - measured 29% short on the first step after an adapt. oomph renormalises at the END of
+        every step, so it healed itself after that one wrong step.
+
+        Both components are scaled by the same factor, so the direction is untouched. Used by the two
+        places that restore the tangent: the adaptation path and remesh_handler_during_continuation.
+        """
+        dparam_ds=self.get_arc_length_parameter_derivative()
+        theta_sqr=self.get_arc_length_theta_sqr()
+        tangent_norm=numpy.sqrt(dparam_ds*dparam_ds+theta_sqr*float(numpy.dot(dof_deriv,dof_deriv)))
+        if numpy.isfinite(tangent_norm) and tangent_norm>0.0:
+            self._update_dof_vectors_for_continuation(numpy.asarray(dof_deriv)/tangent_norm,dof_current)
+            self._set_arc_length_parameter_derivative(float(dparam_ds/tangent_norm))
+
     def remesh_handler_during_continuation(self, force: bool = False, resolve: bool = True, resolve_before_eigen: bool = False, reactivate_biftrack_neigen: int = 4, reactivate_biftrack_shift:float=0,resolve_max_newton_steps : int | None=None,num_adapt:int | None=None,resolve_globally_convergent_newton:bool=False):
         """
         Handle remeshing during continuation. We might have to calculate e.g. a new eigenvector when doing bifurcation tracking.
@@ -3508,6 +3521,7 @@ class Problem(_pyoomph.Problem):
             dof_deriv=self.get_history_dofs(5)
             dof_current=self.get_history_dofs(6)
             self._update_dof_vectors_for_continuation(dof_deriv,dof_current)
+            self._renormalise_continuation_tangent(dof_deriv,dof_current)
         
         if biftrack != "":
             if resolve_before_eigen:
@@ -8561,6 +8575,14 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             dofderiv=self.get_arclength_dof_derivative_vector()
             if len(dofderiv)==0:
                 write_conti=0
+            elif self._get_n_unaugmented_dofs()!=0:
+                # The system is augmented (a bifurcation tracker is active), so this vector has the
+                # AUGMENTED length - 3n+2 for a Hopf or azimuthal tracker. It is meaningless outside the
+                # tracker, and storing it makes the dump unloadable on the plain system: the bifurcation
+                # GUI dumps a state while tracking, so every located bifurcation and every locus point
+                # produced a file that threw "Mismatching size in the dof direction vector" when the
+                # diagram was reloaded.
+                write_conti=0
         else:
             dofderiv=numpy.zeros((0,))
         has_contidata=state.int_data(lambda : write_conti,lambda n : n)
@@ -8568,10 +8590,14 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             dofderiv=state.numpy_data(lambda  : numpy.array(dofderiv),lambda e:e)
             paramderiv=state.float_data(lambda  : self.get_arc_length_parameter_derivative(),lambda e:e)
             thetasqr=state.float_data(lambda  : self.get_arc_length_theta_sqr(),lambda e:e)
-            if not state.save and not ignore_continuation_data:            
-                self._set_dof_direction_arclength(dofderiv)
-                self._set_arc_length_parameter_derivative(paramderiv)
-                self._set_arc_length_theta_sqr(thetasqr)
+            if not state.save and not ignore_continuation_data:
+                # PARKED, not applied here. The meshes have been read by this point but the equation
+                # numbering has not been rebuilt yet - rebuild_global_mesh_from_list, actions_after_adapt
+                # and reapply_boundary_conditions all run after define_state_file returns. So ndof is
+                # still the OLD problem's, and applying a tangent belonging to the file's (adapted) mesh
+                # threw "Mismatching size in the dof direction vector" for any state saved on a refined
+                # mesh. Same reason the interface values are parked for _apply_interface_states().
+                self._parked_continuation_data=(numpy.array(dofderiv),paramderiv,thetasqr)
         else:
             if not state.save:
                 self.reset_arc_length_parameters()
@@ -8666,6 +8692,32 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         mpi_share_any_failure(error,context="loading the state file "+(fname if isinstance(fname,str) else "<stream>"))
         return True
 
+    def _apply_parked_continuation_data(self):
+        """Apply the continuation tangent read from a state file, once the equations are renumbered.
+
+        Parked during define_state_file because ndof is not final there yet; see the note at the parking
+        site. A length that still does not match is dropped with a message instead of raising: that
+        happens for a file written while a bifurcation tracker was active (the vector has the augmented
+        length and means nothing on the plain system) and for one whose mesh cannot be restored, and a
+        mismatched tangent is useless either way - oomph rebuilds it on the next step, whereas refusing
+        to load makes the whole stored solution unreachable.
+        """
+        parked=getattr(self,"_parked_continuation_data",None)
+        if parked is None:
+            return
+        self._parked_continuation_data=None
+        dofderiv,paramderiv,thetasqr=parked
+        if len(dofderiv)!=self.ndof():
+            if not self.is_quiet():
+                print("Note: the stored continuation tangent has {:d} entries but this problem has {:d} "
+                      "dofs, so it is ignored. The solution itself is loaded normally.".format(
+                          len(dofderiv),self.ndof()))
+            self.reset_arc_length_parameters()
+            return
+        self._set_dof_direction_arclength(dofderiv)
+        self._set_arc_length_parameter_derivative(paramderiv)
+        self._set_arc_length_theta_sqr(thetasqr)
+
     def _apply_interface_states(self):
         """Push the interface/skeleton element data read from a state file onto the rebuilt meshes.
 
@@ -8732,6 +8784,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self._apply_interface_states()
         self.setup_pinning()
         self.reapply_boundary_conditions()
+        self._apply_parked_continuation_data()
         self.invalidate_cached_mesh_data()
         dump.close()
 

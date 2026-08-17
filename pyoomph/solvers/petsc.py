@@ -887,6 +887,17 @@ class SlepcEigenSolver(GenericEigenSolver):
     def __init__(self, problem:"Problem"):
         super().__init__(problem)
         self.spectral_transformation:str | None="sinvert"
+        #: When set to ``(re_min, re_max, im_min, im_max)``, the eigenproblem is solved with SLEPc's
+        #: contour-integral method (CISS) over that RECTANGLE of the complex plane instead of by
+        #: shift-invert, returning every eigenvalue inside it rather than a requested number nearest a
+        #: shift. That is what finds a Hopf pair sitting far up the imaginary axis, which shift-invert
+        #: around 0 never sees.
+        #:
+        #: The region has to be bounded - CISS integrates along its boundary - so the imaginary extent
+        #: is an input and not a refinement: a genuinely unbounded stripe cannot be asked for. The cost
+        #: scales with how many eigenvalues are inside, NOT with the requested count, so a wide region
+        #: on a large problem is expensive. See set_eigenvalue_region().
+        self.eigenvalue_region:tuple[float,float,float,float] | None=None
         self.store_basis:bool=False
         self._last_basis:NPComplexArray | NPFloatArray | None=None
         self._last_eps_attempt:Any=None   # See _eps_solve_with_workspace_retry
@@ -1023,6 +1034,42 @@ class SlepcEigenSolver(GenericEigenSolver):
     def get_last_basis(self)->NPComplexArray | NPFloatArray | None:
         return self._last_basis
 
+    def set_eigenvalue_region(self,re_min:float,re_max:float,im_min:float,im_max:float):
+        """Solve for ALL eigenvalues in a rectangle of the complex plane, instead of by shift-invert.
+
+        A stripe around the imaginary axis - ``set_eigenvalue_region(-0.1, 0.1, -50, 50)`` - is the
+        question "is anything about to cross, at any frequency", which is how a Hopf is found.
+        ``set_eigenvalue_region(None)`` or setting :py:attr:`eigenvalue_region` to None goes back to
+        shift-invert.
+        """
+        if not (re_min<re_max and im_min<im_max):
+            raise ValueError("An eigenvalue region needs re_min<re_max and im_min<im_max, got "
+                             "({:g},{:g},{:g},{:g})".format(re_min,re_max,im_min,im_max))
+        self.eigenvalue_region=(float(re_min),float(re_max),float(im_min),float(im_max))
+
+    def _apply_eigenvalue_region(self,E)->bool: #type:ignore
+        """Configure CISS over self.eigenvalue_region. Returns whether it was applied."""
+        if self.eigenvalue_region is None:
+            return False
+        re_min,re_max,im_min,im_max=self.eigenvalue_region
+        # The PETSc options database is global and sticky, and setFromOptions applies it AFTER
+        # setType, so whatever an earlier ordinary solve left there wins:
+        #   eps_type=krylovschur  turns the solver back into Krylov-Schur, which cannot do Which.ALL on
+        #                         a non-Hermitian problem -> EPSSolve raises PETSC_ERR_SUP (56),
+        #   st_type=sinvert       hands CISS a spectral transform it does not drive.
+        # Removing them is not a side effect to regret: _SetDefaultPetscOption only fills them in when
+        # absent, so the next ordinary solve puts its own back.
+        for key in ("eps_type","st_type","st_ksp_type"):
+            if PETSc.Options().hasName(key): #type:ignore
+                PETSc.Options().delValue(key) #type:ignore
+        E.setType(SLEPc.EPS.Type.CISS) #type:ignore
+        rg=E.getRG() #type:ignore
+        rg.setType(SLEPc.RG.Type.INTERVAL) #type:ignore
+        rg.setIntervalEndpoints(re_min,re_max,im_min,im_max) #type:ignore
+        # ALL is what makes it a region query rather than "n nearest something".
+        E.setWhichEigenpairs(SLEPc.EPS.Which.ALL) #type:ignore
+        return True
+
     def further_setup(self,E): #type:ignore
         pass
     
@@ -1150,7 +1197,11 @@ class SlepcEigenSolver(GenericEigenSolver):
                 target=shift
 
         
-        if self.spectral_transformation:
+        # Not while a region is active: CISS drives its own linear solves along the contour, and a
+        # forced -st_type sinvert reaches it through setFromOptions and makes EPSSolve raise
+        # PETSC_ERR_SUP (error code 56). That surfaced as a stripe scan that "worked" and returned the
+        # ordinary shift-invert spectrum, because the retry wrapper swallowed the error.
+        if self.spectral_transformation and self.eigenvalue_region is None:
             _SetDefaultPetscOption("st_ksp_type", "preonly")
             _SetDefaultPetscOption("st_type", self.spectral_transformation)
                             
@@ -1204,9 +1255,16 @@ class SlepcEigenSolver(GenericEigenSolver):
             #print(dir(E))
             #exit()
             # E.setProblemType(SLEPc.EPS.ProblemType.PGNHEP)
+            # BEFORE setFromOptions, which is where SLEPc sets the solver up: applying the region
+            # afterwards raises "error code 56" out of EPSSolve, and the retry wrapper then swallowed it
+            # and returned the ordinary shift-invert answer - a stripe scan that quietly found nothing
+            # new. Measured either way on a spectrum with a known pair at -0.5+-8i.
+            region_active=self._apply_eigenvalue_region(E)
+
             E.setFromOptions() #type:ignore
 
-            if self.spectral_transformation and shift:
+            # The shift belongs to shift-invert; with a region the transform is the contour method's own.
+            if self.spectral_transformation and shift and not region_active:
                 E.getST().setShift(shift)
             self.further_setup(E) #type:ignore
             E.solve() #type:ignore

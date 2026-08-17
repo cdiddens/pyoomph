@@ -157,6 +157,22 @@ class BifurcationTkApp:
           kind="check",getter=lambda: c.trust_inferred_stability)
         A("compute_spectrum_here","Compute the eigenvalues at this point",self._compute_spectrum_here,
           is_solver_task=True,enabled_when=lambda: c.selected_point is not None or c.current_point is not None)
+        A("recompute_spectrum_here","Recompute the eigenvalues at this point",
+          lambda: self._compute_spectrum_here(force=True),is_solver_task=True,
+          tooltip="Redo the spectrum here with the current eigenvalue count, shift and modes")
+        A("recompute_spectrum_branch","Recompute the eigenvalues along this branch",
+          lambda: c.compute_spectrum_for_branch(force=True),is_solver_task=True,
+          tooltip="Redo every point of this branch, whatever it already has")
+        A("scan_stripe_here","Scan the stripe for eigenvalues here",lambda: c.scan_stripe(),
+          is_solver_task=True,
+          tooltip="Find EVERY eigenvalue in |Re|<stripe, |Im|<stripe - the way a Hopf pair far up the "
+                  "imaginary axis is found, which shift-invert never returns")
+        A("scan_stripe_branch","Scan the stripe along this branch",lambda: c.scan_stripe_for_branch(),
+          is_solver_task=True)
+        A("toggle_stripe_merge","Merge a stripe scan into the spectrum",self._toggle_stripe_merge,
+          kind="check",getter=lambda: self.controller.stripe_merge)
+        A("toggle_mode_stability","Count normal modes in the stability",self._toggle_mode_stability,
+          kind="check",getter=lambda: self.controller.count_normal_modes_in_stability)
         A("compute_spectrum_branch","Compute the eigenvalues along this branch",
           lambda: c.compute_spectrum_for_branch(),is_solver_task=True,
           tooltip="Loads each point's state dump and solves the eigenproblem, so a cheap sweep can have "
@@ -234,6 +250,9 @@ class BifurcationTkApp:
         A("save_diagram","Save diagram",self._save_diagram)
         A("reload_diagram","Reload diagram from disk",self._reload_diagram,is_solver_task=True)
         A("export_curves","Export curves...",c.output_curves)
+        A("output_tagged","Output the tagged points",c.output_tagged_points,is_solver_task=True,
+          tooltip="Load each tagged point and run the problem's own output - plots, VTUs - into "
+                  "output/tagNN/. The curve export only copies their state dumps.")
         A("new_branch_from_state","Start new branch from state file...",self._new_branch_from_state,is_solver_task=True)
         A("save_figure","Save figure as...",self._save_figure)
         A("toggle_demo_video","Record a frame per redraw",self._toggle_demo_video,kind="check",
@@ -295,6 +314,7 @@ class BifurcationTkApp:
         self._add_menu_item(m,"new_branch_from_state")
         m.add_separator()
         self._add_menu_item(m,"export_curves")
+        self._add_menu_item(m,"output_tagged")
         self._add_menu_item(m,"save_figure")
         self._add_menu_item(m,"toggle_demo_video")
         m.add_separator()
@@ -338,6 +358,11 @@ class BifurcationTkApp:
         self._add_menu_item(m,"refine_detected")
         self._add_menu_item(m,"compute_spectrum_here")
         self._add_menu_item(m,"compute_spectrum_branch")
+        self._add_menu_item(m,"recompute_spectrum_here")
+        self._add_menu_item(m,"recompute_spectrum_branch")
+        self._add_menu_item(m,"scan_stripe_here")
+        self._add_menu_item(m,"scan_stripe_branch")
+        self._add_menu_item(m,"toggle_stripe_merge")
         m.add_separator()
         self._add_menu_item(m,"start_locus")
         self._add_menu_item(m,"leave_locus")
@@ -583,6 +608,50 @@ class BifurcationTkApp:
         ttk.Button(frame,text="reverse",width=8,command=lambda: self._invoke(self._actions["ds_reverse"])).pack(side=tk.LEFT)
         row+=1
 
+        # Normal modes, only where the problem has them: azimuthal m or Cartesian k.
+        ttk.Label(tab,text="Normal modes").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.modes_var=tk.StringVar()
+        self.modes_entry=ttk.Entry(tab,textvariable=self.modes_var,width=14)
+        self.modes_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.modes_entry.bind("<Return>",lambda *_: self._commit_modes())
+        self.modes_entry.bind("<FocusOut>",lambda *_: self._commit_modes())
+        row+=1
+
+        ttk.Label(tab,text="Stripe Re,Im,max").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.stripe_var=tk.StringVar()
+        self.stripe_entry=ttk.Entry(tab,textvariable=self.stripe_var,width=14)
+        self.stripe_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.stripe_entry.bind("<Return>",lambda *_: self._commit_stripe())
+        self.stripe_entry.bind("<FocusOut>",lambda *_: self._commit_stripe())
+        row+=1
+
+        ttk.Label(tab,text="Adapt").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.adapt_var=tk.StringVar(value="off")
+        self.adapt_combo=ttk.Combobox(tab,state="readonly",width=12,textvariable=self.adapt_var,
+                                      values=("off","when_needed","every_n"))
+        self.adapt_combo.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.adapt_combo.bind("<<ComboboxSelected>>",lambda *_: self._commit_adapt())
+        row+=1
+
+        ttk.Label(tab,text="Adapt every N").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.adapt_n_var=tk.StringVar()
+        self.adapt_n_entry=ttk.Entry(tab,textvariable=self.adapt_n_var,width=14)
+        self.adapt_n_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.adapt_n_entry.bind("<Return>",lambda *_: self._commit_adapt())
+        self.adapt_n_entry.bind("<FocusOut>",lambda *_: self._commit_adapt())
+        row+=1
+
+        self.adapt_eig_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Adapt to the eigenfunction",variable=self.adapt_eig_var,
+                        command=self._commit_adapt).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        self.modes_sweep_var=tk.BooleanVar()
+        self.modes_sweep_check=ttk.Checkbutton(tab,text="Modes at every step",variable=self.modes_sweep_var,
+                                               command=self._commit_modes)
+        self.modes_sweep_check.grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
         ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=6)
         row+=1
 
@@ -704,14 +773,16 @@ class BifurcationTkApp:
         # Selectable, because which eigenvalue is about to cross is something you read off this list -
         # on an already-unstable branch it is not the leading one, and tracking the wrong one converges
         # to the wrong bifurcation.
-        self.eigen_tree=ttk.Treeview(frame,columns=("re","im"),show="tree headings",
+        self.eigen_tree=ttk.Treeview(frame,columns=("mode","re","im"),show="tree headings",
                                      selectmode="browse",height=8)
         self.eigen_tree.heading("#0",text="#")
+        self.eigen_tree.heading("mode",text="m/k")
         self.eigen_tree.heading("re",text="Re")
         self.eigen_tree.heading("im",text="Im")
         self.eigen_tree.column("#0",width=34,minwidth=28,stretch=False,anchor=tk.E)
-        self.eigen_tree.column("re",width=110,minwidth=70,anchor=tk.E)
-        self.eigen_tree.column("im",width=110,minwidth=70,anchor=tk.E)
+        self.eigen_tree.column("mode",width=40,minwidth=30,stretch=False,anchor=tk.E)
+        self.eigen_tree.column("re",width=100,minwidth=70,anchor=tk.E)
+        self.eigen_tree.column("im",width=100,minwidth=70,anchor=tk.E)
         escroll=ttk.Scrollbar(frame,orient=tk.VERTICAL,command=self.eigen_tree.yview)
         self.eigen_tree.configure(yscrollcommand=escroll.set)
         escroll.pack(side=tk.RIGHT,fill=tk.Y)
@@ -901,6 +972,19 @@ class BifurcationTkApp:
         if self.arc_prop_entry.focus_get() is not self.arc_prop_entry:
             self.arc_prop_var.set("{:g}".format(c.arclength_proportion))
         self.arc_prop_entry.configure(state="normal" if c.scale_arc_length else "disabled")
+        if self.stripe_entry.focus_get() is not self.stripe_entry:
+            self.stripe_var.set("{:g},{:g},{:d}".format(c.stripe_re,c.stripe_im,int(c.stripe_max)))
+        self.adapt_var.set(c.adapt_policy)
+        if self.adapt_n_entry.focus_get() is not self.adapt_n_entry:
+            self.adapt_n_var.set(str(c.adapt_every_n))
+        self.adapt_eig_var.set(bool(c.adapt_to_eigenfunction))
+        kind=c.normal_mode_kind()
+        state="normal" if kind else "disabled"
+        self.modes_entry.configure(state=state)
+        self.modes_sweep_check.configure(state=state)
+        if self.modes_entry.focus_get() is not self.modes_entry:
+            self.modes_var.set(",".join("{:g}".format(m) for m in c.normal_modes))
+        self.modes_sweep_var.set(bool(c.compute_modes_during_sweep))
         self.splines_var.set(bool(c.interpolated_splines))
         self.mode_var.set(c.mode)
         self.movepoint_var.set(bool(c.move_point_active))
@@ -1029,7 +1113,7 @@ class BifurcationTkApp:
             self._eigen_signature=None
             return
         values=list(point.eig_values)
-        signature=(id(point),len(values),which)
+        signature=(id(point),len(values),which,tuple(point.eig_modes or ()),c.count_normal_modes_in_stability)
         if signature==self._eigen_signature:
             return                      # nothing to redo on every redraw
         self._eigen_signature=signature
@@ -1038,16 +1122,28 @@ class BifurcationTkApp:
             # showing only the leading eigenvalue as if it were the whole spectrum.
             self.eigen_label_var.set("{:s} point: only the leading eigenvalue was recorded".format(which))
         else:
-            nunstable=point.measured_unstable_count()
-            self.eigen_label_var.set("{:s} point: {:d} eigenvalue{:s}, {:d} unstable".format(
-                which,len(values),"" if len(values)==1 else "s",nunstable))
+            nunstable=point.measured_unstable_count(c.count_normal_modes_in_stability)
+            note=""
+            if point.eig_modes is not None:
+                nmodes=len(set(point.eig_modes))
+                note=", {:d} mode{:s}".format(nmodes,"" if nmodes==1 else "s")
+                if not c.count_normal_modes_in_stability:
+                    note+=" (base state only counted)"
+            if c.spectrum_is_stale(point):
+                # The settings were changed after this was computed, which is precisely when the
+                # Recompute command is what the user is looking for.
+                note+=" - computed with older settings, recompute to refresh"
+            self.eigen_label_var.set("{:s} point: {:d} eigenvalue{:s}{:s}, {:d} unstable".format(
+                which,len(values),"" if len(values)==1 else "s",note,nunstable))
         self.eigen_tree.delete(*self.eigen_tree.get_children())
         shown=values if values else [complex(point.eig_value_Re,point.eig_value_Im)]
+        modes=point.eig_modes if point.eig_modes is not None and len(point.eig_modes)==len(shown) else None
         for i,v in enumerate(shown):
             re,im=float(v.real),float(v.imag)
             tags=("unstable",) if re>0 else (("critical",) if re==0 else ())
+            mode="" if modes is None else "{:g}".format(modes[i])
             self.eigen_tree.insert("","end",text=str(i),
-                                   values=("{:+.6g}".format(re),"{:+.6g}".format(im)),tags=tags)
+                                   values=(mode,"{:+.6g}".format(re),"{:+.6g}".format(im)),tags=tags)
 
     def _update_tree(self):
         c=self.controller
@@ -1154,6 +1250,64 @@ class BifurcationTkApp:
             self.arc_prop_var.set("{:g}".format(self.controller.arclength_proportion))
         self._update_panels()
 
+    def _commit_stripe(self):
+        """Parse "re,im,max": the two half-widths and the cap on how many eigenvalues to return."""
+        c=self.controller
+        text=self.stripe_var.get().strip()
+        try:
+            parts=[float(x) for x in text.replace(";",",").split(",") if x.strip()]
+            if not parts:
+                raise ValueError("empty")
+            c.stripe_re=abs(parts[0])
+            if len(parts)>1:
+                c.stripe_im=abs(parts[1])
+            if len(parts)>2:
+                c.stripe_max=max(1,int(parts[2]))
+        except ValueError:
+            self.log("Could not read the stripe '"+text+"'; expected 're,im,max', e.g. 0.5,20,30")
+        self.stripe_var.set("{:g},{:g},{:d}".format(c.stripe_re,c.stripe_im,int(c.stripe_max)))
+        self._update_panels()
+
+    def _commit_adapt(self):
+        c=self.controller
+        c.adapt_policy=self.adapt_var.get()
+        try:
+            c.adapt_every_n=max(1,int(float(self.adapt_n_var.get())))
+        except ValueError:
+            pass
+        self.adapt_n_var.set(str(c.adapt_every_n))
+        c.adapt_to_eigenfunction=bool(self.adapt_eig_var.get())
+        c.log("Adaptation during continuation:",c.adapt_policy,
+              ("(every {:d} steps)".format(c.adapt_every_n) if c.adapt_policy=="every_n" else ""),
+              ("+ eigenfunction refinement" if c.adapt_to_eigenfunction else ""))
+        self._update_panels()
+
+    def _commit_modes(self):
+        """Parse the comma-separated mode list. Azimuthal modes are integers, Cartesian ones reals."""
+        c=self.controller
+        kind=c.normal_mode_kind()
+        text=self.modes_var.get().strip()
+        parsed:list[float]=[]
+        try:
+            for piece in text.replace(";",",").split(","):
+                piece=piece.strip()
+                if not piece:
+                    continue
+                parsed.append(float(int(piece)) if kind=="m" else float(piece))
+        except ValueError:
+            self.log("Could not read the mode list '"+text+"'; expected "+
+                     ("integers" if kind=="m" else "numbers")+" separated by commas")
+            self.modes_var.set(",".join("{:g}".format(m) for m in c.normal_modes))
+            return
+        c.normal_modes=parsed
+        c.compute_modes_during_sweep=bool(self.modes_sweep_var.get())
+        if parsed:
+            c.log("Normal modes to solve ({:s}): ".format(kind or "?")+
+                  ", ".join("{:g}".format(m) for m in parsed)+
+                  ("  - at every continuation step" if c.compute_modes_during_sweep else
+                   "  - on demand only (Bifurcation -> Compute the eigenvalues...)"))
+        self._update_panels()
+
     def _commit_mode(self):
         self.controller.mode=self.mode_var.get()
 
@@ -1249,10 +1403,24 @@ class BifurcationTkApp:
     def _toggle_trust_inferred(self):
         self.controller.trust_inferred_stability=not self.controller.trust_inferred_stability
 
-    def _compute_spectrum_here(self):
+    def _toggle_stripe_merge(self):
+        c=self.controller
+        c.stripe_merge=not c.stripe_merge
+        c.log("A stripe scan will",
+              "be merged into the existing spectrum" if c.stripe_merge else "replace the spectrum")
+        self._update_panels()
+
+    def _toggle_mode_stability(self):
+        c=self.controller
+        c.count_normal_modes_in_stability=not c.count_normal_modes_in_stability
+        c.log("Stability now counts",
+              "every computed normal mode" if c.count_normal_modes_in_stability else "the base state only")
+        self.refresh()
+
+    def _compute_spectrum_here(self,force:bool=False):
         c=self.controller
         point=c.selected_point if c.selected_point is not None else c.current_point
-        if c.compute_spectrum(point):
+        if c.compute_spectrum(point,force=force):
             c.propagate_stability()
         self._eigen_signature=None      # force the eigenvalue list to rebuild
 

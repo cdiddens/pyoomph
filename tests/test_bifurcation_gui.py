@@ -950,6 +950,277 @@ def test_the_gui_reports_physical_units(tmp_path):
     assert "LABEL ode/w [mm]" in out, "axis labels must carry the unit:\n" + out[-2000:]
 
 
+def test_normal_mode_eigenvalues_are_recorded_and_recomputable(tmp_path):
+    """Azimuthal modes end to end: recorded per eigenvalue, plottable, and recomputable.
+
+    The GUI only ever solved the base-state eigenproblem, so on a problem set up with
+    setup_for_stability_analysis(azimuthal_stability=True) the modes that decide stability were
+    invisible - an axisymmetric state can be perfectly stable to m=0 and unstable to m=1, which is what
+    a polygonal hydraulic jump is.
+
+    The worker also pins the recompute path: raising neigen used to recompute nothing at all, because
+    compute_spectrum_for_branch skipped every point that already "had" a spectrum.
+
+    Out of process, on the smallest axisymmetric problem that carries an azimuthal eigenproblem -
+    generating and compiling the azimuthal code is the cost, not the solving.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "normal_mode_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "MODES 0 1 2 0 1 2" in out, "one mode per eigenvalue:\n" + out[-2000:]
+    assert "REFILL 1 points" in out, "a stale point must be picked up:\n" + out[-2000:]
+
+
+def test_stability_can_count_modes_or_the_base_state_alone():
+    """The View toggle has to change the answer, and only where a mode is actually unstable.
+
+    A stub: the whole content is which eigenvalues are counted. stability_indicator reads the STORED
+    unstable count rather than recounting (they agree while the spectrum is sorted), so the base-state
+    reading has to recount - that is the branch this pins.
+    """
+    from pyoomph.utils.bifurcation_gui.model import BifurcationGUISolutionPoint
+
+    # Unstable on m=1 only: stable as an axisymmetric state, unstable as a full one.
+    p = BifurcationGUISolutionPoint(1.0, {}, 0.5+0j, "", 0,
+                                    eig_values=[0.5+0j, -1.0+0j, -2.0+0j],
+                                    eig_modes=[1.0, 0.0, 2.0])
+    p.unstable_count = p.measured_unstable_count()
+    assert p.measured_unstable_count(True) == 1
+    assert p.measured_unstable_count(False) == 0
+    assert p.stability_indicator(include_modes=True) > 0
+    assert p.stability_indicator(include_modes=False) < 0
+    assert p.eigenvalues_of_mode(1.0) == [0.5+0j]
+
+    # Without a scan every eigenvalue IS the base state, so the toggle must change nothing.
+    q = BifurcationGUISolutionPoint(1.0, {}, 0.5+0j, "", 0, eig_values=[0.5+0j, -1.0+0j])
+    q.unstable_count = q.measured_unstable_count()
+    assert q.measured_unstable_count(True) == q.measured_unstable_count(False) == 1
+    assert q.stability_indicator(include_modes=False) > 0
+    assert q.eigenvalues_of_mode(0.0) == [0.5+0j, -1.0+0j]
+
+
+def test_a_spectrum_is_stale_when_the_settings_changed():
+    """Raising the eigenvalue count has to make existing points count as needing recomputation.
+
+    Includes the json round trip, because the settings are compared for equality: a tuple written to
+    state.json comes back as a list, and a complex shift cannot be written at all, so both are
+    canonicalised by eigen_settings().
+    """
+    import json
+
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+    from pyoomph.utils.bifurcation_gui.model import BifurcationGUISolutionPoint, eigen_settings
+
+    c = BifurcationController.__new__(BifurcationController)
+    c.neigen = 4
+    c.shift = 0.0
+    c.normal_modes = [1, 2]
+
+    class StubProblem:
+        def is_normal_mode_stability_set_up(self): return "azimuthal"
+        def get_bifurcation_tracking_mode(self): return ""
+    c.problem = StubProblem()  # type: ignore[assignment]
+    c.on_locus = lambda: False  # type: ignore[method-assign]
+
+    p = BifurcationGUISolutionPoint(1.0, {}, -1+0j, "", 0, eig_values=[-1+0j],
+                                    eig_settings=c.current_eigen_settings())
+    assert not c.spectrum_is_stale(p)
+    c.neigen = 30
+    assert c.spectrum_is_stale(p), "a raised eigenvalue count must show up as stale"
+    c.neigen = 4
+    c.normal_modes = [1, 2, 3]
+    assert c.spectrum_is_stale(p), "an added mode must show up as stale"
+
+    # A point from before the settings were recorded is not KNOWN to be stale, and treating it as such
+    # would recompute whole diagrams on load.
+    legacy = BifurcationGUISolutionPoint(1.0, {}, -1+0j, "", 0, eig_values=[-1+0j])
+    assert not c.spectrum_is_stale(legacy)
+
+    # Through real json, with a complex shift.
+    settings = eigen_settings(4, 0.5+2j, [0, 1])
+    q = BifurcationGUISolutionPoint(1.0, {}, -1+0j, "", 0, eig_values=[-1+0j], eig_settings=settings)
+    back = BifurcationGUISolutionPoint.from_dict(json.loads(json.dumps(q.to_state_dict())))
+    assert back.eig_settings == settings, back.eig_settings
+
+
+def _complex_petsc_pythonpath():
+    """The lib directory of a COMPLEX PETSc build, or None.
+
+    PYTHONPATH is unset in a non-login shell, so petsc4py is not importable at all there and the real
+    build is what a bare import would find - see CLAUDE.md. The arch directory differs per machine, so
+    it is searched for rather than pasted; a machine without one skips the test instead of failing it.
+    """
+    import glob
+    import subprocess
+
+    roots = [os.environ.get("PETSC_DIR", ""), os.path.expanduser("~/code/packages")]
+    seen = []
+    for root in roots:
+        if not root:
+            continue
+        seen += glob.glob(os.path.join(root, "*", "lib", "petsc4py"))
+        seen += glob.glob(os.path.join(root, "*", "*", "lib", "petsc4py"))
+    for cand in seen:
+        libdir = os.path.dirname(cand)
+        try:
+            out = subprocess.run([sys.executable, "-c",
+                                  "from petsc4py import PETSc;import numpy;"
+                                  "print(PETSc.ScalarType is numpy.complex128)"],
+                                 env={**os.environ, "PYTHONPATH": libdir},
+                                 capture_output=True, text=True, timeout=120)
+        except Exception:
+            continue
+        if out.returncode == 0 and out.stdout.strip() == "True":
+            return libdir
+    return None
+
+
+def test_the_stripe_scan_finds_a_pair_shift_invert_misses(tmp_path):
+    """A region scan must find what a shift-invert solve cannot see, and merge without duplicating.
+
+    pyoomph asks SLEPc for the eigenvalues whose REAL part is nearest the target, so a complex pair
+    further from the target in real part is simply not in the answer however many are requested - which
+    is how a Hopf goes unnoticed. The worker's spectrum makes that unambiguous: two real modes at -0.01
+    and -0.02 and a pair at -0.5+-8i, so a 2-eigenvalue solve returns the reals and nothing else.
+
+    Three things had to be got right and each of them failed first, so each is worth the test: the
+    region has to be applied BEFORE setFromOptions (afterwards EPSSolve raises PETSC_ERR_SUP), the
+    sticky eps_type/st_type options have to be cleared (krylovschur cannot do Which.ALL on a
+    non-Hermitian problem), and the scan needs its own eigenvalue cap (SLEPc bounds a contour solve by
+    the requested count, so asking for 2 returned 2 of the 4 in the region).
+
+    Needs a complex PETSc, which a non-login shell does not have on its path; skipped when absent.
+    """
+    import subprocess
+
+    libdir = _complex_petsc_pythonpath()
+    if libdir is None:
+        pytest.skip("no complex PETSc build found; the stripe scan needs one (see CLAUDE.md)")
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "stripe_worker.py")
+    proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900,
+                          env={**os.environ, "PYTHONPATH": libdir})
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "STRIPE OK" in out
+
+
+def test_outputting_a_tagged_point_writes_its_fields(tmp_path):
+    """Tagging a point and outputting it must write plots and VTUs, not only a state dump.
+
+    The redirection is the substance. Problem._change_output_directory tells each output where to write
+    by storing the new location relative to the problem's base directory - and _MeshFileOutput was the
+    one outputter that never overrode that hook, so VTUs ignored it completely. (The same gap meant
+    PeriodicOrbit.output_orbit, which relies on the very same call, was writing orbit VTUs on top of the
+    ordinary ones.) The worker therefore uses a problem WITH a MeshFileOutput and asserts a .vtu lands
+    in the tag directory; a text-only problem would have passed either way.
+
+    It also asserts the restore: the output directory, the output step counter and the current point all
+    have to come back, and no state dump may leak into the diagram's own store.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "tag_output_worker.py")
+    proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "TAGOUT OK" in out
+
+
+@pytest.mark.parametrize("policy", ["off", "when_needed", "every_n"])
+def test_adaptivity_during_continuation(policy, tmp_path):
+    """The GUI can remesh/adapt during a sweep, and the arclength metric survives it.
+
+    Two different things sit behind one setting, and only one of them applies to most problems:
+    remesh_handler_during_continuation REMESHES and does nothing without a remesher (RemeshWhen), while
+    the adaptation passes refine the existing mesh from the problem's SpatialErrorEstimators. The first
+    version of this only called the handler, and every policy left ndof at 39 - the test passed while
+    proving nothing.
+
+    The assertion that matters is the arclength invariant afterwards. Both paths restore the
+    continuation tangent from the history slots, which preserves its direction but not its length, so
+    without renormalisation ds silently stops meaning a step length - measured 29% short in the plain
+    adapt case. Off must change nothing; the other two must actually adapt.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "adapt_continuation_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--gui-policy", policy,
+                           "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, policy + " failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, policy + " did not finish:\n" + out[-3000:]
+    assert "GUIPOLICY " + policy in out
+
+
+def test_a_state_saved_on_an_adapted_mesh_restores_its_tangent(tmp_path):
+    """Loading a state must apply its continuation tangent AFTER the equations are renumbered.
+
+    define_state_file reads the meshes but the numbering is rebuilt only after it returns -
+    rebuild_global_mesh_from_list, actions_after_adapt and reapply_boundary_conditions all run later. So
+    the tangent used to be checked against the OLD dof count, and any state saved on an adapted mesh
+    threw "Mismatching size in the dof direction vector" and took the whole reload with it. It is now
+    parked and applied afterwards, the same way the interface values already were.
+
+    The assertion is that the tangent is RESTORED, not merely that nothing raises: dropping it would
+    also "pass" while quietly losing the continuation direction.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "stale_tangent_worker.py")
+    proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "STALE TANGENT OK" in out
+    assert "Mismatching size" not in out
+
+
+def test_a_state_dumped_while_tracking_can_be_reloaded(tmp_path):
+    """A dump written with a bifurcation tracker active must not make the diagram unloadable.
+
+    locate_bifurcation() activates the tracker, solves, and records the point - which dumps a state -
+    and only then deactivates, so the dump carried a continuation tangent of the AUGMENTED length
+    (2n+1 for a fold, 3n+2 for a Hopf or azimuthal one). Reloading the diagram later threw
+
+        Mismatching size in the dof direction vector and the actual number of DoFs: 89777 vs 29976
+
+    out of Problem::set_dof_direction_arclength and took the whole reload with it. 89777 = 3*29925+2 is
+    an augmented count, not a mesh difference - which is what identified the cause.
+
+    Two guards, and the worker exercises both: an augmented tangent is no longer written (it means
+    nothing outside the tracker), and a stored tangent whose length does not match is ignored with a
+    note rather than raising - which is what rescues a file written before the first guard existed, or
+    one whose mesh has been adapted since. An ordinary dump must still round-trip its tangent, or the
+    fix would have quietly disabled the feature.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "tracked_state_worker.py")
+    proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "Mismatching size" not in out
+    assert "TRACKED STATE OK" in out
+
+
 def test_branch_switch_refuses_a_fold():
     """A fold has one branch through it, so there is nothing to switch to.
 

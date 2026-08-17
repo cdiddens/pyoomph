@@ -40,7 +40,7 @@ from ... import _pyoomph_core as _pyoomph
 from ...typings import *
 from ...expressions.units import unit_to_string
 
-from .model import (BifurcationGUISolutionPoint, BifurcationGUISolutionBranch, AxisSpec,
+from .model import (eigen_settings, BifurcationGUISolutionPoint, BifurcationGUISolutionBranch, AxisSpec,
                     AXIS_OBSERVABLE, AXIS_PARAMETER, as_axis, observable_axis, parameter_axis,
                     same_parameter_value, STABILITY_EIGEN, STABILITY_INFERRED, STABILITY_UNKNOWN)
 
@@ -204,6 +204,47 @@ class BifurcationController:
         #: Eigenvalues are stored as physical rates; see :py:meth:`_resolve_eigen_unit`.
         self._eigen_mult=1.0
         self._eigen_unit=""
+        #: Normal modes to solve alongside the base state: azimuthal m (integers) or Cartesian k
+        #: (reals), depending on what the problem was set up for. Empty means base state only.
+        self.normal_modes:list[float]=[]
+        #: Solve them at every continuation point too. Off by default because a scan of N modes is N
+        #: extra eigensolves per point, and eigensolves already dominate a sweep - measured on the
+        #: azimuthal probe, three modes cost 2.9x one. Off, the modes are filled in on demand by
+        #: compute_spectrum()/compute_spectrum_for_branch().
+        self.compute_modes_during_sweep=False
+        #: Half-widths of the stripe scanned for eigenvalues: |Re| < stripe_re and |Im| < stripe_im.
+        #: Bounded on purpose - the contour method integrates around the region, so an unbounded stripe
+        #: cannot be asked for and the imaginary extent decides which frequencies are looked at.
+        self.stripe_re=0.5
+        self.stripe_im=20.0
+        #: Upper bound on how many eigenvalues a scan may return. SLEPc caps a contour solve by the
+        #: requested count, so passing the ordinary neigen made a scan return neigen eigenvalues and
+        #: quietly miss the rest - measured: a region holding 4 returned 2 when asked for 2. When a scan
+        #: comes back with exactly this many, the region probably holds more and this should be raised.
+        self.stripe_max=20
+        #: Merge a scan into the point's existing spectrum instead of replacing it, so a shift-invert
+        #: spectrum keeps its eigenvalues and only gains the ones it could not see.
+        self.stripe_merge=True
+        #: When to remesh/adapt during continuation: "off" (the historical behaviour), "when_needed"
+        #: (ask remesh_handler_during_continuation, which checks the problem's own remeshing_necessary()
+        #: and does nothing otherwise) or "every_n" (force one every adapt_every_n steps).
+        self.adapt_policy="off"
+        self.adapt_every_n=5
+        #: Re-solve after the remesh, i.e. remesh_handler_during_continuation(resolve=...).
+        self.adapt_resolve=True
+        #: Number of adaptation passes to run after a step, on top of the remesh handler. These are two
+        #: different things: the handler REMESHES (it needs a remesher, e.g. RemeshWhen, and does
+        #: nothing without one), while this refines/unrefines the existing mesh from the problem's
+        #: SpatialErrorEstimators. Most problems have the latter and not the former.
+        self.adapt_spatial=1
+        #: Also refine towards an eigenfunction afterwards, via Problem.refine_eigenfunction.
+        self.adapt_to_eigenfunction=False
+        self.adapt_eigenindex=0
+        self._steps_since_adapt=0
+        #: Whether the drawn stability counts every computed mode or the base state alone. An
+        #: axisymmetric state can be stable to m=0 and unstable to m=1 - a polygonal hydraulic jump is
+        #: exactly that - so which of the two is being shown has to be sayable.
+        self.count_normal_modes_in_stability=True
         self._mode="al"
         self._move_point=False
         self.interpolated_splines=False
@@ -895,8 +936,51 @@ class BifurcationController:
                 self.log("Could not solve the eigenproblem on the locus ("+str(e).split("\n")[0]+"); recording the critical eigenvalue only")
         self._add_current_state(eig_value=crit,eig_values=spectrum)
 
+    def _record_mode_observables(self,point):
+        """Expose each mode's leading eigenvalue as an observable, so it can go on a plot axis.
+
+        "eigen/max Re [m=1]" and its imaginary partner. Observables rather than a third kind of axis
+        because the axis menus, the labels, the CSV export, value_of() and the state file already carry
+        observables; a new kind would have to be taught to every one of them.
+
+        Points where no scan ran simply do not have the key, and branch_can_be_plotted() already hides a
+        branch that cannot supply the current axis.
+        """
+        if point.eig_modes is None or not point.eig_values:
+            return
+        kind=self.normal_mode_kind() or "m"
+        seen:list[float]=[]
+        for m in point.eig_modes:
+            if m not in seen:
+                seen.append(m)
+        for m in seen:
+            vals=point.eigenvalues_of_mode(m)
+            if not vals:
+                continue
+            lead=max(vals,key=lambda v: numpy.real(v))
+            tag="  [{:s}={:g}]".format(kind,m)
+            for what,value in (("max Re",float(numpy.real(lead))),("max Im",float(numpy.imag(lead)))):
+                name="eigen/"+what+tag
+                point.obs_values[name]=value
+                if name not in self._avail_observables:
+                    self._avail_observables.append(name)
+                    self._observable_units[name]=self._eigen_unit
+                    self._observable_mults[name]=1.0
+                    self._extremum_axes.add(name)   # the tag replaces the "[obs]" the menus would add
+
+    def _last_solved_modes(self,n:int)->"list[float] | None":
+        """The per-eigenvalue mode array the problem still holds, when it matches the spectrum length.
+
+        None when only the base state was solved - which is what the problem reports then, since
+        get_last_eigenmodes_m() is left at None unless a mode list was passed.
+        """
+        for raw in (self.problem.get_last_eigenmodes_m(),self.problem.get_last_eigenmodes_k()):
+            if raw is not None and len(raw)==n:
+                return [float(m) for m in raw]
+        return None
+
     def _add_current_state(self,eig_value=None,eig_values=None,det_sign=None,dparam_ds=None,
-                           measured:bool=True):
+                           measured:bool=True,eig_modes=None):
         """Record the problem's current state as a new point of the current branch.
 
         ``eig_value`` overrides the eigenvalue that would be read from the problem, which is what
@@ -923,12 +1007,15 @@ class BifurcationController:
                 eig_value=spectrum[0]
                 if eig_values is None:
                     eig_values=list(spectrum)
+                    eig_modes=self._last_solved_modes(len(eig_values))
         elif eig_value is not None and eig_values is None:
             eig_values=[eig_value]
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step)))
         p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),eig_value,state_file,self._state_step,
                                       param_values=self.current_parameter_values(),eig_values=eig_values,
-                                      det_sign=det_sign,dparam_ds=dparam_ds)
+                                      det_sign=det_sign,dparam_ds=dparam_ds,eig_modes=eig_modes,
+                                      eig_settings=self.current_eigen_settings() if eig_values else None)
+        self._record_mode_observables(p)
         # On a locus EVERY point has a zero real part, so classifying them all would run a normal-form
         # calculation per step for an answer already known: the tracked type.
         if p.eig_value_Re==0 and self.classify_bifurcations and branch.kind!="locus":
@@ -1217,10 +1304,12 @@ class BifurcationController:
             column_names=[self.axis_label(sp) for sp in export_y]
             if self.interpolated_splines:
                 smoothedsegs,stabs=b.smooth_branch_stab_list(export_y,100,xspec=export_x,
-                                                             trust_inferred=self.trust_inferred_stability)
+                                                             trust_inferred=self.trust_inferred_stability,
+                                                             include_modes=self.count_normal_modes_in_stability)
             else:
                 smoothedsegs,stabs=b.to_branch_stab_list(export_y,xspec=export_x,
-                                                         trust_inferred=self.trust_inferred_stability)
+                                                         trust_inferred=self.trust_inferred_stability,
+                                                         include_modes=self.count_normal_modes_in_stability)
             istab=0
             iunstab=0
             for seg,stab in zip(smoothedsegs,stabs):
@@ -1245,6 +1334,72 @@ class BifurcationController:
                     numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header="\t".join([export_x[1]]+column_names)+self._export_header_suffix(b))
         self.log("Exported curves to",odir)
         return odir
+
+    def output_tagged_points(self)->int:
+        """Write each tagged point's FIELDS - plots, VTUs, whatever the problem outputs.
+
+        The curve export only copies a tagged point's state dump, which preserves the solution but shows
+        nothing. This loads each one and runs the problem's own output into its own directory,
+        ``output/tag01/`` and so on.
+
+        Follows the discipline PeriodicOrbit.output_orbit uses for the same trick (problem.py:280): the
+        output directory, ``write_states`` and ``_output_step`` are all put back afterwards - without
+        that, the redirected outputs would keep counting from wherever the diagram had got to, and every
+        loaded point would write another state dump into the diagram's own store. The point that was
+        current is restored too, since loading moves the problem.
+
+        Its own command rather than part of the curve export: this reloads and re-outputs every tagged
+        point, which on a real mesh with a plotter attached is not instant.
+        """
+        tagged=[p for b in self.branches for p in b if p.tag>=0 and p.statefile]
+        if not tagged:
+            self.log("No tagged points to output. Mark one with the number keys first.")
+            return 0
+        odir=os.path.join(self.problem.get_output_directory(self.data_subdir),"output")
+        restore=self.current_point
+        olddir=self.problem.get_output_directory()
+        write_states=self.problem.write_states
+        outstep=self.problem._output_step
+        done=0
+        try:
+            self.problem.write_states=False
+            for i,p in enumerate(sorted(tagged,key=lambda q: q.tag)):
+                if self._abort_requested:
+                    self._abort_requested=False
+                    self.log("Tagged-point output aborted after {:d} of {:d}".format(done,len(tagged)))
+                    break
+                self._status("OUTPUT TAG {:d} ({:d}/{:d})".format(p.tag,i+1,len(tagged)))
+                try:
+                    self.load_pt(p)
+                    # _change_output_directory is the whole redirection: each file output stores the
+                    # new location RELATIVE to the problem's base directory and writes there. The base
+                    # directory itself must NOT be moved, or that relative path is computed against a
+                    # directory that no longer exists.
+                    self.problem._change_output_directory(os.path.join(odir,"tag{:02d}".format(p.tag)))
+                    self.problem._output_step=0
+                    self.problem.output()
+                    done+=1
+                except Exception as e:
+                    self.log("Could not output tag {:d}: {:s}".format(p.tag,repr(e)))
+        finally:
+            # Each restore stands on its own: an output kind that refuses to be redirected raises here
+            # too, and letting that escape would leave write_states off and the output directory
+            # pointing into a tag folder for the rest of the session.
+            try:
+                self.problem._change_output_directory(olddir)
+            except Exception as e:
+                self.log("Could not restore the output directory:",repr(e))
+            self.problem.write_states=write_states
+            self.problem._output_step=outstep
+            if restore is not None:
+                try:
+                    self.load_pt(restore)
+                except Exception as e:
+                    self.log("Could not return to the previous point: "+repr(e))
+        self.log("Wrote the fields of {:d} tagged point{:s} to {:s}".format(
+            done,"" if done==1 else "s",odir))
+        self._changed()
+        return done
 
     # ------------------------------------------------------------------ tangents
 
@@ -1409,21 +1564,26 @@ class BifurcationController:
             walk(range(len(b)),1)
             walk(range(len(b)-1,-1,-1),-1)
 
-    def compute_spectrum(self,point)->bool:
-        """Solve the eigenproblem at a point that has none, from its own state dump.
+    def compute_spectrum(self,point,force:bool=False)->bool:
+        """Solve the eigenproblem at a point, from its own state dump, scanning the requested modes.
 
         This is what makes quick mode a workflow rather than a compromise: the dumps are all there, so a
-        cheap sweep can have its eigenvalues filled in afterwards without redoing the continuation.
+        cheap sweep can have its eigenvalues filled in afterwards without redoing the continuation - and
+        it is equally how a spectrum is REDONE after the eigenvalue count or the mode list changes.
+        ``force`` is only about which points a caller offers; a point handed here is always recomputed.
         """
         if point is None or not point.statefile:
             return False
         restore=self.current_point
         try:
             self.load_pt(point)
-            self.problem.solve_eigenproblem(self.neigen,self.shift)
+            self.problem.solve_eigenproblem(self.neigen,self.shift,**self._mode_kwargs())
             # Back-filled spectra have to land in the same units as the ones recorded during the sweep.
             spectrum=self._phys_eig(list(self.problem.get_last_eigenvalues()))
             point.eig_values=[complex(v) for v in spectrum]
+            point.eig_modes=self._last_solved_modes(len(spectrum))
+            point.eig_settings=self.current_eigen_settings()
+            self._record_mode_observables(point)
             point.eig_value_Re=numpy.real(spectrum[0])
             point.eig_value_Im=numpy.imag(spectrum[0])
             point.stability_source=STABILITY_EIGEN
@@ -1440,10 +1600,18 @@ class BifurcationController:
                 except Exception as e:
                     self.log("Could not return to the previous point: "+repr(e))
 
-    def compute_spectrum_for_branch(self,branch=None)->int:
-        """Fill in the spectrum for every point of a branch that lacks one. Abortable."""
+    def compute_spectrum_for_branch(self,branch=None,force:bool=False)->int:
+        """Compute the spectrum along a branch. Abortable.
+
+        Without ``force`` this takes the points that need it: the ones with no spectrum, and the ones
+        whose spectrum was computed with different settings from the current ones. That second group is
+        the point of spectrum_is_stale() - raising neigen from 4 to 30 used to recompute nothing at all,
+        because every point already "had" a spectrum. ``force`` redoes the whole branch, which is what
+        the explicit Recompute command asks for.
+        """
         b=branch if branch is not None else self._get_current_branch()
-        todo=[p for p in b if p.stability_source!=STABILITY_EIGEN or not p.eig_values]
+        todo=[p for p in b if force or p.stability_source!=STABILITY_EIGEN or not p.eig_values
+              or self.spectrum_is_stale(p)]
         done=0
         for i,p in enumerate(todo):
             if self._abort_requested:
@@ -1451,7 +1619,7 @@ class BifurcationController:
                 self.log("Spectrum back-fill aborted after {:d} of {:d} points".format(done,len(todo)))
                 break
             self._status("EIGENVALUES {:d}/{:d}".format(i+1,len(todo)))
-            if self.compute_spectrum(p):
+            if self.compute_spectrum(p,force=force):
                 done+=1
         self.propagate_stability(b)
         self.log("Computed the spectrum at {:d} of {:d} points".format(done,len(todo)))
@@ -1754,9 +1922,11 @@ class BifurcationController:
         elif locus:
             self._add_locus_state()
         else:
-            self.problem.solve_eigenproblem(self.neigen,self.shift)
+            self.problem.solve_eigenproblem(self.neigen,self.shift,
+                                            **(self._mode_kwargs() if self.compute_modes_during_sweep else {}))
             self._add_current_state()
 
+        self._adapt_after_step()
         self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point())
         self._last_ds=ds
         self._update_tangents()
@@ -1765,11 +1935,269 @@ class BifurcationController:
 
         return ds
 
+    def scan_stripe(self,point=None)->bool:
+        """Find every eigenvalue in the stripe |Re|<stripe_re, |Im|<stripe_im at one point.
+
+        A shift-invert solve returns the eigenvalues nearest the shift, so a Hopf pair far up the
+        imaginary axis is simply not in the answer. This asks the other question - everything inside a
+        region - which is what the contour method is for.
+
+        Only the SLEPc solver can do it, and only against a complex PETSc build. Merging (the default)
+        keeps whatever the point already had and adds what the scan found, which is the useful
+        combination: the shift-invert spectrum plus the pairs it missed.
+        """
+        point=point if point is not None else self.current_point
+        if point is None:
+            return False
+        solver=self.problem.get_eigen_solver()
+        if not hasattr(solver,"set_eigenvalue_region"):
+            self.log("The stripe scan needs the SLEPc eigensolver (problem.set_eigen_solver('slepc')); "
+                     "the current one is "+type(solver).__name__)
+            return False
+        restore=self.current_point
+        try:
+            self._status("SCANNING THE STRIPE")
+            if restore is not point:
+                self.load_pt(point)
+            solver.set_eigenvalue_region(-abs(self.stripe_re),abs(self.stripe_re),
+                                         -abs(self.stripe_im),abs(self.stripe_im))
+            try:
+                found,modes=self._solve_spectrum(neigen=max(1,int(self.stripe_max)))
+            finally:
+                # Always put the solver back, or every later eigensolve silently becomes a region scan.
+                solver.eigenvalue_region=None
+            self.log("Stripe |Re|<{:g}, |Im|<{:g}: {:d} eigenvalue{:s}".format(
+                self.stripe_re,self.stripe_im,len(found),"" if len(found)==1 else "s"))
+            if len(found)>=int(self.stripe_max):
+                self.log("That is the cap ({:d}); the stripe may hold more - raise it to be sure"
+                         .format(int(self.stripe_max)))
+            self._store_spectrum(point,found,modes,merge=self.stripe_merge)
+            return True
+        except Exception as e:
+            self.log("The stripe scan failed:",repr(e))
+            return False
+        finally:
+            if restore is not None and restore is not point:
+                try:
+                    self.load_pt(restore)
+                except Exception as e:
+                    self.log("Could not return to the previous point: "+repr(e))
+
+    def scan_stripe_for_branch(self,branch=None)->int:
+        """Scan the stripe at every point of a branch. Abortable."""
+        b=branch if branch is not None else self._get_current_branch()
+        done=0
+        for i,p in enumerate(b):
+            if self._abort_requested:
+                self._abort_requested=False
+                self.log("Stripe scan aborted after {:d} of {:d} points".format(done,len(b)))
+                break
+            self._status("STRIPE {:d}/{:d}".format(i+1,len(b)))
+            if self.scan_stripe(p):
+                done+=1
+        self.propagate_stability(b)
+        self.log("Scanned the stripe at {:d} of {:d} points".format(done,len(b)))
+        self._changed()
+        return done
+
+    def _store_spectrum(self,point,values,modes,merge:bool):
+        """Put a computed spectrum on a point, optionally merging it with what is already there.
+
+        Merging concatenates and drops duplicates: a region scan and a shift-invert solve overlap near
+        the shift, and the same eigenvalue arriving twice would be counted twice by the unstable count.
+        The result is re-sorted by descending real part, because "the leading eigenvalue" and the
+        located-bifurcation test both read the first entry.
+        """
+        vals=[complex(v) for v in values]
+        mods=list(modes) if modes is not None else None
+        if merge and point.eig_values:
+            old_modes=point.eig_modes if point.eig_modes is not None else [0.0]*len(point.eig_values)
+            new_modes=mods if mods is not None else [0.0]*len(vals)
+            allv=list(point.eig_values)+vals
+            allm=list(old_modes)+list(new_modes)
+            keptv:list[complex]=[]
+            keptm:list[float]=[]
+            for v,m in zip(allv,allm):
+                scale=max(1.0,abs(v))
+                if any(mm==m and abs(v-kv)<=1e-8*scale for kv,mm in zip(keptv,keptm)):
+                    continue        # the same eigenvalue of the same mode, found by both methods
+                keptv.append(v)
+                keptm.append(m)
+            vals,mods=keptv,(keptm if (mods is not None or point.eig_modes is not None) else None)
+        order=sorted(range(len(vals)),key=lambda i: -numpy.real(vals[i]))
+        point.eig_values=[vals[i] for i in order]
+        point.eig_modes=[mods[i] for i in order] if mods is not None else None
+        if point.eig_values:
+            point.eig_value_Re=numpy.real(point.eig_values[0])
+            point.eig_value_Im=numpy.imag(point.eig_values[0])
+        point.stability_source=STABILITY_EIGEN
+        point.unstable_count=point.measured_unstable_count()
+        point.eig_settings=self.current_eigen_settings()
+        self._record_mode_observables(point)
+
+    def _adapt_after_step(self):
+        """Remesh and/or adapt after an arclength step, per adapt_policy. Off by default.
+
+        "when_needed" hands the decision to Problem.remesh_handler_during_continuation, which consults
+        the problem's own remeshing_necessary() and returns False when there is nothing to do - so the
+        RemeshWhen criteria the problem already declares stay in charge. "every_n" forces one.
+
+        The handler carries the continuation tangent across the new mesh itself (through the history
+        slots) and renormalises it, so ds keeps meaning a step length afterwards.
+        """
+        if self.adapt_policy=="off":
+            return False
+        self._steps_since_adapt+=1
+        force=False
+        if self.adapt_policy=="every_n":
+            if self._steps_since_adapt<max(1,int(self.adapt_every_n)):
+                return False
+            force=True
+        did=False
+        try:
+            self._status("REMESHING")
+            did=bool(self.problem.remesh_handler_during_continuation(force=force,
+                                                                    resolve=self.adapt_resolve))
+        except Exception as e:
+            self.log("Remeshing during continuation failed:",repr(e))
+        if self.adapt_spatial>0:
+            try:
+                self._status("ADAPTING")
+                nref=nunref=0
+                for _ in range(int(self.adapt_spatial)):
+                    r,u=self.problem.adapt()
+                    nref+=r
+                    nunref+=u
+                    if r==0 and u==0:
+                        break
+                if nref or nunref:
+                    did=True
+                    # adapt() carries the continuation tangent across the new mesh through the history
+                    # slots and renormalises it, so ds still means a step length afterwards.
+                    if self.adapt_resolve:
+                        self.problem.solve()
+                    self.log("Adapted during continuation: {:d} refined, {:d} unrefined; ndof is now "
+                             "{:d}".format(nref,nunref,self.problem.ndof()))
+            except Exception as e:
+                self.log("Adapting during continuation failed:",repr(e))
+        if did:
+            self._steps_since_adapt=0
+            self._adapt_to_eigenfunction()
+        elif force:
+            self._steps_since_adapt=0
+        return did
+
+    def _adapt_to_eigenfunction(self):
+        """Refine towards an eigenfunction after a remesh, if that was asked for.
+
+        Refused up front rather than several frames into refine_eigenfunction: it renumbers, which pulls
+        the augmented dof vector out from under a bifurcation tracker, and it cannot run distributed.
+        """
+        if not self.adapt_to_eigenfunction:
+            return
+        if self.problem.get_bifurcation_tracking_mode()!="":
+            self.log("Not refining towards an eigenfunction: a bifurcation tracker is active, and "
+                     "adapting would renumber the augmented system out from under it")
+            return
+        if self.problem.is_distributed():
+            self.log("Not refining towards an eigenfunction: not supported on a distributed problem")
+            return
+        try:
+            self._status("ADAPTING TO THE EIGENFUNCTION")
+            self.problem.solve_eigenproblem(max(self.neigen,self.adapt_eigenindex+1),self.shift)
+            self.problem.refine_eigenfunction(eigenindex=self.adapt_eigenindex,
+                                              resolve_neigen=max(self.neigen,1))
+            self.log("Refined towards eigenfunction {:d}; ndof is now {:d}".format(
+                self.adapt_eigenindex,self.problem.ndof()))
+        except Exception as e:
+            self.log("Could not refine towards the eigenfunction:",repr(e))
+
     def step_and_shrink(self):
         """One step, but never let ds grow - the ``*`` command of the old key interface."""
         ds_backup=self._last_ds
         self.step()
         self._last_ds=(-1 if self._last_ds<0 else 1)*min(abs(self._last_ds),abs(ds_backup))
+
+    def _mode_of_eigenvalue(self,index:int)->"tuple[str,float]":
+        """(kind, mode) of one eigenvalue of the spectrum the problem still holds; mode 0 for the base."""
+        kind=self.normal_mode_kind()
+        if not kind:
+            return "",0.0
+        raw=self.problem.get_last_eigenmodes_m() if kind=="m" else self.problem.get_last_eigenmodes_k()
+        if raw is None or index>=len(raw):
+            return kind,0.0
+        return kind,float(raw[index])
+
+    def normal_mode_kind(self)->str:
+        """"m" for azimuthal, "k" for a Cartesian normal mode, "" when the problem has neither.
+
+        Reads Problem.is_normal_mode_stability_set_up(), i.e. whether setup_for_stability_analysis was
+        called with azimuthal_stability or additional_cartesian_mode.
+        """
+        kind=self.problem.is_normal_mode_stability_set_up()
+        if kind=="azimuthal":
+            return "m"
+        if kind=="cartesian":
+            return "k"
+        return ""
+
+    def _mode_kwargs(self)->dict:
+        """The azimuthal_m/normal_mode_k argument for solve_eigenproblem, or nothing.
+
+        The base mode is always included, so a diagram keeps a base-state spectrum whatever else is
+        scanned. Returns {} when there are no modes to scan, which leaves solve_eigenproblem in its
+        ordinary single-mode form and get_last_eigenmodes_* as None.
+        """
+        kind=self.normal_mode_kind()
+        if not kind or not self.normal_modes:
+            return {}
+        if self.on_locus() and self.problem.get_bifurcation_tracking_mode() not in ("azimuthal","cartesian_normal_mode"):
+            # With a fold/Hopf/pitchfork tracker active the m!=0 problems would need the equations
+            # renumbered, which solve_eigenproblem refuses. The base state is still available.
+            return {}
+        if kind=="m":
+            modes=sorted({0}|{int(m) for m in self.normal_modes})
+            return {"azimuthal_m":modes}
+        modes=sorted({0.0}|{float(k) for k in self.normal_modes})
+        return {"normal_mode_k":modes}
+
+    def _solve_spectrum(self,shift=None,neigen=None)->"tuple[list[complex],list[float] | None]":
+        """Solve the eigenproblem, scanning the requested normal modes, as physical rates.
+
+        Returns ``(values, modes)`` with ``modes`` parallel to ``values`` - which is what the problem
+        itself provides: with a list of modes, solve_eigenproblem merges the spectra, sorts them
+        together by descending real part and records the mode of each eigenvalue. ``modes`` is None when
+        only the base state was solved.
+        """
+        kw=self._mode_kwargs()
+        self.problem.solve_eigenproblem(self.neigen if neigen is None else neigen,
+                                        self.shift if shift is None else shift,**kw)
+        values=self._phys_eig(list(self.problem.get_last_eigenvalues()))
+        modes=None
+        if kw:
+            raw=(self.problem.get_last_eigenmodes_m() if "azimuthal_m" in kw
+                 else self.problem.get_last_eigenmodes_k())
+            if raw is not None and len(raw)==len(values):
+                modes=[float(m) for m in raw]
+        return values,modes
+
+    def current_eigen_settings(self)->tuple:
+        """What a spectrum computed right now would be computed with, for the stale check."""
+        kw=self._mode_kwargs()
+        modes=next(iter(kw.values())) if kw else []
+        return eigen_settings(self.neigen,self.shift,modes)
+
+    def spectrum_is_stale(self,point)->bool:
+        """True when a point's spectrum was computed with different settings from the current ones.
+
+        This is what makes raising the eigenvalue count actionable: without it the back-fill skips every
+        point that already has a spectrum, so nothing is recomputed and the extra eigenvalues never
+        appear. A point from before the settings were recorded reports False - it is not KNOWN to be
+        stale, and treating it as stale would recompute whole diagrams on load.
+        """
+        if point is None or point.eig_settings is None:
+            return False
+        return tuple(point.eig_settings)!=self.current_eigen_settings()
 
     def critical_eigenindex(self)->int:
         """Index of the eigenvalue nearest the imaginary axis, i.e. the one about to cross.
@@ -1797,7 +2225,7 @@ class BifurcationController:
             raise RuntimeError("Already following a bifurcation. Leave the locus first "
                                "(Bifurcation -> Leave the locus) to work on an ordinary branch.")
         self._status("BIFURCATION FINDING"+(" (PITCHFORK)" if pitchfork else ""))
-        self.problem.solve_eigenproblem(self.neigen,self.shift)
+        self.problem.solve_eigenproblem(self.neigen,self.shift,**self._mode_kwargs())
         if eigenindex is None:
             eigenindex=self.critical_eigenindex()
         evs=self.problem.get_last_eigenvalues()
@@ -1805,8 +2233,18 @@ class BifurcationController:
             self.log("Tracking eigenvalue {:d} of {:d}: {:.4g}{:+.4g}i{:s}".format(
                 eigenindex,len(evs),numpy.real(evs[eigenindex]),numpy.imag(evs[eigenindex]),
                 "" if eigenindex==0 else "  (not the leading one - this branch is already unstable)"))
-        self.problem.activate_bifurcation_tracking(self._paramname,"pitchfork" if pitchfork else None,
-                                                   eigenvector=eigenindex)
+        # A critical eigenvalue belonging to a normal mode needs the matching tracker: the ordinary
+        # fold/Hopf handlers work on the base state and would converge to something else entirely.
+        kind,mode=self._mode_of_eigenvalue(eigenindex)
+        track_kw:dict={}
+        btype:str | None="pitchfork" if pitchfork else None
+        if mode:
+            btype="azimuthal" if kind=="m" else "cartesian_normal_mode"
+            track_kw={"azimuthal_mode":int(mode)} if kind=="m" else {"cartesian_wavenumber_k":mode}
+            self.log("That eigenvalue belongs to {:s}={:g}, so a {:s} bifurcation is tracked".format(
+                kind,mode,btype))
+        self.problem.activate_bifurcation_tracking(self._paramname,btype,
+                                                   eigenvector=eigenindex,**track_kw)
         self.problem.solve(max_newton_iterations=20)
         self._add_current_state()
         self._update_tangents()

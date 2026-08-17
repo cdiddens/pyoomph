@@ -116,6 +116,9 @@ sqrt(79/39) = 1.42) and left the constraint at 1.40 instead of 1. Measured on Br
 
 Scaling `(dparameter/ds, dU/ds)` by `1/sqrt((dparameter/ds)^2 + theta^2*|dU/ds|^2)` after the read-back
 restores the constraint to 3e-16 and preserves the direction, both components being scaled together.
+`Problem._renormalise_continuation_tangent` does it, and **both** places that restore the tangent call
+it: the adaptation path and `remesh_handler_during_continuation`, which had the same defect and is the
+one the bifurcation GUI's adaptivity setting drives.
 oomph renormalises at the end of every step anyway, so before the fix it healed itself - after one step
 with a 29% wrong stride.
 

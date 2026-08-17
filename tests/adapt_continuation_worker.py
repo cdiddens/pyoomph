@@ -47,7 +47,8 @@ import sys
 import numpy
 
 from pyoomph import Problem, Equations, InitialCondition, DirichletBC
-from pyoomph.expressions import var_and_test, grad, exp, partial_t
+from pyoomph.expressions import var_and_test, var, grad, exp, partial_t
+from pyoomph.equations.generic import IntegralObservables
 from pyoomph.equations.generic import SpatialErrorEstimator
 from pyoomph.meshes.simplemeshes import LineMesh
 
@@ -75,6 +76,9 @@ class Prob(Problem):
         eqs += DirichletBC(u=0) @ "left"
         eqs += DirichletBC(u=0) @ "right"
         eqs += SpatialErrorEstimator(u=1)
+        # The GUI needs at least one observable to pick a y axis from.
+        eqs += IntegralObservables(_area=1, _u_int=var("u"))
+        eqs += IntegralObservables(u_avg=lambda _area, _u_int: _u_int/_area)
         self += eqs @ "domain"
 
 
@@ -89,6 +93,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--inner-product", default="none", choices=["none", "l2", "ndof"])
+    ap.add_argument("--gui-policy", default=None, choices=["off", "when_needed", "every_n"],
+                    help="drive the bifurcation GUI's adapt policy instead of adapting by hand")
     args = ap.parse_args()
 
     with Prob() as problem:
@@ -107,6 +113,35 @@ def main() -> int:
 
         problem.get_global_parameter("lam").value = 1.0
         problem.solve()
+
+        if args.gui_policy is not None:
+            # The GUI path: adaptation is requested through the controller, which calls
+            # Problem.remesh_handler_during_continuation after each step. That handler restores the
+            # continuation tangent from the history slots, and used to do so WITHOUT renormalising it -
+            # the same defect as the plain adapt path - so the invariant below is the real assertion.
+            from pyoomph.utils.bifurcation_gui import BifurcationGUI
+            from pyoomph.utils.bifurcation_gui.controller import _FixedViewLimits
+            gui = BifurcationGUI(problem, "lam")
+            gui.neigen = 1
+            c = gui.controller
+            c.view = _FixedViewLimits(xlim=(0.0, 5.0), ylim=(-1.0, 5.0))
+            c.adapt_policy = args.gui_policy
+            c.adapt_every_n = 2
+            c.start(0.05)
+            ndof0 = problem.ndof()
+            for _ in range(6):
+                c.step()
+            err = invariant_error(problem)
+            print("GUIPOLICY {:s} ndof {:d} -> {:d} invariant {:.3e}".format(
+                args.gui_policy, ndof0, problem.ndof(), err))
+            assert err < 1e-10, "the arclength invariant broke under policy "+args.gui_policy
+            if args.gui_policy == "off":
+                assert problem.ndof() == ndof0, "'off' must not adapt"
+            else:
+                assert problem.ndof() != ndof0, \
+                    "policy '"+args.gui_policy+"' was expected to adapt, but ndof stayed at "+str(ndof0)
+            print("PYOOMPH_WORKER_DONE")
+            return 0
 
         ds = 0.05
         for _ in range(4):

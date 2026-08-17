@@ -234,6 +234,11 @@ class _MeshFileOutput(_BaseNumpyOutput):
 	def __init__(self,mesh:"AnySpatialMesh",ftrunk:str="output",in_subdir:bool=True,file_ext:str="vtu",tesselate_tri:bool=False,write_pvd:bool | None=None,eigenvector:int | list[int] | None=None,eigenmode:"MeshDataEigenModes"="abs",nondimensional:bool=False,hide_lagrangian:bool=True,hide_underscore:bool=True,history_index:int=0,operator:"MeshDataCacheOperatorBase | None"=None,discontinuous:bool=False,add_eigen_to_mesh_positions:bool=True):
 		super().__init__(mesh)
 		self.fname_trunk=ftrunk
+		#: Where this output has been redirected to, RELATIVE to the problem's base output directory,
+		#: or None. _BaseOutputter.change_output_directory is a no-op by default, and this outputter was
+		#: the one kind that never overrode it - so Problem._change_output_directory moved the text and
+		#: ODE outputs but left the VTUs where they were.
+		self._orbit_subdir:str | None=None
 		self.file_ext=file_ext
 		self.in_subdir=in_subdir
 		self.nondimensional=nondimensional
@@ -280,6 +285,15 @@ class _MeshFileOutput(_BaseNumpyOutput):
 				assert isinstance(cll,ET.Element)
 				self.pvdcollection=cll
 
+
+	def change_output_directory(self,newdir:str,eqtree:"EquationTree"):
+		"""Redirect to newdir, stored relative to the problem's base directory - as _TextOutput does."""
+		basedir=self.problem.get_output_directory()
+		if Path(basedir).samefile(newdir):
+			self._orbit_subdir=None
+		else:
+			self._orbit_subdir=str(Path.relative_to(Path(newdir),Path(basedir)))
+			Path(os.path.join(self.problem.get_output_directory(self._orbit_subdir),self.fname_trunk)).mkdir(parents=True,exist_ok=True)
 
 	def write_pvd(self,new_filename:str,all_files:list[str] | None=None):
 		assert self.write_pvd_file is not None
@@ -551,15 +565,26 @@ class _MeshFileOutput(_BaseNumpyOutput):
 			allfiles=[self.fname_trunk + "_{:06d}_{:d}".format(step,i) + "." + self.file_ext for i in contributing_procs]
 		else:
 			fname = self.fname_trunk + "_{:06d}".format(step) + "." + self.file_ext
+		# get_output_directory(self._orbit_subdir), not get_output_directory(): change_output_directory()
+		# redirects an output by storing the new location RELATIVE to the problem's base directory in
+		# _orbit_subdir, which get_filename() honours - but this method builds its own path and used to
+		# join the base directory directly, so a redirected MeshFileOutput kept writing to the old place.
+		# That is what Problem._change_output_directory is for (PeriodicOrbit.output_orbit uses it), so
+		# orbit VTUs were landing on top of the ordinary ones.
+		outdir=self.problem.get_output_directory(self._orbit_subdir)
 		if self.in_subdir:
 			rel_filename = os.path.join(self.fname_trunk, fname)
-			fname = os.path.join(self.problem.get_output_directory(), self.fname_trunk, fname)
+			fname = os.path.join(outdir, self.fname_trunk, fname)
 			if allfiles is not None:
 				for i,f in enumerate(allfiles):
 					allfiles[i] = os.path.join(self.fname_trunk, f)
 		else:
 			rel_filename = fname
-			fname = os.path.join(self.problem.get_output_directory(), fname)
+			fname = os.path.join(outdir, fname)
+		# The directory is only made when the output is set up or redirected; a redirection that happens
+		# between two writes (the bifurcation GUI outputs each tagged point into its own folder) would
+		# otherwise reach meshio.write with no directory to write into.
+		Path(fname).parent.mkdir(parents=True,exist_ok=True)
 
 		#print(mesh)
 		if mesh.nelement()>0:

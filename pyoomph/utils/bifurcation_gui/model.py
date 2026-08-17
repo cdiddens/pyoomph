@@ -75,13 +75,27 @@ def as_axis(spec)->"AxisSpec":
     return (kind,name)
 
 
+def eigen_settings(neigen:int,shift,modes:"Sequence[float] | None")->tuple:
+    """Canonical, JSON-safe record of what a spectrum was computed with.
+
+    Everything is reduced to plain scalars and a tuple, because this is compared for equality to decide
+    whether a point is stale: a tuple written to state.json comes back as a LIST, so comparing the raw
+    values would report every reloaded point as stale. The shift is split into real and imaginary parts
+    for the same reason - json cannot write a complex.
+    """
+    sh=complex(shift) if shift is not None else complex(0.0)
+    return (int(neigen),float(sh.real),float(sh.imag),
+            tuple(float(m) for m in modes) if modes is not None else ())
+
+
 class BifurcationGUISolutionPoint:
     """One computed solution: every global parameter, all observables, the leading eigenvalue and
     the state file it was dumped to."""
 
     def __init__(self,param_value,obs_values,eig_value,statefile,outstep,param_values:dict[str,float] | None=None,
                  eig_values:"Sequence[complex] | None"=None,det_sign:int | None=None,
-                 dparam_ds:float | None=None) -> None:
+                 dparam_ds:float | None=None,eig_modes:"Sequence[float] | None"=None,
+                 eig_settings:"tuple | None"=None) -> None:
         self.param_value=param_value
         #: Every global parameter at this point, not just the continued one. The state dump restores
         #: all of them, so without this the diagram could not say which slice of parameter space it
@@ -106,6 +120,14 @@ class BifurcationGUISolutionPoint:
         #: read from a state file written before it was recorded - which is why this cannot simply be
         #: assumed to start with the leading eigenvalue above.
         self.eig_values:list[complex]=[complex(v) for v in eig_values] if eig_values is not None else []
+        #: Which normal mode each recorded eigenvalue belongs to, parallel to :py:attr:`eig_values`.
+        #: None when only the base state was solved - which is also what the problem reports then, since
+        #: get_last_eigenmodes_m() is None unless a mode list was passed. The kind of mode (azimuthal m
+        #: or Cartesian k) is one per diagram and lives on the controller, not here.
+        self.eig_modes:list[float] | None=[float(m) for m in eig_modes] if eig_modes is not None else None
+        #: (neigen, shift, modes) the spectrum was computed with, so a point can be recognised as stale
+        #: after the eigenvalue count is raised. None for points from before this was recorded.
+        self.eig_settings:tuple | None=tuple(eig_settings) if eig_settings is not None else None
         self.statefile=statefile
         self.outstep=outstep
         self.scoord:float=0
@@ -146,6 +168,13 @@ class BifurcationGUISolutionPoint:
         re_list,im_list=res.get("eig_values_Re"),res.get("eig_values_Im")
         if re_list is not None and im_list is not None:
             inst.eig_values=[complex(r,i) for r,i in zip(re_list,im_list)]
+        modes=res.get("eig_modes")
+        inst.eig_modes=[float(m) for m in modes] if modes is not None else None
+        settings=res.get("eig_settings")
+        # Rebuilt through the canonicaliser, since json gives the nested modes back as a list and a
+        # stale check compares these for equality.
+        inst.eig_settings=(eigen_settings(settings[0],complex(settings[1],settings[2]),settings[3])
+                           if settings is not None else None)
         for k,v in res["tangs"].items():
             inst._tangs[k]=numpy.array(v)
         return inst
@@ -178,16 +207,38 @@ class BifurcationGUISolutionPoint:
             # entry that makes state.json grow with neigen - see the comment in save_all.
             res["eig_values_Re"]=[float(numpy.real(v)) for v in self.eig_values]
             res["eig_values_Im"]=[float(numpy.imag(v)) for v in self.eig_values]
+            if self.eig_modes is not None:
+                res["eig_modes"]=[float(m) for m in self.eig_modes]
+        if self.eig_settings is not None:
+            n,sr,si,modes=self.eig_settings
+            res["eig_settings"]=[n,sr,si,list(modes)]
         res["tangs"]={}
         for k,v in self._tangs.items():
             res["tangs"][k]=list(v)
         return res
 
-    def measured_unstable_count(self)->int:
-        """How many of the recorded eigenvalues have a positive real part."""
-        return sum(1 for v in self.eig_values if numpy.real(v)>0)
+    def eigenvalues_of_mode(self,mode:float | None)->"list[complex]":
+        """The recorded eigenvalues belonging to one normal mode; ``None`` asks for all of them.
 
-    def stability_indicator(self,trust_inferred:bool=True)->float:
+        With no mode scan at this point every eigenvalue IS the base state, so mode 0 returns the whole
+        spectrum rather than nothing.
+        """
+        if mode is None or self.eig_modes is None:
+            return list(self.eig_values)
+        return [v for v,m in zip(self.eig_values,self.eig_modes) if m==mode]
+
+    def measured_unstable_count(self,include_modes:bool=True)->int:
+        """How many recorded eigenvalues have a positive real part.
+
+        With ``include_modes=False`` only the base mode counts, i.e. the answer the diagram gave before
+        normal modes could be computed at all. It is a real distinction and not a display detail: an
+        axisymmetric state can be perfectly stable to m=0 and unstable to m=1, which is exactly what a
+        polygonal hydraulic jump is.
+        """
+        values=self.eig_values if (include_modes or self.eig_modes is None) else self.eigenvalues_of_mode(0.0)
+        return sum(1 for v in values if numpy.real(v)>0)
+
+    def stability_indicator(self,trust_inferred:bool=True,include_modes:bool=True)->float:
         """A signed number the branch segmentation can read: <0 stable, >0 unstable, 0 a bifurcation.
 
         For a point where an eigenproblem was solved this IS the leading real part, so an ordinary
@@ -199,7 +250,10 @@ class BifurcationGUISolutionPoint:
             return 0.0          # a LOCATED bifurcation: the boundary itself
         if self.stability_source==STABILITY_EIGEN:
             # The count, when it is known, rather than the leading real part: they agree while the
-            # spectrum is sorted by descending real part, but the count says what it means.
+            # spectrum is sorted by descending real part, but the count says what it means. With a mode
+            # scan the stored count is the all-mode one, so restricting to the base mode has to recount.
+            if not include_modes and self.eig_modes is not None:
+                return 1.0 if self.measured_unstable_count(include_modes=False)>0 else -1.0
             if self.unstable_count is not None:
                 return 1.0 if self.unstable_count>0 else -1.0
             return float(self.eig_value_Re)
@@ -409,10 +463,12 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
             res.append(p.get_coordinate(yspec,xspec=xspec))
         return numpy.array(res)
 
-    def smooth_branch_stab_list(self,yspec,subsampling=10,xspec=None,trust_inferred:bool=True):
+    def smooth_branch_stab_list(self,yspec,subsampling=10,xspec=None,trust_inferred:bool=True,
+                                include_modes:bool=True):
         """Like :py:meth:`to_branch_stab_list`, with each segment resampled through a spline."""
         if len(self)<=1:
-            return self.to_branch_stab_list(yspec,xspec=xspec,trust_inferred=trust_inferred)
+            return self.to_branch_stab_list(yspec,xspec=xspec,trust_inferred=trust_inferred,
+                                            include_modes=include_modes)
         s=[p.scoord for p in self]
         # One spline per column, so a list of y specs (the all-observables export) works exactly as
         # a single one does. The previous version special-cased that into a list of splines it could
@@ -424,7 +480,8 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         yis=[UnivariateSpline(s,[p.value_of(sp) for p in self],s=0,k=order) for sp in yspecs]
         eigRei=UnivariateSpline(s,[p.eig_value_Re for p in self],s=0,k=order)
         eigImi=UnivariateSpline(s,[p.eig_value_Im for p in self],s=0,k=order)
-        segs,stabs=self.to_branch_stab_list(yspec,xspec=xspec,trust_inferred=trust_inferred)
+        segs,stabs=self.to_branch_stab_list(yspec,xspec=xspec,trust_inferred=trust_inferred,
+                                            include_modes=include_modes)
         smoothsegs=[]
         for seg in segs:
             if len(seg)==1:
@@ -448,7 +505,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         return smoothsegs,stabs
 
 
-    def to_branch_stab_list(self,yspec,xspec=None,trust_inferred:bool=True):
+    def to_branch_stab_list(self,yspec,xspec=None,trust_inferred:bool=True,include_modes:bool=True):
         """Split the branch into segments of constant stability.
 
         Returns ``(segments, stabilities)``; each segment is an array of
@@ -462,7 +519,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         # known. For a branch where every point has a spectrum this returns exactly eig_value_Re, so the
         # behaviour of an ordinary diagram is unchanged.
         def sv(p):
-            return p.stability_indicator(trust_inferred)
+            return p.stability_indicator(trust_inferred,include_modes)
         def unknown(v):
             return v!=v          # NaN
         res=[]

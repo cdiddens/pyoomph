@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
 import os,json
+from pathlib import Path
 
 
 import matplotlib
@@ -2430,6 +2431,9 @@ class MatplotlibPlotter(BasePlotter):
         #: ``None`` means "do not write a file at all", which _after_plot has always honoured - the
         #: annotation only records what the guard there already implied.
         self.file_trunk:str | None=filetrunk
+        #: Set by _change_output_directory: an absolute directory to write into instead of the
+        #: problem's own output directory, or None.
+        self._redirect_dir:str | None=None
         #: File extension to save the plot. Can also be a list for multiple simultaneous file formats
         self.file_ext=fileext
         #: Size of the plot in pixels
@@ -2496,12 +2500,27 @@ class MatplotlibPlotter(BasePlotter):
             return self._range_objects[key]
         
     def _change_output_directory(self,odir:str):
-        raise RuntimeError("Cannot change output directory for MatplotlibPlotter yet")
+        """Redirect this plotter's images, stored RELATIVE to the problem's base output directory.
+
+        Same mechanism the file outputs use: save() joins the base directory afresh on every call, so
+        keeping a relative subdirectory here is enough and the base is never moved. Refusing outright
+        made Problem._change_output_directory unusable on any problem carrying a plotter - which is
+        every problem the bifurcation GUI is interesting on, and the reason outputting a tagged point
+        died.
+        """
+        # The directory is kept as given rather than relative to the problem's base, because a plotter
+        # is not necessarily bound to its problem yet when this is called - get_problem() asserts.
+        self._redirect_dir=odir
+
+    def _plot_base_directory(self)->str:
+        """Where this plotter's files go, honouring a redirection."""
+        redirect=getattr(self,"_redirect_dir",None)
+        return redirect if redirect is not None else self.get_problem().get_output_directory()
 
     def save(self,fname:str | list[str] | None=None):
         if self._has_invalid_triangulation:
             return
-        pdir=os.path.join(self.get_problem().get_output_directory(),self._output_dir)
+        pdir=os.path.join(self._plot_base_directory(),self._output_dir)
         if fname is None:
             if self.file_trunk is None:
                 raise RuntimeError("Cannot save this plot: file_trunk is None, i.e. this plotter is "

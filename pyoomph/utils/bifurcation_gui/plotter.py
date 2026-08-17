@@ -210,10 +210,12 @@ class BifurcationDiagramPlotter:
 
             if controller.interpolated_splines:
                 segs,stabs=b.smooth_branch_stab_list(yaxis,xspec=xaxis,
-                                                     trust_inferred=controller.trust_inferred_stability)
+                                                     trust_inferred=controller.trust_inferred_stability,
+                                                     include_modes=controller.count_normal_modes_in_stability)
             else:
                 segs,stabs=b.to_branch_stab_list(yaxis,xspec=xaxis,
-                                                 trust_inferred=controller.trust_inferred_stability)
+                                                 trust_inferred=controller.trust_inferred_stability,
+                                                 include_modes=controller.count_normal_modes_in_stability)
 
             for seg,stab in zip(segs,stabs):
                 if stab == True:
