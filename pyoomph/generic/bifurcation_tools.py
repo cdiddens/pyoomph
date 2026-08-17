@@ -1102,15 +1102,29 @@ class NormalModeBifurcationTracker(_NormalModeBifurcationTrackerBase):
                     return numpy.hstack([R,JR@Vr,numpy.dot(Vr,Vr if self.nonlinear_length_constraint else self.V0)-self.eigenscale*(self.eigenscale if self.nonlinear_length_constraint else 1)])                                
             else:
                 assert dparameter is None, "dparameter not supported for require_jacobian=True"
-                R,J,JR,HJVr,dJRdP=self.start_multiassembly().R().J().J(self.real_contribution).dJdU(Vr).dJdp(self.parameter).assemble()
+                # Four things were wrong here, and none of them could show up until a problem reached
+                # this branch at all -- which needs a STATIONARY neutral mode AND no imaginary
+                # contribution, i.e. a scalar-only normal-mode problem. Anything with a vector field
+                # takes the has_imag branch below, which had none of these.
+                #  - dR/dparameter was neither assembled nor placed, so the base rows carried no
+                #    parameter column at all and Newton could not move the parameter;
+                #  - Raug carried the MATRIX JR instead of JR@Vr, which makes numpy.hstack produce an
+                #    object array and Problem.get_custom_residuals_jacobian assert;
+                #  - the Hessian and dJ/dp were asked of the BASE residual, but the row they
+                #    differentiate is J_real*V, so both have to be the real contribution's (the
+                #    dparameter branch above already gets this right);
+                #  - dJ_real/dp was patched like a Jacobian, which puts a 1 on the diagonal of every
+                #    forced-zero eigen row. That row is the equation V_j=0, whose parameter
+                #    derivative is zero, so the derivative goes through the M slot instead.
+                R,J,dRdp,JR,HJVr,dJRdP=self.start_multiassembly().R().J().dRdp(self.parameter).J(self.real_contribution).dJdU(Vr,self.real_contribution).dJdp(self.parameter,self.real_contribution).assemble()
                 J,=self.patch_matrices(eigen=False,J=J)
-                R,=self.patch_residuals(eigen=False,R=[R])
-                JR,dJRdP=self.patch_matrices(eigen=True,J=[JR,dJRdP])
+                R,dRdp=self.patch_residuals(eigen=False,R=[R,dRdp])
+                JR,dJRdP=self.patch_matrices(eigen=True,J=[JR],M=[dJRdP])
                 col=lambda C:self.as_matrix_column(C)
-                row=lambda R:self.as_matrix_row(R)                                
-                Raug=numpy.hstack([R,JR,numpy.dot(Vr,Vr if self.nonlinear_length_constraint else self.V0)-self.eigenscale*(self.eigenscale if self.nonlinear_length_constraint else 1)])                                 #type:ignore
+                row=lambda R:self.as_matrix_row(R)
+                Raug=numpy.hstack([R,JR@Vr,numpy.dot(Vr,Vr if self.nonlinear_length_constraint else self.V0)-self.eigenscale*(self.eigenscale if self.nonlinear_length_constraint else 1)])                                 #type:ignore
                 Jaug=scipy.sparse.block_array(
-                    [[J,None,None],
+                    [[J,None,col(dRdp)],
                      [HJVr,JR,col(dJRdP@Vr)],
                      [None,row(2*Vr if nl else self.V0),None]]).tocsr()
                 return Raug,Jaug #type:ignore
