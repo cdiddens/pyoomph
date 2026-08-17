@@ -333,6 +333,100 @@ def test_bifurcation_gui_controller(tmp_path):
         with pytest.raises(ValueError):
             c.set_continuation_parameter("nope")
 
+        # ------------------------------------------------- following the fold through parameter space
+        # mu is adjusted to hold the fold while b is stepped, which traces mu_c(b) = -b^2/4.
+        c.set_continuation_parameter("mu")
+        regular = next(p for p in c.branches[-1] if p.eig_value_Re != 0)
+        c.select_point(c.branches[-1], regular)
+        c.goto_selected_point()
+        c.ds = -0.05
+        c.locate_bifurcation()
+        assert c.current_point is not None and c.current_point.eig_value_Re == 0
+
+        c.start_locus(tracked="mu", continue_in="b")
+        locus = c.branches[-1]
+        assert locus.kind == "locus"
+        assert (locus.tracked_parameter, locus.continuation_parameter) == ("mu", "b")
+        assert locus.bifurcation_type == "fold"
+        assert c.on_locus()
+        # A locus varies both parameters, so it is drawn in their plane.
+        assert (c.x_axis, c.y_axis) == (parameter_axis("b"), parameter_axis("mu"))
+        assert problem.get_bifurcation_tracking_mode() == "fold"
+
+        c.view = _FixedViewLimits(xlim=(-4.0, 4.0), ylim=(-6.0, 6.0))
+        c.ds = 0.2
+        for _ in range(5):
+            c.step()
+        assert len(locus) == 6
+        for p in locus:
+            b_here = p.param_values["b"]
+            mu_c, u_c = fold_location(b_here)
+            # The whole point: every locus point is the analytic fold for its own b.
+            assert numpy.isclose(p.param_values["mu"], mu_c, atol=1e-6), (b_here, p.param_values)
+            assert numpy.isclose(p.obs_values["ode/u"], u_c, atol=1e-4)
+            # Tracked continuation reports the critical eigenvalue as the synthetic 0 + i*omega; a
+            # real eigensolve is impossible here (solve_eigenproblem refuses while tracking is on).
+            assert p.eig_value_Re == 0
+        assert len({round(p.param_values["b"], 6) for p in locus}) == len(locus), "b really moved"
+        # No normal form is computed per locus point even with classification on: the type is known.
+        assert all(p.bifurcation_info is None for p in locus)
+
+        # ------------------------------------------------- the invariant: tracking follows the branch
+        solution_pt = c.branches[0][0]
+        c.load_pt(solution_pt)
+        assert problem.get_bifurcation_tracking_mode() == "", "an ordinary branch must not be tracked"
+        c.load_pt(locus[2])
+        assert problem.get_bifurcation_tracking_mode() == "fold", "a locus branch must be tracked"
+        assert c.current_branch is locus and c._paramname == "b"
+        # Resuming the locus after that round trip must still land on the analytic curve.
+        c.step()
+        p = c.current_point
+        assert p is not None
+        assert numpy.isclose(p.param_values["mu"], fold_location(p.param_values["b"])[0], atol=1e-6)
+
+        # locating or switching a bifurcation makes no sense while following one
+        with pytest.raises(RuntimeError):
+            c.locate_bifurcation()
+        with pytest.raises(RuntimeError):
+            c.branch_switch()
+        with pytest.raises(ValueError):
+            c.start_locus(tracked="b", continue_in="b")
+
+        # ------------------------------------------------- dropping back off the locus
+        b_at_exit = problem.get_global_parameter("b").value
+        n_branches = len(c.branches)
+        c.leave_locus()
+        assert len(c.branches) == n_branches + 1
+        assert not c.on_locus()
+        assert problem.get_bifurcation_tracking_mode() == "", "tracking is off again"
+        assert c._paramname == "mu", "back to an ordinary continuation in mu"
+        assert numpy.isclose(problem.get_global_parameter("b").value, b_at_exit), "b stays where it was"
+        left = c.current_point
+        assert left is not None
+        u = left.obs_values["ode/u"]
+        # A regular point of the ordinary branch at that b, not the fold itself.
+        assert numpy.isclose(left.param_values["mu"], u * u + b_at_exit * u, atol=1e-7)
+        assert left.eig_value_Re != 0
+        assert not numpy.isclose(u, fold_location(b_at_exit)[1], atol=1e-6)
+        c.step()   # and ordinary continuation works from there
+
+        # ------------------------------------------------- a locus exports in its OWN coordinates
+        # Not in whatever the window is showing: the first two columns must be the parameter pair,
+        # i.e. the curve the tutorials write by hand as "V  Bo_c".
+        outdir = c.output_curves()
+        locus_headers = []
+        for root, _dirs, files in os.walk(outdir):
+            for f in files:
+                if not f.endswith(".txt"):
+                    continue
+                text = open(os.path.join(root, f)).read()
+                if "locus of fold bifurcations" in text:
+                    locus_headers.append(text.splitlines()[0])
+        assert locus_headers, "the locus branch must be exported"
+        for h in locus_headers:
+            cols = h.lstrip("# ").split()
+            assert cols[:2] == ["b", "mu"], h
+
         # ---------------------------------------------------------- abort flag
         c.request_abort()
         assert c.abort_requested

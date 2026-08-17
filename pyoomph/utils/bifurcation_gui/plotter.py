@@ -134,14 +134,32 @@ class BifurcationDiagramPlotter:
             except Exception:
                 pass
 
-    def _draw_faint_branch(self,controller,branch,xaxis,yaxis):
+    def _draw_faint_branch(self,branch,xaxis,yaxis):
         """A branch from another slice: one washed-out line, no markers, no stability coding.
 
         Deliberately featureless - it is context, not data being read off.
         """
-        segs,_stabs=branch.to_branch_stab_list(yaxis,xspec=xaxis)
+        segs,_=branch.to_branch_stab_list(yaxis,xspec=xaxis)
         for seg in segs:
             self.axes.plot(seg[:,0],seg[:,1],linestyle="-",color="0.82",linewidth=0.8,zorder=0)
+
+    def _draw_locus_branch(self,controller,branch,xaxis,yaxis,current=False):
+        """A curve of bifurcation points: one line plus a marker per computed point.
+
+        Drawn in the same brown the individual bifurcations use, so a fold curve reads as "these are
+        all folds" rather than as another solution branch.
+        """
+        pts=numpy.array([p.get_coordinate(yaxis,xspec=xaxis) for p in branch],ndmin=2)
+        if len(pts)==0:
+            return
+        self.axes.plot(pts[:,0],pts[:,1],linestyle="-",color="brown",
+                       linewidth=2.0 if current else 1.0,alpha=1.0 if current else 0.55)
+        self.axes.plot(pts[:,0],pts[:,1],marker="o",markersize=4 if current else 3,
+                       linestyle="none",color="brown",alpha=1.0 if current else 0.55)
+        for p in branch:
+            if p.tag>=0:
+                pc=p.get_coordinate(yaxis,xspec=xaxis)
+                self.axes.annotate(str(p.tag),(pc[0],pc[1]))
 
     def draw(self,controller,infotext:str | None=None):
         """Redraw the whole diagram. ``infotext`` is the centred "busy" box."""
@@ -179,7 +197,14 @@ class BifurcationDiagramPlotter:
             if not on_slice:
                 if not self.show_other_slices:
                     continue
-                self._draw_faint_branch(controller,b,xaxis,yaxis)
+                self._draw_faint_branch(b,xaxis,yaxis)
+                continue
+            # Every point of a locus IS the bifurcation, so the stability segmentation has nothing to
+            # say there: it would see a zero real part at every point and alternate the line style
+            # from one point to the next. One curve in the bifurcation colour instead.
+            if b.kind=="locus":
+                self._draw_locus_branch(controller,b,xaxis,yaxis,
+                                        current=b is controller.current_branch)
                 continue
             color="red" if b == controller.current_branch else "grey"
 

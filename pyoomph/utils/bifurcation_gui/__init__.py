@@ -152,6 +152,19 @@ class BifurcationGUI:
         """Move a parameter that is being held fixed, which begins a new slice."""
         self.controller.set_fixed_parameter(name,value)
 
+    def start_locus(self,tracked:str,continue_in:str,bifurcation_type:str | None=None):
+        """From a located bifurcation, follow it through parameter space.
+
+        ``tracked`` is adjusted to keep the bifurcation condition satisfied while ``continue_in`` is
+        stepped, tracing the locus in the (``continue_in``, ``tracked``) plane - the interactive
+        equivalent of the ``Bo_c(V)`` and ``gamma_c(delta)`` curves the tutorials build by hand.
+        """
+        self.controller.start_locus(tracked,continue_in,bifurcation_type)
+
+    def leave_locus(self,continue_in:str | None=None,offset:float | None=None):
+        """Step off a bifurcation locus onto an ordinary branch through it."""
+        self.controller.leave_locus(continue_in,offset)
+
     def describe_slice(self)->str:
         """The parameters the current diagram holds fixed, e.g. ``"b = 0.3"``.
 

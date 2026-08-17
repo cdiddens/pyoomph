@@ -148,6 +148,13 @@ class BifurcationTkApp:
           enabled_when=at_bifurcation,tooltip="Only available at a classified bifurcation")
         A("transient_leave_0","Leave branch transiently (mode 0)",lambda: c.transient_leave_branch(0),is_solver_task=True)
         A("transient_leave_1","Leave branch transiently (mode 1)",lambda: c.transient_leave_branch(1),is_solver_task=True)
+        A("start_locus","Follow this bifurcation in...",self._dialog_start_locus,is_solver_task=True,
+          enabled_when=lambda: at_bifurcation() and not c.on_locus(),
+          tooltip="Adjust the current parameter to hold the bifurcation while continuing in another, "
+                  "tracing its locus in the plane of the two")
+        A("leave_locus","Leave the locus and continue in...",self._dialog_leave_locus,is_solver_task=True,
+          enabled_when=lambda: c.on_locus(),
+          tooltip="Step off the bifurcation onto an ordinary branch through it")
         A("eigen_settings","Eigenvalue settings...",self._dialog_eigen)
 
         # --- points
@@ -271,6 +278,10 @@ class BifurcationTkApp:
         self._add_menu_item(m,"locate_bifurcation")
         self._add_menu_item(m,"locate_pitchfork")
         self._add_menu_item(m,"branch_switch")
+        m.add_separator()
+        m.add_separator()
+        self._add_menu_item(m,"start_locus")
+        self._add_menu_item(m,"leave_locus")
         m.add_separator()
         self._add_menu_item(m,"transient_leave_0")
         self._add_menu_item(m,"transient_leave_1")
@@ -1051,6 +1062,50 @@ class BifurcationTkApp:
                                   initialvalue=self.controller.ds)
         if val is not None:
             self.controller.ds=val
+
+    def _choose_parameter(self,title:str,prompt:str,exclude=())->str | None:
+        """Small modal list of the problem's parameters. simpledialog has no chooser of its own."""
+        names=[n for n in self.controller.all_parameter_names() if n not in exclude]
+        if not names:
+            messagebox.showinfo(title,"No other global parameter is available.",parent=self.root)
+            return None
+        dlg=tk.Toplevel(self.root)
+        dlg.title(title)
+        ttk.Label(dlg,text=prompt,padding=8,wraplength=340,justify=tk.LEFT).pack(side=tk.TOP,anchor=tk.W)
+        var=tk.StringVar(value=names[0])
+        box=ttk.Combobox(dlg,state="readonly",values=names,textvariable=var,width=28)
+        box.pack(side=tk.TOP,padx=8,pady=4)
+        chosen:list[str]=[]
+        row=ttk.Frame(dlg,padding=8)
+        row.pack(side=tk.BOTTOM,fill=tk.X)
+        ttk.Button(row,text="OK",command=lambda: (chosen.append(var.get()),dlg.destroy())).pack(side=tk.RIGHT)
+        ttk.Button(row,text="Cancel",command=dlg.destroy).pack(side=tk.RIGHT,padx=4)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        self.root.wait_window(dlg)
+        return chosen[0] if chosen else None
+
+    def _dialog_start_locus(self):
+        c=self.controller
+        tracked=c._get_paramname_str()
+        other=self._choose_parameter(
+            "Follow this bifurcation",
+            "'"+tracked+"' will be adjusted to hold the bifurcation.\nWhich parameter should be "
+            "continued along it?",exclude=(tracked,))
+        if other is not None:
+            c.start_locus(tracked=tracked,continue_in=other)
+
+    def _dialog_leave_locus(self):
+        c=self.controller
+        branch=c.current_branch
+        tracked=branch.tracked_parameter if branch is not None else None
+        target=self._choose_parameter(
+            "Leave the locus",
+            "Step off the bifurcation onto an ordinary branch at this point.\nWhich parameter should "
+            "be continued afterwards?")
+        if target is not None:
+            c.leave_locus(continue_in=target)
+        _=tracked
 
     def _dialog_eigen(self):
         n=simpledialog.askinteger("Eigenvalue settings","Number of eigenvalues to compute:",

@@ -52,6 +52,22 @@ import glob
 import shutil
 
 
+#: Bifurcation types that can be tracked, hence also continued as a locus. Mirrors the Literal that
+#: Problem.activate_bifurcation_tracking accepts; kept as data so the GUI can offer and validate it.
+TRACKABLE_BIFURCATION_TYPES=("fold","hopf","pitchfork","azimuthal","cartesian_normal_mode",
+                             "real","complex","normal_mode")
+
+
+def _as_tracking_type(value:str | None):
+    """Narrow a recorded/user-supplied type string to what activate_bifurcation_tracking accepts."""
+    if value is None or value=="":
+        return None
+    if value not in TRACKABLE_BIFURCATION_TYPES:
+        raise ValueError("'"+str(value)+"' is not a trackable bifurcation type; expected one of "+
+                         ", ".join(TRACKABLE_BIFURCATION_TYPES))
+    return cast(Any,value)
+
+
 #: Version stamped into state.json. 1 is implicit for files written before the slice (which
 #: parameter was continued, and what the others were held at) was recorded at all.
 STATE_VERSION=2
@@ -490,6 +506,156 @@ class BifurcationController:
         self.log("Moved "+name+" to",value,"- this is a new slice, so a new branch was started")
         self._changed()
 
+    # ------------------------------------------------------------------ bifurcation loci
+
+    #: Fraction of the parameter's own magnitude used as the first offset when stepping off a fold.
+    leave_locus_offset=0.05
+
+    def on_locus(self)->bool:
+        return self.current_branch is not None and self.current_branch.kind=="locus"
+
+    def _branch_of(self,pt)->"BifurcationGUISolutionBranch | None":
+        for b in self.branches:
+            if pt in b:
+                return b
+        return None
+
+    def _sync_tracking_to(self,branch:"BifurcationGUISolutionBranch | None"):
+        """Make the problem's bifurcation tracking agree with the branch we are on.
+
+        This is the invariant the whole feature rests on: continuing an ordinary branch with a stale
+        tracker active, or a locus with none, both silently compute something else entirely. Only
+        this method and the branch-opening calls are allowed to change the tracking state.
+        """
+        want_locus=branch is not None and branch.kind=="locus"
+        active=self.problem.get_bifurcation_tracking_mode()!=""
+        if want_locus:
+            assert branch is not None
+            if branch.tracked_parameter is None:
+                raise RuntimeError("Locus branch has no tracked parameter recorded")
+            if active:
+                self.problem.deactivate_bifurcation_tracking()
+            evs=self.problem.get_last_eigenvectors()
+            guess=evs[0] if evs is not None and len(evs)>0 else None
+            self.problem.activate_bifurcation_tracking(branch.tracked_parameter,
+                                                       _as_tracking_type(branch.bifurcation_type),
+                                                       eigenvector=guess)
+            self.problem.reset_arc_length_parameters()
+        elif active:
+            self.problem.deactivate_bifurcation_tracking()
+            self.problem.reset_arc_length_parameters()
+
+    def start_locus(self,tracked:str,continue_in:str,bifurcation_type:str | None=None):
+        """From a bifurcation, follow it through parameter space.
+
+        ``tracked`` is adjusted to keep the bifurcation condition satisfied while ``continue_in`` is
+        the one being stepped, which traces the locus of the bifurcation in the (continue_in, tracked)
+        plane - the fold curve Bo_c(V) of the hanging-droplet tutorial, for instance.
+        """
+        cp=self.current_point
+        if cp is None or cp.eig_value_Re!=0:
+            raise RuntimeError("Continuing a bifurcation has to start AT one. Locate a bifurcation first.")
+        names=self.all_parameter_names()
+        for n in (tracked,continue_in):
+            if n not in names:
+                raise ValueError("'"+str(n)+"' is not a global parameter of this problem")
+        if tracked==continue_in:
+            raise ValueError("The tracked and the continued parameter must differ - "
+                             "one is adjusted to hold the bifurcation, the other is stepped")
+        if self.problem.is_distributed():
+            raise RuntimeError("Continuing a bifurcation needs history dofs, which are not available "
+                               "on a distributed (--distribute) problem. Locating one does work there.")
+
+        self._status("STARTING BIFURCATION LOCUS")
+        evs=self.problem.get_last_eigenvectors()
+        guess=evs[0] if evs is not None and len(evs)>0 else None
+        self.problem.activate_bifurcation_tracking(tracked,_as_tracking_type(bifurcation_type),eigenvector=guess)
+        mode=self.problem.get_bifurcation_tracking_mode() or (bifurcation_type or "fold")
+        self.problem.reset_arc_length_parameters()
+
+        self._paramname=continue_in
+        self._tangs={}
+        self._new_branch(kind="locus",tracked_parameter=tracked,bifurcation_type=mode)
+        # Both parameters vary along a locus, so that plane is what it should be drawn in.
+        self._x_axis=parameter_axis(continue_in)
+        self._y_axis=parameter_axis(tracked)
+        # Every point of a locus IS the bifurcation, which is what the synthetic 0 + i*omega that
+        # tracked continuation reports says; recorded rather than re-solved, since solve_eigenproblem
+        # refuses to run while tracking is active.
+        self._add_current_state(eig_value=0+1j*self.problem._get_bifurcation_omega())
+        self.log("Following the "+mode+" in "+tracked+", continuing in "+continue_in)
+        self._changed()
+
+    def leave_locus(self,continue_in:str | None=None,offset:float | None=None):
+        """Drop off the locus onto an ordinary branch through the bifurcation.
+
+        The bifurcation is exactly where the plain Jacobian is singular, so there is no regular
+        tangent for a continuation step to start from - seeding one produces Ds=nan and oomph-lib then
+        retries for ever. Instead the parameter is offset off the bifurcation and a normal Newton
+        solve is done from a guess displaced along the critical eigenvector. Only one side of a fold
+        has solutions and which one is not known in advance, so the candidates are tried in turn.
+        """
+        branch=self.current_branch
+        if branch is None or branch.kind!="locus":
+            raise RuntimeError("Not on a bifurcation locus")
+        tracked=branch.tracked_parameter
+        assert tracked is not None
+        target=continue_in if continue_in is not None else tracked
+        if target not in self.all_parameter_names():
+            raise ValueError("'"+str(target)+"' is not a global parameter of this problem")
+
+        self._status("LEAVING THE LOCUS")
+        evs=self.problem.get_last_eigenvectors()
+        zeta=numpy.real(numpy.asarray(evs[0])) if evs is not None and len(evs)>0 else None
+        if zeta is not None:
+            nrm=numpy.linalg.norm(zeta)
+            zeta=zeta/nrm if nrm>0 else None
+
+        # After deactivating: while tracking is active the dof vector is the augmented one and a copy
+        # taken then cannot be written back to the plain problem.
+        self.problem.deactivate_bifurcation_tracking()
+        self.problem.reset_arc_length_parameters()
+        param=self.problem.get_global_parameter(target)
+        at_bif=float(param.value)
+        dofs_at_bif=numpy.array(self.problem.get_current_dofs()[0]).copy()
+
+        base=offset if offset is not None else self.leave_locus_offset*max(abs(at_bif),1.0)
+        landed=None
+        for delta in (base,base/10,base*10):
+            for sign in (1.0,-1.0):
+                for hsign in ((1.0,-1.0) if zeta is not None else (0.0,)):
+                    param.value=at_bif+sign*delta
+                    guess=dofs_at_bif.copy()
+                    if zeta is not None and hsign!=0.0:
+                        guess=guess+hsign*numpy.sqrt(abs(delta))*zeta
+                    self.problem.set_current_dofs(guess)
+                    try:
+                        self.problem.solve(max_newton_iterations=15)
+                    except Exception:
+                        continue
+                    if numpy.linalg.norm(numpy.array(self.problem.get_current_dofs()[0])-dofs_at_bif)>1e-9:
+                        landed=(sign*delta,hsign)
+                        break
+                if landed: break
+            if landed: break
+        if landed is None:
+            param.value=at_bif
+            self.problem.set_current_dofs(dofs_at_bif)
+            self._sync_tracking_to(branch)
+            raise RuntimeError("Could not step off the bifurcation. Try a different offset "
+                               "(gui.controller.leave_locus_offset) or leave from another locus point.")
+
+        self.problem.solve_eigenproblem(self.neigen,self.shift)
+        self._paramname=target
+        self._tangs={}
+        self._x_axis=None
+        self._y_axis=None
+        self._new_branch()
+        self._add_current_state()
+        self.log("Left the locus at {:s} = {:.6g} (offset {:+.3g}); continuing in {:s}".format(
+            target,at_bif,landed[0],target))
+        self._changed()
+
     def new_branch_from_state(self,statefile):
         self._new_branch()
         self.problem.load_state(statefile,ignore_continuation_data=True,ignore_eigendata=True)
@@ -513,7 +679,9 @@ class BifurcationController:
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step)))
         p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),eig_value,state_file,self._state_step,
                                       param_values=self.current_parameter_values())
-        if p.eig_value_Re==0 and self.classify_bifurcations:
+        # On a locus EVERY point has a zero real part, so classifying them all would run a normal-form
+        # calculation per step for an answer already known: the tracked type.
+        if p.eig_value_Re==0 and self.classify_bifurcations and branch.kind!="locus":
             from ...generic.bifurcation_tools import NormalFormCalculator
             p.bifurcation_info=NormalFormCalculator(self.problem).get_normal_form(self.get_bifurcation_parameter().get_name())
         self.problem.save_state(state_file)
@@ -528,7 +696,14 @@ class BifurcationController:
         # move the user off the slice they were working on. Report it rather than let them believe the
         # value they last typed is still in force.
         before=self.current_parameter_values() if self.problem.is_initialised() else {}
-        self.problem.load_state(pt.statefile,ignore_outstep=True)
+        branch=self._branch_of(pt)
+        # A point saved during tracked continuation has an arclength direction vector of the AUGMENTED
+        # size, which cannot be read into the plain problem ("Mismatching size in the dof direction
+        # vector"). The direction is re-established by _sync_tracking_to below anyway.
+        on_locus=branch is not None and branch.kind=="locus"
+        if self.problem.get_bifurcation_tracking_mode()!="":
+            self.problem.deactivate_bifurcation_tracking()
+        self.problem.load_state(pt.statefile,ignore_outstep=True,ignore_continuation_data=on_locus)
         after=self.current_parameter_values()
         moved={n:(before[n],after[n]) for n in after
                if n in before and n!=self._paramname and not same_parameter_value(before[n],after[n])}
@@ -536,6 +711,11 @@ class BifurcationController:
             self.log("Loading this point moved "+", ".join(
                 "{:s} {:.6g} -> {:.6g}".format(n,a,b) for n,(a,b) in sorted(moved.items())))
         self.current_point=pt
+        if branch is not None:
+            self.current_branch=branch
+            if branch.continuation_parameter is not None:
+                self._paramname=branch.continuation_parameter
+        self._sync_tracking_to(branch)
         if len(self.problem.get_arclength_dof_derivative_vector())==0:
             self.problem.reset_arc_length_parameters()
         self._update_tangents()
@@ -739,17 +919,26 @@ class BifurcationController:
             parts.append("fixed: "+desc)
         return ("\n"+"; ".join(parts)) if parts else ""
 
+    def _export_axes(self,branch:"BifurcationGUISolutionBranch",obs_cols:"list[AxisSpec]"):
+        """The (x, [y...]) a branch should be written out in.
+
+        A locus leads with its two parameters, so the first two columns of the file are the curve the
+        tutorials write by hand (``V``, ``Bo_c``), with the observables after them.
+        """
+        xspec=parameter_axis(branch.continuation_parameter) if branch.continuation_parameter else self.x_axis
+        yspecs=list(obs_cols)
+        if branch.kind=="locus" and branch.tracked_parameter is not None:
+            yspecs=[parameter_axis(branch.tracked_parameter)]+yspecs
+        return xspec,yspecs
+
     def output_curves(self):
         # output_all_observables writes one column per observable. It used to pass None down as the
         # observable name, which reached obs_values[None] and raised - so the flag never worked; the
         # y axis is now simply a list of specs, which the segmentation handles natively.
         if self.output_all_observables:
-            export_y=[observable_axis(n) for n in self._avail_observables]
-            column_names=list(self._avail_observables)
+            obs_cols=[observable_axis(n) for n in self._avail_observables]
         else:
-            export_y=self.y_axis
-            column_names=[self.y_axis[1]]
-        xname=self.x_axis[1]
+            obs_cols=[self.y_axis] if self.y_axis[0]==AXIS_OBSERVABLE else [observable_axis(self._get_current_observable())]
         ddir=self.problem.get_output_directory(self.data_subdir)
         odir=os.path.join(ddir,"output")
 
@@ -767,10 +956,17 @@ class BifurcationController:
             bdir=os.path.join(odir,slice_dirs[b.slice_key()],"branch{:03d}".format(ib))
             Path(bdir).mkdir(parents=True,exist_ok=True)
             header_suffix=self._export_header_suffix(b)
+            # Each branch is exported in ITS OWN natural coordinates, not in whatever the window
+            # happens to be showing: a locus is the curve of its two parameters (V, Bo_c in the
+            # hanging-droplet tutorial), and a solution branch is its own parameter versus the
+            # observables. Exporting everything in the current view produced a locus labelled with
+            # the parameter it does not even vary.
+            export_x,export_y=self._export_axes(b,obs_cols)
+            column_names=[sp[1] for sp in export_y]
             if self.interpolated_splines:
-                smoothedsegs,stabs=b.smooth_branch_stab_list(export_y,100,xspec=self.x_axis)
+                smoothedsegs,stabs=b.smooth_branch_stab_list(export_y,100,xspec=export_x)
             else:
-                smoothedsegs,stabs=b.to_branch_stab_list(export_y,xspec=self.x_axis)
+                smoothedsegs,stabs=b.to_branch_stab_list(export_y,xspec=export_x)
             istab=0
             iunstab=0
             for seg,stab in zip(smoothedsegs,stabs):
@@ -780,25 +976,31 @@ class BifurcationController:
                 else:
                     fn="smoothed_unstable_{:03d}.txt".format(iunstab)
                     iunstab+=1
-                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header="\t".join([xname]+column_names+["ReEigen","ImEigen"])+header_suffix)
+                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header="\t".join([export_x[1]]+column_names+["ReEigen","ImEigen"])+header_suffix)
             nbif=0
             for p in b:
                 if p.eig_value_Re==0:
                     fn="bifurcation_{:03d}.txt".format(nbif)
-                    pc=p.get_coordinate(export_y,with_s=False,with_eigen=True,xspec=self.x_axis)
-                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header="\t".join([xname]+column_names+["ReEigen","ImEigen"])+header_suffix)
+                    pc=p.get_coordinate(export_y,with_s=False,with_eigen=True,xspec=export_x)
+                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header="\t".join([export_x[1]]+column_names+["ReEigen","ImEigen"])+header_suffix)
                     nbif+=1
                 if p.tag>=0 and p.statefile is not None:
                     shutil.copy2(p.statefile, os.path.join(odir,"tag{:02d}.dump".format(p.tag)))
                     fn="tag_{:02d}.txt".format(p.tag)
-                    pc=p.get_coordinate(export_y,with_s=False,xspec=self.x_axis)
-                    numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header="\t".join([xname]+column_names)+self._export_header_suffix(b))
+                    pc=p.get_coordinate(export_y,with_s=False,xspec=export_x)
+                    numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header="\t".join([export_x[1]]+column_names)+self._export_header_suffix(b))
         self.log("Exported curves to",odir)
         return odir
 
     # ------------------------------------------------------------------ tangents
 
     def _update_tangents(self):
+        # On a locus the arclength derivative belongs to the augmented system and the finite-difference
+        # probe below would perturb its eigenvector/parameter entries too. The plotted direction comes
+        # from axis_tangent() instead, which needs no solver internals.
+        if self.on_locus():
+            self._tangs={}
+            return
         FD_eps=1e-6
         cp=self._get_current_point()
         backup,_=self.problem.get_current_dofs()
@@ -835,6 +1037,8 @@ class BifurcationController:
     # ------------------------------------------------------------------ solver commands
 
     def branch_switch(self):
+        if self.on_locus():
+            raise RuntimeError("Branch switching applies to an ordinary branch, not to a bifurcation locus")
         cp=self._get_current_point()
         if cp.eig_value_Re!=0:
             raise RuntimeError("Can only switch branches as bifurcations")
@@ -961,6 +1165,12 @@ class BifurcationController:
             def tangdot(x,y,index):
                 tdot=(x[index]-x[index-1])*(x[index+1]-x[index])+(y[index]-y[index-1])*(y[index+1]-y[index])
                 distdenom=(x[index+1]-x[index-1])**2+(y[index+1]-y[index-1])**2
+                if distdenom<=0:
+                    # The neighbours either side coincide in the plotted coordinates, so there is no
+                    # direction to penalize. This used to divide by zero: the resulting -inf made that
+                    # insertion index win the shortest-length search below unconditionally, i.e. the
+                    # new point was ordered by an arithmetic accident rather than by the metric.
+                    return 0.0
                 return tdot/numpy.sqrt(distdenom)
             for insert_index in range(len(xbase)+1):
                 # Try to insert the new point at each index and measure the length of the branch
@@ -990,12 +1200,31 @@ class BifurcationController:
             newp.scoord=shortest_news
         branch.sort(key=lambda p : p.scoord)
 
+    def axis_tangent(self)->"NPFloatArray | None":
+        """Direction of travel per unit ds, measured in the CURRENT axes.
+
+        Taken from the two most recent points rather than from the solver's arclength derivative,
+        because that derivative is (dparameter, ddofs) of whatever system is active - on a locus the
+        augmented one - and says nothing about a second parameter on the vertical axis. Two points in
+        the plotted coordinates always do.
+        """
+        branch=self.current_branch
+        cp=self.current_point
+        if branch is None or cp is None or len(branch)<2 or cp not in branch:
+            return None
+        i=branch.index(cp)
+        other=branch[i-1] if i>0 else branch[i+1]
+        try:
+            a=cp.get_coordinate(self.y_axis,xspec=self.x_axis)
+            b=other.get_coordinate(self.y_axis,xspec=self.x_axis)
+        except KeyError:
+            return None
+        ds=abs(self._last_ds) or 1.0
+        return numpy.array([(a[0]-b[0])/ds,(a[1]-b[1])/ds])
+
     def _tangent_length(self)->float:
-        """Length of the current tangent in (parameter, observable) space, 0 if there is none."""
-        obs=self._current_observable
-        if obs is None:
-            return 0.0
-        tvec=self._tangs.get(obs)
+        """Length of the direction of travel in the current axes, 0 if there is none yet."""
+        tvec=self.axis_tangent()
         if tvec is None:
             return 0.0
         return float(numpy.sqrt(tvec[0]*tvec[0]+tvec[1]*tvec[1]))
@@ -1007,9 +1236,9 @@ class BifurcationController:
         away once the branch turns and the continuation is free to grow ds.
         """
         assert self._current_observable is not None
-        # On a brand-new diagram no continuation direction exists yet (_update_tangents has never
-        # run), so the reference length would be missing or zero and every subsequent step would be
-        # scaled down to nothing. One ordinary step establishes it.
+        # On a brand-new branch there is only one point, so there is no direction yet and the
+        # reference length would be zero - which would scale every subsequent ds down to nothing.
+        # One ordinary step establishes it.
         if self._tangent_length()==0.0:
             self.step()
             self.save_all()
@@ -1028,7 +1257,8 @@ class BifurcationController:
                 break
             self.step()
             self.save_all()
-            tvec=self._tangs[self._current_observable]*self._last_ds
+            atang=self.axis_tangent()
+            tvec=(atang if atang is not None else numpy.zeros(2))*self._last_ds
             if xscale=="log":
                 xlogfactor=(cp0[0]/cp[0])**2
             else:
@@ -1044,11 +1274,16 @@ class BifurcationController:
         origin=self._get_current_point()
         if self._abort_requested:
             return
-        self._status("ARCLENGTH STEPPING")
+        locus=self.on_locus()
+        self._status("FOLLOWING THE BIFURCATION" if locus else "ARCLENGTH STEPPING")
         ds=self.problem.arclength_continuation(self.get_bifurcation_parameter(),ds)
-        self.problem.solve_eigenproblem(self.neigen,self.shift)
-
-        self._add_current_state()
+        if locus:
+            # solve_eigenproblem raises while bifurcation tracking is active, and there is nothing to
+            # solve: tracked continuation already reports the critical eigenvalue as 0 + i*omega.
+            self._add_current_state(eig_value=0+1j*self.problem._get_bifurcation_omega())
+        else:
+            self.problem.solve_eigenproblem(self.neigen,self.shift)
+            self._add_current_state()
 
         self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point())
         self._last_ds=ds
@@ -1065,6 +1300,9 @@ class BifurcationController:
         self._last_ds=(-1 if self._last_ds<0 else 1)*min(abs(self._last_ds),abs(ds_backup))
 
     def locate_bifurcation(self,pitchfork:bool=False):
+        if self.on_locus():
+            raise RuntimeError("Already following a bifurcation. Leave the locus first "
+                               "(Bifurcation -> Leave the locus) to work on an ordinary branch.")
         self._status("BIFURCATION FINDING"+(" (PITCHFORK)" if pitchfork else ""))
         self.problem.solve_eigenproblem(self.neigen,self.shift)
         self.problem.activate_bifurcation_tracking(self._paramname,"pitchfork" if pitchfork else None)

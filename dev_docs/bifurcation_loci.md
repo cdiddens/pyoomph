@@ -98,6 +98,36 @@ On the probe this converges on the first combination, lands on the branch to `1e
 analytic eigenvalue `-(2u+b)` to six digits, and ordinary continuation then proceeds normally with
 the second parameter untouched.
 
+### 5. A fold is a fold of the Jacobian, not of one parameter
+
+Starting *any* continuation from exactly a bifurcation fails for the same reason as (4), so switching
+the continuation parameter while sitting on one fails too. `set_continuation_parameter` warns about
+it rather than letting the solver report it five frames deep.
+
+## How the GUI holds this together
+
+One invariant: **the problem's bifurcation-tracking state always matches the current branch's kind**,
+and only `_sync_tracking_to()` and the branch-opening calls (`start_locus`, `leave_locus`) may change
+it. `load_pt` calls it on every load, which is what makes clicking between a locus and an ordinary
+branch safe - and what the test asserting `get_bifurcation_tracking_mode()` after each load pins.
+
+Everything else follows from that:
+
+- `step()` dispatches on `branch.kind`: a locus step does no eigensolve and records `0 + i*omega`.
+- `classify_bifurcations` is suppressed on a locus - every point there has a zero real part, so it
+  would run a normal-form calculation per step for an answer already known.
+- `_update_tangents` returns early on a locus; the plotted direction comes from `axis_tangent()`,
+  which finite-differences the two most recent points in the *current* axes and so needs no solver
+  internals. That also made `multistep`'s ds cap work for any pair of axes rather than only for
+  parameter-versus-observable.
+- `locate_bifurcation` and `branch_switch` refuse while on a locus: the former would activate tracking
+  in the continued parameter rather than the tracked one.
+- The plotter draws a locus as one brown curve. The stability segmentation has nothing to say there -
+  it sees a zero real part at every point and would alternate the line style from point to point.
+- `output_curves` writes each branch in its **own** coordinates, so a locus leads with its parameter
+  pair (`b`, `mu_c`) the way the tutorials write `V`, `Bo_c`. Exporting everything in the current view
+  labelled the locus with a parameter it does not vary.
+
 ## Other guards worth surfacing early
 
 `arclength_continuation` refuses, while tracking is active, `spatial_adapt > 0` and any
