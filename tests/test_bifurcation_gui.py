@@ -163,6 +163,37 @@ def test_bifurcation_gui_controller(tmp_path):
         assert c.describe_current_slice() == "b = 1"
         assert set(c.all_parameter_names()) == {"mu", "b"}
 
+        # ---------------------------------------------------------- axes: either can be anything
+        from pyoomph.utils.bifurcation_gui.model import observable_axis, parameter_axis
+
+        assert c.x_axis == parameter_axis("mu"), "x defaults to the continued parameter"
+        assert c.y_axis == observable_axis("ode/u"), "y defaults to the current observable"
+        assert set(c.available_axes()) == {parameter_axis("mu"), parameter_axis("b"),
+                                          observable_axis("ode/u")}
+        # A parameter on both axes is the shape a bifurcation locus is drawn in. Here b is constant,
+        # so it is a horizontal line - the point is that it plots at all, from the same machinery.
+        c.set_x_axis(parameter_axis("b"))
+        c.set_y_axis(parameter_axis("mu"))
+        assert c.branch_can_be_plotted(branch)
+        segs, _ = branch.to_branch_stab_list(c.y_axis, xspec=c.x_axis)
+        assert all(numpy.allclose(seg[:, 0], 1.0) for seg in segs), "b is the x column now"
+        assert c.axis_range(parameter_axis("b")) == (1.0, 1.0)
+        # Setting an observable back on y must also restore _current_observable, which the tangent
+        # bookkeeping, the saved state and the facade attribute all key off.
+        c.set_x_axis(parameter_axis("mu"))
+        c.set_y_axis(observable_axis("ode/u"))
+        assert c._current_observable == "ode/u"
+        assert c._y_axis is None, "an observable on y is expressed through _current_observable"
+
+        # A branch that never recorded the parameter now on an axis is skipped, not drawn wrong.
+        from pyoomph.utils.bifurcation_gui.model import BifurcationGUISolutionBranch
+        foreign = BifurcationGUISolutionBranch(kind="solution", continuation_parameter="nonesuch")
+        foreign.append(branch[0])
+        c.set_x_axis(parameter_axis("nonesuch"))
+        assert not c.branch_can_be_plotted(foreign)
+        c.set_x_axis(None)
+        assert c.x_axis == parameter_axis("mu")
+
         # ---------------------------------------------------------- tags and export
         c.toggle_point_tag(branch[0], 3)
         assert branch[0].tag == 3
@@ -181,6 +212,22 @@ def test_bifurcation_gui_controller(tmp_path):
         assert "continued in mu" in head and "fixed: b = 1" in head
         with open(os.path.join(outdir, "tag_03.txt")) as f:
             assert "fixed: b = 1" in f.read()
+
+        # output_all_observables used to pass None down as the observable name, which reached
+        # obs_values[None] and raised - the flag never worked. The y axis is now a list of specs.
+        c.output_all_observables = True
+        try:
+            outdir = c.output_curves()
+            bdir = os.path.join(outdir, "slice00", "branch000")
+            exported = next(f for f in os.listdir(bdir) if f.startswith("smoothed_"))
+            with open(os.path.join(bdir, exported)) as f:
+                lines = [ln for ln in f if not ln.startswith("#")]
+            header = open(os.path.join(bdir, exported)).readline()
+            assert "ode/u" in header
+            # parameter, every observable, then the two eigenvalue columns
+            assert len(lines[0].split()) == 1 + len(c.available_observables) + 2
+        finally:
+            c.output_all_observables = False
 
         # ---------------------------------------------------------- save / load round trip
         c.save_all()

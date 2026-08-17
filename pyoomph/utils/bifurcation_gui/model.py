@@ -40,6 +40,33 @@ from scipy.interpolate import UnivariateSpline
 from ...typings import *
 
 
+#: What a plot axis shows: ``("observable", name)`` or ``("parameter", name)``. Having parameters and
+#: observables on the same footing is what lets one drawing path produce both an ordinary diagram
+#: (parameter vs observable) and the locus of a bifurcation in a plane of two parameters.
+AxisSpec:TypeAlias="tuple[str,str]"
+
+AXIS_OBSERVABLE="observable"
+AXIS_PARAMETER="parameter"
+
+
+def observable_axis(name:str)->"AxisSpec":
+    return (AXIS_OBSERVABLE,name)
+
+
+def parameter_axis(name:str)->"AxisSpec":
+    return (AXIS_PARAMETER,name)
+
+
+def as_axis(spec)->"AxisSpec":
+    """Accept a bare observable name as well as a full spec."""
+    if isinstance(spec,str):
+        return (AXIS_OBSERVABLE,spec)
+    kind,name=spec
+    if kind not in (AXIS_OBSERVABLE,AXIS_PARAMETER):
+        raise ValueError("Unknown axis kind '"+str(kind)+"'")
+    return (kind,name)
+
+
 class BifurcationGUISolutionPoint:
     """One computed solution: every global parameter, all observables, the leading eigenvalue and
     the state file it was dumped to."""
@@ -50,6 +77,10 @@ class BifurcationGUISolutionPoint:
         #: all of them, so without this the diagram could not say which slice of parameter space it
         #: is a section through - and reloading a point silently moves the others.
         self.param_values:dict[str,float]=dict(param_values) if param_values else {}
+        #: False for points read from a state file written before the parameters were recorded. Such
+        #: a point gets the continued parameter backfilled (that value IS known) but nothing else, so
+        #: "empty param_values" cannot be used to mean "the slice was never recorded".
+        self.param_values_complete=bool(param_values)
         self.obs_values=obs_values
         self.eig_value_Re=numpy.real(eig_value)
         self.eig_value_Im=numpy.imag(eig_value)
@@ -70,6 +101,7 @@ class BifurcationGUISolutionPoint:
         # the continued parameter alone, so "unknown slice" stays distinguishable from "no other
         # parameters exist".
         inst.param_values=dict(res.get("param_values",{}))
+        inst.param_values_complete="param_values" in res
         for k,v in res["tangs"].items():
             inst._tangs[k]=numpy.array(v)
         return inst
@@ -98,23 +130,46 @@ class BifurcationGUISolutionPoint:
         return {n:v for n,v in self.param_values.items() if n not in varying}
 
 
-    def get_coordinate(self,obs,with_s=False,with_eigen=False):
-        if with_eigen:
-            if with_s:
-                return [self.param_value,self.obs_values[obs],self.eig_value_Re,self.eig_value_Im, self.scoord]
-            else:
-                return [self.param_value,self.obs_values[obs],self.eig_value_Re,self.eig_value_Im]
-        else:
-            if with_s:
-                return [self.param_value,self.obs_values[obs],self.scoord]
-            else:
-                return [self.param_value,self.obs_values[obs]]
+    def value_of(self,spec)->float:
+        """The value this point has along one axis.
 
-    def describe(self,obs:str | None=None)->str:
+        ``spec`` is an :py:data:`AxisSpec`: ``("observable", name)`` or ``("parameter", name)``. A
+        bare string is taken as an observable, which is what every call site meant before an axis
+        could be a parameter at all.
+        """
+        kind,name=as_axis(spec)
+        if kind=="parameter":
+            if name not in self.param_values:
+                raise KeyError("Point has no recorded value for parameter '"+str(name)+"'")
+            return self.param_values[name]
+        return self.obs_values[name]
+
+    def get_coordinate(self,yspec,with_s=False,with_eigen=False,xspec=None):
+        """``[x, y..., (ReEig, ImEig), (s)]`` for this point.
+
+        ``yspec`` may be a list of specs, in which case one column per entry is produced - that is
+        how the all-observables export writes every observable next to the parameter.
+        ``xspec`` defaults to the continued parameter's value, i.e. the historical x-axis.
+        """
+        x=self.param_value if xspec is None else self.value_of(xspec)
+        if isinstance(yspec,list):
+            res=[x]+[self.value_of(s) for s in yspec]
+        else:
+            res=[x,self.value_of(yspec)]
+        if with_eigen:
+            res=res+[self.eig_value_Re,self.eig_value_Im]
+        if with_s:
+            res=res+[self.scoord]
+        return res
+
+    def describe(self,obs=None)->str:
         """One-line human-readable summary, used by the point-info panel and the branch tree."""
         res="{:.6g}".format(self.param_value)
-        if obs is not None and obs in self.obs_values:
-            res+=" | {:.6g}".format(self.obs_values[obs])
+        if obs is not None:
+            try:
+                res+=" | {:.6g}".format(self.value_of(obs))
+            except KeyError:
+                pass
         res+=" | eig {:.3g}{:+.3g}i".format(self.eig_value_Re,self.eig_value_Im)
         if self.eig_value_Re==0:
             kind="bifurcation"
@@ -198,7 +253,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         Distinguishing this from "there are no other parameters" is the whole point: an unknown
         slice must be reported as unknown, never silently drawn as if nothing were held fixed.
         """
-        return any(p.param_values for p in self)
+        return any(p.param_values_complete for p in self)
 
     def describe_slice(self)->str:
         """Human-readable "b = 0.3, c = 2" for the status bar, the plot and file headers."""
@@ -232,35 +287,38 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
             bifurcation_type=res.get("bifurcation_type"))
         for p in res["points"]:
             inst.append(BifurcationGUISolutionPoint.from_dict(p))
+        # A legacy point knows the continued parameter's value - it is param_value - just not under
+        # that name. Backfilling it lets such a diagram still be plotted against its own parameter,
+        # while slice_is_known() keeps reporting the rest as unrecorded.
+        if inst.continuation_parameter is not None:
+            for p in inst:
+                if not p.param_values_complete:
+                    p.param_values.setdefault(inst.continuation_parameter,p.param_value)
         return inst
 
 
-    def to_point_list(self,obs):
+    def to_point_list(self,yspec,xspec=None):
         res=[]
         for p in self:
-            res.append(p.get_coordinate(obs))
+            res.append(p.get_coordinate(yspec,xspec=xspec))
         return numpy.array(res)
 
-    def smooth_branch_stab_list(self,obs,subsampling=10):
+    def smooth_branch_stab_list(self,yspec,subsampling=10,xspec=None):
+        """Like :py:meth:`to_branch_stab_list`, with each segment resampled through a spline."""
         if len(self)<=1:
-            return self.to_branch_stab_list(obs)
+            return self.to_branch_stab_list(yspec,xspec=xspec)
         s=[p.scoord for p in self]
-        x=[p.param_value for p in self]
-        # Note: obs is checked once here to build y/yi together, since the two are only ever used
-        # consistently with each other (the "obs is None" branch producing an all-observables array is
-        # currently unsupported further down/in to_branch_stab_list, see comment near the sampling loop)
-        if obs is not None:
-            y=[p.obs_values[obs] for p in self]
-            yi:UnivariateSpline | list[UnivariateSpline]=UnivariateSpline(s,y,s=0,k=min(3,len(s)-1))
-        else:
-            y=numpy.array([[p.obs_values[k]  for p in self] for k in self[0].obs_values.keys()]).transpose()
-            yi=[UnivariateSpline(s,y[:,i],s=0,k=min(3,len(s)-1)) for i in range(y.shape[1])]
-        eigRe=[p.eig_value_Re for p in self]
-        eigIm=[p.eig_value_Im for p in self]
-        xi=UnivariateSpline(s,x,s=0,k=min(3,len(s)-1))
-        eigRei=UnivariateSpline(s,eigRe,s=0,k=min(3,len(s)-1))
-        eigImi=UnivariateSpline(s,eigIm,s=0,k=min(3,len(s)-1))
-        segs,stabs=self.to_branch_stab_list(obs)
+        # One spline per column, so a list of y specs (the all-observables export) works exactly as
+        # a single one does. The previous version special-cased that into a list of splines it could
+        # then not evaluate, and the all-observables path raised instead of running.
+        yspecs=yspec if isinstance(yspec,list) else [yspec]
+        x=[p.param_value if xspec is None else p.value_of(xspec) for p in self]
+        order=min(3,len(s)-1)
+        xi=UnivariateSpline(s,x,s=0,k=order)
+        yis=[UnivariateSpline(s,[p.value_of(sp) for p in self],s=0,k=order) for sp in yspecs]
+        eigRei=UnivariateSpline(s,[p.eig_value_Re for p in self],s=0,k=order)
+        eigImi=UnivariateSpline(s,[p.eig_value_Im for p in self],s=0,k=order)
+        segs,stabs=self.to_branch_stab_list(yspec,xspec=xspec)
         smoothsegs=[]
         for seg in segs:
             if len(seg)==1:
@@ -274,22 +332,31 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
                         ssamp=numpy.linspace(s0,s1,subsampling+1,endpoint=True)
                     else:
                         ssamp=numpy.linspace(s0,s1,subsampling,endpoint=False)
-                    # Note: when obs is None (all-observables mode), yi is a list of splines and
-                    # to_branch_stab_list(None) above already raises (obs_values has no None key),
-                    # so this line is only ever reached with obs not None, where yi is callable.
-                    for xs,ys,eR,eI,ss in zip(xi(ssamp),yi(ssamp),eigRei(ssamp),eigImi(ssamp),ssamp): #type:ignore
-                        sseg.append([xs,ys,eR,eI,ss])
+                    xs=xi(ssamp)
+                    ys=[yf(ssamp) for yf in yis]
+                    eR=eigRei(ssamp)
+                    eI=eigImi(ssamp)
+                    for k in range(len(ssamp)):
+                        sseg.append([xs[k]]+[yv[k] for yv in ys]+[eR[k],eI[k],ssamp[k]])
                 smoothsegs.append(numpy.array(sseg))
         return smoothsegs,stabs
 
 
-    def to_branch_stab_list(self,obs):
+    def to_branch_stab_list(self,yspec,xspec=None):
+        """Split the branch into segments of constant stability.
+
+        Returns ``(segments, stabilities)``; each segment is an array of
+        ``[x, y..., ReEig, ImEig, s]`` rows and the matching stability is True (stable), False
+        (unstable) or None for the short piece that straddles a change of stability.
+        """
+        def coord(p):
+            return numpy.array(p.get_coordinate(yspec,with_s=True,with_eigen=True,xspec=xspec))
         res=[]
         stabs=[]
         if len(self)==0:
             return res,[]
         if len(self)==1:
-            return numpy.array([[self[0].get_coordinate(obs,with_s=True,with_eigen=True)]]),[None]
+            return numpy.array([[coord(self[0])]]),[None]
         currseg=[]
         currstab=self[0].eig_value_Re<0
         if self[0].eig_value_Re==0:
@@ -297,22 +364,22 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         for p1,p2 in zip(self,self[1:]):
             if p2.eig_value_Re==0:
                 if len(currseg)==0:
-                    currseg.append(numpy.array(p1.get_coordinate(obs,with_s=True,with_eigen=True)))
-                currseg.append(numpy.array(p2.get_coordinate(obs,with_s=True,with_eigen=True)))
+                    currseg.append(coord(p1))
+                currseg.append(coord(p2))
                 res.append(numpy.array(currseg))
                 stabs.append(currstab)
                 currseg=[]
                 currstab=not currstab
             elif p1.eig_value_Re*p2.eig_value_Re>=0: # Same stability
                 if len(currseg)==0:
-                    currseg.append(numpy.array(p1.get_coordinate(obs,with_s=True,with_eigen=True)))
-                currseg.append(numpy.array(p2.get_coordinate(obs,with_s=True,with_eigen=True)))
+                    currseg.append(coord(p1))
+                currseg.append(coord(p2))
             else: # Change in stability
                 if len(currseg)>0:
                     res.append(numpy.array(currseg))
                     stabs.append(currstab)
                     currseg=[]
-                res.append(numpy.array([p1.get_coordinate(obs,with_s=True,with_eigen=True),p2.get_coordinate(obs,with_s=True,with_eigen=True)]))
+                res.append(numpy.array([coord(p1),coord(p2)]))
                 stabs.append(None)
                 currstab=p2.eig_value_Re<0
         if len(currseg)>0:

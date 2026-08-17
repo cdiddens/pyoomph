@@ -52,6 +52,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk #type:ignore[attr-defined]
 
 from .actions import Action, KeyMap, event_to_accelerator, format_accelerator
+from .model import AXIS_PARAMETER
 
 from ...typings import *
 
@@ -83,6 +84,10 @@ class BifurcationTkApp:
         self.root.title(title if title is not None else "pyoomph bifurcation diagram")
         self.root.geometry("1250x820")
         self._observable_var=tk.StringVar()
+        self._xaxis_var=tk.StringVar()
+        #: Display string -> axis spec, so the combo boxes and the View submenus never have to parse
+        #: a label back into a (kind, name) pair.
+        self._axis_choices:dict[str,Any]={}
 
         self._build_actions()
         self._build_menus()
@@ -278,8 +283,10 @@ class BifurcationTkApp:
 
         m=tk.Menu(menubar,tearoff=0)
         menubar.add_cascade(label="View",menu=m)
+        self.xaxis_menu=tk.Menu(m,tearoff=0)
+        m.add_cascade(label="X axis",menu=self.xaxis_menu)
         self.observable_menu=tk.Menu(m,tearoff=0)
-        m.add_cascade(label="Observable",menu=self.observable_menu)
+        m.add_cascade(label="Y axis",menu=self.observable_menu)
         self._add_menu_item(m,"cycle_observable")
         m.add_separator()
         self._add_menu_item(m,"toggle_splines")
@@ -305,13 +312,61 @@ class BifurcationTkApp:
         menubar.add_cascade(label="Help",menu=m)
         self._add_menu_item(m,"help")
 
-    def _rebuild_observable_menu(self):
-        self.observable_menu.delete(0,"end")
-        self._observable_var=getattr(self,"_observable_var",tk.StringVar())
-        self._observable_var.set(self.controller._current_observable or "")
-        for name in self.controller.available_observables:
-            self.observable_menu.add_radiobutton(label=name,value=name,variable=self._observable_var,
-                                                 command=lambda n=name: self._set_observable(n))
+    @staticmethod
+    def _axis_display(spec)->str:
+        """Unambiguous label for a menu or combo: a parameter and an observable may share a name."""
+        return "{:s}  [{:s}]".format(spec[1],"param" if spec[0]==AXIS_PARAMETER else "obs")
+
+    def _rebuild_axis_menus(self):
+        """Rebuild the X/Y axis radio submenus and the choice table the combos share."""
+        specs=self.controller.available_axes()
+        self._axis_choices={self._axis_display(sp):sp for sp in specs}
+        displays=list(self._axis_choices.keys())
+        for menu,var,which in ((self.xaxis_menu,self._xaxis_var,"x"),
+                               (self.observable_menu,self._observable_var,"y")):
+            menu.delete(0,"end")
+            for d in displays:
+                menu.add_radiobutton(label=d,value=d,variable=var,
+                                     command=lambda d=d,w=which: self._set_axis(w,d))
+        for combo in (self.xaxis_combo,self.obs_combo):
+            if list(combo["values"])!=displays:
+                combo["values"]=displays
+        self._sync_axis_selectors()
+
+    def _sync_axis_selectors(self):
+        xd=self._axis_display(self.controller.x_axis)
+        yd=self._axis_display(self.controller.y_axis)
+        self._xaxis_var.set(xd)
+        self._observable_var.set(yd)
+        if self.xaxis_combo.get()!=xd:
+            self.xaxis_combo.set(xd)
+        if self.obs_combo.get()!=yd:
+            self.obs_combo.set(yd)
+
+    def _set_axis(self,which:str,display:str):
+        """Put a parameter or an observable on one of the axes, rescaling that axis to its range."""
+        spec=self._axis_choices.get(display)
+        if spec is None:
+            return
+        c=self.controller
+        if which=="x":
+            if spec==c.x_axis:
+                return
+            c.set_x_axis(spec)
+        else:
+            if spec==c.y_axis:
+                return
+            c.set_y_axis(spec)
+        rng=c.axis_range(spec)
+        if rng is not None:
+            lo,hi=rng
+            pad=0.05*(hi-lo) if hi>lo else max(abs(hi),1e-4)
+            if which=="x":
+                self.plotter.set_xlim(lo-pad,hi+pad)
+            else:
+                self.plotter.set_ylim(lo-pad,hi+pad)
+        self._autosave()
+        self.refresh()
 
     # ================================================================== widgets
 
@@ -416,10 +471,18 @@ class BifurcationTkApp:
         ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=6)
         row+=1
 
-        ttk.Label(tab,text="Observable").grid(row=row,column=0,sticky=tk.W,pady=2)
+        # Either axis can show any parameter or any observable, which is what lets the same plot be
+        # an ordinary diagram or the locus of a bifurcation in a plane of two parameters.
+        ttk.Label(tab,text="x axis").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.xaxis_combo=ttk.Combobox(tab,state="readonly",width=16)
+        self.xaxis_combo.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.xaxis_combo.bind("<<ComboboxSelected>>",lambda *_: self._set_axis("x",self.xaxis_combo.get()))
+        row+=1
+
+        ttk.Label(tab,text="y axis").grid(row=row,column=0,sticky=tk.W,pady=2)
         self.obs_combo=ttk.Combobox(tab,state="readonly",width=16)
         self.obs_combo.grid(row=row,column=1,sticky=tk.EW,pady=2)
-        self.obs_combo.bind("<<ComboboxSelected>>",lambda *_: self._set_observable(self.obs_combo.get()))
+        self.obs_combo.bind("<<ComboboxSelected>>",lambda *_: self._set_axis("y",self.obs_combo.get()))
         row+=1
 
         self.scale_al_var=tk.BooleanVar(value=True)
@@ -653,14 +716,10 @@ class BifurcationTkApp:
         self.movepoint_var.set(bool(c.move_point_active))
         self.movepoint_check.configure(state="normal" if c.mode=="mp" else "disabled")
 
-        obs=c.available_observables
-        if list(self.obs_combo["values"])!=obs:
-            self.obs_combo["values"]=obs
-            self._rebuild_observable_menu()
-        if c._current_observable is not None and self.obs_combo.get()!=c._current_observable:
-            self.obs_combo.set(c._current_observable)
-            if hasattr(self,"_observable_var"):
-                self._observable_var.set(c._current_observable)
+        if set(self._axis_choices.values())!=set(c.available_axes()):
+            self._rebuild_axis_menus()
+        else:
+            self._sync_axis_selectors()
 
         for aid,var in self._check_vars.items():
             act=self._actions[aid]
@@ -864,23 +923,22 @@ class BifurcationTkApp:
         self.plotter.set_ylim(y-dy,y+dy)
 
     def _cycle_observable(self):
+        """The historical "y" command: step the vertical axis to the next observable.
+
+        Deliberately cycles observables only, not the parameters that can now also sit on an axis -
+        one keypress should not silently turn an ordinary diagram into a parameter-space plot.
+        """
         obs=self.controller.available_observables
         if len(obs)<2:
             return
-        idx=(obs.index(self.controller.observable)+1)%len(obs)
-        self._set_observable(obs[idx])
+        current=self.controller.y_axis
+        start=obs.index(current[1]) if current[0]!=AXIS_PARAMETER and current[1] in obs else -1
+        self._set_observable(obs[(start+1)%len(obs)])
 
     def _set_observable(self,name:str):
-        """Switch the vertical axis, rescaling it to the new observable's range."""
-        c=self.controller
-        if not name or name==c._current_observable:
-            return
-        c.observable=name
-        rng=c.observable_range(name)
-        if rng is not None:
-            self.plotter.set_ylim(rng[0],rng[1])
-        c.save_all()
-        self.refresh()
+        """Put an observable on the vertical axis (used by the "y" accelerator)."""
+        from .model import observable_axis
+        self._set_axis("y",self._axis_display(observable_axis(name)))
 
     def _delete_point(self):
         try:
@@ -964,7 +1022,7 @@ class BifurcationTkApp:
         self.root.destroy()
 
     def run(self):
-        self._rebuild_observable_menu()
+        self._rebuild_axis_menus()
         self.refresh()
         self.root.mainloop()
 

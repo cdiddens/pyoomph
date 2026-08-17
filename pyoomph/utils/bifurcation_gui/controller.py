@@ -39,7 +39,8 @@ from ...generic import Problem
 from ... import _pyoomph_core as _pyoomph
 from ...typings import *
 
-from .model import BifurcationGUISolutionPoint, BifurcationGUISolutionBranch
+from .model import (BifurcationGUISolutionPoint, BifurcationGUISolutionBranch, AxisSpec,
+                    AXIS_OBSERVABLE, AXIS_PARAMETER, as_axis, observable_axis, parameter_axis)
 
 from typing import Protocol
 from pathlib import Path
@@ -128,6 +129,10 @@ class BifurcationController:
         self._demo_video_step=0
         self._current_observable:str | None=None
         self._avail_observables:list[str]=[]
+        #: Explicit axis choices. None means "follow the default": the continued parameter on x and
+        #: the current observable on y, which is what an ordinary bifurcation diagram shows.
+        self._x_axis:"AxisSpec | None"=None
+        self._y_axis:"AxisSpec | None"=None
         self._observable_funcs:dict[str,Callable[...,float]] | None=None
         self._mode="al"
         self._move_point=False
@@ -280,6 +285,64 @@ class BifurcationController:
     def get_tangent(self,obs:str | None=None)->"NPFloatArray | None":
         return self._tangs.get(obs if obs is not None else self._get_current_observable())
 
+    # ------------------------------------------------------------------ plot axes
+
+    @property
+    def x_axis(self)->"AxisSpec":
+        """What the horizontal axis shows; by default the parameter being continued."""
+        if self._x_axis is not None:
+            return self._x_axis
+        return parameter_axis(self._get_paramname_str())
+
+    @property
+    def y_axis(self)->"AxisSpec":
+        """What the vertical axis shows; by default the selected observable."""
+        if self._y_axis is not None:
+            return self._y_axis
+        return observable_axis(self._get_current_observable())
+
+    def set_x_axis(self,spec:"AxisSpec | str | None"):
+        self._x_axis=as_axis(spec) if spec is not None else None
+        self._changed()
+
+    def set_y_axis(self,spec:"AxisSpec | str | None"):
+        spec=as_axis(spec) if spec is not None else None
+        # An observable on y is also "the current observable": the tangent bookkeeping, the saved
+        # state and the facade attribute all key off that name, so the two must not drift apart.
+        if spec is not None and spec[0]==AXIS_OBSERVABLE:
+            if spec[1] not in self._avail_observables:
+                raise ValueError("Unknown observable "+str(spec[1]))
+            self._current_observable=spec[1]
+            self._y_axis=None
+        else:
+            self._y_axis=spec
+        self._changed()
+
+    def available_axes(self)->"list[AxisSpec]":
+        """Everything that can go on an axis: every global parameter, then every observable."""
+        res:list[AxisSpec]=[parameter_axis(n) for n in self.all_parameter_names()]
+        res+=[observable_axis(n) for n in self._avail_observables]
+        return res
+
+    def axis_label(self,spec:"AxisSpec")->str:
+        """Label for the figure: just the name. The parameter/observable distinction only has to be
+        spelled out where a choice is being made (the menus and combos), not on the plot."""
+        return as_axis(spec)[1]
+
+    def branch_can_be_plotted(self,branch:"BifurcationGUISolutionBranch")->bool:
+        """False when a branch has no value to show on one of the current axes.
+
+        Happens for a branch continued in a different parameter, and for legacy points that never
+        recorded the parameter now on an axis. Such a branch is skipped rather than drawn wrong.
+        """
+        if len(branch)==0:
+            return False
+        try:
+            branch[0].get_coordinate(self.y_axis,xspec=self.x_axis)
+        except KeyError:
+            return False
+        return True
+
     # ------------------------------------------------------------------ observables
 
     # By default, we allow to access all integral observables (not beginning with _) and all ODE dofs
@@ -412,7 +475,7 @@ class BifurcationController:
         bestdist=1e30
         for b in self.branches:
             for p in b:
-                c=p.get_coordinate(self._current_observable)
+                c=p.get_coordinate(self.y_axis,xspec=self.x_axis)
                 dist=((c[0]-x)/dx)**2+((c[1]-y)/dy)**2
                 if dist<bestdist:
                     bestbranch=b
@@ -577,8 +640,16 @@ class BifurcationController:
         return ("\n"+"; ".join(parts)) if parts else ""
 
     def output_curves(self):
-        paramname=self._get_paramname_str()
-        observable=self._get_current_observable()
+        # output_all_observables writes one column per observable. It used to pass None down as the
+        # observable name, which reached obs_values[None] and raised - so the flag never worked; the
+        # y axis is now simply a list of specs, which the segmentation handles natively.
+        if self.output_all_observables:
+            export_y=[observable_axis(n) for n in self._avail_observables]
+            column_names=list(self._avail_observables)
+        else:
+            export_y=self.y_axis
+            column_names=[self.y_axis[1]]
+        xname=self.x_axis[1]
         ddir=self.problem.get_output_directory(self.data_subdir)
         odir=os.path.join(ddir,"output")
 
@@ -597,9 +668,9 @@ class BifurcationController:
             Path(bdir).mkdir(parents=True,exist_ok=True)
             header_suffix=self._export_header_suffix(b)
             if self.interpolated_splines:
-                smoothedsegs,stabs=b.smooth_branch_stab_list(self._current_observable if not self.output_all_observables else None,100)
+                smoothedsegs,stabs=b.smooth_branch_stab_list(export_y,100,xspec=self.x_axis)
             else:
-                smoothedsegs,stabs=b.to_branch_stab_list(self._current_observable if not self.output_all_observables else None)
+                smoothedsegs,stabs=b.to_branch_stab_list(export_y,xspec=self.x_axis)
             istab=0
             iunstab=0
             for seg,stab in zip(smoothedsegs,stabs):
@@ -609,19 +680,19 @@ class BifurcationController:
                 else:
                     fn="smoothed_unstable_{:03d}.txt".format(iunstab)
                     iunstab+=1
-                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header=paramname+"\t"+observable+"\tReEigen\tImEigen"+header_suffix)
+                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header="\t".join([xname]+column_names+["ReEigen","ImEigen"])+header_suffix)
             nbif=0
             for p in b:
                 if p.eig_value_Re==0:
                     fn="bifurcation_{:03d}.txt".format(nbif)
-                    pc=p.get_coordinate(self._current_observable,with_s=False,with_eigen=True)
-                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header=paramname+"\t"+observable+"\tReEigen\tImEigen"+header_suffix)
+                    pc=p.get_coordinate(export_y,with_s=False,with_eigen=True,xspec=self.x_axis)
+                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header="\t".join([xname]+column_names+["ReEigen","ImEigen"])+header_suffix)
                     nbif+=1
                 if p.tag>=0 and p.statefile is not None:
                     shutil.copy2(p.statefile, os.path.join(odir,"tag{:02d}.dump".format(p.tag)))
                     fn="tag_{:02d}.txt".format(p.tag)
-                    pc=p.get_coordinate(self._current_observable,with_s=False)
-                    numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header=paramname+"\t"+observable+self._export_header_suffix(b))
+                    pc=p.get_coordinate(export_y,with_s=False,xspec=self.x_axis)
+                    numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header="\t".join([xname]+column_names)+self._export_header_suffix(b))
         self.log("Exported curves to",odir)
         return odir
 
@@ -753,16 +824,16 @@ class BifurcationController:
         # Renormalize s by going along the arclength. We assume it is all well ordered here
         al=0
         if newp==branch[0]:
-            last=branch[1].get_coordinate(self._current_observable)
+            last=branch[1].get_coordinate(self.y_axis,xspec=self.x_axis)
         else:
-            last=branch[0].get_coordinate(self._current_observable)
+            last=branch[0].get_coordinate(self.y_axis,xspec=self.x_axis)
         xbase=[]
         ybase=[]
         sbase=[]
         for p in branch:
             if p==newp:
                 continue
-            curr=p.get_coordinate(self._current_observable)
+            curr=p.get_coordinate(self.y_axis,xspec=self.x_axis)
             dal=numpy.sqrt((curr[0]-last[0])**2*pscale**2+(curr[1]-last[1])**2*obsscale**2)
             al=al+dal
             p.scoord=al
@@ -781,7 +852,7 @@ class BifurcationController:
             sbase.append(p.scoord)
 
         if newp is not None:
-            xn,yn=newp.get_coordinate(self._current_observable)
+            xn,yn=newp.get_coordinate(self.y_axis,xspec=self.x_axis)
             xn,yn=float(xn*pscale),float(yn*obsscale)
             # Quite demanding, but lets give it a try: Could be improved of course
             shortest_l=1e50
@@ -846,9 +917,9 @@ class BifurcationController:
         ylim=self.view.get_ylim()
         xscale=self.view.get_xscale()
         max_ds=self._tangent_length()*abs(self._last_ds)
-        cp0=self._get_current_point().get_coordinate(self._current_observable)
+        cp0=self._get_current_point().get_coordinate(self.y_axis,xspec=self.x_axis)
         while True:
-            cp=self._get_current_point().get_coordinate(self._current_observable)
+            cp=self._get_current_point().get_coordinate(self.y_axis,xspec=self.x_axis)
             if cp[0]<xlim[0] or cp[0]>xlim[1] or cp[1]<ylim[0] or cp[1]>ylim[1]:
                 break
             if self._abort_requested:
@@ -1039,36 +1110,35 @@ class BifurcationController:
         self._status(None)
         self._changed()
 
-    def observable_range(self,obs:str)->tuple[float,float] | None:
-        """Min/max of an observable over the whole diagram, for autoscaling on a switch."""
-        ymin=1e30
-        ymax=-1e30
+    def axis_range(self,spec:"AxisSpec | str")->tuple[float,float] | None:
+        """Min/max along one axis over the whole diagram, for autoscaling after a switch."""
+        lo,hi=1e30,-1e30
         found=False
         for b in self.branches:
             for p in b:
-                if obs not in p.obs_values:
-                    continue
-                y=p.obs_values[obs]
-                ymin=min(ymin,y)
-                ymax=max(ymax,y)
+                try:
+                    v=p.value_of(spec)
+                except KeyError:
+                    continue    # a branch that never recorded this quantity
+                lo=min(lo,v)
+                hi=max(hi,v)
                 found=True
-        return (ymin,ymax) if found else None
+        return (lo,hi) if found else None
+
+    def observable_range(self,obs:str)->tuple[float,float] | None:
+        """Backwards-compatible alias of :py:meth:`axis_range` for an observable."""
+        return self.axis_range(observable_axis(obs))
 
     def data_range(self)->tuple[tuple[float,float],tuple[float,float]] | None:
-        """Bounding box of the whole diagram in (parameter, current observable)."""
-        obs=self._current_observable
-        if obs is None:
+        """Bounding box of the whole diagram on the current axes."""
+        try:
+            xr=self.axis_range(self.x_axis)
+            yr=self.axis_range(self.y_axis)
+        except AssertionError:
             return None
-        xs=[];ys=[]
-        for b in self.branches:
-            for p in b:
-                if obs not in p.obs_values:
-                    continue
-                xs.append(p.param_value)
-                ys.append(p.obs_values[obs])
-        if not xs:
+        if xr is None or yr is None:
             return None
-        return (min(xs),max(xs)),(min(ys),max(ys))
+        return xr,yr
 
 
 from ...typings import _set_public_api

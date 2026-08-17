@@ -39,6 +39,8 @@ telling the user to reorder their imports when it lost that race.
 import matplotlib.text
 from matplotlib.figure import Figure
 
+from .model import AXIS_OBSERVABLE
+
 from pathlib import Path
 import numpy
 import os
@@ -83,7 +85,7 @@ class BifurcationDiagramPlotter:
         if self._view_initialised:
             return
         self._view_initialised=True
-        cp=controller._get_current_point().get_coordinate(controller._get_current_observable())
+        cp=controller._get_current_point().get_coordinate(controller.y_axis,xspec=controller.x_axis)
         if controller._initial_view is not None:
             self.axes.set_xlim(controller._initial_view[0],controller._initial_view[1])
             self.axes.set_ylim(controller._initial_view[2],controller._initial_view[3])
@@ -136,7 +138,10 @@ class BifurcationDiagramPlotter:
         self.initialise_view(controller)
 
         gca=self.axes
-        observable=controller._current_observable
+        xaxis,yaxis=controller.x_axis,controller.y_axis
+        # The tangent bookkeeping is keyed by observable name, so the arrows only apply when the
+        # vertical axis IS that observable - on a parameter-vs-parameter plot they are meaningless.
+        tang_key=yaxis[1] if yaxis[0]==AXIS_OBSERVABLE else None
         xlim=list(gca.get_xlim())
         ylim=list(gca.get_ylim())
         xscal=gca.get_xscale()
@@ -151,12 +156,16 @@ class BifurcationDiagramPlotter:
         self._clear_artists()
 
         for b in controller.branches:
+            # A branch continued in a different parameter, or one from a file that never recorded the
+            # parameter now on an axis, has nothing to show here. Skipped rather than drawn wrong.
+            if not controller.branch_can_be_plotted(b):
+                continue
             color="red" if b == controller.current_branch else "grey"
 
             if controller.interpolated_splines:
-                segs,stabs=b.smooth_branch_stab_list(observable)
+                segs,stabs=b.smooth_branch_stab_list(yaxis,xspec=xaxis)
             else:
-                segs,stabs=b.to_branch_stab_list(observable)
+                segs,stabs=b.to_branch_stab_list(yaxis,xspec=xaxis)
 
             for seg,stab in zip(segs,stabs):
                 if stab == True:
@@ -169,12 +178,12 @@ class BifurcationDiagramPlotter:
                     dt="dotted"
                     lw=1.0
                 gca.plot(seg[:,0],seg[:,1], linestyle=dt,color=color,linewidth=lw)
-            normpts=numpy.array([p.get_coordinate(observable) for p in b if p.eig_value_Re!=0],ndmin=2)
+            normpts=numpy.array([p.get_coordinate(yaxis,xspec=xaxis) for p in b if p.eig_value_Re!=0],ndmin=2)
             if len(normpts)>0:
                 gca.plot(normpts[:,0],normpts[:,1], 'o', markersize=3,color=color)
             for p in b:
                 if p.eig_value_Re==0:
-                    pc=p.get_coordinate(observable)
+                    pc=p.get_coordinate(yaxis,xspec=xaxis)
                     gca.plot([pc[0]],[pc[1]], marker='o', markersize=6,color="brown")
                     if p.bifurcation_info is not None:
                         shorts={"transcritical":"T","fold":"F","pitchfork":"P","Hopf":"H"}
@@ -183,15 +192,15 @@ class BifurcationDiagramPlotter:
                         elif p.tag>=0:
                             gca.annotate(str(p.tag),(pc[0],pc[1]))
                 elif p.tag>=0:
-                    pc=p.get_coordinate(observable)
+                    pc=p.get_coordinate(yaxis,xspec=xaxis)
                     gca.annotate(str(p.tag),(pc[0],pc[1]))
 
         if controller.current_point is not None:
-            extend_lims(controller.current_point.get_coordinate(observable))
-            pc=controller.current_point.get_coordinate(observable,with_eigen=True)
+            extend_lims(controller.current_point.get_coordinate(yaxis,xspec=xaxis))
+            pc=controller.current_point.get_coordinate(yaxis,with_eigen=True,xspec=xaxis)
             if controller._mode=="al":
                 gca.plot([pc[0]],[pc[1]], marker='o', markersize=5,color="green" )
-                tang=controller._tangs.get(observable)
+                tang=controller._tangs.get(tang_key) if tang_key is not None else None
                 if tang is not None and controller._last_ds is not None:
                     x0=numpy.array([pc[0],pc[1]])
                     dx=controller._last_ds*tang
@@ -199,8 +208,8 @@ class BifurcationDiagramPlotter:
                     xy_end=(float(x0[0]+dx[0]),float(x0[1]+dx[1]))
                     xy_start=(float(x0[0]),float(x0[1]))
                     gca.annotate("", xy=xy_end, xytext=xy_start,arrowprops=dict(arrowstyle="->"),annotation_clip=False)
-                    for i,bst in enumerate(controller.current_point._branch_switch_tangs):
-                        dx=controller._last_ds*bst[observable]
+                    for i,bst in enumerate(controller.current_point._branch_switch_tangs if tang_key is not None else []):
+                        dx=controller._last_ds*bst[tang_key]
                         extend_lims(x0)
                         xy_end=(float(x0[0]+dx[0]),float(x0[1]+dx[1]))
                         xy_start=(float(x0[0]),float(x0[1]))
@@ -213,7 +222,7 @@ class BifurcationDiagramPlotter:
             pttext=None
 
         if controller.selected_point is not None:
-            pc=controller.selected_point.get_coordinate(observable,with_eigen=True)
+            pc=controller.selected_point.get_coordinate(yaxis,with_eigen=True,xspec=xaxis)
             if controller._mode=="mp" and controller._move_point:
                 gca.plot([pc[0]],[pc[1]], marker='o', markersize=5,color="blue")
             else:
@@ -226,8 +235,8 @@ class BifurcationDiagramPlotter:
         if controller.parameter_range is not None and len(controller.parameter_range)==2:
             gca.set_xlim(controller.parameter_range[0],controller.parameter_range[1])
 
-        gca.set_xlabel(controller.get_bifurcation_parameter().get_name())
-        gca.set_ylabel(observable)
+        gca.set_xlabel(controller.axis_label(xaxis))
+        gca.set_ylabel(controller.axis_label(yaxis))
         # The parameters held fixed are part of the result, so they go on the figure itself - a saved
         # PDF of a diagram that does not say what slice it is a section through cannot be captioned.
         slice_desc=controller.describe_current_slice()
