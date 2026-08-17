@@ -166,7 +166,7 @@ def test_bifurcation_gui_controller(tmp_path):
         # ---------------------------------------------------------- the whole spectrum is recorded
         assert len(p0.eig_values) == c.neigen, "every computed eigenvalue is kept, not just the leading one"
         assert numpy.isclose(p0.eig_values[0].real, p0.eig_value_Re), "the leading one comes first"
-        assert p0.unstable_count() == 0, "the starting point is stable"
+        assert p0.measured_unstable_count() == 0, "the starting point is stable"
         spectra_before = [[complex(v) for v in p.eig_values] for b in c.branches for p in b]
 
         # ---------------------------------------------------------- axes: either can be anything
@@ -458,6 +458,42 @@ def test_bifurcation_gui_controller(tmp_path):
             cols = h.lstrip("# ").split()
             assert cols[:2] == ["b", "mu"], h
 
+        # ---------------------------------------------------------- quick mode
+        # What a quick step records, and that the leading eigenvalue is NaN rather than a fake zero -
+        # a zero would make every quick point look like a located bifurcation.
+        problem.set_linear_solver("superlu")
+        assert c.determinant_sign_supported(), "superlu reports a determinant sign"
+        # Continue on the branch we are already on: the assertions are about what a quick STEP records,
+        # not about the branch, and moving a fixed parameter from here would be a continuation of its own.
+        quick_branch = c._get_current_branch()
+        c.ds = -0.05
+        c.set_quick_mode(True)
+        assert c.quick_mode and c.quick_mode_detector == "auto"
+        for _ in range(5):
+            c.step()
+        quick_points = [p for p in quick_branch if p.det_sign is not None]
+        assert quick_points, "a quick step records a determinant sign"
+        for p in quick_points:
+            assert p.eig_values == [], "no spectrum is computed in quick mode"
+            assert p.eig_value_Re != p.eig_value_Re, "the leading eigenvalue is NaN, not a fake zero"
+            assert p.dparam_ds is not None, "the tangent is recorded as the second test function"
+        assert not any(p.eig_value_Re == 0 for p in quick_points), "NaN must not read as a bifurcation"
+
+        c.propagate_stability(quick_branch)
+        assert any(p.stability_source == "inferred" for p in quick_branch)
+
+        # Back-fill from the state dumps: the inferred stability must agree with what the spectrum says.
+        inferred = {id(p): p.unstable_count for p in quick_branch}
+        n = c.compute_spectrum_for_branch(quick_branch)
+        assert n > 0
+        for p in quick_branch:
+            assert p.stability_source == "eigen" and p.eig_values
+            if inferred[id(p)] is not None:
+                assert p.measured_unstable_count() == inferred[id(p)], \
+                    "stability inferred from the determinant disagrees with the spectrum"
+
+        c.set_quick_mode(False)
+
         # ---------------------------------------------------------- abort flag
         c.request_abort()
         assert c.abort_requested
@@ -584,6 +620,87 @@ def test_eigenfunction_plotter_is_derived_from_the_source():
     assert src.file_trunk is not None and "h" in src._range_objects
 
 
+def test_test_functions_discriminate_fold_from_branch_point():
+    """The detection logic itself, on synthetic points, so it does not depend on a sweep's step size.
+
+    A fold reverses the tangent AND flips the determinant; a pitchfork or transcritical point flips only
+    the determinant. That difference is the whole reason two test functions are watched - a dp/ds-only
+    quick mode would pass a pitchfork in silence. Both crossings are exercised end to end against
+    analytic problems by the scratchpad probes; this pins the decision.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+    from pyoomph.utils.bifurcation_gui.model import BifurcationGUISolutionPoint
+
+    logged: list = []
+    c = BifurcationController.__new__(BifurcationController)   # no Problem needed for the decision
+    c._paramname = "mu"
+    c._on_log = logged.append
+    c._on_changed = None
+    c._on_status = None
+    c._on_busy = None
+
+    def pt(mu, det, dp):
+        return BifurcationGUISolutionPoint(mu, {"u": 0.0}, None, None, 0, det_sign=det, dparam_ds=dp)
+
+    # nothing changed
+    a, b = pt(1.0, 1, +1.0), pt(0.9, 1, +1.0)
+    c._detect_bifurcation_between(a, b)
+    assert b.detected_bifurcation is None
+
+    # determinant only -> a branch point (pitchfork / transcritical)
+    a, b = pt(1.0, 1, +1.0), pt(0.9, -1, +1.0)
+    c._detect_bifurcation_between(a, b)
+    assert b.detected_bifurcation == "branch_point"
+
+    # tangent reversed as well -> a fold
+    a, b = pt(1.0, 1, +1.0), pt(0.9, -1, -1.0)
+    c._detect_bifurcation_between(a, b)
+    assert b.detected_bifurcation == "fold"
+
+    # a Hopf moves neither, and must NOT be reported - this is the documented blind spot
+    a, b = pt(1.0, 1, +1.0), pt(0.9, 1, +1.0)
+    c._detect_bifurcation_between(a, b)
+    assert b.detected_bifurcation is None, "a Hopf is invisible to both test functions"
+
+    # a missing sign never invents a detection
+    a, b = pt(1.0, None, None), pt(0.9, -1, +1.0)
+    c._detect_bifurcation_between(a, b)
+    assert b.detected_bifurcation is None
+    assert any("branch_point" in m or "fold" in m for m in logged), "detections are reported"
+
+
+def test_stability_indicator_and_the_inferred_toggle():
+    """The segmentation reads stability through one accessor, so quick-mode points can take part.
+
+    For a point with a measured spectrum it must return exactly the leading real part, or an ordinary
+    diagram would change - that is the regression this guards.
+    """
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint)
+
+    measured = BifurcationGUISolutionPoint(1.0, {"u": 1.0}, -2.5 + 0j, None, 0)
+    assert measured.stability_indicator() == -2.5, "unchanged for a measured point"
+
+    quick = BifurcationGUISolutionPoint(0.9, {"u": 0.9}, None, None, 1, det_sign=1, dparam_ds=1.0)
+    assert quick.stability_indicator() != quick.stability_indicator(), "unknown reads as NaN"
+    quick.stability_source = "inferred"
+    quick.unstable_count = 0
+    assert quick.stability_indicator() == -1.0, "inferred stable"
+    quick.unstable_count = 2
+    assert quick.stability_indicator() == +1.0, "inferred unstable"
+    # Distrusting the inference must put it back to unknown rather than guessing.
+    assert quick.stability_indicator(trust_inferred=False) != quick.stability_indicator(trust_inferred=False)
+
+    # A branch mixing measured and unknown points yields a neutral segment across the pair, which is
+    # the style the plot already uses where stability changes.
+    b = BifurcationGUISolutionBranch(kind="solution", continuation_parameter="mu")
+    b.append(measured)
+    b.append(BifurcationGUISolutionPoint(0.9, {"u": 0.9}, None, None, 1))
+    b.append(BifurcationGUISolutionPoint(0.8, {"u": 0.8}, -2.0 + 0j, None, 2))
+    _segs, stabs = b.to_branch_stab_list("u")
+    assert None in stabs, "a pair with an unknown side cannot claim a stability"
+
+
 def test_legacy_point_has_no_recorded_spectrum():
     """A state file written before the spectrum was recorded must not look as if it had one.
 
@@ -596,16 +713,16 @@ def test_legacy_point_has_no_recorded_spectrum():
               "statefile": None, "outstep": 0, "scoord": 0.0, "tangs": {}}
     p = BifurcationGUISolutionPoint.from_dict(legacy)
     assert p.eig_values == []
-    assert p.unstable_count() == 0
+    assert p.measured_unstable_count() == 0
     assert (p.eig_value_Re, p.eig_value_Im) == (-2.0, 0.5), "the leading one is still there"
 
     # A point that really did record its spectrum round-trips it, unstable count included.
     full = BifurcationGUISolutionPoint(1.0, {"u": 0.5}, -2 + 0.5j, None, 0,
                                        eig_values=[-2 + 0.5j, -2 - 0.5j, 0.3 + 0j])
-    assert full.unstable_count() == 1
+    assert full.measured_unstable_count() == 1
     back = BifurcationGUISolutionPoint.from_dict(full.to_state_dict())
     assert back.eig_values == [-2 + 0.5j, -2 - 0.5j, 0.3 + 0j]
-    assert back.unstable_count() == 1
+    assert back.measured_unstable_count() == 1
 
 
 def test_branch_describes_itself():

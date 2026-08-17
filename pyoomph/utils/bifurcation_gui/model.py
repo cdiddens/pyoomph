@@ -40,6 +40,14 @@ from scipy.interpolate import UnivariateSpline
 from ...typings import *
 
 
+#: Where a point's stability came from. "eigen" = an eigenproblem was solved there; "inferred" =
+#: carried along the branch from such a point and flipped at each determinant-sign change, which is
+#: blind to a Hopf; "unknown" = neither.
+STABILITY_EIGEN="eigen"
+STABILITY_INFERRED="inferred"
+STABILITY_UNKNOWN="unknown"
+
+
 #: What a plot axis shows: ``("observable", name)`` or ``("parameter", name)``. Having parameters and
 #: observables on the same footing is what lets one drawing path produce both an ordinary diagram
 #: (parameter vs observable) and the locus of a bifurcation in a plane of two parameters.
@@ -72,7 +80,8 @@ class BifurcationGUISolutionPoint:
     the state file it was dumped to."""
 
     def __init__(self,param_value,obs_values,eig_value,statefile,outstep,param_values:dict[str,float] | None=None,
-                 eig_values:"Sequence[complex] | None"=None) -> None:
+                 eig_values:"Sequence[complex] | None"=None,det_sign:int | None=None,
+                 dparam_ds:float | None=None) -> None:
         self.param_value=param_value
         #: Every global parameter at this point, not just the continued one. The state dump restores
         #: all of them, so without this the diagram could not say which slice of parameter space it
@@ -83,10 +92,16 @@ class BifurcationGUISolutionPoint:
         #: "empty param_values" cannot be used to mean "the slice was never recorded".
         self.param_values_complete=bool(param_values)
         self.obs_values=obs_values
-        # The leading eigenvalue stays the primary field: every stability decision keys off it, and
-        # a located bifurcation is flagged by its real part being exactly zero.
-        self.eig_value_Re=numpy.real(eig_value)
-        self.eig_value_Im=numpy.imag(eig_value)
+        # The leading eigenvalue stays the primary field: a located bifurcation is flagged by its real
+        # part being exactly zero. NaN when no eigenproblem was solved here (quick mode) - NOT zero,
+        # which would make every such point look like a bifurcation, and comparisons against NaN are
+        # False, so the existing "== 0" tests answer correctly without knowing about it.
+        if eig_value is None:
+            self.eig_value_Re=float("nan")
+            self.eig_value_Im=float("nan")
+        else:
+            self.eig_value_Re=numpy.real(eig_value)
+            self.eig_value_Im=numpy.imag(eig_value)
         #: The whole computed spectrum, for the eigenvalue list in the Points tab. Empty for points
         #: read from a state file written before it was recorded - which is why this cannot simply be
         #: assumed to start with the leading eigenvalue above.
@@ -98,6 +113,18 @@ class BifurcationGUISolutionPoint:
         self._branch_switch_tangs:list[Any]=[]
         self.tag=-1
         self.bifurcation_info:dict | None=None
+        #: Sign of the determinant of the plain Jacobian, from the factorisation the continuation step
+        #: already computed. Only its CHANGES between neighbouring points mean anything - see
+        #: GenericLinearSystemSolver.get_determinant_sign.
+        self.det_sign=det_sign
+        #: dparameter/ds of the continuation tangent. Reverses at a fold and nowhere else.
+        self.dparam_ds=dparam_ds
+        #: "fold" or "branch_point" when a test function changed between the previous point and this
+        #: one. The bifurcation is BRACKETED by the two, not located at either.
+        self.detected_bifurcation:str | None=None
+        self.stability_source=STABILITY_EIGEN if eig_value is not None else STABILITY_UNKNOWN
+        #: Number of eigenvalues with a positive real part: measured, or propagated in quick mode.
+        self.unstable_count:int | None=None
 
     @staticmethod
     def from_dict(res):
@@ -109,6 +136,13 @@ class BifurcationGUISolutionPoint:
         # parameters exist".
         inst.param_values=dict(res.get("param_values",{}))
         inst.param_values_complete="param_values" in res
+        inst.det_sign=res.get("det_sign")
+        inst.dparam_ds=res.get("dparam_ds")
+        inst.detected_bifurcation=res.get("detected_bifurcation")
+        # A point written before quick mode existed always had a spectrum, so the default is "eigen" -
+        # which is also what its NaN-free eig_value_Re says.
+        inst.stability_source=res.get("stability_source",STABILITY_EIGEN)
+        inst.unstable_count=res.get("unstable_count")
         re_list,im_list=res.get("eig_values_Re"),res.get("eig_values_Im")
         if re_list is not None and im_list is not None:
             inst.eig_values=[complex(r,i) for r,i in zip(re_list,im_list)]
@@ -129,6 +163,16 @@ class BifurcationGUISolutionPoint:
             res["tag"]=self.tag
         if self.param_values:
             res["param_values"]=dict(self.param_values)
+        if self.det_sign is not None:
+            res["det_sign"]=int(self.det_sign)
+        if self.dparam_ds is not None:
+            res["dparam_ds"]=float(self.dparam_ds)
+        if self.detected_bifurcation is not None:
+            res["detected_bifurcation"]=self.detected_bifurcation
+        if self.stability_source!=STABILITY_EIGEN:
+            res["stability_source"]=self.stability_source
+        if self.unstable_count is not None:
+            res["unstable_count"]=int(self.unstable_count)
         if self.eig_values:
             # Two flat lists rather than pairs: shorter in the file and json-native. Note this is the
             # entry that makes state.json grow with neigen - see the comment in save_all.
@@ -139,9 +183,23 @@ class BifurcationGUISolutionPoint:
             res["tangs"][k]=list(v)
         return res
 
-    def unstable_count(self)->int:
+    def measured_unstable_count(self)->int:
         """How many of the recorded eigenvalues have a positive real part."""
         return sum(1 for v in self.eig_values if numpy.real(v)>0)
+
+    def stability_indicator(self,trust_inferred:bool=True)->float:
+        """A signed number the branch segmentation can read: <0 stable, >0 unstable, 0 a bifurcation.
+
+        For a point where an eigenproblem was solved this IS the leading real part, so an ordinary
+        diagram behaves exactly as before. For a quick-mode point it is the sign of the propagated
+        unstable count, and NaN while that is unknown - which the segmentation turns into the neutral
+        style it already uses for a piece straddling a change of stability.
+        """
+        if self.stability_source==STABILITY_EIGEN:
+            return float(self.eig_value_Re)
+        if trust_inferred and self.stability_source==STABILITY_INFERRED and self.unstable_count is not None:
+            return 1.0 if self.unstable_count>0 else -1.0
+        return float("nan")
 
     def fixed_parameters(self,varying:Iterable[str])->dict[str,float]:
         """The parameters this point holds fixed, i.e. all of them except the ones being varied."""
@@ -341,10 +399,10 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
             res.append(p.get_coordinate(yspec,xspec=xspec))
         return numpy.array(res)
 
-    def smooth_branch_stab_list(self,yspec,subsampling=10,xspec=None):
+    def smooth_branch_stab_list(self,yspec,subsampling=10,xspec=None,trust_inferred:bool=True):
         """Like :py:meth:`to_branch_stab_list`, with each segment resampled through a spline."""
         if len(self)<=1:
-            return self.to_branch_stab_list(yspec,xspec=xspec)
+            return self.to_branch_stab_list(yspec,xspec=xspec,trust_inferred=trust_inferred)
         s=[p.scoord for p in self]
         # One spline per column, so a list of y specs (the all-observables export) works exactly as
         # a single one does. The previous version special-cased that into a list of splines it could
@@ -356,7 +414,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         yis=[UnivariateSpline(s,[p.value_of(sp) for p in self],s=0,k=order) for sp in yspecs]
         eigRei=UnivariateSpline(s,[p.eig_value_Re for p in self],s=0,k=order)
         eigImi=UnivariateSpline(s,[p.eig_value_Im for p in self],s=0,k=order)
-        segs,stabs=self.to_branch_stab_list(yspec,xspec=xspec)
+        segs,stabs=self.to_branch_stab_list(yspec,xspec=xspec,trust_inferred=trust_inferred)
         smoothsegs=[]
         for seg in segs:
             if len(seg)==1:
@@ -380,7 +438,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         return smoothsegs,stabs
 
 
-    def to_branch_stab_list(self,yspec,xspec=None):
+    def to_branch_stab_list(self,yspec,xspec=None,trust_inferred:bool=True):
         """Split the branch into segments of constant stability.
 
         Returns ``(segments, stabilities)``; each segment is an array of
@@ -389,6 +447,14 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         """
         def coord(p):
             return numpy.array(p.get_coordinate(yspec,with_s=True,with_eigen=True,xspec=xspec))
+        # Read through stability_indicator() rather than eig_value_Re directly, so a quick-mode point
+        # (no eigenproblem solved) can contribute its propagated stability, or NaN while that is not
+        # known. For a branch where every point has a spectrum this returns exactly eig_value_Re, so the
+        # behaviour of an ordinary diagram is unchanged.
+        def sv(p):
+            return p.stability_indicator(trust_inferred)
+        def unknown(v):
+            return v!=v          # NaN
         res=[]
         stabs=[]
         if len(self)==0:
@@ -396,11 +462,22 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
         if len(self)==1:
             return numpy.array([[coord(self[0])]]),[None]
         currseg=[]
-        currstab=self[0].eig_value_Re<0
-        if self[0].eig_value_Re==0:
-            currstab=self[1].eig_value_Re<0
+        currstab=sv(self[0])<0
+        if unknown(sv(self[0])) or sv(self[0])==0:
+            currstab=sv(self[1])<0
         for p1,p2 in zip(self,self[1:]):
-            if p2.eig_value_Re==0:
+            s1,s2=sv(p1),sv(p2)
+            if unknown(s1) or unknown(s2):
+                # Nothing can be claimed across a pair whose stability is not known on both sides, so
+                # it becomes the same neutral piece a change of stability produces.
+                if len(currseg)>0:
+                    res.append(numpy.array(currseg))
+                    stabs.append(currstab)
+                    currseg=[]
+                res.append(numpy.array([coord(p1),coord(p2)]))
+                stabs.append(None)
+                currstab=(s2<0) if not unknown(s2) else currstab
+            elif s2==0:
                 if len(currseg)==0:
                     currseg.append(coord(p1))
                 currseg.append(coord(p2))
@@ -408,7 +485,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
                 stabs.append(currstab)
                 currseg=[]
                 currstab=not currstab
-            elif p1.eig_value_Re*p2.eig_value_Re>=0: # Same stability
+            elif s1*s2>=0: # Same stability
                 if len(currseg)==0:
                     currseg.append(coord(p1))
                 currseg.append(coord(p2))
@@ -419,7 +496,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
                     currseg=[]
                 res.append(numpy.array([coord(p1),coord(p2)]))
                 stabs.append(None)
-                currstab=p2.eig_value_Re<0
+                currstab=s2<0
         if len(currseg)>0:
             res.append(numpy.array(currseg))
             stabs.append(currstab)

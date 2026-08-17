@@ -47,6 +47,28 @@ class ScipySolverError(SolverError):
 	"""
 
 
+def _permutation_is_odd(perm:Any)->bool:
+	"""Parity of a permutation, by counting cycles: parity = (n - number of cycles) mod 2.
+
+	A python loop over n, which is O(n) against the O(nnz*fill) of the factorisation whose sign is being
+	read, so it costs nothing next to the work already done.
+	"""
+	perm=numpy.asarray(perm)
+	n=int(perm.size)
+	seen=numpy.zeros(n,dtype=bool)
+	swaps=0
+	for i in range(n):
+		if seen[i]:
+			continue
+		j=i
+		while not seen[j]:
+			seen[j]=True
+			j=int(perm[j])
+			swaps+=1
+		swaps-=1
+	return bool(swaps&1)
+
+
 @GenericLinearSystemSolver.register_solver()
 class SuperLUSerial(GenericLinearSystemSolver):
 	idname="superlu"
@@ -58,6 +80,31 @@ class SuperLUSerial(GenericLinearSystemSolver):
 	def __init__(self,problem:"Problem",useUmfpack:bool=False):
 		super().__init__(problem)
 		scipy.sparse.linalg.use_solver(useUmfpack=useUmfpack) #type:ignore
+
+	def get_determinant_sign(self)->int | None:
+		"""From the factorisation the last solve already computed, so this costs nothing.
+
+		SuperLU gives ``P_r A P_c = L U`` with a unit-diagonal L, so the sign is that of the product of
+		U's diagonal times the parity of both permutations. Leaving the permutations out - as the
+		commented-out determinant print in this file used to - gives a sign that flips whenever pivoting
+		reorders, i.e. spurious bifurcation detections.
+		"""
+		lu=getattr(self,"_current_LU",None)
+		if lu is None:
+			return None
+		try:
+			diag=lu.U.diagonal()
+		except Exception:
+			return None
+		if len(diag)==0:
+			return None
+		if numpy.any(diag==0):
+			return 0
+		sign=1 if int(numpy.count_nonzero(diag<0))%2==0 else -1
+		for perm in (lu.perm_r,lu.perm_c):
+			if _permutation_is_odd(perm):
+				sign=-sign
+		return sign
 
 	def solve_serial(self,op_flag:int,n:int,nnz:int,nrhs:int,values:NPFloatArray,rowind:NPIntArray,colptr:NPIntArray,b:NPFloatArray,ldb:int,transpose:int)->int:
 #		print("SOLVING system N=",n,"nnz=",nnz)

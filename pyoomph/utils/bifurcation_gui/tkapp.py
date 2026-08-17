@@ -146,6 +146,23 @@ class BifurcationTkApp:
           tooltip="Start a new diagram continuing in the parameter selected in the Parameters tab")
         A("set_selected_parameter","Set the selected parameter's value...",self._dialog_set_parameter,
           is_solver_task=True,enabled_when=lambda: self._selected_parameter() is not None)
+        A("quick_mode","Quick mode (no eigensolve per step)",self._toggle_quick_mode,kind="check",
+          getter=lambda: c.quick_mode,
+          tooltip="Continue without solving an eigenproblem; bifurcations are spotted from the "
+                  "determinant sign and the tangent. A Hopf cannot be seen this way.")
+        A("quick_mode_folds_only","Quick mode: watch folds only",self._toggle_folds_only,kind="check",
+          getter=lambda: c.quick_mode_detector=="folds_only",
+          tooltip="Needs no solver support, but misses pitchfork and transcritical points")
+        A("trust_inferred","Trust stability inferred from the determinant",self._toggle_trust_inferred,
+          kind="check",getter=lambda: c.trust_inferred_stability)
+        A("compute_spectrum_here","Compute the eigenvalues at this point",self._compute_spectrum_here,
+          is_solver_task=True,enabled_when=lambda: c.selected_point is not None or c.current_point is not None)
+        A("compute_spectrum_branch","Compute the eigenvalues along this branch",
+          lambda: c.compute_spectrum_for_branch(),is_solver_task=True,
+          tooltip="Loads each point's state dump and solves the eigenproblem, so a cheap sweep can have "
+                  "its spectra filled in afterwards")
+        A("refine_detected","Refine the detected bifurcation",self._refine_detected,is_solver_task=True,
+          enabled_when=lambda: self._nearest_detected() is not None)
         A("refresh_plots","Refresh field plots",self._refresh_plots,
           enabled_when=lambda: self.plot_panes.has_any(),
           tooltip="Re-render the problem's plotters from the current solution")
@@ -284,6 +301,9 @@ class BifurcationTkApp:
         self._add_menu_item(m,"ds_reverse")
         self._add_menu_item(m,"set_ds")
         m.add_separator()
+        self._add_menu_item(m,"quick_mode")
+        self._add_menu_item(m,"quick_mode_folds_only")
+        m.add_separator()
         self._add_menu_item(m,"continue_in_selected")
         self._add_menu_item(m,"set_selected_parameter")
         m.add_separator()
@@ -296,6 +316,10 @@ class BifurcationTkApp:
         self._add_menu_item(m,"locate_pitchfork")
         self._add_menu_item(m,"branch_switch")
         m.add_separator()
+        m.add_separator()
+        self._add_menu_item(m,"refine_detected")
+        self._add_menu_item(m,"compute_spectrum_here")
+        self._add_menu_item(m,"compute_spectrum_branch")
         m.add_separator()
         self._add_menu_item(m,"start_locus")
         self._add_menu_item(m,"leave_locus")
@@ -333,6 +357,7 @@ class BifurcationTkApp:
         m.add_separator()
         self._add_menu_item(m,"toggle_splines")
         self._add_menu_item(m,"show_other_slices")
+        self._add_menu_item(m,"trust_inferred")
         self._add_menu_item(m,"toggle_logx")
         self._add_menu_item(m,"toggle_logy")
         m.add_separator()
@@ -857,6 +882,8 @@ class BifurcationTkApp:
             "arclength" if c.mode=="al" else "move point")
         # The slice belongs in the status bar, not only in a panel: a diagram read off the screen
         # without it cannot be interpreted once there is more than one parameter.
+        if c.quick_mode:
+            summary+=" | QUICK ("+("folds only" if c.quick_mode_detector=="folds_only" else "det+tangent")+")"
         slice_desc=c.describe_current_slice()
         if slice_desc:
             summary+=" | fixed: "+slice_desc
@@ -963,7 +990,7 @@ class BifurcationTkApp:
             # showing only the leading eigenvalue as if it were the whole spectrum.
             self.eigen_label_var.set("{:s} point: only the leading eigenvalue was recorded".format(which))
         else:
-            nunstable=point.unstable_count()
+            nunstable=point.measured_unstable_count()
             self.eigen_label_var.set("{:s} point: {:d} eigenvalue{:s}, {:d} unstable".format(
                 which,len(values),"" if len(values)==1 else "s",nunstable))
         self.eigen_tree.delete(*self.eigen_tree.get_children())
@@ -1146,6 +1173,46 @@ class BifurcationTkApp:
         if self.plot_panes.has_any():
             self._graphs_pane.add(self.plot_panes.paned,weight=2)
             self._plot_panes_attached=True
+
+    def _toggle_quick_mode(self):
+        self.controller.set_quick_mode(not self.controller.quick_mode)
+
+    def _toggle_folds_only(self):
+        c=self.controller
+        c.set_quick_mode(c.quick_mode,"auto" if c.quick_mode_detector=="folds_only" else "folds_only")
+
+    def _toggle_trust_inferred(self):
+        self.controller.trust_inferred_stability=not self.controller.trust_inferred_stability
+
+    def _compute_spectrum_here(self):
+        c=self.controller
+        point=c.selected_point if c.selected_point is not None else c.current_point
+        if c.compute_spectrum(point):
+            c.propagate_stability()
+        self._eigen_signature=None      # force the eigenvalue list to rebuild
+
+    def _nearest_detected(self):
+        """The bracketed bifurcation nearest the selected (or current) point, if any."""
+        c=self.controller
+        branch=c.selected_branch if c.selected_branch is not None else c.current_branch
+        if branch is None:
+            return None
+        ref=c.selected_point if c.selected_point is not None else c.current_point
+        candidates=[p for p in branch if p.detected_bifurcation is not None]
+        if not candidates or ref is None:
+            return candidates[0] if candidates else None
+        return min(candidates,key=lambda p: abs(p.param_value-ref.param_value))
+
+    def _refine_detected(self):
+        """Go to the bracketing point and run the ordinary bifurcation location from there."""
+        c=self.controller
+        target=self._nearest_detected()
+        if target is None:
+            return
+        if c.current_point is not target:
+            c.select_point(c._branch_of(target),target)
+            c.goto_selected_point()
+        c.locate_bifurcation_or_switch()
 
     def _toggle_other_slices(self):
         self.plotter.show_other_slices=not self.plotter.show_other_slices

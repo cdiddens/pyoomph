@@ -209,9 +209,11 @@ class BifurcationDiagramPlotter:
             color="red" if b == controller.current_branch else "grey"
 
             if controller.interpolated_splines:
-                segs,stabs=b.smooth_branch_stab_list(yaxis,xspec=xaxis)
+                segs,stabs=b.smooth_branch_stab_list(yaxis,xspec=xaxis,
+                                                     trust_inferred=controller.trust_inferred_stability)
             else:
-                segs,stabs=b.to_branch_stab_list(yaxis,xspec=xaxis)
+                segs,stabs=b.to_branch_stab_list(yaxis,xspec=xaxis,
+                                                 trust_inferred=controller.trust_inferred_stability)
 
             for seg,stab in zip(segs,stabs):
                 if stab == True:
@@ -224,6 +226,19 @@ class BifurcationDiagramPlotter:
                     dt="dotted"
                     lw=1.0
                 gca.plot(seg[:,0],seg[:,1], linestyle=dt,color=color,linewidth=lw)
+            # A bifurcation that quick mode BRACKETED rather than located: an open marker halfway
+            # between the two points it lies between, so it cannot be mistaken for a computed one.
+            for ip,p in enumerate(b):
+                if p.detected_bifurcation is None or ip==0:
+                    continue
+                try:
+                    a=b[ip-1].get_coordinate(yaxis,xspec=xaxis)
+                    c2=p.get_coordinate(yaxis,xspec=xaxis)
+                except KeyError:
+                    continue
+                gca.plot([0.5*(a[0]+c2[0])],[0.5*(a[1]+c2[1])],marker="o",markersize=9,
+                         markerfacecolor="none",markeredgecolor="brown",markeredgewidth=1.4,
+                         linestyle="none")
             normpts=numpy.array([p.get_coordinate(yaxis,xspec=xaxis) for p in b if p.eig_value_Re!=0],ndmin=2)
             if len(normpts)>0:
                 gca.plot(normpts[:,0],normpts[:,1], 'o', markersize=3,color=color)

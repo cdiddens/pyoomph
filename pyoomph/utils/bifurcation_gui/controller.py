@@ -41,7 +41,7 @@ from ...typings import *
 
 from .model import (BifurcationGUISolutionPoint, BifurcationGUISolutionBranch, AxisSpec,
                     AXIS_OBSERVABLE, AXIS_PARAMETER, as_axis, observable_axis, parameter_axis,
-                    same_parameter_value)
+                    same_parameter_value, STABILITY_EIGEN, STABILITY_INFERRED, STABILITY_UNKNOWN)
 
 from typing import Protocol
 from pathlib import Path
@@ -167,6 +167,15 @@ class BifurcationController:
         self.output_all_observables=False
         self._initial_view=None
         self.classify_bifurcations=False
+        #: Continue without solving an eigenproblem at every point, spotting bifurcations from test
+        #: functions instead. See dev_docs/quick_continuation.md for what it can and cannot see.
+        self.quick_mode=False
+        #: "auto" watches both the determinant sign and dparameter/ds; "folds_only" watches dparam/ds
+        #: alone, which needs no solver support but cannot see a pitchfork or a transcritical point.
+        self.quick_mode_detector="auto"
+        #: Draw stability that was propagated from a measured point rather than measured here. Turning
+        #: it off shows those segments as unknown, since a Hopf crossing would make it wrong.
+        self.trust_inferred_stability=True
 
         #: Supplies the visible axis ranges, see :py:class:`BifurcationViewLimits`.
         self.view:BifurcationViewLimits=_FixedViewLimits()
@@ -703,7 +712,8 @@ class BifurcationController:
                 self.log("Could not solve the eigenproblem on the locus ("+str(e).split("\n")[0]+"); recording the critical eigenvalue only")
         self._add_current_state(eig_value=crit,eig_values=spectrum)
 
-    def _add_current_state(self,eig_value=None,eig_values=None):
+    def _add_current_state(self,eig_value=None,eig_values=None,det_sign=None,dparam_ds=None,
+                           measured:bool=True):
         """Record the problem's current state as a new point of the current branch.
 
         ``eig_value`` overrides the eigenvalue that would be read from the problem, which is what
@@ -714,21 +724,24 @@ class BifurcationController:
         to a different solve.
         """
         branch=self.current_branch if self.current_branch is not None else self._new_branch()
-        if eig_value is None:
+        if eig_value is None and measured and det_sign is None and dparam_ds is None:
             spectrum=self.problem.get_last_eigenvalues()
             eig_value=spectrum[0]
             if eig_values is None:
                 eig_values=list(spectrum)
-        elif eig_values is None:
+        elif eig_value is not None and eig_values is None:
             eig_values=[eig_value]
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step)))
         p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),eig_value,state_file,self._state_step,
-                                      param_values=self.current_parameter_values(),eig_values=eig_values)
+                                      param_values=self.current_parameter_values(),eig_values=eig_values,
+                                      det_sign=det_sign,dparam_ds=dparam_ds)
         # On a locus EVERY point has a zero real part, so classifying them all would run a normal-form
         # calculation per step for an answer already known: the tracked type.
         if p.eig_value_Re==0 and self.classify_bifurcations and branch.kind!="locus":
             from ...generic.bifurcation_tools import NormalFormCalculator
             p.bifurcation_info=NormalFormCalculator(self.problem).get_normal_form(self.get_bifurcation_parameter().get_name())
+        if p.stability_source==STABILITY_EIGEN and p.eig_values:
+            p.unstable_count=p.measured_unstable_count()
         self.problem.save_state(state_file)
         self._state_step+=1
         self.current_point=p
@@ -1009,9 +1022,11 @@ class BifurcationController:
             export_x,export_y=self._export_axes(b,obs_cols)
             column_names=[sp[1] for sp in export_y]
             if self.interpolated_splines:
-                smoothedsegs,stabs=b.smooth_branch_stab_list(export_y,100,xspec=export_x)
+                smoothedsegs,stabs=b.smooth_branch_stab_list(export_y,100,xspec=export_x,
+                                                             trust_inferred=self.trust_inferred_stability)
             else:
-                smoothedsegs,stabs=b.to_branch_stab_list(export_y,xspec=export_x)
+                smoothedsegs,stabs=b.to_branch_stab_list(export_y,xspec=export_x,
+                                                         trust_inferred=self.trust_inferred_stability)
             istab=0
             iunstab=0
             for seg,stab in zip(smoothedsegs,stabs):
@@ -1079,6 +1094,175 @@ class BifurcationController:
 
         self.problem.set_current_dofs(backup)
 
+    # ------------------------------------------------------------------ quick mode
+
+    def determinant_sign_supported(self)->bool:
+        """Whether the configured linear solver can report a determinant sign at all.
+
+        Asks the CLASS, not the current value: get_determinant_sign() also returns None when no
+        factorisation exists yet, which at enable time is the normal state and must not be mistaken for
+        "this solver cannot do it".
+        """
+        from ...solvers.generic import GenericLinearSystemSolver
+        try:
+            solver=self.problem.get_la_solver()
+        except Exception:
+            return False
+        return type(solver).get_determinant_sign is not GenericLinearSystemSolver.get_determinant_sign
+
+    def set_quick_mode(self,on:bool,detector:str | None=None):
+        """Turn quick mode on or off, refusing "auto" on a solver that cannot report a determinant.
+
+        Refusing rather than quietly falling back: a mode that silently stops seeing pitchforks and
+        transcritical points is worse than one that will not start, and the message names the way out.
+        """
+        if detector is not None:
+            if detector not in ("auto","folds_only"):
+                raise ValueError("quick_mode_detector must be 'auto' or 'folds_only'")
+            self.quick_mode_detector=detector
+        if on and self.quick_mode_detector=="auto" and not self.determinant_sign_supported():
+            solver=self.problem.get_la_solver()
+            raise RuntimeError(
+                "Quick mode cannot watch the determinant with the '"+str(getattr(solver,"idname","?"))+
+                "' linear solver: it does not report a determinant sign.\n"
+                "Use problem.set_linear_solver('superlu'), or 'petsc' with use_mumps(), to get folds AND "
+                "branch points.\nOr set the detector to 'folds_only', which needs no solver support but "
+                "sees only folds - a pitchfork or transcritical point will pass unnoticed.")
+        self.quick_mode=bool(on)
+        self.log("Quick mode "+("on" if on else "off")+
+                 (" (detector: "+self.quick_mode_detector+")" if on else ""))
+        self._changed()
+
+    def _determinant_sign(self)->int | None:
+        """The solver's determinant sign, but only when it belongs to the PLAIN Jacobian.
+
+        While an augmented system is active - bifurcation tracking - the factorisation is of a bordered
+        matrix whose determinant does not vanish at the bifurcation, so its sign says nothing about one.
+        _get_n_unaugmented_dofs()==0 is oomph's "not augmented" sentinel.
+        """
+        if self.quick_mode_detector!="auto":
+            return None
+        try:
+            if self.problem._get_n_unaugmented_dofs()!=0:
+                return None
+            return self.problem.get_la_solver().get_determinant_sign()
+        except Exception:
+            return None
+
+    def _detect_bifurcation_between(self,previous,current):
+        """Set current.detected_bifurcation when a test function changed across the pair.
+
+        A fold reverses dparameter/ds AND flips the determinant; a branch point (pitchfork,
+        transcritical) flips only the determinant, which is exactly why both are watched. A Hopf moves
+        neither and is invisible - that limit is the price of not eigensolving.
+        """
+        if previous is None or current is None:
+            return
+        turned=(previous.dparam_ds is not None and current.dparam_ds is not None
+                and numpy.sign(previous.dparam_ds)!=numpy.sign(current.dparam_ds))
+        det_flipped=(previous.det_sign is not None and current.det_sign is not None
+                     and previous.det_sign!=0 and current.det_sign!=0
+                     and previous.det_sign!=current.det_sign)
+        if turned:
+            current.detected_bifurcation="fold"
+        elif det_flipped:
+            current.detected_bifurcation="branch_point"
+        else:
+            return
+        self.log("Detected a {:s} between {:s} = {:.6g} and {:.6g}{:s}".format(
+            current.detected_bifurcation,self._get_paramname_str(),
+            previous.param_value,current.param_value,
+            "" if not (turned and det_flipped) else " (both test functions changed)"))
+
+    def propagate_stability(self,branch=None):
+        """Carry the unstable count along a branch from the points where it was measured.
+
+        sign(det J) flips exactly when an odd number of real eigenvalues crosses zero, so the count can
+        be stepped along the branch and flipped at each recorded change. Where a LATER measured point
+        disagrees with the propagated value, that is a crossing the determinant could not see - a Hopf -
+        and it is reported rather than hidden.
+        """
+        branches=[branch] if branch is not None else self.branches
+        for b in branches:
+            for p in b:
+                if p.stability_source==STABILITY_EIGEN:
+                    p.unstable_count=p.measured_unstable_count() if p.eig_values else p.unstable_count
+            measured=[i for i,p in enumerate(b) if p.stability_source==STABILITY_EIGEN and p.unstable_count is not None]
+            if not measured:
+                continue
+            def walk(indices,step):
+                count=None
+                last_det=None
+                for i in indices:
+                    p=b[i]
+                    if p.stability_source==STABILITY_EIGEN and p.unstable_count is not None:
+                        if count is not None and p.unstable_count!=count:
+                            self.log(("Warning: the stability inferred from the determinant disagrees with "
+                                      "the spectrum measured at {:s} = {:.6g} ({:d} vs {:d} unstable). A "
+                                      "Hopf bifurcation was probably crossed - the determinant cannot see "
+                                      "one.").format(self._get_paramname_str(),p.param_value,count,p.unstable_count))
+                        count=p.unstable_count
+                        last_det=p.det_sign
+                        continue
+                    if count is None:
+                        continue
+                    if p.det_sign is not None and last_det is not None and p.det_sign!=last_det:
+                        count=count+1 if count==0 else count-1
+                    if p.det_sign is not None:
+                        last_det=p.det_sign
+                    p.unstable_count=count
+                    p.stability_source=STABILITY_INFERRED
+            walk(range(len(b)),1)
+            walk(range(len(b)-1,-1,-1),-1)
+
+    def compute_spectrum(self,point)->bool:
+        """Solve the eigenproblem at a point that has none, from its own state dump.
+
+        This is what makes quick mode a workflow rather than a compromise: the dumps are all there, so a
+        cheap sweep can have its eigenvalues filled in afterwards without redoing the continuation.
+        """
+        if point is None or not point.statefile:
+            return False
+        restore=self.current_point
+        try:
+            self.load_pt(point)
+            self.problem.solve_eigenproblem(self.neigen,self.shift)
+            spectrum=list(self.problem.get_last_eigenvalues())
+            point.eig_values=[complex(v) for v in spectrum]
+            point.eig_value_Re=numpy.real(spectrum[0])
+            point.eig_value_Im=numpy.imag(spectrum[0])
+            point.stability_source=STABILITY_EIGEN
+            point.unstable_count=point.measured_unstable_count()
+            return True
+        except Exception as e:
+            self.log("Could not compute the spectrum at "+self._get_paramname_str()+
+                     " = {:.6g}: {:s}".format(point.param_value,repr(e)))
+            return False
+        finally:
+            if restore is not None and restore is not point:
+                try:
+                    self.load_pt(restore)
+                except Exception as e:
+                    self.log("Could not return to the previous point: "+repr(e))
+
+    def compute_spectrum_for_branch(self,branch=None)->int:
+        """Fill in the spectrum for every point of a branch that lacks one. Abortable."""
+        b=branch if branch is not None else self._get_current_branch()
+        todo=[p for p in b if p.stability_source!=STABILITY_EIGEN or not p.eig_values]
+        done=0
+        for i,p in enumerate(todo):
+            if self._abort_requested:
+                self._abort_requested=False
+                self.log("Spectrum back-fill aborted after {:d} of {:d} points".format(done,len(todo)))
+                break
+            self._status("EIGENVALUES {:d}/{:d}".format(i+1,len(todo)))
+            if self.compute_spectrum(p):
+                done+=1
+        self.propagate_stability(b)
+        self.log("Computed the spectrum at {:d} of {:d} points".format(done,len(todo)))
+        self._changed()
+        return done
+
     # ------------------------------------------------------------------ solver commands
 
     def branch_switch(self):
@@ -1122,6 +1306,11 @@ class BifurcationController:
 
     def transient_leave_branch(self,eigenindex=0):
         self._status("LEAVING BRANCH TRANSIENTLY")
+        if self.quick_mode and len(self.problem.get_last_eigenvectors())<=eigenindex:
+            # This perturbs the solution along an eigenvector, so it needs one; in quick mode none was
+            # computed. Solving here beats failing several frames deep in the perturbation.
+            self.log("Quick mode: solving the eigenproblem, which leaving a branch transiently needs")
+            self.problem.solve_eigenproblem(self.neigen,self.shift)
         cp=self._get_current_point()
         eig=numpy.sqrt(cp.eig_value_Re**2+cp.eig_value_Im**2)
         eig=max(1e-4,eig)
@@ -1320,9 +1509,18 @@ class BifurcationController:
         if self._abort_requested:
             return
         locus=self.on_locus()
-        self._status("FOLLOWING THE BIFURCATION" if locus else "ARCLENGTH STEPPING")
+        quick=self.quick_mode and not locus
+        self._status("FOLLOWING THE BIFURCATION" if locus else
+                     ("QUICK STEPPING (no eigensolve)" if quick else "ARCLENGTH STEPPING"))
         ds=self.problem.arclength_continuation(self.get_bifurcation_parameter(),ds)
-        if locus:
+        if quick:
+            # The whole point: no eigensolve. Two test functions are recorded instead, read from work
+            # the step has already done - the factorisation the Newton solve produced, and the
+            # continuation tangent.
+            self._add_current_state(eig_value=None,det_sign=self._determinant_sign(),
+                                   dparam_ds=self.problem.get_arc_length_parameter_derivative())
+            self._detect_bifurcation_between(origin,self.current_point)
+        elif locus:
             self._add_locus_state()
         else:
             self.problem.solve_eigenproblem(self.neigen,self.shift)

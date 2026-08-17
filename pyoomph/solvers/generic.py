@@ -173,6 +173,25 @@ class GenericLinearSystemSolver:
 		"""
 		return False
 
+	def get_determinant_sign(self)->int | None:
+		"""Sign of the determinant of the matrix last factorised, or None if this solver cannot say.
+
+		Only the SIGN, and only its CHANGES, are meaningful: the value carries whatever overall sign
+		convention and row scaling the assembled system has, so it is not the mathematical sign of
+		det(J). What it is good for is detecting that an odd number of real eigenvalues has crossed
+		zero between two continuation points - a fold or a branch point - without solving an
+		eigenproblem. See dev_docs/quick_continuation.md.
+
+		The caller must check that the system is not augmented before trusting it (bifurcation tracking
+		factorises a bordered matrix whose determinant does not vanish at the bifurcation);
+		``Problem._get_n_unaugmented_dofs()==0`` is the sentinel for "not augmented".
+
+		Returns +1, -1, 0 for an exactly singular factorisation, or None when unavailable. The default
+		is None, so a solver only reports a sign if it genuinely has one to report - like
+		:py:meth:`requires_explicit_diagonal`, answering wrongly here is worse than not answering.
+		"""
+		return None
+
 	def setup_solver(self)->None:
 		pass
 
