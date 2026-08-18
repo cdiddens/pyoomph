@@ -231,12 +231,25 @@ class BifurcationTkApp:
         A("delete_point_alt","Delete point",self._delete_point)
         for d in range(10):
             A("tag_{:d}".format(d),"Tag {:d}".format(d),lambda d=d: c.tag_selected_point(d))
+        A("split_branch","Split branch here",self._split_branch,
+          enabled_when=lambda: c.selected_point is not None and c.selected_branch is not None
+                               and c.selected_point in c.selected_branch
+                               and c.selected_branch.index(c.selected_point)>0,
+          tooltip="Cut the selected branch in two, the selected point starting the new half. For when "
+                  "a continuation step landed on a different branch")
+        A("merge_branches","Merge selected branch into current",self._merge_branches,
+          enabled_when=lambda: c.selected_branch is not None and c.selected_branch is not c.current_branch,
+          tooltip="Join two branches that are one curve, ordered by which of their ends meet")
 
         # --- view
         A("toggle_splines","Interpolated splines",self._toggle_splines,kind="check",
           getter=lambda: c.interpolated_splines)
         A("toggle_mode","Move-point mode",self._toggle_mode,kind="check",
           getter=lambda: c.mode=="mp")
+        A("toggle_move_point","Grab selected point",c.toggle_move_point,kind="check",
+          getter=lambda: c.move_point_active,
+          tooltip="While grabbed, the point-selection keys move the point along its branch instead of "
+                  "moving the selection")
         A("cycle_observable","Next observable",self._cycle_observable)
         A("toggle_logx","Logarithmic parameter axis",lambda: self._toggle_scale("x"),kind="check",
           getter=lambda: self.plotter.get_xscale()=="log")
@@ -388,7 +401,11 @@ class BifurcationTkApp:
         for d in range(10):
             self._add_menu_item(tagmenu,"tag_{:d}".format(d))
         m.add_separator()
+        self._add_menu_item(m,"split_branch")
+        self._add_menu_item(m,"merge_branches")
+        m.add_separator()
         self._add_menu_item(m,"toggle_mode")
+        self._add_menu_item(m,"toggle_move_point")
 
         m=tk.Menu(menubar,tearoff=0)
         menubar.add_cascade(label="View",menu=m)
@@ -723,6 +740,7 @@ class BifurcationTkApp:
         self.movepoint_var=tk.BooleanVar()
         self.movepoint_check=ttk.Checkbutton(tab,text="Grab selected point",variable=self.movepoint_var,
                                              command=self._commit_move_point)
+        # Same command as the menu entry and its key, so the three cannot disagree about the state.
         self.movepoint_check.grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
 
         tab.columnconfigure(1,weight=1)
@@ -1313,7 +1331,7 @@ class BifurcationTkApp:
 
     def _commit_move_point(self):
         if self.controller.move_point_active!=self.movepoint_var.get():
-            self.controller.toggle_move_point()
+            self._invoke(self._actions["toggle_move_point"])
 
     def _toggle_mode(self):
         self.controller.mode="mp" if self.controller.mode=="al" else "al"
@@ -1516,6 +1534,31 @@ class BifurcationTkApp:
             self.controller.delete_selected_point()
         except RuntimeError as e:
             messagebox.showwarning("Cannot delete",str(e),parent=self.root)
+
+    def _split_branch(self):
+        try:
+            self.controller.split_branch()
+        except RuntimeError as e:
+            messagebox.showwarning("Cannot split",str(e),parent=self.root)
+
+    def _merge_branches(self):
+        # Named in the question, because which branch survives and which one disappears from the tree
+        # is not obvious from the menu entry alone.
+        c=self.controller
+        if c.selected_branch is None or c.current_branch is None or c.selected_branch is c.current_branch:
+            messagebox.showwarning("Cannot merge","Select the other branch in the Branches tab first",
+                                   parent=self.root)
+            return
+        if not messagebox.askokcancel(
+                "Merge branches",
+                "Join the selected branch ({:d} points) into the one you are on ({:d} points)?\n"
+                "They are ordered by which of their ends meet; nothing is recomputed.".format(
+                    len(c.selected_branch),len(c.current_branch)),parent=self.root):
+            return
+        try:
+            c.merge_branches()
+        except RuntimeError as e:
+            messagebox.showwarning("Cannot merge",str(e),parent=self.root)
 
     def _save_diagram(self):
         self.controller.save_all()

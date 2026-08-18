@@ -29,6 +29,13 @@
 #
 #   transcritical   du/dt = mu*u - u^2   branches u = 0 and u = mu, crossing at mu = 0
 #   pitchfork       du/dt = mu*u - u^3   branches u = 0 and u = +-sqrt(mu), meeting at mu = 0
+#   fold            du/dt = mu - u^2     one branch, u = +-sqrt(mu), turning around at mu = 0
+#
+# The fold is here to pin the OTHER half of the classification: the fold/branch-point decision is made
+# on how far dR/dparameter lies out of the range of the Jacobian, measured as an angle so that it does
+# not depend on the arbitrary scaling of the left null vector. A fold has to keep coming out as a fold,
+# and has to refuse to switch, or the measure has merely been loosened until everything is a branch
+# point.
 #
 # The trivial branch u = 0 exists for every mu in both, which is what makes this a real test: a switch
 # that does not work does not fail loudly, it quietly stays on u = 0. Both the switch AND the steps
@@ -57,13 +64,17 @@ def build(kind: str):
 
         def define_residuals(self):
             u, u_test = var_and_test("u")
-            rhs = self.mu * u - u**2 if kind == "transcritical" else self.mu * u - u**3
+            rhs = {"transcritical": self.mu*u - u**2,
+                   "pitchfork": self.mu*u - u**3,
+                   "fold": self.mu - u**2}[kind]
             self.add_weak(partial_t(u) - rhs, u_test)
 
     class Prob(Problem):
         def define_problem(self):
             eqs = Eqs(self.get_global_parameter("mu"))
-            eqs += InitialCondition(u=0.0)
+            # The fold's branch is u = +-sqrt(mu), which does not pass through u = 0 at all, so it
+            # needs a starting point ON the branch rather than the trivial one the others use.
+            eqs += InitialCondition(u=1.0 if kind == "fold" else 0.0)
             self += eqs @ "ode"
 
     return Prob()
@@ -78,7 +89,7 @@ def other_branch(kind: str, mu: float):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kind", required=True, choices=["transcritical", "pitchfork"])
+    ap.add_argument("--kind", required=True, choices=["transcritical", "pitchfork", "fold"])
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--api", default="gui", choices=["gui", "problem"],
                     help="gui: through BifurcationGUI; problem: Problem.switch_branch on its own")
@@ -88,7 +99,28 @@ def main() -> int:
         problem.set_output_directory(args.outdir)
         problem.set_linear_solver("superlu")
         problem.setup_for_stability_analysis(analytic_hessian=True)
-        problem.get_global_parameter("mu").value = -0.2
+        problem.get_global_parameter("mu").value = 1.0 if args.kind == "fold" else -0.2
+
+        if args.kind == "fold":
+            problem.solve()
+            problem.solve_eigenproblem(1)
+            problem.activate_bifurcation_tracking("mu")
+            problem.solve()
+            assert abs(problem.get_global_parameter("mu").value) < 1e-7, "the fold is at mu = 0"
+            nf = problem.classify_bifurcation("mu")
+            assert nf.get("type") == "fold", "expected a fold, got " + str(nf.get("type"))
+            # dR/dmu IS the null direction here, so the measure is at its maximum. A branch point of
+            # the same problem size scores 1e-5; the decision is not close.
+            assert nf["a_rel"] > 0.5, "a fold must be nowhere near the branch-point end: {:.3g}".format(nf["a_rel"])
+            try:
+                problem.switch_branch("mu", normal_form=nf, quiet=True)
+            except RuntimeError as e:
+                assert "fold" in str(e), str(e)
+            else:
+                raise AssertionError("switching branches at a fold has to be refused")
+            print("kind=fold a_rel={:.3g}".format(nf["a_rel"]))
+            print("PYOOMPH_WORKER_DONE")
+            return 0
 
         if args.api == "problem":
             # No GUI anywhere: this is the path a plain script takes.
@@ -99,6 +131,11 @@ def main() -> int:
             assert abs(problem.get_global_parameter("mu").value) < 1e-7, "the bifurcation is at mu = 0"
             nf = problem.classify_bifurcation("mu")
             assert nf.get("type") == args.kind, "expected " + args.kind + ", got " + str(nf.get("type"))
+            # Saved here so the pitchfork's second arm can be reached from the bifurcation later.
+            import io
+            at_bifurcation = io.BytesIO()
+            problem.save_state(at_bifurcation, quiet=True)
+
             ds = problem.switch_branch("mu", normal_form=nf, quiet=True)
             assert ds is not None, "switch_branch could not reach the other branch"
             assert problem.get_bifurcation_tracking_mode() == "", "tracking must be off afterwards"
@@ -114,7 +151,27 @@ def main() -> int:
                 worst = max(worst, abs(abs(u) - expect))
             print("kind={:s} api=problem max_error={:.3e}".format(args.kind, worst))
             assert worst < 1e-6, "not on the analytic other branch: {:.3e}".format(worst)
-            # A fold has nothing to switch to and must say so rather than wander off.
+
+            if args.kind == "pitchfork":
+                # Both arms, u = +sqrt(mu) and u = -sqrt(mu), have to be reachable. They sit on the
+                # SAME side of mu, so the direction argument is the only thing that tells them apart -
+                # and it did not, because the predictor took the absolute value of its argument and
+                # returned the very same point for both. Done last, from the saved state: it does not
+                # need bifurcation tracking back (switch_branch only wants the normal form and the
+                # solution at the bifurcation), and re-activating it here would have to re-solve an
+                # eigenproblem whose Jacobian is exactly singular.
+                signs = []
+                for direction in (1, -1):
+                    at_bifurcation.seek(0)
+                    problem.load_state(at_bifurcation, quiet=True)
+                    assert problem.switch_branch("mu", normal_form=nf, direction=direction,
+                                                 quiet=True) is not None, \
+                        "direction {:+d} could not reach an arm of the pitchfork".format(direction)
+                    signs.append(numpy.sign(problem.get_ode("ode").get_value("u", as_float=True)))
+                assert signs[0] == -signs[1] and 0 not in signs, \
+                    "the two directions must reach the two arms of the pitchfork, got " + str(signs)
+                print("pitchfork arms reached: {:+g} and {:+g}".format(*signs))
+
             print("PYOOMPH_WORKER_DONE")
             return 0
 

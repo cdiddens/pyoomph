@@ -1147,7 +1147,14 @@ class BifurcationController:
         return True
 
     def toggle_move_point(self):
+        """Grab or release the selected point, so the selection keys move it along its branch.
+
+        Grabbing switches into move-point mode as well: the flag does nothing outside it, and a grab
+        that silently has no effect is indistinguishable from a broken one.
+        """
         self._move_point=not self._move_point
+        if self._move_point and self._mode!="mp":
+            self.mode="mp"
         self._changed()
 
     @property
@@ -1206,6 +1213,105 @@ class BifurcationController:
             self._remove_statefile(torem.statefile)
         sel_branch.remove(torem)
         self._changed()
+
+    def split_branch(self,point=None,branch=None)->"BifurcationGUISolutionBranch":
+        """Cut a branch in two at a point, which becomes the first point of the new half.
+
+        For the ordinary way a diagram goes wrong: a continuation step lands on a different branch and
+        everything from there on belongs somewhere else. Nothing is recomputed and no state file is
+        touched - the points are the same objects, they just stop being drawn as one curve. Select the
+        first point that belongs to the OTHER branch; splitting at the first point of a branch would
+        leave nothing behind and is refused.
+        """
+        if point is None or branch is None:
+            point,branch=self._ensure_selection()
+        if point not in branch:
+            raise RuntimeError("That point is not on that branch")
+        index=branch.index(point)
+        if index==0:
+            raise RuntimeError("Splitting here would leave the first half empty. Select the first "
+                               "point that belongs to the new branch, not the first point of this one.")
+        tail=BifurcationGUISolutionBranch(list(branch[index:]),kind=branch.kind,
+                                          continuation_parameter=branch.continuation_parameter,
+                                          tracked_parameter=branch.tracked_parameter,
+                                          bifurcation_type=branch.bifurcation_type)
+        del branch.data[index:]
+        # By identity: a branch is a UserList, so == compares its POINTS, and two branches holding the
+        # same points would have index()/remove() act on whichever comes first.
+        self.branches.insert(self._branch_index_of(branch)+1,tail)
+        # The problem is still sitting where it was, so whichever half now holds the current point is
+        # the branch a continuation would extend.
+        if self.current_point is not None and self.current_point in tail:
+            self.current_branch=tail
+        self.selected_branch=tail
+        self.selected_point=point
+        self.reorder_branch_upon_point_insertion(branch,None)
+        self.reorder_branch_upon_point_insertion(tail,None)
+        self.log("Split off {:d} point{:s} into a new branch, {:d} left on the old one".format(
+            len(tail),"" if len(tail)==1 else "s",len(branch)))
+        self._changed()
+        return tail
+
+    def merge_branches(self,first=None,second=None)->"BifurcationGUISolutionBranch":
+        """Join two branches that are really one curve, ordering them by which ends meet.
+
+        Defaults to merging the SELECTED branch into the CURRENT one, which is what the tree offers.
+        The joint is chosen from the four ways two curves can meet end to end, and the gap it leaves
+        is reported: nothing here checks that the two are the same solution, only the user knows that,
+        but a joint of the wrong length is worth seeing.
+
+        Refused for branches that are not sections of the same thing - a different kind of branch, a
+        different continuation parameter, or a different slice of parameter space. Joining those would
+        produce a curve that is not a section of anything.
+        """
+        if first is None:
+            first=self._get_current_branch()
+        if second is None:
+            second=self.selected_branch if self.selected_branch is not first else None
+        if second is None or first is second:
+            raise RuntimeError("Merging needs two different branches: select the other one in the "
+                               "Branches tab, then merge it into the one you are on")
+        if first.kind!=second.kind or first.continuation_parameter!=second.continuation_parameter \
+                or first.tracked_parameter!=second.tracked_parameter:
+            raise RuntimeError("These branches were not computed the same way (kind or parameters "
+                               "differ), so they cannot be one curve")
+        if first.slice_is_known() and second.slice_is_known() and first.slice_key()!=second.slice_key():
+            raise RuntimeError("These branches sit in different slices of parameter space ("+
+                               first.describe_slice()+" against "+second.describe_slice()+
+                               "), so they are not one curve")
+
+        def coord(p):
+            c=p.get_coordinate(self.y_axis,xspec=self.x_axis)
+            return numpy.array([float(c[0]),float(c[1])])
+        xlim=self.view.get_xlim(); ylim=self.view.get_ylim()
+        scale=numpy.array([1/max(abs(xlim[1]-xlim[0]),1e-30),1/max(abs(ylim[1]-ylim[0]),1e-30)])
+        # The four ways two curves can be laid end to end. The tail of `order` is what the merged list
+        # becomes, so reversing is expressed here rather than by mutating either branch.
+        options=[("first[-1] to second[0]", lambda: list(first)+list(second), coord(first[-1]),coord(second[0])),
+                 ("first[-1] to second[-1]",lambda: list(first)+list(reversed(second)),coord(first[-1]),coord(second[-1])),
+                 ("first[0] to second[0]",  lambda: list(reversed(second))+list(first),coord(first[0]),coord(second[0])),
+                 ("first[0] to second[-1]", lambda: list(second)+list(first),coord(first[0]),coord(second[-1]))]
+        label,build,a,b=min(options,key=lambda o:numpy.linalg.norm((o[2]-o[3])*scale))
+        gap=float(numpy.linalg.norm((a-b)*scale))
+        first.data=build()
+        del self.branches[self._branch_index_of(second)]
+        if self.current_branch is second:
+            self.current_branch=first
+        self.selected_branch=first
+        if self.selected_point is not None and self.selected_point not in first:
+            self.selected_point=None
+        self.reorder_branch_upon_point_insertion(first,None)
+        self.log("Merged {:s}; the joint spans {:.3g} of the plot, and the branch now has {:d} points"
+                 .format(label,gap,len(first)))
+        self._changed()
+        return first
+
+    def _branch_index_of(self,branch)->int:
+        """Position of a branch in the list, by identity rather than by equality."""
+        for i,b in enumerate(self.branches):
+            if b is branch:
+                return i
+        raise RuntimeError("That branch is not part of this diagram")
 
     def _remove_statefile(self,fname:str):
         # A missing dump must not abort a delete: the diagram is reloadable without it, and users
@@ -1419,33 +1525,59 @@ class BifurcationController:
         backup,_=self.problem.get_current_dofs()
         dp=self.problem.get_arc_length_parameter_derivative()
         ddof=numpy.array(self.problem.get_arclength_dof_derivative_vector())
-        if len(ddof)>0:
+        if len(ddof)==len(backup) and len(ddof)>0:
             self.problem.set_current_dofs(backup+FD_eps*ddof)
             po=self.evaluate_observables()
+            for k in self._avail_observables:
+                self._tangs[k]=numpy.array([dp,(po[k]-cp.obs_values[k])/FD_eps])
+            cp._tangs=self._tangs.copy()
         else:
-            po=cp.obs_values.copy()
-
-        for k in self._avail_observables:
-            do=(po[k]-cp.obs_values[k])/FD_eps
-            self._tangs[k]=numpy.array([dp,do])
-        cp._tangs=self._tangs.copy()
-
-
-        if cp.bifurcation_info is not None:
-            bi=cp.bifurcation_info
-            cp._branch_switch_tangs=[]
-            if bi["type"]=="transcritical":
-                for dptr in [-dp,dp]:
-                    ddof=numpy.array(bi["perturbation_predictor"](dptr))
-                    self.problem.set_current_dofs(backup+FD_eps*ddof)
-                    po=self.evaluate_observables()
-                    btangtangs={}
-                    for k in self._avail_observables:
-                        do=(po[k]-cp.obs_values[k])/FD_eps
-                        btangtangs[k]=numpy.array([dptr,do])
-                    cp._branch_switch_tangs.append(btangtangs)
-
+            # There is no continuation state to read a direction from, so there is no arrow to draw.
+            # This is exactly the situation AT a located bifurcation: the normal-form calculation
+            # deactivates bifurcation tracking, which resets oomph's continuation vectors, so the dof
+            # derivative comes back EMPTY and dparameter/ds reads back as 1. Filling that in as [1,0]
+            # drew a horizontal arrow of length ds at every located bifurcation - a direction of travel
+            # that is not the branch's and not the one a branch switch would take.
+            self._tangs={}
+            cp._tangs={}
+        self._update_branch_switch_tangents(cp,backup)
         self.problem.set_current_dofs(backup)
+
+    def _update_branch_switch_tangents(self,cp,base):
+        """Where a branch switch would go, as arrows in the same units as the arclength one.
+
+        Only the two kinds that HAVE a second branch get them, and a pitchfork gets both of its arms -
+        they differ in the sign of the amplitude at the same parameter offset, so drawing one of them
+        would suggest the other does not exist. The chord to the PREDICTED point is what is stored,
+        divided by |ds| because that is what the plotter multiplies it by again; the offset is the one
+        :py:meth:`branch_switch` would use, not dparameter/ds - which is unavailable here anyway.
+        """
+        cp._branch_switch_tangs=[]
+        bi=cp.bifurcation_info
+        if bi is None or bi.get("type") not in ("transcritical","pitchfork"):
+            return
+        param_predictor=bi.get("param_predictor")
+        perturbation_predictor=bi.get("perturbation_predictor")
+        if param_predictor is None or perturbation_predictor is None:
+            return
+        eps=self.branch_switch_parameter_offset()
+        scale=abs(self._last_ds) if self._last_ds else 1.0
+        for sgn in (1,-1):
+            try:
+                dpar=float(param_predictor(sgn*eps))
+                du=numpy.asarray(perturbation_predictor(sgn*eps),dtype=float)
+                if du.size!=len(base):
+                    return
+                self.problem.set_current_dofs(base+du)
+                po=self.evaluate_observables()
+            except Exception as e:
+                # The prediction can land where the observables cannot be evaluated at all - a film
+                # height through zero, say. An arrow is not worth aborting anything for.
+                self.log("Could not draw the branch-switch direction: "+repr(e))
+                cp._branch_switch_tangs=[]
+                return
+            cp._branch_switch_tangs.append(
+                {k:numpy.array([dpar,po[k]-cp.obs_values[k]])/scale for k in self._avail_observables})
 
     # ------------------------------------------------------------------ quick mode
 
@@ -1650,17 +1782,72 @@ class BifurcationController:
                 # is active that is already the critical one AND solve_eigenproblem would refuse, so this
                 # only runs when classifying after the fact.
                 self.problem.solve_eigenproblem(self.neigen,self.shift)
-            return NormalFormCalculator(self.problem).get_normal_form(self._get_paramname_str())
+            return NormalFormCalculator(self.problem).get_normal_form(
+                self._get_paramname_str(),assume=self._fold_ruled_out_by_the_branch())
         except Exception as e:
             self.log("Could not compute the normal form of this bifurcation: "+repr(e))
             return None
 
-    def branch_switch(self,offset:float | None=None,direction:int=1):
+    def _fold_ruled_out_by_the_branch(self)->str | None:
+        """``"branch_point"`` when the branch demonstrably ran THROUGH the parameter value we are at.
+
+        The normal form decides fold against branch point from a single number, the projection of
+        dR/dparameter on the left null vector, and near a second nearly-critical eigenvalue that number
+        is the least reliable one in the calculation. The branch itself answers the same question
+        without any of that: a fold is where the parameter turns around, so both points either side of
+        one lie on the SAME side of its parameter value, while a branch point sits strictly between
+        them. Only used when it applies - away from a fresh continuation step this returns None and the
+        normal form decides alone.
+        """
+        located=float(self.get_bifurcation_parameter().value)
+        prev=self._point_before_current()
+        cur=self.current_point
+        if prev is None or cur is None:
+            return None
+        evs=self.problem.get_last_eigenvalues()
+        if evs is not None and len(evs)>0 and abs(numpy.imag(evs[0]))>1e-8:
+            return None   # a Hopf also passes straight through; this test says nothing about one
+        lo,hi=sorted((float(prev.param_value),float(cur.param_value)))
+        if hi-lo<=0:
+            return None
+        margin=0.01*(hi-lo)
+        if lo+margin<located<hi-margin:
+            return "branch_point"
+        return None
+
+    def branch_switch_parameter_offset(self)->float:
+        """The parameter offset a branch switch steps off by, taken from the step size in use.
+
+        ds is an ARCLENGTH step, so what it buys in the parameter is ds*|dparameter/ds|. The tangent at
+        a located bifurcation is gone (see :py:meth:`_update_tangents`), so the one recorded at the
+        point before it is used. Where there is none to ask, this falls back to what it always was:
+        :py:attr:`branch_switch_offset` times the parameter - 2% of it, which on a diagram spanning 4%
+        of the parameter overshoots every branch in it, and did.
+        """
+        prev=self._point_before_current()
+        tang=None
+        if prev is not None and prev._tangs:
+            tang=prev._tangs.get(self._current_observable)
+            if tang is None:
+                tang=next(iter(prev._tangs.values()))
+        if tang is not None and self._last_ds:
+            eps=abs(float(self._last_ds)*float(tang[0]))
+            if eps>0:
+                return eps
+        return self.branch_switch_offset*max(abs(float(self.get_bifurcation_parameter().value)),1.0)
+
+    def branch_switch(self,offset:float | None=None,direction:int | None=None):
         """Step onto the other branch through the current bifurcation and record it as a new branch.
 
         The numerics live on :py:meth:`~pyoomph.generic.problem.Problem.switch_branch`, so the same
         manoeuvre is available to a plain script; what is here is the part that is about the diagram -
         which point we are at, opening a branch for the result, and the step size to carry on with.
+
+        Both the offset and the direction default to what the continuation is set to: the offset to the
+        parameter step the current ds buys (:py:meth:`branch_switch_parameter_offset`) and the direction
+        to the sign of ds. So the keys that steer a sweep steer this too - ``/`` picks which side of a
+        transcritical, or which arm of a pitchfork, is tried first, and ``+``/``-`` how far off the
+        bifurcation the switch aims.
         """
         if self.on_locus():
             raise RuntimeError("Branch switching applies to an ordinary branch, not to a bifurcation locus")
@@ -1681,6 +1868,12 @@ class BifurcationController:
             self.log("A fold has only one branch through it - there is nothing to switch to")
             return False
 
+        if offset is None:
+            offset=self.branch_switch_parameter_offset()
+        if direction is None:
+            direction=-1 if (self._last_ds is not None and self._last_ds<0) else 1
+        self.log("Switching branches with a parameter offset of {:.3g} in direction {:+d}".format(
+            offset,direction))
         self._status("BRANCH SWITCHING")
         ds=self.problem.switch_branch(self.get_bifurcation_parameter(),normal_form=cp.bifurcation_info,
                                       offset=offset,direction=direction,
@@ -1693,8 +1886,12 @@ class BifurcationController:
         # just off the bifurcation dU/dparameter is badly conditioned and a larger step overshoots back
         # onto the branch we came from. arclength_continuation grows it again by itself.
         self._last_ds=ds
-        self.log("Switched onto the other {:s} branch; ds set to {:.3g}".format(
-            str(cp.bifurcation_info.get("type")),self._last_ds))
+        # The offset is 4*ds by switch_branch's contract, and its SIGN is the useful part: for a
+        # pitchfork it says which side of the parameter the two arms turned out to be on, which is the
+        # sub- against supercritical question the normal form's b3 is too shaky to answer.
+        self.log("Switched onto the other {:s} branch at {:s} = {:.6g} (offset {:+.3g}); ds set to {:.3g}"
+                 .format(str(cp.bifurcation_info.get("type")),self._get_paramname_str(),
+                         self.get_bifurcation_parameter().value,4*ds,self._last_ds))
         self.problem.solve_eigenproblem(self.neigen,self.shift)
         self._new_branch()
         self._tangs={}
@@ -1704,30 +1901,49 @@ class BifurcationController:
         self._changed()
         return True
 
+    #: How many growth times of the mode the transient runs for, and how many steps one growth time is
+    #: resolved with. The step size matters more than the total: see transient_leave_branch.
+    transient_growth_times=100
+    transient_steps_per_growth=20
+
     def transient_leave_branch(self,eigenindex=0):
+        """Perturb along an eigenfunction and integrate until the solution settles somewhere else.
+
+        The time step must stay WELL BELOW the growth time of the mode being followed. A fully implicit
+        step much longer than 1/lambda does not amplify an unstable mode, it damps it - BDF2's
+        amplification factor tends to zero as lambda*dt grows - and the adaptive stepper walks straight
+        into that: the solution sits near a stationary state, so the temporal error is tiny, so dt is
+        doubled every step. Measured on a thin-film branch point, dt reached 500 growth times and the
+        run came back to the very solution it was told to leave, with the same eigenvalue to six
+        digits. Hence maxstep, which is the whole point of this method working at all.
+
+        The perturbation comes from Problem.perturb_by_eigenfunction, which scales it to a residual
+        rather than to a fixed multiple of an eigenvector of arbitrary norm, and fills in the history
+        dofs so the first steps do not have to recover from an impulsive start.
+        """
         self._status("LEAVING BRANCH TRANSIENTLY")
-        if self.quick_mode and len(self.problem.get_last_eigenvectors())<=eigenindex:
-            # This perturbs the solution along an eigenvector, so it needs one; in quick mode none was
-            # computed. Solving here beats failing several frames deep in the perturbation.
-            self.log("Quick mode: solving the eigenproblem, which leaving a branch transiently needs")
+        evecs=self.problem.get_last_eigenvectors()
+        if evecs is None or len(evecs)<=eigenindex:
+            # This perturbs the solution along an eigenvector, so it needs one, and there are two
+            # ordinary ways not to have it: quick mode never computed one, and loading a point drops
+            # the eigendata. Solving here beats failing several frames deep in the perturbation.
+            self.log("Solving the eigenproblem, which leaving a branch transiently needs")
             self.problem.solve_eigenproblem(self.neigen,self.shift)
         cp=self._get_current_point()
-        eig=numpy.sqrt(cp.eig_value_Re**2+cp.eig_value_Im**2)
-        eig=max(1e-4,eig)
-        tsnd=1/eig
-        ts=self.problem.get_scaling("temporal")*tsnd
+        # AT a bifurcation the rate is zero and there is no growth time to speak of; the floor is what
+        # the previous implementation used and keeps the step finite.
+        rate=max(1e-4,numpy.sqrt(cp.eig_value_Re**2+cp.eig_value_Im**2))
+        growth_time=self.problem.get_scaling("temporal")/rate
 
+        self.problem.deactivate_bifurcation_tracking()
         self.problem.reset_arc_length_parameters()
         self.problem.set_current_time(0)
 
-        self.problem.perturb_dofs(0.1*numpy.real(self.problem.get_last_eigenvectors()[eigenindex]))
-        self.problem.initialise_dt(tsnd)
-        self.problem.assign_initial_values_impulsive(tsnd)
-        self.problem.timestepper.set_num_unsteady_steps_done(0)
-        self.problem._taken_already_an_unsteady_step=False
-        self.problem._last_step_was_stationary=True
-        self.problem.deactivate_bifurcation_tracking()
-        self.problem.run(1000*ts,startstep=ts,temporal_error=1,outstep=False,do_not_set_IC=True)
+        dt=self.problem.perturb_by_eigenfunction(dt=growth_time/self.transient_steps_per_growth,
+                                                 eigenmode=eigenindex)
+        endtime=self.transient_growth_times*growth_time
+        self.problem.run(endtime,startstep=dt,maxstep=growth_time/5,temporal_error=1,outstep=False,
+                         do_not_set_IC=True)
         self.problem.set_current_time(0)
         self.problem.solve(max_newton_iterations=20)
         self.problem.solve_eigenproblem(self.neigen,self.shift)
@@ -1736,7 +1952,7 @@ class BifurcationController:
         self._add_current_state()
         self._update_tangents()
         self._mode="al"
-        self.log("Integrated",1000*ts)
+        self.log("Integrated",endtime,"({:g} growth times of the mode)".format(self.transient_growth_times))
 
 
     def reorder_branch_upon_point_insertion(self,branch:BifurcationGUISolutionBranch,newp:BifurcationGUISolutionPoint | None):
@@ -2216,7 +2432,33 @@ class BifurcationController:
         evs=self.problem.get_last_eigenvalues()
         if evs is None or len(evs)==0:
             return 0
-        return int(numpy.argmin(numpy.abs(numpy.real(numpy.asarray(evs)))))
+        re=numpy.real(numpy.asarray(evs))
+        # Nearest the axis is the wrong pick right after a crossing. Two modes going unstable within a
+        # few thousandths of each other - which is what a periodic domain does routinely - leave the
+        # next STABLE eigenvalue marginally nearer zero than the two that just crossed, and the fold
+        # tracker then goes looking for a bifurcation the branch has not reached, from a starting guess
+        # that belongs to a different mode. It diverges, or converges to something unrelated. So when
+        # the last step is what made this branch (more) unstable, take the least unstable of the modes
+        # now on the wrong side: that is the one whose crossing lies between the last two points.
+        prev=self._point_before_current()
+        cur=self.current_point
+        if (cur is not None and prev is not None and cur.unstable_count is not None
+                and prev.unstable_count is not None and cur.unstable_count>prev.unstable_count):
+            positive=[i for i in range(len(re)) if re[i]>0]
+            if positive:
+                return int(min(positive,key=lambda i:re[i]))
+        return int(numpy.argmin(numpy.abs(re)))
+
+    def _point_before_current(self):
+        """The point recorded just before the current one on the current branch, if there is one."""
+        branch=self.current_branch
+        if branch is None or self.current_point is None or len(branch)<2:
+            return None
+        try:
+            i=branch.index(self.current_point)
+        except ValueError:
+            return branch[-2]
+        return branch[i-1] if i>0 else None
 
     def locate_bifurcation(self,pitchfork:bool=False,eigenindex:int | None=None):
         """Find the nearest bifurcation and record it.

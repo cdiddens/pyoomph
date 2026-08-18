@@ -6117,14 +6117,21 @@ class Problem(_pyoomph.Problem):
             return maxres
     
         if desired_initial_residuals is not None:
+            # A perturbation big enough to push a field out of the domain its equations are defined on -
+            # a negative film height under a 1/h^6 disjoining pressure, a negative concentration under a
+            # log - gives inf or nan rather than a large number. Counting that as "too large" is what
+            # makes the search shrink it; read as a plain comparison it is neither larger nor smaller
+            # than the target, so both loops below fell through and the FULL eigenvector was kept, and
+            # the transient then died on an infinite residual at its first step.
+            too_big=lambda r: (not numpy.isfinite(r)) or r>desired_initial_residuals
             scale0=1.0
             res0=set_ic(scale0)
             scale1=scale0 # In case res0 already exactly equals desired_initial_residuals, neither while loop below runs
-            if res0>desired_initial_residuals:
-                while res0>desired_initial_residuals:
+            if too_big(res0):
+                while too_big(res0):
                     scale1=scale0/2
                     res1=set_ic(scale1)
-                    if res1<desired_initial_residuals:
+                    if not too_big(res1):
                         break
                     else:
                         res0=res1
@@ -6133,7 +6140,7 @@ class Problem(_pyoomph.Problem):
                 while res0<desired_initial_residuals:  
                     scale1=scale0*2
                     res1=set_ic(scale1)
-                    if res1>desired_initial_residuals:
+                    if too_big(res1):
                         break
                     else:
                         scale0=scale1
@@ -6148,13 +6155,16 @@ class Problem(_pyoomph.Problem):
                 scale=(scale0+scale1)/2
                 res=set_ic(scale)
                 #print("Bisection scale: {}, residual: {}".format(scale,res),desired_initial_residuals)
-                if res>desired_initial_residuals:                    
+                if too_big(res):
                     scale1=scale
                 else:
                     scale0=scale
         
-            res=set_ic(scale)
-            #print("Final scale: {}, residual: {}".format(scale,res))
+            # scale0 rather than the last bisection midpoint: the loop above only ever moves scale0 to a
+            # value it has verified, so this is the largest amplitude known to be admissible, while
+            # `scale` may be the failing end of the bracket.
+            res=set_ic(scale0)
+            #print("Final scale: {}, residual: {}".format(scale0,res))
         self.invalidate_cached_mesh_data()
         self.invalidate_eigendata()
         return dtfixed
@@ -6187,7 +6197,8 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("Cannot find out whether a solution is stable when bifurcation tracking is active")
         return numpy.real(self._last_eigenvalues[0])<=0 #type:ignore
 
-    def classify_bifurcation(self,parameter:"str | _pyoomph.GiNaC_GlobalParam | None"=None,eigenindex:int=0)->dict[str,Any]:
+    def classify_bifurcation(self,parameter:"str | _pyoomph.GiNaC_GlobalParam | None"=None,eigenindex:int=0,
+                             assume:str | None=None)->dict[str,Any]:
         """Normal form of the bifurcation the problem is currently sitting at.
 
         The returned dict names the bifurcation in ``["type"]`` - ``"fold"``, ``"transcritical"``,
@@ -6205,6 +6216,10 @@ class Problem(_pyoomph.Problem):
         Args:
             parameter: The parameter the bifurcation is in. Defaults to the one being tracked.
             eigenindex: Which computed eigenpair is the critical one. Defaults to the first.
+            assume: ``"fold"`` or ``"branch_point"`` to decide that question rather than have it read
+                off the normal form. Worth passing whenever the branch itself already answers it - a
+                continuation that walked THROUGH the point without the parameter turning around did
+                not pass a fold.
 
         Returns:
             The normal-form dictionary.
@@ -6226,11 +6241,12 @@ class Problem(_pyoomph.Problem):
                 print("Warning: classifying a bifurcation where the critical eigenvalue has real part "+
                       "{:.3g}, which is not zero. This does not look like a bifurcation, and the normal ".format(critical)+
                       "form of a regular point is meaningless.")
-        return NormalFormCalculator(self).get_normal_form(parameter,eigenindex=eigenindex)
+        return NormalFormCalculator(self).get_normal_form(parameter,eigenindex=eigenindex,assume=assume)
 
     def switch_branch(self,parameter:"str | _pyoomph.GiNaC_GlobalParam",normal_form:dict[str,Any] | None=None,
                       offset:float | None=None,direction:int=1,relative_offset:float=0.02,
-                      max_newton_iterations:int=15,quiet:bool=False)->float | None:
+                      max_newton_iterations:int=15,quiet:bool=False,offset_ratio:float=1.25,
+                      max_attempts:int=120)->float | None:
         """Step from a bifurcation onto the OTHER branch that passes through it.
 
         Usable on its own, without the bifurcation GUI::
@@ -6259,16 +6275,23 @@ class Problem(_pyoomph.Problem):
             offset: Parameter offset to step off the bifurcation by. Defaults to ``relative_offset``
                 times the parameter's own magnitude; smaller is truer to the normal form but closer to
                 the singular point.
-            direction: ``+1`` or ``-1`` to prefer one side of the bifurcation. Both are tried either way,
-                since for a pitchfork only one side has a branch at all.
+            direction: ``+1`` or ``-1`` to pick which of the two branches through the bifurcation is
+                predicted first; both are tried either way. For a pitchfork this is the only thing that
+                tells its two arms apart - they sit on the same side of the parameter and differ in the
+                sign of the amplitude.
             relative_offset: Used when ``offset`` is not given.
             max_newton_iterations: For the solve onto the new branch.
             quiet: Suppress the progress messages.
+            offset_ratio: Spacing of the ladder of offsets that is tried, from three times ``offset``
+                down over three decades. Closer to 1 samples more finely and costs one Newton solve
+                per rung and side; the window that works can be narrower than a factor of 1.5.
+            max_attempts: Hard cap on those Newton solves, so a large problem cannot spend minutes
+                failing.
 
         Returns:
-            A step size for continuing along the new branch - the offset actually taken, signed. It is
-            deliberately that small: just off the bifurcation ``dU/dparameter`` is still badly
-            conditioned and a larger step overshoots back onto the old branch, and
+            A step size for continuing along the new branch: a quarter of the offset actually taken,
+            signed. It is deliberately that small: just off the bifurcation ``dU/dparameter`` is still
+            badly conditioned and a larger step overshoots back onto the old branch, and
             :py:meth:`arclength_continuation` grows it again by itself. ``None`` if no side of the
             bifurcation could be reached, in which case the problem is left where it was.
 
@@ -6294,22 +6317,41 @@ class Problem(_pyoomph.Problem):
                                "predictor, so there is no prediction for where the other branch goes")
 
         p0=float(param.value)
-        # The tangent of the branch we are ON, to tell "reached the other branch" from "came back to
-        # this one". Taken before deactivating, while it still refers to this branch.
-        old_dir=numpy.array(self.get_arclength_dof_derivative_vector())
         self.deactivate_bifurcation_tracking()
         self.reset_arc_length_parameters()
         # AFTER deactivating: while tracking is active the dof vector is the augmented one and could not
         # be written back to the plain problem.
         base=numpy.array(self.get_current_dofs()[0]).copy()
-        if old_dir.size!=base.size:
-            old_dir=None #type:ignore[assignment]
 
         base_offset=abs(offset) if offset is not None else relative_offset*max(abs(p0),1.0)
+        # A geometric ladder from 3x the requested offset downwards, FINE rather than coarse. How
+        # narrow the window of offsets that works can be is the whole reason: on the thin-film branch
+        # point this was written for, 40 offsets spanning three decades were tried by hand and exactly
+        # ONE landed on the new branch - its neighbours a factor 1.43 either side failed, and in
+        # opposite ways (too far out, Newton diverges because no solution is near the guess; too far
+        # in, it converges back onto the branch we came from). There is no monotonicity to bisect on,
+        # so the answer is to sample finely and stop at the first success.
+        n_offsets=max(2,int(round(numpy.log(300.0)/numpy.log(offset_ratio))))
+        ladder=[3*base_offset*offset_ratio**-k for k in range(n_offsets)]
+        # A pitchfork puts both of its branches on ONE side of the parameter, which side being the sign
+        # of 6*b1/b3 - and b3 is the least trustworthy number in the normal form (a third derivative
+        # through a nearly singular solve). Where it comes out wrong, every offset on the predicted side
+        # asks for a solution that does not exist, so the mirrored side is tried too - at each rung
+        # rather than after the whole ladder, since the rung is what usually decides and running 20
+        # hopeless offsets before even looking at the other side is 20 solves wasted. For a
+        # transcritical the two sides are already covered by the direction loop.
+        sides=[(1,direction),(1,-direction)]
+        if kind=="pitchfork":
+            sides+=[(-1,direction),(-1,-direction)]
         landed=None
-        for eps in (base_offset,base_offset/10,base_offset*10):
-            for sgn in (direction,-direction):
-                dp=float(param_predictor(sgn*eps))
+        used_pside=1
+        attempts=0
+        for eps in ladder:
+            for pside,sgn in sides:
+                if attempts>=max_attempts:
+                    break
+                attempts+=1
+                dp=pside*float(param_predictor(sgn*eps))
                 du=numpy.asarray(perturbation_predictor(sgn*eps),dtype=float)
                 if du.size!=base.size:
                     raise RuntimeError("The branch predictor returned {:d} values for {:d} degrees of "
@@ -6323,30 +6365,50 @@ class Problem(_pyoomph.Problem):
                 moved=numpy.array(self.get_current_dofs()[0])-base
                 if numpy.linalg.norm(moved)<=1e-9:
                     continue          # did not leave the bifurcation at all
-                # It has to be explained by the NEW branch's prediction rather than by the old branch's
-                # tangent, or Newton has simply walked back to where it came from.
-                if numpy.linalg.norm(moved-du)>0.5*max(numpy.linalg.norm(du),1e-30):
-                    if old_dir is not None and numpy.linalg.norm(old_dir)>0:
-                        along_old=abs(float(numpy.dot(moved,old_dir))/numpy.linalg.norm(old_dir))
-                        if along_old>0.9*float(numpy.linalg.norm(moved)):
-                            continue  # it is the old branch
-                    else:
-                        continue
+                # What separates the two branches is the AMPLITUDE IN THE CRITICAL MODE: du points
+                # along it, the branch we came from has none of it (the normal form's own splitting
+                # puts that branch's tangent in the complement of the kernel). So project what Newton
+                # actually did onto du. Measured on a thin-film branch point, landings on the new
+                # branch score 0.9 to 9 times the predicted amplitude, while every fall-back onto the
+                # old branch scores 1e-4 or less - there is no ambiguity to tune against.
+                #
+                # This used to be judged by comparing `moved` against the old branch's arclength
+                # tangent, which fails twice over: the prediction is only leading order, so a genuine
+                # landing routinely differs from du by more than the 50% that test allowed, and
+                # get_arclength_dof_derivative_vector() is EMPTY unless an arclength continuation ran
+                # in this session - after go_to_param, or on a diagram loaded from disk, every
+                # candidate was rejected out of hand and the switch always reported failure.
+                du_norm=float(numpy.linalg.norm(du))
+                if abs(float(numpy.dot(moved,du)))<0.1*du_norm*du_norm:
+                    continue
                 landed=dp
+                used_pside=pside
                 break
-            if landed is not None:
+            if landed is not None or attempts>=max_attempts:
                 break
 
         if landed is None:
             param.value=p0
             self.set_current_dofs(base)
             if not quiet:
-                print("Could not step onto the other branch. Try a different offset or direction.")
+                print("Could not step onto the other branch: {:d} predicted points tried, from an "
+                      "offset of {:.3g} down to {:.3g}, and none of them landed on it. Try a different "
+                      "offset, or a finer ladder with offset_ratio closer to 1.".format(
+                          attempts,ladder[0],ladder[min(len(ladder),attempts)-1]))
             return None
+        if used_pside<0 and not quiet:
+            print("The normal form predicted this pitchfork's branches on the other side of "+
+                  param.get_name()+"; they are on this one, so it is sub- rather than supercritical "
+                  "or the other way round.")
         if not quiet:
             print("Switched onto the other "+str(kind)+" branch at "+param.get_name()+
                   " = {:.6g} (offset {:+.3g})".format(p0+landed,landed))
-        return landed if landed!=0.0 else base_offset
+        # A QUARTER of it, not the offset itself. The offset that works is often the largest one the
+        # ladder tried, because the smaller ones fall back onto the branch we came from - and a branch
+        # born at a bifurcation can be short. Measured on a thin-film branch point: continuing at the
+        # full offset stepped over the new branch's own fold on the very first step and landed back on
+        # the trivial branch, while a quarter of it traced the branch to its turning point.
+        return 0.25*(landed if landed!=0.0 else base_offset)
 
     def guess_nearest_bifurcation_type(self,eigenvector:int=0)->Literal["hopf","fold","pitchfork","azimuthal","cartesian_normal_mode"]:
         """

@@ -649,6 +649,55 @@ def test_eigenfunction_plotter_is_derived_from_the_source():
     assert src.file_trunk is not None and "h" in src._range_objects
 
 
+def test_leaving_a_branch_transiently_reaches_another_solution(tmp_path):
+    """Perturb along the unstable eigenfunction, integrate, and land somewhere else.
+
+    Two things had to be true for this to work at all, and neither was. The perturbation is scaled to a
+    target residual by bisection, and a residual that comes out inf - which is what a perturbation the
+    size of a whole eigenvector does to any equation with a 1/h or a log in it - compared as neither
+    larger nor smaller than the target, so the full amplitude survived and the transient died on its
+    first step. And the step size has to stay below the growth time of the mode: a fully implicit step
+    far above it damps an unstable mode rather than amplifying it, so the adaptive stepper - which sees
+    a solution sitting still near a stationary state and keeps doubling dt - marched back to the very
+    solution it was told to leave and reported the old branch as a new one.
+
+    The worker checks both, plus that the landing is a stable state and not the unstable one.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "transient_leave_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "LEFT the branch" in out
+
+
+def test_a_fold_is_not_mistaken_for_a_branch_point(tmp_path):
+    """The other half of the classification: a fold must keep coming out as a fold.
+
+    The fold/branch-point decision is how far dR/dparameter lies out of the range of the Jacobian,
+    measured as an ANGLE - the projection itself carries no scale, since the left null vector is
+    normalised by its overlap with the right one, and a second nearly-critical eigenvalue makes that
+    overlap small and the projection correspondingly large. That is what used to report a thin-film
+    branch point as a fold. A test that only checks branch points would be passed by a measure that
+    has simply been loosened until nothing is a fold any more, hence this one.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "branch_switch_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--kind", "fold", "--api", "problem",
+                           "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "kind=fold" in out
+
+
 @pytest.mark.parametrize("api", ["gui", "problem"])
 @pytest.mark.parametrize("kind", ["transcritical", "pitchfork"])
 def test_branch_switching_lands_on_the_other_branch(kind, api, tmp_path):
@@ -1532,3 +1581,261 @@ def test_import_order_is_free():
     assert plotter.get_xscale() == "linear"
     plotter.set_yscale("log")
     assert plotter.get_yscale() == "log"
+
+
+def test_critical_eigenindex_takes_the_mode_that_just_crossed():
+    """Right after a crossing, the mode to track is the one that crossed - not the nearest to zero.
+
+    Two modes going unstable within a few thousandths of each other is what a periodic domain does
+    routinely. On a real thin-film branch the spectrum straight after such a step was
+    [+0.016507, +0.016484, -0.016089, ...]: nearest the imaginary axis is the STABLE eigenvalue, by 2%.
+    Tracking that one asks the fold handler for a bifurcation the branch has not reached yet, from a
+    guess belonging to a different mode, and it diverged.
+
+    Where the unstable count did NOT change the old rule is the right one and is kept: on a branch that
+    was already unstable when we arrived, the bifurcation ahead belongs to the eigenvalue closest to
+    the axis, which is the KS hexdot case the method was written for.
+
+    A stub, because it is a choice of index and nothing else.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+
+    class StubProblem:
+        def __init__(self, evs):
+            self.evs = evs
+        def get_last_eigenvalues(self):
+            return self.evs
+
+    class StubPoint:
+        def __init__(self, unstable, param):
+            self.unstable_count = unstable
+            self.param_value = param
+
+    c = BifurcationController.__new__(BifurcationController)
+    prev, cur = StubPoint(0, 1.271), StubPoint(2, 1.279)
+    c.current_branch = [prev, cur]
+    c.current_point = cur
+
+    c.problem = StubProblem([0.016507, 0.016484, -0.016089, -0.03])  # type: ignore[assignment]
+    assert c.critical_eigenindex() == 1, "the least unstable of the two that just crossed"
+
+    # Same spectrum, but the step did not change the stability: nothing crossed here, so the next
+    # crossing is the eigenvalue nearest the axis.
+    cur.unstable_count = prev.unstable_count = 2
+    assert c.critical_eigenindex() == 2
+
+    # Already unstable on arrival and staying that way - the eigenvalue about to cross is not the
+    # leading one, which is exactly why this method exists.
+    c.problem = StubProblem([0.5, -0.01, -0.2])  # type: ignore[assignment]
+    assert c.critical_eigenindex() == 1
+
+    # No history to compare against: fall back to the same rule rather than guess.
+    c.current_branch, c.current_point = [], None
+    assert c.critical_eigenindex() == 1
+
+
+def test_a_branch_stepped_through_is_not_a_fold():
+    """The branch's own geometry answers fold-or-branch-point, and it outranks the normal form.
+
+    A fold is where the parameter turns around, so the two points either side of one lie on the SAME
+    side of its parameter value; a branch point sits strictly between them. The normal form decides the
+    same question from the projection of dR/dparameter on the left null vector, which is the least
+    reliable number in the calculation when a second eigenvalue is nearly critical - and that is
+    precisely the situation in which a bifurcation gets located between two ordinary continuation
+    points.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+
+    class StubParam:
+        def __init__(self, value):
+            self.value = value
+
+    class StubProblem:
+        def __init__(self, param, evs):
+            self.param = param
+            self.evs = evs
+        def get_last_eigenvalues(self):
+            return self.evs
+
+    class StubPoint:
+        def __init__(self, param):
+            self.param_value = param
+            self.unstable_count = None
+
+    c = BifurcationController.__new__(BifurcationController)
+    c.current_branch = [StubPoint(1.270959), StubPoint(1.279080)]
+    c.current_point = c.current_branch[-1]
+    c.problem = StubProblem(StubParam(1.271597), [0.0])  # type: ignore[assignment]
+    c.get_bifurcation_parameter = lambda: c.problem.param  # type: ignore[assignment]
+
+    assert c._fold_ruled_out_by_the_branch() == "branch_point"
+
+    # A fold found beyond the pair says nothing - both points are on one side of it, which is what a
+    # fold looks like from a continuation.
+    c.problem.param.value = 1.2801
+    assert c._fold_ruled_out_by_the_branch() is None
+
+    # Landing on a point rather than between them is not evidence either.
+    c.problem.param.value = 1.279080
+    assert c._fold_ruled_out_by_the_branch() is None
+
+    # A Hopf also passes straight through the parameter, so the test must not claim anything there.
+    c.problem.param.value = 1.271597
+    c.problem.evs = [0.0 + 3.2j]
+    assert c._fold_ruled_out_by_the_branch() is None
+
+
+def _diagram_with_two_branches():
+    """A controller carrying two straight branches, with no problem and no window behind it."""
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController, _FixedViewLimits
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint)
+
+    def point(mu, u):
+        return BifurcationGUISolutionPoint(mu, {"ode/u": u}, -1.0, "", 0,
+                                           param_values={"mu": mu})
+
+    c = BifurcationController.__new__(BifurcationController)
+    c._on_changed = c._on_status = c._on_busy = None
+    c._on_log = lambda *a: None
+    c.view = _FixedViewLimits(xlim=(0.0, 1.0), ylim=(0.0, 1.0))
+    c._paramname = "mu"
+    c._x_axis = c._y_axis = None
+    c._current_observable = "ode/u"
+    c._avail_observables = ["ode/u"]
+    first = BifurcationGUISolutionBranch([point(0.1*i, 0.1*i) for i in range(4)],
+                                         continuation_parameter="mu")
+    second = BifurcationGUISolutionBranch([point(0.3+0.1*i, 0.3+0.1*i) for i in range(1, 4)],
+                                          continuation_parameter="mu")
+    c.branches = [first, second]
+    c.current_branch, c.current_point = first, first[-1]
+    c.selected_branch, c.selected_point = first, first[-1]
+    return c, first, second
+
+
+def test_a_branch_can_be_split_at_a_point():
+    """Cutting a branch in two, for when a continuation step landed on a different one.
+
+    The selected point starts the new half - that is the one the user identifies, being the first that
+    does not belong. Splitting at the first point of a branch would leave nothing behind and has to be
+    refused rather than produce an empty branch that every later operation has to guard against.
+    """
+    c, first, _ = _diagram_with_two_branches()
+    c.selected_branch, c.selected_point = first, first[2]
+
+    tail = c.split_branch()
+    assert list(first) == [first[0], first[1]], "the old branch keeps everything before the point"
+    assert len(tail) == 2 and tail[0] is c.selected_point, "and the point starts the new one"
+    assert c.branches.index(tail) == c.branches.index(first)+1, "the new half follows the old one"
+    assert tail.continuation_parameter == "mu", "a split half is still the same kind of branch"
+    # The problem is still sitting on the point it was, so that half is what a step would extend.
+    assert c.current_branch is tail and c.current_point in tail
+
+    c.selected_point = tail[0]
+    try:
+        c.split_branch()
+    except RuntimeError as e:
+        assert "first point" in str(e)
+    else:
+        raise AssertionError("splitting at the first point of a branch has to be refused")
+
+
+def test_two_branches_can_be_merged_by_the_ends_that_meet():
+    """Joining two branches that are one curve, and refusing the ones that are not.
+
+    Which of the four end-to-end pairings is used is decided by distance in the plotted coordinates,
+    so the caller does not have to know which branch was computed in which direction.
+    """
+    c, first, second = _diagram_with_two_branches()
+    c.selected_branch, c.selected_point = second, second[0]
+
+    merged = c.merge_branches()
+    assert merged is first, "the branch you are on survives, the other one goes"
+    assert len(c.branches) == 1
+    assert [round(p.param_value, 6) for p in merged] == [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6], \
+        "first[-1] meets second[0], so they are laid end to end in that order"
+    assert all(merged[i].scoord <= merged[i+1].scoord for i in range(len(merged)-1)), \
+        "and the arclength coordinates are renormalised over the whole thing"
+
+    # A branch computed the other way round has to be turned over rather than joined backwards.
+    c, first, second = _diagram_with_two_branches()
+    second.data = list(reversed(second.data))
+    c.selected_branch = second
+    merged = c.merge_branches()
+    assert [round(p.param_value, 6) for p in merged] == [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+
+    # Different slices of parameter space are different physical results, not one curve.
+    c, first, second = _diagram_with_two_branches()
+    for p in second:
+        p.param_values = {"mu": p.param_value, "b": 0.5}
+    for p in first:
+        p.param_values = {"mu": p.param_value, "b": 0.25}
+    c.selected_branch = second
+    try:
+        c.merge_branches()
+    except RuntimeError as e:
+        assert "slice" in str(e), str(e)
+    else:
+        raise AssertionError("branches from different slices must not be merged")
+
+
+def test_the_branch_switch_offset_follows_the_step_size():
+    """The offset a branch switch steps off by comes from the ds the user has set.
+
+    ds is an arclength step, so what it buys in the parameter is ds*|dparameter/ds| - and the tangent
+    AT a located bifurcation is gone, because the normal-form calculation resets the continuation
+    state, so the one recorded at the point before it is what there is to ask. The old fixed 2% of the
+    parameter is the fallback, and on a diagram spanning 4% of the parameter it overshoots every
+    branch in it.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+
+    class StubParam:
+        value = 1.2716
+
+    class StubProblem:
+        def get_last_eigenvalues(self):
+            return [0.0]
+
+    class StubPoint:
+        def __init__(self, tangs):
+            self._tangs = tangs
+            self.param_value = 1.271
+            self.unstable_count = None
+
+    c = BifurcationController.__new__(BifurcationController)
+    c.problem = StubProblem()  # type: ignore[assignment]
+    c.get_bifurcation_parameter = lambda: StubParam()  # type: ignore[assignment]
+    c._current_observable = "obs"
+    c.branch_switch_offset = 0.02
+    c._last_ds = 0.0173
+    prev = StubPoint({"obs": numpy.array([0.7071, 2.3e-4])})
+    c.current_branch = [prev, StubPoint({})]
+    c.current_point = c.current_branch[-1]
+
+    assert abs(c.branch_switch_parameter_offset() - 0.0173*0.7071) < 1e-12
+
+    # No tangent recorded anywhere: back to the old rule, and it must not be zero.
+    c.current_branch = []
+    c.current_point = None
+    assert abs(c.branch_switch_parameter_offset() - 0.02*1.2716) < 1e-12
+
+
+def test_every_default_shortcut_reaches_a_command(tmp_path):
+    """A key in the default map with no action behind it does nothing, silently.
+
+    _on_key looks the accelerator up, finds no action of that id and returns - which is how "Grab
+    selected point" spent its life reachable only from a checkbox in the settings panel. Building the
+    window is enough to check this; it needs no problem and is never shown, but it is tk.Tk() all the
+    same, hence a worker under gui_launch_prefix() rather than an in-process test.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "shortcut_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker],
+                          cwd=here, capture_output=True, text=True, timeout=300)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "SHORTCUTS OK" in out

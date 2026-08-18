@@ -272,7 +272,9 @@ class BifurcationDiagramPlotter:
                     xy_start=(float(x0[0]),float(x0[1]))
                     gca.annotate("", xy=xy_end, xytext=xy_start,arrowprops=dict(arrowstyle="->"),annotation_clip=False)
                     for i,bst in enumerate(controller.current_point._branch_switch_tangs if tang_key is not None else []):
-                        dx=controller._last_ds*bst[tang_key]
+                        # abs(ds): the two arrows are the two branches through the bifurcation, which
+                        # do not swap over when the direction of travel is reversed.
+                        dx=abs(controller._last_ds)*bst[tang_key]
                         extend_lims(x0)
                         xy_end=(float(x0[0]+dx[0]),float(x0[1]+dx[1]))
                         xy_start=(float(x0[0]),float(x0[1]))

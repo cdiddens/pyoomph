@@ -2148,7 +2148,12 @@ class NormalFormCalculator:
             closest=numpy.argmin(numpy.abs(evals-lamb))
             return evects[closest],evals[closest]
       
-      def get_normal_form(self,param:str | None=None,eigenindex:int=0):
+      def get_normal_form(self,param:str | None=None,eigenindex:int=0,assume:str | None=None):
+        """Normal form of the bifurcation the problem is sitting at, Hopf or real.
+
+        ``assume`` is passed on to :py:meth:`get_normal_form1d` and forces its fold/branch-point
+        decision; it has no meaning for a Hopf and is rejected there.
+        """
         if param is None:
             if self.problem._bifurcation_tracking_parameter_name is not None and self.problem._bifurcation_tracking_parameter_name!="":
                 param=self.problem._bifurcation_tracking_parameter_name
@@ -2158,9 +2163,12 @@ class NormalFormCalculator:
             raise RuntimeError("Eigenpair at index "+str(eigenindex)+" not calculated!")
         lambd=self.problem.get_last_eigenvalues()[eigenindex]
         if numpy.abs(numpy.imag(lambd))>1e-8:
+            if assume is not None:
+                raise ValueError("assume applies to the fold/branch-point decision of a real "
+                                 "bifurcation; this eigenvalue is complex, so it is a Hopf")
             return self.get_normal_form_hopf(param=param,eigenindex=eigenindex)
         else:
-            return self.get_normal_form1d(param=param,eigenindex=eigenindex)
+            return self.get_normal_form1d(param=param,eigenindex=eigenindex,assume=assume)
         
       def get_normal_form_hopf(self,param:str | None=None,eigenindex:int=0):
             # Translated from Julia language code BifurcationKitDocs.jl (https://bifurcationkit.github.io/BifurcationKitDocs.jl)
@@ -2276,7 +2284,14 @@ class NormalFormCalculator:
             
             
             
-      def get_normal_form1d(self,param:str | None=None,eigenindex:int=0):
+      def get_normal_form1d(self,param:str | None=None,eigenindex:int=0,assume:str | None=None,tol_fold:float=1e-3):
+            """Normal form of a real (non-Hopf) bifurcation the problem is sitting at.
+
+            ``assume`` overrides the fold/branch-point decision with "fold" or "branch_point" - useful
+            when the geometry of the branch already answers it, e.g. when the continuation walked
+            THROUGH the point without the parameter turning around, which no fold does. ``tol_fold`` is
+            compared against the scale-free measure described below, not against a itself.
+            """
             # Compute a normal form based on Golubitsky, Martin, David G Schaeffer, and Ian Stewart. Singularities and Groups in Bifurcation Theory. New York: Springer-Verlag, 1985, VI.1.d page 295.
             # Translated from Julia language code BifurcationKitDocs.jl (https://bifurcationkit.github.io/BifurcationKitDocs.jl)
             if param is None:
@@ -2338,13 +2353,32 @@ class NormalFormCalculator:
             wst = E(self.la_solve(L, E(b2v))) # Golub. Schaeffer Vol 1 page 33, eq 3.22    
             b3v = self.d3f(zeta) + 3 * Hzeta@wst
             b3 = numpy.dot(b3v, zeta_star)    
-            res={"a":a,"b1":b1,"b2":b2,"b3":b3}
-            print("a=",a)
+            # "Is a zero?" is the fold/branch-point question, but a itself carries no scale: zeta_star is
+            # normalised by 1/<zeta,zeta_star>, so a mode whose left and right null vectors overlap
+            # poorly - which is exactly what happens when a second eigenvalue sits close by - inflates a
+            # by that factor alone. An absolute threshold then reads a branch point as a fold. What does
+            # not move is the ANGLE between R01=-dR/dp and the left null vector: a=0 means dR/dp lies in
+            # the range of J, i.e. the parameter cannot move the solution off the branch, and the cosine
+            # says that scale-free. Measured: a genuine fold gives O(1) here, a branch point 1e-5 or less.
+            a_rel=abs(a)/max(numpy.linalg.norm(R01)*numpy.linalg.norm(zeta_star),1e-300)
+            res={"a":a,"b1":b1,"b2":b2,"b3":b3,"a_rel":a_rel}
+            print("a=",a," (relative to |dR/dp| and the left null vector:",a_rel,")")
             print("b1=",b1)
             print("b2=",b2)
             print("b3=",b3)
-            tol_fold=0.001
-            if abs(a) < tol_fold:
+            if assume not in (None,"fold","branch_point"):
+                raise ValueError("assume must be None, 'fold' or 'branch_point', got "+repr(assume))
+            is_fold=(a_rel>=tol_fold) if assume is None else (assume=="fold")
+            if assume is not None:
+                print("Classified as a "+("fold" if is_fold else "branch point")+" on request, not from a")
+            elif tol_fold/10<a_rel<tol_fold*10:
+                # Within a decade of the threshold either way. Measured, the two cases sit three decades
+                # apart (a Bratu fold gives 0.94, a branch point 3e-5), so anything this close is worth
+                # saying out loud rather than deciding silently.
+                print("WARNING: this is only",a_rel,"against a threshold of",tol_fold,
+                      "- the fold/branch-point verdict is not clear-cut here. Pass assume='fold' or "
+                      "assume='branch_point' if you know which it is.")
+            if not is_fold:
                 if 100*abs(b2/2) < abs(b3/6):
                     print("Likely a pitchfork")
                     psign=1 if b1*b3<0 else -1
@@ -2353,18 +2387,24 @@ class NormalFormCalculator:
                     res["psign"]=psign
                     res["zeta"]=zeta
                     res["param_predictor"]=lambda dp : psign*abs(dp)
-                    res["perturbation_predictor"]=lambda dp: zeta*numpy.sqrt(abs(6*b1/b3*dp))
+                    # The SIGN of dp picks which of the two symmetric branches is predicted: they sit at
+                    # +-zeta and share the same parameter side, so without this both of switch_branch's
+                    # two directions asked for the very same point and one of the two branches could
+                    # never be reached.
+                    res["perturbation_predictor"]=lambda dp: numpy.sign(dp)*zeta*numpy.sqrt(abs(6*b1/b3*dp))
                     
                 else:
                     print("Likely transcritical")
                     res["type"]="transcritical"
                     res["psign"]="arbitrary" # Can be chosen arbitrarily
+                    res["zeta"]=zeta
                     res["param_predictor"]=lambda dp : dp
                     res["perturbation_predictor"]=lambda dp: -zeta*2*b1/b2*dp
             else:
                 print("Likely fold")
                 res["type"]="fold"
                 res["psign"]=0 # Parameter may not change
+                res["zeta"]=zeta
                 res["param_predictor"]=lambda dp : 0
                 res["perturbation_predictor"]=lambda dp: zeta*dp
             return res
