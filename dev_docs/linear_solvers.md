@@ -288,10 +288,17 @@ check was added: the library performs it, and better.
 **The escalation is worth having.** A shift-and-invert factorises `J − σM`, commonly denser than `J`
 alone, so it exhausts MUMPS' workspace more readily — and pyoomph never sets `st_mat_mumps_icntl_14`
 unless `use_mumps()` was handed an explicit `mumps_param14`, which asks the user to have foreseen the
-whole thing. `_eps_solve_with_workspace_retry()` doubles it and **rebuilds** the EPS once. Rebuilding,
+whole thing. `_eps_solve_with_workspace_retry()` doubles it and **rebuilds** the EPS. Rebuilding,
 not re-solving: a PETSc option is consumed when the object it configures is set up, so a raised
 `ICNTL(14)` is only seen by a KSP/PC that has not been set up yet, and the spectral transform's has.
 The EPS construction moved into a closure for exactly this.
+
+It doubles **for as long as MUMPS keeps asking**, not once. A single retry only ever reaches 40, and
+40 is not much: the reactive-thin-film problem (`LineMesh(N=5000)`, 20 002 dofs, a periodic BC and a
+volume constraint, so two dense rows) needs 60 and used to die on the retry — the escalation gave up
+one step short of the answer, and, being called from the bifurcation GUI's old atexit autostart, did
+it as an "Exception ignored" with exit status 0. `_increase_mumps_icntl14()` caps at 1000 and reports
+that it could not move, which is what ends the loop: 20 → 40 → 80 → … → 1000 is six retries at worst.
 
 **`INFOG(1) = -19` is not in the escalation list**, in either solver. It means the factorisation
 exceeded `ICNTL(23)`, the hard cap on working memory in MB, and doubling `ICNTL(14)` against a cap asks
@@ -304,6 +311,7 @@ Verified on the complex PETSc build, `LineMesh(N=20000)`, 80 002 dofs:
 | --- | --- | --- |
 | none | 0 | unchanged; same eigenvalues as before the patch |
 | `st_mat_mumps_icntl_14 = -95` | −9 family | `retrying with -st_mat_mumps_icntl_14 40`, then the correct spectrum |
+| reactive thin film, default `ICNTL(14)` | −9 | `40`, still −9, `80`, then the correct spectrum (used to raise) |
 | `st_mat_mumps_icntl_23 = 1` | −19 | names the cap, re-raises, no retry spent |
 | an ST KSP that cannot converge | n/a | re-raised untouched (PETSc error 91), exactly as before |
 

@@ -1089,7 +1089,7 @@ class SlepcEigenSolver(GenericEigenSolver):
         return self
 
     def _eps_solve_with_workspace_retry(self,build_and_solve:Callable[[],Any])->Any:
-        """Run an EPS solve, retrying once with more MUMPS workspace if that is what it ran out of.
+        """Run an EPS solve, retrying with more MUMPS workspace for as long as that is what it lacks.
 
         Deliberately much smaller than PETSCSolver._ksp_solve_checked, because only one of the two
         problems that method exists for is present here.
@@ -1110,28 +1110,34 @@ class SlepcEigenSolver(GenericEigenSolver):
         commonly denser than J alone, so it runs out of MUMPS workspace more readily than the linear
         solver does -- and pyoomph never sets st_mat_mumps_icntl_14 unless use_mumps() was given an
         explicit mumps_param14, which asks the user to have foreseen the whole thing. Doubling it and
-        running once more is MUMPS' own prescription, and it turns a dead run into a slower one.
+        running again is MUMPS' own prescription, and it turns a dead run into a slower one.
+
+        Keep doubling rather than trying once: a single retry raises ICNTL(14) from MUMPS' default of
+        20 to 40, and 40 is not a lot. The lubrication problem this loop was written for (a 1D film
+        with a periodic BC and a volume constraint, so two dense rows in 20002) needs 60, and used to
+        fail on the retry -- an escalation that gives up one step short of the answer buys nothing.
+        _increase_mumps_icntl14 caps at 1000 and reports that it could not move, which ends the loop.
 
         Anything that is not a MUMPS workspace error is re-raised untouched, so a genuinely singular
         shifted matrix, a bad target or a non-MUMPS factorisation fails exactly as it did before.
         """
-        try:
-            return build_and_solve()
-        except Exception as first_error:
-            E = getattr(self, "_last_eps_attempt", None)
-            infog1 = _mumps_infog_from_pc(E.getST().getKSP().getPC(), 1) if E is not None else None #type:ignore
-            if infog1 == _MUMPS_ICNTL23_ERROR:
-                print("MUMPS hit the working-memory cap set by -st_mat_mumps_icntl_23. Raise or remove "
-                      "that cap; ICNTL(14) cannot buy room a cap forbids.")
-                raise
-            if infog1 is None or infog1 not in _MUMPS_ICNTL14_ERRORS:
-                raise
-            if not _increase_mumps_icntl14("st_mat_mumps_icntl_14", False):
-                raise
-            if E is not None:
-                E.destroy() #type:ignore
-                self._last_eps_attempt = None
-            return build_and_solve()
+        while True:
+            try:
+                return build_and_solve()
+            except Exception:
+                E = getattr(self, "_last_eps_attempt", None)
+                infog1 = _mumps_infog_from_pc(E.getST().getKSP().getPC(), 1) if E is not None else None #type:ignore
+                if infog1 == _MUMPS_ICNTL23_ERROR:
+                    print("MUMPS hit the working-memory cap set by -st_mat_mumps_icntl_23. Raise or "
+                          "remove that cap; ICNTL(14) cannot buy room a cap forbids.")
+                    raise
+                if infog1 is None or infog1 not in _MUMPS_ICNTL14_ERRORS:
+                    raise
+                if not _increase_mumps_icntl14("st_mat_mumps_icntl_14", False):
+                    raise
+                if E is not None:
+                    E.destroy() #type:ignore
+                    self._last_eps_attempt = None
 
     def solve(self, neval:int, shift:float | None | complex=None,sort:bool=True,which:EigenSolverWhich="LM",OPpart:Literal["r", "i"] | None=None,v0:NPComplexArray | NPFloatArray | None=None,target:complex | None=None,custom_J_and_M:tuple["DefaultMatrixType","DefaultMatrixType"] | None=None,with_left_eigenvectors:bool=False,quiet:bool=True)->tuple[NPComplexArray,NPComplexArray,"DefaultMatrixType","DefaultMatrixType"]:
         if which!="LM":

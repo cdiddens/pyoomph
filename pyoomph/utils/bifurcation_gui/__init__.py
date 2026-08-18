@@ -34,11 +34,12 @@ Typical use is unchanged from the earlier, purely key-driven version::
 
     with MyProblem() as problem:
         problem.setup_for_stability_analysis()
-        problem.solve()
         gui=BifurcationGUI(problem,"my_parameter")
         gui.neigen=30
         gui.classify_bifurcations=True
-        gui.start(0.001)
+        if gui.must_init():          # False if a stored diagram is found, which is loaded instead
+            problem.solve()          # whatever it takes to reach the first stationary solution
+        gui.start(0.001)             # opens the window; the argument is the initial arclength step
 
 :py:meth:`BifurcationGUI.start` now opens a window with menus, a toolbar and side panels instead of
 a bare matplotlib figure; all the old keys still work and are listed next to their menu entries.
@@ -58,9 +59,6 @@ rendered next to the diagram and re-drawn as you move along a branch, so there i
 window to see what the solution looks like. Eigenfunction views are derived from the same plot
 definition on demand under *View -> Field plots*.
 """
-
-import atexit
-import sys
 
 from ...generic import Problem
 from ... import _pyoomph_core as _pyoomph
@@ -91,10 +89,6 @@ class BifurcationGUI:
         self.title:str | None=None
         #: Reserved for the background-solver executor; the inline one is the only one implemented.
         self.use_solver_thread=False
-        # Set by must_init(): the arguments the window is later opened with, and whether that has
-        # happened (or been cancelled) already.
-        self._autostart_args:tuple[float,int] | None=None
-        self._autostart_done=False
 
     # ---------------------------------------------------------------- forwarded state
 
@@ -239,19 +233,20 @@ class BifurcationGUI:
 
     # ---------------------------------------------------------------- lifecycle
 
-    def start(self,init_ds:float | None=None,initial_max_newton_iterations=10):
+    def start(self,init_ds:float | None=None,initial_max_newton_iterations:int=10):
         """Solve the starting point, open the window and enter the event loop.
 
-        Returns when the window is closed. An existing diagram in the problem's output directory is
-        reloaded, so a session can be resumed. ``init_ds`` may be left out after
-        :py:meth:`must_init`, which has already been told the step size.
+        ``init_ds`` is the initial arclength step. Returns when the window is closed. An existing
+        diagram in the problem's output directory is reloaded, so a session can be resumed - the same
+        diagram whose presence :py:meth:`must_init` reports, and the call belongs *after* the block
+        that method guards::
+
+            if gui.must_init():
+                problem.solve()
+            gui.start(0.001)
         """
-        self._autostart_done=True  # an explicit start cancels the one must_init() armed
-        atexit.unregister(self._autostart_on_exit)
         if init_ds is None:
-            if self._autostart_args is None:
-                raise RuntimeError("Pass the initial step size: start(init_ds), or call must_init(init_ds) first")
-            init_ds=self._autostart_args[0]
+            raise RuntimeError("start() needs the initial arclength step size, e.g. gui.start(0.001)")
         fresh=self.controller.start(init_ds,initial_max_newton_iterations)
         if fresh:
             self.plotter.initialise_view(self.controller)
@@ -271,85 +266,48 @@ class BifurcationGUI:
 
         app.run()
 
-    def must_init(self,init_ds:float,initial_max_newton_iterations=10,autostart:bool=True)->bool:
+    def must_init(self,init_ds:float | None=None)->bool:
         """Prepare the problem for a diagram and say whether it still has to be built by hand.
 
-        Guards the code that walks the problem to its first solution::
+        Guards the code that walks the problem to its first solution, with :py:meth:`start` after it::
 
-            if BifurcationGUI(problem,problem.param_gamma).must_init(0.001):
+            gui=BifurcationGUI(problem,problem.param_gamma)
+            if gui.must_init():
                 problem.param_gamma.value=0.24
                 problem.set_initial_condition(ic_name="hexdots")
                 problem.solve(timestep=10)
                 problem.solve()
                 problem.go_to_param(gamma=0.28,startstep=0.01)
-            # the window opens by itself once the enclosing "with problem" block ends
+            gui.start(0.001)
 
-        False means a diagram was found in the output directory, so the block is skipped and that
-        diagram is loaded instead - which on a real problem saves the whole transient-plus-go_to_param
-        walk. True means there is nothing to load and the block has to produce a starting solution.
+        False means a diagram was found in the output directory, so the block is skipped and
+        :py:meth:`start` loads that diagram instead - which on a real problem saves the whole
+        transient-plus-go_to_param walk. True means there is nothing to load and the block has to
+        produce a starting solution.
 
         The other half of the job is *when* this runs. It initialises the problem here, after the
         constructor has set the runmode to "overwrite" - initialising under the default "delete"
         runmode removes the stored diagram, which is what made a resumable session impossible; see
         :py:meth:`BifurcationController.prepare`.
 
-        Since a plain ``if`` has no closing hook, the window is opened for you, at the end of the
-        ``with SomeProblem() as problem:`` block (or at interpreter exit for a script that does not use
-        one). It is not opened if the script is on its way out through an exception, and calling
-        :py:meth:`start` yourself cancels it. Pass ``autostart=False`` to be responsible for that call.
+        ``init_ds`` exists only to catch the earlier signature, where this method took the step size
+        and opened the window by itself once the enclosing ``with problem`` block (or the interpreter)
+        ended. That hid every failure inside :py:meth:`start`: an exception raised from an atexit
+        handler is printed as "Exception ignored" and leaves the process exiting with status 0.
         """
-        self.controller.prepare(init_ds)
-        self._autostart_args=(init_ds,initial_max_newton_iterations)
-        if autostart:
-            self._arm_autostart()
+        if init_ds is not None:
+            raise RuntimeError(
+                "must_init() no longer takes the initial step size and no longer opens the window by "
+                "itself - call start() after the guarded block instead:\n"
+                "    gui=BifurcationGUI(problem,\"param\")\n"
+                "    if gui.must_init():\n"
+                "        ...\n"
+                "    gui.start({:g})".format(init_ds))
+        self.controller.prepare()
         fresh=not self.controller.has_saved_state()
         if not fresh:
             self.controller.log("Found a stored diagram and will load it, so the initialisation is skipped")
         return fresh
-
-    # The window has to open after the guarded block, and a plain "if" gives nothing to hang that on.
-    # Problem.release() is the hook: Problem.__exit__ calls it, and __exit__ itself cannot be wrapped
-    # per instance because the "with" statement looks special methods up on the type, not the instance.
-    # release() tears the problem down, so the window must open BEFORE it - hence a wrapper and not a
-    # callback afterwards. A script that never uses "with" is covered by atexit, which still runs early
-    # enough for tkinter to work (sys.is_finalizing() is False there).
-
-    def _arm_autostart(self):
-        problem=self.problem
-        previous_release=problem.release
-
-        def release_and_start(*args,**kwargs):
-            problem.release=previous_release      # only ever fire once, and never re-enter
-            self._autostart()
-            return previous_release(*args,**kwargs)
-
-        problem.release=release_and_start
-        # This pins the GUI, and with it the problem, until the window has run. That is deliberate: the
-        # usual call is on a temporary (BifurcationGUI(...).must_init(...)), which nothing else holds.
-        atexit.register(self._autostart_on_exit)
-
-    def _autostart(self):
-        if self._autostart_done:
-            return
-        self._autostart_done=True
-        atexit.unregister(self._autostart_on_exit)
-        assert self._autostart_args is not None
-        # An exception on its way out of the "with problem" block still reaches release(), because
-        # Problem.__exit__'s isinstance(type,Exception) test compares a CLASS against Exception and so
-        # never holds. Opening a window on a half-built problem would bury the traceback the user needs.
-        raising=sys.exc_info()[0]
-        if raising is not None:
-            self.controller.log("Not opening the window: the script is raising "+raising.__name__)
-            return
-        self.start(*self._autostart_args)
-
-    def _autostart_on_exit(self):
-        # Set by the default excepthook, so this is how the atexit route sees a script that died.
-        died=getattr(sys,"last_exc",None) or getattr(sys,"last_type",None)
-        if died is not None:
-            self._autostart_done=True
-            return
-        self._autostart()
 
     def _create_app(self):
         try:

@@ -661,11 +661,12 @@ def test_must_init_keeps_the_diagram_and_skips_the_setup(tmp_path):
     block skipped the problem sits at its raw initial condition, so the initial solve that start() used
     to do unconditionally would be working from a guess the script never intended.
 
-    A plain "if" has no closing hook, so the window is opened from Problem.release() - which is also
-    reached when the block exits through an exception, because Problem.__exit__'s
-    isinstance(type,Exception) test compares a class against Exception and never holds. The "raises"
-    phase pins that a failing script gets its traceback rather than a window, and "nowith" pins the
-    atexit fallback for scripts that never use "with SomeProblem() as problem".
+    The window is opened by start(), which the script calls after the guarded block, so a failure in
+    there raises where the script can see it. The "raises" phase pins that a script failing between the
+    two gets its traceback rather than a window, "nowith" that the common shape without "with
+    SomeProblem() as problem" works the same, and "legacy" that the earlier must_init(ds) call - which
+    opened the window from an atexit handler, where an exception is printed as "Exception ignored" and
+    the process still exits 0 - is rejected with a message naming its replacement.
     """
     import subprocess
 
@@ -698,7 +699,10 @@ def test_must_init_keeps_the_diagram_and_skips_the_setup(tmp_path):
     assert "WINDOW_OPENED" not in raised, "a raising script must not get a window:\n" + raised[-2000:]
 
     nowith = run("nowith", out_sub="nowith")
-    assert "NOWITH opened=True" in nowith, "atexit must open the window:\n" + nowith[-2000:]
+    assert "NOWITH opened=True" in nowith, "start() must open the window:\n" + nowith[-2000:]
+
+    legacy = run("legacy", out_sub="legacy")
+    assert "LEGACY rejected" in legacy, "must_init(ds) must be rejected:\n" + legacy[-2000:]
 
 
 def test_extremum_observables_become_axis_choices(tmp_path):
