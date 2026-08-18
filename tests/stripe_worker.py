@@ -79,47 +79,60 @@ class Prob(Problem):
         self += eqs @ "ode"
 
 
-with Prob() as problem:
-    problem.set_output_directory(sys.argv[1])
-    problem.set_eigensolver("slepc")
-    problem.get_global_parameter("mu").value = 1.0
-    problem.quiet()
+# Run under a __main__ guard: this file lives in tests/ and the suite is invoked as
+# `python -m pytest *.py` (see citools/nightly_develop.sh), which hands pytest every .py in
+# the directory by name -- and a file named on the command line is imported regardless of
+# python_files. Without the guard the whole problem below is built and solved at COLLECTION
+# time, and pyoomph's own argv parsing then reads pytest's first filename argument as the
+# output directory, so it tries to mkdir over a source file and collection dies. Every other
+# worker in this directory is guarded the same way.
+def main():
+    with Prob() as problem:
+        problem.set_output_directory(sys.argv[1])
+        problem.set_eigensolver("slepc")
+        problem.get_global_parameter("mu").value = 1.0
+        problem.quiet()
 
-    gui = BifurcationGUI(problem, "mu")
-    gui.neigen = 2                      # deliberately too few to see everything
-    c = gui.controller
-    c.view = _FixedViewLimits(xlim=(-5, 40), ylim=(-5, 5))
-    c.start(0.5)
+        gui = BifurcationGUI(problem, "mu")
+        gui.neigen = 2                      # deliberately too few to see everything
+        c = gui.controller
+        c.view = _FixedViewLimits(xlim=(-5, 40), ylim=(-5, 5))
+        c.start(0.5)
 
-    p = c.current_point
-    print("expected eigenvalues: {:+g}, {:+g}, {:+g}+-{:g}i".format(SLOW[0], SLOW[1], EPS, OMEGA))
-    print("shift-invert (neigen=2):")
-    for v in p.eig_values:
-        print("   {:+.4f}{:+.4f}i".format(v.real, v.imag))
-    assert not any(abs(v.imag) > 1 for v in p.eig_values), \
-        "the pair should NOT be in a 2-eigenvalue shift-invert result"
-    print("   -> the pair is invisible to it, as intended")
-    n_before = len(p.eig_values)
+        p = c.current_point
+        print("expected eigenvalues: {:+g}, {:+g}, {:+g}+-{:g}i".format(SLOW[0], SLOW[1], EPS, OMEGA))
+        print("shift-invert (neigen=2):")
+        for v in p.eig_values:
+            print("   {:+.4f}{:+.4f}i".format(v.real, v.imag))
+        assert not any(abs(v.imag) > 1 for v in p.eig_values), \
+            "the pair should NOT be in a 2-eigenvalue shift-invert result"
+        print("   -> the pair is invisible to it, as intended")
+        n_before = len(p.eig_values)
 
-    c.stripe_re, c.stripe_im = 1.0, OMEGA + 2.0
-    c.stripe_merge = True
-    print("\nstripe |Re|<{:g}, |Im|<{:g}, merging ...".format(c.stripe_re, c.stripe_im))
-    assert c.scan_stripe(p), "the scan failed"
-    print("after the merge:")
-    for v in p.eig_values:
-        print("   {:+.4f}{:+.4f}i".format(v.real, v.imag))
+        c.stripe_re, c.stripe_im = 1.0, OMEGA + 2.0
+        c.stripe_merge = True
+        print("\nstripe |Re|<{:g}, |Im|<{:g}, merging ...".format(c.stripe_re, c.stripe_im))
+        assert c.scan_stripe(p), "the scan failed"
+        print("after the merge:")
+        for v in p.eig_values:
+            print("   {:+.4f}{:+.4f}i".format(v.real, v.imag))
 
-    pair = [v for v in p.eig_values if abs(v.imag) > 1]
-    assert len(pair) == 2, "the pair must be there now, got {:d}".format(len(pair))
-    assert abs(abs(pair[0].imag) - OMEGA) < 1e-6, pair
-    assert abs(pair[0].real - EPS) < 1e-6, pair
-    assert len(p.eig_values) == n_before + 2, \
-        "merging must add exactly the two it found and duplicate nothing: {:d} -> {:d}".format(
-            n_before, len(p.eig_values))
-    assert p.unstable_count == 0, p.unstable_count
-    print("\nleading {:+.4f}, unstable {:d}".format(p.eig_value_Re, p.unstable_count))
+        pair = [v for v in p.eig_values if abs(v.imag) > 1]
+        assert len(pair) == 2, "the pair must be there now, got {:d}".format(len(pair))
+        assert abs(abs(pair[0].imag) - OMEGA) < 1e-6, pair
+        assert abs(pair[0].real - EPS) < 1e-6, pair
+        assert len(p.eig_values) == n_before + 2, \
+            "merging must add exactly the two it found and duplicate nothing: {:d} -> {:d}".format(
+                n_before, len(p.eig_values))
+        assert p.unstable_count == 0, p.unstable_count
+        print("\nleading {:+.4f}, unstable {:d}".format(p.eig_value_Re, p.unstable_count))
 
-    # The solver must be back to shift-invert, or every later solve becomes a region scan.
-    assert problem.get_eigen_solver().eigenvalue_region is None
-    print("STRIPE OK")
-    print("PYOOMPH_WORKER_DONE")
+        # The solver must be back to shift-invert, or every later solve becomes a region scan.
+        assert problem.get_eigen_solver().eigenvalue_region is None
+        print("STRIPE OK")
+        print("PYOOMPH_WORKER_DONE")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
