@@ -5533,7 +5533,7 @@ class Problem(_pyoomph.Problem):
     def set_arclength_inner_product(self,kind:"str | Callable[[NPFloatArray],float] | None"="l2"):
         """Choose the inner product in which arclength measures the *solution* part of a step.
 
-        oomph's arclength constraint is
+        oomph's arclength constraint is::
 
             (dparameter/ds)^2 + theta^2 * |dU/ds|^2 = 1
 

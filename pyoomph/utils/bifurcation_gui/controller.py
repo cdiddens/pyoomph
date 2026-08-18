@@ -288,11 +288,15 @@ class BifurcationController:
     def set_observer(self,*,on_changed:Callable[[],None] | None=None,on_status:Callable[[str | None],None] | None=None,on_log:Callable[[str],None] | None=None,on_busy:Callable[[str | None],None] | None=None):
         """Install the callbacks through which a user interface follows this controller.
 
-        ``on_changed`` - the diagram or the selection changed and should be redrawn.
-        ``on_status``  - a long operation wants a label shown (``None`` clears it); this also
-                         repaints, which is what lets the abort flag be picked up mid-sweep.
-        ``on_log``     - a line of progress text.
-        ``on_busy``    - a solver task starts (label) or ends (``None``).
+        ``on_changed``
+            the diagram or the selection changed and should be redrawn.
+        ``on_status``
+            a long operation wants a label shown (``None`` clears it); this also repaints, which is
+            what lets the abort flag be picked up mid-sweep.
+        ``on_log``
+            a line of progress text.
+        ``on_busy``
+            a solver task starts (label) or ends (``None``).
         """
         if on_changed is not None: self._on_changed=on_changed
         if on_status is not None: self._on_status=on_status
@@ -1936,7 +1940,7 @@ class BifurcationController:
         return ds
 
     def scan_stripe(self,point=None)->bool:
-        """Find every eigenvalue in the stripe |Re|<stripe_re, |Im|<stripe_im at one point.
+        """Find every eigenvalue in the stripe ``|Re|<stripe_re``, ``|Im|<stripe_im`` at one point.
 
         A shift-invert solve returns the eigenvalues nearest the shift, so a Hopf pair far up the
         imaginary axis is simply not in the answer. This asks the other question - everything inside a
