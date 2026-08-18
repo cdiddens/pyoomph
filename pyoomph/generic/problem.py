@@ -1617,9 +1617,6 @@ class Problem(_pyoomph.Problem):
     def set_eigenfunction_as_dofs(self,n:int,*,mode:"MeshDataEigenModes"="abs",additive_mesh_positions:bool=True,eigenvector_position_scale:float | None=None,perturb_amplitude:float | None=None)->tuple[NPFloatArray, NPFloatArray, float] | tuple[NPFloatArray, NPFloatArray]:
         if n>=len(self._last_eigenvectors):
             raise RuntimeError("Cannot set eigenfunction "+str(n)+" as dofs, since we have calculated only "+str(len(self._last_eigenvectors))+" eigenfunctions")
-        # A base-length eigenvector would otherwise be silently zero-padded to the augmented length by
-        # the numpy.pad below, i.e. written over the base dofs AND over the tracker's own unknowns.
-        self._require_no_bifurcation_tracking("Pushing an eigenfunction into the dofs (set_eigenfunction_as_dofs)")
         with_pos=not additive_mesh_positions
         actual_dofs,positional_dofs,pinned_values=self.get_all_values_at_current_time(with_pos)
         if eigenvector_position_scale is None:
@@ -1627,8 +1624,16 @@ class Problem(_pyoomph.Problem):
         newpinned=self.setup_pinned_values_of_eigenfunction(numpy.array(pinned_values),n,mode) #type:ignore
         #print(newpinned)
         pert=self._last_eigenvectors[n]
-        if len(pert)<len(actual_dofs):
-            pert=numpy.pad(pert,(0,len(actual_dofs)-len(pert))) #type:ignore
+        # While a tracker is installed the dof vector is the augmented one (base dofs first, then the
+        # eigenvector blocks and the tracker's scalars), whereas the eigenvector stays base-length.
+        # Pushing an eigenfunction is a base-dof operation either way: the padded tail is put back
+        # verbatim just before the write below, so the tracked state survives untouched. This used to
+        # zero-pad and was therefore refused outright while tracking -- which also refused the one
+        # caller that reaches here during tracking, MeshDataCacheEntry, whose whole job is to push an
+        # eigenfunction, read the node data and restore the dofs (see meshes/meshdatacache.py).
+        n_base_dofs=len(pert)
+        if n_base_dofs<len(actual_dofs):
+            pert=numpy.pad(pert,(0,len(actual_dofs)-n_base_dofs)) #type:ignore
         if mode=="abs":
             newdofs:NPFloatArray=numpy.absolute(pert)
         elif mode=="real":
@@ -1649,13 +1654,17 @@ class Problem(_pyoomph.Problem):
         if perturb_amplitude is not None:
             if mode!="real" and mode!="imag":
                 raise RuntimeError("Perturb mode only works in real or imag")
-            aampl:float=numpy.amax(newdofs)-numpy.amin(newdofs) #type:ignore
+            aampl:float=numpy.amax(newdofs[:n_base_dofs])-numpy.amin(newdofs[:n_base_dofs]) #type:ignore
             if aampl<1e-20:
                 newdofs=actual_dofs
             else:
                 newdofs=perturb_amplitude*newdofs/aampl+actual_dofs
             newpinned=pinned_values.copy()
             
+        if n_base_dofs<len(newdofs):
+            # Whatever the mode and perturbation arithmetic above made of the padded tail, the
+            # tracker's own unknowns go back in unchanged.
+            newdofs=numpy.concatenate((newdofs[:n_base_dofs],actual_dofs[n_base_dofs:])) #type:ignore
         self.set_all_values_at_current_time(newdofs,newpinned,with_pos)
         if perturb_amplitude is not None:
             return actual_dofs, pinned_values,aampl #type:ignore
@@ -5286,9 +5295,21 @@ class Problem(_pyoomph.Problem):
         if isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler):
             raise RuntimeError("Cannot solve an eigenproblem while periodic orbit tracking is active. Use the Floquet multipliers of the orbit instead, or deactivate the orbit handler first.")
         # The Python-side custom augmentation (Problem.add_augmented_dofs / bifurcation_tools.py):
-        # its dofs are appended to Dof_pt directly and the C++ scope knows nothing about them.
-        if self._get_n_unaugmented_dofs()!=0: #type:ignore
-            raise RuntimeError("Cannot solve an eigenproblem while a custom augmented system (add_augmented_dofs / a CustomBifurcationTracker) is active. Remove the augmentation first.")
+        # its dofs are appended to Dof_pt directly and the C++ scope knows nothing about them, so an
+        # eigensolve would assemble on the longer distribution.
+        #
+        # What n_unaugmented_dofs records is the dof count at the moment an augmentation was
+        # INSTALLED, so !=0 means "a handler is installed", NOT "the dof vector grew":
+        # AugmentedAssemblyHandler.initialize() sets it for every subclass, including the ones that
+        # append no dofs at all -- DeflationAssemblyHandler.define_augmented_dofs() is empty, and
+        # deflated_continuation() then yields to the caller with the operator still installed
+        # (keep_deflation_operator_active=True) precisely so that eigenproblems can be solved there.
+        # With no extra dofs the dof vector, its distribution and the assembled matrices are the base
+        # problem's, and the eigensolve is exactly the unaugmented one, so only a genuinely longer
+        # vector is refused here.
+        _n_unaug=self._get_n_unaugmented_dofs() #type:ignore
+        if _n_unaug!=0 and _n_unaug!=self.ndof():
+            raise RuntimeError("Cannot solve an eigenproblem while a custom augmented system (add_augmented_dofs / a CustomBifurcationTracker) adds dofs to the problem ("+str(_n_unaug)+" base dofs vs "+str(self.ndof())+" now). Remove the augmentation first.")
 
         if self.get_bifurcation_tracking_mode()=="":
             return False
