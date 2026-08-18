@@ -131,8 +131,9 @@ class CelsiusClass:
 
 celsius = CelsiusClass()
 
-#: Written between the symbols of a compound unit, e.g. "kg m^2/s^3". Output headers are tab-joined,
-#: so a space here cannot break a column.
+#: Written between the symbols of a compound unit, e.g. "kg m^2/s^3". Output headers are tab-joined
+#: AND read back tab-separated (LoadedTextDataFile), so a space here cannot break a column - it did
+#: while the reader still split the header on arbitrary whitespace.
 UNIT_SEPARATOR=" "
 
 __simplified_units:dict[str,dict[str,tuple[int,int]]] = {}

@@ -122,9 +122,24 @@ class LoadedTextDataFile:
             raise RuntimeError("Found no header in the file "+str(filename))
                 
         self.data: NPFloatArray = numpy.loadtxt(filename, ndmin=2)  # type:ignore
-        header_names=header.strip().strip("#").strip().split()        
-        header_keys=[s.lstrip("@") for s in header_names[self.data.shape[1]:]]
-        self.params={s.split("=")[0]:s.split("=")[1] for s in header_keys}                
+        # Split the header on TABS, which is what pyoomph joins it with, not on arbitrary whitespace.
+        # A column name can contain a space since compound units are written out separated, e.g.
+        # "power[kg m^2/s^3]". Whitespace-splitting tore such a name into several tokens, which put
+        # every following name on the wrong column and offered the surplus tokens up as parameters,
+        # where they raised an IndexError. Files written elsewhere may still be space-separated, so
+        # fall back to that when there is no tab at all.
+        header_body=header.strip().strip("#").strip()
+        header_names=header_body.split("\t") if "\t" in header_body else header_body.split()
+        header_names=[s.strip() for s in header_names if s.strip()]
+        # Trailing "@key=value" entries never contain a space, so split them on whitespace too: they
+        # are commonly appended to the last header field instead of behind a tab of their own.
+        header_keys=[s.lstrip("@") for f in header_names[self.data.shape[1]:] for s in f.split()]
+        for s in header_keys:
+            if "=" not in s:
+                raise RuntimeError("The header of the file '"+str(filename)+"' has more entries than "
+                                   "the "+str(self.data.shape[1])+" columns of data, and '"+s+"' is "
+                                   "not a '@key=value' parameter either")
+        self.params={s.split("=")[0]:s.split("=",1)[1] for s in header_keys}
         self.columns=header_names[:self.data.shape[1]]
         self.access_params_via_brackets=True
                     
