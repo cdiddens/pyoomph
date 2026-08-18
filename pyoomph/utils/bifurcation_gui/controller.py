@@ -213,7 +213,9 @@ class BifurcationController:
         #: azimuthal probe, three modes cost 2.9x one. Off, the modes are filled in on demand by
         #: compute_spectrum()/compute_spectrum_for_branch().
         self.compute_modes_during_sweep=False
-        #: Half-widths of the stripe scanned for eigenvalues: |Re| < stripe_re and |Im| < stripe_im.
+        #: Half-widths of the stripe scanned for eigenvalues: ``|Re| < stripe_re`` and
+        #: ``|Im| < stripe_im``. Literal markup, because sphinx reads bars around a word as a
+        #: substitution reference and reported an undefined one.
         #: Bounded on purpose - the contour method integrates around the region, so an unbounded stripe
         #: cannot be asked for and the imaginary extent decides which frequencies are looked at.
         self.stripe_re=0.5

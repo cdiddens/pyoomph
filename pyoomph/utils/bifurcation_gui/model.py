@@ -398,9 +398,10 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
     def __init__(self,initlist=None,*,kind:str="solution",continuation_parameter:str | None=None,
                  tracked_parameter:str | None=None,bifurcation_type:str | None=None) -> None:
         super().__init__(initlist or [])
-        #: "solution" - an ordinary branch of stationary states, continued in one parameter.
-        #: "locus"    - a curve of bifurcation points, tracked in `tracked_parameter` while being
-        #:              continued in `continuation_parameter`; two parameters vary along it.
+        #: What this branch is. "solution" is an ordinary branch of stationary states, continued in
+        #: one parameter. "locus" is a curve of bifurcation points, tracked in ``tracked_parameter``
+        #: while being continued in ``continuation_parameter``, so two parameters vary along it.
+        #: Written as running text rather than an aligned list, which sphinx read as an indented block.
         self.kind=kind
         self.continuation_parameter=continuation_parameter
         self.tracked_parameter=tracked_parameter
