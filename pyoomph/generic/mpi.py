@@ -84,6 +84,10 @@ if no_mpi_file.exists():
 	def mpi_share_any_failure(error:'Optional[BaseException]'=None, context:str="")->None: #type:ignore
 		if error is not None:
 			raise error
+
+	def install_mpi_abort_excepthook()->None: #type:ignore
+		pass
+
 else:
 	from mpi4py import MPI #type:ignore
 	import sys
@@ -178,7 +182,47 @@ else:
 								   " ("+d+"). This rank got through it itself and raises here so that "
 								   "the job ends rather than waiting for a rank that is gone.")
 
+	_abort_excepthook_installed=[False]
+
+	def install_mpi_abort_excepthook()->None: #type:ignore
+		"""Make an uncaught exception on ANY rank end the job, instead of hanging it.
+
+		A rank that dies on its own leaves the others exactly where they were, which is almost always
+		inside a collective they will now wait in forever. Aborting is the only way out: agreeing on
+		anything first would need the very collective the dead rank is never going to call - the same
+		reason mpi_abort() exists for the rank-0-only sections.
+
+		This is what the nightly hit on 2026-08-18. One rank raised inside Problem.output() while the
+		other three sat in a collective, and because OpenMPI polls rather than sleeps, the job did not
+		fail - it spun at 100% CPU on four cores for three hours, until the tutorial step's 8h timeout
+		would have killed it. A deadlock and real work look identical in top; the run had reported
+		"simulation time: 3.07 s" for the script three hours earlier.
+
+		The traceback is printed and both streams flushed BEFORE the abort: Abort() does not unwind
+		and does not flush, so anything still buffered dies with the job - which is what would make
+		this hard to diagnose from a log. Chained rather than replaced, so an application that has
+		installed its own hook keeps it. SystemExit never reaches sys.excepthook, so a plain
+		sys.exit() is unaffected.
+		"""
+		if _abort_excepthook_installed[0] or get_mpi_nproc()<=1:
+			return
+		_abort_excepthook_installed[0]=True
+		_previous_hook=sys.excepthook
+		def _abort_hook(exctype,value,tb): #type:ignore
+			try:
+				_previous_hook(exctype,value,tb)
+				sys.stderr.write("pyoomph: uncaught "+exctype.__name__+" on MPI rank "+str(get_mpi_rank())+
+								 " of "+str(get_mpi_nproc())+" -- aborting the whole job. The other ranks "
+								 "are waiting in a collective that this rank will now never reach, so "
+								 "letting it exit alone would leave them spinning rather than failing.\n")
+				sys.stderr.flush()
+				sys.stdout.flush()
+			finally:
+				mpi_abort(1)
+		sys.excepthook=_abort_hook
+
 	if get_mpi_nproc()>1:
+		install_mpi_abort_excepthook()
 		# Before the banner, not after: the banner is the first thing that would otherwise be
 		# printed once per rank.
 		from .logging import setup_mpi_console as _setup_mpi_console
