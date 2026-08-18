@@ -21,7 +21,18 @@ trap verdict EXIT
 cd "$(dirname "$0")"
 
 PYTHON=python3
-$PYTHON -m pip install  --no-build-isolation -e . -v \
+
+# Ubuntu ships a PEP 668 EXTERNALLY-MANAGED marker in the system stdlib, and an apt upgrade of
+# libpython3.12-stdlib puts it back even if it was removed locally - after which pip refuses the
+# editable install outright, before compiling anything. We are not root, so the install lands in the
+# user site-packages and touches nothing apt owns; --break-system-packages just says so. Skipped
+# inside a virtualenv, where pip ignores the marker anyway.
+PEP668=()
+if $PYTHON -c 'import os, sys, sysconfig; sys.exit(0 if sys.prefix == sys.base_prefix and os.path.exists(os.path.join(sysconfig.get_path("stdlib"), "EXTERNALLY-MANAGED")) else 1)'; then
+  PEP668=(--break-system-packages)
+fi
+
+$PYTHON -m pip install "${PEP668[@]}" --no-build-isolation -e . -v \
     --config-settings=editable.mode=redirect \
     --config-settings=build-dir=build \
     --config-settings=build.verbose=true \
