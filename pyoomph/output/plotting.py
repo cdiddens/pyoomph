@@ -1456,29 +1456,34 @@ class MatplotLibOverlayBase(MatplotLibPart):
         return [0.0,0.0]
 
     def check_pos(self):
+        # Positions are fractions of the plotter's overlay frame - the whole figure for a spatial
+        # plot, the graph rectangle for a MatplotlibPlotter1D, whose figure has margins around it for
+        # the axis labels. Sizes stay fractions of the figure, since that is what they are drawn in.
+        fl,fb,fr,ft=self.plotter._overlay_frame()
+        fw,fh=fr-fl,ft-fb
         if self.ypos is None:
             #Auto determine position
             if isinstance(self.position,(list,tuple)):
-                self.ypos=self.position[1]
+                self.ypos=fb+self.position[1]*fh
             elif self.position is not None:
                 if self.position.find("lower")>=0 or self.position.find("bottom")>=0:
-                    self.ypos=self.ymargin
+                    self.ypos=fb+self.ymargin*fh
                     if self.verticalalign is None:
                         self.verticalalign="bottom"
                 elif self.position.find("upper")>=0 or self.position.find("top")>=0:
-                    self.ypos = 1-self.ymargin-self.get_overlay_size()[1]
+                    self.ypos = ft-self.ymargin*fh-self.get_overlay_size()[1]
                     if self.verticalalign is None:
                         self.verticalalign="top"
         if self.xpos is None:
             if isinstance(self.position,(list,tuple)):
-                self.xpos=self.position[0]
+                self.xpos=fl+self.position[0]*fw
             elif self.position is not None:
                 if self.position.find("left")>=0:
-                    self.xpos=self.xmargin
+                    self.xpos=fl+self.xmargin*fw
                     if self.horizontalalign is None:
                         self.horizontalalign="left"
                 elif self.position.find("right")>=0:
-                    self.xpos = 1-self.xmargin-self.get_overlay_size()[0]
+                    self.xpos = fr-self.xmargin*fw-self.get_overlay_size()[0]
                     if self.horizontalalign is None:
                         self.horizontalalign="right"
 
@@ -1487,13 +1492,13 @@ class MatplotLibOverlayBase(MatplotLibPart):
             if self.xpos is None:
                 if self.position is not None:
                     if self.position.find("center")>=0:
-                        self.xpos=0.5-self.get_overlay_size()[0]*0.5
+                        self.xpos=fl+0.5*fw-self.get_overlay_size()[0]*0.5
                         if self.horizontalalign is None:
                             self.horizontalalign="center"
             if self.ypos is None:
                 if self.position is not None:
                     if self.position.find("center")>=0:
-                        self.ypos=0.5-self.get_overlay_size()[1]*0.5
+                        self.ypos=fb+0.5*fh-self.get_overlay_size()[1]*0.5
                         if self.verticalalign is None:
                             self.verticalalign="center"
 
@@ -1517,6 +1522,18 @@ class MatplotLibBaseRange:
 
 #An object which allows you to store the range of e.g. colorbars over multiple timesteps
 class MatplotLibPersistentRange(MatplotLibBaseRange):
+    """A data range that survives (or does not survive) from one output step to the next.
+
+    The ``mode`` decides that:
+
+    * ``"current"`` - forgotten and re-taken from the data at every output step.
+    * ``"fixed"`` - only ever fills a bound that is still ``None``, i.e. it locks onto the FIRST
+      output step that supplies a non-degenerate range and keeps it. Note that this does *not* grow
+      to contain later steps, which is a common misreading of the name.
+    * ``"grow"`` - the union over all output steps so far. This is what a movie wants, so that the
+      axis or colorbar never shrinks halfway through and makes two frames incomparable.
+    * a ``(lo,hi)`` pair - reset to exactly that at every output step.
+    """
     def __init__(self,vmin:float | None,vmax:float | None,mode:str | tuple[float, float] | list[float]="current"):
         super(MatplotLibPersistentRange, self).__init__()        
         self.vmin=vmin
@@ -1544,6 +1561,11 @@ class MatplotLibPersistentRange(MatplotLibBaseRange):
                     self.vmin=vmin
                 if self.vmax is None:
                     self.vmax=vmax
+        elif self.mode=="grow":
+            if self.vmin is None or vmin<self.vmin:
+                self.vmin=vmin
+            if self.vmax is None or vmax>self.vmax:
+                self.vmax=vmax
 
 
 
@@ -2168,7 +2190,19 @@ class MatplotLibLinePlot(MatplotLibPartWithMeshData):
     label:str | None=None
     markersize:float | None=None
     markerstyle:str | None=None
+    #: Order the points by ascending abscissa. Only correct for a graph that is monotonic in x: it
+    #: tears apart a closed loop, a folded interface or any (x,y) curve of a mesh. Those cases want
+    #: :py:class:`~pyoomph.output.plotting1d.MatplotLibGraphLine`, which orders by the mesh
+    #: connectivity instead.
     sort_by_x=True
+
+    #: Whether this line widens the axes to contain it. Off for decorations such as node markers,
+    #: which sit on a curve whose range another part has already contributed.
+    contributes_to_range=True
+
+    #: Keywords add_plot spells differently from this class. Without the mapping,
+    #: add_plot(..., mode="lineplot", linecolor="red") set a dead attribute and did nothing.
+    _kwarg_aliases={"linecolor":"color","linewidths":"linewidth"}
 
     def __init__(self, plotter:"MatplotlibPlotter"):
         super(MatplotLibLinePlot, self).__init__(plotter)
@@ -2176,12 +2210,44 @@ class MatplotLibLinePlot(MatplotLibPartWithMeshData):
         self._coordinates=None
         self._data=None
         self._plotdata=None
+        self._segments:list[tuple[NPFloatArray,NPFloatArray]]=[]
         self._external_xdata:NPFloatArray | None=None
         self._external_ydata:NPFloatArray | None=None
+
+    def set_kwargs(self,kwargs:dict[str,Any]):
+        mapped=dict(kwargs)
+        for alias,target in self._kwarg_aliases.items():
+            if mapped.get(alias) is not None and mapped.get(target) is None:
+                mapped[target]=mapped[alias]
+            mapped.pop(alias,None)
+        super().set_kwargs(mapped)
 
     def set_external_data(self,x:NPFloatArray,y:NPFloatArray):
         self._external_xdata=x
         self._external_ydata=y
+
+    def _resolve_segments(self)->list[tuple[NPFloatArray,NPFloatArray]]:
+        """The (x,y) pairs to draw, one entry per connected piece of the curve.
+
+        Always a single entry here. Subclasses that follow the mesh connectivity return one entry per
+        polyline, so a mesh made of several disconnected 1d pieces is not drawn as one zig-zag.
+        """
+        if self._external_xdata is not None and self._external_ydata is not None:
+            return [(self._external_xdata,self._external_ydata)]
+        self._coordinates=self.mshcache.get_coordinates(lagrangian=self.use_lagrangian_coordinates)
+        self._data=self.mshcache.get_data(self.field)
+        assert self._data is not None
+        coordinates,data=self._coordinates,self._data
+        if self.transform is not None:
+            # Applied like in every other MatplotLibPartWithMeshData. This class used to ignore the
+            # transform entirely, so a mirrored line plot came out unmirrored.
+            coordinates,data=self.transform.apply(coordinates,data)
+            self._coordinates,self._data=coordinates,data
+        return [(coordinates[0],data)]
+
+    def _draw_segment(self,ax:Any,x:NPFloatArray,y:NPFloatArray,kwargs:dict[str,Any],index:int)->list[Any]:
+        """Draw one connected piece. ``index`` numbers it, for subclasses carrying per-piece data."""
+        return ax.plot(x,y,**kwargs) #type:ignore
 
     def pre_process(self):
         assert self.axes is not None
@@ -2189,35 +2255,41 @@ class MatplotLibLinePlot(MatplotLibPartWithMeshData):
             self.axes.pre_process()
         if self.zindex<=self.axes.zindex:
             self.zindex=self.axes.zindex+1
-        if self._external_xdata is not None and self._external_ydata is not None:
-            xdata:NPFloatArray=self._external_xdata
-            ydata:NPFloatArray=self._external_ydata
-        else:
-            self._coordinates=self.mshcache.get_coordinates(lagrangian=self.use_lagrangian_coordinates)
-            self._data=self.mshcache.get_data(self.field)
-            assert self._data is not None
-            xdata:NPFloatArray = self._coordinates[0]
-            ydata:NPFloatArray = self._data
-
-        xdata*=self.axes.xfactor*self.xfactor
-        ydata *= self.axes.yfactor*self.yfactor
+        xfact=self.axes.xfactor*self.xfactor
+        yfact=self.axes.yfactor*self.yfactor
+        segments:list[tuple[NPFloatArray,NPFloatArray]]=[]
+        for xdata,ydata in self._resolve_segments():
+            # Not in place: for set_external_data the array belongs to the caller, so an in-place
+            # scaling compounded the factor on every output step. Mesh data only escaped that
+            # because get_coordinates()/get_data() build a fresh array on each call.
+            segments.append((xdata*xfact,ydata*yfact))
         if self.sort_by_x:
-            srt:NPIntArray = numpy.argsort(xdata) #type:ignore
-            xdata,ydata=xdata[srt],ydata[srt]
-        self._plotdata=[xdata, ydata]
-        xmin:float=numpy.amin(xdata) #type:ignore
-        xmax:float=numpy.amax(xdata) #type:ignore        
-        self.axes.consider_range(xmin=xmin,xmax=xmax)
-        if self.axes.rangemode_x=="fixed":
-            inds= numpy.logical_and(self.axes.xmin <= xdata, xdata <= self.axes.xmax) #type:ignore
-            self.axes.consider_range(ymin=numpy.amin(ydata[inds]), ymax=numpy.amax(ydata[inds]),use_y2=self.use_y2) #type:ignore
+            sorted_segments:list[tuple[NPFloatArray,NPFloatArray]]=[]
+            for x,y in segments:
+                srt:NPIntArray=numpy.argsort(x) #type:ignore
+                sorted_segments.append((x[srt],y[srt]))
+            segments=sorted_segments
+        self._segments=segments
+        if len(segments)==0:
+            self._plotdata=None
+            return
+        # Kept as a flat [x,y] pair whenever there is exactly one segment, which is what everything
+        # reading _plotdata has always assumed.
+        self._plotdata=[segments[0][0],segments[0][1]] if len(segments)==1 else None
+        if not self.contributes_to_range:
+            return
+        allx:NPFloatArray=numpy.concatenate([x for x,_ in segments]) #type:ignore
+        ally:NPFloatArray=numpy.concatenate([y for _,y in segments]) #type:ignore
+        self.axes.consider_range(xmin=numpy.amin(allx),xmax=numpy.amax(allx)) #type:ignore
+        if self.axes.rangemode_x=="fixed" and self.axes.xmin is not None and self.axes.xmax is not None:
+            inds= numpy.logical_and(self.axes.xmin <= allx, allx <= self.axes.xmax) #type:ignore
+            if numpy.any(inds): #type:ignore
+                self.axes.consider_range(ymin=numpy.amin(ally[inds]), ymax=numpy.amax(ally[inds]),use_y2=self.use_y2) #type:ignore
         else:
-            self.axes.consider_range(ymin=numpy.amin(ydata),ymax=numpy.amax(ydata),use_y2=self.use_y2) #type:ignore
+            self.axes.consider_range(ymin=numpy.amin(ally),ymax=numpy.amax(ally),use_y2=self.use_y2) #type:ignore
 
-    def add_to_plot(self):
-        # self.axes is always set before add_to_plot runs (see pre_process above)
-        assert self.axes is not None
-        kwargs={"linewidth":self.linewidth,"linestyle":self.linestyle}
+    def _line_kwargs(self)->dict[str,Any]:
+        kwargs:dict[str,Any]={"linewidth":self.linewidth,"linestyle":self.linestyle}
         if self.color:
             kwargs["color"]=self.color
         if self.label:
@@ -2226,11 +2298,19 @@ class MatplotLibLinePlot(MatplotLibPartWithMeshData):
             kwargs["marker"]=self.markerstyle
         if self.markersize:
             kwargs["markersize"]=self.markersize
-        if self.use_y2:
-            l=self.axes.ax_y2.plot(self._plotdata[0],self._plotdata[1],**kwargs) #type:ignore
-        else:
-            l=self.axes.ax.plot(self._plotdata[0],self._plotdata[1],**kwargs) #type:ignore
-        self.axes._linelist+=l
+        return kwargs
+
+    def add_to_plot(self):
+        # self.axes is always set before add_to_plot runs (see pre_process above)
+        assert self.axes is not None
+        ax=self.axes.ax_y2 if self.use_y2 else self.axes.ax
+        for i,(x,y) in enumerate(self._segments):
+            kwargs=self._line_kwargs()
+            if i>0 and "label" in kwargs:
+                # One legend entry per part, not per disconnected piece: matplotlib hides labels
+                # that start with an underscore.
+                kwargs["label"]="_"+str(kwargs["label"])
+            self.axes._linelist+=self._draw_segment(ax,x,y,kwargs,i)
 
 
 @MatplotLibPart.register()
@@ -2682,9 +2762,92 @@ class MatplotlibPlotter(BasePlotter):
         return res
 
     def add_axes(self,title:str | None=None,xpos:float | None=None,ypos:float | None=None,position:str | tuple[float, float] | None=None,width:float | None=None,height:float | None=None,xlabel:str | None=None,xfactor:float | None=None,ylabel:str | None=None,yfactor:float | None=None)->MatplotLibAxes:
+        """
+        Adds an inset x-y graph on top of the spatial plot, e.g. to show a time series beside the field.
+
+        Lines are drawn into it with :py:meth:`add_plot` (``axes=`` this object) or, for data that does
+        not come from a mesh, with :py:meth:`add_external_data`. For a problem that is *entirely*
+        one-dimensional, use :py:class:`~pyoomph.output.plotting1d.MatplotlibPlotter1D` instead, whose
+        main axes is such a graph rather than a spatial map.
+
+        Args:
+            title: Title above the inset.
+            xpos: x-position of the lower left corner, in figure fractions.
+            ypos: y-position of the lower left corner, in figure fractions.
+            position: Alternative to xpos/ypos, e.g. ``"bottom left"``.
+            width: Width in figure fractions.
+            height: Height in figure fractions.
+            xlabel: Label of the x-axis.
+            xfactor: Factor all x-data is multiplied with, e.g. to express a time in ms.
+            ylabel: Label of the y-axis.
+            yfactor: Factor all y-data is multiplied with.
+
+        Returns:
+            The axes object, to be passed as ``axes=`` to :py:meth:`add_plot`.
+        """
         allkwargs = {"title": title,"xpos":xpos,"ypos":ypos,"position":position,"width":width,"height":height,"xlabel":xlabel,"xfactor":xfactor,"ylabel":ylabel,"yfactor":yfactor}
         res=self._add_part("axes",**allkwargs)
         assert isinstance(res,MatplotLibAxes)
+        return res
+
+    def _overlay_frame(self)->tuple[float,float,float,float]:
+        """The rectangle overlay positions are fractions of, as (left, bottom, right, top).
+
+        The whole figure here, since a spatial plot fills it. MatplotlibPlotter1D returns its graph
+        rectangle instead, so that "top right" is the top right of the graph rather than of a figure
+        whose margins carry the axis labels.
+        """
+        return (0.0,0.0,1.0,1.0)
+
+    def _default_axes(self)->MatplotLibAxes | None:
+        """The axes a line is drawn into when the caller names none.
+
+        A spatial plot has no default graph, so this is None here; MatplotlibPlotter1D returns its
+        main graph instead, which is what lets its add_plot/add_external_data be called without an
+        axes= at all.
+        """
+        return None
+
+    def add_external_data(self,x:NPFloatArray | Sequence[float],y:NPFloatArray | Sequence[float],*,axes:MatplotLibAxes | None=None,label:str | None=None,color:str | None=None,linestyle:str | None=None,linewidth:float | None=None,marker:str | None=None,markersize:float | None=None,use_y2:bool=False,xfactor:float | None=None,yfactor:float | None=None)->MatplotLibLinePlot:
+        """
+        Draws arbitrary x/y data into an axes object, e.g. an analytical solution or experimental data.
+
+        This is the public counterpart of :py:meth:`MatplotLibLinePlot.set_external_data`, which had no
+        wrapper at all: callers had to construct the part by hand and append it to the plotter's
+        private list of parts.
+
+        Args:
+            x: The abscissa values.
+            y: The ordinate values. Must have the same length as ``x``.
+            axes: The axes to draw into, from :py:meth:`add_axes`. On a
+                :py:class:`~pyoomph.output.plotting1d.MatplotlibPlotter1D` it defaults to the main graph.
+            label: Legend entry. Requires the axes to have a ``legend_position``.
+            color: Line color.
+            linestyle: Line style, e.g. ``"dotted"``.
+            linewidth: Line width.
+            marker: Marker style, e.g. ``"o"``.
+            markersize: Marker size.
+            use_y2: Draw against the secondary y-axis.
+            xfactor: Factor the x-data is multiplied with.
+            yfactor: Factor the y-data is multiplied with.
+
+        Returns:
+            The added line, whose properties can be adjusted afterwards.
+        """
+        xarr:NPFloatArray=numpy.asarray(x,dtype=numpy.float64) #type:ignore
+        yarr:NPFloatArray=numpy.asarray(y,dtype=numpy.float64) #type:ignore
+        if xarr.shape!=yarr.shape:
+            raise ValueError("add_external_data got x with shape "+str(xarr.shape)+" but y with shape "+str(yarr.shape))
+        if axes is None:
+            axes=self._default_axes()
+        if axes is None:
+            raise RuntimeError("add_external_data needs an axes object to draw into. Create one with "
+                               "add_axes(...), or use a MatplotlibPlotter1D, whose main graph is used "
+                               "automatically.")
+        allkwargs={"axes":axes,"label":label,"color":color,"linestyle":linestyle,"linewidth":linewidth,"markerstyle":marker,"markersize":markersize,"use_y2":use_y2,"xfactor":xfactor,"yfactor":yfactor}
+        res=self._add_part("lineplot",**allkwargs)
+        assert isinstance(res,MatplotLibLinePlot)
+        res.set_external_data(xarr,yarr)
         return res
 
     def add_text(self,text:str,position:str | tuple[float, float] | None=None,textsize:float | None=None,verticalalign:str | None=None,horizontalalign:str | None=None,bbox:Any | None=None,zindex:float | None=None,color:str | None=None)->MatplotlibText:
@@ -2925,7 +3088,10 @@ class MatplotlibPlotter(BasePlotter):
                     elif msh.get_tracers(field,error_on_missing=False) is not None:
                         pass
                     elif cached.get_data(field) is None:
-                        raise RuntimeError("TODO: Cannot find the field to plot: "+str(infield))
+                        # Naming what is there turns this from a dead end into a typo fix. The old
+                        # message was a bare "TODO: Cannot find the field to plot".
+                        raise RuntimeError("Cannot find the field to plot: "+str(infield)+". The mesh '"
+                                           +mshname+"' offers: "+", ".join(cached.get_default_output_fields()))
 
 
             if not (mode in self._mode_to_class.keys()):
@@ -3087,5 +3253,27 @@ class MatplotlibPlotter(BasePlotter):
             plt.gcf().set_size_inches(wW,hH*ar)
 
 
+#: Names that really live in plotting1d but are reachable from here as well, so that a user who
+#: found MatplotlibPlotter does not have to know about a second module to find its 1d counterpart.
+_REEXPORTED_FROM_1D = ("MatplotlibPlotter1D","MatplotLibMainAxes","MatplotLibGraphLine",
+                       "MatplotLibGraphNodes","MatplotLibGraphElementBorders")
+
+
+def __getattr__(name:str):
+    """Resolve the re-exported 1d plotting names on first access.
+
+    Lazily, not with a plain import at the top: plotting1d imports from this module, so importing it
+    from here would be circular - and it would break in exactly the case that looks most innocent,
+    "import pyoomph.output.plotting1d" as the very first import, where plotting1d is still an empty
+    entry in sys.modules while this module runs.
+    """
+    if name in _REEXPORTED_FROM_1D:
+        from . import plotting1d
+        return getattr(plotting1d,name)
+    raise AttributeError("module "+__name__+" has no attribute "+name)
+
+
 from ..typings import _set_public_api
 _set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"
+# The lazy names are not in globals() yet, so _set_public_api cannot see them.
+__all__ = sorted(set(__all__) | set(_REEXPORTED_FROM_1D))

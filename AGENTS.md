@@ -255,7 +255,9 @@ Outputs (`pyoomph/output/*.py`, add via `+=`, written on `problem.output()`):
 `TextFileOutput()` (plain text dump of nodal values), `MeshFileOutput()` (VTU/mesh
 file for ParaView), `ODEFileOutput()` (for `ODEEquations` domains), 
 `IntegralObservableOutput()`. `pyoomph.output.plotting.MatplotlibPlotter` can be
-attached to `problem.plotter` for built-in matplotlib-based 2D field plots.
+attached to `problem.plotter` for built-in matplotlib-based 2D field plots, and
+`pyoomph.output.plotting1d.MatplotlibPlotter1D` for 1D domains, which it draws as
+ordinary x-y graphs (also the (x,y) curve of a 1D mesh embedded in 2D/3D).
 
 ## Built-in physics equation libraries (`pyoomph/equations/*.py`)
 

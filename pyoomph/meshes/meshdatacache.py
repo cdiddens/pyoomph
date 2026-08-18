@@ -315,7 +315,12 @@ class MeshDataCacheEntry:
         if (field in self.local_expr_indices.keys()) and not (field is self.nodal_field_inds.keys()):
             s=self.mesh.get_code_gen()._get_local_expression_unit_factor(field)
         else:
-            s = self.mesh.get_code_gen().get_equations().get_scaling(field)
+            # Asked of the code generator, not of the equations directly: Equations.get_scaling needs
+            # a code generator to be the current one and raises otherwise, which made get_unit usable
+            # only from inside a scope that happened to have set one - text output has one, a plotter
+            # does not. The code generator's own get_scaling sets and restores that scope around the
+            # very same call, so the answer is unchanged wherever the old form worked at all.
+            s = self.mesh.get_code_gen().get_scaling(field)
         if not isinstance(s,Expression): #type:ignore
             s=Expression(s)
         s = self.mesh.get_code_gen().expand_placeholders(s, False)
