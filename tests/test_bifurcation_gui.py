@@ -43,6 +43,7 @@
 
 import json
 import os
+import shutil
 import sys
 
 import pytest
@@ -54,6 +55,31 @@ from pyoomph.expressions import var_and_test, partial_t
 from pyoomph.utils.bifurcation_gui import BifurcationGUI
 from pyoomph.utils.bifurcation_gui.controller import (STATE_VERSION, BifurcationController,
                                                      _FixedViewLimits)
+
+
+def gui_launch_prefix():
+    """Command prefix for a worker that opens a real Tk window.
+
+    Two of the workers below drive BifurcationTkApp, i.e. tk.Tk(), which needs an X display to talk
+    to. The nightly runs from cron, where there is none, so without this they fail with "no display
+    name and no $DISPLAY environment variable" -- which says nothing about the behaviour under test.
+
+    xvfb-run -a picks a free display number itself and tears the server down when the command exits,
+    so there is no lifetime to manage here and no fixed :N to collide with a desktop session or with
+    a second copy of the suite. A real DISPLAY is used as-is when there is one, so this changes
+    nothing for a developer running the suite from a terminal.
+
+    Skipped rather than failed when there is neither: the tests need something they have not been
+    given, which is what skip means. The nightly surfaces SKIPPED lines in its report
+    (citools/nightly_develop.sh), so it stays visible instead of quietly passing.
+    """
+    if os.environ.get("DISPLAY"):
+        return []
+    xvfb_run = shutil.which("xvfb-run")
+    if xvfb_run is None:
+        pytest.skip("needs an X display: $DISPLAY is unset and xvfb-run is not installed "
+                    "(apt install xvfb)")
+    return [xvfb_run, "-a"]
 
 
 def fold_location(b: float) -> tuple[float, float]:
@@ -678,7 +704,7 @@ def test_must_init_keeps_the_diagram_and_skips_the_setup(tmp_path):
         env = dict(os.environ)
         if expect_mu is not None:
             env["PYOOMPH_EXPECT_MU"] = repr(expect_mu)
-        proc = subprocess.run([sys.executable, worker, "--phase", phase,
+        proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker, "--phase", phase,
                                "--outdir", os.path.join(str(tmp_path), out_sub)],
                               cwd=here, capture_output=True, text=True, timeout=900, env=env)
         out = (proc.stdout or "") + (proc.stderr or "")
@@ -722,7 +748,8 @@ def test_extremum_observables_become_axis_choices(tmp_path):
 
     here = os.path.dirname(os.path.abspath(__file__))
     worker = os.path.join(here, "extremum_observable_worker.py")
-    proc = subprocess.run([sys.executable, worker, "--outdir", os.path.join(str(tmp_path), "out")],
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker,
+                           "--outdir", os.path.join(str(tmp_path), "out")],
                           cwd=here, capture_output=True, text=True, timeout=900)
     out = (proc.stdout or "") + (proc.stderr or "")
     assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
