@@ -1127,6 +1127,7 @@ namespace pyoomph
     void update_dof_vectors_for_continuation(const std::vector<double> & ddof, const std::vector<double> & curr);
     void update_param_info_for_continuation(double dp,double p0);
     void set_dof_direction_arclength(std::vector<double> ddir);
+    void compute_arclength_tangent(const std::string param); // Computes d(dof)/ds and dparam/ds at the current solution, without taking a step
     void get_dofs(oomph::DoubleVector& dofs) const  override {oomph::Problem::get_dofs(dofs);}
     void get_dofs(const unsigned& t, oomph::DoubleVector& dofs) const override; // Dofs at history time level t (t=0 is current)
     void set_dofs(const oomph::DoubleVector& dofs) override {oomph::Problem::set_dofs(dofs);}

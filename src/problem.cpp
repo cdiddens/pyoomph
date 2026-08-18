@@ -1841,6 +1841,31 @@ namespace pyoomph
 		return this->arc_length_step_solve(valptr, ds, max_adapt);
 	}
 
+	// Fills oomph-lib's Dof_derivative and Parameter_derivative at the CURRENT solution without taking a
+	// step, by the same route a step's end does it: solve J z = dR/dparam, then normalise (dparam/ds,
+	// dU/ds) onto the arclength constraint. Wanted wherever a solution was reached by something other
+	// than an arclength step - branch switching lands with a plain Newton solve at a prescribed
+	// parameter offset - and the direction the continuation would leave in is nevertheless a real
+	// quantity that can be asked for. The Jacobian must be non-singular here, i.e. NOT at a bifurcation.
+	void Problem::compute_arclength_tangent(const std::string param)
+	{
+		if (!global_params_by_name.count(param))
+			throw_runtime_error("Cannot compute the arclength tangent in the global parameter " + param + ", since it is not present in the problem");
+		// oomph sizes these inside arc_length_step_solve_helper, not in calculate_continuation_derivatives,
+		// which writes into them regardless. Reached with no step taken yet they are still empty, and the
+		// write went out of range - a segfault, not an exception. Same guard as the step's own.
+		if (!this->Use_continuation_timestepper)
+		{
+			const unsigned long ndof_local = this->Dof_distribution_pt->nrow_local();
+			if (this->Dof_derivative.size() != ndof_local)
+				this->Dof_derivative.resize(ndof_local, 0.0);
+			if (this->Dof_current.size() != ndof_local)
+				this->Dof_current.resize(ndof_local, 0.0);
+		}
+		auto *p = global_params_by_name[param];
+		this->calculate_continuation_derivatives(&(p->value()));
+	}
+
 	// d(dof)/ds (arclength derivative) as a plain std::vector, exposing oomph-lib's internal Dof_derivative
 	std::vector<double> Problem::get_arclength_dof_derivative_vector()
 	{

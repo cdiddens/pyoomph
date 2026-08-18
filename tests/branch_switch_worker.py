@@ -277,6 +277,31 @@ def main() -> int:
         assert len(c.branches) == n_before + 1, "a new branch must be opened"
         new = c.branches[-1]
 
+        # The point a switch lands on has a direction of travel like any other, but it was reached by a
+        # Newton solve at a prescribed parameter offset rather than by an arclength step, so the solver
+        # held no tangent there and the point drew no arrow until the step after it. It is computed
+        # now. Checked as the SLOPE dobs/dparameter, which is what the arrow points along and is
+        # independent of how the tangent is normalised - theta is retuned during a sweep.
+        landed = c.current_point
+        tang = c._tangs.get("ode/u")
+        assert tang is not None and abs(tang[0]) > 0, \
+            "the point a switch lands on has no continuation direction"
+        u = landed.obs_values["ode/u"]
+        # u = mu on the transcritical's other branch, u = sqrt(mu) on the pitchfork's arms.
+        expect_slope = 1.0 if args.kind == "transcritical" else 1.0/(2*u)
+        slope = tang[1]/tang[0]
+        print("kind={:s} landed slope={:+.6g} expected {:+.6g}".format(args.kind, slope, expect_slope))
+        assert abs(slope - expect_slope) < 1e-4*max(1.0, abs(expect_slope)), \
+            "the tangent does not point along the branch: {:.6g} against {:.6g}".format(slope, expect_slope)
+        from matplotlib.text import Annotation as _Annotation
+        from pyoomph.utils.bifurcation_gui.plotter import BifurcationDiagramPlotter as _Plotter
+        _pl = _Plotter()
+        _pl.draw(c)
+        assert [a for a in _pl.axes.get_children()
+                if isinstance(a, _Annotation) and a.arrowprops
+                and a.arrowprops.get("color", "black") == "black"], \
+            "no continuation arrow is drawn at the point the switch landed on"
+
         for _ in range(4):
             c.step()
 

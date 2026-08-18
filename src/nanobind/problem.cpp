@@ -1189,6 +1189,9 @@ void PyReg_Problem(nb::module_ &m)
 		//.def("reset_arc_length_parameters", &pyoomph::Problem::reset_arc_length_parameters)
 		.def("reset_arc_length_parameters", [](pyoomph::Problem *self)
 			 { self->reset_arc_length_parameters(); }, "Reset all internal arclength continuation parameters (theta^2, sign of Jacobian, continuation direction, parameter derivative, ...) to their default starting values.")
+		.def("_compute_arclength_tangent", &pyoomph::Problem::compute_arclength_tangent, nb::arg("parameter_name"),
+			 "Compute the arclength derivatives (d(dof)/ds and dparameter/ds) at the current solution without taking a continuation step. "
+			 "Requires a non-singular Jacobian, i.e. not at a bifurcation.")
 		.def("_set_dof_direction_arclength", &pyoomph::Problem::set_dof_direction_arclength, nb::arg("direction"),
 			 "Set the direction vector along which the dof-derivative for arclength continuation is initialized/oriented.")
 		.def(

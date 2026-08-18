@@ -1364,6 +1364,70 @@ def test_branch_switch_refuses_a_fold():
         c.branch_switch()
 
 
+def test_a_step_off_the_end_extends_the_branch():
+    """A continuation step from an end point belongs beyond that end, not wherever it fits best.
+
+    Points are ordered along a branch by a search over every insertion index, scored by the length of
+    the resulting path. On a branch that curves back towards its own beginning - an isola about to
+    close, a hysteresis loop - the shortest path can be the one with the new point at the OTHER end,
+    and the branch then no longer holds the points in the order they were computed. Everything read off
+    it goes with that: the stability segments, the splines, and the two-point tangent.
+
+    Where the step came from settles it without any of that geometry, so the origin is now passed in.
+    Only outwards, though: reversing ds at an end and stepping back over the branch is a legitimate
+    thing to do and really does put the point between two others, which is what the search is for.
+
+    On stubs, since none of this touches the solver.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController, _FixedViewLimits
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint,
+                                                     AXIS_PARAMETER, AXIS_OBSERVABLE)
+
+    # An arc that comes back round towards its start: the last point sits near the first.
+    ISOLA = [(0.0, 0.0), (0.6, 0.5), (1.0, 0.0), (0.6, -0.5), (0.1, -0.4)]
+
+    def build():
+        c = BifurcationController.__new__(BifurcationController)
+        c._on_log = lambda *a: None
+        c._on_changed = None
+        c._on_status = None
+        c._on_busy = None
+        c.view = _FixedViewLimits(xlim=(-2.0, 2.0), ylim=(-2.0, 2.0))
+        c._x_axis = (AXIS_PARAMETER, "mu")
+        c._y_axis = (AXIS_OBSERVABLE, "u")
+        c._current_observable = "u"
+        c._paramname = "mu"
+        branch = BifurcationGUISolutionBranch(kind="solution", continuation_parameter="mu")
+        for i, (mu, u) in enumerate(ISOLA):
+            p = BifurcationGUISolutionPoint(mu, {"u": u}, -1 + 0j, None, i, param_values={"mu": mu})
+            p.scoord = i / (len(ISOLA) - 1)
+            branch.append(p)
+        c.branches = [branch]
+        c.current_branch = branch
+        return c, branch
+
+    def place(new, origin_index, pass_origin=True):
+        c, branch = build()
+        p = BifurcationGUISolutionPoint(new[0], {"u": new[1]}, -1 + 0j, None, 99,
+                                        param_values={"mu": new[0]})
+        c.reorder_branch_upon_point_insertion(branch, p,
+                                              origin=branch[origin_index] if pass_origin else None)
+        return branch.index(p), len(branch)
+
+    # Continuing on from the last point, which here heads back towards the first.
+    assert place((-0.05, -0.1), -1) == (5, 6), "a step off the end has to become the new end"
+    # Without the origin - every other caller, which inserts rather than continues - the search
+    # decides as it always did, and here it closes the loop instead.
+    assert place((-0.05, -0.1), -1, pass_origin=False)[0] == 0, \
+        "the search itself is unchanged; this is the case the origin exists to settle"
+    # The same off the other end.
+    assert place((-0.4, 0.3), 0) == (0, 6), "a step off the start has to become the new start"
+    # And ds reversed at the end: the step points back along the branch, so it is an insertion.
+    assert place((0.35, -0.47), -1)[0] == 4, \
+        "stepping back over the branch must still be placed by the search"
+
+
 def test_test_functions_discriminate_fold_from_branch_point():
     """The detection logic itself, on synthetic points, so it does not depend on a sweep's step size.
 

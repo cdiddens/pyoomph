@@ -1524,12 +1524,21 @@ class BifurcationController:
         FD_eps=1e-6
         cp=self._get_current_point()
         backup,_=self.problem.get_current_dofs()
+        if len(self.problem.get_arclength_dof_derivative_vector())==0:
+            self._compute_continuation_tangent(cp)
         dp=self.problem.get_arc_length_parameter_derivative()
         ddof=numpy.array(self.problem.get_arclength_dof_derivative_vector())
         if len(ddof)==len(backup) and len(ddof)>0:
             self.problem.set_current_dofs(backup+FD_eps*ddof)
             po=self.evaluate_observables()
             for k in self._avail_observables:
+                # Not every available observable is on every point: a mode observable
+                # ("eigen/max Re [m=0]") only exists where a mode scan ran, and the list grows the
+                # first time one does. Reading it off a point recorded before that raised KeyError out
+                # of here, which - once a tangent existed at a loaded point to make this loop run at
+                # all - took down the spectrum back-fill that had just loaded it.
+                if k not in po or k not in cp.obs_values:
+                    continue
                 self._tangs[k]=numpy.array([dp,(po[k]-cp.obs_values[k])/FD_eps])
             cp._tangs=self._tangs.copy()
         else:
@@ -1538,7 +1547,8 @@ class BifurcationController:
             # deactivates bifurcation tracking, which resets oomph's continuation vectors, so the dof
             # derivative comes back EMPTY and dparameter/ds reads back as 1. Filling that in as [1,0]
             # drew a horizontal arrow of length ds at every located bifurcation - a direction of travel
-            # that is not the branch's and not the one a branch switch would take.
+            # that is not the branch's and not the one a branch switch would take. Elsewhere the
+            # tangent is computed rather than left out; see _compute_continuation_tangent.
             self._tangs={}
             cp._tangs={}
         self._update_departure_tangents(cp,backup)
@@ -1603,6 +1613,43 @@ class BifurcationController:
             return False
         bi["zeta"]=zeta/n
         attach_normal_form_predictors(bi)
+        return True
+
+    def _compute_continuation_tangent(self,cp)->bool:
+        """Ask the solver for the direction of travel at a point that was not reached by a step.
+
+        A branch switch lands on the other branch with a Newton solve at a prescribed parameter offset,
+        a transient leaves one wherever it settles, and the first point of a diagram is just a solve;
+        none of them is an arclength step, so oomph holds no tangent afterwards and the point drew no
+        arrow at all until the step after it had been taken. But the tangent is a property of the point,
+        not of how the point was reached, so it can simply be computed: one solve of J dU = -dR/dp,
+        normalised onto the arclength constraint, which is what the end of every step does anyway.
+
+        Not AT a bifurcation - that Jacobian is singular, and it is the one place where having no
+        tangent is the right answer (see :py:meth:`_update_tangents`).
+
+        The arclength scaling is switched off for the call. With it on, oomph retunes theta^2 as part of
+        computing the derivatives, so that the parameter takes its desired share of the arclength - 50%
+        by default - and the tangent comes back normalised in a metric that is not the one in force. It
+        showed as dparameter/ds = 1/sqrt(2) at every point regardless of the branch: on a pitchfork arm,
+        where the true value is 0.758, that is a visibly wrong direction. Retuning belongs at the end of
+        a step, which rescales ds to match (_recast_ds_after_metric_change); a direction merely being
+        asked about must not move the metric under the step size.
+        """
+        if cp.eig_value_Re==0 or self.on_locus():
+            return False
+        if self.scale_arc_length:
+            self.problem.set_arc_length_parameter(scale_arc_length=False)
+        try:
+            self.problem._compute_arclength_tangent(self._paramname)
+        except Exception as e:
+            # A singular or nearly singular Jacobian is the ordinary reason, and an arrow is not worth
+            # interrupting anything for - this is exactly the state the code below already handles.
+            self.log("Could not compute the continuation direction here: "+str(e).split("\n")[0])
+            return False
+        finally:
+            if self.scale_arc_length:
+                self.problem.set_arc_length_parameter(scale_arc_length=True)
         return True
 
     def _critical_null_vector(self,cp)->NPFloatArray | None:
@@ -1705,7 +1752,8 @@ class BifurcationController:
                 cp._departure_tangs=[]
                 return
             cp._departure_tangs.append(
-                {k:numpy.array([dpar,po[k]-cp.obs_values[k]])/scale for k in self._avail_observables})
+                {k:numpy.array([dpar,po[k]-cp.obs_values[k]])/scale for k in self._avail_observables
+                 if k in po and k in cp.obs_values})
         cp._departure_kind=kind
 
     def _prime_fold_continuation_tangent(self)->bool:
@@ -2227,7 +2275,43 @@ class BifurcationController:
         return True
 
 
-    def reorder_branch_upon_point_insertion(self,branch:BifurcationGUISolutionBranch,newp:BifurcationGUISolutionPoint | None):
+    def _outward_extension_scoord(self,newp,origin,pbase,xbase,ybase,sbase,xn,yn)->float | None:
+        """The s of a point that continues the branch OUTWARDS from one of its ends, or None.
+
+        A continuation step taken from an end point is the one insertion whose place is known before any
+        geometry is measured: it belongs beyond that end, because that is where the continuation went.
+        The search below decides instead by which insertion makes the path shortest, and a branch that
+        curves back towards its own beginning can be shorter with the new point at the OTHER end - an
+        isola about to close puts it there, and then the order the points were computed in is gone,
+        along with the stability segments, the splines and the tangent that are read off it.
+
+        Only outwards. Reversing ds at an end and stepping back over the branch is a legitimate thing to
+        do, and the point then really does belong between two others, which is what the search is for.
+        The two are told apart on the last leg of the branch: a step that does not point back along it
+        is continuing the direction of travel.
+        """
+        if origin is None or origin is newp or len(pbase)<2:
+            return None
+        if origin is pbase[-1]:
+            leg=(xbase[-1]-xbase[-2],ybase[-1]-ybase[-2])
+            step=(xn-xbase[-1],yn-ybase[-1])
+            if leg[0]*step[0]+leg[1]*step[1]>0:
+                return sbase[-1]+0.5*(sbase[-1]-sbase[-2])
+        elif origin is pbase[0]:
+            leg=(xbase[0]-xbase[1],ybase[0]-ybase[1])
+            step=(xn-xbase[0],yn-ybase[0])
+            if leg[0]*step[0]+leg[1]*step[1]>0:
+                return sbase[0]-0.5*(sbase[1]-sbase[0])
+        return None
+
+    def reorder_branch_upon_point_insertion(self,branch:BifurcationGUISolutionBranch,newp:BifurcationGUISolutionPoint | None,
+                                            origin:BifurcationGUISolutionPoint | None=None):
+        """Put ``newp`` where it belongs along ``branch`` and renormalise every s.
+
+        ``origin`` is the point the new one was computed FROM, when there is one. It is what makes a
+        step off the end of the branch extend it rather than be placed by the search - see
+        :py:meth:`_outward_extension_scoord`.
+        """
         if newp is not None:
             if newp not in branch:
                 branch.append(newp)
@@ -2256,9 +2340,11 @@ class BifurcationController:
         xbase=[]
         ybase=[]
         sbase=[]
+        pbase=[]
         for p in branch:
             if p==newp:
                 continue
+            pbase.append(p)
             curr=p.get_coordinate(self.y_axis,xspec=self.x_axis)
             dal=numpy.sqrt((curr[0]-last[0])**2*pscale**2+(curr[1]-last[1])**2*obsscale**2)
             al=al+dal
@@ -2280,6 +2366,11 @@ class BifurcationController:
         if newp is not None:
             xn,yn=newp.get_coordinate(self.y_axis,xspec=self.x_axis)
             xn,yn=float(xn*pscale),float(yn*obsscale)
+            outward=self._outward_extension_scoord(newp,origin,pbase,xbase,ybase,sbase,xn,yn)
+            if outward is not None:
+                newp.scoord=outward
+                branch.sort(key=lambda p : p.scoord)
+                return
             # Quite demanding, but lets give it a try: Could be improved of course
             shortest_l=1e50
             shortest_news:float=0
@@ -2430,7 +2521,10 @@ class BifurcationController:
             self._add_current_state()
 
         self._adapt_after_step()
-        self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point())
+        # origin is where this step started: a step off the end of the branch extends it, rather than
+        # being placed among the points already there.
+        self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point(),
+                                                 origin=origin)
         self._last_ds=ds
         self._update_tangents()
         if origin._tangs is None or len(origin._tangs)==0:
