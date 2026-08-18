@@ -34,6 +34,7 @@ headlessly - see :py:mod:`~pyoomph.utils.bifurcation_gui.controller` for the num
 """
 
 from collections import UserList
+import numbers
 import numpy
 from scipy.interpolate import UnivariateSpline
 
@@ -88,6 +89,49 @@ def eigen_settings(neigen:int,shift,modes:"Sequence[float] | None")->tuple:
             tuple(float(m) for m in modes) if modes is not None else ())
 
 
+def _normal_form_to_state(bi:dict | None)->dict | None:
+    """The part of a normal form that can go into state.json: its numbers, not its vectors.
+
+    What is dropped is zeta, which is one entry per degree of freedom, and the predictor closures built
+    from it. Writing a dof-sized vector per bifurcation would change what state.json is - it is a small
+    text file next to the binary dumps that hold the solutions - and the vector is recoverable at the
+    point itself from one eigensolve, which is what BifurcationController._ensure_normal_form does.
+    What is kept is enough to say WHAT the bifurcation is without touching the solver at all, which is
+    what the diagram's labels and the choice of how to leave it need.
+    """
+    if not bi:
+        return None
+    out:dict[str,Any]={}
+    for k,v in bi.items():
+        if callable(v) or isinstance(v,numpy.ndarray):
+            continue
+        if isinstance(v,(bool,str)):
+            out[k]=v
+        elif isinstance(v,numbers.Integral):
+            out[k]=int(v)
+        elif isinstance(v,numbers.Real):
+            out[k]=float(v)
+        elif isinstance(v,numbers.Complex):
+            # A Hopf's a and b are complex. Stored as a tagged pair rather than a bare [re, im] list,
+            # so reading it back cannot confuse it with an entry that is genuinely a list of two.
+            out[k]={"__complex__":[float(numpy.real(v)),float(numpy.imag(v))]}
+    return out or None
+
+
+def _normal_form_from_state(stored:dict | None)->dict | None:
+    """Invert _normal_form_to_state. The result has no zeta and no predictors - see there."""
+    if not stored:
+        return None
+    out:dict[str,Any]={}
+    for k,v in stored.items():
+        if isinstance(v,dict) and "__complex__" in v:
+            re_im=v["__complex__"]
+            out[k]=complex(float(re_im[0]),float(re_im[1]))
+        else:
+            out[k]=v
+    return out
+
+
 class BifurcationGUISolutionPoint:
     """One computed solution: every global parameter, all observables, the leading eigenvalue and
     the state file it was dumped to."""
@@ -132,7 +176,12 @@ class BifurcationGUISolutionPoint:
         self.outstep=outstep
         self.scoord:float=0
         self._tangs:dict[str,NPFloatArray]={}
-        self._branch_switch_tangs:list[Any]=[]
+        #: Directions off this point when it is a bifurcation, per observable and divided by |ds|:
+        #: the branches a switch would reach, or the +-eigenvector a transient would leave along.
+        #: Recomputed by the controller, never read from a file - see _update_departure_tangents.
+        self._departure_tangs:list[Any]=[]
+        #: "switch" or "perturb", saying which of the two the entries above are; None when there are none.
+        self._departure_kind:str | None=None
         self.tag=-1
         self.bifurcation_info:dict | None=None
         #: Sign of the determinant of the plain Jacobian, from the factorisation the continuation step
@@ -161,6 +210,7 @@ class BifurcationGUISolutionPoint:
         inst.det_sign=res.get("det_sign")
         inst.dparam_ds=res.get("dparam_ds")
         inst.detected_bifurcation=res.get("detected_bifurcation")
+        inst.bifurcation_info=_normal_form_from_state(res.get("bifurcation_info"))
         # A point written before quick mode existed always had a spectrum, so the default is "eigen" -
         # which is also what its NaN-free eig_value_Re says.
         inst.stability_source=res.get("stability_source",STABILITY_EIGEN)
@@ -198,6 +248,9 @@ class BifurcationGUISolutionPoint:
             res["dparam_ds"]=float(self.dparam_ds)
         if self.detected_bifurcation is not None:
             res["detected_bifurcation"]=self.detected_bifurcation
+        nf=_normal_form_to_state(self.bifurcation_info)
+        if nf:
+            res["bifurcation_info"]=nf
         if self.stability_source!=STABILITY_EIGEN:
             res["stability_source"]=self.stability_source
         if self.unstable_count is not None:

@@ -249,9 +249,13 @@ class BifurcationDiagramPlotter:
                     pc=p.get_coordinate(yaxis,xspec=xaxis)
                     gca.plot([pc[0]],[pc[1]], marker='o', markersize=6,color="brown")
                     if p.bifurcation_info is not None:
-                        shorts={"transcritical":"T","fold":"F","pitchfork":"P","Hopf":"H"}
+                        # get_normal_form writes "hopf" in lower case; keyed as "Hopf" the letter never
+                        # appeared. And the tag used to swallow it: without the brackets, Python read
+                        # this as (tag+",") if tagged else (""+letter), so a tagged bifurcation showed
+                        # its number and an untagged one its letter, never both.
+                        shorts={"transcritical":"T","fold":"F","pitchfork":"P","hopf":"H"}
                         if p.bifurcation_info["type"] in shorts:
-                            gca.annotate(str(p.tag)+"," if p.tag>=0 else ""+ shorts[p.bifurcation_info["type"]],(pc[0],pc[1]))
+                            gca.annotate((str(p.tag)+"," if p.tag>=0 else "")+shorts[p.bifurcation_info["type"]],(pc[0],pc[1]))
                         elif p.tag>=0:
                             gca.annotate(str(p.tag),(pc[0],pc[1]))
                 elif p.tag>=0:
@@ -263,22 +267,42 @@ class BifurcationDiagramPlotter:
             pc=controller.current_point.get_coordinate(yaxis,with_eigen=True,xspec=xaxis)
             if controller._mode=="al":
                 gca.plot([pc[0]],[pc[1]], marker='o', markersize=5,color="green" )
+                x0=numpy.array([pc[0],pc[1]])
+                xy_start=(float(x0[0]),float(x0[1]))
                 tang=controller._tangs.get(tang_key) if tang_key is not None else None
                 if tang is not None and controller._last_ds is not None:
-                    x0=numpy.array([pc[0],pc[1]])
                     dx=controller._last_ds*tang
-                    extend_lims(x0)
                     xy_end=(float(x0[0]+dx[0]),float(x0[1]+dx[1]))
-                    xy_start=(float(x0[0]),float(x0[1]))
+                    extend_lims(xy_end)
                     gca.annotate("", xy=xy_end, xytext=xy_start,arrowprops=dict(arrowstyle="->"),annotation_clip=False)
-                    for i,bst in enumerate(controller.current_point._branch_switch_tangs if tang_key is not None else []):
-                        # abs(ds): the two arrows are the two branches through the bifurcation, which
-                        # do not swap over when the direction of travel is reversed.
-                        dx=abs(controller._last_ds)*bst[tang_key]
-                        extend_lims(x0)
-                        xy_end=(float(x0[0]+dx[0]),float(x0[1]+dx[1]))
-                        xy_start=(float(x0[0]),float(x0[1]))
-                        gca.annotate("", xy=xy_end, xytext=xy_start,arrowprops=dict(arrowstyle="->",color="brown",linewidth=1 if i==0 else 0.1),annotation_clip=False)
+                # Deliberately NOT nested in the block above. At a located bifurcation there is no
+                # arclength tangent at all - _update_tangents empties _tangs there on purpose - and that
+                # is precisely the point where these arrows are the only ones to draw. Nested under
+                # "tang is not None" they could therefore never appear anywhere.
+                # abs(ds): the arrows are directions off the bifurcation, which do not swap over when
+                # the direction of travel is reversed. It undoes the scaling the controller applied.
+                scale=abs(controller._last_ds) if controller._last_ds else 1.0
+                # The heavy arrow is the one the default action would take RIGHT NOW: a branch switch
+                # defaults its direction to the sign of ds, and index 0 is the +1 direction. The other
+                # is drawn thin rather than left out, so a pitchfork does not look like it has one arm.
+                primary=0 if (controller._last_ds is None or controller._last_ds>=0) else 1
+                # A fold or a Hopf has no second steady branch: its two arrows are the +-eigenvector a
+                # transient would leave along, so they are dashed to say "this is a perturbation, not a
+                # branch", and neither of them is the preferred one.
+                perturbing=controller.current_point._departure_kind=="perturb"
+                for i,bst in enumerate(controller.current_point._departure_tangs if tang_key is not None else []):
+                    if tang_key not in bst:
+                        # An observable this direction was never evaluated for: it is recorded per
+                        # observable, and the set can differ from the one the point was computed with.
+                        # Worth no arrow, certainly not a KeyError out of the middle of a redraw.
+                        continue
+                    dx=scale*bst[tang_key]
+                    xy_end=(float(x0[0]+dx[0]),float(x0[1]+dx[1]))
+                    extend_lims(xy_end)
+                    aprops=dict(arrowstyle="->",color="brown",
+                                linewidth=1.0 if perturbing else (1.4 if i==primary else 0.6),
+                                linestyle="dashed" if perturbing else "solid")
+                    gca.annotate("", xy=xy_end, xytext=xy_start,arrowprops=aprops,annotation_clip=False)
                 eigv=pc[2]+1j*pc[3]
                 pttext="({:3.3g},{:3.3g})\n".format(pc[0],pc[1])+f'{eigv:.2g}'
             else:

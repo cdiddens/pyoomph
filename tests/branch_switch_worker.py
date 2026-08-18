@@ -93,6 +93,8 @@ def main() -> int:
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--api", default="gui", choices=["gui", "problem"],
                     help="gui: through BifurcationGUI; problem: Problem.switch_branch on its own")
+    ap.add_argument("--phase", default="full", choices=["full", "write", "reload"],
+                    help="write/reload: the same diagram over two processes, to check what survives it")
     args = ap.parse_args()
 
     with build(args.kind) as problem:
@@ -180,7 +182,54 @@ def main() -> int:
         gui.classify_bifurcations = True
         c = gui.controller
         c.view = _FixedViewLimits(xlim=(-2.0, 4.0), ylim=(-2.0, 2.0))
+        # start() discovers the observables either way; with a diagram already on disk it solves
+        # nothing and load_all() below restores it.
         c.start(0.05)
+        if args.phase == "reload":
+            c.load_all()
+            bifs = [p for b in c.branches for p in b if p.eig_value_Re == 0]
+            assert len(bifs) == 1, "expected the one saved bifurcation, got {:d}".format(len(bifs))
+            cp = bifs[0]
+            # The classification itself has to survive the file. It used to be dropped entirely, taking
+            # the diagram's letter, the choice of how to leave the point, and every arrow with it.
+            assert cp.bifurcation_info is not None, "the classification did not survive the reload"
+            assert cp.bifurcation_info.get("type") == args.kind, \
+                "reloaded as " + str(cp.bifurcation_info.get("type")) + ", not " + args.kind
+            c.load_pt(cp)
+            # zeta is deliberately NOT in the file - it is one number per degree of freedom - so this
+            # is the recovery path: one eigensolve, then the predictors rebuilt from the coefficients
+            # that were saved. If it rebuilt them differently, the switch below lands off the branch.
+            assert cp.bifurcation_info.get("param_predictor") is not None, \
+                "the predictors were not rebuilt after the reload"
+            from matplotlib.text import Annotation
+            from pyoomph.utils.bifurcation_gui.plotter import BifurcationDiagramPlotter
+            plotter = BifurcationDiagramPlotter()
+            plotter.draw(c)
+            drawn = [a for a in plotter.axes.get_children()
+                     if isinstance(a, Annotation) and a.arrowprops
+                     and a.arrowprops.get("color") == "brown"]
+            assert len(drawn) == 2, \
+                "a reloaded {:s} has to show its two directions again, got {:d}".format(args.kind, len(drawn))
+            labels = [t.get_text() for t in plotter.axes.texts]
+            assert {"transcritical": "T", "pitchfork": "P"}[args.kind] in labels, \
+                "the reloaded diagram lost its bifurcation label: " + str(labels)
+            n_before = len(c.branches)
+            assert c.branch_switch(), "branch_switch reported failure after a reload"
+            assert len(c.branches) == n_before + 1
+            for _ in range(4):
+                c.step()
+            errors = []
+            for p in c.branches[-1]:
+                expect = other_branch(args.kind, p.param_value)
+                if expect is None or abs(p.param_value) < 1e-4:
+                    continue
+                errors.append(abs(abs(p.obs_values["ode/u"]) - expect))
+            assert errors, "the new branch has no point away from the bifurcation"
+            print("kind={:s} reloaded max_error={:.3e}".format(args.kind, max(errors)))
+            assert max(errors) < 1e-6, \
+                "the rebuilt normal form does not predict the same branch: {:.3e}".format(max(errors))
+            print("PYOOMPH_WORKER_DONE")
+            return 0
         for _ in range(2):
             c.step()
 
@@ -191,6 +240,37 @@ def main() -> int:
         assert cp.bifurcation_info is not None, "classify_bifurcations must name it"
         assert cp.bifurcation_info.get("type") == args.kind, \
             "expected " + args.kind + ", got " + str(cp.bifurcation_info.get("type"))
+
+        # The arrows that say where a switch would go. They live on the point, but they used to be
+        # drawn only inside "if the arclength tangent exists", and at a located bifurcation it never
+        # does - _update_tangents empties _tangs there on purpose - so they appeared nowhere at all.
+        from matplotlib.text import Annotation
+        from pyoomph.utils.bifurcation_gui.plotter import BifurcationDiagramPlotter
+        plotter = BifurcationDiagramPlotter()
+        plotter.draw(c)
+        drawn = [a for a in plotter.axes.get_children()
+                 if isinstance(a, Annotation) and a.arrowprops
+                 and a.arrowprops.get("color") == "brown"]
+        assert len(drawn) == 2, \
+            "both branches through the {:s} must be drawn, got {:d} arrow(s)".format(args.kind, len(drawn))
+        for a in drawn:
+            assert a.xyann == (float(cp.param_value), float(cp.obs_values["ode/u"])), \
+                "an arrow has to start at the bifurcation, not at " + str(a.xyann)
+            assert abs(a.xy[0] - a.xyann[0]) + abs(a.xy[1] - a.xyann[1]) > 1e-9, \
+                "a zero-length arrow shows no direction"
+        # The two arms of a pitchfork sit on the SAME side of the parameter and differ in the sign of
+        # the amplitude; a transcritical's two arrows are one branch traversed both ways.
+        dus = sorted(a.xy[1] - a.xyann[1] for a in drawn)
+        assert dus[0] < 0 < dus[1], "the two arrows must point to opposite amplitudes: " + str(dus)
+        if args.kind == "pitchfork":
+            dps = [a.xy[0] - a.xyann[0] for a in drawn]
+            assert dps[0] * dps[1] > 0, "both pitchfork arms lie on one side of mu: " + str(dps)
+
+        if args.phase == "write":
+            c.save_all()
+            print("kind={:s} written".format(args.kind))
+            print("PYOOMPH_WORKER_DONE")
+            return 0
 
         n_before = len(c.branches)
         assert c.branch_switch(), "branch_switch reported failure"

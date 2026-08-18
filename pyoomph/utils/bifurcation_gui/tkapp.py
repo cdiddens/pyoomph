@@ -199,16 +199,20 @@ class BifurcationTkApp:
           lambda: c.set_arclength_inner_product("l2"))
 
         # --- bifurcations
-        A("locate_bifurcation","Locate bifurcation / switch branch",c.locate_bifurcation_or_switch,
+        A("locate_bifurcation","Locate bifurcation / leave it",c.locate_bifurcation_or_switch,
           toolbar="Find bif",is_solver_task=True,
-          tooltip="At a bifurcation this switches branch, otherwise it tracks one down")
+          tooltip="At a bifurcation this takes the way off it that its type offers - a branch switch "
+                  "at a transcritical or a pitchfork, leaving transiently at a fold or a Hopf, which "
+                  "have no second steady branch. Otherwise it tracks a bifurcation down")
         A("locate_selected_eigenvalue","Locate the bifurcation of the selected eigenvalue",
           self._locate_selected_eigenvalue,is_solver_task=True,
           enabled_when=lambda: self._selected_eigenindex() is not None,
           tooltip="Track the eigenvalue picked in the Points tab rather than the one nearest the axis")
         A("locate_pitchfork","Locate pitchfork",lambda: c.locate_bifurcation(pitchfork=True),is_solver_task=True)
         A("branch_switch","Switch branch",c.branch_switch,toolbar="Switch",is_solver_task=True,
-          enabled_when=at_bifurcation,tooltip="Only available at a classified bifurcation")
+          enabled_when=at_bifurcation,
+          tooltip="Only available at a classified bifurcation, and only a transcritical or a pitchfork "
+                  "has a second branch to switch to")
         A("transient_leave_0","Leave branch transiently (mode 0)",lambda: c.transient_leave_branch(0),is_solver_task=True)
         A("transient_leave_1","Leave branch transiently (mode 1)",lambda: c.transient_leave_branch(1),is_solver_task=True)
         A("start_locus","Follow this bifurcation in...",self._dialog_start_locus,is_solver_task=True,

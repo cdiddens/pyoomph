@@ -723,6 +723,36 @@ def test_branch_switching_lands_on_the_other_branch(kind, api, tmp_path):
     assert "kind=" + kind in out
 
 
+@pytest.mark.parametrize("kind", ["transcritical", "pitchfork"])
+def test_a_reloaded_diagram_keeps_its_classifications(kind, tmp_path):
+    """What a bifurcation IS has to survive being written to a diagram and read back.
+
+    Two processes over one output directory, because that is the situation: the second run of a script
+    finds state.json and rebuilds the diagram from it. The classification used to be left out of the
+    file altogether, so a reloaded bifurcation came back as an anonymous point - no letter on the
+    diagram, no arrows, no way to choose how to leave it, and branch switching that had to recompute
+    the whole normal form before it could do anything.
+
+    The null vector is still not in the file - one entry per degree of freedom does not belong in a
+    small text file beside the dumps - so the second half of this is the recovery: one eigensolve at the
+    point, then the predictors rebuilt from the coefficients that were saved. Landing back on the
+    analytic branch afterwards is what says they were rebuilt as the originals and not merely rebuilt.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "branch_switch_worker.py")
+    outdir = os.path.join(str(tmp_path), "out")
+    for phase in ("write", "reload"):
+        proc = subprocess.run([sys.executable, worker, "--kind", kind, "--api", "gui",
+                               "--phase", phase, "--outdir", outdir],
+                              cwd=here, capture_output=True, text=True, timeout=900)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        assert proc.returncode == 0, phase + " worker failed:\n" + out[-3000:]
+        assert "PYOOMPH_WORKER_DONE" in out, phase + " worker did not finish:\n" + out[-3000:]
+    assert "reloaded max_error" in out
+
+
 def test_must_init_keeps_the_diagram_and_skips_the_setup(tmp_path):
     """A second run must find its diagram, not redo the walk to the starting solution, and open itself.
 

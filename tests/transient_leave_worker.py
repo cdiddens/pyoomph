@@ -115,10 +115,23 @@ def main() -> int:
         c.transient_leave_branch(0)
         gaps = [b - a for a, b in zip(problem.step_times, problem.step_times[1:])]
         growth_time = 1.0/rate
-        print("TOOK {:d} steps, longest {:.4g} against a growth time of {:.4g}".format(
-            len(problem.step_times), max(gaps) if gaps else float("nan"), growth_time))
-        assert gaps and max(gaps) <= growth_time/5*1.001, \
-            "the time step ran away past the growth time: {:.4g}".format(max(gaps))
+        print("TOOK {:d} steps, longest {:.4g} against a growth time of {:.4g}, ending at {:.4g}".format(
+            len(problem.step_times), max(gaps) if gaps else float("nan"), growth_time,
+            problem.step_times[-1] if problem.step_times else float("nan")))
+        # The cap applies WHILE the unstable mode is what is growing, which is what a step longer than
+        # the growth time would damp away instead of amplifying. The controller watches the distance
+        # from the branch and lets the step grow once that growth has stalled, so the cap is asserted
+        # over the first two growth times - the interval over which the stall cannot yet be declared -
+        # and not over the nonlinear approach to the new state afterwards.
+        early = [b - a for a, b in zip(problem.step_times, problem.step_times[1:]) if b <= 2*growth_time]
+        assert early and max(early) <= growth_time/5*1.001, \
+            "the time step ran away past the growth time while the mode was growing: {:.4g}".format(max(early))
+        # And it has to STOP once the solution has arrived. Integrating the full 100 growth times took
+        # 602 steps here, all of them after the solution had reached the state it was going to.
+        assert problem.step_times[-1] < 50*growth_time, \
+            "the transient did not stop when the solution had settled: ran to {:.4g}".format(problem.step_times[-1])
+        assert len(problem.step_times) < 100, \
+            "far more steps than the departure needs: {:d}".format(len(problem.step_times))
         landed = problem.get_ode("ode").get_value("u", as_float=True)
         print("LEFT the branch, landing at u = {:+.6g} (expected +-{:.6g})".format(landed, numpy.sqrt(0.5)))
         assert len(c.branches) == n_before + 1, "leaving the branch has to open a new one"

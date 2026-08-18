@@ -34,6 +34,7 @@ reloading) can be driven headlessly from a test or a batch script. The user inte
 through the observer hooks installed by :py:meth:`BifurcationController.set_observer`.
 """
 
+from ...generic.bifurcation_tools import attach_normal_form_predictors
 from ...generic.codegen import EquationTree
 from ...generic import Problem
 from ... import _pyoomph_core as _pyoomph
@@ -1540,44 +1541,208 @@ class BifurcationController:
             # that is not the branch's and not the one a branch switch would take.
             self._tangs={}
             cp._tangs={}
-        self._update_branch_switch_tangents(cp,backup)
+        self._update_departure_tangents(cp,backup)
         self.problem.set_current_dofs(backup)
 
-    def _update_branch_switch_tangents(self,cp,base):
-        """Where a branch switch would go, as arrows in the same units as the arclength one.
+    def _solved_critical_eigenvector(self)->NPComplexArray | None:
+        """The eigenvector of the mode nearest the imaginary axis in the last eigensolve.
 
-        Only the two kinds that HAVE a second branch get them, and a pitchfork gets both of its arms -
-        they differ in the sign of the amplitude at the same parameter offset, so drawing one of them
-        would suggest the other does not exist. The chord to the PREDICTED point is what is stored,
-        divided by |ds| because that is what the plotter multiplies it by again; the offset is the one
-        :py:meth:`branch_switch` would use, not dparameter/ds - which is unavailable here anyway.
+        Nearest by REAL part, not by modulus: at a Hopf the critical pair sits at +-i*omega and is the
+        furthest from the origin of anything in the spectrum, while every stable mode it is competing
+        with has a real part well below zero. None when no eigensolve is at hand, which is what a point
+        just loaded from a diagram looks like - state files do not carry eigenvectors.
         """
-        cp._branch_switch_tangs=[]
+        try:
+            evecs=self.problem.get_last_eigenvectors()
+            evals=self.problem.get_last_eigenvalues()
+        except Exception:
+            return None
+        if evecs is None or evals is None or len(evecs)==0 or len(evals)==0:
+            return None
+        idx=int(numpy.argmin(numpy.abs(numpy.real(numpy.asarray(evals,dtype=complex)))))
+        return numpy.asarray(evecs[min(idx,len(evecs)-1)])
+
+    def _ensure_normal_form(self,cp,allow_eigensolve:bool=False)->bool:
+        """Complete a normal form that came back from a saved diagram, which carries no null vector.
+
+        state.json keeps the COEFFICIENTS of a classification but not zeta, which is one entry per
+        degree of freedom (see model._normal_form_to_state). A reloaded bifurcation therefore knows what
+        it IS - which is what its label and the choice of how to leave it need - but cannot say where
+        the other branch goes until zeta is back. That costs one eigensolve at the point, about what a
+        continuation step costs, and only ever at a bifurcation whose classification was restored.
+
+        zeta is normalised to unit length because that is the convention its coefficients were computed
+        in: b2 and b3 scale with it, so a null vector of another length would predict another amplitude.
+        The remaining freedom is its SIGN, which swaps the two arms of a pitchfork - and both of them
+        are offered anyway.
+        """
         bi=cp.bifurcation_info
-        if bi is None or bi.get("type") not in ("transcritical","pitchfork"):
-            return
-        param_predictor=bi.get("param_predictor")
-        perturbation_predictor=bi.get("perturbation_predictor")
-        if param_predictor is None or perturbation_predictor is None:
-            return
-        eps=self.branch_switch_parameter_offset()
-        scale=abs(self._last_ds) if self._last_ds else 1.0
-        for sgn in (1,-1):
+        if bi is None:
+            return False
+        if bi.get("zeta") is not None:
+            return True
+        vec=self._solved_critical_eigenvector()
+        if vec is None:
+            if not allow_eigensolve:
+                return False
+            self.log("Solving the eigenproblem to recover the eigenvector of this restored "
+                     +str(bi.get("type"))+", which was not saved with the diagram")
             try:
-                dpar=float(param_predictor(sgn*eps))
-                du=numpy.asarray(perturbation_predictor(sgn*eps),dtype=float)
-                if du.size!=len(base):
-                    return
+                self.problem.solve_eigenproblem(self.neigen,self.shift)
+            except Exception as e:
+                self.log("... which did not work: "+str(e).split("\n")[0])
+                return False
+            vec=self._solved_critical_eigenvector()
+            if vec is None:
+                return False
+        zeta=numpy.real(numpy.asarray(vec,dtype=complex)).astype(float)
+        if zeta.size!=self.problem.ndof():
+            return False
+        n=float(numpy.linalg.norm(zeta))
+        if n<=0 or not numpy.isfinite(n):
+            return False
+        bi["zeta"]=zeta/n
+        attach_normal_form_predictors(bi)
+        return True
+
+    def _critical_null_vector(self,cp)->NPFloatArray | None:
+        """The critical eigenvector at a located bifurcation, as a real dof vector.
+
+        Taken from the normal form when there is one, since that is the vector the classification was
+        built on, and from the last eigensolve otherwise.
+        """
+        bi=cp.bifurcation_info
+        cand=bi.get("zeta") if bi is not None else None
+        if cand is None:
+            cand=self._solved_critical_eigenvector()
+        if cand is None:
+            return None
+        # A Hopf's eigenvector is complex, and its REAL part is where the transient starts from:
+        # perturb_by_eigenfunction adds Re(zeta*exp(i*omega*t)), which at t = 0 is exactly that.
+        vec=numpy.real(numpy.asarray(cand,dtype=complex)).astype(float)
+        return vec if vec.size==self.problem.ndof() else None
+
+    def _arclength_unit_dof_direction(self,vec)->NPFloatArray | None:
+        """Scale a dof direction to unit length in the arclength metric, at dparameter/ds = 0.
+
+        The constraint is (dparameter/ds)^2 + theta^2*|dU/ds|^2 = 1 (see
+        Problem._renormalise_continuation_tangent), so with the parameter held still the dof part has
+        length 1/theta - not 1. Getting that wrong does not point the tangent anywhere else, it just
+        makes ds buy a different stride than it says.
+        """
+        if vec is None:
+            return None
+        theta_sqr=self.problem.get_arc_length_theta_sqr()
+        if not numpy.isfinite(theta_sqr) or theta_sqr<=0:
+            theta_sqr=1.0
+        n=float(numpy.linalg.norm(vec))
+        if n<=0 or not numpy.isfinite(n):
+            return None
+        return numpy.asarray(vec,dtype=float)/(n*numpy.sqrt(theta_sqr))
+
+    def _update_departure_tangents(self,cp,base):
+        """Where the ways off this bifurcation go, as arrows in the same units as the arclength one.
+
+        Two families, drawn alike but meaning quite different things:
+
+        * a transcritical or a pitchfork HAS a second steady branch, so the arrows are the chord to the
+          point :py:meth:`branch_switch` predicts, at the offset it would use. A pitchfork gets both of
+          its arms - they differ in the sign of the amplitude at the same parameter offset, so drawing
+          one of them would suggest the other does not exist.
+        * a fold or a Hopf has no second steady branch through it. What leaves them is a transient, and
+          what it leaves along is the critical eigenvector, so the arrows are +-zeta with NO component
+          along the parameter: perturbing the solution does not move the parameter. At a fold that is
+          also the branch's own tangent, which is what :py:meth:`step` continues along there.
+
+        Everything is stored divided by |ds|, because that is what the plotter multiplies it by again -
+        which is also what makes every arrow here scale with the step size in use.
+        """
+        cp._departure_tangs=[]
+        cp._departure_kind=None
+        bi=cp.bifurcation_info
+        btype=bi.get("type") if bi is not None else None
+        if btype is not None and bi.get("zeta") is None:
+            # A classification restored from a diagram: it knows its type but not its null vector, and
+            # every arrow below is built from that vector. The dofs are put back first because the
+            # caller may have left them displaced by its finite-difference probe.
+            self.problem.set_current_dofs(base)
+            self._ensure_normal_form(cp,allow_eigensolve=self.recover_restored_normal_forms)
+        scale=abs(self._last_ds) if self._last_ds else 1.0
+        if btype in ("transcritical","pitchfork"):
+            param_predictor=bi.get("param_predictor")
+            perturbation_predictor=bi.get("perturbation_predictor")
+            if param_predictor is None or perturbation_predictor is None:
+                return
+            eps=self.branch_switch_parameter_offset()
+            try:
+                offsets=[(float(param_predictor(sgn*eps)),
+                          numpy.asarray(perturbation_predictor(sgn*eps),dtype=float)) for sgn in (1,-1)]
+            except Exception as e:
+                self.log("Could not evaluate the branch-switch prediction: "+repr(e))
+                return
+            kind="switch"
+        elif btype in ("fold","hopf"):
+            zeta=self._arclength_unit_dof_direction(self._critical_null_vector(cp))
+            if zeta is None:
+                return
+            # One step's worth of arclength along the eigenvector and nothing along the parameter,
+            # which is what the arclength constraint gives once dparameter/ds is set to zero.
+            offsets=[(0.0,sgn*scale*zeta) for sgn in (1,-1)]
+            kind="perturb"
+        else:
+            return
+        for dpar,du in offsets:
+            if du.size!=len(base):
+                cp._departure_tangs=[]
+                return
+            try:
                 self.problem.set_current_dofs(base+du)
                 po=self.evaluate_observables()
             except Exception as e:
                 # The prediction can land where the observables cannot be evaluated at all - a film
                 # height through zero, say. An arrow is not worth aborting anything for.
-                self.log("Could not draw the branch-switch direction: "+repr(e))
-                cp._branch_switch_tangs=[]
+                self.log("Could not draw the direction off the bifurcation: "+repr(e))
+                cp._departure_tangs=[]
                 return
-            cp._branch_switch_tangs.append(
+            cp._departure_tangs.append(
                 {k:numpy.array([dpar,po[k]-cp.obs_values[k]])/scale for k in self._avail_observables})
+        cp._departure_kind=kind
+
+    def _prime_fold_continuation_tangent(self)->bool:
+        """Hand the continuation the fold's own tangent, so that a step from an exact fold can be taken.
+
+        At a fold dU/dparameter does not exist - that IS the fold - so the tangent oomph computes when
+        it holds none (by solving J dU = -dR/dparameter) is a singular solve there, and a step from a
+        located fold died inside oomph instead of going anywhere. The tangent is known analytically
+        instead: the parameter turns around, so dparameter/ds = 0, and the branch runs along the null
+        eigenvector. Priming those two is enough, because oomph takes Dof_current and Parameter_current
+        from the present state at the start of every step and only the derivatives from before it.
+
+        The sign is chosen to carry on the way the branch was already travelling. At a fold it is the
+        PARAMETER that reverses while the solution keeps going, so it is the direction in the
+        observable that has to be preserved - and it is taken against ds, since a negative ds steps
+        backwards along whatever tangent is stored.
+        """
+        cp=self._get_current_point()
+        direction=self._arclength_unit_dof_direction(self._critical_null_vector(cp))
+        if direction is None:
+            return False
+        sign=1.0
+        incoming=self.axis_tangent()
+        dep=cp._departure_tangs[0] if cp._departure_tangs else None
+        if incoming is not None and dep is not None and self._current_observable in dep:
+            if dep[self._current_observable][1]*incoming[1]<0:
+                sign=-1.0
+        if self._last_ds is not None and self._last_ds<0:
+            sign=-sign
+        # _set_dof_direction_arclength resets every arclength parameter, theta^2 among them, so it is
+        # put back afterwards - the step retunes it itself, as it does for an ordinary step.
+        theta_sqr=self.problem.get_arc_length_theta_sqr()
+        self.problem._set_dof_direction_arclength(list(sign*direction))
+        self.problem._set_arc_length_parameter_derivative(0.0)
+        self.problem._set_arc_length_theta_sqr(theta_sqr)
+        self.log("Continuing around the fold along its null vector (dparameter/ds = 0)")
+        return True
 
     # ------------------------------------------------------------------ quick mode
 
@@ -1864,9 +2029,21 @@ class BifurcationController:
             raise RuntimeError("Cannot switch branches: the normal form of this bifurcation could not be "
                                "computed, so there is no prediction for where the other branch goes. The "
                                "reason is in the log above.")
+        # Before any attempt to complete the normal form below: what rules a fold out is its TYPE, and
+        # recovering predictors for a switch that is about to be refused would be work done to no end.
         if cp.bifurcation_info.get("type")=="fold":
             self.log("A fold has only one branch through it - there is nothing to switch to")
             return False
+        if cp.bifurcation_info.get("param_predictor") is None:
+            # Read back from a diagram: the coefficients are there and only the null vector is missing,
+            # so one eigensolve completes it - much less than the normal form costs to compute again.
+            if not self._ensure_normal_form(cp,allow_eigensolve=True):
+                self.log("The saved classification could not be completed; recomputing the normal form")
+                cp.bifurcation_info=self._classify_current_point()
+            if cp.bifurcation_info is None or cp.bifurcation_info.get("param_predictor") is None:
+                raise RuntimeError("Cannot switch branches: this bifurcation's normal form has no "
+                                   "prediction for where the other branch goes. The reason is in the "
+                                   "log above.")
 
         if offset is None:
             offset=self.branch_switch_parameter_offset()
@@ -1901,21 +2078,40 @@ class BifurcationController:
         self._changed()
         return True
 
-    #: How many growth times of the mode the transient runs for, and how many steps one growth time is
-    #: resolved with. The step size matters more than the total: see transient_leave_branch.
+    #: How many growth times of the mode the transient runs for at most, and how many steps one growth
+    #: time is resolved with. The step size matters more than the total: see transient_leave_branch.
     transient_growth_times=100
     transient_steps_per_growth=20
+    #: Growth of the distance from the branch, per monitoring interval, below which the unstable mode
+    #: is no longer what is driving the solution. One interval is one growth time, so a mode still
+    #: growing at its own rate multiplies the distance by e = 2.72; well under that means the departure
+    #: has gone nonlinear and the time step no longer has to resolve the mode.
+    transient_stall_growth=1.6
+    #: What the cap on dt is multiplied by per monitoring interval once it has departed. The cap never
+    #: passes the interval itself, so the distance keeps being sampled.
+    transient_relax_factor=2.0
+    #: Stop once one monitoring interval moves the solution less than this, relative to how far it has
+    #: travelled: it has arrived somewhere and the remaining growth times would only confirm it.
+    transient_settle_tolerance=1e-3
 
     def transient_leave_branch(self,eigenindex=0):
         """Perturb along an eigenfunction and integrate until the solution settles somewhere else.
 
-        The time step must stay WELL BELOW the growth time of the mode being followed. A fully implicit
-        step much longer than 1/lambda does not amplify an unstable mode, it damps it - BDF2's
-        amplification factor tends to zero as lambda*dt grows - and the adaptive stepper walks straight
-        into that: the solution sits near a stationary state, so the temporal error is tiny, so dt is
-        doubled every step. Measured on a thin-film branch point, dt reached 500 growth times and the
-        run came back to the very solution it was told to leave, with the same eigenvalue to six
-        digits. Hence maxstep, which is the whole point of this method working at all.
+        While the solution is still NEAR the branch, the time step must stay well below the growth time
+        of the mode being followed. A fully implicit step much longer than 1/lambda does not amplify an
+        unstable mode, it damps it - BDF2's amplification factor tends to zero as lambda*dt grows - and
+        the adaptive stepper walks straight into that: the solution sits near a stationary state, so the
+        temporal error is tiny, so dt is doubled every step. Measured on a thin-film branch point, dt
+        reached 500 growth times and the run came back to the very solution it was told to leave, with
+        the same eigenvalue to six digits.
+
+        That argument only holds while the mode is what is growing. Once the solution is far from the
+        branch the dynamics are the nonlinear approach to wherever it is going, the temporal error
+        controller is a sound judge of it again, and holding dt at the old cap only makes the departure
+        take a long time in small steps. So the distance from the branch is watched, and the cap is
+        relaxed once it is clear the solution has left - and the run stops early when that distance
+        stops changing, which is the solution having arrived. A limit cycle never stops changing, so
+        that case runs to the full time as before.
 
         The perturbation comes from Problem.perturb_by_eigenfunction, which scales it to a residual
         rather than to a fixed multiple of an eigenvector of arbitrary norm, and fills in the history
@@ -1931,28 +2127,104 @@ class BifurcationController:
             self.problem.solve_eigenproblem(self.neigen,self.shift)
         cp=self._get_current_point()
         # AT a bifurcation the rate is zero and there is no growth time to speak of; the floor is what
-        # the previous implementation used and keeps the step finite.
-        rate=max(1e-4,numpy.sqrt(cp.eig_value_Re**2+cp.eig_value_Im**2))
-        growth_time=self.problem.get_scaling("temporal")/rate
+        # the previous implementation used and keeps the step finite. The recorded eigenvalues are
+        # PHYSICAL rates (see _phys_eig), so they go back to the problem's own time scale before being
+        # turned into a time - dividing the temporal scaling by a physical rate is not a time at all
+        # unless that scaling happens to be one second.
+        rate=max(1e-4,numpy.sqrt(cp.eig_value_Re**2+cp.eig_value_Im**2)/(self._eigen_mult or 1.0))
+        TS=self.problem.get_scaling("temporal")
+        growth_time=TS/rate
 
         self.problem.deactivate_bifurcation_tracking()
         self.problem.reset_arc_length_parameters()
         self.problem.set_current_time(0)
 
+        on_branch=numpy.array(self.problem.get_current_dofs()[0])
         dt=self.problem.perturb_by_eigenfunction(dt=growth_time/self.transient_steps_per_growth,
                                                  eigenmode=eigenindex)
-        endtime=self.transient_growth_times*growth_time
-        self.problem.run(endtime,startstep=dt,maxstep=growth_time/5,temporal_error=1,outstep=False,
-                         do_not_set_IC=True)
+        kick=float(numpy.linalg.norm(numpy.array(self.problem.get_current_dofs()[0])-on_branch))
+        if kick<=0 or not numpy.isfinite(kick):
+            # Nothing to measure a departure against. Fall back to the fixed cap for the whole run,
+            # which is what this method did before the distance was watched at all.
+            kick=None
+
+        growth_nd=float(growth_time/TS)
+        maxstep_nd=growth_nd/5
+        previous=numpy.array(self.problem.get_current_dofs()[0])
+        travelled=kick
+        stalled=0
+        relaxed=False
+        reason="ran the full {:g} growth times".format(self.transient_growth_times)
+        for interval in range(1,int(self.transient_growth_times)+1):
+            try:
+                self.problem.run(interval*growth_nd*TS,startstep=dt,maxstep=maxstep_nd*TS,
+                                 temporal_error=1,outstep=False,do_not_set_IC=True)
+            except Exception as e:
+                # There is not always somewhere else to go: perturbed the other way, a fold's own
+                # normal form u' = -u^2 runs off to infinity in finite time, and what comes back is the
+                # time stepper failing rather than a solution. Since this is now what the default action
+                # does at a fold, it has to report that and put the problem back, not throw.
+                self.log("The transient did not reach anything: "+str(e).split("\n")[0])
+                self.log("The solution ran away after {:.3g} growth times. Nothing was recorded; back "
+                         "at the point it started from.".format(
+                             self.problem.get_current_time(as_float=True,dimensional=False)/growth_nd))
+                self.load_pt(cp)
+                self._changed()
+                return False
+            dt=None  # carry on with the step the adaptive run worked its way up to
+            now=numpy.array(self.problem.get_current_dofs()[0])
+            moved=float(numpy.linalg.norm(now-previous))
+            previous=now
+            if self._abort_requested:
+                self._abort_requested=False
+                reason="aborted after {:d} growth times".format(interval)
+                break
+            if kick is None:
+                continue
+            before,travelled=travelled,float(numpy.linalg.norm(now-on_branch))
+            if moved<self.transient_settle_tolerance*max(travelled,kick):
+                reason=("came back to the branch it was told to leave after {:d} growth times"
+                        if travelled<kick else "settled after {:d} growth times").format(interval)
+                break
+            # The distance is measured against where the growth of an undisturbed mode would put it,
+            # NOT against a fixed multiple of the perturbation: perturb_by_eigenfunction scales the kick
+            # to a residual, and on a small problem that can already be most of the way to the new
+            # state, so "has it travelled 100 kicks yet" is a question that is never answered yes.
+            if before>0 and travelled<self.transient_stall_growth*before:
+                stalled+=1
+            else:
+                stalled=0
+            # Two intervals, not one: on an oscillatory mode the distance stands still twice per period
+            # while the mode is perfectly healthy, and one quiet interval would let dt go at the worst
+            # possible moment.
+            if stalled>=2:
+                if not relaxed:
+                    relaxed=True
+                    self.log("The departure has gone nonlinear after {:d} growth times; the time step "
+                             "no longer has to resolve the mode".format(interval))
+                # Never past the monitoring interval itself, or the distance would stop being sampled.
+                maxstep_nd=min(growth_nd,maxstep_nd*self.transient_relax_factor)
         self.problem.set_current_time(0)
-        self.problem.solve(max_newton_iterations=20)
-        self.problem.solve_eigenproblem(self.neigen,self.shift)
+        try:
+            self.problem.solve(max_newton_iterations=20)
+            self.problem.solve_eigenproblem(self.neigen,self.shift)
+        except Exception as e:
+            # Where the transient stopped is not always a steady state - a limit cycle is the ordinary
+            # case, and the Newton solve from a point on it need not converge to anything.
+            self.log("The transient arrived somewhere, but no steady state could be solved for there: "
+                     +str(e).split("\n")[0])
+            self.log("Back at the point it started from; try leaving with a different mode, or follow "
+                     "the orbit in time instead.")
+            self.load_pt(cp)
+            self._changed()
+            return False
         self._new_branch()
         self._tangs={}
         self._add_current_state()
         self._update_tangents()
         self._mode="al"
-        self.log("Integrated",endtime,"({:g} growth times of the mode)".format(self.transient_growth_times))
+        self.log("Transient leaving "+reason+" (one growth time is "+str(growth_time)+")")
+        return True
 
 
     def reorder_branch_upon_point_insertion(self,branch:BifurcationGUISolutionBranch,newp:BifurcationGUISolutionPoint | None):
@@ -2128,6 +2400,17 @@ class BifurcationController:
         quick=self.quick_mode and not locus
         self._status("FOLLOWING THE BIFURCATION" if locus else
                      ("QUICK STEPPING (no eigensolve)" if quick else "ARCLENGTH STEPPING"))
+        # A step from an exact fold has no tangent to start from and cannot compute one there; see
+        # _prime_fold_continuation_tangent. Only a fold: at a branch point or a Hopf the ordinary
+        # restart works and continues the branch we came in on, which is a step worth having.
+        if (not locus and origin.bifurcation_info is not None
+                and origin.bifurcation_info.get("type")=="fold"
+                and len(self.problem.get_arclength_dof_derivative_vector())==0):
+            if not self._prime_fold_continuation_tangent():
+                raise RuntimeError(
+                    "Cannot continue from this fold: it needs the null eigenvector to step along, and "
+                    "none is available here (a point loaded from a diagram carries no eigenvectors). "
+                    "Solve the eigenproblem at this point first, or leave the branch transiently.")
         theta_before=self.problem.get_arc_length_theta_sqr()
         dparam_ds_before=self.problem.get_arc_length_parameter_derivative()
         ds=self.problem.arclength_continuation(self.get_bifurcation_parameter(),ds)
@@ -2497,10 +2780,44 @@ class BifurcationController:
         self.problem.deactivate_bifurcation_tracking()
         self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point())
 
+    #: Solve the eigenproblem once when a bifurcation whose classification was READ BACK from a saved
+    #: diagram is loaded, to recover the null vector that state.json does not store - which is what its
+    #: arrows and its branch switching are built from. Off means a reloaded bifurcation keeps its label
+    #: and its type but shows no arrows until something else solves an eigenproblem there.
+    recover_restored_normal_forms=True
+
+    def leave_bifurcation(self)->bool:
+        """Take the way off the bifurcation we are sitting on that its TYPE offers.
+
+        A transcritical or a pitchfork has a second steady branch through it, so the answer is a branch
+        switch. A fold and a Hopf do not: a fold turns the one branch around and a Hopf sheds a periodic
+        orbit, so nothing steady leaves them and the answer is to leave transiently and see where the
+        solution ends up. Asking for a branch switch at a fold used to be the only offer, and it could
+        only ever decline.
+
+        Continuing the branch itself is unaffected and stays on ``step``: past a branch point or a Hopf
+        that is an ordinary step, and around a fold it is the null-vector restart.
+        """
+        cp=self._get_current_point()
+        if cp.bifurcation_info is None:
+            # Same reasoning as in branch_switch: the problem is sitting at the bifurcation, which is
+            # all the normal form needs, so it is cheaper to classify here than to send the user away.
+            self.log("This bifurcation was not classified; computing its normal form now")
+            cp.bifurcation_info=self._classify_current_point()
+        btype=cp.bifurcation_info.get("type") if cp.bifurcation_info is not None else None
+        if btype in ("transcritical","pitchfork"):
+            return bool(self.branch_switch())
+        if btype in ("fold","hopf"):
+            self.log("A {:s} has no second steady branch, so this leaves it transiently".format(str(btype)))
+            return bool(self.transient_leave_branch())
+        self.log("The type of this bifurcation could not be determined, so there is no way off it to "
+                 "choose. Try 'Switch branch' or leaving the branch transiently by hand.")
+        return False
+
     def locate_bifurcation_or_switch(self,eigenindex:int | None=None):
-        """What ``b`` has always done: at a bifurcation, switch branch; otherwise, go find one."""
+        """What ``b`` has always done: at a bifurcation, leave it; otherwise, go find one."""
         if self.current_point is not None and self.current_point.eig_value_Re==0:
-            self.branch_switch()
+            self.leave_bifurcation()
         else:
             try:
                 self.locate_bifurcation(eigenindex=eigenindex)

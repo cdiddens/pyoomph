@@ -6202,7 +6202,7 @@ class Problem(_pyoomph.Problem):
         """Normal form of the bifurcation the problem is currently sitting at.
 
         The returned dict names the bifurcation in ``["type"]`` - ``"fold"``, ``"transcritical"``,
-        ``"pitchfork"`` or ``"Hopf"`` - and, for the ones that have a second branch, carries the
+        ``"pitchfork"`` or ``"hopf"`` - and, for the ones that have a second branch, carries the
         predictors :py:meth:`switch_branch` uses to step onto it.
 
         Call it at a located bifurcation, i.e. after

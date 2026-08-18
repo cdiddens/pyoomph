@@ -11026,7 +11026,16 @@ namespace oomph
         // Perform any actions...
         actions_after_parameter_increase(parameter_pt);
 
-        Ds_current = (*parameter_pt - Parameter_current) / Parameter_derivative;
+        //FOR PYOOMPH: guarded against Parameter_derivative == 0, which is the tangent AT a fold
+        // (the parameter turns around, so it does not move along the branch there). The line exists to
+        // re-derive the step actually taken in case actions_after_parameter_increase clamped the
+        // parameter; with dparameter/ds == 0 the parameter was never asked to move, so there is
+        // nothing to re-derive and Ds_current stands. Unguarded it computed 0/0, and the NaN went
+        // straight into the predicted dofs below and out into the Jacobian.
+        if (Parameter_derivative != 0.0)
+        {
+          Ds_current = (*parameter_pt - Parameter_current) / Parameter_derivative;
+        }
 
         // Loop over the (local) variables and set their initial values
         for (unsigned long l = 0; l < ndof_local; l++)

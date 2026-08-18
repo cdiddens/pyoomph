@@ -2385,29 +2385,53 @@ class NormalFormCalculator:
                     print("With sign",psign)
                     res["type"]="pitchfork"
                     res["psign"]=psign
-                    res["zeta"]=zeta
-                    res["param_predictor"]=lambda dp : psign*abs(dp)
-                    # The SIGN of dp picks which of the two symmetric branches is predicted: they sit at
-                    # +-zeta and share the same parameter side, so without this both of switch_branch's
-                    # two directions asked for the very same point and one of the two branches could
-                    # never be reached.
-                    res["perturbation_predictor"]=lambda dp: numpy.sign(dp)*zeta*numpy.sqrt(abs(6*b1/b3*dp))
-                    
                 else:
                     print("Likely transcritical")
                     res["type"]="transcritical"
                     res["psign"]="arbitrary" # Can be chosen arbitrarily
-                    res["zeta"]=zeta
-                    res["param_predictor"]=lambda dp : dp
-                    res["perturbation_predictor"]=lambda dp: -zeta*2*b1/b2*dp
             else:
                 print("Likely fold")
                 res["type"]="fold"
                 res["psign"]=0 # Parameter may not change
-                res["zeta"]=zeta
-                res["param_predictor"]=lambda dp : 0
-                res["perturbation_predictor"]=lambda dp: zeta*dp
+            res["zeta"]=zeta
+            attach_normal_form_predictors(res)
             return res
+
+
+def attach_normal_form_predictors(nf:dict[str,Any])->dict[str,Any]:
+      """Fill in a real normal form's predictors from its coefficients and its null vector.
+
+      Kept apart from the classification that computes those coefficients so that there is one copy of
+      each formula rather than two: a normal form read back from a saved bifurcation diagram keeps the
+      coefficients, which are a handful of numbers, but not zeta, which is the size of the problem. Give
+      it a freshly computed zeta and this makes it predict exactly what the original did - provided zeta
+      is normalised the same way, to unit length, because b2 and b3 scale with it.
+
+      Hopf is not among the types handled here. Its predictor is parameterised by the phase omega*t as
+      well and returns an absolute state rather than a perturbation, and nothing reads it back; a
+      restored Hopf therefore carries its coefficients and its zeta, and no predictors.
+      """
+      zeta=nf.get("zeta")
+      if zeta is None:
+            return nf
+      t=nf.get("type")
+      if t=="pitchfork":
+            b1,b3=nf["b1"],nf["b3"]
+            psign=nf["psign"]
+            nf["param_predictor"]=lambda dp : psign*abs(dp)
+            # The SIGN of dp picks which of the two symmetric branches is predicted: they sit at
+            # +-zeta and share the same parameter side, so without this both of switch_branch's
+            # two directions asked for the very same point and one of the two branches could
+            # never be reached.
+            nf["perturbation_predictor"]=lambda dp: numpy.sign(dp)*zeta*numpy.sqrt(abs(6*b1/b3*dp))
+      elif t=="transcritical":
+            b1,b2=nf["b1"],nf["b2"]
+            nf["param_predictor"]=lambda dp : dp
+            nf["perturbation_predictor"]=lambda dp: -zeta*2*b1/b2*dp
+      elif t=="fold":
+            nf["param_predictor"]=lambda dp : 0
+            nf["perturbation_predictor"]=lambda dp: zeta*dp
+      return nf
 
 
 from ..typings import _set_public_api

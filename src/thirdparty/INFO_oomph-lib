@@ -657,3 +657,19 @@ factorise_serial(), which does not clear, and always printed the right number.
 The row count is now taken before factorise() and printed from that.
 Upstream equivalent: none yet; this is an upstream oomph-lib bug, not a pyoomph-specific one, but
 upstream only hits it on the SuperLU_DIST path.
+
+problem.cc (Changed on 18th August 2026, Problem::arc_length_step_solve_helper, predictor stage):
+"Ds_current = (*parameter_pt - Parameter_current)/Parameter_derivative;" divided by the parameter
+derivative without checking it. That line re-derives the arclength step actually taken in case the
+user's actions_after_parameter_increase clamped the parameter, so it is a no-op unless something
+moved the parameter somewhere else. A tangent with dparameter/ds exactly 0 is not a pathology, it is
+the tangent AT a fold - the parameter turns around there, so it does not move along the branch - and
+pyoomph now primes exactly that tangent to continue around a located fold from the bifurcation GUI
+(BifurcationController._prime_fold_continuation_tangent). Unguarded the line computed 0/0, the NaN
+went into the predicted dofs on the next lines and came back out of the linear solver as
+"array must not contain infs or NaNs".
+Now skipped when Parameter_derivative is 0: the parameter was never asked to move, so there is
+nothing to re-derive and Ds_current keeps the value it was given.
+Upstream equivalent: none; upstream never prescribes the tangent by hand, so it cannot reach a
+Parameter_derivative of exactly 0 (calculate_continuation_derivatives_helper builds it as
+1/sqrt(1+theta^2*chi), which is always positive).
