@@ -704,6 +704,51 @@ elif [ "${DOCS_ENABLED:-1}" = "0" ]; then
     DOCS_SKIPPED="DOCS_ENABLED=0 switches the docs step off"
 else
     DOCS_VENV="${NIGHTLY_TMPDIR:-${TMPDIR:-/tmp}}/docs-venv"
+
+    # The compiled half of the package, staged into the checkout for the duration of the build.
+    #
+    # PYTHONPATH=$REPO_DIR is enough to import the branch only if the checkout is self-contained,
+    # and with the editable install this machine uses it is not: scikit-build-core leaves the pure
+    # Python in the checkout but puts _pyoomph_core.abi3.so in site-packages, and joins the two with
+    # a .pth plus a finder that injects both directories into pyoomph.__path__. A deliberately empty
+    # venv has neither, so "import pyoomph" got as far as expressions/__init__.py and died on
+    # "No module named pyoomph._pyoomph_core" - before sphinx ran at all. Giving the venv
+    # --system-site-packages would fix the import and destroy the point of the step, which is to
+    # prove docs/requirements.txt sufficient on its own; copying the one extension module in keeps
+    # the venv otherwise untouched.
+    #
+    # Skipped when the .so already lives in the checkout (an in-tree build), so nothing is
+    # overwritten and nothing that was already there is removed. *.so is in .gitignore, so the
+    # staged copy cannot make the next run abort on a dirty checkout, and the trap below removes it
+    # even when the step fails or times out - a stale .so left behind would shadow later rebuilds.
+    DOCS_CORE_SO=""
+    DOCS_CORE_STAGED=""
+    _docs_core="$("$PYTHON" -c 'import os,pyoomph._pyoomph_core as c
+print(os.path.realpath(c.__file__))' 2>/dev/null)"
+    _docs_repo_real="$(cd "$REPO_DIR" 2>/dev/null && pwd -P)"
+    if [ -n "$_docs_core" ] && [ -e "$_docs_core" ] && [ -n "$_docs_repo_real" ]; then
+        case "$_docs_core" in
+            "$_docs_repo_real"/*) : ;;   # already in the checkout: nothing to stage
+            *)
+                if [ -e "$REPO_DIR/pyoomph/$(basename "$_docs_core")" ]; then
+                    note "docs: $REPO_DIR/pyoomph/$(basename "$_docs_core") exists already -- not staging over it"
+                else
+                    DOCS_CORE_SO="$_docs_core"
+                    DOCS_CORE_STAGED="$REPO_DIR/pyoomph/$(basename "$_docs_core")"
+                fi
+                ;;
+        esac
+    fi
+    _docs_stage_cmd=""
+    if [ -n "$DOCS_CORE_SO" ]; then
+        _docs_stage_cmd="
+trap 'rm -f $(printf '%q' "$DOCS_CORE_STAGED")' EXIT
+echo '=== staging the compiled extension into the checkout ==='
+cp $(printf '%q' "$DOCS_CORE_SO") $(printf '%q' "$DOCS_CORE_STAGED") || exit 1"
+    else
+        DOCS_CORE_MISSING=1
+    fi
+
     _docs_pdf_cmd=""
     if [ "${DOCS_PDF:-1}" != "0" ]; then
         if command -v latexmk >/dev/null 2>&1 && command -v xelatex >/dev/null 2>&1 &&
@@ -740,7 +785,7 @@ export LC_ALL=C PYTHONUTF8=1
 # 'fresh environment' untrue: here it put the PETSc build's petsc4py and slepc4py in front of
 # everything, which pip duly resolved against ('slepc4py requires numpy<2'). Clear it, and set it
 # to the checkout alone once the installing is done.
-unset PYTHONPATH
+unset PYTHONPATH$_docs_stage_cmd
 rm -rf $(printf '%q' "$DOCS_VENV") || exit 1
 $(printf '%q' "$PYTHON") -m venv $(printf '%q' "$DOCS_VENV") || exit 1
 echo '=== pip install -r docs/requirements.txt ==='
