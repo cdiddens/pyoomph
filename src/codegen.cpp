@@ -290,6 +290,18 @@ namespace pyoomph
 	// reproduces the behaviour that existed before this flag.
 	bool expand_element_size_in_expansion_modes = false;
 	std::set<ShapeExpansion> __all_Hessian_shapeexps;                 // Accumulates all shape expansions encountered while building a Hessian contribution
+	// The same, but WITHOUT the "derived" filter the set above applies, and used for one purpose only:
+	// deciding which shape-function families the Hessian body needs at runtime (mark_shapes_required).
+	// A derived shape expansion is the bare basis function phi_i of a Jacobian/Hessian COLUMN; it must
+	// not enter the set above, because that one drives the emission of interpolated_* variables and a
+	// derived expansion carries the same variable name as its undifferentiated twin (see
+	// ShapeExpansion::get_spatial_interpolation_name, which ignores is_derived) - two entries then
+	// produce two identical `double intrp_..._u=0.0;` declarations, i.e. C that does not compile.
+	// But the emitted Hessian entry DOES dereference phi_i / dphi_i/dx, so the flags have to include
+	// them: shapes_required_Hessian used to carry psi alone for a lid-driven cavity whose
+	// HessianVectorProduct0 reads dx_shapes, which only stayed harmless as long as the runtime fill was
+	// all-or-nothing per space (any flag pulled in all four families).
+	std::set<ShapeExpansion> __all_Hessian_shapeexps_for_shapeflags;
 	std::set<TestFunction> __all_Hessian_testfuncs;                   // Accumulates all test functions encountered while building a Hessian contribution
 	std::set<FiniteElementField *,FiniteElementFieldPtrLess> __all_Hessian_indices_required;    // Fields that need a Hessian index (i.e. contribute to the outer derivative direction)
 	bool __in_hessian = false;                                        // True while performing second-order (Hessian) differentiation
@@ -3008,14 +3020,19 @@ namespace pyoomph
 					
 					for (auto sexpa : shapeexps)
 					{
+						// The derived ones are excluded HERE only (they would collide as interpolation
+						// variables), but they are still read by the emitted code - see
+						// __all_Hessian_shapeexps_for_shapeflags.
 						if ((!sexpa.is_derived && !sexpa.is_derived_other_index) || sexpa.nodal_coord_dir != -1 || sexpa.nodal_coord_dir2 != -1)
 							__all_Hessian_shapeexps.insert(sexpa);
+						__all_Hessian_shapeexps_for_shapeflags.insert(sexpa);
 						__all_Hessian_indices_required.insert(sexpa.field);
 					}
 					for (auto sexpa : shapeexpsM)
 					{
 						if ((!sexpa.is_derived && !sexpa.is_derived_other_index) || sexpa.nodal_coord_dir != -1 || sexpa.nodal_coord_dir2 != -1)
 							__all_Hessian_shapeexps.insert(sexpa);
+						__all_Hessian_shapeexps_for_shapeflags.insert(sexpa);
 						__all_Hessian_indices_required.insert(sexpa.field);
 					}
 					//		  		   __all_Hessian_shapeexps.insert(shapeexps.begin(),shapeexps.end());
@@ -5674,6 +5691,7 @@ namespace pyoomph
 		std::ostringstream osm; // Main contribution
 
 		__all_Hessian_shapeexps.clear();
+		__all_Hessian_shapeexps_for_shapeflags.clear();
 		__all_Hessian_testfuncs.clear();
 		__all_Hessian_indices_required.clear();
 		if (__SE_to_struct_hessian)
@@ -5718,6 +5736,7 @@ namespace pyoomph
 			{
 				if (!sh.is_derived && !sh.is_derived_other_index)
 					__all_Hessian_shapeexps.insert(sh);
+				__all_Hessian_shapeexps_for_shapeflags.insert(sh);
 				__all_Hessian_indices_required.insert(sh.field);
 			}
 		}
@@ -5793,6 +5812,13 @@ namespace pyoomph
 			sp_for_merge.is_derived_other_index = false;
 			sp_for_merge.expansion_mode = 0;
 			merged_shapeexps.insert(sp_for_merge);
+		}
+		// The basis functions of the Jacobian COLUMNS (phi_i, dphi_i/dx, ... at l_shape/l_shape2), which
+		// all_shapeexps deliberately does not contain - see __all_Hessian_shapeexps_for_shapeflags. They
+		// are only marked, never merged into the interpolation sets.
+		for (auto &sp : __all_Hessian_shapeexps_for_shapeflags)
+		{
+			this->mark_shapes_required("Hessian[" + std::to_string(residual_index) + "]", sp.field->get_space(), sp.basis);
 		}
 		for (auto &tf : all_testfuncs)
 		{
