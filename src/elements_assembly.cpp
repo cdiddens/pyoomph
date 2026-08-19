@@ -24,6 +24,10 @@ The main author may be contacted at c.diddens@utwente.nl
 // the multi-assembly driver, the finite-difference fallbacks for nodal and Lagrangian positions,
 // and the analytic-vs-FD debugging comparisons.
 
+#include <array>
+#include <map>
+#include <set>
+
 #include "macroelements.hpp"
 #include "elements.hpp"
 #include "exception.hpp"
@@ -65,6 +69,62 @@ namespace pyoomph
 		}
 	} __nohang_dispatch_report;
 
+	// PYOOMPH_REPORT_EXT_DATA builds a per-element-code histogram of (nexternal_data, external dofs,
+	// ndof), sampled once per element at its first residual/Jacobian assembly. External data attached
+	// per element CODE from merged_required_shapes (the OR over every contribution, including integral
+	// and output expressions) inflates ndof, and the dense element block is ndof^2 - so this is what
+	// says whether that inflation is worth attacking.
+	static const bool __report_ext_data = getenv("PYOOMPH_REPORT_EXT_DATA") != NULL;
+	static std::map<std::string, std::map<std::array<unsigned, 3>, unsigned long>> __ext_data_hist;
+	static std::set<const void *> __ext_data_seen;
+	static struct __ExtDataReport
+	{
+		~__ExtDataReport()
+		{
+			if (!__report_ext_data)
+				return;
+			if (__ext_data_hist.empty())
+			{
+				std::cout << "PYOOMPH_REPORT_EXT_DATA: no element was ever assembled - nothing was sampled" << std::endl;
+				return;
+			}
+			for (const auto &c : __ext_data_hist)
+			{
+				unsigned long nel = 0, sum_ndof = 0, sum_extdof = 0;
+				for (const auto &e : c.second)
+				{
+					nel += e.second;
+					sum_ndof += (unsigned long)e.first[2] * e.second;
+					sum_extdof += (unsigned long)e.first[1] * e.second;
+				}
+				std::cout << "PYOOMPH_REPORT_EXT_DATA: " << c.first << ": " << nel << " elements, "
+						  << sum_extdof << " of " << sum_ndof << " local dofs come from external data ("
+						  << (sum_ndof ? 100.0 * sum_extdof / sum_ndof : 0.0) << "%)" << std::endl;
+				for (const auto &e : c.second)
+					std::cout << "    nexternal_data=" << e.first[0] << " external_dofs=" << e.first[1]
+							  << " ndof=" << e.first[2] << " : " << e.second << " elements" << std::endl;
+			}
+		}
+	} __ext_data_report;
+
+	void BulkElementBase::__sample_ext_data_stats()
+	{
+		if (!__report_ext_data)
+			return;
+		if (!__ext_data_seen.insert((const void *)this).second)
+			return;
+		unsigned next = this->nexternal_data(), extdofs = 0;
+		for (unsigned ed = 0; ed < next; ed++)
+		{
+			oomph::Data *d = this->external_data_pt(ed);
+			for (unsigned i = 0; i < d->nvalue(); i++)
+				if (this->external_local_eqn(ed, i) >= 0)
+					extdofs++;
+		}
+		__ext_data_hist[std::string(codeinst->get_code()->get_file_name())]
+					   [{next, extdofs, (unsigned)this->ndof()}]++;
+	}
+
 	// Whether this element gets the specialised, hanging-node-free entry point. has_hang is what
 	// fill_hang_info_with_equations reported, i.e. "some dof of this element really hangs, or an
 	// additional dof constraint reduced it".
@@ -77,6 +137,20 @@ namespace pyoomph
 			else __hang_dispatch_count++;
 		}
 		return nohang;
+	}
+
+	// Whether contribution `c` really has a SEPARATE NoHang entry point. When the code generator found
+	// no use for pyoomph_hang_on in the body (codegen.cpp, hang_parameter_was_used) it emits only one
+	// routine and the function table aliases both slots - the "NoHang" call is then the ordinary body,
+	// which still loads the hang buffers. Stage 3a's skip is keyed on this pointer, i.e. on the very
+	// thing that selects the entry point, so the two cannot drift apart.
+	static inline bool __has_separate_nohang(const JITFuncSpec_Table_FiniteElement_t *ft, int c, bool steady)
+	{
+		JITFuncSpec_ResidualAndJacobian_FiniteElement *const hang_tab = (steady ? ft->ResidualAndJacobianSteady : ft->ResidualAndJacobian);
+		JITFuncSpec_ResidualAndJacobian_FiniteElement *const nohang_tab = (steady ? ft->ResidualAndJacobianSteady_NoHang : ft->ResidualAndJacobian_NoHang);
+		if (!hang_tab || !nohang_tab)
+			return false;
+		return nohang_tab[c] && nohang_tab[c] != hang_tab[c];
 	}
 
 	// Multi-assembly: performs several residual/Jacobian/mass-matrix/Hessian-vector-product/
@@ -168,12 +242,65 @@ namespace pyoomph
 		}
 
 		// This is the only benefit of this approach: We only have to do this once!
-		// What the fill just reported, rather than the "assume always hanging" it used to be overwritten
-		// with: elements in which nothing hangs take the specialised entry points below.
-		const bool has_hang = this->fill_hang_info_with_equations(*required_shapes, this->shape_info, NULL);
+		// Elements in which nothing hangs take the specialised entry points below. The answer comes
+		// from the cheap predicate rather than from the fill's return value, because Stage 3a needs it
+		// BEFORE the fill in order to skip it.
+		this->__sample_ext_data_stats();
+		const bool has_hang = this->hang_fill_would_report_hang(*required_shapes);
+		const bool use_nohang = __use_nohang_entry(has_hang);
+		// Stage 3a. The fill is only skippable if EVERY function this pass is about to call is a
+		// separately compiled NoHang body: those have pyoomph_hang_on folded to 0 and provably never
+		// load a hang buffer. Parameter derivatives and Hessian-vector products have no NoHang twin at
+		// all (only ResidualAndJacobian[Steady] do, see jitbridge.h), so a pass carrying one of those
+		// keeps the fill unconditional.
+		bool may_skip_hang_fill = use_nohang && !__disable_hang_fill_cache;
+		if (may_skip_hang_fill)
+		{
+			int steady0 = -1; // lazily resolved: the timestepper lookup below assumes nodes or internal data
+			for (auto &inf : info)
+			{
+				if (inf.contribution < 0)
+					continue;
+				if (inf.dparams.size() || inf.hessians.size())
+				{
+					may_skip_hang_fill = false;
+					break;
+				}
+				if (inf.residuals || inf.jacobian || inf.mass_matrix)
+				{
+					if (steady0 < 0)
+					{
+						const oomph::TimeStepper *ts0 = (this->nnode() ? this->node_pt(0)->time_stepper_pt() : this->internal_data_pt(0)->time_stepper_pt());
+						steady0 = (ts0->is_steady() ? 1 : 0);
+					}
+					if (!__has_separate_nohang(functable, inf.contribution, steady0 == 1))
+					{
+						may_skip_hang_fill = false;
+						break;
+					}
+				}
+			}
+		}
+		if (may_skip_hang_fill)
+		{
+			if (__paranoid_hang_fill_cache)
+			{
+				const bool real = this->fill_hang_info_with_equations(*required_shapes, this->shape_info, NULL);
+				if (real)
+					throw_runtime_error("PYOOMPH_PARANOID_HANG_FILL_CACHE: the hang predicate said 'nothing hangs' but fill_hang_info_with_equations reported a hang (multi-assembly)");
+				this->poison_hang_info(this->shape_info);
+			}
+			if (__report_hang_fill_cache)
+				__hang_fill_cache_count(HANGCACHE_FILL_SKIPPED);
+		}
+		else
+		{
+			this->fill_hang_info_with_equations(*required_shapes, this->shape_info, NULL);
+			if (__report_hang_fill_cache)
+				__hang_fill_cache_count(HANGCACHE_FILL_RUN);
+		}
 		this->interpolate_hang_values();
 		prepare_shape_buffer_for_integration(*required_shapes, shapeflag);
-		const bool use_nohang = __use_nohang_entry(has_hang);
       bool shared_multi_assemble=functable->use_shared_shape_buffer_during_multi_assemble;
       functable->during_shared_multi_assembling=shared_multi_assemble;
       unsigned n_int_pt=(shared_multi_assemble ? this->shape_info->n_int_pt : 1);
@@ -347,6 +474,8 @@ namespace pyoomph
 			return; // Nothing to do -> Element does not depend on this parameter
 		if (!functable->ParameterDerivative[functable->current_res_jac][paramindex])
 			return;
+		// Unconditional, unlike the two residual/Jacobian paths: ParameterDerivative has no _NoHang
+		// twin in the function table, so the body that runs here always loads the hang buffers.
 		this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
 		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
 		prepare_shape_buffer_for_integration(functable->shapes_required_ResJac[functable->current_res_jac], flag);
@@ -408,15 +537,15 @@ namespace pyoomph
 
 		if (!functable->ResidualAndJacobian[functable->current_res_jac])
 			return;
+		this->__sample_ext_data_stats();
 		prepare_shape_buffer_for_integration(functable->shapes_required_ResJac[functable->current_res_jac], flag);
 		shape_info->jacobian_size = jacobian.nrow();
 		shape_info->mass_matrix_size = mass_matrix.nrow();
-		// The fill's return value is the real answer ("some dof of this element hangs, or a dof
-		// constraint reduced it") and is now used: it used to be overwritten with an unconditional true.
-		const bool has_hang = this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
+		// The predicate is the real answer ("some dof of this element hangs, a dof constraint reduced
+		// it, or an attached element's equations are remapped through the same buffers"); it used to be
+		// the fill's return value, but Stage 3a needs the answer BEFORE the fill in order to skip it.
+		const bool has_hang = this->hang_fill_would_report_hang(functable->shapes_required_ResJac[functable->current_res_jac]);
 		const bool use_nohang = __use_nohang_entry(has_hang);
-		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
-		// std::cout << "RESIDUAL LENGTH  " << residuals.size() << "  " << this->nexternal_data() <<  std::endl;
 
 		JITFuncSpec_ResidualAndJacobian_FiniteElement func;
 		const oomph::TimeStepper *tstepper = (this->nnode() ? this->node_pt(0)->time_stepper_pt() : this->internal_data_pt(0)->time_stepper_pt());
@@ -430,6 +559,31 @@ namespace pyoomph
 			func = (use_nohang ? functable->ResidualAndJacobian_NoHang[functable->current_res_jac]
 							   : functable->ResidualAndJacobian[functable->current_res_jac]);
 		}
+		// Stage 3a: derived from the very pointer selected just above, so the skip and the dispatch
+		// cannot diverge. A separately compiled _NoHang body has pyoomph_hang_on folded to 0 and
+		// therefore never loads a hang buffer (jitbridge.h, "Hanging macros"); where codegen emitted no
+		// such twin the two table slots alias and the fill stays.
+		if (use_nohang && !__disable_hang_fill_cache &&
+			__has_separate_nohang(functable, functable->current_res_jac, tstepper->is_steady()))
+		{
+			if (__paranoid_hang_fill_cache)
+			{
+				const bool real = this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
+				if (real)
+					throw_runtime_error("PYOOMPH_PARANOID_HANG_FILL_CACHE: the hang predicate said 'nothing hangs' but fill_hang_info_with_equations reported a hang");
+				this->poison_hang_info(this->shape_info);
+			}
+			if (__report_hang_fill_cache)
+				__hang_fill_cache_count(HANGCACHE_FILL_SKIPPED);
+		}
+		else
+		{
+			this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
+			if (__report_hang_fill_cache)
+				__hang_fill_cache_count(HANGCACHE_FILL_RUN);
+		}
+		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
+		// std::cout << "RESIDUAL LENGTH  " << residuals.size() << "  " << this->nexternal_data() <<  std::endl;
 
 		if (flag)
 		{
@@ -633,6 +787,7 @@ namespace pyoomph
       mbuffer.initialise(0.0);      
 		prepare_shape_buffer_for_integration(functable->shapes_required_Hessian[functable->current_res_jac], 3);
 		shape_info->jacobian_size = this->ndof();
+		// Unconditional: HessianVectorProduct has no _NoHang twin either.
 		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[functable->current_res_jac], this->shape_info, NULL);
 		this->interpolate_hang_values(); // This should be done elsewhere
 		JITFuncSpec_HessianVectorProduct_FiniteElement func = functable->HessianVectorProduct[functable->current_res_jac];
@@ -858,9 +1013,9 @@ namespace pyoomph
 		prepare_shape_buffer_for_integration(functable->shapes_required_Hessian[functable->current_res_jac], 3);
 		shape_info->jacobian_size = n_var; // Storing the number of dofs now
 										   //& shape_info->mass_matrix_size=n_vec; // Won't be used, but storing the numbers of vects
-		// bool has_hang =
+		// Unconditional: HessianVectorProduct has no _NoHang twin, so this body always reads the hang
+		// buffers and Stage 3a's skip does not apply here.
 		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[functable->current_res_jac], this->shape_info, NULL);
-		// bool has_hang = true;				 // ASSUME ALWAYS HANGING!
 		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
 		JITFuncSpec_HessianVectorProduct_FiniteElement func = functable->HessianVectorProduct[functable->current_res_jac];
 
@@ -881,6 +1036,11 @@ namespace pyoomph
 	{
 		const unsigned n_node = this->nnode();
 		if (n_node == 0) return;
+		// Every perturbation below re-enters get_residuals with a DIFFERENT dof vector, so the hanging
+		// values genuinely change inside this one enclosing assembly sweep: the pass dedupe has to be
+		// off for the whole loop (and a fresh pass opened afterwards, since the loop leaves the last
+		// perturbed interpolation in the nodes).
+		HangInterpPassSuspension __no_pass;
 
 		this->update_before_nodal_fd();
 
@@ -957,6 +1117,9 @@ namespace pyoomph
 	// detailed dump of the element's dof/equation-number bookkeeping.
 	void BulkElementBase::debug_analytical_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, double diff_eps)
 	{
+		// oomph-lib's generic FD path below perturbs dofs and re-enters get_residuals, exactly like our own
+		// FD loops do.
+		HangInterpPassSuspension __no_pass;
 		oomph::Vector<double> fd_residuals(residuals.size(), 0.0);
 //		std::cout << "DB NDOF " << this->ndof() << std::endl  << std::flush;
 //		std::cout << "   J" << jacobian.nrow() << " x " << jacobian.ncol() << std::endl << std::flush;
@@ -1126,6 +1289,8 @@ namespace pyoomph
 	// afterwards.
 	void BulkElementBase::fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
 	{
+		HangInterpPassSuspension __no_pass; // see fill_in_jacobian_from_nodal_by_fd
+
 		const unsigned n_node = this->nnode();
 		if (n_node == 0)
 		{
@@ -1302,6 +1467,8 @@ namespace pyoomph
 		   {
 		    throw_runtime_error("The Jacobian of the residual "+std::string(functable->res_jac_names[functable->current_res_jac])+" cannot be calculated by finite differences, since the residual is not calculated at all.");
 		   }
+			// oomph-lib's own FD Jacobian: same reason as in fill_in_jacobian_from_nodal_by_fd.
+			HangInterpPassSuspension __no_pass;
 			this->RefineableSolidElement::fill_in_contribution_to_jacobian(residuals, jacobian);
 		}
 

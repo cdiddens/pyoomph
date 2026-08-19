@@ -35,6 +35,8 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #include <cstdlib>
 #include <cmath>
+#include <cstring>
+#include <limits>
 #include <sstream>
 #include <iostream>
 #include <map>
@@ -57,6 +59,33 @@ namespace pyoomph
 	// builds. Off by default and strictly read-only, so a build with it compiled in behaves exactly as
 	// before while the variable is unset.
 	static const bool __paranoid_ale_identity = getenv("PYOOMPH_PARANOID_ALE_IDENTITY") != NULL;
+
+	// PYOOMPH_POISON_UNREQUIRED, see the declaration in elements.hpp: fill every shape buffer family
+	// that the PASSED required-shapes struct does not ask for with signalling NaN. Same precedent and
+	// same discipline as PYOOMPH_PARANOID_ALE_IDENTITY above - off by default, and when on it only ever
+	// writes values nobody is supposed to read.
+	static const char *__poison_unrequired_mode = getenv("PYOOMPH_POISON_UNREQUIRED");
+	static const bool __poison_unrequired = __poison_unrequired_mode != NULL;
+	// PYOOMPH_POISON_UNREQUIRED=all poisons every family AFTER the fill, at the end of each
+	// integration point. That is the tool's own positive control: a poison that silently wrote
+	// nothing, or that wrote into buffers nobody reads, would report "clean" on every case just as
+	// loudly as a codebase with no under-requests. Poisoning required families BEFORE the fill proves
+	// nothing - the fill simply overwrites it, which is what a first attempt at this control did.
+	static const bool __poison_everything = __poison_unrequired && !strcmp(__poison_unrequired_mode, "all");
+	// Engagement counter, for the same reason: "0 entries poisoned" is not a clean bill of health.
+	static unsigned long __poison_written = 0;
+	static struct __PoisonReport
+	{
+		~__PoisonReport()
+		{
+			if (!__poison_unrequired)
+				return;
+			std::cout << "PYOOMPH_POISON_UNREQUIRED: " << __poison_written << " buffer entries poisoned";
+			if (!__poison_written)
+				std::cout << " - NOTHING was poisoned, so nothing was proven";
+			std::cout << std::endl;
+		}
+	} __poison_report;
 
 	// Counted and reported at exit, because a check that is never reached passes just as quietly as one
 	// that holds: a run that ends with "0 comparisons" has proven nothing.
@@ -527,6 +556,11 @@ namespace pyoomph
 		bool require_hessian = flag > 2;
 		bool require_dxdshape = (flag && functable->moving_nodes && (!functable->fd_position_jacobian)); //&& (required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_DL)			
 		bool require_dx_elemsize=require_dxdshape && (required.elemsize_Eulerian ||  required.elemsize_Eulerian_cartesian);
+		// The two families are separate flags on the generated code's side (elemsize_Eulerian vs
+		// elemsize_Eulerian_cartesian, chosen by the symbol's is_with_coordsys()), so a code asking only
+		// for the coordinate-system-weighted size must not also pay for the Cartesian sensitivities.
+		const bool need_eul_d = required.elemsize_Eulerian;
+		const bool need_cart_d = required.elemsize_Eulerian_cartesian;
 		if (require_dx_elemsize)
 		{
 		 // Fill the derivative buffer
@@ -534,16 +568,16 @@ namespace pyoomph
 		 {
 		  	for (unsigned int l=0;l<this->nnode();l++)
 		   {
-		    shape_info->elemsize_Cart_d_coords[i][l]=0.0;
-		    shape_info->elemsize_d_coords[i][l]=0.0;		    
+		    if (need_cart_d) shape_info->elemsize_Cart_d_coords[i][l]=0.0;
+		    if (need_eul_d) shape_info->elemsize_d_coords[i][l]=0.0;
 		    if (require_hessian)
 		    {
 				for (unsigned int j=0;j<this->nodal_dimension();j++)
 			 	{
 			  		for (unsigned int m=0;m<this->nnode();m++)
 					{
-		      		shape_info->elemsize_d2_coords[i][j][l][m]=0.0;
-  		      		shape_info->elemsize_Cart_d2_coords[i][j][l][m]=0.0;		    		    
+		      		if (need_eul_d) shape_info->elemsize_d2_coords[i][j][l][m]=0.0;
+  		      		if (need_cart_d) shape_info->elemsize_Cart_d2_coords[i][j][l][m]=0.0;
   		      	}
   		      }
   		    }
@@ -580,7 +614,7 @@ namespace pyoomph
 			 {
 			  	for (unsigned int l=0;l<this->nnode();l++)
 				{
-				 shape_info->elemsize_Cart_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l];
+				 if (need_cart_d) shape_info->elemsize_Cart_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l];
 				 if (required.elemsize_Eulerian)
 				 {
 				   shape_info->elemsize_d_coords[i][l]+=shape_info->int_pt_weights_d_coords[i][l]*J;				  
@@ -592,7 +626,7 @@ namespace pyoomph
 				 	{
 				  		for (unsigned int m=0;m<this->nnode();m++)
 						{
-	  		      		shape_info->elemsize_Cart_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m];		    		    
+	  		      		if (need_cart_d) shape_info->elemsize_Cart_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m];
 	  		      		if (required.elemsize_Eulerian)
 				         {
 					   		shape_info->elemsize_d2_coords[i][j][l][m]+=shape_info->int_pt_weights_d2_coords[i][j][l][m]*J;
@@ -956,9 +990,217 @@ namespace pyoomph
 						}
 	}
 
+	// PYOOMPH_DISABLE_SHAPE_FAMILY_SPLIT restores the pre-split behaviour - every family of a space
+	// that is needed at all gets filled - from ONE place, so that the whole stage can be A/B'd with a
+	// single binary (the PYOOMPH_DISABLE_NOHANG_DISPATCH pattern). The poison keys on the same helper,
+	// so it follows the lever automatically.
+	static const bool __disable_shape_family_split = getenv("PYOOMPH_DISABLE_SHAPE_FAMILY_SPLIT") != NULL;
+
+	static inline BulkElementBase::RequiredShapeFamilies __widen_if_lever(BulkElementBase::RequiredShapeFamilies f)
+	{
+		// d2x is deliberately NOT widened: before the split it was gated by the GLOBAL "does any space
+		// want second derivatives" flag, and everything the second-derivative formulas need from the
+		// geometry (Qibc, dM_dX, the second local derivatives of the mapping) is built under that same
+		// flag. Widening it per space therefore segfaults on the first static-mesh case tried, which is
+		// what the fill sites restore instead (see the space_d2x lines).
+		if (__disable_shape_family_split && f.any())
+			f.psi = f.dx = f.dX = true;
+		return f;
+	}
+
+	// See the declaration. Two things are folded in here that the three copies of the predicate this
+	// replaces disagreed about:
+	//  * dX_psi now counts on its OWN space, not only via the dominant-space clause. A non-dominant
+	//    space asked for nothing but Lagrangian (or local-coordinate) derivatives used to get NO fill
+	//    at all and the generated code would have read a stale buffer. No corpus instance exists - the
+	//    combination needs a Lagrangian-gradient term on a non-geometry space - but nothing prevented
+	//    one, and poison mode now guards it.
+	//  * the old fill-side variant carried an extra "|| (dominant_space == "" && nnode_of_space == 0)"
+	//    alternative that was ANDed with nnode_of_space != 0, i.e. dead. It is simply gone.
+	BulkElementBase::RequiredShapeFamilies BulkElementBase::required_shape_families(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, unsigned ispace) const
+	{
+		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_RequiredShapes_For_Space_t &rs = required.continuous_spaces[ispace];
+		// The Pos.* flags name whichever space carries the geometry; set_remaining_shapes_appropriately
+		// resolves the shape_Pos aliases onto exactly that space, so there they widen the request.
+		const bool dominant = eleminfo.nnode_of_space[ispace] &&
+							  !strcmp(functable->dominant_space, functable->continuous_spaces[ispace].space_name);
+		RequiredShapeFamilies f;
+		f.psi = rs.psi || (dominant && required.Pos.psi);
+		f.dx = rs.dx_psi || (dominant && required.Pos.dx_psi);
+		f.dX = rs.dX_psi || (dominant && required.Pos.dX_psi);
+		f.d2x = rs.d2x_psi || (dominant && required.Pos.d2x_psi);
+		return __widen_if_lever(f);
+	}
+
+	BulkElementBase::RequiredShapeFamilies BulkElementBase::required_shape_families_DL(const JITFuncSpec_RequiredShapes_FiniteElement_t &required)
+	{
+		RequiredShapeFamilies f;
+		f.psi = required.DL.psi;
+		f.dx = required.DL.dx_psi;
+		f.dX = required.DL.dX_psi;
+		f.d2x = required.DL.d2x_psi;
+		return __widen_if_lever(f);
+	}
+
+	// A signalling NaN, written by explicit loops: memset cannot produce a NaN, since no repeated
+	// byte value is one.
+	static const double __POISON = std::numeric_limits<double>::signaling_NaN();
+
+	static inline void __poison_scalar(double &x)
+	{
+		x = __POISON;
+		__poison_written++;
+	}
+	static inline void __poison1(double *a, unsigned n)
+	{
+		if (!a) return;
+		for (unsigned i = 0; i < n; i++) a[i] = __POISON;
+		__poison_written += n;
+	}
+	static inline void __poison2(double **a, unsigned n, unsigned m)
+	{
+		if (!a) return;
+		for (unsigned i = 0; i < n; i++) __poison1(a[i], m);
+	}
+	static inline void __poison3(double ***a, unsigned n, unsigned m, unsigned k)
+	{
+		if (!a) return;
+		for (unsigned i = 0; i < n; i++) __poison2(a[i], m, k);
+	}
+	static inline void __poison4(double ****a, unsigned n, unsigned m, unsigned k, unsigned l)
+	{
+		if (!a) return;
+		for (unsigned i = 0; i < n; i++) __poison3(a[i], m, k, l);
+	}
+
+	void BulkElementBase::poison_unrequired_shapes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *si, bool element_level) const
+	{
+		if (!__poison_unrequired || !si) return;
+		const unsigned n_dim = this->nodal_dimension();
+		const unsigned n_node = this->nnode();
+
+		if (element_level)
+		{
+			// The element-level families. They are filled once per assembly, BEFORE the
+			// per-integration-point fills, so they have to be poisoned from
+			// prepare_shape_buffer_for_integration rather than from fill_shape_info_at_s.
+			for (unsigned k = 0; k < 3; k++)
+			{
+				const bool want = (k == 0) || (k == 1 ? required.history_geometry1 : required.history_geometry2);
+				if (!required.elemsize_Eulerian || !want) __poison_scalar(si->elemsize_Eulerian[k]);
+				if (!required.elemsize_Eulerian_cartesian || !want) __poison_scalar(si->elemsize_Eulerian_cartesian[k]);
+			}
+			if (!required.elemsize_Lagrangian) __poison_scalar(si->elemsize_Lagrangian);
+			if (!required.elemsize_Lagrangian_cartesian) __poison_scalar(si->elemsize_Lagrangian_cartesian);
+			if (!required.elemsize_Eulerian)
+			{
+				__poison2(si->elemsize_d_coords, n_dim, n_node);
+				__poison4(si->elemsize_d2_coords, n_dim, n_dim, n_node, n_node);
+			}
+			if (!required.elemsize_Eulerian_cartesian)
+			{
+				__poison2(si->elemsize_Cart_d_coords, n_dim, n_node);
+				__poison4(si->elemsize_Cart_d2_coords, n_dim, n_dim, n_node, n_node);
+			}
+			return;
+		}
+
+		// Per-space AND per-family, keyed on the very predicate the fill uses
+		// (required_shape_families), which is what makes the poison meaningful: it must poison exactly
+		// what the fill declines to write, or it either misses under-requests or invents them.
+		// The history slots k=1,2 are poisoned along with k=0 because the history fills key on the same
+		// `required` struct, so a family nobody asked for is unfilled at every history level.
+		for (unsigned int ispace = 0; ispace < NUM_CONTINUOUS_SPACES; ispace++)
+		{
+			const unsigned nn = eleminfo.nnode_of_space[ispace];
+			const RequiredShapeFamilies fam = this->required_shape_families(required, ispace);
+			if (!fam.psi)
+				__poison1(si->shapes[ispace], nn);
+			if (!fam.dx)
+				for (unsigned k = 0; k < 3; k++) __poison2(si->dx_shapes[k][ispace], nn, n_dim);
+			if (!fam.dX)
+			{
+				__poison2(si->dX_shapes[ispace], nn, n_dim);
+				__poison2(si->dS_shapes[ispace], nn, n_dim);
+			}
+			if (!fam.d2x)
+			{
+				for (unsigned k = 0; k < 3; k++) __poison2(si->d2x_shapes[k][ispace], nn, MAX_N2DERIV);
+				__poison2(si->d2S_shapes[ispace], nn, MAX_N2DERIV);
+				__poison4(si->d_d2x_shape_dcoord[ispace], nn, MAX_N2DERIV, n_node, n_dim);
+			}
+			// The nodal-coordinate sensitivities are still gated by require_dxdshape rather than per
+			// space (stage 6), and their fill sits inside the "is this space needed at all" block - so
+			// any() is the honest predicate for them, not fam.dx.
+			if (!fam.any())
+				__poison4(si->d_dx_shape_dcoord[ispace], nn, n_dim, n_node, n_dim);
+		}
+
+		{
+			const RequiredShapeFamilies fam = required_shape_families_DL(required);
+			const unsigned nn = eleminfo.nnode_DL;
+			if (!fam.psi)
+				__poison1(si->shape_DL, nn);
+			if (!fam.dx)
+				for (unsigned k = 0; k < 3; k++) __poison2(si->dx_shape_DL[k], nn, n_dim);
+			if (!fam.dX)
+			{
+				__poison2(si->dX_shape_DL, nn, n_dim);
+				__poison2(si->dS_shape_DL, nn, n_dim);
+			}
+			if (!fam.d2x)
+			{
+				for (unsigned k = 0; k < 3; k++) __poison2(si->d2x_shape_DL[k], nn, MAX_N2DERIV);
+				__poison2(si->d2S_shape_DL, nn, MAX_N2DERIV);
+				__poison4(si->d_d2x_shape_dcoord_DL, nn, MAX_N2DERIV, n_node, n_dim);
+			}
+			if (!fam.any())
+				__poison4(si->d_dx_shape_dcoord_DL, nn, n_dim, n_node, n_dim);
+		}
+
+		if (!(required.normal || required.normal_deriv))
+		{
+			for (unsigned k = 0; k < 3; k++) __poison1(si->normal[k], n_dim);
+			__poison3(si->d_normal_dcoord, n_dim, n_node, n_dim);
+		}
+		if (!required.normal_deriv)
+		{
+			for (unsigned k = 0; k < 3; k++) __poison2(si->dnormal_dx[k], n_dim, n_dim);
+			__poison4(si->d_dnormal_dx_dcoord, n_dim, n_dim, n_node, n_dim);
+		}
+	}
+
+	// The bulk/opposite sub-buffers are filled by the recursive fill_shape_info_at_s call, which
+	// poisons them itself with its own sub-struct. Only the ones this pass does NOT recurse into are
+	// handled here: nothing writes them at all, yet the generated code can still reach them through
+	// shapeinfo->bulk_shapeinfo, which is precisely the failure mode a stale flag produces.
+	void InterfaceElementBase::poison_unrequired_shapes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *si, bool element_level) const
+	{
+		BulkElementBase::poison_unrequired_shapes(required, si, element_level);
+		if (!__poison_unrequired || !si) return;
+		JITFuncSpec_RequiredShapes_FiniteElement_t nothing;
+		memset(&nothing, 0, sizeof(nothing));
+		if (!required.bulk_shapes && si->bulk_shapeinfo && this->bulk_element_pt())
+		{
+			BulkElementBase *blk = dynamic_cast<BulkElementBase *>(this->bulk_element_pt());
+			if (blk) blk->poison_unrequired_shapes(nothing, si->bulk_shapeinfo, element_level);
+		}
+		if (!required.opposite_shapes && si->opposite_shapeinfo && this->opposite_side)
+		{
+			this->opposite_side->poison_unrequired_shapes(nothing, si->opposite_shapeinfo, element_level);
+		}
+	}
+
 	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
 		bool require_hessian = flag > 2;
+
+		// History fills run BEFORE the current-configuration one and share the history-independent
+		// buffers with it, so poisoning on their (deliberately stripped-down) required struct would
+		// wipe what the real fill is about to need. Only the current configuration is poisoned.
+		if (__poison_unrequired && history_index == 0)
+			this->poison_unrequired_shapes(required, shape_info, false);
 
 		unsigned el_dim = this->dim();
 		unsigned n_dim = this->nodal_dimension();
@@ -1351,14 +1593,18 @@ namespace pyoomph
 
 		for (unsigned int ispace=0;ispace<NUM_CONTINUOUS_SPACES;ispace++)
 		{
-			bool req = required.continuous_spaces[ispace].dx_psi || required.continuous_spaces[ispace].psi || required.continuous_spaces[ispace].d2x_psi;
-			req |= eleminfo.nnode_of_space[ispace] && (required.Pos.psi || required.Pos.dx_psi || required.Pos.dX_psi || required.Pos.d2x_psi || required.continuous_spaces[ispace].dX_psi) && ((!strcmp(functable->dominant_space, functable->continuous_spaces[ispace].space_name)) || ((!strcmp(functable->dominant_space, "")) && !eleminfo.nnode_of_space[ispace]));
+			// One shared predicate (see BulkElementBase::required_shape_families), which the poison and
+			// set_remaining_shapes_appropriately key on too.
+			const RequiredShapeFamilies fam = this->required_shape_families(required, ispace);
 
-			if (req)
+			if (fam.any())
 			{
 				oomph::Shape psi(eleminfo.nnode_of_space[ispace]);
 				oomph::DShape dpsids(eleminfo.nnode_of_space[ispace], std::max((unsigned int)1, el_dim));
-				const bool space_d2x = require_d2x && el_dim && eleminfo.nnode_of_space[ispace];
+				// Per-space, not the global require_d2x: a C1 pressure next to a C2 field that wants
+				// second derivatives must not pay for them. Everything the geometry side of the
+				// second-derivative formulas needs is guarded by require_geom_d2, which is wider.
+				const bool space_d2x = (__disable_shape_family_split ? require_d2x : fam.d2x) && el_dim && eleminfo.nnode_of_space[ispace];
 				oomph::DShape d2psids(std::max((unsigned int)1, eleminfo.nnode_of_space[ispace]), MAX_N2DERIV);
 				if (space_d2x)
 					this->d2shape_local_of_space(ispace, s, psi, dpsids, d2psids);
@@ -1366,24 +1612,37 @@ namespace pyoomph
 					this->dshape_local_of_space(ispace, s, psi, dpsids);
 				for (unsigned l = 0; l < eleminfo.nnode_of_space[ispace]; l++)
 				{
-					shape_info->shapes[ispace][l] = psi[l];
-					for (unsigned int i = 0; i < n_dim; i++)
+					// One family at a time. psi-only is by far the most common request, and it used to
+					// pay for both gradient contractions; the local derivatives dpsids come out of the
+					// same dshape_local_of_space call either way, so only the contractions are saved.
+					if (fam.psi)
+						shape_info->shapes[ispace][l] = psi[l];
+					if (fam.dx)
 					{
-						shape_info->dx_shapes[history_index][ispace][l][i] = 0.0;
-						for (unsigned b = 0; b < el_dim; b++)
+						for (unsigned int i = 0; i < n_dim; i++)
 						{
-							shape_info->dx_shapes[history_index][ispace][l][i] += gab_gai[b][i] * dpsids(l, b);
+							shape_info->dx_shapes[history_index][ispace][l][i] = 0.0;
+							for (unsigned b = 0; b < el_dim; b++)
+							{
+								shape_info->dx_shapes[history_index][ispace][l][i] += gab_gai[b][i] * dpsids(l, b);
+							}
 						}
 					}
 
-					for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shapes[ispace][l][i] =  dpsids(l, i);
-
-					for (unsigned int i = 0; i < n_lagr; i++)
+					if (fam.dX)
 					{
-						shape_info->dX_shapes[ispace][l][i] = 0.0;
-						for (unsigned b = 0; b < el_dim; b++)
+						// dS rides on the dX_psi flag, see jitbridge.h: the code generator classifies a
+						// local-coordinate derivative as a Lagrangian one (D1XBasisFunctionLocalCoord
+						// derives from D1XBasisFunctionLagr), so there is no flag of its own to key on.
+						for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shapes[ispace][l][i] =  dpsids(l, i);
+
+						for (unsigned int i = 0; i < n_lagr; i++)
 						{
-							shape_info->dX_shapes[ispace][l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+							shape_info->dX_shapes[ispace][l][i] = 0.0;
+							for (unsigned b = 0; b < el_dim; b++)
+							{
+								shape_info->dX_shapes[ispace][l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+							}
 						}
 					}
 
@@ -1679,13 +1938,14 @@ namespace pyoomph
 
 		// Same pattern as above, for the discontinuous-Lagrange (DL) space (no "dominant space"
 		// fallback since DL fields are never used to represent the geometry).
-		if (required.DL.dx_psi || required.DL.psi || required.DL.d2x_psi)
+		const RequiredShapeFamilies fam_DL = required_shape_families_DL(required);
+		if (fam_DL.any())
 		{
 			oomph::Shape psi(eleminfo.nnode_DL);
 			oomph::DShape dpsids(eleminfo.nnode_DL, std::max((unsigned int)1, el_dim));
 			// The DL basis is affine in s in every dimension, so d2psids is identically zero - but the
 			// physical second derivative is not, since the Q term survives on a curved element.
-			const bool space_d2x_DL = require_d2x && el_dim && eleminfo.nnode_DL;
+			const bool space_d2x_DL = (__disable_shape_family_split ? require_d2x : fam_DL.d2x) && el_dim && eleminfo.nnode_DL;
 			oomph::DShape d2psids(std::max((unsigned int)1, eleminfo.nnode_DL), MAX_N2DERIV);
 			if (space_d2x_DL)
 				this->d2shape_local_at_s_DL(s, psi, dpsids, d2psids);
@@ -1693,24 +1953,32 @@ namespace pyoomph
 				this->dshape_local_at_s_DL(s, psi, dpsids);
 			for (unsigned l = 0; l < eleminfo.nnode_DL; l++)
 			{
-				shape_info->shape_DL[l] = psi[l];
-				for (unsigned int i = 0; i < n_dim; i++)
+				// Split per family exactly as for the continuous spaces above.
+				if (fam_DL.psi)
+					shape_info->shape_DL[l] = psi[l];
+				if (fam_DL.dx)
 				{
-					shape_info->dx_shape_DL[history_index][l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
+					for (unsigned int i = 0; i < n_dim; i++)
 					{
-						shape_info->dx_shape_DL[history_index][l][i] += gab_gai[b][i] * dpsids(l, b);
+						shape_info->dx_shape_DL[history_index][l][i] = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
+						{
+							shape_info->dx_shape_DL[history_index][l][i] += gab_gai[b][i] * dpsids(l, b);
+						}
 					}
 				}
 
-				for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_DL[l][i] =  dpsids(l, i);
-
-				for (unsigned int i = 0; i < n_lagr; i++)
+				if (fam_DL.dX)
 				{
-					shape_info->dX_shape_DL[l][i] = 0.0;
-					for (unsigned b = 0; b < el_dim; b++)
+					for (unsigned int i=0; i < this->dim();i++) shape_info->dS_shape_DL[l][i] =  dpsids(l, i);
+
+					for (unsigned int i = 0; i < n_lagr; i++)
 					{
-						shape_info->dX_shape_DL[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+						shape_info->dX_shape_DL[l][i] = 0.0;
+						for (unsigned b = 0; b < el_dim; b++)
+						{
+							shape_info->dX_shape_DL[l][i] += gab_gai_Lagr[b][i] * dpsids(l, b);
+						}
 					}
 				}
 
@@ -2117,11 +2385,10 @@ namespace pyoomph
 	// the priority chain C2TB -> C2 -> C1TB -> C1 depending on which nodes/spaces are present.
 	void BulkElementBase::set_remaining_shapes_appropriately(JITShapeInfo_t *shape_info, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes)
 	{
-		bool required_C2TB = required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].d2x_psi;
-		required_C2TB |= eleminfo.nnode_of_space[SPACE_INDEX_C2TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.Pos.d2x_psi || required_shapes.continuous_spaces[SPACE_INDEX_C2TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C2TB"));
-		
-		bool required_C1TB = required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dx_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].d2x_psi;		
-		required_C1TB |= eleminfo.nnode_of_space[SPACE_INDEX_C1TB] && (required_shapes.Pos.psi || required_shapes.Pos.dx_psi || required_shapes.Pos.dX_psi || required_shapes.Pos.d2x_psi || required_shapes.continuous_spaces[SPACE_INDEX_C1TB].dX_psi) && (!strcmp(this->codeinst->get_func_table()->dominant_space, "C1TB"));
+		// Same predicate as the fill, from the same helper: the two used to spell it out separately and
+		// had to agree, or the Pos aliases would point at a space that was never filled.
+		const bool required_C2TB = this->required_shape_families(required_shapes, SPACE_INDEX_C2TB).any();
+		const bool required_C1TB = this->required_shape_families(required_shapes, SPACE_INDEX_C1TB).any();
 		
 		if (required_C2TB)
 		{
@@ -2322,6 +2589,16 @@ namespace pyoomph
 		shape_info->int_pt_weight[0] = w * J;
 		shape_info->int_pt_weight_Lagrangian = w * JLagr;
 
+		if (__poison_everything)
+		{
+			// Positive control, see __poison_everything: everything the generated code is about to read
+			// is destroyed here, so every case MUST come out NaN. If one does not, the buffers it reads
+			// are not the ones this tool poisons and its "clean" verdict is worthless.
+			JITFuncSpec_RequiredShapes_FiniteElement_t nothing;
+			memset(&nothing, 0, sizeof(nothing));
+			this->poison_unrequired_shapes(nothing, shape_info, false);
+		}
+
 		if (__paranoid_ale_identity)
 		{
 			// The remaining two identities can only be checked once the integration weight is known and
@@ -2379,6 +2656,8 @@ namespace pyoomph
 	void BulkElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		if (__poison_unrequired)
+			this->poison_unrequired_shapes(required_shapes, shape_info, true);
 		shape_info->n_int_pt = integral_pt()->nweight();
 
 		const oomph::TimeStepper *tstepper = (this->nnode() ? this->node_pt(0)->time_stepper_pt() : this->internal_data_pt(0)->time_stepper_pt());

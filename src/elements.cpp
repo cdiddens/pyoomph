@@ -1213,6 +1213,12 @@ namespace pyoomph
 		// The local equation numbering is about to be rebuilt, so the local dof -> contribution map
 		// keyed on it is stale.
 		local_dof_contribution_indices_valid = false;
+		// Same for the cached hang classification: fill_element_info() is reached from
+		// assign_eqn_numbers(), i.e. after every adapt/remesh/pin/constraint change, which is exactly
+		// when a node can start or stop hanging. Only invalidated here, never recomputed - the
+		// interface elements' equation remap vectors are rebuilt AFTER this point, so a scan taken
+		// here would see a half-built element.
+		hang_state_valid = false;
 
 		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
 

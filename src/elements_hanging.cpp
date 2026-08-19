@@ -24,6 +24,8 @@ The main author may be contacted at c.diddens@utwente.nl
 // construction, the flattened hang buffers handed to the JIT code, fill_hang_info_with_equations,
 // and the Delaunay tesselation used to emit hanging elements for numpy/paraview output.
 
+#include <limits>
+
 #include "macroelements.hpp"
 #include "elements.hpp"
 #include "exception.hpp"
@@ -35,6 +37,87 @@ The main author may be contacted at c.diddens@utwente.nl
 
 namespace pyoomph
 {
+
+	// Definitions of the stage-0 hang-fill diagnostics declared in elements.hpp.
+	const bool __measure_skip_hang_fills = getenv("PYOOMPH_MEASURE_SKIP_HANG_FILLS") != NULL;
+	const bool __report_hang_fill_time = getenv("PYOOMPH_REPORT_HANG_FILL_TIME") != NULL;
+	unsigned __hang_fill_time_depth = 0;
+	static double __hang_fill_time[HANGFILL_NUM_SLOTS] = {0.0, 0.0, 0.0};
+	static unsigned long __hang_fill_calls[HANGFILL_NUM_SLOTS] = {0, 0, 0};
+	void __hang_fill_time_add(int slot, double seconds)
+	{
+		__hang_fill_time[slot] += seconds;
+		__hang_fill_calls[slot]++;
+	}
+	static struct __HangFillTimeReport
+	{
+		~__HangFillTimeReport()
+		{
+			if (!__report_hang_fill_time)
+				return;
+			static const char *names[HANGFILL_NUM_SLOTS] = {
+				"fill_hang_info_with_equations", "interpolate_hang_values (own element)",
+				"interpolate_hang_values (attached bulk/opposite, i.e. duplicates)"};
+			for (int i = 0; i < HANGFILL_NUM_SLOTS; i++)
+				std::cout << "PYOOMPH_REPORT_HANG_FILL_TIME: " << names[i] << ": " << __hang_fill_calls[i]
+						  << " outermost calls, " << __hang_fill_time[i] << " s" << std::endl;
+		}
+	} __hang_fill_time_report;
+
+	// --- Stage 3 definitions (levers, counters, the assembly-pass id and the interpolate gate) ---
+	const bool __disable_hang_fill_cache = getenv("PYOOMPH_DISABLE_HANG_FILL_CACHE") != NULL;
+	const bool __report_hang_fill_cache = getenv("PYOOMPH_REPORT_HANG_FILL_CACHE") != NULL;
+	const bool __paranoid_hang_fill_cache = getenv("PYOOMPH_PARANOID_HANG_FILL_CACHE") != NULL;
+	static unsigned long __hang_fill_cache_counters[HANGCACHE_NUM_COUNTERS] = {0, 0, 0, 0, 0};
+	void __hang_fill_cache_count(int which) { __hang_fill_cache_counters[which]++; }
+	static struct __HangFillCacheReport
+	{
+		~__HangFillCacheReport()
+		{
+			if (!__report_hang_fill_cache)
+				return;
+			static const char *names[HANGCACHE_NUM_COUNTERS] = {
+				"fill_hang_info_with_equations SKIPPED (NoHang entry, no remap channel)",
+				"fill_hang_info_with_equations run",
+				"interpolate_hang_values skipped (classified: nothing to interpolate)",
+				"interpolate_hang_values skipped (already interpolated in this assembly pass)",
+				"interpolate_hang_values run"};
+			for (int i = 0; i < HANGCACHE_NUM_COUNTERS; i++)
+				std::cout << "PYOOMPH_REPORT_HANG_FILL_CACHE: " << names[i] << ": "
+						  << __hang_fill_cache_counters[i] << std::endl;
+		}
+	} __hang_fill_cache_report;
+
+	unsigned long __hang_interp_pass = 0;
+	unsigned long __hang_interp_pass_counter = 0;
+	static unsigned __hang_interp_depth = 0;
+
+	HangInterpGate::HangInterpGate(BulkElementBase *e) : el(e), outer(__hang_interp_depth++ == 0) {}
+	HangInterpGate::~HangInterpGate() { __hang_interp_depth--; }
+
+	bool HangInterpGate::skip()
+	{
+		if (!outer || __disable_hang_fill_cache)
+			return false;
+		// Classification first: it is element-local and holds for every pass, so it also spares the
+		// non-assembly callers (output, observables, restart), which run outside any pass.
+		if (el->get_hang_state() & BulkElementBase::HANGSTATE_NOTHING_TO_INTERPOLATE)
+		{
+			if (__report_hang_fill_cache)
+				__hang_fill_cache_count(HANGCACHE_INTERP_SKIPPED_BY_CLASS);
+			return true;
+		}
+		if (__hang_interp_pass && el->last_hang_interp_pass == __hang_interp_pass)
+		{
+			if (__report_hang_fill_cache)
+				__hang_fill_cache_count(HANGCACHE_INTERP_SKIPPED_BY_STAMP);
+			return true;
+		}
+		el->last_hang_interp_pass = __hang_interp_pass; // 0 outside a pass: never matches, so no stamp
+		if (__report_hang_fill_cache)
+			__hang_fill_cache_count(HANGCACHE_INTERP_RUN);
+		return false;
+	}
 
 
 	// For every local node l, if it is a hanging node (its Lagrangian/Eulerian position is
@@ -804,8 +887,199 @@ namespace pyoomph
 	// values (e.g. a C1 field's value at a C2-only node, which has no direct equation of its own)
 	// by averaging the surrounding real nodes' values, since dummy nodes are never themselves
 	// hanging but must still hold sensible values for consistent interpolation/output.
+	// The cheap counterpart of fill_hang_info_with_equations()/interpolate_hang_values(): it answers
+	// "would either of them do anything?" without touching a buffer. Mirrors the fills branch for
+	// branch, because a "no" here suppresses them.
+	//
+	// HAS_HANG must never be under-reported (that would skip a fill whose tables are then read), and
+	// is therefore derived from exactly the conditions the fills use. NOTHING_TO_INTERPOLATE may be
+	// under-reported freely (the interpolation then just runs), so its node-constraint test is the
+	// cheap "does this node carry ANY constraint" one rather than a per-mode walk.
+	unsigned char BulkElementBase::compute_hang_state() const
+	{
+		bool has_hang = false, to_interpolate = false;
+		auto *ft = codeinst->get_func_table();
+
+		// Positions. Bounded by nnode(), NOT by eleminfo.nnode: an ODE element reports eleminfo.nnode
+		// = 1 for a node slot that is a null pointer, which is exactly why it overrides
+		// fill_hang_info_with_equations_for_pos to return false instead of letting the loop run.
+		const unsigned n_real_nodes = this->nnode();
+		if (n_real_nodes)
+		{
+			const unsigned ndim_pos = this->nodal_dimension();
+			for (unsigned l = 0; l < n_real_nodes && !has_hang; l++)
+			{
+				oomph::Node *n = node_pt(l);
+				if (n->is_hanging())
+				{
+					has_hang = true;
+					break;
+				}
+				if (has_additional_dof_constraints)
+				{
+					for (unsigned f = 0; f < ndim_pos; f++)
+						if (this->node_is_c1_constrained_for_position(n, f))
+						{
+							has_hang = true;
+							break;
+						}
+				}
+			}
+		}
+
+		// Base-bulk field values of every present continuous space, plus that space's dummy-value map
+		// (which interpolate_hang_values writes even when nothing hangs -- the mixed C2/C1 case).
+		const std::vector<std::vector<unsigned>> &space_map = this->get_nodal_space_index_to_element_index_map();
+		const std::vector<std::vector<std::vector<unsigned>>> &dummy_map = this->get_dummy_value_interpolation_map();
+		for (unsigned ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info = ft->present_continuous_spaces[ispace];
+			if (!space_info->numfields_basebulk)
+				continue;
+			const unsigned nnode_space = eleminfo.nnode_of_space[space_info->space_index];
+			const std::vector<unsigned> &s2e = space_map[space_info->space_index];
+			for (unsigned l = 0; l < nnode_space; l++)
+			{
+				oomph::Node *n = node_pt(s2e[l]);
+				Node *pn = dynamic_cast<Node *>(n);
+				if (pn && pn->get_additional_dof_constraints())
+					to_interpolate = true;
+				for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
+				{
+					const unsigned v = space_info->nodal_offset_basebulk + f;
+					if (n->is_hanging(v))
+					{
+						has_hang = true;
+						to_interpolate = true;
+					}
+					else if (has_additional_dof_constraints && this->node_is_c1_constrained_for_value(n, v))
+					{
+						has_hang = true;
+						to_interpolate = true;
+					}
+				}
+			}
+			for (const std::vector<unsigned> &interp : dummy_map[space_info->space_index])
+				if (interp.size() >= 2)
+				{
+					to_interpolate = true;
+					break;
+				}
+		}
+
+		// The positions are pushed for hanging or position-constrained nodes; both already set
+		// has_hang above, but a node carrying only a FIELD constraint still enters that loop body.
+		if (!to_interpolate)
+		{
+			for (unsigned l = 0; l < n_real_nodes; l++)
+			{
+				oomph::Node *n = node_pt(l);
+				Node *pn = dynamic_cast<Node *>(n);
+				if (n->is_hanging() || (pn && pn->get_additional_dof_constraints()))
+				{
+					to_interpolate = true;
+					break;
+				}
+			}
+		}
+
+		if (this->scan_hang_interface_fields())
+			has_hang = true;
+		if (!to_interpolate && this->scan_interface_has_something_to_interpolate())
+			to_interpolate = true;
+		if (has_hang)
+			to_interpolate = true;
+
+		unsigned char res = 0;
+		if (has_hang)
+			res |= HANGSTATE_HAS_HANG;
+		if (!to_interpolate)
+			res |= HANGSTATE_NOTHING_TO_INTERPOLATE;
+		return res;
+	}
+
+	unsigned char BulkElementBase::get_hang_state()
+	{
+		if (!hang_state_valid)
+		{
+			hang_state = this->compute_hang_state();
+			hang_state_valid = true;
+		}
+		else if (__paranoid_hang_fill_cache)
+		{
+			// The whole risk of the cache is staleness (an invalidation that fill_element_info did not
+			// reach), so the check is a fresh scan against the cached answer, not just a sanity test of
+			// the scan itself.
+			const unsigned char fresh = this->compute_hang_state();
+			if (fresh != hang_state)
+				throw_runtime_error("PYOOMPH_PARANOID_HANG_FILL_CACHE: the cached hang classification is stale (cached " + std::to_string((int)hang_state) + ", recomputed " + std::to_string((int)fresh) + ")");
+		}
+		return hang_state;
+	}
+
+	bool BulkElementBase::hang_fill_would_report_hang(const JITFuncSpec_RequiredShapes_FiniteElement_t &required)
+	{
+		(void)required; // a bulk element has no attached-element remap channel
+		return (this->get_hang_state() & HANGSTATE_HAS_HANG) != 0;
+	}
+
+	// See the declaration. A NaN weight on a nummaster=1 entry pointing at local equation 0 makes any
+	// read show up as a NaN in the assembled block rather than as a crash or a plausible number.
+	void BulkElementBase::poison_hang_info(JITShapeInfo_t *shape_info)
+	{
+		if (!shape_info)
+			return;
+		const double nan_w = std::numeric_limits<double>::quiet_NaN();
+		auto poison = [&](JITHangInfo_t &hb)
+		{
+			hb.nummaster = 1;
+			hb.masters[0].weight = nan_w;
+			hb.masters[0].local_eqn = 0;
+		};
+		auto *ft = codeinst->get_func_table();
+		if (eleminfo.nnode && shape_info->hanginfo_Pos)
+			for (unsigned f = 0; f < this->nodal_dimension(); f++)
+				for (unsigned l = 0; l < eleminfo.nnode; l++)
+					poison(shape_info->hanginfo_Pos[f][l]);
+		if (!shape_info->hanginfo)
+			return;
+		for (unsigned ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *si = ft->present_continuous_spaces[ispace];
+			const unsigned nn = eleminfo.nnode_of_space[si->space_index];
+			for (unsigned f = 0; f < si->numfields_basebulk; f++)
+				for (unsigned l = 0; l < nn; l++)
+					poison(shape_info->hanginfo[si->buffer_offset_basebulk + f][l]);
+			for (unsigned f = 0; f < si->numfields - si->numfields_basebulk; f++)
+				for (unsigned l = 0; l < nn; l++)
+					poison(shape_info->hanginfo[si->buffer_offset_interf + f][l]);
+		}
+		for (unsigned ispace = 0; ispace < ft->num_present_dg_spaces; ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *si = ft->present_dg_spaces[ispace];
+			const unsigned nn = eleminfo.nnode_of_space[si->space_index];
+			for (unsigned f = 0; f < si->numfields_basebulk; f++)
+				for (unsigned l = 0; l < nn; l++)
+					poison(shape_info->hanginfo[si->buffer_offset_basebulk + f][l]);
+			for (unsigned f = 0; f < si->numfields - si->numfields_basebulk; f++)
+				for (unsigned l = 0; l < nn; l++)
+					poison(shape_info->hanginfo[si->buffer_offset_interf + f][l]);
+		}
+		for (unsigned f = 0; f < ft->info_DL.numfields; f++)
+			for (unsigned l = 0; l < eleminfo.nnode_DL; l++)
+				poison(shape_info->hanginfo[ft->info_DL.buffer_offset_basebulk + f][l]);
+		for (unsigned f = 0; f < ft->info_D0.numfields; f++)
+			poison(shape_info->hanginfo[ft->info_D0.buffer_offset_basebulk + f][0]);
+	}
+
 	void BulkElementBase::interpolate_hang_values()
 	{
+		HangFillTimeScope __hftime(HANGFILL_SLOT_INTERP);
+		if (__measure_skip_hang_fills)
+			return; // measurement lever only, see __measure_skip_hang_fills
+		HangInterpGate __gate(this);
+		if (__gate.skip())
+			return;
 
 		auto * ft = codeinst->get_func_table();
 
@@ -816,6 +1090,16 @@ namespace pyoomph
 		for (unsigned l = 0; l < this->nnode(); l++)
 		{
 			oomph::Node *n = node_pt(l);
+			// One dynamic_cast and one constraint-list test per NODE, instead of per (node, direction)
+			// inside node_is_c1_constrained_for_position. A node that neither hangs nor carries any
+			// additional dof constraint has nothing to push, so the whole per-direction body is skipped.
+			// Deliberately node-level rather than keyed on the element's has_additional_dof_constraints
+			// flag: that flag is maintained by pin_dummy_values, and interpolate_hang_values is also
+			// called outside assembly, where its validity would have to be proven rather than assumed.
+			Node *pn = dynamic_cast<Node *>(n);
+			const bool constrained = pn && pn->get_additional_dof_constraints();
+			if (!n->is_hanging() && !constrained)
+				continue;
 			for (unsigned i = 0; i < n->ndim(); i++)
 			{
 				if (n->is_hanging() || this->node_is_c1_constrained_for_position(n, i))
@@ -837,11 +1121,16 @@ namespace pyoomph
 			{
 				const unsigned l_elem = space_node_to_elem_node[l];
 				oomph::Node *n = node_pt(l_elem);
+				// Same node-level gate as for the positions above: without a constraint list the
+				// per-field node_is_c1_constrained_for_value walk cannot say anything, so a node that
+				// hangs in no value and carries no constraint is skipped entirely.
+				Node *pn = dynamic_cast<Node *>(n);
+				const bool constrained = pn && pn->get_additional_dof_constraints();
 				const unsigned ntstorage = n->ntstorage();
 				for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
 				{
 					const unsigned v = space_info->nodal_offset_basebulk + f;
-					if (n->is_hanging(v) || this->node_is_c1_constrained_for_value(n, v))
+					if (n->is_hanging(v) || (constrained && this->node_is_c1_constrained_for_value(n, v)))
 					{
 						for (unsigned t = 0; t < ntstorage; t++)
 							n->value_pt(v)[t] = this->flattened_value(n, v, t, 0);
@@ -1015,6 +1304,11 @@ namespace pyoomph
 	// means the generated code expects a dependency that was never registered as external data.
 	bool BulkElementBase::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
+		HangFillTimeScope __hftime(HANGFILL_SLOT_FILL);
+		// Measurement lever only; see __measure_skip_hang_fills. eqn_remap != NULL means these buffers
+		// are the attached-element equation REMAP channel, not hang info, so that call is never skipped.
+		if (__measure_skip_hang_fills && !eqn_remap)
+			return false;
 		bool res=this->fill_hang_info_with_equations_for_pos(shape_info); // Potentially only do if required
 		res=this->fill_hang_info_with_equations_basebulk(shape_info) || res;
 		res=this->fill_hang_info_with_equations_interface(shape_info) || res;

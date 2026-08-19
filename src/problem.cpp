@@ -1649,6 +1649,10 @@ namespace pyoomph
 			// "abandon the solve" when no solve is running.
 			throw oomph::NewtonSolverError(0, std::numeric_limits<double>::max());
 		}
+		// One assembly pass: the dof vector is fixed for its whole duration, so each element's hanging
+		// values need re-deriving at most once (see HangInterpPassScope). The MPI sync below is itself
+		// a full interpolate sweep, and it stamps, so its work is then not repeated per element.
+		HangInterpPassScope __hang_pass;
 		sync_hanging_values_if_parallel(this);
 		if (!use_custom_residual_jacobian)
 		{
@@ -1682,6 +1686,7 @@ namespace pyoomph
 	// normal elemental assembly and the custom-residual-Jacobian path (there identified by parameter name).
 	void Problem::get_derivative_wrt_global_parameter(double* const& parameter_pt,oomph::DoubleVector& result)
 	{
+		HangInterpPassScope __hang_pass; // see Problem::get_residuals
 		if (!use_custom_residual_jacobian)
 		{
 			get_derivative_wrt_global_parameter_elemental_assembly(parameter_pt,result);
@@ -1718,6 +1723,7 @@ namespace pyoomph
 	// Top-level Jacobian assembly entry point; same dispatch/Dirichlet-handling pattern as get_residuals()
 	void Problem::get_jacobian(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian)
 	{
+		HangInterpPassScope __hang_pass; // see Problem::get_residuals
 		sync_hanging_values_if_parallel(this);
 		last_jacobian_was_condensed = false;
 		if (!use_custom_residual_jacobian)
@@ -2571,6 +2577,9 @@ namespace pyoomph
 		double t_start = oomph::TimingHelpers::timer();
 		for (unsigned r = 0; r < n_repeat; r++)
 		{
+			// One pass PER REPEAT, so each repeat costs what one real assembly sweep costs; one pass
+			// around the whole loop would have the first repeat pay for all of them.
+			HangInterpPassScope __hang_pass;
 			for (unsigned long e = 0; e < n_elements; e++)
 			{
 				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
@@ -2931,6 +2940,7 @@ namespace pyoomph
 		*/
 
 		std::vector<double> result(this->ndof(), 0.0);
+		HangInterpPassScope __hang_pass; // see Problem::get_residuals
 		const unsigned long n_elements = mesh_pt()->nelement();
 		for (unsigned int ne = 0; ne < n_elements; ne++)
 		{
@@ -2965,6 +2975,7 @@ namespace pyoomph
 	SparseRank3Tensor Problem::assemble_hessian_tensor(bool symmetric)
 	{
 		SparseRank3Tensor result(this->ndof(), symmetric);
+		HangInterpPassScope __hang_pass; // see Problem::get_residuals
 		const unsigned long n_elements = mesh_pt()->nelement();
 		for (unsigned int ne = 0; ne < n_elements; ne++)
 		{

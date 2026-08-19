@@ -21,6 +21,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 
 #pragma once
+#include <chrono>
 #include "exception.hpp"
 #include "jitbridge.h"
 
@@ -46,6 +47,137 @@ extern "C"
 
 namespace pyoomph
 {
+
+  // --- Assembly-overhead campaign, stage 0 diagnostics ---
+  //
+  // Three measurement-only levers around the per-element hang bookkeeping, which runs in full for
+  // every element on every assembly (the outlook item of dev_docs/code_generation.md 9.4.14).
+  //
+  // PYOOMPH_MEASURE_SKIP_HANG_FILLS turns fill_hang_info_with_equations and interpolate_hang_values
+  // into early returns, to put a ceiling on what removing them could ever save. MEASUREMENT ONLY and
+  // unsound in general - the generated code then reads a stale hangbuffer. It is bitwise-safe exactly
+  // on meshes with no hanging nodes, no additional dof constraints and no dummy-value maps, which is
+  // the configuration the ceiling is measured in. The attached-element eqn_remap channel is
+  // deliberately NOT skipped: fill_hang_info_with_equations abuses the very same buffers for it
+  // (codegen.cpp, "REMAP channel"), and skipping that yields garbage local equation numbers - a
+  // crash rather than a stale-but-plausible number.
+  extern const bool __measure_skip_hang_fills;
+
+  // PYOOMPH_REPORT_HANG_FILL_TIME accumulates wall time and call counts of both fills and of the
+  // interface neighbour re-interpolation, reported at exit. Same motivation as
+  // PYOOMPH_REPORT_NOHANG_DISPATCH: a share that was never measured is not thereby a small share.
+  extern const bool __report_hang_fill_time;
+  enum HangFillTimeSlot
+  {
+    HANGFILL_SLOT_FILL = 0,            // fill_hang_info_with_equations (incl. its bulk/opposite recursion)
+    HANGFILL_SLOT_INTERP = 1,          // interpolate_hang_values on the element being assembled
+    HANGFILL_SLOT_NEIGHBOUR = 2,       // the same, re-run on the attached bulk/opposite elements
+    HANGFILL_NUM_SLOTS = 3
+  };
+  void __hang_fill_time_add(int slot, double seconds);
+  extern unsigned __hang_fill_time_depth;
+
+  // RAII accumulator. Only the OUTERMOST scope is timed: the fills recurse (interface -> bulk ->
+  // bulk's bulk) and the InterfaceElement template calls both of its parents, so accumulating per
+  // entry would count the same nanoseconds several times over. The neighbour block is entered at
+  // depth 0 and therefore lands in its own slot rather than in the element's own.
+  class HangFillTimeScope
+  {
+    int slot;
+    std::chrono::steady_clock::time_point t0;
+
+  public:
+    explicit HangFillTimeScope(int s) : slot(-1)
+    {
+      if (!__report_hang_fill_time || __hang_fill_time_depth++)
+        return;
+      slot = s;
+      t0 = std::chrono::steady_clock::now();
+    }
+    ~HangFillTimeScope()
+    {
+      if (!__report_hang_fill_time)
+        return;
+      __hang_fill_time_depth--;
+      if (slot < 0)
+        return;
+      __hang_fill_time_add(slot, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    }
+  };
+
+  // --- Assembly-overhead campaign, stage 3: hang bookkeeping caches ---
+  //
+  // PYOOMPH_DISABLE_HANG_FILL_CACHE restores the pre-stage-3 behaviour entirely (fill always run,
+  // interpolate always run, no classification, no pass dedupe), so an A/B comparison of the whole
+  // stage can be made with ONE binary - the pattern PYOOMPH_DISABLE_NOHANG_DISPATCH established.
+  extern const bool __disable_hang_fill_cache;
+  // PYOOMPH_REPORT_HANG_FILL_CACHE prints, at exit, how often each of the two mechanisms engaged. A
+  // "no difference" measurement with zero engagement proves nothing, so the counters are reported
+  // alongside every benchmark.
+  extern const bool __report_hang_fill_cache;
+  // PYOOMPH_PARANOID_HANG_FILL_CACHE is the self-test: it runs the full fill on every element whose
+  // fill was skipped and aborts if its return value disagrees with the cheap predicate, then poisons
+  // the hang buffers of skipped elements so that a NoHang body that DOES read one is caught; and it
+  // checks the "nothing to interpolate" classification against the nodes themselves.
+  extern const bool __paranoid_hang_fill_cache;
+  enum HangFillCacheCounter
+  {
+    HANGCACHE_FILL_SKIPPED = 0,
+    HANGCACHE_FILL_RUN,
+    HANGCACHE_INTERP_SKIPPED_BY_CLASS,
+    HANGCACHE_INTERP_SKIPPED_BY_STAMP,
+    HANGCACHE_INTERP_RUN,
+    HANGCACHE_NUM_COUNTERS
+  };
+  void __hang_fill_cache_count(int which);
+
+  // Id of the global assembly sweep currently running, or 0 for "none". interpolate_hang_values()
+  // re-derives values that are constant for the whole sweep, so within one pass the second and
+  // further calls for the same element (an interface re-interpolating its bulk neighbour, then that
+  // bulk element assembling itself, then the interface on its other side) are redundant. 0 is the
+  // safe default: every caller that is NOT inside a sweep interpolates unconditionally.
+  extern unsigned long __hang_interp_pass;
+  extern unsigned long __hang_interp_pass_counter;
+
+  // Opens a new pass for its lifetime. Nesting is fine (the previous id is restored).
+  class HangInterpPassScope
+  {
+    unsigned long prev;
+
+  public:
+    HangInterpPassScope() : prev(__hang_interp_pass) { __hang_interp_pass = ++__hang_interp_pass_counter; }
+    ~HangInterpPassScope() { __hang_interp_pass = prev; }
+  };
+
+  // Closes the pass for its lifetime, i.e. restores unconditional interpolation. Wrapped around
+  // every finite-difference loop: those perturb a dof and re-enter get_residuals per perturbation,
+  // so the hang values genuinely change within one enclosing sweep. On exit a FRESH pass id is
+  // opened rather than the old one restored, because the FD loop left interpolated values belonging
+  // to the last perturbed state in the nodes of this element and its neighbours; a stale stamp would
+  // keep them.
+  class HangInterpPassSuspension
+  {
+    unsigned long prev;
+
+  public:
+    HangInterpPassSuspension() : prev(__hang_interp_pass) { __hang_interp_pass = 0; }
+    ~HangInterpPassSuspension() { __hang_interp_pass = (prev ? ++__hang_interp_pass_counter : 0); }
+  };
+
+  class BulkElementBase;
+  // Depth-guarded gate in front of interpolate_hang_values(). Only the OUTERMOST call may skip: the
+  // InterfaceElement override calls its bulk base, and gating there a second time would run the
+  // interface half without the bulk half.
+  class HangInterpGate
+  {
+    BulkElementBase *el;
+    bool outer;
+
+  public:
+    explicit HangInterpGate(BulkElementBase *e);
+    ~HangInterpGate();
+    bool skip();
+  };
 
   // Required for the Hessian nodal derivatives of second order
   // Dense rank-6 tensor with flat storage (row-major, index n6 varies fastest), used to hold
@@ -434,6 +566,48 @@ namespace pyoomph
     // so generated code redistributes their residual/Jacobian contributions to the C1 corner nodes.
     // Overridden by InterfaceElementBase to additionally handle INTERFACE_DOF_CONSTRAIN_TO_C1.
     virtual bool fill_additional_hang_buffer_data(JITShapeInfo_t *shape_info);
+
+    // --- Stage 3: cached per-element hang classification ---
+    //
+    // The shape buffer is shared between all elements of a code (Default_shape_info_buffer), so the
+    // hang TABLES cannot be cached there. What can be cached is the DECISION: whether anything in
+    // this element hangs at all, and whether interpolate_hang_values() would write anything. Both
+    // depend only on the mesh topology, the hang schemes and the dof constraints - never on dof
+    // VALUES, which is why caching them is sound while caching any result would not be.
+    //
+    // Invalidated in fill_element_info(), next to local_dof_contribution_indices_valid: every
+    // adapt/remesh/pin/constraint change reaches it through assign_eqn_numbers().
+    enum HangStateBits
+    {
+      HANGSTATE_HAS_HANG = 1u,               // fill_hang_info_with_equations() would return true
+      HANGSTATE_NOTHING_TO_INTERPOLATE = 2u  // interpolate_hang_values() would write nothing
+    };
+    unsigned char hang_state = 0;
+    bool hang_state_valid = false;
+    // Id of the assembly pass in which this element's hang values were last interpolated; 0 = never.
+    unsigned long last_hang_interp_pass = 0;
+    // Computed lazily on FIRST USE, deliberately not eagerly in fill_element_info(): the interface
+    // elements' equation remap vectors are rebuilt after it (problem.cpp, "rebuild the interface
+    // remapping"), so a classification taken there would be based on a half-built state.
+    unsigned char get_hang_state();
+    // The scan itself. Mirrors, branch for branch, what the corresponding fill/interpolate would do;
+    // virtual for the same reason the fills are (the interface element adds its own fields).
+    virtual unsigned char compute_hang_state() const;
+    // The interface-only halves of the scan, so the base version composes exactly as the fills do.
+    virtual bool scan_hang_interface_fields() const { return false; }
+    virtual bool scan_interface_has_something_to_interpolate() const { return false; }
+
+  public:
+    // What fill_hang_info_with_equations(required, ..., NULL) WOULD return, without doing the fill.
+    // The skip in elements_assembly.cpp needs the answer before the fill, which is why this exists
+    // at all (today has_hang IS the fill's return value).
+    virtual bool hang_fill_would_report_hang(const JITFuncSpec_RequiredShapes_FiniteElement_t &required);
+    // PYOOMPH_PARANOID_HANG_FILL_CACHE only: writes a NaN weight into every hang buffer slot the
+    // fill would have written, so that a supposedly hang-free body that still reads one is caught.
+    virtual void poison_hang_info(JITShapeInfo_t *shape_info);
+    friend class HangInterpGate;
+
+  protected:
     static const std::vector<std::vector<std::vector<unsigned>>> Dummy_Value_Interpolation_Map;
   public:
     // Maps a "dummy value" (a value slot that exists only to keep a lower-order field's nodal
@@ -554,6 +728,45 @@ namespace pyoomph
     // to be scattered through normal_coord_node() when they are combined with them.
     virtual unsigned n_normal_coord_nodes() const { return this->nnode(); }
     virtual unsigned normal_coord_node(unsigned l) const { return l; }
+
+    // PYOOMPH_REPORT_EXT_DATA sampling hook (defined in elements_assembly.cpp). A member because
+    // external_local_eqn() is protected in oomph-lib. No-op unless the lever is set.
+    void __sample_ext_data_stats();
+
+    // PYOOMPH_POISON_UNREQUIRED: fill every shape buffer family that `required` does NOT ask for with
+    // signalling NaN, so that generated code reading a buffer nobody flagged produces NaN instead of
+    // a plausible stale number. Diagnostic only; a no-op unless the lever is set. `required` is the
+    // struct actually PASSED to the fill, not functable->merged_required_shapes - the point is to
+    // catch a per-pass under-request that the merge would hide. Never touches hanginfo / the equation
+    // remap tables. Defined in elements_shapeinfo.cpp.
+    virtual void poison_unrequired_shapes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *si, bool element_level) const;
+
+    // Which shape-function families of ONE interpolation space a fill pass has to produce. They are
+    // filled individually: a psi-only space (by far the most common combination) does not pay for the
+    // two gradient contractions.
+    //
+    // That split is only sound because the flags are complete. They were not: codegen.cpp excludes
+    // "derived" shape expansions (the bare basis functions of the Jacobian COLUMNS) from the set it
+    // marks required shapes from, so shapes_required_Hessian carried psi alone for a lid-driven
+    // cavity whose HessianVectorProduct body dereferences dx_shapes. All-or-nothing filling hid it
+    // completely - any one flag pulled in all four families. The generator now marks those bases from
+    // a separate set (__all_Hessian_shapeexps_for_shapeflags); poison mode is what keeps it honest.
+    struct RequiredShapeFamilies
+    {
+      bool psi = false;  // shapes[]
+      bool dx = false;   // dx_shapes[] (Eulerian gradient), all three history slots
+      bool dX = false;   // dX_shapes[] (Lagrangian gradient) AND dS_shapes[]: the local-coordinate
+                         // derivative has no flag of its own and is marked as dX_psi by the code
+                         // generator (D1XBasisFunctionLocalCoord derives from D1XBasisFunctionLagr).
+      bool d2x = false;  // d2x_shapes[], d2S_shapes[] and d_d2x_shape_dcoord[]
+      bool any() const { return psi || dx || dX || d2x; }
+    };
+    // The single place that decides the above. fill_shape_info_at_s, set_remaining_shapes_appropriately
+    // and poison_unrequired_shapes all key on it; they used to spell the predicate out three times and
+    // had to be kept in lockstep by hand.
+    RequiredShapeFamilies required_shape_families(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, unsigned ispace) const;
+    // The DL twin. No "dominant space" clause: DL fields never represent the geometry.
+    static RequiredShapeFamilies required_shape_families_DL(const JITFuncSpec_RequiredShapes_FiniteElement_t &required);
 
     // Discontinuous fields are stored as internal_data, on interfaces possibly also on external_data
     virtual oomph::Data *get_D0_nodal_data(const unsigned &fieldindex);
@@ -1264,12 +1477,23 @@ namespace pyoomph
     void prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag) override;
     double fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds = NULL, unsigned history_index=0) const override;
     bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap) override;
+    // Additionally poisons the bulk/opposite sub-buffers that this pass does NOT recurse into, i.e.
+    // exactly those an unflagged reader could still reach through shapeinfo->bulk_shapeinfo.
+    void poison_unrequired_shapes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *si, bool element_level) const override;
     // Additional interface-only hanging-node bookkeeping, used by InterfaceElementBase to handle
     // the extra fields that exist only on the interface element and not on the bulk element.
     bool fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info) override;
     // Additionally handles INTERFACE_DOF_CONSTRAIN_TO_C1 additional dof constraints (on top of the
     // CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1 ones already handled by the base class implementation).
     bool fill_additional_hang_buffer_data(JITShapeInfo_t *shape_info) override;
+    // Stage-3 scan counterparts of the two overrides above, plus the recursion clause: the fill
+    // reports "hanging" for ANY interface element that pulls in a bulk or opposite element, because
+    // it then abuses the hang buffers as the local-equation remap channel. That is exactly why the
+    // fill of such an element must never be skipped, and keeping the clause here rather than at the
+    // call sites keeps the predicate and the fill in one place.
+    bool scan_hang_interface_fields() const override;
+    bool scan_interface_has_something_to_interpolate() const override;
+    bool hang_fill_would_report_hang(const JITFuncSpec_RequiredShapes_FiniteElement_t &required) override;
     void ensure_external_data() override;
     void assign_additional_local_eqn_numbers() override;
     void fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
@@ -1433,6 +1657,7 @@ namespace pyoomph
   protected:
     bool fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap) override
     {
+      HangFillTimeScope __hftime(HANGFILL_SLOT_FILL);
       bool res1 = BASE::fill_hang_info_with_equations(required, shape_info, eqn_remap);
       bool res2 = InterfaceElementBase::fill_hang_info_with_equations(required, shape_info, eqn_remap);
       return res1 || res2;
@@ -1441,6 +1666,10 @@ namespace pyoomph
 
     void interpolate_hang_values() override
     {
+      HangFillTimeScope __hftime(HANGFILL_SLOT_INTERP);
+      HangInterpGate __gate(this);
+      if (__gate.skip())
+        return;
       BASE::interpolate_hang_values();
       this->interpolate_hang_values_at_interface();
     }
@@ -1488,6 +1717,12 @@ namespace pyoomph
         }
       }
       //      std::cout << "ADDING INTERFACE ELEM EXTERNAL DATA " << this->nexternal_data() << std::endl;
+      // The geometric flags describe external_data_pt() BY INDEX, so they have to go with the list they
+      // describe. (Today the only flush is this one, on a freshly constructed element whose vector is
+      // still empty, so nothing is currently stale - but the flag became load-bearing when
+      // fill_in_jacobian_from_lagragian_by_fd started honouring it, and a stale "geometric" entry there
+      // is a silently wrong Jacobian column.)
+      this->external_data_is_geometric.clear();
       this->flush_external_data();
       //      std::cout << "FLUSING EXTERNAL DATA " << this->nexternal_data() << std::endl;
       this->add_DG_external_data();

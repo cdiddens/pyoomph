@@ -347,8 +347,9 @@ typedef void (*JITFuncSpec_GeometricJacobianSpatialDerivative)(const JITElementI
 
 // d2X_psi (Lagrangian second derivatives) is reserved but not implemented - the code generator
 // refuses to set it. It is declared now so that adding it later is not a second ABI break.
-// There is deliberately no d2S_psi: local-coordinate derivatives have no flag of their own either
-// (dS_shapes rides on the psi||dx_psi gate), and d2S_shapes likewise rides on d2x_psi.
+// There is deliberately no d2S_psi: local-coordinate derivatives have no flag of their own either.
+// dS_shapes rides on dX_psi - D1XBasisFunctionLocalCoord derives from D1XBasisFunctionLagr, so
+// mark_shapes_required classifies it as a Lagrangian derivative - and d2S_shapes rides on d2x_psi.
 typedef struct JITFuncSpec_RequiredShapes_For_Space
 {
   bool psi,dx_psi,dX_psi,d2x_psi,d2X_psi;

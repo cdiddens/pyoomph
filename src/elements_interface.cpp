@@ -74,6 +74,73 @@ namespace pyoomph
 		return res;
 	}
 
+	// Stage-3 scan counterpart of fill_hang_info_with_equations_interface() AND of the interface half
+	// of fill_additional_hang_buffer_data() below: true exactly when either of them would report a
+	// hang, without writing a buffer.
+	bool InterfaceElementBase::scan_hang_interface_fields() const
+	{
+		auto *ft = codeinst->get_func_table();
+		for (unsigned ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info = ft->present_continuous_spaces[ispace];
+			if (space_info->numfields == space_info->numfields_basebulk)
+				continue; // no interface-only fields in this space
+			const std::vector<unsigned> &s2e = this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
+			const unsigned nnode_space = eleminfo.nnode_of_space[space_info->space_index];
+			for (unsigned l = 0; l < nnode_space; l++)
+			{
+				if (this->hang_info_for_space(space_info, s2e[l]))
+					return true;
+				if (!has_additional_dof_constraints)
+					continue;
+				Node *n = dynamic_cast<Node *>(node_pt(s2e[l]));
+				if (!n)
+					continue;
+				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info; info = info->next)
+				{
+					if (info->mode != INTERFACE_DOF_CONSTRAIN_TO_C1)
+						continue;
+					for (unsigned j = space_info->numfields_basebulk; j < space_info->numfields; j++)
+						if (space_info->interface_dof_indices[j - space_info->numfields_basebulk] == info->index)
+							return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	// Scan counterpart of interpolate_hang_values_at_interface(): a hanging node in a space carrying
+	// interface-only fields, or a dummy-value map entry for such a space.
+	bool InterfaceElementBase::scan_interface_has_something_to_interpolate() const
+	{
+		auto *ft = codeinst->get_func_table();
+		const std::vector<std::vector<std::vector<unsigned>>> &dummy_map = this->get_dummy_value_interpolation_map();
+		for (unsigned ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
+		{
+			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info = ft->present_continuous_spaces[ispace];
+			if (space_info->numfields <= space_info->numfields_basebulk)
+				continue;
+			if (!dummy_map[space_info->space_index].empty())
+				return true;
+			const std::vector<unsigned> &s2e = this->get_nodal_space_index_to_element_index_map()[space_info->space_index];
+			for (unsigned l = 0; l < eleminfo.nnode_of_space[space_info->space_index]; l++)
+				if (node_pt(s2e[l])->is_hanging(space_info->hangindex))
+					return true;
+		}
+		return false;
+	}
+
+	// The recursion clause of the predicate: fill_hang_info_with_equations() below returns true for
+	// ANY interface element that pulls in a bulk or opposite element, because it then writes the
+	// local-equation REMAP into these very buffers. Skipping that fill would hand the generated code
+	// another element's equation numbers, so the predicate has to keep reporting "hanging" here.
+	bool InterfaceElementBase::hang_fill_would_report_hang(const JITFuncSpec_RequiredShapes_FiniteElement_t &required)
+	{
+		if (required.bulk_shapes || required.opposite_shapes)
+			return true;
+		return BulkElementBase::hang_fill_would_report_hang(required);
+	}
+
 	// Interface-field counterpart to BulkElementBase::fill_additional_hang_buffer_data: additionally
 	// sets up the synthetic hanging scheme for interface-only dofs locally reduced to C1 via
 	// add_additional_dof_constraint (mode INTERFACE_DOF_CONSTRAIN_TO_C1); "index" there is the
@@ -277,6 +344,7 @@ namespace pyoomph
 
 	void InterfaceElementBase::fill_in_jacobian_from_nodal_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) 
 	{
+		HangInterpPassSuspension __no_pass; // the interface-only perturbation loop below re-enters get_residuals too
 		BulkElementBase::fill_in_jacobian_from_nodal_by_fd(residuals, jacobian);
 		const unsigned n_node = this->nnode();
 		if (n_node == 0) return;
@@ -395,6 +463,8 @@ namespace pyoomph
 	// get_dummy_value_interpolation_map()) so that both hold consistent interpolated values for output/restart.
 	void InterfaceElementBase::interpolate_hang_values_at_interface()
 	{
+		if (__measure_skip_hang_fills)
+			return; // measurement lever only, see __measure_skip_hang_fills
 		auto * ft=this->get_code_instance()->get_func_table();
 		const std::vector<std::vector<std::vector<unsigned>>> & dummy_value_interpolation_map=this->get_dummy_value_interpolation_map();
 		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
@@ -1363,7 +1433,14 @@ namespace pyoomph
 		  auto * space_info=ft->present_dg_spaces[si];
 		  for (unsigned i=0;i<space_info->numfields_bulk;i++)
 		  {
-			this->add_external_data(blk->get_DG_nodal_data(space_info->space_index, i));
+			// DG field values, never positions. The flag has to be recorded here rather than left to
+			// the resize() in add_required_external_data: that only FILLS new slots, so a code with DG
+			// spaces but no ED0 and no bulk/opposite requirements would leave the vector shorter than
+			// nexternal_data() and trip the size check in fill_in_jacobian_from_lagragian_by_fd.
+			const unsigned index = this->add_external_data(blk->get_DG_nodal_data(space_info->space_index, i));
+			if (index >= external_data_is_geometric.size())
+				external_data_is_geometric.resize(index + 1, false);
+			external_data_is_geometric[index] = false;
 		  }
 	  }	  
 	}
@@ -2224,6 +2301,7 @@ namespace pyoomph
 	// add_required_ext_data), since those degrees of freedom are not covered by the base class's own nodes.
 	void InterfaceElementBase::fill_in_jacobian_from_lagragian_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
 	{
+		HangInterpPassSuspension __no_pass; // see BulkElementBase::fill_in_jacobian_from_nodal_by_fd
 		BulkElementBase::fill_in_jacobian_from_lagragian_by_fd(residuals, jacobian);
 		const unsigned n_node = this->nnode();
 		if (n_node == 0)
@@ -2244,7 +2322,14 @@ namespace pyoomph
 		}
 		for (unsigned int ed = 0; ed < this->nexternal_data(); ed++)
 		{
-			// TODO: Only geometric data!
+			// Only the GEOMETRIC external data (the bulk/opposite nodes' variable_position_pt, added
+			// with is_geometric=true). This routine exists to patch in the position columns the
+			// generated code did not produce because fd_position_jacobian is set; the value columns of
+			// the attached elements come out of the generated code analytically, through the equation
+			// remapping, so finite-differencing them here only overwrote correct entries with less
+			// accurate ones.
+			if (!external_data_is_geometric[ed])
+				continue;
 			oomph::Data *data = this->external_data_pt(ed);
 			for (unsigned int i = 0; i < data->nvalue(); i++)
 			{
@@ -2322,6 +2407,10 @@ namespace pyoomph
 	// up to date before integration, then delegates the rest to the base class.
 	void InterfaceElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
+		{
+		// Timed in its own slot: these are re-interpolations of NEIGHBOURING elements, i.e. work that
+		// each of those elements also does when it is assembled itself.
+		HangFillTimeScope __hftime(HANGFILL_SLOT_NEIGHBOUR);
 		if (required_shapes.bulk_shapes)
 		{
 			dynamic_cast<BulkElementBase *>(this->bulk_element_pt())->interpolate_hang_values(); // TODO: This might be put somewhere else
@@ -2341,6 +2430,7 @@ namespace pyoomph
 			{
 				dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->opposite_side)->bulk_element_pt())->interpolate_hang_values(); // TODO: This might be put somewhere else
 			}
+		}
 		}
 
 		BulkElementBase::prepare_shape_buffer_for_integration(required_shapes, flag);
@@ -2374,6 +2464,7 @@ namespace pyoomph
 	// (bulk_eqn_map, bulk_bulk_eqn_map, opp_interf_eqn_map, opp_bulk_eqn_map) built by update_equation_remapping().
 	bool InterfaceElementBase::fill_hang_info_with_equations(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info, int *eqn_remap)
 	{
+		HangFillTimeScope __hftime(HANGFILL_SLOT_FILL);
 		//	Bulk is setup elsewhere
 		bool ret_bulk = false;
 
@@ -2449,6 +2540,10 @@ namespace pyoomph
 	// Currently a no-op override (the actual external-data setup happens via add_required_external_data /
 	// add_DG_external_data elsewhere); kept as an explicit override with the old approach commented out below
 	// for reference, since blindly calling the base class here would flush already-set-up external data.
+	// Deliberately a no-op, NOT BulkElementBase::ensure_external_data(): that one flushes the whole
+	// external-data list and re-adds only the ED0 entries, which on an interface element would drop the
+	// bulk/opposite data added at construction (and leave external_data_is_geometric describing a list
+	// that no longer exists).
 	void InterfaceElementBase::ensure_external_data()
 	{
 		/*   BulkElementBase::ensure_external_data(); //This would flush the storage...
