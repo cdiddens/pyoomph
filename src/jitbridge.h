@@ -531,7 +531,11 @@ typedef struct JITFuncSpec_Table_FiniteElement
   void *handle; // Handle to the SO
   JITFuncSpec_ResidualAndJacobian_FiniteElement *ResidualAndJacobian;
   JITFuncSpec_ResidualAndJacobian_FiniteElement *ResidualAndJacobianSteady;
+  /* Twins of the two above for elements in which nothing hangs, selected per element by
+     BulkElementBase::fill_in_generic_residual_contribution_jit. Never NULL where the corresponding
+     hanging slot is non-NULL: where no specialised body was emitted they simply point at it. */
   JITFuncSpec_ResidualAndJacobian_FiniteElement *ResidualAndJacobian_NoHang;
+  JITFuncSpec_ResidualAndJacobian_FiniteElement *ResidualAndJacobianSteady_NoHang;
   bool * missing_residual_assembly; // Some residuals are not calculated (if not needed, e.g. for azimuthal eigenproblem). We cannot FD then!
 
   JITFuncSpec_HessianVectorProduct_FiniteElement *HessianVectorProduct;
@@ -805,31 +809,43 @@ static double signum(double x)
   {                                             \
     _H_contrib = CONTRIB;
 
-// Hanging macros
-#define BEGIN_RESIDUAL_CONTINUOUS_SPACE(EQN, CONTRIB, HANGINFO, LINDEX)                                             \
-  if (HANGINFO[LINDEX].nummaster)                                                                                   \
+// Hanging macros.
+//
+// The leading HANGON argument is what lets ONE emitted body serve both the hanging and the
+// non-hanging element populations (dev_docs/code_generation.md 9.4.14). It is either the literal 1
+// or the constant `_impl` parameter pyoomph_hang_on, so after inlining the compiler sees a compile-
+// time constant:
+//
+//  * HANGON == 0: `&&` short-circuits, so HANGINFO is never even loaded, `nummaster` folds to 0, the
+//    guard collapses to `(EQN) >= 0`, the master loop to a single iteration and hang_weight to 1.0 -
+//    i.e. exactly the shape of BEGIN_JACOBIAN_NOHANG, without emitting the body a second time.
+//  * HANGON == 1: the arithmetic of the hanging path, unchanged.
+//
+// Testing `nummaster || (EQN) >= 0` BEFORE evaluating CONTRIB is the second half of the point: a
+// pinned, non-hanging dof used to compute its contribution and then throw it away. Only a real hang
+// needs the contribution before the row is known (the same value is scattered to several masters),
+// and that case still gets it. CONTRIB is pure arithmetic plus pure callbacks, so not evaluating it
+// is unobservable - pyoomph does not unmask FP exceptions.
+#define BEGIN_RESIDUAL_CONTINUOUS_SPACE(HANGON, EQN, CONTRIB, HANGINFO, LINDEX)                                     \
+  nummaster = ((HANGON) && HANGINFO[LINDEX].nummaster) ? HANGINFO[LINDEX].nummaster : 0u;                           \
+  if (nummaster || (EQN) >= 0)                                                                                      \
   {                                                                                                                 \
-    nummaster = HANGINFO[LINDEX].nummaster;                                                                         \
-  }                                                                                                                 \
-  else                                                                                                              \
-  {                                                                                                                 \
-    nummaster = 1;                                                                                                  \
-  }                                                                                                                 \
-  _res_contrib = CONTRIB;                                                                                       \
-  for (int m = 0; m < nummaster; m++)                                                                               \
-  {                                                                                                                 \
-    if (HANGINFO[LINDEX].nummaster)                                                                                 \
+    const unsigned _nmaster = (nummaster ? nummaster : 1u);                                                         \
+    _res_contrib = CONTRIB;                                                                                         \
+    for (unsigned m = 0; m < _nmaster; m++)                                                                         \
     {                                                                                                               \
-      local_eqn = HANGINFO[LINDEX].masters[m].local_eqn;                                                            \
-      hang_weight = HANGINFO[LINDEX].masters[m].weight;                                                             \
-    }                                                                                                               \
-    else                                                                                                            \
-    {                                                                                                               \
-      local_eqn = EQN;                                                                                              \
-      hang_weight = 1.0;                                                                                            \
-    }                                                                                                               \
-    if (local_eqn >= 0) /*&& (!eleminfo->nullified_residual_dof || !eleminfo->nullified_residual_dof[local_eqn] )*/ \
-    {
+      if (nummaster)                                                                                                \
+      {                                                                                                             \
+        local_eqn = HANGINFO[LINDEX].masters[m].local_eqn;                                                          \
+        hang_weight = HANGINFO[LINDEX].masters[m].weight;                                                           \
+      }                                                                                                             \
+      else                                                                                                          \
+      {                                                                                                             \
+        local_eqn = EQN;                                                                                            \
+        hang_weight = 1.0;                                                                                          \
+      }                                                                                                             \
+      if (local_eqn >= 0) /*&& (!eleminfo->nullified_residual_dof || !eleminfo->nullified_residual_dof[local_eqn] )*/ \
+      {
 
 #define ADD_TO_RESIDUAL_CONTINUOUS_SPACE() \
   assert(local_eqn < eleminfo->ndof);      \
@@ -837,32 +853,32 @@ static double signum(double x)
 
 #define END_RESIDUAL_CONTINUOUS_SPACE() \
   }                                     \
+  }                                     \
   }
 
-#define BEGIN_JACOBIAN_HANG(EQN, CONTRIB, HANGINFO, LINDEX)             \
-  if (HANGINFO[LINDEX].nummaster)                                       \
-  {                                                                     \
-    nummaster2 = HANGINFO[LINDEX].nummaster;                            \
-  }                                                                     \
-  else                                                                  \
-  {                                                                     \
-    nummaster2 = 1;                                                     \
-  }                                                                     \
-  _J_contrib = CONTRIB;                                               \
-  for (int m2 = 0; m2 < nummaster2; m2++)                               \
-  {                                                                     \
-    if (HANGINFO[LINDEX].nummaster)                                     \
-    {                                                                   \
-      local_unknown = HANGINFO[LINDEX].masters[m2].local_eqn;           \
-      hang_weight2 = HANGINFO[LINDEX].masters[m2].weight;               \
-    }                                                                   \
-    else                                                                \
-    {                                                                   \
-      local_unknown = EQN;                                              \
-      hang_weight2 = 1.0;                                               \
-    }                                                                   \
-    if (local_unknown >= 0)                                             \
-    {
+// Note the asymmetry to BEGIN_JACOBIAN_NOHANG, which is deliberate and predates this: that macro
+// DECLARES its own `double _J_contrib`, shadowing the one declared per integration block, while this
+// one ASSIGNS the outer variable.
+#define BEGIN_JACOBIAN_HANG(HANGON, EQN, CONTRIB, HANGINFO, LINDEX)       \
+  nummaster2 = ((HANGON) && HANGINFO[LINDEX].nummaster) ? HANGINFO[LINDEX].nummaster : 0u; \
+  if (nummaster2 || (EQN) >= 0)                                           \
+  {                                                                       \
+    const unsigned _nmaster2 = (nummaster2 ? nummaster2 : 1u);            \
+    _J_contrib = CONTRIB;                                                 \
+    for (unsigned m2 = 0; m2 < _nmaster2; m2++)                           \
+    {                                                                     \
+      if (nummaster2)                                                     \
+      {                                                                   \
+        local_unknown = HANGINFO[LINDEX].masters[m2].local_eqn;           \
+        hang_weight2 = HANGINFO[LINDEX].masters[m2].weight;               \
+      }                                                                   \
+      else                                                                \
+      {                                                                   \
+        local_unknown = EQN;                                              \
+        hang_weight2 = 1.0;                                               \
+      }                                                                   \
+      if (local_unknown >= 0)                                             \
+      {
 
 #define ADD_TO_JACOBIAN_HANG_NOHANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight * _J_contrib;
 #define ADD_TO_JACOBIAN_NOHANG_HANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight2 * _J_contrib;
@@ -885,6 +901,7 @@ static double signum(double x)
   }
 
 #define END_JACOBIAN_HANG() \
+  }                         \
   }                         \
   }
 

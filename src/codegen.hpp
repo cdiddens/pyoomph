@@ -706,6 +706,11 @@ namespace pyoomph
       std::string get_name() const { return name; }
       virtual std::string get_shape_name() const { return name; } // Name used to look up the shape-function table in the generated code
       virtual bool can_have_hanging_nodes() { return false; }
+      // What to print as the HANGON argument of the hanging-node macros when emitting code for
+      // `for_code`, or "" to use the non-hanging macro family instead. Exists once rather than at
+      // each of the two emission sites because the rule has a correctness trap in it (see the
+      // definition in codegen.cpp).
+      std::string get_hang_on_str(FiniteElementCode *for_code);
       virtual bool need_interpolation_loop() { return true; } // False for spaces (e.g. D0) where a single value replaces the usual per-node interpolation loop
       FiniteElementCode *get_code() const { return code; }
       // Monotonically increasing, construction-order-assigned id - see FiniteElementField::get_creation_index()
@@ -1091,6 +1096,7 @@ namespace pyoomph
       // a regression or to keep one enormous element from paying compile time the others do not need.
       int jacobian_hoist_min_cost = -1;   // -1: use the global default (PYOOMPH_JACOBIAN_HOIST_MIN, else 1)
       bool split_rjm_by_flag = true;      // false: emit one Residual/Jacobian/Mass body with a runtime flag
+      bool split_rjm_by_hang = true;      // false: emit no hanging-node-free twin of the Residual/Jacobian/Mass body (see 9.4.14). Requires split_rjm_by_flag, since the twin rides on the same _impl trick
       double debug_jacobian_epsilon; // Step size used when numerically cross-checking the analytical Jacobian against finite differences
       bool with_adaptivity;
       bool coordinates_as_dofs; // If true, the nodal positions are themselves unknowns with residual/Jacobian entries (moving-mesh/ALE elements)
@@ -1188,7 +1194,7 @@ namespace pyoomph
       // `may_be_asked_for_mass_matrix` false means: a mass matrix is not IMPOSSIBLE here, only unusual,
       // so the flag!=0 branch keeps a runtime flag instead of getting a third specialised body. It must
       // never be used to mean "cannot happen" - see write_generic_RJM.
-      virtual void write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang, bool may_be_asked_for_mass_matrix = true);     // Generic Residual/Jacobian/Mass matrix (also for parameter derivatives)
+      virtual void write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang, bool may_be_asked_for_mass_matrix = true, bool allow_hang_split = false);     // Generic Residual/Jacobian/Mass matrix (also for parameter derivatives). allow_hang_split: this routine is hot enough to be worth a hanging-node-free twin (only the two ResidualAndJacobian ones are)
       virtual bool write_generic_Hessian(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang); // Generic Hessian vector product
       virtual void write_code(std::ostream &os); // Top-level driver: writes the full generated C++ source for this element (calls the write_code_*()/write_generic_*() methods for every residual)
       virtual std::string get_precodegen_fingerprint_text(); // Tier-2 JIT cache (shadow mode): canonical text capturing every residual/expression and setting write_code() will read, computed BEFORE the (expensive) symbolic differentiation/CSE/printing write_code() performs. Cheap to compute since it only walks/prints the already-built expression trees once, with no derivation. See pyoomph/generic/jit_cache.py.
@@ -1269,11 +1275,27 @@ namespace pyoomph
       // produces the block expressions the JACOBIAN_BLOCK_* flags describe; accumulating the others on
       // top would mix in blocks that are not the ones the runtime assembles.
       bool record_jacobian_blocks_for_flags = false;
+
+      // Only true while write_generic_RJM is writing a routine whose body is emitted as a
+      // PYOOMPH_RJM_IMPL taking the extra constant `pyoomph_hang_on` parameter. Routine-scoped state
+      // on the code (like record_jacobian_blocks_for_flags above) rather than another bool threaded
+      // through write_generic_RJM_contribution: those signatures already carry a `hanging_eqns` flag
+      // with a different meaning, and a second one next to it would invite confusing the two.
+      bool emitting_hang_parameter = false;
+      // Set by get_hang_on_str whenever it actually printed pyoomph_hang_on. A routine that never did
+      // (e.g. an interface code all of whose spaces live on the bulk, where the hang buffers are the
+      // equation remap and must stay unconditional) would get two identical entry points, so its
+      // _NoHang twin is not emitted at all and the function table aliases the slots as before.
+      bool hang_parameter_was_used = false;
       // residual index -> (row test field, column unknown field) -> (Jacobian half, mass-matrix half),
       // summed over every emitted contribution. Lives on the code rather than on the field (unlike
       // jacobian_contribution_for_code) because proving block (i,j) = +-transpose(block (j,i)) needs
       // both halves side by side, and they come from different FiniteElementSpaces. Cleared once
       // write_code_info() has turned it into the flag tables.
+      // Names of the RJM routines for which a <name>_NoHang entry point was actually emitted, read by
+      // the function-table registration to keep the invariant "a _NoHang slot is non-NULL whenever its
+      // twin is" without having to re-derive the decision.
+      std::set<std::string> emitted_nohang_entry_points;
       std::map<unsigned, std::map<std::pair<FiniteElementField *, FiniteElementField *>, std::pair<GiNaC::ex, GiNaC::ex>, FiniteElementFieldPairPtrLess>> jacobian_block_exprs;
       void record_jacobian_block_expr(FiniteElementField *rowf, FiniteElementField *colf, const GiNaC::ex &jac_part, const GiNaC::ex &mass_part);
 

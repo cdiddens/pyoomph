@@ -1333,6 +1333,154 @@ the branch and the bulk path paid for six terms it never used. Since the fills o
 inliner delete the N-terms outright: **0.2957 s, +0.3% against the 0.2947 s reference, three passes within
 0.001 s.** Sharing the formula costs nothing; sharing it through an unfoldable flag cost 3.5%.
 
+### 9.4.14 Specialising the hanging-node machinery away, per element
+
+With adaptivity on, every entry of every element used to run the hanging-node macros
+(`BEGIN_RESIDUAL_CONTINUOUS_SPACE`, `BEGIN_JACOBIAN_HANG`), because the hang/no-hang choice was made at
+**generation** time from `ContinuousFiniteElementSpace::can_have_hanging_nodes()`, i.e. from
+`with_adaptivity` alone. So a fully non-hanging element - the vast majority even on an adapted mesh -
+paid, per entry, a `nummaster` load, two tests, a master loop, and an unconditional evaluation of the
+contribution even for a pinned equation. The non-hanging macros test `local_eqn >= 0` *first*.
+
+The runtime half of the fix was already in the tree and dead: `fill_hang_info_with_equations` returns
+whether anything in the element really hangs, but the answer was overwritten with `has_hang = true;
+// ASSUME ALWAYS HANGING!`, and the `ResidualAndJacobian_NoHang` function-table slot was registered
+with the same function as its twin.
+
+**Mechanism.** The same trick as §9.4.6, one level further: the hang macros gained a leading `HANGON`
+argument, and the `_impl` a second constant parameter, so *one* emitted body becomes two entry points.
+
+```c
+#define BEGIN_RESIDUAL_CONTINUOUS_SPACE(HANGON, EQN, CONTRIB, HANGINFO, LINDEX)          \
+  nummaster = ((HANGON) && HANGINFO[LINDEX].nummaster) ? HANGINFO[LINDEX].nummaster : 0u; \
+  if (nummaster || (EQN) >= 0)                                                           \
+  { const unsigned _nmaster = (nummaster ? nummaster : 1u);                              \
+    _res_contrib = CONTRIB;                                                              \
+    for (unsigned m = 0; m < _nmaster; m++) { ... } }
+```
+
+With `HANGON` folded to 0 the `&&` short-circuits, `HANGINFO` is never loaded, the guard collapses to
+`(EQN) >= 0` **before** `CONTRIB`, the loop to one iteration and `hang_weight` to `1.0` - exactly the
+shape of `BEGIN_JACOBIAN_NOHANG`, without emitting the body twice. With `HANGON` folded to 1 the
+arithmetic is what it always was, plus the pinned-unknown skip, which is why §10's parked note about
+that ordering is now only true of the hanging path.
+
+`write_generic_RJM` appends `, const int pyoomph_hang_on` to the `_impl` signature and writes a second
+dispatcher `<name>_NoHang` passing 0 where the normal one passes 1; a new
+`ResidualAndJacobianSteady_NoHang` table slot mirrors the steady routine, because the steady slot is
+what a stationary solve - the common case - actually calls. `elements_assembly.cpp` picks per element
+from the fill's return value.
+
+**The one rule that is not an optimisation choice.** For a space belonging to *another* code (a bulk or
+opposite-side space read from an interface element) `HANGON` stays the literal 1, unconditionally.
+`fill_hang_info_with_equations` reuses those same hang buffers as the local-equation **remap** channel:
+it writes `nummaster=1`, `weight=1.0` and the remapped `local_eqn` for every dof, hanging or not
+(`src/elements_hanging.cpp:1062-1099`). Folding `HANGON` to 0 there would ignore those entries and
+scatter the element into the wrong rows. `FiniteElementSpace::get_hang_on_str` states the three-way
+rule once, for exactly this reason.
+
+**Predicate conservatism, deliberate.** `InterfaceElementBase`'s override of the fill returns true
+whenever bulk or opposite shapes are required, so an interface element with bulk dependence always
+takes the hanging entry point. That is over-conservative - most such elements hang nothing - but
+narrowing it needs its own validation pass and buys little (interface elements are a small fraction of
+the assembly). Left as an outlook item. The base predicate also covers the
+`add_additional_dof_constraint` C1 reductions, which correctly force the hanging path independently of
+adaptivity.
+
+**Ceiling and result.** The ceiling was measured first, by compiling with `with_adaptivity=False` on
+unrefined meshes - which produces exactly the code the dispatch selects - and it is what decided the
+work was worth doing. In-process elemental assembly (`_benchmark_elemental_assembly`), interleaved
+arms, one process per arm, min of three rounds:
+
+| unrefined | metric | today (dispatch off) | dispatch on | ceiling | of the ceiling |
+|---|---|---|---|---|---|
+| `poisson2d` (ndof 14520) | residual | 0.02861 s | 0.02850 s (-0.4%) | 0.02857 s (-0.1%) | - |
+| | res+jac | 0.03417 s | 0.03202 s (**-6.3%**) | 0.03196 s (-6.5%) | 97% |
+| `ns2d` (ndof 32042) | residual | 0.03809 s | 0.03766 s (-1.1%) | 0.03747 s (-1.6%) | 69% |
+| | res+jac | 0.06987 s | 0.05810 s (**-16.8%**) | 0.05716 s (-18.2%) | 93% |
+| `ale2d` (ndof 9695) | residual | 0.00662 s | 0.00631 s (-4.7%) | 0.00631 s (-4.8%) | 99% |
+| | res+jac | 0.03908 s | 0.03399 s (**-13.0%**) | 0.03381 s (-13.5%) | 96% |
+
+The win is in the Jacobian, not the residual: a residual entry is one multiply-add, so the branch
+overhead it saves is a smaller share of it.
+
+On **genuinely refined** meshes (level 1 everywhere, level 2 near one boundary; 71% of the element
+assemblies take the specialised entry point) the hanging path does not regress and the mixed population
+gains about as much: `poisson2d` res+jac -6.4%, `ns2d` -17.9%, `ale2d` -14.2%.
+
+**What it costs.** Unlike §9.4.6 this doubles only the *adaptive* routines, and nothing at all where
+`with_adaptivity` is false (the split is off by construction there), nor in a routine whose spaces all
+belong to other codes - the `_NoHang` entry point is only written if the body actually read
+`pyoomph_hang_on`, otherwise the table slots alias as before.
+
+| | generated C | `.so` | compile |
+|---|---|---|---|
+| `solid3d`, adaptive, split off | 378 251 B | 93 752 B | 8.64 s |
+| `solid3d`, adaptive, split on | 379 067 B (+0.2%) | 142 952 B (**+52%**) | 10.10 s (+17%) |
+| `solid3d`, non-adaptive | 377 194 B | 81 408 B | 8.2-8.5 s (unchanged either way) |
+| `ns2d`, adaptive, split off | 138 699 B | 133 320 B | 2.11 s |
+| `ns2d`, adaptive, split on | 139 451 B (+0.5%) | 141 560 B (+6.2%) | 2.34 s (+11%) |
+
+That is well under §9.4.6's +114%/+116%, so the available further bound - routing `flag == 2` in the
+`_NoHang` dispatcher to the hanging `_impl`, 5 bodies instead of 6 - was measured and deliberately not
+applied.
+
+#### Validating it: the same binary, two entry points
+
+`PYOOMPH_DISABLE_NOHANG_DISPATCH` forces every element back through the hanging entry point without
+regenerating or recompiling anything, so the two arms of a comparison differ in nothing else.
+`PYOOMPH_REPORT_NOHANG_DISPATCH` counts which entry point each element assembly took and says so at
+exit - a comparison in which the specialised path never engaged is two identical numbers and a
+meaningless pass, the same failure mode the frozen-sparsity work had to guard against.
+
+Seven cases, residual + Jacobian (+ mass matrix where `flag == 2` applies), compared for **exact**
+equality, never `allclose`:
+
+| case | NoHang / hang assemblies | result |
+|---|---|---|
+| unrefined adaptive-capable mesh, unsteady | 144 / 0 | bitwise identical |
+| refined mesh, real hanging nodes | 720 / 288 | bitwise identical |
+| stationary solve (`Steady_NoHang`) | 180 / 0 | bitwise identical |
+| refined mesh, stationary, with mass matrix | 1716 / 264 | see below |
+| moving mesh (`ale2d`), refined | 624 / 148 | see below |
+| two domains, asymmetric refinement (remap channel) | 1680 / 320 | bitwise identical |
+| `add_additional_dof_constraint` on an adaptive mesh | 720 / 288 | bitwise identical |
+
+The two exceptions are **not** semantic. On the two cases whose entries are large sums of products -
+the moving-mesh Jacobian and the Navier-Stokes one - the two arms differ by at most 3.4 ulp
+(`ale2d` Jacobian 8.7e-18 against a matrix norm of 128; `nsmass` 1.4e-17 in the Jacobian and 4.3e-19 in
+the mass matrix, residual bitwise identical). Compiled with `-ffp-contract=off` they are bitwise
+identical, entry for entry, including the mass matrix - so the difference is GCC's freedom to contract
+`a*b+c` into an FMA differently in two differently-shaped basic blocks, not different arithmetic. The
+tcc backend, which contracts nothing, gives bitwise identical results on both cases with contraction
+left on. This is the same sensitivity §12 records for gcc-vs-tcc.
+
+Two things had to be fixed in the harness before any of that meant anything, and both are worth
+knowing for the next such comparison:
+
+* **The adaptive solves are not bit-reproducible run to run.** The same binary, run twice, produced
+  `ale2d` Jacobian entries differing by 1e-32 - and three adapt cycles of Newton amplify that to 1e-18
+  in the assembled matrix. Comparing "whatever the solver produced" measures the solver. Both arms now
+  snap the dof vector (zero the low mantissa bits) before assembling, so they assemble the same input.
+* A **pure-refactor gate** ran first, before any specialisation existed: the rewritten macros with
+  `HANGON` printed as the literal 1 everywhere, against the pre-change build. Bitwise identical on five
+  of six cases; on `ale2d` the same <=2 ulp FMA signature, pinned down by re-running the *new* build's
+  generated C against the *old* macro bodies (installed by hand into `pyoomph/jitbridge/jitbridge.h`),
+  which reproduced the old build bit for bit. That isolates "the restructuring is a refactor" from "the
+  specialisation is correct", which is why it is worth doing in that order.
+
+Targeted suites: `test_adaptivity.py` + `test_constrained_adaptivity.py` (32 passed),
+`test_adaptive_interface_coupling.py` (137 passed), `test_generated_code_expressions.py` +
+`test_jacobian_block_flags.py` as the non-adaptive smoke test (27 passed).
+
+#### Outlook
+
+* The Hessian macros (`src/jitbridge.h`) were left alone on purpose: §9.4.9/§9.4.11 show that path is
+  dominated by sparse-tensor inserts, not by the emitted code.
+* Narrowing the `InterfaceElementBase` predicate to elements that really hang.
+* Skipping `fill_hang_info_with_equations` / `interpolate_hang_values` entirely for elements known not
+  to hang - currently both still run in full before the dispatch reads the answer.
+
 ## 10. Things deliberately left alone
 
 - **`expanded_additional_field_cache` is written but never read** (`if (false && ...)` in both the
@@ -1351,9 +1499,11 @@ inliner delete the N-terms outright: **0.2957 s, +0.3% against the 0.2947 s refe
   innermost loop, and GCC provably cannot hoist it above the `ipt` loop because that loop opens with an
   indirect call through the same non-`restrict` table pointer. Measure it *after* any CSE pass, not
   before.
-- **The hanging-node macros evaluate `CONTRIB` before testing `local_unknown >= 0`** (`src/jitbridge.h`),
-  unlike the non-hanging variants. For a genuinely hanging node the contribution is needed for every
-  master, so the ordering is deliberate; the waste is confined to pinned unknowns.
+- **The hanging-node macros evaluate `CONTRIB` before testing `local_unknown >= 0`** (`src/jitbridge.h`)
+  — *superseded by §9.4.14.* The ordering is still deliberate, but only where it is needed: a genuinely
+  hanging node does need the contribution before the row is known, so the hanging path keeps it, while
+  the specialised no-hang bodies now test the equation first and skip the contribution for a pinned
+  unknown entirely. Nothing is left here to leave alone.
 - **`pow(x,3)`/`pow(x,4)`.** Unlike squaring, `x*(x*x)` and `(x*x)*(x*x)` differ from `pow` in the last
   bits, so they need their own decision rather than riding along with §8.1.
 
@@ -1373,6 +1523,9 @@ All change how pyoomph gets there or what it reports, never what it computes.
 | `PYOOMPH_DISABLE_RJM_SPLIT` | emit one Residual/Jacobian/Mass function with a runtime flag instead of three specialised bodies behind a dispatcher (§9.4.6) |
 | `PYOOMPH_DISABLE_JACOBIAN_HOIST` | emit each Jacobian entry inside the trial loop as before, instead of hoisting its `l_shape`-independent coefficients (§9.4.5) |
 | `PYOOMPH_JACOBIAN_HOIST_MIN` | how many expression nodes a coefficient must have before it is worth naming; default 32, higher trades Jacobian time for residual-only time (§9.4.5) |
+| `PYOOMPH_DISABLE_HANG_SPLIT` | generation time: emit no hanging-node-free twin of the Residual/Jacobian/Mass body, so every element runs the hanging one as before (§9.4.14) |
+| `PYOOMPH_DISABLE_NOHANG_DISPATCH` | run time: send every element to the hanging entry point on an unchanged binary and unchanged generated code. The lever the bitwise validation of §9.4.14 turns |
+| `PYOOMPH_REPORT_NOHANG_DISPATCH` | count hanging vs non-hanging entry-point assemblies and print both at exit (§9.4.14). Diagnostic only; a run reporting zero specialised assemblies has proven nothing about them |
 | `PYOOMPH_PARANOID_ALE_IDENTITY` | rebuild every moving-mesh shape sensitivity from closed form and compare, reporting counts and worst deviation per identity and per `(el_dim, nodal_dim)` at exit, plus any `J = 0` element (§9.4). Read-only; a run that ends with "NO comparisons" has proven nothing |
 
 ## 12. Reproducing

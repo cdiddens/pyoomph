@@ -36,6 +36,49 @@ The main author may be contacted at c.diddens@utwente.nl
 namespace pyoomph
 {
 
+	// Per-element hanging/non-hanging dispatch (dev_docs/code_generation.md 9.4.14).
+	//
+	// PYOOMPH_DISABLE_NOHANG_DISPATCH forces every element through the hanging entry point again, on an
+	// unchanged binary and unchanged generated code. That is what makes the specialised bodies testable:
+	// the two arms of the comparison differ in nothing but which entry point was called.
+	static const bool __nohang_dispatch_disabled = getenv("PYOOMPH_DISABLE_NOHANG_DISPATCH") != NULL;
+
+	// PYOOMPH_REPORT_NOHANG_DISPATCH counts which entry point each element assembly took and prints the
+	// tally at exit. Diagnostic only. It exists for the same reason as the ALE-identity report in
+	// elements_shapeinfo.cpp: a comparison in which the specialised path never engaged produces two
+	// identical numbers and looks like a perfect result, so the engagement has to be counted rather
+	// than inferred.
+	static const bool __report_nohang_dispatch = getenv("PYOOMPH_REPORT_NOHANG_DISPATCH") != NULL;
+	static unsigned long __nohang_dispatch_count = 0, __hang_dispatch_count = 0;
+	static struct __NoHangDispatchReport
+	{
+		~__NoHangDispatchReport()
+		{
+			if (!__report_nohang_dispatch)
+				return;
+			std::cout << "PYOOMPH_REPORT_NOHANG_DISPATCH: " << __nohang_dispatch_count
+					  << " element assemblies took the NoHang entry point, " << __hang_dispatch_count
+					  << " took the hanging one";
+			if (!__nohang_dispatch_count)
+				std::cout << " - the specialised path NEVER engaged, so nothing about it was proven";
+			std::cout << std::endl;
+		}
+	} __nohang_dispatch_report;
+
+	// Whether this element gets the specialised, hanging-node-free entry point. has_hang is what
+	// fill_hang_info_with_equations reported, i.e. "some dof of this element really hangs, or an
+	// additional dof constraint reduced it".
+	static inline bool __use_nohang_entry(bool has_hang)
+	{
+		const bool nohang = !has_hang && !__nohang_dispatch_disabled;
+		if (__report_nohang_dispatch)
+		{
+			if (nohang) __nohang_dispatch_count++;
+			else __hang_dispatch_count++;
+		}
+		return nohang;
+	}
+
 	// Multi-assembly: performs several residual/Jacobian/mass-matrix/Hessian-vector-product/
 	// parameter-derivative contributions (described by `info`, one entry per "contribution",
 	// e.g. bulk + several attached interfaces) for this element in a single pass, sharing one
@@ -125,11 +168,12 @@ namespace pyoomph
 		}
 
 		// This is the only benefit of this approach: We only have to do this once!
-		this->fill_hang_info_with_equations(*required_shapes, this->shape_info, NULL);
+		// What the fill just reported, rather than the "assume always hanging" it used to be overwritten
+		// with: elements in which nothing hangs take the specialised entry points below.
+		const bool has_hang = this->fill_hang_info_with_equations(*required_shapes, this->shape_info, NULL);
 		this->interpolate_hang_values();
 		prepare_shape_buffer_for_integration(*required_shapes, shapeflag);
-
-		bool has_hang = true; // Assuming always hanging at the moment
+		const bool use_nohang = __use_nohang_entry(has_hang);
       bool shared_multi_assemble=functable->use_shared_shape_buffer_during_multi_assemble;
       functable->during_shared_multi_assembling=shared_multi_assemble;
       unsigned n_int_pt=(shared_multi_assemble ? this->shape_info->n_int_pt : 1);
@@ -156,14 +200,13 @@ namespace pyoomph
 
 					if (tstepper->is_steady())
 					{
-						func = functable->ResidualAndJacobianSteady[inf.contribution];
+						func = (use_nohang ? functable->ResidualAndJacobianSteady_NoHang[inf.contribution]
+										   : functable->ResidualAndJacobianSteady[inf.contribution]);
 					}
 					else
 					{
-						if (!has_hang)
-							func = functable->ResidualAndJacobian_NoHang[inf.contribution];
-						else
-							func = functable->ResidualAndJacobian[inf.contribution];
+						func = (use_nohang ? functable->ResidualAndJacobian_NoHang[inf.contribution]
+										   : functable->ResidualAndJacobian[inf.contribution]);
 					}
 					if (func)
 					{
@@ -337,7 +380,8 @@ namespace pyoomph
 	// instead; if enable_zeta_projection is set, assembles the (unrelated) zeta-projection
 	// residuals instead of the physical equations. Otherwise prepares the shape buffer, resolves
 	// hanging-node equation info, and calls the appropriate JIT-generated ResidualAndJacobian
-	// function (steady/unsteady, hanging/non-hanging variant).
+	// function (steady/unsteady, hanging/non-hanging variant). The hanging/non-hanging half of that
+	// choice is a real one since 9.4.14 - it used to be hard-wired to "hanging" for every element.
 	void BulkElementBase::fill_in_generic_residual_contribution_jit(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &mass_matrix, unsigned flag)
 	{
 		if (__replace_RJM_by_param_deriv)
@@ -367,8 +411,10 @@ namespace pyoomph
 		prepare_shape_buffer_for_integration(functable->shapes_required_ResJac[functable->current_res_jac], flag);
 		shape_info->jacobian_size = jacobian.nrow();
 		shape_info->mass_matrix_size = mass_matrix.nrow();
-		bool has_hang = this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
-		has_hang = true;				 // ASSUME ALWAYS HANGING!
+		// The fill's return value is the real answer ("some dof of this element hangs, or a dof
+		// constraint reduced it") and is now used: it used to be overwritten with an unconditional true.
+		const bool has_hang = this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
+		const bool use_nohang = __use_nohang_entry(has_hang);
 		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
 		// std::cout << "RESIDUAL LENGTH  " << residuals.size() << "  " << this->nexternal_data() <<  std::endl;
 
@@ -376,14 +422,13 @@ namespace pyoomph
 		const oomph::TimeStepper *tstepper = (this->nnode() ? this->node_pt(0)->time_stepper_pt() : this->internal_data_pt(0)->time_stepper_pt());
 		if (tstepper->is_steady())
 		{
-			func = functable->ResidualAndJacobianSteady[functable->current_res_jac];
+			func = (use_nohang ? functable->ResidualAndJacobianSteady_NoHang[functable->current_res_jac]
+							   : functable->ResidualAndJacobianSteady[functable->current_res_jac]);
 		}
 		else
 		{
-			if (!has_hang)
-				func = functable->ResidualAndJacobian_NoHang[functable->current_res_jac];
-			else
-				func = functable->ResidualAndJacobian[functable->current_res_jac];
+			func = (use_nohang ? functable->ResidualAndJacobian_NoHang[functable->current_res_jac]
+							   : functable->ResidualAndJacobian[functable->current_res_jac]);
 		}
 
 		if (flag)

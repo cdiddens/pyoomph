@@ -3275,7 +3275,10 @@ namespace pyoomph
 			l_shape = "l_shape";
 		}
 
-		bool hang = this->can_have_hanging_nodes() || this->code != for_code;
+		// "" means "no hanging possible here"; otherwise the token to hand the hang macros as their
+		// HANGON argument (a literal 1, or the constant _impl parameter when this routine is split).
+		const std::string hang_on = this->get_hang_on_str(for_code);
+		bool hang = !hang_on.empty();
 
 		// The hoisted coefficients (9.4) have to be emitted BEFORE the loop, so the loop body is
 		// buffered and the two streams are concatenated at the end. With hoisting off or unavailable
@@ -3327,7 +3330,7 @@ namespace pyoomph
 			if (hang)
 			{
 				std::string hang_info = f->get_hanginfo_str(for_code);
-				body << indent << "  BEGIN_JACOBIAN_HANG(" << eqn_index << ", ";
+				body << indent << "  BEGIN_JACOBIAN_HANG(" << hang_on << ", " << eqn_index << ", ";
 				if (hoisted.empty())
 					print_simplest_form(diffpart, body, csrc_opts);
 				else
@@ -3481,7 +3484,11 @@ namespace pyoomph
 			std::string eqn_index = field->get_equation_str(for_code, l_test);
 			std::string hang_info = field->get_hanginfo_str(for_code);
 			bool hessian_loop1_written = false;
-			bool can_have_hanging = this->can_have_hanging_nodes() || for_code != this->code; // Always hang for external spaces
+			// "" means "no hanging possible here"; otherwise the token to hand the hang macros as
+			// their HANGON argument. External/bulk spaces always hang - their hang buffers carry the
+			// equation remap (see FiniteElementSpace::get_hang_on_str).
+			const std::string hang_on = this->get_hang_on_str(for_code);
+			bool can_have_hanging = !hang_on.empty();
 			if (!hessian)
 			{
 				field->mark_residual_contribution_for_code(for_code,for_code->get_current_residual_index());
@@ -3490,7 +3497,7 @@ namespace pyoomph
 				has_contribs = true;
 				if (can_have_hanging)
 				{
-					oss << indent << "    BEGIN_RESIDUAL_CONTINUOUS_SPACE(" << eqn_index << ",";
+					oss << indent << "    BEGIN_RESIDUAL_CONTINUOUS_SPACE(" << hang_on << ", " << eqn_index << ",";
 					print_residual_entry(for_code, res_part, oss, csrc_opts);
 					if (for_code->latex_printer)
 					{
@@ -3798,6 +3805,30 @@ namespace pyoomph
 	bool ContinuousFiniteElementSpace::can_have_hanging_nodes()
 	{
 		return code->with_adaptivity;
+	}
+
+	// Three-way decision behind the hanging-node macros, see the declaration in codegen.hpp.
+	//
+	// The middle case is the specialisation: the hang macros are emitted, but with the constant
+	// `_impl` parameter as their HANGON argument, so the same body compiles to a hanging and a
+	// non-hanging entry point and elements_assembly.cpp picks per element.
+	//
+	// The FIRST case is a correctness trap and not an optimisation opportunity: for a space living on
+	// another code (a bulk or opposite-side space accessed from an interface element),
+	// fill_hang_info_with_equations reuses these very hang buffers as the local-equation REMAP channel
+	// - it writes nummaster=1, weight=1.0 and the remapped local_eqn for every dof, hanging or not
+	// (src/elements_hanging.cpp:1062-1099). With HANGON folded to 0 those entries would be skipped and
+	// the element would scatter into the wrong rows/columns, so they stay unconditional.
+	std::string FiniteElementSpace::get_hang_on_str(FiniteElementCode *for_code)
+	{
+		if (for_code != this->code)
+			return "1"; // external/bulk/opposite space: the hang buffers carry the equation remap
+		if (!this->can_have_hanging_nodes())
+			return ""; // no hanging possible at all -> the plain non-hang macros
+		if (!for_code->emitting_hang_parameter)
+			return "1";
+		for_code->hang_parameter_was_used = true;
+		return "pyoomph_hang_on";
 	}
 
 	unsigned FiniteElementCode::next_creation_index = 0;
@@ -5924,7 +5955,7 @@ namespace pyoomph
 	// the CSE subexpression code, and finally delegates the actual residual/Jacobian/mass-matrix
 	// emission to write_generic_RJM_contribution() on every FiniteElementSpace inside the
 	// integration-point loop.
-	void FiniteElementCode::write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool, bool may_be_asked_for_mass_matrix)
+	void FiniteElementCode::write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool, bool may_be_asked_for_mass_matrix, bool allow_hang_split)
 	{
 		__in_hessian = false;
 		emitted_mass_matrix_contribution = false;
@@ -5932,8 +5963,18 @@ namespace pyoomph
 		// assembly modes become three specialised bodies. See PYOOMPH_RJM_IMPL in jitbridge.h.
 		static const bool split_rjm_globally = getenv("PYOOMPH_DISABLE_RJM_SPLIT") == NULL;
 		const bool split_rjm = split_rjm_globally && this->split_rjm_by_flag;
+		// The same trick once more, for the hanging-node machinery: a second constant parameter turns
+		// the one emitted body into a hanging and a non-hanging entry point, and the assembly picks per
+		// element (elements_assembly.cpp). Requires split_rjm - without the _impl there is nothing to
+		// add a constant parameter to - and with_adaptivity, since otherwise no hang macro is emitted
+		// at all and the two entry points would be the same code.
+		static const bool hang_split_globally = getenv("PYOOMPH_DISABLE_HANG_SPLIT") == NULL;
+		const bool split_hang = split_rjm && hang_split_globally && this->split_rjm_by_hang && this->with_adaptivity && allow_hang_split;
+		this->emitting_hang_parameter = split_hang;
+		this->hang_parameter_was_used = false;
+		const std::string hangparam = (split_hang ? ",const int pyoomph_hang_on" : "");
 		if (split_rjm)
-			os << "PYOOMPH_RJM_IMPL " << funcname << "_impl(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,const unsigned flag)" << std::endl;
+			os << "PYOOMPH_RJM_IMPL " << funcname << "_impl(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,const unsigned flag" << hangparam << ")" << std::endl;
 		else
 			os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
 		os << "{" << std::endl;
@@ -6144,17 +6185,27 @@ namespace pyoomph
 
 		// The registered entry point. Keeping the name means nothing outside this file changes: the
 		// function table, the C++ callers and the ABI are all as they were.
+		this->emitting_hang_parameter = false;
 		if (!split_rjm)
 			return;
+		// Two entry points only if the body actually reads pyoomph_hang_on somewhere; see
+		// hang_parameter_was_used in codegen.hpp.
+		const bool write_nohang_entry = split_hang && this->hang_parameter_was_used;
+		if (write_nohang_entry)
+			this->emitted_nohang_entry_points.insert(funcname);
 		const std::string args = "eleminfo, shapeinfo, residuals, jacobian, mass_matrix";
-		os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
+		// hangarg is what the dispatcher hands the constant parameter: the normal entry point keeps the
+		// hanging-node machinery, the _NoHang twin folds it away.
+		auto write_dispatcher = [&](const std::string &entryname, const std::string &hangarg)
+		{
+		os << "static void " << entryname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
 		os << "{" << std::endl;
-		os << "  if (flag == 0) " << funcname << "_impl(" << args << ", 0);" << std::endl;
+		os << "  if (flag == 0) " << funcname << "_impl(" << args << ", 0" << hangarg << ");" << std::endl;
 		if (!emitted_mass_matrix_contribution)
 		{
 			// No mass-matrix entry was emitted anywhere in this routine, so `if (flag == 2)` guards
 			// nothing and the flag==1 and flag==2 bodies are the same code. Ask for one of them.
-			os << "  else " << funcname << "_impl(" << args << ", 1); /* no mass matrix in this routine */" << std::endl;
+			os << "  else " << funcname << "_impl(" << args << ", 1" << hangarg << "); /* no mass matrix in this routine */" << std::endl;
 		}
 		else if (!may_be_asked_for_mass_matrix)
 		{
@@ -6171,15 +6222,19 @@ namespace pyoomph
 			// is what keeps that an assumption we would HEAR about rather than one that silently returns
 			// a zero mass matrix: it costs one predictable branch per element per assembly.
 			os << "  else { assert(flag < 2 && \"mass matrix requested from the unsteady routine of an MPT/TPZ residual - make the timesteppers steady first\"); "
-			   << funcname << "_impl(" << args << ", 1); }" << std::endl;
+			   << funcname << "_impl(" << args << ", 1" << hangarg << "); }" << std::endl;
 		}
 		else
 		{
-			os << "  else if (flag == 1) " << funcname << "_impl(" << args << ", 1);" << std::endl;
-			os << "  else " << funcname << "_impl(" << args << ", 2);" << std::endl;
+			os << "  else if (flag == 1) " << funcname << "_impl(" << args << ", 1" << hangarg << ");" << std::endl;
+			os << "  else " << funcname << "_impl(" << args << ", 2" << hangarg << ");" << std::endl;
 		}
 		os << "}" << std::endl
 		   << std::endl;
+		};
+		write_dispatcher(funcname, split_hang ? ", 1" : "");
+		if (write_nohang_entry)
+			write_dispatcher(funcname + "_NoHang", ", 0");
 	}
 
 	// Emits the top-of-file preprocessor boilerplate for the generated element's C source: the
@@ -6852,7 +6907,9 @@ namespace pyoomph
 		auto print_named_ex_map = [&](const std::map<std::string, GiNaC::ex> &m)
 		{ for (auto &kv : m) { os << kv.first << "="; print_ex(kv.second); } };
 
-		os << "FMT9\n"; // Bump whenever this function's coverage/format changes
+		os << "FMT10\n"; // Bump whenever this function's coverage/format changes
+		// FMT10: the hanging-node split (split_rjm_by_hang, PYOOMPH_DISABLE_HANG_SPLIT) is covered, and
+		// so is PYOOMPH_DISABLE_RJM_SPLIT, which decides the same kind of thing and was missing.
 		// FMT9: the Z2 compound-flux grouping and its per-group normalization/weight are covered
 		// (see the Z2 block below). Before that, the same estimator expressions in different groups
 		// or with a different normalize_relative/weight shared one fingerprint.
@@ -6870,7 +6927,9 @@ namespace pyoomph
 		// the archive is write-only and cannot affect the emitted code.
 		os << "sw_memo=" << __expand_memo_on
 		   << " sw_unit_fastcheck=" << (getenv("PYOOMPH_UNIT_FASTCHECK") != NULL)
-		   << " sw_no_unit_prescan=" << (getenv("PYOOMPH_DISABLE_UNIT_PRESCAN") != NULL) << "\n";
+		   << " sw_no_unit_prescan=" << (getenv("PYOOMPH_DISABLE_UNIT_PRESCAN") != NULL)
+		   << " sw_no_rjm_split=" << (getenv("PYOOMPH_DISABLE_RJM_SPLIT") != NULL)
+		   << " sw_no_hang_split=" << (getenv("PYOOMPH_DISABLE_HANG_SPLIT") != NULL) << "\n";
 		os << "dim=" << nodal_dim << " lagr_dim=" << lagr_dim << " max_dt_order=" << max_dt_order << " integration_order=" << integration_order << "\n";
 		os << "generate_hessian=" << generate_hessian << " assemble_hessian_by_symmetry=" << assemble_hessian_by_symmetry << "\n";
 		os << "analytical_jacobian=" << analytical_jacobian << " analytical_position_jacobian=" << analytical_position_jacobian << "\n";
@@ -6880,7 +6939,7 @@ namespace pyoomph
 		// The emission choices of 9.4, recorded so a generated file can be traced back to the settings
 		// that produced it. They need no cache epoch of their own: both change the generated C, and the
 		// JIT cache key is the contents of that file (pyoomph/generic/ccompiler.py).
-		os << "jacobian_hoist_min_cost=" << jacobian_hoist_min_cost << " split_rjm_by_flag=" << split_rjm_by_flag << "\n";
+		os << "jacobian_hoist_min_cost=" << jacobian_hoist_min_cost << " split_rjm_by_flag=" << split_rjm_by_flag << " split_rjm_by_hang=" << split_rjm_by_hang << "\n";
 		// NOTE: typeid(*coordinate_sys).name() is deliberately NOT used here (unlike elsewhere in
 		// this function) - every Python-level CustomCoordinateSystem subclass (Cartesian,
 		// Axisymmetric, ...) is wrapped by the same single nanobind trampoline class on the C++
@@ -7077,6 +7136,7 @@ namespace pyoomph
 	{
 		__current_code = this;
 		this->archive.clear();
+		this->emitted_nohang_entry_points.clear(); // Refilled by write_generic_RJM; a rewrite must not inherit the last one's decisions
 		CustomMathExpressionBase::code_map.clear();
 		CustomMultiReturnExpressionBase::code_map.clear();
 		find_all_accessible_spaces();
@@ -7125,14 +7185,16 @@ namespace pyoomph
 				extra_steady_routine[resind] = make_steady.require_extra_steady_routine();
 
 				record_jacobian_blocks_for_flags = (get_derive_jacobian_by_expansion_mode() == NULL);
-				write_generic_RJM(os, "ResidualAndJacobian" + std::to_string(resind), residual[resind], true, !extra_steady_routine[resind]); // Hanging unsteady routine
+				write_generic_RJM(os, "ResidualAndJacobian" + std::to_string(resind), residual[resind], true, !extra_steady_routine[resind], true); // Hanging unsteady routine
 				record_jacobian_blocks_for_flags = false;
 				os << std::endl;
 
 				if (extra_steady_routine[resind])
 				{
 					os << std::endl;
-					write_generic_RJM(os, "ResidualAndJacobianSteady" + std::to_string(resind), steady_residual, true); // Hanging unsteady routine
+					// The steady twin gets the hang split too: a stationary solve is the common case, and
+					// elements_assembly.cpp picks the Steady slot without ever looking at the unsteady one.
+					write_generic_RJM(os, "ResidualAndJacobianSteady" + std::to_string(resind), steady_residual, true, true, true); // Hanging steady routine
 					os << std::endl;
 				}
 
@@ -9753,6 +9815,8 @@ namespace pyoomph
 		cleanup << " pyoomph_tested_free(functable->ResidualAndJacobian); functable->ResidualAndJacobian=PYOOMPH_NULL; " << std::endl;					
 		init << " functable->ResidualAndJacobianSteady=(JITFuncSpec_ResidualAndJacobian_FiniteElement *)calloc(functable->num_res_jacs,sizeof(JITFuncSpec_ResidualAndJacobian_FiniteElement));" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->ResidualAndJacobianSteady); functable->ResidualAndJacobianSteady=PYOOMPH_NULL; " << std::endl;							
+		init << " functable->ResidualAndJacobianSteady_NoHang=(JITFuncSpec_ResidualAndJacobian_FiniteElement *)calloc(functable->num_res_jacs,sizeof(JITFuncSpec_ResidualAndJacobian_FiniteElement));" << std::endl;
+		cleanup << " pyoomph_tested_free(functable->ResidualAndJacobianSteady_NoHang); functable->ResidualAndJacobianSteady_NoHang=PYOOMPH_NULL; " << std::endl;							
 		init << " functable->shapes_required_ResJac=(JITFuncSpec_RequiredShapes_FiniteElement_t *)calloc(functable->num_res_jacs,sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));" << std::endl;
 		cleanup << " pyoomph_tested_free(functable->shapes_required_ResJac); functable->shapes_required_ResJac=PYOOMPH_NULL; " << std::endl;									
 		init << " functable->shapes_required_Hessian=(JITFuncSpec_RequiredShapes_FiniteElement_t *)calloc(functable->num_res_jacs,sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));" << std::endl;
@@ -9775,16 +9839,16 @@ namespace pyoomph
 			cleanup << " pyoomph_tested_free(functable->res_jac_names["<<resiind<<"]); functable->res_jac_names["<<resiind<<"]=PYOOMPH_NULL; " << std::endl;		
 			if (!residual[resiind].is_zero())
 			{
-				init << " functable->ResidualAndJacobian_NoHang[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;
-				init << " functable->ResidualAndJacobian[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;				
-				if (extra_steady_routine[resiind])
-				{
-					init << " functable->ResidualAndJacobianSteady[" << resiind << "]=&ResidualAndJacobianSteady" << resiind << ";" << std::endl;
-				}
-				else
-				{
-					init << " functable->ResidualAndJacobianSteady[" << resiind << "]=&ResidualAndJacobian" << resiind << ";" << std::endl;
-				}
+				// The _NoHang slots point at the specialised entry point where one was emitted and at the
+				// hanging one otherwise, so the assembly can dereference them unconditionally.
+				const std::string unsteady_name = "ResidualAndJacobian" + std::to_string(resiind);
+				const std::string steady_name = (extra_steady_routine[resiind] ? "ResidualAndJacobianSteady" + std::to_string(resiind) : unsteady_name);
+				const std::string unsteady_nohang = (emitted_nohang_entry_points.count(unsteady_name) ? unsteady_name + "_NoHang" : unsteady_name);
+				const std::string steady_nohang = (emitted_nohang_entry_points.count(steady_name) ? steady_name + "_NoHang" : steady_name);
+				init << " functable->ResidualAndJacobian[" << resiind << "]=&" << unsteady_name << ";" << std::endl;
+				init << " functable->ResidualAndJacobian_NoHang[" << resiind << "]=&" << unsteady_nohang << ";" << std::endl;
+				init << " functable->ResidualAndJacobianSteady[" << resiind << "]=&" << steady_name << ";" << std::endl;
+				init << " functable->ResidualAndJacobianSteady_NoHang[" << resiind << "]=&" << steady_nohang << ";" << std::endl;
 				if (generate_hessian)
 				{
 					if (has_hessian_contribution[resiind])

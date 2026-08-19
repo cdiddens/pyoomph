@@ -817,7 +817,7 @@ class Problem(_pyoomph.Problem):
         #: domains) overrides individual ones by adding an
         #: :py:class:`~pyoomph.equations.additional.EquationCompilationFlags`. The values here are
         #: the defaults of the code generator itself (see ``FiniteElementCode`` in src/codegen.cpp).
-        self.equation_compilation_flags:"EquationCompilationFlags"=EquationCompilationFlags(analytical_position_jacobian=True,analytical_jacobian=True,warn_on_large_numerical_factor=0.0,debug_jacobian_epsilon=0.0,ccode_expression_mode="",with_adaptivity=True,jacobian_hoist_min_cost=-1,split_rjm_by_flag=True)
+        self.equation_compilation_flags:"EquationCompilationFlags"=EquationCompilationFlags(analytical_position_jacobian=True,analytical_jacobian=True,warn_on_large_numerical_factor=0.0,debug_jacobian_epsilon=0.0,ccode_expression_mode="",with_adaptivity=True,jacobian_hoist_min_cost=-1,split_rjm_by_flag=True,split_rjm_by_hang=True)
         self.extra_compiler_flags:list[str]=[]
         
         #: After analyzing the Jacobian, a field with an empty Jacobian row will be pinned automatically

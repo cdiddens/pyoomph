@@ -429,6 +429,13 @@ void PyReg_CodeGen(nb::module_ &m)
                 "as a compile-time constant, instead of one body testing it at run time. True by default: "
                 "it is what keeps a residual-only assembly from paying for the Jacobian code it never "
                 "executes, at the cost of a larger shared library and a longer compile.")
+        .def_rw("split_rjm_by_hang", &pyoomph::FiniteElementCode::split_rjm_by_hang,
+                "Whether the Residual/Jacobian/Mass function additionally gets a twin in which the "
+                "hanging-node machinery is folded away, so that elements without a single hanging degree "
+                "of freedom - the vast majority even on an adapted mesh - skip the master loops and test "
+                "pinned equations first (see dev_docs/code_generation.md 9.4.14). True by default. Has no "
+                "effect without split_rjm_by_flag or without with_adaptivity; the cost is again a larger "
+                "shared library and a longer compile.")
         .def_rw("assemble_hessian_by_symmetry", &pyoomph::FiniteElementCode::assemble_hessian_by_symmetry,
                         "Whether Hessian assembly exploits its symmetry to only derive half of the entries - see generate_hessian.")
         .def("_debug_second_order_Hessian_deriv", &pyoomph::FiniteElementCode::debug_second_order_Hessian_deriv,

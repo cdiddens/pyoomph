@@ -172,6 +172,7 @@ class EquationCompilationFlags(BaseEquations):
         with_adaptivity: Whether to generate the code required for spatial adaptivity.
         jacobian_hoist_min_cost: How large a Jacobian/Hessian coefficient must be before it is named above the trial loop. ``-1`` follows the global setting.
         split_rjm_by_flag: Whether the residual/Jacobian/mass function is emitted once per assembly mode instead of one body branching at runtime.
+        split_rjm_by_hang: Whether the residual/Jacobian/mass function additionally gets a twin without the hanging-node machinery, used for elements in which nothing hangs. Requires ``split_rjm_by_flag`` and ``with_adaptivity``.
 
     Every argument defaults to ``None``, which means "inherit": the setting is then taken from the
     domain this one is nested in, and eventually from :py:attr:`~pyoomph.generic.problem.Problem.equation_compilation_flags`.
@@ -182,9 +183,9 @@ class EquationCompilationFlags(BaseEquations):
 
     #: The settings controlled here. Each one is a read/write property of the code generator of the
     #: same name, so they can be transferred generically.
-    _flag_names = ("analytical_position_jacobian", "analytical_jacobian", "warn_on_large_numerical_factor", "debug_jacobian_epsilon", "ccode_expression_mode", "with_adaptivity", "jacobian_hoist_min_cost", "split_rjm_by_flag")
+    _flag_names = ("analytical_position_jacobian", "analytical_jacobian", "warn_on_large_numerical_factor", "debug_jacobian_epsilon", "ccode_expression_mode", "with_adaptivity", "jacobian_hoist_min_cost", "split_rjm_by_flag", "split_rjm_by_hang")
 
-    def __init__(self,analytical_position_jacobian:bool | None=None,analytical_jacobian:bool | None=None,warn_on_large_numerical_factor:float | None=None,debug_jacobian_epsilon:float | None=None,ccode_expression_mode:str | None=None,with_adaptivity:bool | None=None,jacobian_hoist_min_cost:int | None=None,split_rjm_by_flag:bool | None=None):
+    def __init__(self,analytical_position_jacobian:bool | None=None,analytical_jacobian:bool | None=None,warn_on_large_numerical_factor:float | None=None,debug_jacobian_epsilon:float | None=None,ccode_expression_mode:str | None=None,with_adaptivity:bool | None=None,jacobian_hoist_min_cost:int | None=None,split_rjm_by_flag:bool | None=None,split_rjm_by_hang:bool | None=None):
         super(EquationCompilationFlags, self).__init__()
         self.analytical_position_jacobian=analytical_position_jacobian
         self.analytical_jacobian=analytical_jacobian
@@ -194,6 +195,7 @@ class EquationCompilationFlags(BaseEquations):
         self.with_adaptivity=with_adaptivity
         self.jacobian_hoist_min_cost=jacobian_hoist_min_cost
         self.split_rjm_by_flag=split_rjm_by_flag
+        self.split_rjm_by_hang=split_rjm_by_hang
 
     def with_defaults_from(self,fallback:"EquationCompilationFlags | None")->"EquationCompilationFlags":
         """Returns a copy of these flags where every setting left at ``None`` is taken from ``fallback``."""
