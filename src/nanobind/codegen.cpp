@@ -419,6 +419,16 @@ void PyReg_CodeGen(nb::module_ &m)
                         "right before write_code() runs; exposed read-write here so the JIT cache's Tier-2 pre-codegen "
                         "fingerprint (see jit_cache.py) can be computed with the same up-to-date value instead of "
                         "whatever this held at some earlier, possibly stale point.")
+        .def_rw("jacobian_hoist_min_cost", &pyoomph::FiniteElementCode::jacobian_hoist_min_cost,
+                "How many expression nodes a Jacobian/Hessian entry's coefficient must have before it is "
+                "worth naming above the trial loop (see dev_docs/code_generation.md 9.4). -1, the default, "
+                "follows the global setting. Raising it trades assembly speed for a smaller generated "
+                "function; there is normally no reason to set it per element except to bisect a regression.")
+        .def_rw("split_rjm_by_flag", &pyoomph::FiniteElementCode::split_rjm_by_flag,
+                "Whether to emit the Residual/Jacobian/Mass function once per assembly mode, with the flag "
+                "as a compile-time constant, instead of one body testing it at run time. True by default: "
+                "it is what keeps a residual-only assembly from paying for the Jacobian code it never "
+                "executes, at the cost of a larger shared library and a longer compile.")
         .def_rw("assemble_hessian_by_symmetry", &pyoomph::FiniteElementCode::assemble_hessian_by_symmetry,
                         "Whether Hessian assembly exploits its symmetry to only derive half of the entries - see generate_hessian.")
         .def("_debug_second_order_Hessian_deriv", &pyoomph::FiniteElementCode::debug_second_order_Hessian_deriv,

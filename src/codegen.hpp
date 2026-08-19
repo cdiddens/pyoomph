@@ -1085,6 +1085,12 @@ namespace pyoomph
       int element_dim;
       bool analytical_jacobian; // If true, differentiate the residual symbolically for the Jacobian; otherwise the Jacobian is obtained by finite differences at runtime
       bool analytical_position_jacobian; // Same, but specifically for the moving-mesh (nodal position) Jacobian entries
+      // Per-element overrides for the two emission choices of dev_docs/code_generation.md 9.4. Both
+      // default to "follow the global setting", which is what the PYOOMPH_* environment switches set;
+      // an element only needs its own value when it differs from the rest of the problem, e.g. to bisect
+      // a regression or to keep one enormous element from paying compile time the others do not need.
+      int jacobian_hoist_min_cost = -1;   // -1: use the global default (PYOOMPH_JACOBIAN_HOIST_MIN, else 1)
+      bool split_rjm_by_flag = true;      // false: emit one Residual/Jacobian/Mass body with a runtime flag
       double debug_jacobian_epsilon; // Step size used when numerically cross-checking the analytical Jacobian against finite differences
       bool with_adaptivity;
       bool coordinates_as_dofs; // If true, the nodal positions are themselves unknowns with residual/Jacobian entries (moving-mesh/ALE elements)

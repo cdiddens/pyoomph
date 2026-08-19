@@ -921,6 +921,23 @@ specialisation is dead weight whenever a separate steady routine is written at a
 tests and together they should recover most of the compile-time cost on the elements that do not need
 it, without touching the ones that do.
 
+**5 and 6. Per-element properties and the cache - DONE.** `FiniteElementCode` gained
+`jacobian_hoist_min_cost` (-1: follow the global setting) and `split_rjm_by_flag`, bound through
+nanobind and reachable from `EquationCompilationFlags`, with the environment switches acting as the
+global default a per-element value overrides. Both are written into the debug info file next to
+`coordinates_as_dofs=`, so a generated file can be traced back to the settings that produced it. They
+need **no cache epoch**: the JIT key is the contents of the generated `.c` plus `jitbridge.h`
+(`pyoomph/generic/ccompiler.py`), and both properties change that text - which is exactly the property a
+future per-element setting must preserve, and why the comment saying so sits at the emission site.
+Verified end to end on the emitted C rather than on the binding: default gives 3 dispatcher calls and 60
+hoisted coefficients, `split_rjm_by_flag=False` gives 0 and 60, `jacobian_hoist_min_cost=999` gives 3
+and 0.
+
+Note the case for this weakened while it waited. It was written when the split cost +116% compile time
+and +114% `.so`; item 4 brought that to +29% and +53%, so per-element control is now a diagnostic
+convenience - bisecting a regression to one element - rather than a way to avoid a serious bill. The
+original item text follows.
+
 **5. Per-element properties, not just environment variables.** Hoisting and splitting are currently only
 reachable through `PYOOMPH_JACOBIAN_HOIST_MIN`, `PYOOMPH_DISABLE_JACOBIAN_HOIST` and
 `PYOOMPH_DISABLE_RJM_SPLIT`, which are process-wide. They should become `FiniteElementCode` properties
@@ -1001,6 +1018,15 @@ the generator has a path that can emit it.
 
 Removing the three is safe but changes the `JITShapeInfo_t` layout, which every cached `.so` was compiled
 against; that invalidates itself correctly, since the cache key includes the contents of `jitbridge.h`.
+
+**7. Can the hoisted coefficients be simplified? - MEASURED, and no.** On the 3D solid element the 57
+hoisted coefficients hold 182 880 bytes of right-hand side and contain **9** repeated balanced groups of
+20 characters or more, worth 4 212 bytes - **2.3%**, by the same textual model that overstated §8.3's
+real pass by a factor of five. The expected win is therefore well under 1%, against the -1.9% that got
+that pass reverted, and the largest repeats are `pow(x, 2.0)` argument lists which §8.1 established GCC
+folds unaided. There is a reason for the emptiness: **the hoist already partitioned the entry**, so
+sibling coefficients share little by construction - the CSE opportunity was consumed by the thing that
+created the coefficients. Not attempted. The original item text follows.
 
 **7. Can the hoisted coefficients be simplified?** They are extracted structurally - `accumulate_linear_in`
 multiplies out `factor * rest` as it descends - so nothing simplifies them afterwards, and sibling

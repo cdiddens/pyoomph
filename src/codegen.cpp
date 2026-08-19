@@ -2623,13 +2623,16 @@ namespace pyoomph
 		}
 		std::ostringstream body;
 		bool any = false;
+		const unsigned min_cost = (csrc_opts.for_code && csrc_opts.for_code->jacobian_hoist_min_cost >= 0)
+									  ? (unsigned)csrc_opts.for_code->jacobian_hoist_min_cost
+									  : __hoist_min_cost;
 		for (size_t k = 0; k < atoms.size(); k++)
 		{
 			if (coeffs[k].is_zero())
 				continue;
 			if (!body.str().empty())
 				body << "+";
-			if (hoist_expr_cost(coeffs[k]) >= __hoist_min_cost)
+			if (hoist_expr_cost(coeffs[k]) >= min_cost)
 			{
 				const std::string nm = "_hc" + std::to_string(__hoist_coeff_counter++);
 				pre << indent << "const double " << nm << " = ";
@@ -2669,13 +2672,16 @@ namespace pyoomph
 			return "";
 		std::ostringstream body;
 		bool any_hoisted = false;
+		const unsigned min_cost = (csrc_opts.for_code && csrc_opts.for_code->jacobian_hoist_min_cost >= 0)
+									  ? (unsigned)csrc_opts.for_code->jacobian_hoist_min_cost
+									  : __hoist_min_cost;
 		for (size_t k = 0; k < atoms.size(); k++)
 		{
 			if (coeffs[k].is_zero())
 				continue;
 			if (!body.str().empty())
 				body << "+";
-			if (hoist_expr_cost(coeffs[k]) >= __hoist_min_cost)
+			if (hoist_expr_cost(coeffs[k]) >= min_cost)
 			{
 				const std::string nm = "_jc" + std::to_string(__hoist_coeff_counter++);
 				pre << indent << "const double " << nm << " = ";
@@ -5924,7 +5930,8 @@ namespace pyoomph
 		emitted_mass_matrix_contribution = false;
 		// Emitted as an implementation with a CONSTANT flag plus a dispatcher below, so that the three
 		// assembly modes become three specialised bodies. See PYOOMPH_RJM_IMPL in jitbridge.h.
-		static const bool split_rjm = getenv("PYOOMPH_DISABLE_RJM_SPLIT") == NULL;
+		static const bool split_rjm_globally = getenv("PYOOMPH_DISABLE_RJM_SPLIT") == NULL;
+		const bool split_rjm = split_rjm_globally && this->split_rjm_by_flag;
 		if (split_rjm)
 			os << "PYOOMPH_RJM_IMPL " << funcname << "_impl(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,const unsigned flag)" << std::endl;
 		else
@@ -6870,6 +6877,10 @@ namespace pyoomph
 		os << "with_adaptivity=" << with_adaptivity << " ccode_expression_mode=" << ccode_expression_mode << "\n";
 		os << "use_shared_shape_buffer_during_multi_assemble=" << use_shared_shape_buffer_during_multi_assemble << "\n";
 		os << "coordinates_as_dofs=" << coordinates_as_dofs << "\n"; // moving-mesh/ALE flag (functable->moving_nodes)
+		// The emission choices of 9.4, recorded so a generated file can be traced back to the settings
+		// that produced it. They need no cache epoch of their own: both change the generated C, and the
+		// JIT cache key is the contents of that file (pyoomph/generic/ccompiler.py).
+		os << "jacobian_hoist_min_cost=" << jacobian_hoist_min_cost << " split_rjm_by_flag=" << split_rjm_by_flag << "\n";
 		// NOTE: typeid(*coordinate_sys).name() is deliberately NOT used here (unlike elsewhere in
 		// this function) - every Python-level CustomCoordinateSystem subclass (Cartesian,
 		// Axisymmetric, ...) is wrapped by the same single nanobind trampoline class on the C++

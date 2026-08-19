@@ -174,7 +174,7 @@ class EquationCompilationFlags(BaseEquations):
     Every argument defaults to ``None``, which leaves the corresponding setting as it is - only the
     ones you pass are overridden.
     """    
-    def __init__(self,analytical_position_jacobian:bool | None=None,analytical_jacobian:bool | None=None,warn_on_large_numerical_factor:bool | None=None,debug_jacobian_epsilon:float | None=None,ccode_expression_mode:str | None=None,with_adaptivity:bool | None=None):
+    def __init__(self,analytical_position_jacobian:bool | None=None,analytical_jacobian:bool | None=None,warn_on_large_numerical_factor:bool | None=None,debug_jacobian_epsilon:float | None=None,ccode_expression_mode:str | None=None,with_adaptivity:bool | None=None,jacobian_hoist_min_cost:int | None=None,split_rjm_by_flag:bool | None=None):
         super(EquationCompilationFlags, self).__init__()
         self.analytical_position_jacobian=analytical_position_jacobian
         self.analytical_jacobian=analytical_jacobian
@@ -182,6 +182,8 @@ class EquationCompilationFlags(BaseEquations):
         self.debug_jacobian_epsilon=debug_jacobian_epsilon
         self.ccode_expression_mode=ccode_expression_mode
         self.with_adaptivity=with_adaptivity
+        self.jacobian_hoist_min_cost=jacobian_hoist_min_cost
+        self.split_rjm_by_flag=split_rjm_by_flag
 
     def before_compilation(self,codegen:"FiniteElementCodeGenerator"):
         if self.analytical_position_jacobian is not None:
@@ -192,6 +194,10 @@ class EquationCompilationFlags(BaseEquations):
             codegen.debug_jacobian_epsilon=self.debug_jacobian_epsilon
         if self.ccode_expression_mode is not None:
             codegen.ccode_expression_mode=self.ccode_expression_mode        
+        if self.jacobian_hoist_min_cost is not None:
+            codegen.jacobian_hoist_min_cost=self.jacobian_hoist_min_cost
+        if self.split_rjm_by_flag is not None:
+            codegen.split_rjm_by_flag=self.split_rjm_by_flag
         if self.with_adaptivity is not None:
             codegen.with_adaptivity=self.with_adaptivity
 
