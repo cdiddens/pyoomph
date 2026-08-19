@@ -77,6 +77,9 @@ class SuperLUSerial(GenericLinearSystemSolver):
 	# system onto rank 0 and calls solve_serial() below there. solve_serial() issues no collective, as
 	# that flag requires.
 	gathers_to_root_under_mpi=True
+	# The inherited exploit_proven_symmetry flag is a documented no-op here: neither SuperLU nor
+	# UMFPACK offers a symmetric factorization, so there is nothing to switch to and the decision
+	# helper is never consulted.
 	def __init__(self,problem:"Problem",useUmfpack:bool=False):
 		super().__init__(problem)
 		scipy.sparse.linalg.use_solver(useUmfpack=useUmfpack) #type:ignore
@@ -290,9 +293,24 @@ class ScipyEigenSolver(GenericEigenSolver):
 		if neval <= 0:
 			neval=n
 
+		# Symmetric driver (ARPACK eigsh) only in shift-invert mode: without sigma, eigsh requires M
+		# positive DEFINITE, while shift-invert only needs positive SEMI-definite - and pyoomph mass
+		# matrices are PSD-singular (pressure/pinned rows). PSD itself is ASSUMED, not proven (see
+		# GenericEigenSolver.exploit_proven_symmetry). The remaining guards keep the engaged path
+		# exactly equivalent to the eigs call it replaces.
+		use_sym=(self._use_symmetric_eigensolver_now() and shift is not None and numpy.imag(shift)==0
+				 and which=="LM" and OPpart is None
+				 and J.dtype.kind!="c" and M.dtype.kind!="c"
+				 and (v0 is None or not numpy.iscomplexobj(v0)))
+		self.last_symmetry_decision=use_sym
+
 		if neval>=n-1:
-			
-			evals,evects=scipy.linalg.eig(J.toarray(),b=M.toarray(),left=False) #type:ignore			
+			# Dense path stays scipy.linalg.eig even for a proven-symmetric pencil: generalized eigh
+			# requires a strictly positive definite b, which a singular M violates.
+			if use_sym:
+				self.last_symmetry_decision=False
+				self.last_symmetry_decision_reason="dense path (generalized eigh needs strictly PD M)"
+			evals,evects=scipy.linalg.eig(J.toarray(),b=M.toarray(),left=False) #type:ignore
 			if sort:
 				if target:
 					srt = numpy.argsort(numpy.abs(evals-target))
@@ -315,7 +333,15 @@ class ScipyEigenSolver(GenericEigenSolver):
 			evects=None
 			for attempt in range(max_retries+1):
 				try:
-					evals,evects=scipy.sparse.linalg.eigs(J,M=M,sigma=shift,return_eigenvectors=True,k=neval,OPinv=OPInv,which=which,OPpart=OPpart,v0=v0,ncv=ncv,tol=self.tol) #type:ignore
+					if use_sym:
+						# Same problem J v = lambda M v, same shift-invert - only the symmetric
+						# Lanczos driver instead of the general Arnoldi one. Cast back to complex so
+						# the return contract (and everything downstream) is unchanged.
+						evals,evects=scipy.sparse.linalg.eigsh(J,M=M,sigma=shift,return_eigenvectors=True,k=neval,OPinv=OPInv,which=which,v0=v0,ncv=ncv,tol=self.tol) #type:ignore
+						evals=evals.astype("complex128") #type:ignore
+						evects=evects.astype("complex128") #type:ignore
+					else:
+						evals,evects=scipy.sparse.linalg.eigs(J,M=M,sigma=shift,return_eigenvectors=True,k=neval,OPinv=OPInv,which=which,OPpart=OPpart,v0=v0,ncv=ncv,tol=self.tol) #type:ignore
 					break
 				except scipy.sparse.linalg.ArpackError:
 					if attempt>=max_retries:

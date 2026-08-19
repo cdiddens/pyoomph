@@ -8269,7 +8269,45 @@ namespace pyoomph
 		}
 
 		return std::make_tuple(ss.str(), all_good);
-		
+
+	}
+
+	// Reduces the per-block proofs of assemble_defined_field_list() to a whole-matrix verdict for the
+	// named residual set: the assembled Jacobian (mass matrix) is symmetric iff every contributing
+	// block carries JACOBIAN_BLOCK_SYMMETRIC. False means "not proven", never "disproven". Solvers use
+	// this to switch to symmetric factorizations, so anything that makes the actually-solved matrix
+	// differ from the plain elemental Jacobian must force (false,false) here: bifurcation-tracking /
+	// DofAugmentations borders (n_unaugmented_dofs!=0 while augmented), a Python-side custom assembler,
+	// and dR/dp replacement. Arclength continuation is fine - it borders algebraically, not in the matrix.
+	// All inputs are rank-replicated, so the verdict is deterministic under MPI without a collective.
+	std::tuple<bool,bool> Problem::get_proven_matrix_symmetry(const std::string &residual_name)
+	{
+		if (n_unaugmented_dofs != 0) return std::make_tuple(false, false);
+		// The C++ bifurcation trackers do not touch n_unaugmented_dofs - they enlarge the system via an
+		// oomph AssemblyHandler instead, so test for a non-default handler as well (same pair of gates
+		// as the static-condensation eligibility check).
+		oomph::AssemblyHandler *ah = this->assembly_handler_pt();
+		if (!ah || typeid(*ah) != typeid(oomph::AssemblyHandler)) return std::make_tuple(false, false);
+		if (use_custom_residual_jacobian) return std::make_tuple(false, false);
+		if (__replace_RJM_by_param_deriv) return std::make_tuple(false, false);
+		int ri = -1;
+		for (unsigned i = 0; i < residual_names.size(); i++)
+			if (residual_names[i] == residual_name) { ri = i; break; }
+		if (ri < 0 || jacobian_block_flags_union.size() != residual_names.size()) return std::make_tuple(false, false);
+		// Unlike the report above, do NOT skip pin_due_to_empty_jacobian_row_or_col fields: whether
+		// their rows are actually removed depends on the remove_dofs_without_jacobian_row argument of
+		// _set_solved_residual (the eigenproblem path keeps them), so requiring the proof on every
+		// contributing block is the conservative choice - at worst a false negative.
+		bool jac_sym = true, mass_sym = true;
+		for (unsigned j = 0; j < defined_fields.size(); j++)
+		{
+			for (unsigned k = 0; k < defined_fields.size(); k++)
+			{
+				if (jacobian_contributing_fields[ri][j][k] && !(jacobian_block_flags_union[ri][j][k] & JACOBIAN_BLOCK_SYMMETRIC)) jac_sym = false;
+				if (mass_matrix_contributing_fields[ri][j][k] && !(mass_matrix_block_flags_union[ri][j][k] & JACOBIAN_BLOCK_SYMMETRIC)) mass_sym = false;
+			}
+		}
+		return std::make_tuple(jac_sym, mass_sym);
 	}
 
 

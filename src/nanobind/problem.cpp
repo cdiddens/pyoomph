@@ -666,6 +666,10 @@ void PyReg_Problem(nb::module_ &m)
 		.def("_get_jacobian_information_string", &pyoomph::Problem::get_jacobian_information_string,
 			 "Return a human-readable summary of the defined fields, residuals and their Jacobian coupling structure, "
 			 "together with a flag whether the structure looks consistent; used for diagnostics/debugging.")
+		.def("_get_proven_matrix_symmetry", &pyoomph::Problem::get_proven_matrix_symmetry, nb::arg("residual_name") = "",
+			 "Return (jacobian_symmetric, mass_matrix_symmetric) for the named residual set: True only if every "
+			 "contributing block carries the symbolic symmetry proof AND no bifurcation tracking, dof augmentation, "
+			 "custom assembler or parameter-derivative replacement is active. False means 'not proven', never 'disproven'.")
 		.def("refine_uniformly", (void(pyoomph::Problem::*)()) & pyoomph::Problem::refine_uniformly,
 			 "Uniformly refine all refineable meshes of the problem by one level.")
 		.def("unrefine_uniformly", (unsigned(pyoomph::Problem::*)()) & pyoomph::Problem::unrefine_uniformly,

@@ -211,7 +211,31 @@ and a Bratu fold-tracking run (arclength + eigenproblem + Hessian + dResidualdPa
   by construction, but nothing asserts it.
 - `has_constant_mass_matrix_for_sure` is still inferred from the Hessian pass; the per-block mass
   constancy could strengthen it directly.
-- The intended consumers: keep the Schur-complement inverse across solves in static condensation when
-  the condensed block is CONSTANT (or CONSTANT_FIXED_DT within a fixed-dt transient), and choose
+- Further intended consumers: keep the Schur-complement inverse across solves in static condensation
+  when the condensed block is CONSTANT (or CONSTANT_FIXED_DT within a fixed-dt transient), and choose
   fieldsplit KSP/PC per block (CG/Cholesky on proven-symmetric diagonal blocks, full saddle-point
   treatment only where the pair structure demands it). Both read `jacobian_block_flags_union`.
+
+## 7. Consumers: whole-matrix symmetry for the solvers
+
+`Problem::get_proven_matrix_symmetry(residual_name)` reduces the union tables to a whole-matrix
+verdict `(jacobian symmetric, mass matrix symmetric)`: every contributing block must carry
+`JACOBIAN_BLOCK_SYMMETRIC`, and anything that makes the actually-solved matrix differ from the plain
+elemental Jacobian forces `(false,false)` — an active `AssemblyHandler` other than the default
+(bifurcation tracking), augmented dofs (`n_unaugmented_dofs != 0`), a custom assembler, and dR/dp
+replacement. Arclength continuation is deliberately NOT gated: it borders algebraically, the matrix
+stays the plain Jacobian. Bound to Python as `Problem._get_proven_matrix_symmetry`.
+
+Both solver base classes consume it through `exploit_proven_symmetry` (ON by default; the decision
+is re-taken at every factorisation, never cached, and recorded in `last_symmetry_decision`/`..._reason`
+so a benchmark can tell an engaged symmetric path from a silent fallback):
+
+- `GenericLinearSystemSolver._use_symmetric_factorisation_now()` → Pardiso mtype `-2` (Bunch-Kaufman,
+  never `2`: SPD is not provable), PETSc/MUMPS `pc_type cholesky` (MUMPS SYM=2 — PETSc's native
+  Cholesky is unpivoted and proven-symmetric Jacobians are typically indefinite) plus the Mat
+  SYMMETRIC hint, Accelerate LDLT. SuperLU/UMFPACK have no symmetric factorisation — documented no-op.
+- `GenericEigenSolver._use_symmetric_eigensolver_now()` → scipy `eigsh` (shift-invert only: without
+  sigma eigsh needs a positive DEFINITE M) and SLEPc `GHEP` + Cholesky ST. Requires BOTH matrices
+  proven symmetric, a real assembly and no matrix manipulators; it additionally ASSUMES M is positive
+  semi-definite (true for the Gram matrices `partial_t` generates, not provable symbolically) — a
+  hand-written negative mass contribution must set `exploit_proven_symmetry=False`.

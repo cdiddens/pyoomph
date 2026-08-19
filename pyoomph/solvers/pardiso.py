@@ -802,6 +802,8 @@ class PardisoSolver(GenericLinearSystemSolver):
         self.n_full_factorisations:int=0    # phase 12: reordering + symbolic + numeric
         self.n_numeric_factorisations:int=0 # phase 22: numeric only, symbolic reused
         self.n_numeric_reuses:int=0         # factors kept entirely, used as a CGS preconditioner
+        self.n_symmetric_factorisations:int=0 # op_flag==1 calls that engaged mtype -2 (proven symmetry)
+        self._active_mtype:int=11           # mtype the current/last factorisation was decided for
 
     def set_num_threads(self,nthreads:int | None):
         if nthreads is None or nthreads==0:
@@ -833,6 +835,21 @@ class PardisoSolver(GenericLinearSystemSolver):
     def get_b(self,n:int,b:NPFloatArray):
         return b
 
+    def _diagonal_fully_stored(self,A:Any)->bool:
+        # MKL's symmetric mtypes require every diagonal position to be PRESENT in the pattern (an
+        # explicit zero suffices). Structural check: same pattern with all-ones values, so stored
+        # zeros count too - A.diagonal() itself cannot tell a stored zero from an absent entry.
+        ones=csr_matrix((numpy.ones_like(A.data),A.indices,A.indptr),shape=A.shape)
+        return int(ones.diagonal().sum())==A.shape[0]
+
+    def requires_explicit_diagonal(self)->bool:
+        # Only when the symmetric path (mtype -2) would actually engage: MKL needs the full diagonal
+        # stored then. Keying on the verdict, not just the flag, keeps the matrix - and hence the
+        # pivoting - of nonsymmetric problems bit-identical to a build without this feature.
+        if not self.exploit_proven_symmetry:
+            return False
+        return self.problem._get_proven_matrix_symmetry(self.problem._get_solved_residual())[0]
+
     def _invalidate_factorisation(self)->None:
         """Throw the current factorisation away, so the next op_flag==1 builds a completely fresh one.
 
@@ -858,7 +875,7 @@ class PardisoSolver(GenericLinearSystemSolver):
                 pass
             self._current_pardiso = None
 
-    def _reuse_symbolic_factorisation(self,A:Any)->bool:
+    def _reuse_symbolic_factorisation(self,A:Any,mtype:int=11)->bool:
         """Feed a re-assembled Jacobian into the existing factorisation object without redoing the
         symbolic phase. Returns False if that is not possible, in which case the caller must build a
         fresh solver.
@@ -875,6 +892,17 @@ class PardisoSolver(GenericLinearSystemSolver):
         ps = self._current_pardiso
         if ps is None or self._structure_id == 0:
             return False
+        if ps.mtype != mtype:
+            # Intentional flip between symmetric and general (a tracker was toggled), not a pattern
+            # bug - a fresh symbolic factorisation is required, quietly.
+            return False
+        if mtype not in (11, 13):
+            # pardisoSolver holds only the upper triangle for symmetric mtypes: compare and copy
+            # against the same half, or an identical pattern reads as a mismatch. Sort first - triu
+            # of an unsorted CSR would otherwise be compared against the sorted ps.ja.
+            if not A.has_sorted_indices:
+                A.sort_indices()
+            A = sp.triu(A, format='csr')
         if ps.n != A.shape[0] or len(ps.a) != len(A.data):
             return False
         # oomph-lib does not emit the column indices of a row in ascending order, and pardisoSolver
@@ -902,10 +930,23 @@ class PardisoSolver(GenericLinearSystemSolver):
         if op_flag == 1:
 #            print("INFO",len(values),len(rowind),len(colptr))
             A = self.get_jacobian_matrix(n,values, rowind, colptr)  # That is not optimal, of course
+            # mtype -2 = real symmetric indefinite (Bunch-Kaufman), never 2 (SPD is not provable
+            # symbolically). MKL additionally requires every diagonal entry to be STORED for the
+            # symmetric mtypes; requires_explicit_diagonal() asks the assembly for that, but guard
+            # here anyway - not every path to this solve runs the pre-Newton sync.
             mode = 11
+            if self._use_symmetric_factorisation_now():
+                if self._diagonal_fully_stored(A):
+                    mode = -2
+                else:
+                    self.last_symmetry_decision = False
+                    self.last_symmetry_decision_reason = "diagonal not fully stored (MKL symmetric mtypes require it)"
+            self._active_mtype = mode
+            if mode == -2:
+                self.n_symmetric_factorisations += 1
             structure_id = self.problem.jacobian_structure_id
             if (not self.try_to_reuse_solver) and structure_id != 0 and structure_id == self._structure_id \
-                    and self._reuse_symbolic_factorisation(A):
+                    and self._reuse_symbolic_factorisation(A,mode):
                 # Same pattern, new values: only the numerical factorisation has to be redone.
                 self._lastA = A
                 self._current_pardiso.factor_numeric_only() #type:ignore
@@ -916,22 +957,24 @@ class PardisoSolver(GenericLinearSystemSolver):
             self._structure_id = structure_id
             if self.try_to_reuse_solver:
                 self._lastA=A
-                if self._current_pardiso is None:    
+                if self._current_pardiso is None:
                     self._current_pardiso = pardisoSolver(A, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,repair_bad_solves=self.repair_bad_solves)
                     if self.verbose: print("CREATED NEW PARDISO AND FACTOR")
                     self._current_pardiso.factor()
                     self.n_full_factorisations+=1
                     self._pattern_verified=True
-                elif self._reuse_symbolic_factorisation(A):
+                elif self._reuse_symbolic_factorisation(A,mode):
                     # Values copied in, factors deliberately left alone: this branch is the numeric
                     # reuse, and op_flag==2 will use those factors as a CGS preconditioner. The call
                     # above also VERIFIED the pattern, which is what lets the fallback there be a
                     # phase-22 refactorisation instead of a full rebuild.
                     self._pattern_verified=True
                     self.n_numeric_reuses+=1
-                elif self._current_pardiso.update_matrix_values(A):
+                elif self._current_pardiso.update_matrix_values(A if mode in (11,13) else sp.triu(A,format='csr'),mtype=mode):
                     # Same sizes but the pattern was not verified (or symbolic reuse is off), so the
-                    # cheap fallback in op_flag==2 is not available.
+                    # cheap fallback in op_flag==2 is not available. pardisoSolver holds only the upper
+                    # triangle for symmetric mtypes, so hand it the same half; its own mtype check
+                    # routes an mtype flip (tracker toggled) to the rebuild branch below.
                     self._pattern_verified=False
                     self.n_numeric_reuses+=1
                 else:
@@ -972,7 +1015,9 @@ class PardisoSolver(GenericLinearSystemSolver):
                                        "factorised, so there is nothing to solve with.")
                 if self.verbose:
                     print("PARDISO: refactorising for a resolve, the previous factorisation was discarded")
-                self._current_pardiso = pardisoSolver(self._lastA, mtype=11, verbose=self.verbose,
+                # _lastA is the FULL matrix either way; pardisoSolver extracts the triangle itself for
+                # symmetric mtypes, so rebuilding with the mtype of the discarded factorisation is safe.
+                self._current_pardiso = pardisoSolver(self._lastA, mtype=getattr(self,'_active_mtype',11), verbose=self.verbose,
                                                       iparm_override=self.iparm_override,
                                                       repair_bad_solves=self.repair_bad_solves)
                 self._current_pardiso.factor()
@@ -1005,7 +1050,7 @@ class PardisoSolver(GenericLinearSystemSolver):
                     else:
                         if self._current_pardiso:
                             self._current_pardiso.clear()
-                        mode=11
+                        mode=getattr(self,'_active_mtype',11)
                         self._current_pardiso = pardisoSolver(self._lastA, mtype=mode, verbose=self.verbose,iparm_override=self.iparm_override,repair_bad_solves=self.repair_bad_solves)
                         self._current_pardiso.factor()
                         self.n_full_factorisations+=1
@@ -1022,6 +1067,16 @@ class PardisoSolver(GenericLinearSystemSolver):
                     sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve_checked(rhs), b) #type:ignore
                 else:
                     sol = self._current_pardiso.solve_checked(self.get_b(n,b))
+                # For the symmetric mtypes, pardisoSolver holds only the upper triangle and cannot
+                # form the residual itself (last_backward_error stays None), which would silently
+                # disable the over-limit invalidation below - and the in-solver pivot escalation of
+                # solve_checked never fires either. The full matrix is still here, so form the same
+                # backward error at the same cost (one SpMV); discard-and-refactorise is the safety
+                # net that replaces the escalation. b still holds the right-hand side at this point.
+                if self._current_pardiso.last_backward_error is None and self._current_pardiso.mtype not in (11,13) and self._lastA is not None:
+                    _scale=float(numpy.amax(numpy.absolute(b))) if b.size else 0.0
+                    if _scale>0.0:
+                        self._current_pardiso.last_backward_error=float(numpy.amax(numpy.absolute(self._lastA*sol-b)))/_scale
                 # Once a factorisation has had to escalate its pivoting AND KEPT IT, the next one on
                 # this problem almost certainly will too -- under spatial adaptivity the mesh only
                 # gets harder from here. (An escalation that did not help withdraws itself and clears
@@ -1057,6 +1112,14 @@ class PardisoInvOp(object):
             self.mat=A
         else:
             self.mat=A-sigma*M #type:ignore
+        if mode==-2:
+            # Same MKL requirement as in PardisoSolver: every diagonal position of the shifted matrix
+            # must be stored. J-sigma*M usually has it (M carries the time-derivative diagonal), but
+            # fall back to the general mtype rather than fail when it does not.
+            _mat=self.mat.tocsr() #type:ignore
+            _ones=sp.csr_matrix((numpy.ones_like(_mat.data),_mat.indices,_mat.indptr),shape=_mat.shape)
+            if int(_ones.diagonal().sum())!=_mat.shape[0]:
+                mode=11
         self._current_pardiso=pardisoSolver(self.mat, mtype=mode, verbose=False) #type:ignore
         self._current_pardiso.factor()
 
@@ -1087,6 +1150,11 @@ class PardisoArpackEigenSolver(ScipyEigenSolver):
             mode=11
             if M.dtype==numpy.dtype("complex128") or J.dtype==numpy.dtype("complex128"):
                 mode=13
+            elif self.last_symmetry_decision and numpy.imag(shift)==0:
+                # Set by ScipyEigenSolver.solve before asking for the operator: J-shift*M is then real
+                # symmetric (indefinite), factorised via Bunch-Kaufman. The shift guard is defensive -
+                # the symmetric decision is only ever True for a purely real solve path anyway.
+                mode=-2
             OPinv = PardisoInvOp(J, M, sigma=shift,mode=mode)
         return OPinv
 

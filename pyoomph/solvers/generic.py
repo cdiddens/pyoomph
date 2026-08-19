@@ -143,6 +143,30 @@ class GenericLinearSystemSolver:
 
 	def __init__(self,problem:"Problem"):
 		self.problem=problem
+		#: Switch to a symmetric factorization whenever the assembled matrix is symbolically proven
+		#: symmetric (see Problem._get_proven_matrix_symmetry). Falls back silently to the general
+		#: factorization on any doubt - augmented (tracking) systems, custom assemblers, unproven
+		#: blocks - so leaving it on cannot produce a wrong result, only different pivoting/roundoff.
+		self.exploit_proven_symmetry:bool=True
+		#: Outcome of the last _use_symmetric_factorisation_now() call (None = never asked), plus the
+		#: reason. For tests and benchmarks: a comparison where the symmetric path silently fell back
+		#: looks like a null result, so check this before believing one.
+		self.last_symmetry_decision:Optional[bool]=None
+		self.last_symmetry_decision_reason:str=""
+
+	def _use_symmetric_factorisation_now(self)->bool:
+		"""Per-solve decision whether the matrix about to be factorised is proven symmetric.
+
+		Never cached: the same problem flips between symmetric and not when a bifurcation tracker or
+		custom assembler is (de)activated, so backends must ask again at every op_flag==1.
+		"""
+		if not self.exploit_proven_symmetry:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"disabled by exploit_proven_symmetry=False"
+			return False
+		jac_sym,_=self.problem._get_proven_matrix_symmetry(self.problem._get_solved_residual())
+		self.last_symmetry_decision=jac_sym
+		self.last_symmetry_decision_reason="jacobian proven symmetric" if jac_sym else "jacobian not proven symmetric (or augmented/custom assembly)"
+		return jac_sym
 
 	@property
 	def problem(self)->"Problem":
@@ -724,6 +748,38 @@ class GenericEigenSolver:
 		self.imag_contribution:str | None=None
 		self.ncv:int | None=None
 		self.last_assembly_was_complex:bool=False
+		#: Use a symmetric eigensolver (scipy eigsh / SLEPc GHEP) when J and M are both symbolically
+		#: proven symmetric. This additionally ASSUMES M is positive semi-definite - true for
+		#: pyoomph-generated mass matrices (Gram matrices of the partial_t terms), but not provable
+		#: symbolically, so a hand-written negative mass contribution must set this to False.
+		self.exploit_proven_symmetry:bool=True
+		#: Outcome/reason of the last _use_symmetric_eigensolver_now() call (None = never asked);
+		#: also read by the Pardiso/Accelerate shift-invert operators to pick a symmetric mode.
+		self.last_symmetry_decision:Optional[bool]=None
+		self.last_symmetry_decision_reason:str=""
+
+	def _use_symmetric_eigensolver_now(self)->bool:
+		"""Per-solve decision whether the eigenproblem J,M pair is proven symmetric.
+
+		Requires BOTH matrices proven symmetric, a purely real assembly (imag_contribution unset -
+		expansion-mode residual sets carry no symmetry proofs anyway) and no matrix manipulators
+		(EigenMatrixSetDofsToZero replaces J rows by identity rows, which breaks symmetry after
+		assembly). Positive semi-definiteness of M is assumed, not proven - see exploit_proven_symmetry.
+		"""
+		if not self.exploit_proven_symmetry:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"disabled by exploit_proven_symmetry=False"
+			return False
+		if self.imag_contribution is not None:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"complex assembly (imag_contribution set)"
+			return False
+		if self.matrix_manipulators:
+			self.last_symmetry_decision,self.last_symmetry_decision_reason=False,"matrix manipulators break symmetry after assembly"
+			return False
+		jac_sym,mass_sym=self.problem._get_proven_matrix_symmetry(self.real_contribution)
+		decision=jac_sym and mass_sym
+		self.last_symmetry_decision=decision
+		self.last_symmetry_decision_reason="J and M proven symmetric (M assumed PSD)" if decision else "J or M not proven symmetric (or augmented/custom assembly)"
+		return decision
 
 	@property
 	def problem(self)->"Problem":

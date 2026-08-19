@@ -913,6 +913,7 @@ namespace pyoomph
     void assemble_defined_field_list(); // (Re)builds defined_fields/defined_fields_to_domain and the residual/jacobian-contribution tables from all currently loaded bulk element codes
     void update_jacobian_csr_structure(); // Rebuilds global_eqs_to_jacobian_buffer_index after the equation numbering or sparsity pattern has changed
     std::tuple<std::string,bool> get_jacobian_information_string(); // Human-readable report of which fields/residuals contribute to the Jacobian (and whether any dofs had to be pinned due to empty rows/cols), for debugging singular Jacobians
+    std::tuple<bool,bool> get_proven_matrix_symmetry(const std::string &residual_name); // (jacobian symmetric, mass matrix symmetric) for the named residual set; false means "not proven", never "disproven"
     void sparse_assemble_row_or_column_compressed_base_problem(oomph::Vector<int*>& column_or_row_index,oomph::Vector<int*>& row_or_column_start,oomph::Vector<double*>& value,oomph::Vector<unsigned>& nnz,oomph::Vector<double*>& residuals,bool compressed_row_flag); // The "normal" (non-periodic-orbit) sparse assembly, used as fallback by sparse_assemble_row_or_column_compressed()
     unsigned get_n_unaugmented_dofs() const {return n_unaugmented_dofs;}
     bool use_custom_residual_jacobian=false; // If true, residuals/Jacobian are supplied by get_custom_residuals_jacobian() instead of elemental assembly
