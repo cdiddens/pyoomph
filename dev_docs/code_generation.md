@@ -1067,9 +1067,11 @@ all.
 
 §9.4.8 left the wrong impression that ~92% of Hessian assembly is upstream of the entries. That was an
 inference from one number ("the hoist moved 7.9%"), not a measurement, and it was wrong. Decomposing
-`Problem::assemble_hessian_tensor` by skipping one stage at a time
-(`PYOOMPH_HESS_SKIP_ELEMENT`/`_SKIP_SCATTER`/`_SKIP_ACCUM`, all of which make the result wrong and exist
-only to be timed) gives the whole budget, on `ale2d` N=12:
+`Problem::assemble_hessian_tensor` by skipping one stage at a time gives the whole budget, on `ale2d`
+N=12. The switches used for it - `PYOOMPH_HESS_SKIP_ELEMENT`/`_SKIP_SCATTER`/`_SKIP_ACCUM`, each
+short-circuiting one stage - were removed once they had produced this table, because they make the
+Hessian silently wrong and that is not a thing to leave lying in an assembly routine; three `if`s in
+`Problem::assemble_hessian_tensor` bring them back if the question is ever reopened:
 
 | stage | seconds | share | generated code? |
 |---|---|---|---|
@@ -1190,7 +1192,6 @@ All change how pyoomph gets there or what it reports, never what it computes.
 | `PYOOMPH_DISABLE_EXPAND_MEMO` | turn off the placeholder-expansion memo (on by default, §3) |
 | `PYOOMPH_ARCHIVE_EXPRESSIONS` | fill `FiniteElementCode::archive` again (§5) |
 | `PYOOMPH_TIME_ADD_RESIDUAL` | per-phase timing of `add_residual`/`expand_placeholders` on stderr, with mapper entries, memo hits and distinct-subexpression counts |
-| `PYOOMPH_HESS_SKIP_ELEMENT` / `_SKIP_SCATTER` / `_SKIP_ACCUM` | skip one stage of `assemble_hessian_tensor` so the stages can be timed apart; each makes the result WRONG and exists only for measurement (§9.4.9) |
 | `PYOOMPH_DEBUG_HOIST` | report on stderr why a Jacobian/Hessian entry could not be split for hoisting, with the atoms and their trial-index classes (§9.4.8) |
 | `PYOOMPH_DISABLE_RJM_SPLIT` | emit one Residual/Jacobian/Mass function with a runtime flag instead of three specialised bodies behind a dispatcher (§9.4.6) |
 | `PYOOMPH_DISABLE_JACOBIAN_HOIST` | emit each Jacobian entry inside the trial loop as before, instead of hoisting its `l_shape`-independent coefficients (§9.4.5) |
