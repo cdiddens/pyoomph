@@ -73,9 +73,13 @@ _NEWTON_REDUCTION = 1e-10
 # Crouzeix-Raviart is exempt from the reduction test and only has to converge within a few iterations.
 # Its saddle-point system on refined triangle meshes is ill-conditioned enough that the direct linear solve
 # is itself inaccurate: one step takes the residual from 8.4e-04 to 1.5e-05 and the second one to ~1e-10.
-# This is a property of the discretisation, not of the hanging-node Jacobian -- it reproduces identically
-# with the pre-existing (pre-mixed_adapt) pressure fixation, and the equivalent TH cases on the same meshes
-# reduce by 1e-14. The existing CR tests elsewhere in the suite carry looser bounds for the same reason.
+# This is not a fault of the hanging-node Jacobian -- it reproduces identically with the pre-existing
+# (pre-mixed_adapt) pressure fixation, and the equivalent TH cases on the same meshes reduce by 1e-14.
+# The conditioning interacts with the SOLVER, though, and calling it a property of the discretisation
+# alone was too generous: MKL Pardiso pivots statically and returns these systems with backward errors
+# of order 1e0 (Newton then fails outright, which is what solve_case's repair_bad_solves addresses),
+# while a dynamically pivoting solver reaches 1e-14 -- see _use_pivoting_solver in
+# tests/test_triangle_refinement.py.
 _NO_REDUCTION_TEST = {"stokes_cr"}
 _MAX_NEWTON_STEPS = 3
 
