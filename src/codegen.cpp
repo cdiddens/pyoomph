@@ -5452,6 +5452,20 @@ namespace pyoomph
 				const pyoomph::NormalSymbol &sp = GiNaC::ex_to<GiNaC::GiNaCNormalSymbol>(*i).get_struct();
 				if (sp.history_step != 0 && this->history_geometry_is_relevant())
 					this->mark_shapes_required(for_what, this->get_my_position_space(), "history_geometry" + std::to_string(sp.history_step));
+				// The position-space "psi" that goes with a normal is the POSITION-JACOBIAN channel, not a
+				// shape the residual reads: the normal's nodal-coordinate sensitivities are expressed in
+				// the position-owning element's nodes, so that element's position dofs have to be
+				// attached, remapped and given hang info. On a static mesh there are no position dofs and
+				// none of that exists, yet the mark used to be unconditional - the structurally identical
+				// elemsize branch below has always had the guard. The consequence was not merely a set
+				// flag: a non-NULL bulk_shapes forces a full bulk shape fill per integration point, a
+				// bulk interpolate_hang_values, bulk equation remapping, and (because the interface
+				// fill_hang_info_with_equations returns true whenever it recursed) the HANG entry point
+				// for EVERY interface element of a static mesh. Corpus: 175 of the generated codes
+				// setting it never touch bulk_shapeinfo at all.
+				//
+				// Guarded on the code OWNING the marked position space, exactly as the elemsize branch
+				// does. No is_lagrangian() term: a normal is never Lagrangian.
 				if (sp.get_code() == this || sp.get_code() == NULL)
 				{
 					this->mark_shapes_required(for_what, this->get_my_position_space(), "normal");
@@ -5459,11 +5473,13 @@ namespace pyoomph
 						this->mark_shapes_required(for_what, this->get_my_position_space(), "normal_deriv");
 					if (this->bulk_code)
 					{
-						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
+						if (this->bulk_code->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
 					}
 					else
 					{
-						this->mark_shapes_required(for_what, this->get_my_position_space(), "psi");
+						if (this->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->get_my_position_space(), "psi");
 					}
 				}
 				else if (this->bulk_code && sp.get_code() == this->bulk_code)
@@ -5473,11 +5489,13 @@ namespace pyoomph
 						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "normal_deriv");
 					if (this->bulk_code->bulk_code)
 					{
-						this->mark_shapes_required(for_what, this->bulk_code->bulk_code->get_my_position_space(), "psi");
+						if (this->bulk_code->bulk_code->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->bulk_code->bulk_code->get_my_position_space(), "psi");
 					}
 					else
 					{
-						this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
+						if (this->bulk_code->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->bulk_code->get_my_position_space(), "psi");
 					}
 				}
 				else if (this->opposite_interface_code && sp.get_code() == this->opposite_interface_code)
@@ -5487,11 +5505,13 @@ namespace pyoomph
 						this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "normal_deriv");
 					if (this->opposite_interface_code->bulk_code)
 					{
-						this->mark_shapes_required(for_what, this->opposite_interface_code->bulk_code->get_my_position_space(), "psi");
+						if (this->opposite_interface_code->bulk_code->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->opposite_interface_code->bulk_code->get_my_position_space(), "psi");
 					}
 					else
 					{
-						this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "psi");
+						if (this->opposite_interface_code->coordinates_as_dofs)
+							this->mark_shapes_required(for_what, this->opposite_interface_code->get_my_position_space(), "psi");
 					}
 				}
 				else
