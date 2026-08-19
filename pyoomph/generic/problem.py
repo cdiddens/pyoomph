@@ -7276,6 +7276,19 @@ class Problem(_pyoomph.Problem):
             alleigenvals:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
             alleigenvects:NPComplexArray=numpy.array([],dtype=numpy.complex128) #type:ignore
             minfoL:list[int | float]=[]
+            # Settle the equation numbering ONCE for the whole scan. AxisymmetryBC keeps the axis
+            # conditions pinned strongly as long as only the base mode has been solved and releases them
+            # - imposing the same zeros by matrix manipulation instead - as soon as a mode != 0 is asked
+            # for, which changes ndof. A scan starting at m=0 therefore produced a first block of
+            # eigenvectors shorter than all the others, and stacking them below died in numpy with
+            # "all the input array dimensions except for the concatenation axis must match exactly".
+            # Doing the release up front costs nothing and leaves the base-mode spectrum unchanged: the
+            # manipulator imposes exactly the conditions the pinning did, which is checked in
+            # tests/test_azimuthal_mode_list.py.
+            nonzero=[ms for ms in vlist if ms!=0]
+            if nonzero:
+                param.value=nonzero[0]
+                self.actions_before_eigen_solve(must_not_renumber=tracking)
             for ms in vlist:
                 param.value = ms
                 self.actions_before_eigen_solve(must_not_renumber=tracking)
@@ -7285,10 +7298,19 @@ class Problem(_pyoomph.Problem):
                 else:
                     alleigenvals:NPComplexArray=numpy.hstack([alleigenvals,self.get_last_eigenvalues().copy()]) #type:ignore
                 minfoL+=[ms]*len(self.get_last_eigenvalues())
+                evects=numpy.array(self.get_last_eigenvectors()).copy()
                 if len(alleigenvects)==0:
-                    alleigenvects:NPComplexArray= numpy.array(self.get_last_eigenvectors()).copy() #type:ignore
+                    alleigenvects:NPComplexArray= evects #type:ignore
                 else:
-                    alleigenvects:NPComplexArray=numpy.vstack([alleigenvects,numpy.array(self.get_last_eigenvectors()).copy()]) #type:ignore
+                    if evects.shape[1:]!=alleigenvects.shape[1:]:
+                        # Some other equation renumbered per mode; say which mode and what changed rather
+                        # than letting numpy report two array shapes.
+                        raise RuntimeError("The eigenvectors of mode "+str(ms)+" have length "+str(evects.shape[-1])+
+                                           " while the earlier modes of this scan gave "+str(alleigenvects.shape[-1])+
+                                           ". Something changed which degrees of freedom are pinned between the modes, "
+                                           "so their eigenvectors cannot be combined into one spectrum. Solve the modes "
+                                           "one at a time to see them separately.")
+                    alleigenvects:NPComplexArray=numpy.vstack([alleigenvects,evects]) #type:ignore
 
             if sort:
                 if target:
