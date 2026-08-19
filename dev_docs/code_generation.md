@@ -1243,8 +1243,9 @@ value built through the E-tensor chain.)
 `fill_shape_info_at_s` now writes `d2_dx2_shape_dcoord` straight from that expression on bulk elements,
 which makes the E-tensor chain **and its per-integration-point `RankSixTensor` heap allocation**
 unnecessary - `D2X2_dshape` is only allocated when something still needs it. Interfaces keep the old
-path: there the second derivative picks up normal-projector terms this closed form does not carry, and
-that derivation has not been done. Under `PYOOMPH_PARANOID_ALE_IDENTITY` both paths are computed, so the
+path: there the second derivative picks up normal-projector terms this closed form does not carry. That
+derivation has since been done and validated - see §9.4.13 - but using it measured slower, so interfaces
+still take the E-tensor path deliberately rather than for want of a formula. Under `PYOOMPH_PARANOID_ALE_IDENTITY` both paths are computed, so the
 check keeps comparing two independent derivations instead of the closed form against itself.
 
 | | Hessian assembly |
@@ -1283,6 +1284,54 @@ An artefact worth recording too: the broken build measured -16.1% and the fixed 
 i.e. doing strictly more work came out faster. The likeliest explanation is that the skipped fill left
 `int_pt_weights_d2_coords` holding uninitialised values and the entries then did denormal arithmetic.
 A "speedup" that arrives together with wrong numbers deserves the suspicion it got.
+
+### 9.4.13 The interface second derivative: derived, validated, and deliberately not used
+
+§9.4.12 left the codim>0 case open. Carrying the normal-projector through a second differentiation, using
+`N·Dpsi = 0` and `P_ij = sum_q X^q_i (D_j Psi_q)`, which gives `dN_ij/dX^r_k = -[N_ik (D_j Psi_r) + N_jk (D_i Psi_r)]`:
+
+```
+d2( D_i psi_l ) / dX^q_j dX^r_k  =  (D_k psi_l)(D_j Psi_r)(D_i Psi_q) + (D_j psi_l)(D_k Psi_q)(D_i Psi_r)
+    - N_jk (Dpsi_l . DPsi_r)(D_i Psi_q)  - N_ik (D_j psi_l)(DPsi_q . DPsi_r)
+    - N_ik (D_j Psi_r)(Dpsi_l . DPsi_q)  - N_jk (D_i Psi_r)(Dpsi_l . DPsi_q)
+    - N_ij (D_k psi_l)(DPsi_r . DPsi_q)  - N_ij (D_k Psi_q)(Dpsi_l . DPsi_r)
+```
+
+The first line is §9.4.12 exactly; the six N-terms vanish when `el_dim == n_dim`, so this is the general
+form and the bulk expression is its specialisation. Validated against the E-tensor chain on an interface
+(`el_dim 1 in 2D`, 7 776 comparisons, worst 8.4e-16) and re-confirmed on bulk in 2D and 3D
+(`el_dim 3 in 3D`, **114 791 256 comparisons**, 0 violations, worst 3.7e-13).
+
+**Using it on interfaces is a pessimisation, and structurally so.** Measured on `ale2d`:
+
+| | Hessian assembly |
+|---|---|
+| E-tensor everywhere (pre-§9.4.12) | 0.3676 s |
+| closed form on bulk only (shipped) | 0.2947 s |
+| closed form everywhere, one general expression | 0.3149 s (+6.9%) |
+| closed form everywhere, N-terms branched on `el_dim != n_dim` | 0.3056 s (+3.7%) |
+
+The reason is that the two paths scale in *different* dimensions. The E-tensor's inner contraction costs
+`O(el_dim)`, and `el_dim` is precisely what drops on an interface - a line in 2D contracts over one
+direction. The closed form costs `O(n_dim)`, which does not drop. So exactly where the closed form takes
+on its six extra N-terms, its competitor gets cheaper; on a bulk element the same trade runs the other
+way and the closed form wins by 19.8%. `closed_form_d2` therefore stays `(el_dim == n_dim)`, now with a
+comment recording the measurement rather than the absence of a derivation.
+
+What the work is worth keeping for is coverage. The interface second-derivative fill ships, and until now
+`PYOOMPH_PARANOID_ALE_IDENTITY` had nothing to compare it against - §9.4.12's check covered only the bulk
+path. It is now checked against an independently derived closed form, which is the arrangement that
+matters given how §9.4.12's bug got through.
+
+#### A refactor tax worth naming
+
+Sharing one `d2_shape_dcoord_closed_form` helper between the fills and the check initially cost **+3.5%
+on bulk**, which looked like cross-build drift and was not. The helper took `with_normal_terms` as a
+runtime `bool` computed from `el_dim != n_dim`; both are runtime values, so the compiler could not fold
+the branch and the bulk path paid for six terms it never used. Since the fills only run when
+`closed_form_d2` is already true, passing a literal `false` (and a static zero projector) lets the
+inliner delete the N-terms outright: **0.2957 s, +0.3% against the 0.2947 s reference, three passes within
+0.001 s.** Sharing the formula costs nothing; sharing it through an unfoldable flag cost 3.5%.
 
 ## 10. Things deliberately left alone
 
