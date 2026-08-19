@@ -296,7 +296,7 @@ def _moving_curvature_problem(hessian):
             self.add_equations(eqs @ "domain")
             self.add_equations(Surf() @ "domain/bottom")
             if not hessian:
-                self.debug_jacobian_by_fd_epsilon = 1e-5
+                self.equation_compilation_flags.debug_jacobian_epsilon = 1e-5
 
     p = P()
     if hessian:

@@ -187,6 +187,9 @@ class BifurcationController:
         self._demo_video_step=0
         self._current_observable:str | None=None
         self._avail_observables:list[str]=[]
+        #: Observable the diagram should open on, set before start(). Only a wish at that point: the
+        #: names are not known until the problem is initialised, so it is resolved in start().
+        self._initial_observable:str | None=None
         #: Explicit axis choices. None means "follow the default": the continued parameter on x and
         #: the current observable on y, which is what an ordinary bifurcation diagram shows.
         self._x_axis:"AxisSpec | None"=None
@@ -416,6 +419,35 @@ class BifurcationController:
         if name not in self._avail_observables:
             raise ValueError("Unknown observable "+str(name))
         self._current_observable=name
+
+    def set_initial_observable(self,name:str):
+        """Observable the diagram opens on, instead of the first one in alphabetical order.
+
+        Call it before :py:meth:`start`, where the name is checked against the observables the problem
+        actually has - they cannot be listed earlier, since they are read off the initialised problem.
+        A stored diagram overrides this, as it remembers what was last selected.
+
+        The double space that the ExtremumObservables names carry ("liquid/interface/nx  [min, x]")
+        need not be reproduced: names are matched with their whitespace collapsed.
+        """
+        self._initial_observable=name
+
+    def _resolve_initial_observable(self):
+        """Apply set_initial_observable() once the observable names are known."""
+        want=self._initial_observable
+        if want is None:
+            return
+        def norm(n:str)->str:
+            return " ".join(n.split())
+        match=None
+        for n in self._avail_observables:
+            if n==want or norm(n)==norm(want):
+                match=n
+                break
+        if match is None:
+            raise ValueError("Unknown initial observable "+repr(want)+". Available are:\n  "
+                             +"\n  ".join(self._avail_observables))
+        self._current_observable=match
 
     def get_tangent(self,obs:str | None=None)->"NPFloatArray | None":
         return self._tangs.get(obs if obs is not None else self._get_current_observable())
@@ -3056,6 +3088,7 @@ class BifurcationController:
         self._avail_observables=[k for k in self.evaluate_observables().keys()]
         if self._current_observable is None or self._current_observable not in self._avail_observables:
             self._current_observable=self._avail_observables[0]
+        self._resolve_initial_observable()
         if self.has_saved_state() and not ignore_saved:
             return False
 

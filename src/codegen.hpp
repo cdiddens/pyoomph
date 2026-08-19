@@ -1256,7 +1256,7 @@ namespace pyoomph
          else return this->get_domain_name();
       }
       virtual void set_discontinuous_refinement_exponent(std::string field, double exponent);
-      double warn_on_large_numerical_factor = 0.0; // If nonzero, warn (or, if negative, only warn without further action) when a generated numerical coefficient exceeds this magnitude, which often indicates a nondimensionalization issue
+      double warn_on_large_numerical_factor = 0.0; // If nonzero, report a generated numerical coefficient exceeding this magnitude, which often indicates a nondimensionalization issue. Positive: warn only, negative: throw. 0 disables the check
       bool use_shared_shape_buffer_during_multi_assemble = false; // If true, elements sharing the same shape-function buffer during a multi-assemble pass reuse it instead of recomputing it (performance optimization, see elements.cpp)
       LaTeXPrinter *latex_printer;
       virtual void set_latex_printer(LaTeXPrinter *lp) { latex_printer = lp; }

@@ -160,6 +160,22 @@ class BifurcationGUI:
         """Move a parameter that is being held fixed, which begins a new slice."""
         self.controller.set_fixed_parameter(name,value)
 
+    def set_initial_observable(self,name:str):
+        """Observable the diagram opens on when it is built from scratch.
+
+        Called before :py:meth:`start`, which is where the name is checked - the observables are read
+        off the initialised problem and cannot be listed earlier::
+
+            gui.set_initial_observable("liquid/interface/nx [min, x]")
+
+        A reloaded diagram keeps the observable it was left on instead.
+        """
+        self.controller.set_initial_observable(name)
+
+    def available_observables(self)->list[str]:
+        """Every observable that can go on the y axis (only complete after :py:meth:`start`)."""
+        return self.controller.available_observables
+
     def set_arclength_scaling(self,scale:bool):
         """Retune theta^2 after every step so the parameter keeps a fixed share of the arclength."""
         self.controller.set_arclength_scaling(scale)

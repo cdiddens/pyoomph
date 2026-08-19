@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from ..solvers.generic import GenericEigenSolver
     from ..meshes.remesher import RemesherBase
     from ..meshes.interpolator import BaseMeshToMeshInterpolator
+    from ..equations.additional import EquationCompilationFlags
 
 
 def _check_for_valid_var_name(name:str,for_domain:bool):
@@ -1715,6 +1716,26 @@ class EquationTree:
         self._codegen:"FiniteElementCodeGenerator | None"=None
         self._mesh:"AnyMesh | None"=None
         self._children:dict[str,"EquationTree"] = {}
+        self._compilation_flags:"EquationCompilationFlags | None"=None
+
+    def get_compilation_flags(self,problem:"Problem")->"EquationCompilationFlags":
+        """The code generation flags in effect on this domain.
+
+        Any :py:class:`~pyoomph.equations.additional.EquationCompilationFlags` added here wins, all
+        settings it leaves at ``None`` are inherited from the parent domain and eventually from
+        :py:attr:`~pyoomph.generic.problem.Problem.equation_compilation_flags`.
+        """
+        if self._compilation_flags is None:
+            from ..equations.additional import EquationCompilationFlags
+            if self._parent is not None:
+                flags=self._parent.get_compilation_flags(problem)
+            else:
+                flags=problem.equation_compilation_flags
+            if self._equations is not None:
+                for own in self._equations.get_equation_of_type(EquationCompilationFlags,always_as_list=True):
+                    flags=cast(EquationCompilationFlags,own).with_defaults_from(flags)
+            self._compilation_flags=flags
+        return self._compilation_flags
 
     def get_mesh(self)->"AnyMesh":
         assert self._mesh is not None
@@ -2140,6 +2161,7 @@ class EquationTree:
                         nodal_dim=cg.get_nodal_dimension()
                         parent_domain=cg.get_parent_domain()
                     dummy._set_nodal_dimension(nodal_dim)
+                    source.get_compilation_flags(problem).apply_to_codegen(dummy)
                     return dummy
 
                 assert self._parent is not None
@@ -2209,9 +2231,10 @@ class EquationTree:
         if self._equations is not None:
             if self._codegen is None:
                 self._codegen=FiniteElementCodeGenerator()                
-                self._codegen.ccode_expression_mode=problem.default_ccode_expression_mode
-                if problem.debug_jacobian_by_fd_epsilon is not None and problem.debug_jacobian_by_fd_epsilon>0.0:
-                    self._codegen.debug_jacobian_epsilon=problem.debug_jacobian_by_fd_epsilon
+                # Inherited from the parent domains and the problem. The flags of this domain itself
+                # are applied again in before_compilation, but the warning threshold among them has
+                # to be in place already while the residuals are assembled.
+                self.get_compilation_flags(problem).apply_to_codegen(self._codegen)
                 self._codegen._name=self.get_my_path_name()
                 self._codegen.set_latex_printer(problem.latex_printer)
                 self._codegen._set_problem(problem) 

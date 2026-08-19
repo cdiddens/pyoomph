@@ -457,7 +457,8 @@ void PyReg_CodeGen(nb::module_ &m)
         .def_rw("use_shared_shape_buffer_during_multi_assemble", &pyoomph::FiniteElementCode::use_shared_shape_buffer_during_multi_assemble,
                         "Whether shape function buffers are shared/reused across the different residual/Jacobian/Hessian combinations assembled in a single multi-assembly pass.")
         .def_rw("warn_on_large_numerical_factor", &pyoomph::FiniteElementCode::warn_on_large_numerical_factor,
-                        "Whether to emit a warning when a very large or very small numerical prefactor is encountered while generating code (often indicating a units/scaling mistake).")
+                        "Magnitude a numerical prefactor in a generated residual may not exceed (often indicating a units/scaling mistake). "
+                        "A positive value only warns, a negative one raises an error, 0 disables the check.")
         .def_rw("stop_on_jacobian_difference", &pyoomph::FiniteElementCode::stop_on_jacobian_difference,
                         "Whether to raise an error (rather than just warn) when the analytical and finite-difference Jacobians disagree beyond debug_jacobian_epsilon.")
         .def("get_precodegen_fingerprint_text", &pyoomph::FiniteElementCode::get_precodegen_fingerprint_text,

@@ -820,8 +820,8 @@ def test_extremum_observables_become_axis_choices(tmp_path):
 
     Out of process, since it needs its own Problem. The worker also pins that six axis choices cost two
     mesh sweeps rather than six, that the "[max, x]" tag replaces the "[obs]" one instead of stacking
-    with it, and that a name containing spaces, a comma and brackets survives the CSV export and a
-    save/load round trip.
+    with it, that set_initial_observable() picks which of them the diagram opens on, and that a name
+    containing spaces, a comma and brackets survives the CSV export and a save/load round trip.
     """
     import subprocess
 

@@ -50,6 +50,7 @@ import argparse
 import numpy
 from ..meshes.mesh import  AnyMesh,AnySpatialMesh,BulkTemplateMesh, MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d, ODEStorageMesh, InterfaceMesh,MeshFromTemplate,MeshFromTemplateBase,MeshTemplate
 from .codegen import EquationTree,BaseEquations, FiniteElementCodeGenerator,CombinedEquations,DummyEquations, InterfaceEquations #ODEEquations
+from ..equations.additional import EquationCompilationFlags
 from ..solvers.generic import DefaultMatrixType, EigenSolverWhich, GenericLinearSystemSolver,GenericEigenSolver
 from ..expressions.units import *
 from ..expressions import get_global_symbol,cartesian,axisymmetric,axisymmetric_flipped,radialsymmetric,BaseCoordinateSystem,nondim,testfunction,weak,OptionalCoordinateSystem
@@ -512,11 +513,11 @@ class Problem(_pyoomph.Problem):
         additional_equations (Union[Literal[0], EquationTree]): Additional equations for the problem.
         continuation_data_in_states (bool): Flag indicating whether to store continuation data in the states.
         default_1d_file_extension (Union[Literal["txt", "mat"], List[Literal["txt", "mat"]]]): Default file extension for 1D files.
-        default_ccode_expression_mode (str): Default C code expression mode.
         default_spatial_integration_order (Union[int, None]): Default spatial integration order.
         default_timestepping_scheme (Literal["BDF2", "BDF1", "Newmark2"]): Default timestepping scheme.
         eigen_data_in_states (Union[int, bool]): Flag indicating whether to store eigen data in the states.
         eigenvector_position_scale (float): Scaling factor for eigenvector positions.
+        equation_compilation_flags (EquationCompilationFlags): Code generation settings inherited by all domains.
         extra_compiler_flags (List[str]): Extra compiler flags for the problem.
         ignore_command_line (bool): Flag indicating whether to ignore command line arguments.
         latex_printer (Optional[LaTeXPrinter]): LaTeX printer for the problem.
@@ -812,9 +813,11 @@ class Problem(_pyoomph.Problem):
 
         self._custom_assembler:CustomAssemblyBase | None=None
 
-        self.default_ccode_expression_mode:str="" # Try to factor all expressions with "factor"
-        #: Debugging the Jacobian by finite differences with a given epsilon (None or <=0 means no debugging). 
-        self.debug_jacobian_by_fd_epsilon:float | None=-1 
+        #: Code generation settings used on every domain, unless a domain (or one of its parent
+        #: domains) overrides individual ones by adding an
+        #: :py:class:`~pyoomph.equations.additional.EquationCompilationFlags`. The values here are
+        #: the defaults of the code generator itself (see ``FiniteElementCode`` in src/codegen.cpp).
+        self.equation_compilation_flags:"EquationCompilationFlags"=EquationCompilationFlags(analytical_position_jacobian=True,analytical_jacobian=True,warn_on_large_numerical_factor=0.0,debug_jacobian_epsilon=0.0,ccode_expression_mode="",with_adaptivity=True,jacobian_hoist_min_cost=-1,split_rjm_by_flag=True)
         self.extra_compiler_flags:list[str]=[]
         
         #: After analyzing the Jacobian, a field with an empty Jacobian row will be pinned automatically
@@ -1075,8 +1078,8 @@ class Problem(_pyoomph.Problem):
         For each element this forms random vectors Y and C and compares the analytic Hessian-vector
         product ``d2R_i/(du_j du_k) Y_i C_k`` against a finite difference of the *analytic* Jacobian
         along C. It therefore validates the Hessian only relative to the Jacobian; combine it with
-        :py:attr:`debug_jacobian_by_fd_epsilon`, which validates the Jacobian against finite
-        differences of the residual, to pin down the whole chain.
+        ``equation_compilation_flags.debug_jacobian_epsilon``, which validates the Jacobian against
+        finite differences of the residual, to pin down the whole chain.
 
         Requires the analytic Hessian to have been generated, i.e.
         ``setup_for_stability_analysis(analytic_hessian=True)`` before initialisation.

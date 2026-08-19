@@ -166,15 +166,25 @@ class EquationCompilationFlags(BaseEquations):
     Args:
         analytical_position_jacobian: Whether to derive the moving-mesh (nodal position) Jacobian symbolically.
         analytical_jacobian: Whether to derive the Jacobian symbolically instead of by finite differences.
-        warn_on_large_numerical_factor: Warn when a numerical coefficient in the expanded residual exceeds this threshold, which usually means a scale is off.
+        warn_on_large_numerical_factor: Report a numerical coefficient in the expanded residual exceeding this magnitude, which usually means a scale is off. A positive value warns, a negative one raises, 0 switches the check off.
         debug_jacobian_epsilon: Assemble both the analytical and the finite-difference Jacobian and report entries differing by more than this. For debugging only - it is expensive.
         ccode_expression_mode: How the generated C expressions are rearranged: ``"expand"``, ``"normal"``, ``"collect_common_factors"`` or ``"factor"``.
         with_adaptivity: Whether to generate the code required for spatial adaptivity.
+        jacobian_hoist_min_cost: How large a Jacobian/Hessian coefficient must be before it is named above the trial loop. ``-1`` follows the global setting.
+        split_rjm_by_flag: Whether the residual/Jacobian/mass function is emitted once per assembly mode instead of one body branching at runtime.
 
-    Every argument defaults to ``None``, which leaves the corresponding setting as it is - only the
-    ones you pass are overridden.
-    """    
-    def __init__(self,analytical_position_jacobian:bool | None=None,analytical_jacobian:bool | None=None,warn_on_large_numerical_factor:bool | None=None,debug_jacobian_epsilon:float | None=None,ccode_expression_mode:str | None=None,with_adaptivity:bool | None=None,jacobian_hoist_min_cost:int | None=None,split_rjm_by_flag:bool | None=None):
+    Every argument defaults to ``None``, which means "inherit": the setting is then taken from the
+    domain this one is nested in, and eventually from :py:attr:`~pyoomph.generic.problem.Problem.equation_compilation_flags`.
+    Adding e.g. ``EquationCompilationFlags(analytical_jacobian=False)`` to a bulk domain therefore
+    also disables the analytical Jacobian on all its interfaces, while everything else stays as set
+    on the problem.
+    """
+
+    #: The settings controlled here. Each one is a read/write property of the code generator of the
+    #: same name, so they can be transferred generically.
+    _flag_names = ("analytical_position_jacobian", "analytical_jacobian", "warn_on_large_numerical_factor", "debug_jacobian_epsilon", "ccode_expression_mode", "with_adaptivity", "jacobian_hoist_min_cost", "split_rjm_by_flag")
+
+    def __init__(self,analytical_position_jacobian:bool | None=None,analytical_jacobian:bool | None=None,warn_on_large_numerical_factor:float | None=None,debug_jacobian_epsilon:float | None=None,ccode_expression_mode:str | None=None,with_adaptivity:bool | None=None,jacobian_hoist_min_cost:int | None=None,split_rjm_by_flag:bool | None=None):
         super(EquationCompilationFlags, self).__init__()
         self.analytical_position_jacobian=analytical_position_jacobian
         self.analytical_jacobian=analytical_jacobian
@@ -185,27 +195,29 @@ class EquationCompilationFlags(BaseEquations):
         self.jacobian_hoist_min_cost=jacobian_hoist_min_cost
         self.split_rjm_by_flag=split_rjm_by_flag
 
+    def with_defaults_from(self,fallback:"EquationCompilationFlags | None")->"EquationCompilationFlags":
+        """Returns a copy of these flags where every setting left at ``None`` is taken from ``fallback``."""
+        if fallback is None:
+            return self
+        res=EquationCompilationFlags()
+        for n in self._flag_names:
+            own=getattr(self,n)
+            setattr(res,n,getattr(fallback,n) if own is None else own)
+        return res
+
+    def apply_to_codegen(self,codegen:"FiniteElementCodeGenerator"):
+        """Writes every setting that is not ``None`` to the code generator, leaving the others alone."""
+        for n in self._flag_names:
+            v=getattr(self,n)
+            if v is not None:
+                setattr(codegen,n,v)
+
     def before_compilation(self,codegen:"FiniteElementCodeGenerator"):
-        if self.analytical_position_jacobian is not None:
-            codegen.analytical_position_jacobian=self.analytical_position_jacobian
-        if self.analytical_jacobian is not None:
-            codegen.analytical_jacobian=self.analytical_jacobian
-        if self.debug_jacobian_epsilon is not None:
-            codegen.debug_jacobian_epsilon=self.debug_jacobian_epsilon
-        if self.ccode_expression_mode is not None:
-            codegen.ccode_expression_mode=self.ccode_expression_mode        
-        if self.jacobian_hoist_min_cost is not None:
-            codegen.jacobian_hoist_min_cost=self.jacobian_hoist_min_cost
-        if self.split_rjm_by_flag is not None:
-            codegen.split_rjm_by_flag=self.split_rjm_by_flag
-        if self.with_adaptivity is not None:
-            codegen.with_adaptivity=self.with_adaptivity
-
-
-
-
+        self.apply_to_codegen(codegen)
 
     def define_fields(self):
+        # Also set in before_compilation, but the warning fires while the residuals are assembled,
+        # i.e. long before that.
         if self.warn_on_large_numerical_factor is not None:
             self.get_current_code_generator().warn_on_large_numerical_factor=self.warn_on_large_numerical_factor
 
