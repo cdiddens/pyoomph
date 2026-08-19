@@ -253,6 +253,14 @@ namespace pyoomph
 
 		if (require_hessian)
 		{
+		 // Only the E tensor below is replaced by the closed form of 9.4.12; the rest of this block
+		 // computes D_dshape_Dcoords and, from it, int_pt_weights_d2_coords - the second derivative of
+		 // the integration measure, which the Hessian needs whether or not the E tensor is built.
+		 // Gating the whole block on D2X2_dshape silently dropped that and made every moving-mesh
+		 // Hessian wrong by a few percent; the identity check did not catch it, because it validates
+		 // the E-tensor path that the flag keeps alive.
+		 if (D2X2_dshape)
+		 {
 		   // Fill the E tensor. Note: D in the document is accessed as follows:
 		   //  	$D^{lb}_{ij}=DXdshape_il_jb(j,l,i,b)
 		   
@@ -339,6 +347,7 @@ namespace pyoomph
 		       */
 		     }
 		   }
+		 }
 
 
 			// Variable to store the second derivatives of shape function wrt to coordinates, i.e.,
@@ -1005,7 +1014,14 @@ namespace pyoomph
 
 		oomph::RankFourTensor<double> DXdshape_il_jb; //[n_dim][n_node][n_dim][el_dim]; //this is d(g^{ab}g_{a,j})/d(x_i^l) //TODO: This could lead to stack problems due to size
       RankSixTensor * D2X2_dshape=NULL;
-      if (require_hessian && require_dxdshape)
+      // On a bulk element the second nodal-coordinate derivative of a shape gradient is a sum of two
+      // triple products of FIRST derivatives (see the fill sites below), so neither this rank-6 scratch
+      // nor the E-tensor chain that fills it is needed - and it was 24.4% of Hessian assembly
+      // (dev_docs/code_generation.md 9.4.11). An interface picks up normal-projector terms the closed
+      // form does not carry, so there the old path stays. Under PYOOMPH_PARANOID_ALE_IDENTITY both are
+      // computed, so the check compares two independent derivations rather than one against itself.
+      const bool closed_form_d2 = (el_dim == n_dim) && !__paranoid_ale_identity;
+      if (require_hessian && require_dxdshape && !closed_form_d2)
       {
         D2X2_dshape=new RankSixTensor(n_dim,el_dim,n_node,n_node,n_dim,n_dim);
       }
@@ -1485,7 +1501,46 @@ namespace pyoomph
 									}
 							}
 						}
-						if (require_hessian)
+						if (require_hessian && closed_form_d2)
+						{
+							// d2(D_i psi_l)/dX^q_j dX^r_k = (D_k psi_l)(D_j Psi_r)(D_i Psi_q)
+							//                             + (D_j psi_l)(D_k Psi_q)(D_i Psi_r)
+							// on a bulk element. Written straight out, so the E tensor above and its
+							// per-integration-point rank-6 allocation are never needed.
+							double Dpsi_l[3];
+							for (unsigned int i = 0; i < n_dim; i++)
+							{
+								Dpsi_l[i] = 0.0;
+								for (unsigned b = 0; b < el_dim; b++)
+									Dpsi_l[i] += gab_gai[b][i] * dpsids(l, b);
+							}
+							for (unsigned lel = 0; lel < eleminfo.nnode; lel++)
+							{
+								double Dq[3];
+								for (unsigned int i = 0; i < n_dim; i++)
+								{
+									Dq[i] = 0.0;
+									for (unsigned b = 0; b < el_dim; b++)
+										Dq[i] += gab_gai[b][i] * dpsids_Element(lel, b);
+								}
+								for (unsigned lel2 = 0; lel2 < eleminfo.nnode; lel2++)
+								{
+									double Dr[3];
+									for (unsigned int i = 0; i < n_dim; i++)
+									{
+										Dr[i] = 0.0;
+										for (unsigned b = 0; b < el_dim; b++)
+											Dr[i] += gab_gai[b][i] * dpsids_Element(lel2, b);
+									}
+									for (unsigned int i = 0; i < n_dim; i++)
+										for (unsigned int j = 0; j < n_dim; j++)
+											for (unsigned int j2 = 0; j2 < n_dim; j2++)
+												shape_info->d2_dx2_shape_dcoord[ispace][l][i][lel][j][lel2][j2] =
+													Dpsi_l[j2] * Dr[j] * Dq[i] + Dpsi_l[j] * Dq[j2] * Dr[i];
+								}
+							}
+						}
+						else if (require_hessian)
 						{
 						for (unsigned int i = 0; i < n_dim; i++)
 							{
@@ -1505,6 +1560,57 @@ namespace pyoomph
 									}
 									}
 								}
+							}
+						}
+						if (__paranoid_ale_identity)
+						{
+							// Differentiating the first-order identity a second time gives, for a bulk
+							// element (where the normal-space projector N vanishes),
+							//
+							//   d2(D_i psi_l)/dX^q_j dX^r_k
+							//        = (D_k psi_l)(D_j Psi_r)(D_i Psi_q) + (D_j psi_l)(D_k Psi_q)(D_i Psi_r)
+							//
+							// - two triple products of FIRST derivatives, symmetric under (q,j)<->(r,k) as
+							// it must be. If that holds, the whole rank-6 array is redundant, and it is
+							// 24.4% of Hessian assembly to fill (dev_docs/code_generation.md 9.4.11).
+							// Checked on bulk elements only: on an interface the second derivative picks
+							// up N-terms this closed form does not carry.
+							if (el_dim == n_dim)
+							{
+								double Dpsi_l[3];
+								for (unsigned int i = 0; i < n_dim; i++)
+								{
+									Dpsi_l[i] = 0.0;
+									for (unsigned b = 0; b < el_dim; b++)
+										Dpsi_l[i] += gab_gai[b][i] * dpsids(l, b);
+								}
+								for (unsigned lel = 0; lel < eleminfo.nnode; lel++)
+									for (unsigned lel2 = 0; lel2 < eleminfo.nnode; lel2++)
+									{
+										double Dq[3], Dr[3];
+										for (unsigned int i = 0; i < n_dim; i++)
+										{
+											Dq[i] = Dr[i] = 0.0;
+											for (unsigned b = 0; b < el_dim; b++)
+											{
+												Dq[i] += gab_gai[b][i] * dpsids_Element(lel, b);
+												Dr[i] += gab_gai[b][i] * dpsids_Element(lel2, b);
+											}
+										}
+										for (unsigned int i = 0; i < n_dim; i++)
+											for (unsigned int j = 0; j < n_dim; j++)
+												for (unsigned int j2 = 0; j2 < n_dim; j2++)
+												{
+													std::ostringstream where;
+													where << "(space " << ispace << ", node " << l << ", dir " << i
+														  << ", coord " << lel << "/" << j << " and " << lel2 << "/" << j2
+														  << ", el_dim " << el_dim << ", nodal_dim " << n_dim << ")";
+													ale_identity_check("d2_dx2_shape_dcoord", el_dim, n_dim,
+																	   shape_info->d2_dx2_shape_dcoord[ispace][l][i][lel][j][lel2][j2],
+																	   Dpsi_l[j2] * Dr[j] * Dq[i] + Dpsi_l[j] * Dq[j2] * Dr[i],
+																	   where.str());
+												}
+									}
 							}
 						}
 						}

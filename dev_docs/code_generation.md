@@ -939,6 +939,10 @@ property that changes anything *not* visible in the text would not be, and neith
 written into the debug info file next to `coordinates_as_dofs=` (`src/codegen.cpp:6435`), so that a
 `.so` can be traced back to the settings that produced it.
 
+**8. Can the COORDDIFF terms go away entirely? - MEASURED, and split in two: the pre-passes are worth
+4.0% and are not worth doing, the rank-6 arrays are worth 24.4% and are. See §9.4.11.** The original
+item text follows.
+
 **8. Can the COORDDIFF terms go away entirely?** §9.4.4 concluded, on runtime grounds, that the identity
 substitution was not worth building: the `COORDDIFF` pre-pass measured 2.2% on `ale2d` and that was the
 whole direct saving. **That conclusion was reached before hoisting existed and should be revisited,
@@ -1155,6 +1159,104 @@ entries.
 Worth keeping in proportion: this is the largest single win in the Hessian path and it is not code
 generation. Ranked against each other on the same case, the sparse-tensor storage is worth -35%, the
 one-line double-lookup fix inside it -11.8%, and the entire symbolic hoisting machinery of §9.4.8 -7.9%.
+
+### 9.4.11 Decomposing the element half: it is the rank-6 shape fills
+
+§9.4.9 put 43% of Hessian assembly in "the generated element code". That was measured by skipping
+`elem_pt->assemble_hessian_tensor()`, which skips the generated function *and* the
+`fill_shape_buffer_for_point` callback it makes - so the 43% was never purely generated code. Splitting
+it further, by deleting one fill loop at a time from the emitted C and leaving its consumers running
+(so the arrays still exist and are still read, they just hold zeros - no dead-code cascade):
+
+| removed | cost | share of Hessian assembly |
+|---|---|---|
+| the rank-6 Hessian shape fills (C++) | 0.0898 s | **24.4%** |
+| the `2ndCOORDDIFF` pre-pass (generated C) | 0.0134 s | 3.6% |
+| the first-order `COORDDIFF` pre-pass | 0.0014 s | 0.4% |
+
+Against a 0.3676 s baseline (post-§9.4.10, so the inserts no longer dominate).
+
+**Two arms of that experiment were confounded and are not in the table.** Zeroing the shape buffer
+(`noshape`) or the entries (`zero`) makes every Hessian entry evaluate to zero, so
+`fabs(hval) > Numerical_zero_for_sparse_assembly` fails and `accumulate()` is never called: those arms
+silently drop the insert cost as well, which is why both landed at ~0.155 s and looked like -57%. The
+rank-6 row above avoids this by zeroing *only* the rank-6 arrays, leaving the entries non-zero and the
+inserts intact in both arms. A third arm, deleting the interpolation accumulation, could not be measured
+at all: the harness solves before timing and a zeroed interpolation makes that Newton solve diverge.
+
+#### What this says about §9.4.7 item 8
+
+It splits the item in two, and reverses which half is worth doing.
+
+The **`COORDDIFF` pre-passes are not worth eliminating**: 4.0% between them, which is §8.3-reverted
+territory and nowhere near paying for rewriting five `derivative()` sites plus the interface
+normal-projector term.
+
+The **rank-6 arrays are**: 24.4%, the largest single item left in Hessian assembly now that the sparse
+tensor has been dealt with. And the fix is not the one item 8 proposed. These are filled in C++
+(`fill_shape_info_at_s`, the `require_hessian` blocks), so what is wanted is to stop computing and
+storing `d2_dx2_shape_dcoord`/`d2_d2x2_shape_dcoord`/`d_d2x_shape_dcoord` at all - which the identities
+of §9.4.1 permit, since a second nodal-coordinate derivative of a shape gradient is a sum of products of
+first derivatives. That is a runtime change with a code-generation prerequisite, not a code-generation
+change.
+
+### 9.4.12 The rank-6 arrays, in closed form
+
+Differentiating §9.4.1's identity a second time gives, on a bulk element,
+
+```
+d2( D_i psi_l ) / dX^q_j dX^r_k  =  (D_k psi_l)(D_j Psi_r)(D_i Psi_q) + (D_j psi_l)(D_k Psi_q)(D_i Psi_r)
+```
+
+two triple products of FIRST derivatives, symmetric under `(q,j) <-> (r,k)` as it has to be. Verified the
+same way as the first-order identities: **5 668 704 comparisons, 0 violations, worst relative deviation
+7.3e-12** on a real moving-mesh Hessian problem. (Looser than the ~1e-13 of the first-order checks, as
+expected: it is a triple product of quantities that each already carry that error, compared against a
+value built through the E-tensor chain.)
+
+`fill_shape_info_at_s` now writes `d2_dx2_shape_dcoord` straight from that expression on bulk elements,
+which makes the E-tensor chain **and its per-integration-point `RankSixTensor` heap allocation**
+unnecessary - `D2X2_dshape` is only allocated when something still needs it. Interfaces keep the old
+path: there the second derivative picks up normal-projector terms this closed form does not carry, and
+that derivation has not been done. Under `PYOOMPH_PARANOID_ALE_IDENTITY` both paths are computed, so the
+check keeps comparing two independent derivations instead of the closed form against itself.
+
+| | Hessian assembly |
+|---|---|
+| E-tensor path | 0.3676 s |
+| **closed form** | **0.2947 s (-19.8%)** |
+| rank-6 fills skipped entirely | 0.2778 s |
+
+The last row is the ceiling, because the array still has to be *written* even by the closed form, and the
+closed form reaches 81% of it. What remains is ~0.017 s (4.6% of assembly) of pure write traffic;
+removing that means the generated code must stop reading `d2_dx2_shape_dcoord` at all and evaluate the
+products inline - a code-generation change for a fifth of the prize this runtime change took. Worth
+knowing before anyone starts it.
+
+#### The bug this shipped with first, and why the check did not catch it
+
+The first version gated the whole `if (require_hessian)` block in
+`fill_shape_info_at_s_dNodalPos_helper` on `D2X2_dshape` being allocated. That block spans **two
+unrelated computations**: the E tensor, and `D_dshape_Dcoords`, from which `int_pt_weights_d2_coords` -
+the second derivative of the integration MEASURE - is built. Skipping the second silently stopped
+computing a quantity the Hessian needs whether or not the E tensor exists, and every moving-mesh Hessian
+came out wrong by 0.3% to 34% against finite differences, with no crash and no diagnostic.
+
+**The 5.7-million-comparison identity check passed throughout.** It had to: under
+`PYOOMPH_PARANOID_ALE_IDENTITY` the E-tensor path is deliberately kept alive so the check compares two
+independent derivations - which means the flag validates the formula while exercising the code path
+production no longer takes. The one configuration that mattered was the one it never ran. The
+first-order checks of §9.4.1 do not have this hazard because they only ever *read* arrays that are
+filled either way; this change altered what gets filled.
+
+What did catch it, in two minutes, was `tests/test_second_derivatives.py` - a finite-difference
+comparison of the assembled Hessian. Validating an intermediate at machine precision is not a substitute
+for validating the result.
+
+An artefact worth recording too: the broken build measured -16.1% and the fixed one measures -19.8%,
+i.e. doing strictly more work came out faster. The likeliest explanation is that the skipped fill left
+`int_pt_weights_d2_coords` holding uninitialised values and the entries then did denormal arithmetic.
+A "speedup" that arrives together with wrong numbers deserves the suspicion it got.
 
 ## 10. Things deliberately left alone
 
