@@ -248,7 +248,6 @@ typedef struct JITShapeInfo
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord[NUM_CONTINUOUS_SPACES]; // second derivative of dx_shape_C2 w/r to nodal coords (node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d_d2x_shape_dcoord))))[NUM_CONTINUOUS_SPACES]; // derivative of d2x_shape w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index)
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_d2x2_shape_dcoord[NUM_CONTINUOUS_SPACES]; // second derivative of d2x_shape w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index, deriv. coord node index2, deriv coord dir index2)
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shapes))[NUM_CONTINUOUS_SPACES]; // shapes (node index, node index). In principle just delta_{i,j}
 
   double ARRAY_DECL_NNODE(shape_DL);                // DL shapes (node index)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(dx_shape_DL))[3];         // DL shapes (history, node index, coord index)
@@ -260,7 +259,6 @@ typedef struct JITShapeInfo
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_dx2_shape_dcoord_DL; // second derivative of dx_shape_DL w/r to nodal coords (intpt,node index, coord index, deriv. coord node index, deriv coord dir index,deriv. coord node index2, deriv coord dir index2)
   double ARRAY_DECL_NDIM(ARRAY_DECL_NNODE(ARRAY_DECL_N2DERIV(ARRAY_DECL_NNODE(d_d2x_shape_dcoord_DL)))); // derivative of d2x_shape_DL w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index)
   double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT d2_d2x2_shape_dcoord_DL; // second derivative of d2x_shape_DL w/r to nodal coords (node index, slot, deriv. coord node index, deriv coord dir index, deriv. coord node index2, deriv coord dir index2)
-  double ARRAY_DECL_NNODE(ARRAY_DECL_NNODE(nodal_shape_DL)); // DL shapes (node index, node index). In principle just delta_{i,j}
 
   #ifdef FIXED_SIZE_SHAPE_BUFFER
   double *shape_Pos; // Pos space shapes. These will be mapped to the dominant element space
@@ -329,7 +327,6 @@ typedef struct JITShapeInfo
   struct JITShapeInfo * PYOOMPH_RESTRICT bulk_shapeinfo;
   // struct JITShapeInfo * otherbulk_shapeinfo; //Bulk element on the other side
   struct JITShapeInfo * PYOOMPH_RESTRICT opposite_shapeinfo; // Shape info on the other side
-  int ARRAY_DECL_NNODE(opposite_node_index);                // Reindex the nodes on the opposite side (can be different due to orientation)
 } JITShapeInfo_t;
 
 typedef void (*JITFuncSpec_ResidualAndJacobian_FiniteElement)(const JITElementInfo_t *, const JITShapeInfo_t *, double * PYOOMPH_RESTRICT, double * PYOOMPH_RESTRICT, double * PYOOMPH_RESTRICT, unsigned);
@@ -719,6 +716,54 @@ static double signum(double x)
   assert(local_eqn < eleminfo->ndof); \
   residuals[local_eqn] += _res_contrib;
 #define END_RESIDUAL() }
+
+// The Residual/Jacobian/Mass function is emitted ONCE, as an implementation taking a compile-time
+// constant flag, behind a three-line entry point that calls it with 0, 1 and 2. Forcing the inline is
+// the whole point: the compiler then folds `if (flag)` and `if (flag == 2)` away, so a residual-only
+// assembly runs a body that contains no Jacobian code at all - it does not merely skip it. That matters
+// because the register allocator works on the whole function, and a large Jacobian block was measured
+// to slow the residual-only path it never enters (dev_docs/code_generation.md 9.4.6).
+//
+// A compiler without the attribute simply gets one body with a runtime flag, exactly as before:
+// correct, just not specialised.
+//
+// Per compiler, from the vendor documentation rather than from testing (we build with GCC here):
+//
+//  * MSVC has no __attribute__ syntax; the equivalent is the __forceinline KEYWORD, which "overrides
+//    the cost-benefit analysis". It is honoured under the /O2 that ccompiler.py passes. It cannot
+//    inline under /Ob0 (the debug default) and issues no diagnostic in that case, so a debug build
+//    degrades silently to the runtime-flag form - which is exactly the intended fallback.
+//    clang-cl defines _MSC_VER and accepts __forceinline, so it takes this branch too; that is why
+//    _MSC_VER is tested FIRST, since clang-cl may define both.
+//  * Clang accepts the GNU spelling and defines __GNUC__, so it takes the GCC branch. Its
+//    always_inline "disables inlining heuristics and inlining is always attempted regardless of
+//    optimization level", but like every compiler here it "does not guarantee that inline
+//    substitution actually occurs".
+//  * GCC diagnoses a FAILURE to inline an always_inline function as a hard ERROR, not a warning. On a
+//    JIT path that turns a missed optimisation into a failed compile, so it is worth knowing that the
+//    documented causes - target-option mismatch across translation units, definition not available,
+//    varargs, recursion - none of them apply here: one translation unit, one -march, and the
+//    implementation is defined immediately above its only three callers.
+//
+// The __OPTIMIZE__ term is about the debug build: with PYOOMPH_DEBUG=1 ccompiler.py compiles at -O0,
+// where specialising buys nothing (nobody measures a debug build) and a single out-of-line body is far
+// easier to step through than three inlined copies of it. Measured on the 3D solid element:
+//
+//   -O0, guarded (this branch off): dispatcher 121 B + one _impl of 210 775 B, .so 403 672 B, 0.51 s
+//   -O0, always_inline forced     : one symbol of 221 877 B,                    .so 420 008 B, 0.59 s
+//   -O3, always_inline            : one symbol of  71 523 B,                    .so  94 128 B
+//
+// Note what those numbers do NOT say: forcing it at -O0 does not triple the code. GCC folds the
+// constant `flag` branches while inlining, even with no optimiser running, so the three copies collapse
+// to +5%. The guard is worth having for debuggability and the 16% of compile time, not because the
+// alternative is catastrophic - an earlier version of this comment claimed it was.
+#if defined(_MSC_VER)
+#define PYOOMPH_RJM_IMPL static __forceinline void
+#elif defined(__GNUC__) && !defined(__TINYC__) && defined(__OPTIMIZE__)
+#define PYOOMPH_RJM_IMPL static inline __attribute__((always_inline)) void
+#else
+#define PYOOMPH_RJM_IMPL static void
+#endif
 
 #define BEGIN_JACOBIAN() \
   if (flag)              \

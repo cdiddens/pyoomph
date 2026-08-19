@@ -1294,13 +1294,6 @@ namespace pyoomph
     // implemented per concrete Interface*Element* subclass, since the mapping depends on the face
     // geometry (line/triangle/quad) and node ordering conventions.
     virtual oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &) const { throw_runtime_error("Implement"); }
-    virtual void fill_opposite_node_indices(JITShapeInfo_t *shape_info)
-    {
-      for (unsigned int i = 0; i < opposite_node_index.size(); i++)
-      {
-        shape_info->opposite_node_index[i] = opposite_node_index[i];
-      }
-    }
     // Determines opposite_orientation and opposite_node_index by matching this element's vertex
     // nodes to those of opposite_side (within a small tolerance, allowing for the "offset" vector
     // e.g. on periodic domains), so that fields on the two sides can be looked up consistently.

@@ -2340,6 +2340,367 @@ namespace pyoomph
 		}
 	}
 
+	// ---------------------------------------------------------------------------------------------
+	// Exact hoisting of a Jacobian entry out of the l_shape loop. See dev_docs/code_generation.md 9.4.
+	//
+	// A Jacobian entry is a Frechet derivative, hence EXACTLY linear in the quantities carrying the
+	// trial index l_shape: the trial shape functions, and on a moving mesh every geometric sensitivity,
+	// which are indexed by l_shape too. Its coefficients therefore do not depend on l_shape - yet the
+	// emitted C recomputes the whole entry nnode times per (integration point, l_test). Naming each
+	// coefficient once above the loop is not a heuristic CSE (contrast 8.3, which was reverted): it is
+	// that linearity, used. nnode*|entry| becomes |entry| + nnode*K for K atoms, and K is 3-4 where
+	// nnode is 27 on the 3D solid element that motivated this.
+	//
+	// If the split fails for any reason the entry is emitted unchanged, so a case the mathematics did
+	// not anticipate costs performance, never correctness.
+	static unsigned __hoist_coeff_counter = 0;
+	static const bool __hoist_disabled = getenv("PYOOMPH_DISABLE_JACOBIAN_HOIST") != NULL;
+
+	// Coefficients below this many expression nodes are left inline rather than named. The default is 1,
+	// i.e. hoist everything: naming a coefficient costs one value live across the trial loop, and once
+	// the assembly function is split by its flag (9.4.6) that value lives in a body the residual-only
+	// call never enters, so it costs nothing there. Measured on the split build, 3D solid element:
+	// 1 -> -63.7%, 8 -> -63.2%, 32 -> -62.6%, 64 -> -48.5%, with residual-only flat at -8..-10%
+	// throughout and 9 kB of extra C between the extremes.
+	//
+	// The knob is kept because the answer inverts without the split: with PYOOMPH_DISABLE_RJM_SPLIT the
+	// coefficients DO sit in the residual-only path, hoisting cheap ones slowed it 3.6x, and 32 was the
+	// right cut (9.4.5).
+	static const unsigned __hoist_min_cost = getenv("PYOOMPH_JACOBIAN_HOIST_MIN")
+												? (unsigned)atoi(getenv("PYOOMPH_JACOBIAN_HOIST_MIN"))
+												: 1;
+
+	// Leaves count 1 as well: a leaf here is a shape-function or interpolated-value array read, and on
+	// this weak form the loads are what dominate (the same correction 8.3 had to make).
+	static unsigned hoist_expr_cost(const GiNaC::ex &e)
+	{
+		unsigned c = 1;
+		for (size_t i = 0; i < e.nops(); i++)
+			c += hoist_expr_cost(e.op(i));
+		return c;
+	}
+
+	// The quantities indexed by the trial index. A plain TestFunction is indexed by l_test and a plain
+	// (non-derived) ShapeExpansion is an interpolated value, so neither qualifies; but a test function
+	// or an interpolated value differentiated by a nodal COORDINATE does, because its C array carries
+	// the coordinate node as an index (see dcoord_shape_array and the _COORDDIFF_ arrays).
+	static bool is_l_shape_atom(const GiNaC::ex &e)
+	{
+		if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(e))
+		{
+			const pyoomph::ShapeExpansion &sp = GiNaC::ex_to<GiNaC::GiNaCShapeExpansion>(e).get_struct();
+			return sp.is_derived || sp.nodal_coord_dir >= 0 || sp.nodal_coord_dir2 >= 0;
+		}
+		if (GiNaC::is_a<GiNaC::GiNaCTestFunction>(e))
+		{
+			const pyoomph::TestFunction &tf = GiNaC::ex_to<GiNaC::GiNaCTestFunction>(e).get_struct();
+			return tf.nodal_coord_dir >= 0 || tf.nodal_coord_dir2 >= 0;
+		}
+		if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(e))
+			return GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(e).get_struct().is_derived();
+		if (GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(e))
+			return GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(e).get_struct().is_derived();
+		if (GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(e))
+			return GiNaC::ex_to<GiNaC::GiNaCNormalSymbol>(e).get_struct().get_derived_direction() >= 0;
+		return false;
+	}
+
+	// Which trial index an atom carries, as BITS: 1 = l_shape, 2 = l_shape2, 3 = both, 0 = not an atom.
+	// Test with `cls & 2` for "carries l_shape2" - `2 | 3` is just 3 and matches everything, which is a
+	// mistake worth making only once. Only the
+	// Hessian has two indices; there, an atom carries BOTH exactly when it is a second derivative, and
+	// otherwise carries l_shape2 iff its "other index" flag is set. Kept in step with the print sites -
+	// GiNaCShapeExpansion::print, GiNaCTestFunction::print, and the SpatialIntegral/ElementSize/Normal
+	// printers - which is where the actual [l_shape]/[l_shape2] subscripts are chosen.
+	static unsigned l_shape_atom_class(const GiNaC::ex &e)
+	{
+		if (!is_l_shape_atom(e))
+			return 0;
+		bool second = false, by_lshape2 = false;
+		if (GiNaC::is_a<GiNaC::GiNaCShapeExpansion>(e))
+		{
+			const pyoomph::ShapeExpansion &sp = GiNaC::ex_to<GiNaC::GiNaCShapeExpansion>(e).get_struct();
+			// A DERIVED shape expansion carrying a nodal-coordinate direction prints as
+			// d_dx_shape_dcoord[l_shape2][dir][l_shape][cdir] - the trial function of one index
+			// differentiated by the nodal coordinate of the other - so it carries BOTH. The
+			// second-coordinate-derivative forms (2ndCOORDDIFF, d2_dx2_shape_dcoord) do too.
+			second = (sp.nodal_coord_dir2 >= 0) || (sp.is_derived && sp.nodal_coord_dir >= 0);
+			by_lshape2 = sp.is_derived_other_index;
+		}
+		else if (GiNaC::is_a<GiNaC::GiNaCTestFunction>(e))
+		{
+			const pyoomph::TestFunction &tf = GiNaC::ex_to<GiNaC::GiNaCTestFunction>(e).get_struct();
+			second = (tf.nodal_coord_dir2 >= 0);
+			by_lshape2 = tf.is_derived_other_index;
+		}
+		else if (GiNaC::is_a<GiNaC::GiNaCSpatialIntegralSymbol>(e))
+		{
+			const auto &si = GiNaC::ex_to<GiNaC::GiNaCSpatialIntegralSymbol>(e).get_struct();
+			second = si.is_derived2();
+			by_lshape2 = si.is_derived_by_lshape2();
+		}
+		else if (GiNaC::is_a<GiNaC::GiNaCElementSizeSymbol>(e))
+		{
+			const auto &es = GiNaC::ex_to<GiNaC::GiNaCElementSizeSymbol>(e).get_struct();
+			second = es.is_derived2();
+			by_lshape2 = es.is_derived_by_lshape2();
+		}
+		else if (GiNaC::is_a<GiNaC::GiNaCNormalSymbol>(e))
+		{
+			const auto &ns = GiNaC::ex_to<GiNaC::GiNaCNormalSymbol>(e).get_struct();
+			second = (ns.get_derived_direction2() >= 0);
+			by_lshape2 = ns.is_derived_by_lshape2();
+		}
+		if (second)
+			return 3;
+		return by_lshape2 ? 2 : 1;
+	}
+
+	// Atoms whose class shares any bit with `mask`, in first-appearance order.
+	static void collect_atoms_of_class(const GiNaC::ex &e, unsigned mask, std::vector<GiNaC::ex> &out)
+	{
+		const unsigned cls = l_shape_atom_class(e);
+		if (cls)
+		{
+			if (cls & mask)
+			{
+				for (const auto &a : out)
+					if (a.is_equal(e))
+						return;
+				out.push_back(e);
+			}
+			return;
+		}
+		for (size_t i = 0; i < e.nops(); i++)
+			collect_atoms_of_class(e.op(i), mask, out);
+	}
+
+	static void collect_l_shape_atoms(const GiNaC::ex &e, std::vector<GiNaC::ex> &out)
+	{
+		if (is_l_shape_atom(e))
+		{
+			for (const auto &a : out)
+				if (a.is_equal(e))
+					return;
+			out.push_back(e);
+			return;
+		}
+		for (size_t i = 0; i < e.nops(); i++)
+			collect_l_shape_atoms(e.op(i), out);
+	}
+
+	// Accumulate `factor * (linear form of t)` into acc[]. Structural rather than via expand(): the
+	// entries reach hundreds of kilobytes and expanding them is exactly the cost we are removing.
+	static const char *__hoist_fail_reason = "";
+	static GiNaC::ex __hoist_fail_at;
+
+	static bool accumulate_linear_in(const GiNaC::ex &t, const GiNaC::ex &factor,
+									 const std::vector<GiNaC::symbol> &syms, std::vector<GiNaC::ex> &acc)
+	{
+		auto has_any = [&syms](const GiNaC::ex &x)
+		{
+			for (const auto &sy : syms)
+				if (x.has(sy))
+					return true;
+			return false;
+		};
+		if (GiNaC::is_a<GiNaC::add>(t))
+		{
+			for (size_t i = 0; i < t.nops(); i++)
+			{
+				// An additive term free of every atom would be a Jacobian contribution that survives a
+				// vanishing trial function. That cannot happen, so treat it as a failure rather than
+				// silently dropping it.
+				if (!has_any(t.op(i)))
+				{
+					__hoist_fail_reason = "additive term with no atom";
+					__hoist_fail_at = t.op(i);
+					return false;
+				}
+				if (!accumulate_linear_in(t.op(i), factor, syms, acc))
+					return false;
+			}
+			return true;
+		}
+		if (GiNaC::is_a<GiNaC::mul>(t))
+		{
+			GiNaC::ex rest = 1, core;
+			unsigned ncore = 0;
+			for (size_t i = 0; i < t.nops(); i++)
+			{
+				if (has_any(t.op(i)))
+				{
+					core = t.op(i);
+					ncore++;
+				}
+				else
+					rest *= t.op(i);
+			}
+			if (ncore != 1)
+			{
+				__hoist_fail_reason = (ncore == 0 ? "product with no atom" : "product of two or more atoms");
+				__hoist_fail_at = t;
+				return false; // quadratic in the atoms, so not a first derivative
+			}
+			return accumulate_linear_in(core, factor * rest, syms, acc);
+		}
+		for (size_t k = 0; k < syms.size(); k++)
+			if (t.is_equal(syms[k]))
+			{
+				acc[k] += factor;
+				return true;
+			}
+		__hoist_fail_reason = "atom inside a power or a function";
+		__hoist_fail_at = t;
+		return false; // a power of an atom, or an atom inside a function: not linear
+	}
+
+	// entry == sum_k coeffs[k] * atoms[k], or false and nothing usable.
+	static bool split_entry_by_l_shape(const GiNaC::ex &entry, const std::vector<GiNaC::ex> &atoms,
+									   std::vector<GiNaC::ex> &coeffs)
+	{
+		std::vector<GiNaC::symbol> syms;
+		GiNaC::exmap m;
+		for (size_t k = 0; k < atoms.size(); k++)
+		{
+			syms.push_back(GiNaC::symbol("__hoist_atom_" + std::to_string(k)));
+			m[atoms[k]] = syms.back();
+		}
+		const GiNaC::ex sub = entry.subs(m, GiNaC::subs_options::no_pattern);
+		std::vector<GiNaC::ex> acc(atoms.size(), GiNaC::ex(0));
+		if (!accumulate_linear_in(sub, GiNaC::ex(1), syms, acc))
+			return false;
+		// The coefficients must be free of the atoms, or the loop body would be wrong.
+		for (const auto &c : acc)
+			for (const auto &sy : syms)
+				if (c.has(sy))
+					return false;
+		coeffs = acc;
+		return true;
+	}
+
+	// The Hessian counterpart. A Hessian entry is a SECOND derivative, hence bilinear in the two trial
+	// indices: linear in the l_shape2-carrying atoms with coefficients that still depend on l_shape.
+	// Naming those coefficients just above the inner loop turns nnode*nnode2 evaluations of the whole
+	// entry into nnode evaluations plus nnode*nnode2 multiply-adds. Atoms carrying BOTH indices (the
+	// second-derivative family: int_pt_weights_d2_coords, d2_normal_d2coord, the 2ndCOORDDIFF arrays,
+	// d2_dx2_shape_dcoord) belong to the inner set too - the entry is linear in them as well, and their
+	// coefficients carry no index at all.
+	//
+	// A second split of those coefficients by the l_shape-carrying atoms would let the constants move
+	// above the OUTER loop as well; that is left for later, because the outer loop is opened lazily and
+	// shared between field pairs, and this level already removes the nnode2 factor.
+	static std::string hoist_hessian_entry(const GiNaC::ex &entry, std::ostream &pre,
+										   const std::string &indent, GiNaC::print_FEM_options &csrc_opts)
+	{
+		static const bool dbg = getenv("PYOOMPH_DEBUG_HOIST") != NULL;
+		if (__hoist_disabled || entry.is_zero())
+			return "";
+		std::vector<GiNaC::ex> atoms;
+		collect_atoms_of_class(entry, 2, atoms); // bit 1: everything carrying l_shape2, i.e. classes 2 and 3
+		if (atoms.empty())
+		{
+			if (dbg)
+			{
+				std::vector<GiNaC::ex> all;
+				collect_atoms_of_class(entry, 3, all);
+				std::cerr << "HOIST-HESS: no l_shape2 atom (" << all.size() << " atoms of any class)" << std::endl;
+				for (auto &a : all)
+					std::cerr << "    class " << l_shape_atom_class(a) << " : " << a << std::endl;
+			}
+			return "";
+		}
+		std::vector<GiNaC::ex> coeffs;
+		if (!split_entry_by_l_shape(entry, atoms, coeffs))
+		{
+			if (dbg)
+			{
+				std::cerr << "HOIST-HESS: split failed (" << __hoist_fail_reason << ") at: " << __hoist_fail_at << std::endl;
+				for (size_t k = 0; k < atoms.size(); k++)
+					std::cerr << "    atom " << k << " class " << l_shape_atom_class(atoms[k]) << " : " << atoms[k] << std::endl;
+			}
+			return "";
+		}
+		std::ostringstream body;
+		bool any = false;
+		for (size_t k = 0; k < atoms.size(); k++)
+		{
+			if (coeffs[k].is_zero())
+				continue;
+			if (!body.str().empty())
+				body << "+";
+			if (hoist_expr_cost(coeffs[k]) >= __hoist_min_cost)
+			{
+				const std::string nm = "_hc" + std::to_string(__hoist_coeff_counter++);
+				pre << indent << "const double " << nm << " = ";
+				print_simplest_form(coeffs[k], pre, csrc_opts);
+				pre << ";" << std::endl;
+				body << nm;
+				any = true;
+			}
+			else
+			{
+				body << "(";
+				print_simplest_form(coeffs[k], body, csrc_opts);
+				body << ")";
+			}
+			body << "*(";
+			print_simplest_form(atoms[k], body, csrc_opts);
+			body << ")";
+		}
+		if (!any)
+			return "";
+		return body.str().empty() ? std::string("0.0") : body.str();
+	}
+
+	// Emits `double _jcN = <coeff>;` lines into `pre` and returns the loop-body expression, or "" when
+	// the entry could not be split and must be printed as it always was.
+	static std::string hoist_jacobian_entry(const GiNaC::ex &entry, std::ostream &pre,
+											const std::string &indent, GiNaC::print_FEM_options &csrc_opts)
+	{
+		if (__hoist_disabled || entry.is_zero())
+			return "";
+		std::vector<GiNaC::ex> atoms;
+		collect_l_shape_atoms(entry, atoms);
+		if (atoms.empty())
+			return "";
+		std::vector<GiNaC::ex> coeffs;
+		if (!split_entry_by_l_shape(entry, atoms, coeffs))
+			return "";
+		std::ostringstream body;
+		bool any_hoisted = false;
+		for (size_t k = 0; k < atoms.size(); k++)
+		{
+			if (coeffs[k].is_zero())
+				continue;
+			if (!body.str().empty())
+				body << "+";
+			if (hoist_expr_cost(coeffs[k]) >= __hoist_min_cost)
+			{
+				const std::string nm = "_jc" + std::to_string(__hoist_coeff_counter++);
+				pre << indent << "const double " << nm << " = ";
+				print_simplest_form(coeffs[k], pre, csrc_opts);
+				pre << ";" << std::endl;
+				body << nm;
+				any_hoisted = true;
+			}
+			else
+			{
+				body << "(";
+				print_simplest_form(coeffs[k], body, csrc_opts);
+				body << ")";
+			}
+			body << "*(";
+			print_simplest_form(atoms[k], body, csrc_opts);
+			body << ")";
+		}
+		// Nothing was worth naming: leave the entry exactly as it was rather than emit a re-associated
+		// copy of it for no gain.
+		if (!any_hoisted)
+			return "";
+		return body.str().empty() ? std::string("0.0") : body.str();
+	}
+
 	// The nodal position space only carries real degrees of freedom (and thus needs
 	// Jacobian/Hessian rows/columns of its own) when the mesh coordinates are themselves unknowns
 	// being solved for (moving-mesh/ALE problems with coordinates_as_dofs); otherwise positions are
@@ -2694,6 +3055,20 @@ namespace pyoomph
 
 					has_contribs = true;
 
+					// The entry is built BEFORE the inner loop header is written, so that the coefficients
+					// hoisted out of it (9.4.8) can be emitted above the loop. The subexpression pass of
+					// 9.3 runs first either way; only the emission order moves.
+					//	 		                        std::cout << "DIFFPART2 " << diffpart2 << std::endl;
+					GiNaC::ex diffpart2_se = (*__SE_to_struct_hessian)(diffpart2);
+					//						 		                        std::cout << "DIFFPART2 SE" << diffpart2_se << std::endl;
+					for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
+					std::ostringstream hess_pre;
+					const std::string hess_hoisted =
+						(only_mass_part || l_shape2 != "l_shape2")
+							? std::string("")
+							: hoist_hessian_entry(diffpart2_se, hess_pre, indent + "     ", csrc_opts);
+					os << hess_pre.str();
+
 					if (numnodes_str2 != "1")
 					{
 						os << indent << "     for (unsigned int l_shape2=0;l_shape2<" << numnodes_str2 << ";l_shape2++)" << std::endl;
@@ -2703,15 +3078,13 @@ namespace pyoomph
 					//		   os << indent << "   //HESSIAN SHAPE CONTRIB: " << f2->get_nodal_index_str(for_code) << ": " << diffpart2 ;
 
 					os << std::endl;
-					//	 		                        std::cout << "DIFFPART2 " << diffpart2 << std::endl;
-					GiNaC::ex diffpart2_se = (*__SE_to_struct_hessian)(diffpart2);
-					//						 		                        std::cout << "DIFFPART2 SE" << diffpart2_se << std::endl;
-					for_code->subexpressions = __SE_to_struct_hessian->subexpressions;
 					if (hang2)
 					{
 						os << indent << "        BEGIN_HESSIAN_SHAPE_LOOP2_CONTINUOUS_SPACE(" << eqn_index2 << ",";
 						if (only_mass_part)
 							os << "0";
+						else if (!hess_hoisted.empty())
+							os << hess_hoisted;
 						else
 							print_simplest_form(diffpart2_se, os, csrc_opts);
 						os << "," << hang_info2 << "," << l_shape2 << ")" << std::endl;
@@ -2721,6 +3094,8 @@ namespace pyoomph
 						os << indent << "        BEGIN_HESSIAN_SHAPE_LOOP2(" << eqn_index2 << ", ";
 						if (only_mass_part)
 							os << "0";
+						else if (!hess_hoisted.empty())
+							os << hess_hoisted;
 						else
 							print_simplest_form(diffpart2_se, os, csrc_opts);
 						os << ")" << std::endl;
@@ -2891,12 +3266,15 @@ namespace pyoomph
 		}
 		else
 		{
-			os << indent << "for (unsigned int l_shape=0;l_shape<" << numnodes_str << ";l_shape++)" << std::endl;
-			os << indent << "{" << std::endl;
 			l_shape = "l_shape";
 		}
 
 		bool hang = this->can_have_hanging_nodes() || this->code != for_code;
+
+		// The hoisted coefficients (9.4) have to be emitted BEFORE the loop, so the loop body is
+		// buffered and the two streams are concatenated at the end. With hoisting off or unavailable
+		// `pre` stays empty and the emitted code is exactly what it always was.
+		std::ostringstream pre, body;
 
 		for (auto &f : jacobian_fields)
 		{
@@ -2935,30 +3313,32 @@ namespace pyoomph
 				for_code->record_jacobian_block_expr(residual_field, f, diffpart, mass_part);
 			if (!diffpart.is_zero())
 				residual_field->mark_jacobian_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
+			// Only worth doing where there is a loop to hoist out of: a single-DoF space indexes with
+			// the literal "0" and pays nothing per trial node.
+			const std::string hoisted = (l_shape == "l_shape")
+											? hoist_jacobian_entry(diffpart, pre, indent, csrc_opts)
+											: std::string("");
 			if (hang)
 			{
 				std::string hang_info = f->get_hanginfo_str(for_code);
-				os << indent << "  BEGIN_JACOBIAN_HANG(" << eqn_index << ", ";
-				//if (for_code->get_derive_jacobian_by_expansion_mode())
-				//{
-				//	os << indent << " /* SYMBOLIC FORM  " << std::endl << diffpart << std::endl << " */ ";
-				//}
-				print_simplest_form(diffpart, os, csrc_opts);
-				os << "," << hang_info << "," << l_shape << ")" << std::endl;
+				body << indent << "  BEGIN_JACOBIAN_HANG(" << eqn_index << ", ";
+				if (hoisted.empty())
+					print_simplest_form(diffpart, body, csrc_opts);
+				else
+					body << hoisted;
+				body << "," << hang_info << "," << l_shape << ")" << std::endl;
 			}
 			else
 			{
-				//	    os << indent << "  //TODO Jacobian of ext data must be always hanging!!! " <<std::endl;
-				os << indent << "  BEGIN_JACOBIAN_NOHANG(" << eqn_index << ", ";
-				//if (for_code->get_derive_jacobian_by_expansion_mode())
-				//{
-				//	os << indent << " /* SYMBOLIC FORM  " << std::endl << diffpart << std::endl << " */ ";
-				//}
-				print_simplest_form(diffpart, os, csrc_opts);
-				os << indent << ")" << std::endl;
+				body << indent << "  BEGIN_JACOBIAN_NOHANG(" << eqn_index << ", ";
+				if (hoisted.empty())
+					print_simplest_form(diffpart, body, csrc_opts);
+				else
+					body << hoisted;
+				body << indent << ")" << std::endl;
 			}
 			if (!diffpart.is_zero()) // A pure mass contribution still needs the block, but adds no Jacobian
-				os << indent << "    ADD_TO_JACOBIAN_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "()" << std::endl;
+				body << indent << "    ADD_TO_JACOBIAN_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "()" << std::endl;
 			// diffpart.evalf().print(GiNaC::print_csrc_FEM(os,&csrc_opts));
 			// GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(diffpart).evalf()))).print(GiNaC::print_csrc_FEM(os,&csrc_opts));
 
@@ -2974,16 +3354,27 @@ namespace pyoomph
 				// mass matrix get a tight, value-independent pattern of its own instead of either
 				// inheriting the Jacobian's (3x too dense) or being value-filtered (not reusable).
 				residual_field->mark_mass_matrix_contribution_for_code(for_code,for_code->get_current_residual_index(),f);
-				os << indent << "    ADD_TO_MASS_MATRIX_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "(";
-				//		    mass_part.evalf().print(GiNaC::print_csrc_FEM(os,&csrc_opts));
-				//          GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(mass_part).evalf()))).print(GiNaC::print_csrc_FEM(os,&csrc_opts));
-				//std::cout << mass_part << std::endl;
-				print_simplest_form(mass_part, os, csrc_opts);
-				os << ")" << std::endl;
+				for_code->emitted_mass_matrix_contribution = true;
+				const std::string hoisted_mass = (l_shape == "l_shape")
+													 ? hoist_jacobian_entry(mass_part, pre, indent, csrc_opts)
+													 : std::string("");
+				body << indent << "    ADD_TO_MASS_MATRIX_" << (hanging_eqns ? "HANG" : "NOHANG") << "_" << (hang ? "HANG" : "NOHANG") << "(";
+				if (hoisted_mass.empty())
+					print_simplest_form(mass_part, body, csrc_opts);
+				else
+					body << hoisted_mass;
+				body << ")" << std::endl;
 			}
-			os << indent << "  END_JACOBIAN_" << (hang ? "HANG" : "NOHANG") << "()" << std::endl;
+			body << indent << "  END_JACOBIAN_" << (hang ? "HANG" : "NOHANG") << "()" << std::endl;
 		}
 
+		os << pre.str();
+		if (numnodes_str != "1")
+		{
+			os << indent << "for (unsigned int l_shape=0;l_shape<" << numnodes_str << ";l_shape++)" << std::endl;
+			os << indent << "{" << std::endl;
+		}
+		os << body.str();
 		if (numnodes_str != "1")
 		{
 			os << indent << "}" << std::endl;
@@ -5527,10 +5918,17 @@ namespace pyoomph
 	// the CSE subexpression code, and finally delegates the actual residual/Jacobian/mass-matrix
 	// emission to write_generic_RJM_contribution() on every FiniteElementSpace inside the
 	// integration-point loop.
-	void FiniteElementCode::write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool)
+	void FiniteElementCode::write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool, bool may_be_asked_for_mass_matrix)
 	{
 		__in_hessian = false;
-		os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
+		emitted_mass_matrix_contribution = false;
+		// Emitted as an implementation with a CONSTANT flag plus a dispatcher below, so that the three
+		// assembly modes become three specialised bodies. See PYOOMPH_RJM_IMPL in jitbridge.h.
+		static const bool split_rjm = getenv("PYOOMPH_DISABLE_RJM_SPLIT") == NULL;
+		if (split_rjm)
+			os << "PYOOMPH_RJM_IMPL " << funcname << "_impl(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,const unsigned flag)" << std::endl;
+		else
+			os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
 		os << "{" << std::endl;
 		os << "  int local_eqn, local_unknown;" << std::endl;
 		os << "  bool _has_residual_contribution,_has_jacobian_contribution;" << std::endl;
@@ -5734,6 +6132,45 @@ namespace pyoomph
 			os << std::endl;
 		}
 
+		os << "}" << std::endl
+		   << std::endl;
+
+		// The registered entry point. Keeping the name means nothing outside this file changes: the
+		// function table, the C++ callers and the ABI are all as they were.
+		if (!split_rjm)
+			return;
+		const std::string args = "eleminfo, shapeinfo, residuals, jacobian, mass_matrix";
+		os << "static void " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo,double * PYOOMPH_RESTRICT residuals, double * PYOOMPH_RESTRICT jacobian, double * PYOOMPH_RESTRICT mass_matrix,unsigned flag)" << std::endl;
+		os << "{" << std::endl;
+		os << "  if (flag == 0) " << funcname << "_impl(" << args << ", 0);" << std::endl;
+		if (!emitted_mass_matrix_contribution)
+		{
+			// No mass-matrix entry was emitted anywhere in this routine, so `if (flag == 2)` guards
+			// nothing and the flag==1 and flag==2 bodies are the same code. Ask for one of them.
+			os << "  else " << funcname << "_impl(" << args << ", 1); /* no mass matrix in this routine */" << std::endl;
+		}
+		else if (!may_be_asked_for_mass_matrix)
+		{
+			// This routine has mass-matrix entries but is the UNSTEADY one of a residual that also got a
+			// separate steady routine, i.e. MPT/TPZ time integration. A mass matrix is requested through
+			// whichever routine tstepper->is_steady() picks (src/elements_assembly.cpp:157,378), and
+			// every consumer that asks for one either makes the timesteppers steady first
+			// (pyoomph/generic/problem.py:5374 and the make_steady/undo pairs in bifurcation_tools,
+			// assembly, periodic_driving_response, lyapunov:109) or is BDF2-only and therefore never
+			// reaches this branch at all - LyapunovExponentCalculatorBDF2, the one caller that assembles
+			// a mass matrix mid-transient, is BDF2 by construction and BDF2 needs no steady routine.
+			//
+			// So flag==2 should not arrive here, and specialising to 1 saves the third body. The assert
+			// is what keeps that an assumption we would HEAR about rather than one that silently returns
+			// a zero mass matrix: it costs one predictable branch per element per assembly.
+			os << "  else { assert(flag < 2 && \"mass matrix requested from the unsteady routine of an MPT/TPZ residual - make the timesteppers steady first\"); "
+			   << funcname << "_impl(" << args << ", 1); }" << std::endl;
+		}
+		else
+		{
+			os << "  else if (flag == 1) " << funcname << "_impl(" << args << ", 1);" << std::endl;
+			os << "  else " << funcname << "_impl(" << args << ", 2);" << std::endl;
+		}
 		os << "}" << std::endl
 		   << std::endl;
 	}
@@ -6663,15 +7100,23 @@ namespace pyoomph
 				// derived by expansion mode (azimuthal/Cartesian normal-mode stability) are skipped too -
 				// their blocks are complex and would need conjugate-transpose semantics, so their flags
 				// stay 0, which the contract reads as "nothing proven".
-				record_jacobian_blocks_for_flags = (get_derive_jacobian_by_expansion_mode() == NULL);
-				write_generic_RJM(os, "ResidualAndJacobian" + std::to_string(resind), residual[resind], true); // Hanging unsteady routine
-				record_jacobian_blocks_for_flags = false;
-				os << std::endl;
-
-				// Check if we need a dedicated steady routine. This happens, if you use e.g. MPT or TPZ time integration, which use history values
+				// Check if we need a dedicated steady routine. This happens, if you use e.g. MPT or TPZ
+				// time integration, which use history values. Decided BEFORE the unsteady routine is
+				// written, because it decides how many specialised bodies that routine needs:
+				// assemble_eigenproblem_matrices asks for a mass matrix through whichever routine
+				// tstepper->is_steady() selects (src/elements_assembly.cpp:157,378), so once a separate
+				// steady routine exists, the unsteady one is the unusual place to ask - not an
+				// impossible one, which is why write_generic_RJM keeps a runtime flag there rather than
+				// specialising the branch away. MakeResidualSteady is a pure GiNaC map, so hoisting it
+				// above the write changes nothing else.
 				MakeResidualSteady make_steady(this);
 				GiNaC::ex steady_residual = make_steady(residual[resind]);
 				extra_steady_routine[resind] = make_steady.require_extra_steady_routine();
+
+				record_jacobian_blocks_for_flags = (get_derive_jacobian_by_expansion_mode() == NULL);
+				write_generic_RJM(os, "ResidualAndJacobian" + std::to_string(resind), residual[resind], true, !extra_steady_routine[resind]); // Hanging unsteady routine
+				record_jacobian_blocks_for_flags = false;
+				os << std::endl;
 
 				if (extra_steady_routine[resind])
 				{

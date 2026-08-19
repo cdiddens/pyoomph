@@ -491,7 +491,9 @@ compiler cannot differentiate anything.
 | remove the dead `d_subexpr_*` stores | ~0 | ~0 | not attempted; symptom of §9.2 |
 | automatic `subexpression()` injection | unknown | unknown | not attempted; narrower than it looks |
 | **`subexpression()` reaching the Hessian** | **−91% code, −97% Hessian assembly** | — | **done (§9.3)** |
-| index-aware coordinate derivative cache | unmeasured | unmeasured | still open (§9.2); the largest remaining lever |
+| index-aware coordinate derivative cache | superseded | superseded | **not built** — §9.4 removes the cost instead of memoising it |
+| **hoist the Jacobian entry's coefficients out of the trial loop** | **−63.6% on a 3D moving-mesh solid**, ~0 on static meshes | — | **done (§9.4.5)** |
+| **split the assembly function by its flag** | **−7.8% residual-only**, and it is what makes the row above free of a residual regression | n/a (no `always_inline`) | **done (§9.4.6)**, at +114% `.so` and +116% compile |
 
 On automatic injection: marker injection *before* differentiation is the obvious idea and the riskier
 half — it changes what gets differentiated symbolically, it is blocked from anything containing a test
@@ -525,8 +527,11 @@ a `__LINE__` value for `__assert_fail`, plus the embedded source path; the eleme
 ## 9. The subexpression machinery beyond the Jacobian
 
 Three leads, recorded here when they were still open. §9.1 and §9.3 are now done — §9.1 turned out not
-to be the bug it looked like, §9.3 was worth −91% on the generated Hessian. §9.2 is still open and is
-the reason moving-mesh elements generate the largest code in the project.
+to be the bug it looked like, §9.3 was worth −91% on the generated Hessian. §9.2 named the moving-mesh
+coordinate derivative as the largest remaining lever and left it unmeasured; **§9.4 settles it**, and
+supersedes the fix §9.2 proposed — the cost it wanted to memoise per `l_shape` is removed instead, by
+hoisting it out of the loop entirely (§9.4.5) and by splitting the assembly function so each mode
+compiles only the code it runs (§9.4.6). §9.4.7 lists what is still open.
 
 ### 9.1 A swallowed `throw_runtime_error` — resolved, and it was not a bug
 
@@ -652,6 +657,503 @@ often dead in the Hessian, since the outer index goes through the nested copy; t
 again (once per integration point against `nnode²` entries), except that an unreferenced `exp()` is not
 free to the compiler without `-fno-math-errno`. Neither was measurable against the numbers above.
 
+## 9.4 The moving-mesh shape sensitivities are closed forms, and the entries are exactly linear
+
+§9.2 named the coordinate derivative "the largest remaining lever" and left it unmeasured. It is
+measured now, and the lever turns out to be a different one from the cache it proposed.
+
+### 9.4.1 The identities
+
+Everything pyoomph fills for a moving mesh is a product of quantities the shape buffer already holds.
+With `D` the Eulerian (on an interface: surface) gradient and `Psi` the geometry space's shapes,
+
+```
+d( D_i psi_l ) / dX^q_j  =  - (D_j psi_l)(D_i Psi_q)  +  N_ij ( D psi_l . D Psi_q )
+d( dx )       / dX^q_j  =  dx * (D_j Psi_q)
+d( n_i )      / dX^q_j  =  - n_j (D_i Psi_q)
+```
+
+`N = I - P` projects onto the normal space and is identically zero on a bulk element. In generated-code
+names the first is `d_dx_shape_dcoord[S][l][i][q][j] == -dx_shapes[0][S][l][j]*dx_shape_Pos[0][q][i]`
+plus the `N` term, so that whole rank-4 array is a rank-1 outer product; the second is already literally
+what `src/elements_shapeinfo.cpp:106` computes, which is why the moving-measure family of Jacobian terms
+is exactly the residual integrand times `dx_shape_Pos`; and the `COORDDIFF` pre-pass of
+`write_spatial_interpolation` is the first identity contracted with nodal values.
+
+Verified by `PYOOMPH_PARANOID_ALE_IDENTITY` (§11), an opt-in read-only check that rebuilds each filled
+entry from closed form: **~265 million comparisons, zero violations, worst relative deviation 8.5e-13**,
+over bulk 1D/2D/3D, codim-1 interfaces in 2D and 3D, a codim-2 line in 3D, C1/C2/C2TB/C1TB and `_DL`,
+axisymmetric, deformed and undeformed, and including 249M from the 3D contact-line tutorial
+`docs/source/tutorial/ale/spread/droplet_spread_3d.py`.
+
+Two things that check will tell you, learned the hard way. An undeformed axis-aligned mesh satisfies the
+identity trivially - the metric is diagonal and constant - so it proves nothing; deform first. And a
+**collapsed** interface element is invisible to `set_detect_inverted_elements`, which only checks the
+sign of a *square* mapping, while an interface's `J = sqrt(det g_ab)` is non-negative by construction:
+such an element yields `J = 0`, infinite `g^{ab}`, and silently NaNs every residual on that interface.
+The check reports it as `DEGENERATE MAPPING` with the offending node positions.
+
+### 9.4.2 What follows: every Jacobian entry is linear in the trial basis
+
+Each geometric primitive's sensitivity is linear in `{psi_q, D_i psi_q}`, so the chain rule forces
+
+```
+dR_l/dX^q_j = A_j(l_test) * shape_Pos[q] + sum_i B_ji(l_test) * dx_shape_Pos[0][q][i]
+```
+
+with `A`, `B` independent of `q`. The generator prints one flat expression *inside* the `l_shape` loop,
+so those coefficients are recomputed `nnode` times per (integration point, `l_test`). Unlike §8.3's
+subtree CSE, hoisting them is exact rather than heuristic - and it was confirmed on the emitted C:
+reconstructing every entry from its `K` basis evaluations reproduces the assembled Jacobian to 2.5e-12
+(`ale2d`) and 3.0e-9 (`solid3d`, where extracting coefficients by basis evaluation loses cancellation
+structure a symbolic emitter would keep).
+
+### 9.4.3 Measured, and it depends entirely on `nnode/K`
+
+Two new `tests/benchmarks/bench_assembly.py` cases, both moving-mesh, timed in-process with the arms
+interleaved at the process level. `zero` replaces every position-dof Jacobian entry with a constant
+(wrong results; it bounds what any of this could win). `hoist` rewrites each entry into the exactly
+equivalent hoisted form. `nocdiff` deletes the `COORDDIFF` accumulation.
+
+| case | ndof | elemental res | res+jac | `zero` | `hoist` | `nocdiff` |
+|---|---|---|---|---|---|---|
+| `solid3d` (3D hyperelastic, C2, nnode 27) | 24 336 | 0.083 s | 4.575 s | 0.896 s (**-80.4%**) | 1.800 s (**-60.7%**) | n/a |
+| `ale2d` (2D free-surface NS, C2, nnode 9) | 9 695 | 0.0071 s | 0.0403 s | 0.0297 s (**-26.4%**) | 0.0404 s (**+0.2%**) | 0.0395 s (-2.2%) |
+
+Atoms per entry: 3-4 for `solid3d` against `nnode` 27; up to 7 for `ale2d` against `nnode` 9. **That
+ratio is the whole result.** The win is roughly `1 - K/nnode` of the position-entry share, so a
+high-order 3D element with few atoms wins enormously and a low-order 2D element with several coupled
+fields wins nothing at all - the same shape of answer as §8.3's Navier-Stokes control, for the same
+reason.
+
+`solid3d`'s `hoist` number is pessimistic: the model hands the compiler `K` copies of each entry text
+(320 kB of C becomes 508 kB) and its residual-only arm slows from 0.083 s to 0.52 s, i.e. ~0.44 s of
+overhead that has nothing to do with the Jacobian entries. A real emitter prints each coefficient once -
+they partition the entry, so the C would *shrink* - which puts the achievable figure between -61% and
+the -80% ceiling.
+
+### 9.4.4 What this says about the staged plan
+
+* `solid3d` never touches the identities at all. Its position Jacobian is expressed in `dX_shape_Pos`,
+  the **Lagrangian** shape derivative, which does not move with the mesh; the atoms are already minimal.
+  So the coefficient hoisting is the entire win there, and the identity substitution is irrelevant.
+* `ale2d` is the opposite: it is full of `d_dx_shape_dcoord`, `COORDDIFF`, `int_pt_weights_d_coords` and
+  `d_normal_dcoord`, and the identities would collapse those to `dx_shape_Pos`. But the direct runtime
+  saving is small - the `COORDDIFF` pre-pass is worth 2.2% - so their value is in reducing `K`, and in
+  2D that only takes `K` from 7 to about 5 against `nnode` 9.
+* Therefore: **the coefficient hoisting is worth building and the identity substitution is not, on
+  runtime grounds alone.** The identities remain worth having for what they remove structurally (the
+  rank-4 and rank-6 sensitivity arrays and the `COORDDIFF` pre-pass, i.e. memory and fill work that
+  grows as `nnode^2` and `nnode^3`), and that case should be made on memory, not on these numbers.
+* This supersedes §9.2's proposal. An index-aware `d_subexpr_N_d_coordinate_x[l_shape]` cache addresses
+  the same cost by memoising per `l_shape`; hoisting removes the per-`l_shape` work entirely and needs
+  no new cache.
+
+### 9.4.5 Implemented: the coefficients are hoisted out of the trial loop
+
+`FiniteElementSpace::write_generic_RJM_jacobian_contribution` now buffers the loop body, splits each
+Jacobian (and mass-matrix) entry into `sum_k coeff_k * atom_k` over the `l_shape`-indexed atoms, and
+emits `const double _jcN = <coeff_k>;` **before** the `for (l_shape...)` header. The split is
+structural, not `expand()`-based - an add distributes, a mul must have exactly one factor containing
+atoms, and anything else fails - because expanding a 350 kB entry is precisely the cost being removed.
+Any failure returns the empty string and the entry is printed exactly as before, so a case the
+mathematics did not anticipate costs performance, never correctness.
+
+**Coefficients below `PYOOMPH_JACOBIAN_HOIST_MIN` (default 32) expression nodes are left inline.** This
+is not a micro-optimisation, it is the difference between two regimes. Naming a coefficient makes it one
+more value live across the whole trial loop, and the register allocator works on the whole generated
+function - including the residual-only path, which never enters the `if (flag)` block the coefficients
+live in and yet gets measurably slower. On the 3D solid element:
+
+| `PYOOMPH_JACOBIAN_HOIST_MIN` | elemental residual | residual+jacobian |
+|---|---|---|
+| hoisting off | 0.0832 s | 4.5792 s |
+| 1 | 0.4348 s | 1.6820 s (-63.2%) |
+| 8 | 0.2981 s | 1.6828 s (-63.2%) |
+| **32 (default)** | **0.2985 s** | **1.6652 s (-63.6%)** |
+| 48 | 0.2997 s | 1.6862 s (-63.2%) |
+| 64 | 0.0867 s | 2.4161 s (-47.2%) |
+| 96 | 0.0872 s | 2.4227 s (-47.1%) |
+
+The transition between 48 and 64 is a single coefficient: hoisting it is worth 16 points of Jacobian
+time and costs 0.21 s of residual-only time. Per Newton step (one residual evaluation plus one
+residual+Jacobian) 32 still wins clearly, 4.66 s -> 1.96 s, i.e. **-58%**; a workload doing many more
+residual evaluations than Jacobians would prefer 64, which is what the switch is for.
+
+Measured, all arms interleaved in one binary via `PYOOMPH_DISABLE_JACOBIAN_HOIST`:
+
+| case | elemental res+jac, off | on | generated C | `.so` |
+|---|---|---|---|---|
+| `solid3d` | 4.5792 s | 1.6652 s (**-63.6%**) | 320 534 -> 359 634 B (+12%) | 61 272 -> 73 560 B |
+| `ale2d` | 0.0404 s | 0.0388 s (**-3.8%**) | 55 308 -> 55 232 B | unchanged |
+| `ns2d` / `ns3d` / `coupled` / `poisson3d` | | -0.1% / -0.1% / -0.5% / -0.2% | | |
+
+The static-mesh cases confirm the shape of the result: this applies to every Jacobian block, not only
+the moving-mesh ones, and where the entry is already cheap it is neutral rather than harmful. `ale2d`
+gains 3.8% where §9.4.3's textual model predicted +0.2%, exactly as that section warned - the model
+evaluated the whole entry `K` times, whereas the emitter prints coefficients that partition it.
+
+Correctness: the assembled Jacobian is unchanged to **2.3e-12** relative on `ale2d`; 258 targeted tests
+pass at the final setting (206 + 52, the latter being `test_tensor_index_conventions.py` and `test_bifurcation_tracker_jacobians.py`), including every azimuthal and normal-mode path. `solid3d` is not a conditioning witness -
+its torsioned unsolved state has `max|A| = 1.9e13` and individual entries move by up to 5e-5 relative
+through pure reassociation.
+
+### 9.4.6 Splitting the assembly function by its flag
+
+§9.4.5 left a wart: hoisting made the **residual-only** path 3.6x slower even though it never enters the
+`if (flag)` block the coefficients live in. The cause is that there was only ever one generated
+function. `flag` is a runtime parameter, so the Jacobian code sits in the same body as the residual
+code, and both the register allocator and the instruction cache pay for it whether or not it runs.
+
+So the body is now emitted once as `PYOOMPH_RJM_IMPL <name>_impl(..., const unsigned flag)` -
+`static inline __attribute__((always_inline))` on GCC - behind a three-line entry point keeping the
+registered name:
+
+```c
+static void ResidualAndJacobian0(..., unsigned flag)
+{
+  if (flag == 0) ResidualAndJacobian0_impl(..., 0);
+  else if (flag == 1) ResidualAndJacobian0_impl(..., 1);
+  else ResidualAndJacobian0_impl(..., 2);
+}
+```
+
+`flag` is then a compile-time constant in each copy, so `if (flag)` and `if (flag == 2)` fold away and
+each mode gets a body containing only the code it runs. Only 0, 1 and 2 are ever passed
+(`src/elements_assembly.cpp:177-190`). Nothing outside the generated file changes: same name, same
+function table, same ABI, same C++ callers. A compiler without the attribute (tcc) gets one body with a
+runtime flag, exactly as before - correct, just not specialised.
+
+**It is bitwise identical**: the arithmetic is untouched, only which copy of it exists. Verified on
+`ale2d` with hoisting off, every Jacobian entry equal bit for bit.
+
+Measured four ways in one binary (`PYOOMPH_DISABLE_RJM_SPLIT`, `PYOOMPH_DISABLE_JACOBIAN_HOIST`):
+
+| `solid3d` | residual | res+jac |
+|---|---|---|
+| neither | 0.0825 s | 4.5569 s |
+| split only | 0.0761 s (**-7.8%**) | 4.5448 s (-0.3%) |
+| hoist only | 0.2906 s (**+252%**) | 1.6560 s (-63.7%) |
+| **both** | **0.0761 s (-7.8%)** | **1.6848 s (-63.0%)** |
+
+The split cures the hoisting's residual regression completely and costs 0.7 points of Jacobian time.
+Per Newton step (one residual evaluation plus one residual+Jacobian) that is 4.639 s -> 1.761 s,
+**-62%**, against -58% for hoisting alone. On `ale2d` all four arms are within ~1% of each other, so
+nothing there argues either way.
+
+**What it costs.** The specialised bodies are real code:
+
+| | generated C | `.so` | gcc `-O3 -march=native` |
+|---|---|---|---|
+| neither | 320 534 B | 61 272 B | 2.02 s |
+| both | 360 183 B (+12%) | 130 960 B (**+114%**) | 4.36 s (**+116%**) |
+
+The C grows only 12% (the dispatcher is 549 B; the rest is §9.4.5's coefficients) but the binary and the
+compile time roughly double, because three bodies get optimised instead of one. That is paid once per
+JIT cache miss, and the cache key already covers it - but it is the reason to keep the switch.
+
+Not yet established: whether the **third** specialisation earns its share. `solid3d` has no mass matrix
+at all, and on `ale2d` the mass-matrix arm tracks the Jacobian arm to within noise. A two-way split
+(`flag == 0` specialised, `flag != 0` left runtime) would halve the extra compile time and binary size
+and is a one-line change to the dispatcher; it wants a case where mass-matrix assembly is actually hot,
+i.e. an eigenproblem, before being decided. §9.4.7 item 4 is the cheaper half of the same idea: two of
+the cases where the third body is provably dead can be decided at generation time without measuring
+anything.
+
+### 9.4.7 Outlook - what is open on this, in order
+
+Both changes of §9.4.5 and §9.4.6 are in and measured, but they were built in that order and each
+invalidates assumptions the other made. The list below is roughly in the order it should be worked
+through, because the early items change what the later ones should be measured against.
+
+**1. Re-check the hoist limit.** `PYOOMPH_JACOBIAN_HOIST_MIN` was set to 32 by the sweep in §9.4.5, and
+that sweep was run *before* the function split existed. Its whole shape came from one effect: naming a
+cheap coefficient slowed the residual-only path. §9.4.6 removed that effect entirely - the residual-only
+body no longer contains the Jacobian code, so there is nothing for a coefficient to be live across. The
+sweep should therefore be repeated on the split build, and the optimum is expected to move **down**
+(hoist more, possibly everything), because the reason to hold back is gone. Note the two settings are
+not independent: with the split off, 32 remains right.
+
+**2. Inline directives beyond GCC - DONE.** `PYOOMPH_RJM_IMPL` now reads
+`#if defined(_MSC_VER)` -> `static __forceinline void`, `#elif defined(__GNUC__) && !defined(__TINYC__)
+&& defined(__OPTIMIZE__)` -> `always_inline`, else plain `static`. From the vendor documentation, since
+only GCC can be tested here: MSVC has no `__attribute__` syntax and needs the `__forceinline` KEYWORD,
+honoured under the `/O2` `ccompiler.py` passes but not under `/Ob0`, where it degrades silently with no
+diagnostic; **clang-cl defines `_MSC_VER` and accepts `__forceinline`**, which is why `_MSC_VER` is
+tested first; clang defines `__GNUC__` and takes the GCC branch, attempting the inline at any
+optimisation level; and **GCC diagnoses a failed `always_inline` as a hard ERROR**, which on a JIT path
+turns a missed optimisation into a failed compile - none of the documented causes (target-option
+mismatch, definition unavailable, varargs, recursion) apply to a function defined immediately above its
+only three callers in one translation unit. The `__OPTIMIZE__` term keeps a `PYOOMPH_DEBUG=1` build on
+the single out-of-line body, which is worth 16% of debug compile time and is much easier to step
+through; it is NOT true, as this file briefly claimed, that forcing it at -O0 triples the code - GCC
+folds the constant `flag` branches while inlining even with no optimiser running, and the three copies
+cost +5%. The original item text follows.
+
+**2. Inline directives beyond GCC.** `PYOOMPH_RJM_IMPL` (`src/jitbridge.h`) currently reads
+`#if defined(__GNUC__) && !defined(__TINYC__)`. Clang defines `__GNUC__` and accepts
+`__attribute__((always_inline))`, so it *should* be covered - but that is an assumption, not a
+measurement, and clang has its own inlining thresholds that an attribute does not always override.
+MSVC is definitely **not** covered and silently falls back to `static`, i.e. no specialisation at all;
+it needs `__forceinline`, and jitbridge.h already has `_MSC_VER` branches (lines 26, 1079) to follow.
+Verify per compiler that the three bodies actually exist - `nm --size-sort` on the `.so` and the
+residual-only timing are both sufficient tells, and a build where the attribute was quietly ignored
+looks exactly like a build where the split does nothing.
+
+**3. Hoisting in the Hessian - DONE, see §9.4.8 (-7.9%, and it corrected how the ceiling is measured).** `write_generic_Hessian_contribution` has the same structure with two
+trial loops, `l_shape` and `l_shape2`, and a Hessian entry is *bilinear* in their atoms rather than
+linear. So the same argument applies twice: coefficients independent of both indices hoist above both
+loops, and coefficients depending only on `l_shape` hoist between them. The pay-off should be larger
+than in the Jacobian because the inner work is `nnode^2` rather than `nnode` - but §9.3 warns that the
+Hessian's second index runs through `GiNaCSubExpression::derivative`'s escape hatch, and
+`is_l_shape_atom` currently classifies `is_derived_other_index` atoms together with the others, which
+is right for detection and not obviously right for a two-level split. This is the largest remaining
+item and deserves its own measurement rather than being assumed from §9.4.5's numbers.
+
+**4. Do not specialise a mass matrix that cannot exist.** The third body is emitted unconditionally, and
+it is the expensive one: §9.4.6's +114% binary and +116% compile time are three bodies where two would
+often do. Two cases can be decided at generation time. If the residual contributes **no** mass-matrix
+entry at all - already known, since `mark_mass_matrix_contribution_for_code` is called exactly when
+`mass_part` is non-zero - then `flag == 2` and `flag == 1` produce identical code and the dispatcher
+should fold them. And the **steady** routine (`ResidualAndJacobianSteady<N>`, emitted alongside the
+unsteady one at `src/codegen.cpp:6895`) has no time derivatives by construction, so its mass-matrix
+specialisation is dead weight whenever a separate steady routine is written at all. Both are cheap
+tests and together they should recover most of the compile-time cost on the elements that do not need
+it, without touching the ones that do.
+
+**5. Per-element properties, not just environment variables.** Hoisting and splitting are currently only
+reachable through `PYOOMPH_JACOBIAN_HOIST_MIN`, `PYOOMPH_DISABLE_JACOBIAN_HOIST` and
+`PYOOMPH_DISABLE_RJM_SPLIT`, which are process-wide. They should become `FiniteElementCode` properties
+alongside `analytical_position_jacobian` (`src/codegen.hpp:1087`), exposed through nanobind and
+reachable from `EquationCompilationFlags` (`pyoomph/equations/additional.py:162`), so a problem with one
+huge element and several trivial ones can pay the compile time only where it buys something. The
+environment variables should stay as the global default the properties start from - that is the pattern
+`analytical_position_jacobian` already follows, and it keeps the A/B sweeps of §12 working.
+
+**6. Get the settings into the JIT cache key - and check they already are.** The key is built from the
+*contents* of the generated `.c` plus `jitbridge.h` (`pyoomph/generic/ccompiler.py:107-138`), and both
+switches change that text, so today they are covered for free and no epoch is needed. Item 5 must not
+break that: a per-element property that changes emission changes the text and stays covered, but a
+property that changes anything *not* visible in the text would not be, and neither would a change to
+`PYOOMPH_RJM_IMPL`'s definition if it ever moved out of `jitbridge.h`. The settings should also be
+written into the debug info file next to `coordinates_as_dofs=` (`src/codegen.cpp:6435`), so that a
+`.so` can be traced back to the settings that produced it.
+
+**8. Can the COORDDIFF terms go away entirely?** §9.4.4 concluded, on runtime grounds, that the identity
+substitution was not worth building: the `COORDDIFF` pre-pass measured 2.2% on `ale2d` and that was the
+whole direct saving. **That conclusion was reached before hoisting existed and should be revisited,
+because hoisting gives the substitution a second, different pay-off.** Every distinct `l_shape`-indexed
+atom in an entry is now one more hoisted coefficient, i.e. one more `const double _jcN = ...` in the
+generated C; and §9.4.6 has just made generated code expensive (+116% compile time). Collapsing
+`intrp_..._COORDDIFF_i_field[l_shape]`, `d_dx_shape_dcoord[...][l_shape][...]`,
+`int_pt_weights_d_coords[j][l_shape]` and `d_normal_dcoord[i][l_shape][j]` into multiples of
+`dx_shape_Pos[0][l_shape][i]` and `shape_Pos[l_shape]` takes `K` on `ale2d`'s bulk entries from 7 to
+about 5 in 2D and, more to the point, makes several coefficients merge instead of standing separately.
+So the question is no longer "is 2.2% worth it" but "does a smaller atom basis pay for itself in
+generated code, compile time and hoisted-coefficient count". Measure `K` per entry, the number of `_jcN`
+emitted, and the compile time - not only the runtime. The substitution itself belongs at the
+`derivative()` sites (`GiNaCShapeExpansion::derivative` 11601/11648/11692,
+`GiNaCTestFunction::derivative` 11862, `GiNaCNormalSymbol::derivative` 10901) so GiNaC sees a product of
+two existing shape structures, and `set_ignore_dpsi_coord_diffs_in_jacobian` must keep working; the
+interface case additionally needs the normal-projector term of §9.4.1, which is not a plain product.
+
+**9. Which shape-info buffers are now dead weight?** Two independent questions, both in
+`src/elements.cpp:839-890` and `:1085-1099`, and both worth asking with the identity check of §11
+switched on. First, if item 8 lands, `d_dx_shape_dcoord` (`MAX_NODES x MAX_NODAL_DIM x MAX_NODES x
+MAX_NODAL_DIM` per continuous space, plus the `_DL` twin), `d_normal_dcoord`, and above all the rank-6
+`d2_dx2_shape_dcoord` / `d2_d2x2_shape_dcoord` are never read by the generated code any more, and both
+their allocation and their per-integration-point fill (`elements_shapeinfo.cpp:1346-1384`, the
+`require_dxdshape` and `require_hessian` blocks) can go. That is the memory argument §9.4.4 said would
+have to be made on its own terms, and the rank-6 arrays are `(nnode*dim)^3` doubles per space per point,
+so it is not a small one. Second, and independent of item 8: whether anything there is *already* filled and never read. **This
+half is done** - see below.
+
+#### 9a. The already-dead shape-buffer fields, and a warning about how to look for them
+
+Method: take every field of `JITShapeInfo_t`, count the generated `.c` files on disk that reference it
+(1171 of them, all untracked build artefacts - `grep -r` silently skips them, `find -exec grep` does
+not), count references from the macros in `jitbridge.h`/`jitbridge_hang.h`, and count references from
+`src/*.cpp`. 22 fields are referenced by no generated file and no macro.
+
+**Only three of the 22 are actually dead**, and the other nineteen are the warning:
+
+* `nodal_shapes` (one per continuous space) and `nodal_shape_DL` - allocated at
+  `src/elements.cpp:860,868` at `MAX_NODES x MAX_NODES` each, **never written, never read, and the
+  generator has no path that could emit them**. About 29 kB per shape buffer, allocated and freed for
+  nothing. Their jitbridge comment - "In principle just delta_{i,j}" - reads like the note of someone
+  who already suspected it.
+* `opposite_node_index` - *is* written (`src/elements.hpp:1301`, copied out of the element's own member
+  of the same name every time the opposite side is set up) and then read by nobody: the code that wants
+  it uses the element member directly (`elements.hpp:1413`), not the shape-buffer copy.
+
+The other nineteen are **live but simply absent from the corpus**, which is the trap. `elemsize_d_coords`,
+`elemsize_d2_coords` and `elemsize_Cart_d2_coords` are emitted at `src/codegen.cpp:10974,10978`;
+`d_dnormal_dx_dcoord` and `d2_dnormal_dx_d2coord` at `:11151,11155`; and the whole `_DL`/`_Pos`
+sensitivity family comes out of `dcoord_shape_array`. Every one of them is built by *concatenation*, so
+grepping the generator for the field name finds nothing, and none of them appears in the corpus because
+no archived run happened to combine (say) an element-size symbol with a moving mesh. A field's absence
+from generated code is evidence about the corpus, not about the field - the only sound test is whether
+the generator has a path that can emit it.
+
+Removing the three is safe but changes the `JITShapeInfo_t` layout, which every cached `.so` was compiled
+against; that invalidates itself correctly, since the cache key includes the contents of `jitbridge.h`.
+
+**7. Can the hoisted coefficients be simplified?** They are extracted structurally - `accumulate_linear_in`
+multiplies out `factor * rest` as it descends - so nothing simplifies them afterwards, and sibling
+coefficients of the same entry visibly share factors (`dx`, the test-function values, whole subexpression
+references). Three things to try, cheapest first: run the existing `ccode_expression_mode` machinery
+(`collect_common_factors`) over the coefficients only, where the expressions are now small enough that
+it is affordable and the §8.3 objection about expanding 350 kB entries no longer applies; hoist factors
+common to *several* coefficients of one entry into a further temporary; and check whether the
+coefficients duplicate work already available as a `subexpression()` value. This is also the natural
+place to revisit §8.3's conclusion, because that pass failed on entries that were flat and enormous,
+and the coefficients are neither.
+
+### 9.4.8 The Hessian: hoisted, -7.9%, and the ceiling measurement was wrong
+
+A Hessian entry is a second derivative, hence **bilinear** in the two trial indices. Splitting it by the
+atoms carrying `l_shape2` leaves coefficients that still depend on `l_shape`, and those are emitted
+between the two loops - so `nnode*nnode2` evaluations of the whole entry become `nnode` evaluations plus
+`nnode*nnode2` multiply-adds. Atoms carrying **both** indices join the inner set, because the entry is
+linear in them too and their coefficients carry no index at all. It is the same linear splitter as
+§9.4.5, applied with a class filter; `hoist_hessian_entry` is a dozen lines on top of it.
+
+`l_shape_atom_class()` decides which index an atom carries. Two things there are easy to get wrong and
+both were got wrong first:
+
+* a **derived** `ShapeExpansion` with `nodal_coord_dir >= 0` prints as
+  `d_dx_shape_dcoord[l_shape2][dir][l_shape][cdir]` - the trial function of one index differentiated by
+  the nodal coordinate of the other - so it carries BOTH indices even though only the *first* coordinate
+  direction is set. Classifying it by `nodal_coord_dir2` alone misses every bulk entry;
+* the classes are BITS (1 = `l_shape`, 2 = `l_shape2`, 3 = both). `2 | 3` is `3`, which matches
+  everything, so the mask pulled `l_shape`-only atoms into the substituted set and every bulk entry then
+  failed the split as a "product of two atoms".
+
+Neither was found by reasoning. `PYOOMPH_DEBUG_HOIST` - which reports why a split was declined, and dumps
+the atoms with their classes - found both in two iterations, and is worth keeping for that reason.
+
+**Measured** on `ale2d` with `analytic_hessian=True`, timing `Problem._assemble_hessian_tensor`,
+interleaved:
+
+| | Hessian assembly | inner-loop entry text | generated C | `.so` |
+|---|---|---|---|---|
+| hoisting off | 0.5788 s | 56 967 B (largest entry 5091 B) | 336 526 B | 256 544 B |
+| **hoisting on** | **0.5328 s (-7.9%)** | **17 116 B (largest 973 B)** | 350 627 B (+4%) | **248 352 B** |
+
+Correct to 3.0e-13 relative over 655 487 shared entries. The sparsity differs by 387 entries out of
+655 744, all of magnitude ~2.8e-17 against `max|H| = 341` - a cancellation landing on exact zero in one
+association order and on round-off in the other.
+
+#### The `zero` arm measures more than the entries
+
+The headroom experiment said **-72.8%**: replace every Hessian entry with `0.0` and assembly drops from
+0.578 s to 0.157 s. The hoist then removed 70% of the inner-loop text and bought 7.9%. Both numbers are
+right; the interpretation of the first was not. **Blanking an entry lets the compiler delete everything
+that exists only to feed it** - the subexpression block, the interpolations, the `2ndCOORDDIFF`
+pre-pass - so the `zero` arm bounds "the entries *and* their exclusive upstream", which here is an order
+of magnitude larger than the entries.
+
+This qualifies §9.4.3 as well, where the same method reported an 80.4% ceiling for the Jacobian. There
+the hoist delivered -63% of it, so that ceiling was mostly real - but it was mostly real by luck of the
+weak form, not by construction, and a future `zero`-style arm should be read as an upper bound on a
+*superset* of what a hoist can reach.
+
+**So the Hessian's cost is mostly not in its entries** - but the first version of this paragraph guessed
+where it was instead, and guessed wrong. §9.4.9 measures it: the generated element code is 43% of Hessian
+assembly (the entries being about a fifth of that), and the largest single item is not code generation at
+all.
+
+### 9.4.9 Where the Hessian time actually goes - and it is mostly not code generation
+
+§9.4.8 left the wrong impression that ~92% of Hessian assembly is upstream of the entries. That was an
+inference from one number ("the hoist moved 7.9%"), not a measurement, and it was wrong. Decomposing
+`Problem::assemble_hessian_tensor` by skipping one stage at a time
+(`PYOOMPH_HESS_SKIP_ELEMENT`/`_SKIP_SCATTER`/`_SKIP_ACCUM`, all of which make the result wrong and exist
+only to be timed) gives the whole budget, on `ale2d` N=12:
+
+| stage | seconds | share | generated code? |
+|---|---|---|---|
+| `SparseRank3Tensor::accumulate()` inserts | 0.284 | **52%** | no |
+| the generated element code | ~0.235 | **43%** | yes |
+| the `nvar^3` scatter loop | 0.021 | 4% | no |
+| the two `nvar^3` dense buffers per element | ~0.005 | ~1% | no |
+
+Two corrections to what reading the code suggested. The element code is **43%**, not 8% - the entries are
+about a fifth of it, the rest being subexpressions, interpolations, the `2ndCOORDDIFF` pre-pass and loop
+overhead. And the per-element buffer allocation, which looks alarming (`problem.cpp` allocates
+`nvar x nvar^2` and `elements_assembly.cpp:565` allocates a second one purely to throw away the mass
+Hessian), is **~1%** - not worth touching.
+
+#### The one-line change that beat the whole hoist
+
+`accumulate()` did two red-black-tree lookups per entry:
+
+```cpp
+if (data[i].count(index)) data[i][index] += val;   // lookup, then lookup again
+else                      data[i][index] = val;
+```
+
+That is ~1.3 million traversals per assembly for 655 744 entries. `std::map<...,double>::operator[]`
+value-initialises a missing entry to 0.0, so `data[i][index] += val;` is the same operation with half
+the lookups and **bitwise identical** arithmetic - same additions in the same order.
+
+Measured by re-running the same decomposition inside each build, so the comparison does not depend on
+the two builds being otherwise comparable (and the `noaccum` arms agree to 0.3%, which is the check):
+
+| | full | noaccum | inserts |
+|---|---|---|---|
+| double lookup | 0.5454 s | 0.2612 s | 0.2841 s |
+| **single lookup** | **0.4813 s** | 0.2605 s | **0.2208 s (-22.3%)** |
+
+**-11.8% of total Hessian assembly**, against -7.9% for the entire hoisting machinery of §9.4.8. Not 50%,
+because the second lookup was cache-warm after the first.
+
+### 9.4.10 Replacing the tensor's per-row maps with sorted vectors
+
+The remaining inserts were `std::map` traffic: an ordered red-black tree with a heap allocation per node,
+maintaining an ordering that nothing reads until the very end. `SparseRank3Tensor` is written once, in a
+burst of ~10^6 `accumulate()` calls, and only afterwards walked in `(j,k)` order by
+`finalize_for_vector_product()` and `get_entries()`.
+
+So each row is now a flat `std::vector<Rank3Entry>`: `accumulate()` appends, and a row is **compacted**
+- sorted by `(j,k)`, duplicates summed in place - when it has doubled since its last compaction, and
+unconditionally by `compact_all()` before either reader runs. The doubling trigger is what keeps the
+duplicates from becoming a memory regression: a row holds at most ~2x its compacted size, and the
+amortised cost per contribution stays constant.
+
+Two details that are easy to get wrong:
+
+* `finalize_for_vector_product()` starts a new CSR column group on `entry.j > last_col`, which is only
+  correct if the row is sorted by `(j,k)` with duplicates already merged - a property the map gave for
+  free. Both readers therefore compact first.
+* `data` and `compacted_size` are `mutable`, because `get_entries()` is `const` and must compact before
+  it can report anything. That keeps the public API - which nanobind binds - unchanged.
+
+Measured on `ale2d` N=12 with `analytic_hessian=True`, the insert figures taken WITHIN each build via
+`PYOOMPH_HESS_SKIP_ACCUM` so they do not depend on the builds being otherwise comparable:
+
+| storage | full | noaccum | inserts |
+|---|---|---|---|
+| map, `count()`-then-assign (original) | 0.5454 s | 0.2612 s | 0.2841 s |
+| map, single lookup (§9.4.9) | 0.4813 s | 0.2605 s | 0.2208 s |
+| **sorted vector** | **0.3542 s** | 0.2512 s | **0.1030 s** |
+
+**Inserts -63.7%, total Hessian assembly -35.1%** against the original. The `noaccum` control drifted
+3.6% between the map and vector builds, which is not accounted for by anything in the change (both
+construct an empty container per row), so the cross-build totals are good to a few percent while the
+within-build insert numbers are firm.
+
+The tensor is unchanged: identical sparsity (655 617 entries, none unique to either side) and **every
+significant entry bitwise identical**, with a largest absolute deviation of 3.0e-14 against
+`max|H| = 341` confined to entries at or below the reporting threshold. `std::sort` is not stable, so
+contributions to one `(j,k)` may be summed in a different order than they were accumulated - that is the
+same last-bit freedom the generated code already has, and here it did not even reach the significant
+entries.
+
+Worth keeping in proportion: this is the largest single win in the Hessian path and it is not code
+generation. Ranked against each other on the same case, the sparse-tensor storage is worth -35%, the
+one-line double-lookup fix inside it -11.8%, and the entire symbolic hoisting machinery of §9.4.8 -7.9%.
+
 ## 10. Things deliberately left alone
 
 - **`expanded_additional_field_cache` is written but never read** (`if (false && ...)` in both the
@@ -688,6 +1190,12 @@ All change how pyoomph gets there or what it reports, never what it computes.
 | `PYOOMPH_DISABLE_EXPAND_MEMO` | turn off the placeholder-expansion memo (on by default, §3) |
 | `PYOOMPH_ARCHIVE_EXPRESSIONS` | fill `FiniteElementCode::archive` again (§5) |
 | `PYOOMPH_TIME_ADD_RESIDUAL` | per-phase timing of `add_residual`/`expand_placeholders` on stderr, with mapper entries, memo hits and distinct-subexpression counts |
+| `PYOOMPH_HESS_SKIP_ELEMENT` / `_SKIP_SCATTER` / `_SKIP_ACCUM` | skip one stage of `assemble_hessian_tensor` so the stages can be timed apart; each makes the result WRONG and exists only for measurement (§9.4.9) |
+| `PYOOMPH_DEBUG_HOIST` | report on stderr why a Jacobian/Hessian entry could not be split for hoisting, with the atoms and their trial-index classes (§9.4.8) |
+| `PYOOMPH_DISABLE_RJM_SPLIT` | emit one Residual/Jacobian/Mass function with a runtime flag instead of three specialised bodies behind a dispatcher (§9.4.6) |
+| `PYOOMPH_DISABLE_JACOBIAN_HOIST` | emit each Jacobian entry inside the trial loop as before, instead of hoisting its `l_shape`-independent coefficients (§9.4.5) |
+| `PYOOMPH_JACOBIAN_HOIST_MIN` | how many expression nodes a coefficient must have before it is worth naming; default 32, higher trades Jacobian time for residual-only time (§9.4.5) |
+| `PYOOMPH_PARANOID_ALE_IDENTITY` | rebuild every moving-mesh shape sensitivity from closed form and compare, reporting counts and worst deviation per identity and per `(el_dim, nodal_dim)` at exit, plus any `J = 0` element (§9.4). Read-only; a run that ends with "NO comparisons" has proven nothing |
 
 ## 12. Reproducing
 

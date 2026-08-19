@@ -1175,7 +1175,14 @@ namespace pyoomph
       virtual void write_generic_spatial_integration_footer(std::ostream &os, std::string indent);
       virtual void write_generic_nodal_delta_header(std::ostream &os, std::string indent);
       virtual void write_generic_nodal_delta_footer(std::ostream &os, std::string indent);
-      virtual void write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang);     // Generic Residual/Jacobian/Mass matrix (also for parameter derivatives)
+      // Set while a Residual/Jacobian/Mass routine is being written, whenever a non-zero mass-matrix
+      // entry is actually emitted. Read only by write_generic_RJM, to decide whether the routine needs a
+      // flag==2 specialisation of its own at all.
+      bool emitted_mass_matrix_contribution = false;
+      // `may_be_asked_for_mass_matrix` false means: a mass matrix is not IMPOSSIBLE here, only unusual,
+      // so the flag!=0 branch keeps a runtime flag instead of getting a third specialised body. It must
+      // never be used to mean "cannot happen" - see write_generic_RJM.
+      virtual void write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang, bool may_be_asked_for_mass_matrix = true);     // Generic Residual/Jacobian/Mass matrix (also for parameter derivatives)
       virtual bool write_generic_Hessian(std::ostream &os, std::string funcname, GiNaC::ex resi, bool with_hang); // Generic Hessian vector product
       virtual void write_code(std::ostream &os); // Top-level driver: writes the full generated C++ source for this element (calls the write_code_*()/write_generic_*() methods for every residual)
       virtual std::string get_precodegen_fingerprint_text(); // Tier-2 JIT cache (shadow mode): canonical text capturing every residual/expression and setting write_code() will read, computed BEFORE the (expensive) symbolic differentiation/CSE/printing write_code() performs. Cheap to compute since it only walks/prints the already-built expression trees once, with no derivation. See pyoomph/generic/jit_cache.py.

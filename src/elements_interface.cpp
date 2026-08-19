@@ -2341,7 +2341,6 @@ namespace pyoomph
 			{
 				dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->opposite_side)->bulk_element_pt())->interpolate_hang_values(); // TODO: This might be put somewhere else
 			}
-			this->fill_opposite_node_indices(shape_info);
 		}
 
 		BulkElementBase::prepare_shape_buffer_for_integration(required_shapes, flag);

@@ -33,8 +33,85 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "expressions.hpp"
 #include "timestepper.hpp"
 
+#include <cstdlib>
+#include <cmath>
+#include <sstream>
+#include <iostream>
+#include <map>
+
 namespace pyoomph
 {
+
+	// PYOOMPH_PARANOID_ALE_IDENTITY: re-derive the moving-mesh shape sensitivities from closed form and
+	// compare against what was actually filled. The mapping x_i = sum_q X^q_i Psi_q(s) makes them pure
+	// products of quantities that are already in the buffer,
+	//
+	//     d( D_i psi_l ) / dX^q_j  =  - (D_j psi_l)(D_i Psi_q)  +  N_ij (D psi_l . D Psi_q)
+	//     d( dx )       / dX^q_j  =  dx * (D_j Psi_q)
+	//     d( n_i )      / dX^q_j  =  - n_j (D_i Psi_q)
+	//
+	// with D the Eulerian (on an interface: surface) gradient, Psi the GEOMETRY space's shapes, and
+	// N = I - P the projector onto the normal space - identically zero on a bulk element, where the
+	// tangents span everything. The whole rank-4 d_dx_shape_dcoord array is therefore redundant data,
+	// which is worth exploiting but only once it has been shown to hold for every geometry pyoomph
+	// builds. Off by default and strictly read-only, so a build with it compiled in behaves exactly as
+	// before while the variable is unset.
+	static const bool __paranoid_ale_identity = getenv("PYOOMPH_PARANOID_ALE_IDENTITY") != NULL;
+
+	// Counted and reported at exit, because a check that is never reached passes just as quietly as one
+	// that holds: a run that ends with "0 comparisons" has proven nothing.
+	// Keyed by identity AND by the (el_dim, nodal_dim) pair, so the report proves which geometries were
+	// actually exercised - a bulk-only run says nothing about the normal-projector term.
+	struct AleIdentityStat
+	{
+		unsigned long n = 0, bad = 0;
+		double worst = 0.0;
+		std::string worst_where;
+	};
+	static std::map<std::string, AleIdentityStat> __ale_identity_stats;
+	static struct __AleIdentityReport
+	{
+		~__AleIdentityReport()
+		{
+			if (!__paranoid_ale_identity)
+				return;
+			if (__ale_identity_stats.empty())
+			{
+				std::cout << "PYOOMPH_PARANOID_ALE_IDENTITY: NO comparisons were made - nothing was proven"
+						  << std::endl;
+				return;
+			}
+			for (const auto &e : __ale_identity_stats)
+			{
+				std::cout << "PYOOMPH_PARANOID_ALE_IDENTITY: " << e.first << " -> " << e.second.n
+						  << " comparisons, " << e.second.bad << " violations, worst relative deviation "
+						  << e.second.worst << std::endl;
+				if (e.second.bad)
+					std::cout << "    worst at " << e.second.worst_where << std::endl;
+			}
+		}
+	} __ale_identity_report;
+
+	static void ale_identity_check(const char *what, unsigned el_dim, unsigned nodal_dim, double got, double expected, const std::string &where)
+	{
+		// The sensitivities scale like 1/h^2, so a purely relative tolerance is the right one; the
+		// additive 1 keeps entries that ought to be zero (every bulk N-term) from tripping on noise.
+		const double scale = 1.0 + std::fabs(got) + std::fabs(expected);
+		const double rel = std::fabs(got - expected) / scale;
+		std::ostringstream key;
+		key << what << " [el_dim " << el_dim << " in " << nodal_dim << "D]";
+		auto &e = __ale_identity_stats[key.str()];
+		e.n++;
+		if (rel > 1e-8)
+			e.bad++;
+		if (rel > e.worst)
+		{
+			e.worst = rel;
+			std::ostringstream oss;
+			oss << where << ": filled " << got << ", closed form gives " << expected;
+			e.worst_where = oss.str();
+		}
+	}
 
 	// Convenience overload that fills the element's own (default) shape_info buffer; see the
 	// shape_info-taking overload below for the actual work.
@@ -1359,6 +1436,55 @@ namespace pyoomph
 								}
 							}
 						}
+						if (__paranoid_ale_identity)
+						{
+							// Both factors are rebuilt locally rather than read back from the buffer, so
+							// the check cannot be satisfied by a fill order coincidence: D psi_l from this
+							// space's own local derivatives, D Psi_q from dpsids_Element, which is the
+							// GEOMETRY space - it is the mapping that carries the nodal-position
+							// dependence, whichever space the field happens to live on.
+							double Dpsi_l[3], Nproj[3][3];
+							for (unsigned int i = 0; i < n_dim; i++)
+							{
+								Dpsi_l[i] = 0.0;
+								for (unsigned b = 0; b < el_dim; b++)
+									Dpsi_l[i] += gab_gai[b][i] * dpsids(l, b);
+								for (unsigned int j = 0; j < n_dim; j++)
+								{
+									double P = 0.0; // P_ij = g^{ab} t_{a,i} t_{b,j}, the tangential projector
+									for (unsigned b = 0; b < el_dim; b++)
+										P += gab_gai[b][i] * interpolated_t(b, j);
+									Nproj[i][j] = (i == j ? 1.0 : 0.0) - P;
+								}
+							}
+							for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
+							{
+								double Dpsi_q[3], dot = 0.0;
+								for (unsigned int i = 0; i < n_dim; i++)
+								{
+									Dpsi_q[i] = 0.0;
+									for (unsigned b = 0; b < el_dim; b++)
+										Dpsi_q[i] += gab_gai[b][i] * dpsids_Element(l2, b);
+								}
+								for (unsigned int a = 0; a < n_dim; a++)
+									dot += Dpsi_l[a] * Dpsi_q[a];
+								for (unsigned int i = 0; i < n_dim; i++)
+									for (unsigned int i2 = 0; i2 < n_dim; i2++)
+									{
+										std::ostringstream where;
+										where << "(space " << ispace << ", node " << l << "/" << eleminfo.nnode_of_space[ispace]
+											  << ", dir " << i << ", coord node " << l2 << ", coord dir " << i2
+											  << ", el_dim " << el_dim << ", nodal_dim " << n_dim
+											  << ", eleminfo.nnode " << eleminfo.nnode
+											  << ", this->nnode() " << this->nnode()
+											  << ", n_node " << n_node << ")";
+										ale_identity_check("d_dx_shape_dcoord", el_dim, n_dim,
+														   shape_info->d_dx_shape_dcoord[ispace][l][i][l2][i2],
+														   -Dpsi_l[i2] * Dpsi_q[i] + Nproj[i][i2] * dot,
+														   where.str());
+									}
+							}
+						}
 						if (require_hessian)
 						{
 						for (unsigned int i = 0; i < n_dim; i++)
@@ -1496,6 +1622,49 @@ namespace pyoomph
 									shape_info->d_dx_shape_dcoord_DL[l][i][l2][i2] += DXdshape_il_jb(i2, l2, i, b) * dpsids(l, b);
 								}
 							}
+						}
+					}
+					if (__paranoid_ale_identity)
+					{
+						// Same closed form as for the continuous spaces above - the identity is a property
+						// of the mapping, not of the space the shapes belong to.
+						double Dpsi_l[3], Nproj[3][3];
+						for (unsigned int i = 0; i < n_dim; i++)
+						{
+							Dpsi_l[i] = 0.0;
+							for (unsigned b = 0; b < el_dim; b++)
+								Dpsi_l[i] += gab_gai[b][i] * dpsids(l, b);
+							for (unsigned int j = 0; j < n_dim; j++)
+							{
+								double P = 0.0;
+								for (unsigned b = 0; b < el_dim; b++)
+									P += gab_gai[b][i] * interpolated_t(b, j);
+								Nproj[i][j] = (i == j ? 1.0 : 0.0) - P;
+							}
+						}
+						for (unsigned l2 = 0; l2 < eleminfo.nnode; l2++)
+						{
+							double Dpsi_q[3], dot = 0.0;
+							for (unsigned int i = 0; i < n_dim; i++)
+							{
+								Dpsi_q[i] = 0.0;
+								for (unsigned b = 0; b < el_dim; b++)
+									Dpsi_q[i] += gab_gai[b][i] * dpsids_Element(l2, b);
+							}
+							for (unsigned int a = 0; a < n_dim; a++)
+								dot += Dpsi_l[a] * Dpsi_q[a];
+							for (unsigned int i = 0; i < n_dim; i++)
+								for (unsigned int i2 = 0; i2 < n_dim; i2++)
+								{
+									std::ostringstream where;
+									where << "(space DL, node " << l << ", dir " << i << ", coord node " << l2
+										  << ", coord dir " << i2 << ", el_dim " << el_dim
+										  << ", nodal_dim " << n_dim << ")";
+									ale_identity_check("d_dx_shape_dcoord_DL", el_dim, n_dim,
+													   shape_info->d_dx_shape_dcoord_DL[l][i][l2][i2],
+													   -Dpsi_l[i2] * Dpsi_q[i] + Nproj[i][i2] * dot,
+													   where.str());
+								}
 						}
 					}
 					if (require_hessian)
@@ -1922,9 +2091,81 @@ namespace pyoomph
 			}
 		}
 
+		if (__paranoid_ale_identity && !(J > 0.0 && std::isfinite(J)))
+		{
+			std::ostringstream key;
+			key << "DEGENERATE MAPPING J=" << (std::isfinite(J) ? "finite" : "non-finite")
+				<< " [el_dim " << this->dim() << " in " << this->nodal_dimension() << "D, nnode "
+				<< this->nnode() << "]";
+			auto &e = __ale_identity_stats[key.str()];
+			e.n++;
+			e.bad++;
+			if (e.worst_where.empty())
+			{
+				std::ostringstream oss;
+				oss << "J=" << J << " at integration point " << ipt << " of domain '"
+					<< ((codeinst && codeinst->get_func_table() && codeinst->get_func_table()->domain_name)
+							? codeinst->get_func_table()->domain_name : "?")
+					<< "', node positions:";
+				for (unsigned l = 0; l < this->nnode(); l++)
+				{
+					oss << " (";
+					for (unsigned d = 0; d < this->nodal_dimension(); d++)
+						oss << (d ? "," : "") << this->node_pt(l)->x(d);
+					oss << ")";
+				}
+				e.worst_where = oss.str();
+			}
+		}
 		shape_info->int_pt_weight_unity= w;
 		shape_info->int_pt_weight[0] = w * J;
 		shape_info->int_pt_weight_Lagrangian = w * JLagr;
+
+		if (__paranoid_ale_identity)
+		{
+			// The remaining two identities can only be checked once the integration weight is known and
+			// the "Pos" aliases have been resolved (set_remaining_shapes_appropriately runs once per
+			// assembly, before this). Checking them through dx_shape_Pos rather than through the space
+			// they alias is deliberate: it is exactly the assumption that the position space IS the
+			// geometry space that the generated code makes, and that ConstrainPositionsToC1Space could
+			// in principle break.
+			const JITFuncSpec_Table_FiniteElement_t *ft = codeinst->get_func_table();
+			if (flag && ft->moving_nodes && !ft->fd_position_jacobian && shape_info->dx_shape_Pos[0])
+			{
+				const unsigned ND = this->nodal_dimension();
+				const unsigned NQ = this->nnode();
+				for (unsigned q = 0; q < NQ; q++)
+					for (unsigned j = 0; j < ND; j++)
+					{
+						std::ostringstream where;
+						where << "(coord node " << q << ", coord dir " << j << ", el_dim " << this->dim()
+							  << ", nodal_dim " << ND << ")";
+						// d(dx)/dX^q_j = dx * D_j Psi_q, i.e. d(det J)/dX = det J * dpsi_q/dx_j.
+						ale_identity_check("int_pt_weights_d_coords", this->dim(), ND,
+										   shape_info->int_pt_weights_d_coords[j][q],
+										   shape_info->int_pt_weight[0] * shape_info->dx_shape_Pos[0][q][j],
+										   where.str());
+						// d(n_i)/dX^q_j = -n_j D_i Psi_q. Only meaningful where a normal exists at all.
+						// Gated on normal_deriv, not on normal: d_normal_dcoord is written whenever a normal
+						// is wanted at all, but the generated code only ever READS it when it needs the
+						// sensitivity. Checking the write-only case reports mismatches in values nobody
+						// consumes - established, not assumed: with the guard widened to `normal`, 96 of
+						// 108 entries disagree on a 2D free surface while the normal_deriv cases are
+						// exact. Worth a look on its own, but it is not this identity.
+						if (required_shapes.normal_deriv && shape_info->d_normal_dcoord)
+							for (unsigned i = 0; i < ND; i++)
+							{
+								std::ostringstream w2;
+								w2 << "(normal comp " << i << ", coord node " << q << ", coord dir " << j
+								   << ", el_dim " << this->dim() << ", nodal_dim " << ND << ")";
+								ale_identity_check("d_normal_dcoord", this->dim(), ND,
+												   shape_info->d_normal_dcoord[i][q][j],
+												   -shape_info->normal[0][j] * shape_info->dx_shape_Pos[0][q][i],
+												   w2.str());
+							}
+					}
+			}
+		}
 
 	}
 

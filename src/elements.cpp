@@ -857,7 +857,6 @@ namespace pyoomph
 		for (unsigned int i = 0; i < NUM_CONTINUOUS_SPACES; i++)
 		{
 			my_alloc_or_free(do_alloc, (*buff)->shapes[i], MAX_NODES);
-			my_alloc_or_free(do_alloc, (*buff)->nodal_shapes[i], MAX_NODES, MAX_NODES);
 			for (unsigned k = 0; k < 3; k++)
 				my_alloc_or_free(do_alloc, (*buff)->dx_shapes[k][i], MAX_NODES, MAX_NODAL_DIM);
 			my_alloc_or_free(do_alloc, (*buff)->dX_shapes[i], MAX_NODES, MAX_NODAL_DIM);
@@ -865,7 +864,6 @@ namespace pyoomph
 		}
 
 		my_alloc_or_free(do_alloc, (*buff)->shape_DL, MAX_NODES);
-		my_alloc_or_free(do_alloc, (*buff)->nodal_shape_DL, MAX_NODES, MAX_NODES);
 		for (unsigned k = 0; k < 3; k++)
 			my_alloc_or_free(do_alloc, (*buff)->dx_shape_DL[k], MAX_NODES, MAX_NODAL_DIM);
 		my_alloc_or_free(do_alloc, (*buff)->dX_shape_DL, MAX_NODES, MAX_NODAL_DIM);
@@ -880,8 +878,6 @@ namespace pyoomph
 		my_alloc_or_free(do_alloc, (*buff)->timestepper_weights_dt_BDF2, MAX_TIME_WEIGHTS);
 		my_alloc_or_free(do_alloc, (*buff)->timestepper_weights_dt_Newmark2, MAX_TIME_WEIGHTS);
 		my_alloc_or_free(do_alloc, (*buff)->timestepper_weights_d2t_Newmark2, MAX_TIME_WEIGHTS);
-
-		my_alloc_or_free(do_alloc, (*buff)->opposite_node_index, MAX_NODES);
 #else
 		if (do_alloc)
 			__shape_buffer_mem_usage += sizeof(JITShapeInfo_t);
