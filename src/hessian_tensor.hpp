@@ -21,7 +21,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 
 #pragma once
-#include <map>
+#include <algorithm>
 #include <vector>
 namespace pyoomph
 {
@@ -35,14 +35,28 @@ namespace pyoomph
   class SparseRank3Tensor
   {
   protected:
-    // Comparator used to order (j,k) index pairs in the per-row maps below (lexicographic).
-    struct map_index_comp
+    // One stored contribution to T_i(j,k). Rows are kept as flat vectors rather than as ordered maps:
+    // the tensor is written once, in a burst of ~10^6 accumulate() calls, and only afterwards read in
+    // (j,k) order. A std::map paid a red-black-tree descent and a node allocation per contribution for
+    // an ordering nothing needed until the end; append-then-sort pays neither
+    // (dev_docs/code_generation.md 9.4.10).
+    struct Rank3Entry
     {
-      bool operator()(const std::pair<int, int> &a, const std::pair<int, int> &b) const { return a.first < b.first || (a.first == b.first && a.second < b.second); }
+      int j, k;
+      double value;
     };
+    static bool entry_less(const Rank3Entry &a, const Rank3Entry &b) { return a.j < b.j || (a.j == b.j && a.k < b.k); }
 
-    bool symmetric;                                                          // Symmetric in the second&third index, like a Hessian
-    std::vector<std::map<std::pair<int, int>, double, map_index_comp>> data; // [i](j,k)->value
+    bool symmetric;                          // Symmetric in the second&third index, like a Hessian
+    // Mutable because consolidation is a representation detail: get_entries() is logically const but
+    // must compact before it can report anything.
+    mutable std::vector<std::vector<Rank3Entry>> data;  // [i] -> unordered (j,k,value) contributions
+    mutable std::vector<size_t> compacted_size;         // [i] -> row length just after its last compaction
+
+    // Sort row i by (j,k) and sum duplicate (j,k) contributions in place.
+    void compact_row(unsigned i) const;
+    // Compact every row, so that each is sorted by (j,k) with no duplicates.
+    void compact_all() const;
     int tens_size;                                                           // Cached size (number of rows i); -1 until finalize_for_vector_product() has run, then equals data.size() before it was cleared
     // CSR-like storage built by finalize_for_vector_product(), used to evaluate right_vector_mult() quickly:
     // vector_prod_contribs[c] holds the (k,value) pairs for the column index matrix_col_index[c].
@@ -82,11 +96,13 @@ namespace pyoomph
       }
       else
       {
-        std::pair<int, int> index = {j, k};
-        if (data[i].count(index))
-          data[i][index] += val;
-        else
-          data[i][index] = val;
+        // Append; duplicates are summed when the row is compacted. Compaction is triggered once a row
+        // has doubled since it was last compacted, which bounds the memory held by duplicates at ~2x
+        // the compacted size while keeping the amortised cost per contribution constant.
+        std::vector<Rank3Entry> &row = data[i];
+        row.push_back(Rank3Entry{(int)j, (int)k, val});
+        if (row.size() >= 2 * compacted_size[i] + 64)
+          compact_row(i);
       }
     }
 

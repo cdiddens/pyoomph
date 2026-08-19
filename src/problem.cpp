@@ -2964,6 +2964,11 @@ namespace pyoomph
 	// caller must ensure) symmetry under exchange of the last two indices (j,k) to roughly halve the work.
 	SparseRank3Tensor Problem::assemble_hessian_tensor(bool symmetric)
 	{
+		// Temporary decomposition switches (dev_docs/code_generation.md 9.4.9): each skips one stage so
+		// the stages can be timed apart. They make the RESULT WRONG and exist only for measurement.
+		static const bool skip_element = getenv("PYOOMPH_HESS_SKIP_ELEMENT") != NULL;
+		static const bool skip_scatter = getenv("PYOOMPH_HESS_SKIP_SCATTER") != NULL;
+		static const bool skip_accum = getenv("PYOOMPH_HESS_SKIP_ACCUM") != NULL;
 		SparseRank3Tensor result(this->ndof(), symmetric);
 		const unsigned long n_elements = mesh_pt()->nelement();
 		for (unsigned int ne = 0; ne < n_elements; ne++)
@@ -2971,7 +2976,10 @@ namespace pyoomph
 			BulkElementBase *elem_pt = dynamic_cast<BulkElementBase *>(mesh_pt()->element_pt(ne));
 			const unsigned nvar = assembly_handler_pt()->ndof(elem_pt);
 			oomph::DenseMatrix<double> hessian_buffer(nvar, nvar * nvar, 0.0);
-			elem_pt->assemble_hessian_tensor(hessian_buffer);
+			if (!skip_element)
+				elem_pt->assemble_hessian_tensor(hessian_buffer);
+			if (skip_scatter)
+				continue;
 			for (unsigned int i = 0; i < nvar; i++)
 			{
 				unsigned iG = assembly_handler_pt()->eqn_number(elem_pt, i);
@@ -2989,7 +2997,8 @@ namespace pyoomph
 						if (std::fabs(hval) > Numerical_zero_for_sparse_assembly)
 						{
 							unsigned kG = assembly_handler_pt()->eqn_number(elem_pt, k);
-							result.accumulate(iG, jG, kG, hval);
+							if (!skip_accum)
+								result.accumulate(iG, jG, kG, hval);
 						}
 					}
 				}

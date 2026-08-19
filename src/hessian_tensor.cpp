@@ -27,8 +27,45 @@ namespace pyoomph
 
   // Allocates 'size' empty per-row maps (one per first index i); the tensor starts
   // completely empty and is filled up via accumulate().
-  SparseRank3Tensor::SparseRank3Tensor(unsigned size, bool _symmetric) : symmetric(_symmetric), data(size), tens_size(-1)
+  SparseRank3Tensor::SparseRank3Tensor(unsigned size, bool _symmetric) : symmetric(_symmetric), data(size), compacted_size(size, 0), tens_size(-1)
   {
+  }
+
+  // Sort one row by (j,k) and sum duplicate contributions in place. Called from accumulate() once a row
+  // has doubled, and from compact_all() before anything reads the tensor.
+  void SparseRank3Tensor::compact_row(unsigned i) const
+  {
+    std::vector<Rank3Entry> &row = data[i];
+    if (row.empty())
+    {
+      compacted_size[i] = 0;
+      return;
+    }
+    std::sort(row.begin(), row.end(), entry_less);
+    size_t w = 0;
+    for (size_t r = 0; r < row.size();)
+    {
+      const int j = row[r].j, k = row[r].k;
+      double acc = 0.0;
+      // std::sort is not stable, so contributions to one (j,k) may be summed in a different order than
+      // they were accumulated. That is a reassociation of a sum of doubles, i.e. the same last-bit
+      // freedom the generated code already has, not a change of value.
+      while (r < row.size() && row[r].j == j && row[r].k == k)
+        acc += row[r++].value;
+      row[w].j = j;
+      row[w].k = k;
+      row[w].value = acc;
+      w++;
+    }
+    row.resize(w);
+    compacted_size[i] = w;
+  }
+
+  void SparseRank3Tensor::compact_all() const
+  {
+    for (unsigned int i = 0; i < data.size(); i++)
+      if (data[i].size() != compacted_size[i])
+        compact_row(i);
   }
 
   // Already calculate the indices for the CSR format to make a quick vector product
@@ -43,22 +80,23 @@ namespace pyoomph
     vector_prod_contribs.clear();
     matrix_row_start.push_back(0);
     size_t size_accu = 0;
+    compact_all(); // the loop below requires each row sorted by (j,k), with duplicates already summed
     for (unsigned int i = 0; i < data.size(); i++)
     {
       int last_col = -1;
-      for (auto &entry : data[i]) // entry.first => j,k   and  entry.second=contrib
+      for (const auto &entry : data[i])
       {
         // A new distinct j value starts a new (i,j) CSR entry; all k-contributions for the
         // same (i,j) are collected in vector_prod_contribs.back() until j changes again.
-        if (entry.first.first > last_col)
+        if (entry.j > last_col)
         {
-          matrix_col_index.push_back(entry.first.first);
+          matrix_col_index.push_back(entry.j);
           vector_prod_contribs.push_back(std::vector<std::pair<int, double>>());
           size_accu += sizeof(std::vector<std::pair<int, double>>);
-          last_col = entry.first.first;
+          last_col = entry.j;
         }
         size_accu += sizeof(std::pair<int, float>);
-        vector_prod_contribs.back().push_back(std::make_pair(entry.first.second, entry.second));
+        vector_prod_contribs.back().push_back(std::make_pair(entry.k, entry.value));
       }
       matrix_row_start.push_back(vector_prod_contribs.size());
     }
@@ -119,12 +157,12 @@ namespace pyoomph
   std::vector<std::tuple<int, int, int, double>> SparseRank3Tensor::get_entries() const
   {
     std::vector<std::tuple<int, int, int, double>> res;
+    compact_all(); // duplicates are only summed at compaction, so report nothing before it has run
     for (unsigned int i = 0; i < data.size(); i++)
     {
-      const auto &d = data[i];
-      for (const auto &me : d)
+      for (const auto &me : data[i])
       {
-        res.push_back(std::make_tuple(i, me.first.first, me.first.second, me.second));
+        res.push_back(std::make_tuple(i, me.j, me.k, me.value));
       }
     }
     return res;
