@@ -46,7 +46,7 @@ interface+integral-observable problem **66.7%** (6 of 9), bulk elements of a pro
 only an observable **10.1%**. Moving-mesh interfaces sit at 41.3%, which is legitimate and geometric.
 
 The rank-4 `d_dx_shape_dcoord` fill is **40.6%** of elemental Jacobian assembly on a moving mesh —
-untouched here, and the largest single item still open (§7).
+the largest single item, addressed in §4a.
 
 ---
 
@@ -287,22 +287,56 @@ in the new one.
 | `PYOOMPH_DISABLE_SHAPE_FAMILY_SPLIT` | restores the all-or-nothing per-space fill. Widens `psi/dx/dX` and restores the **global** `d2x` gate: the second-derivative formulas need geometry quantities that only exist under it, and widening the families alone segfaults |
 | `PYOOMPH_DISABLE_HANG_FILL_CACHE` / `PYOOMPH_REPORT_HANG_FILL_CACHE` / `PYOOMPH_PARANOID_HANG_FILL_CACHE` | restore / count / recompute-and-cross-check the hang skip. The paranoid mode runs the full fill on skipped elements, compares, and NaN-poisons their hang buffers |
 | `PYOOMPH_DISABLE_ASSEMBLY_EXTDATA_SPLIT` | attaches (and remaps) from the full merge again, covering both the ED0 and the bulk/opposite halves |
+| `PYOOMPH_DISABLE_DCOORD_SPLIT` | fills the rank-4 nodal-coordinate sensitivities for every required space again (§4a). Its own lever, not folded into the shape-family one: a wrong flag here drops Jacobian columns silently instead of producing a NaN, so it has to be switched - and FD-compared - on its own |
 | `PYOOMPH_MEASURE_SKIP_HANG_FILLS` | **measurement only, unsound in general**: early-returns from both fills. Bitwise-safe only with no hangs, no constraints and no mixed-space dummy map; deliberately does not skip the `eqn_remap` channel, where it would produce garbage equation numbers rather than a stale value |
 | `PYOOMPH_REPORT_HANG_FILL_TIME`, `PYOOMPH_REPORT_EXT_DATA` | the baselines of §1.1 |
 
 A comparison whose specialised path never engaged shows two identical numbers and looks like a
 perfect result. Every report lever above exists so that cannot happen silently.
 
-## 7. Open
+## 4a. The rank-4 nodal-coordinate sensitivities, per space
 
-* **The rank-4 `d_dx_shape_dcoord` fill, 40.6% of moving-mesh elemental Jacobian assembly.**
-  `require_dxdshape` consults no required-shape flag at all (`flag && moving_nodes &&
-  !fd_position_jacobian`, with the author's own XXX/TODO), so it is filled for every required space
-  whether the generated Jacobian differentiates that space's gradients or not.
-  `set_ignore_dpsi_coord_diffs_in_jacobian` already suppresses the *reads*; the fill-side dual needs a
-  per-space flag in `JITFuncSpec_RequiredShapes_For_Space` (an ABI change) that is a superset of the
-  emitted reads. Over-suppression silently zeros Jacobian columns, so the FD comparator on several
-  moving-mesh problems is mandatory, as is poisoning the rank-4 buffer when unflagged.
+`require_dxdshape` consulted no required-shape flag at all (`flag && moving_nodes &&
+!fd_position_jacobian`, with the author's own XXX/TODO next to it), so `d_dx_shape_dcoord` was
+filled for **every** required space whether the generated Jacobian differentiated that space's
+gradient or not. It is the most expensive family of a moving-mesh fill: 40.6% of elemental Jacobian
+assembly on an ALE free surface.
+
+`dx_psi_dcoord` is now a per-space flag (an ABI addition to
+`JITFuncSpec_RequiredShapes_For_Space_t`). Getting it *wrong in the safe direction* costs the whole
+benefit and getting it wrong in the other direction silently drops nodal-position columns of the
+Jacobian - no NaN, no crash - so the marking is deliberately attached to the emission sites rather
+than re-derived:
+
+* **Three sites emit a rank-4 read**: the interpolation loop's `required_coorddiffs`, the Jacobian
+  expression printer, and the test-function printer. All three mark through one routine-scoped
+  member, `current_shapeflag_func_type`, set by the RJM and Hessian writers and cleared by the
+  writers of the non-assembled categories. Deriving the flag from only the first of them
+  under-requested on exactly one file of the first case tried (a free-surface interface element) -
+  the same trap as §9.4.15, caught the same way.
+* **The marking must sit inside the branch that reads.** The test-function printer has three
+  branches; only the middle one reads the rank-4 array (the first reads no sensitivity, the third
+  reads the rank-6 one). Marking before the branch is *correct* but over-requests, and measurably:
+  the ALE interface case went from −1.2% to −6.0% once the mark moved inside.
+
+Verification is a per-file scan of every generated `.c` comparing flags against reads, which must
+show flags ⊇ reads (and, for the benefit, flags = reads):
+
+| case | required spaces | flagged | actually read | jac |
+|---|---|---|---|---|
+| ale_iface | C1 C2 | C2 | C2 | **−6.0%** |
+| ale_elemsize_both | C2 | C2 | C2 | **−10.7%** |
+| lagr_grad | C1 C2 | C1 C2 | C1 C2 | −0.4% |
+
+`lagr_grad` differentiates both of its spaces' gradients, so there is nothing to skip and the honest
+result is zero. `ale_elemsize_both`'s win comes from the DL twin of the same gate.
+
+The FD comparator is mandatory here and was run both ways: zero differences at `1e-6` with the split
+on and off, while the same check at `1e-14` reports 38 - i.e. it is sensitive enough to have seen a
+dropped column. Poison mode covers the rank-4 buffer when unflagged, and residual/Jacobian are
+bitwise identical against `PYOOMPH_DISABLE_DCOORD_SPLIT` on every moving-mesh case.
+
+## 7. Open
 * The DG attachment gate (§4.3), once DG marshalling is attachment-aware.
 * Narrowing the `InterfaceElementBase` hang predicate to elements that really hang (it currently
   returns true whenever bulk or opposite shapes are required — conservative and correct).

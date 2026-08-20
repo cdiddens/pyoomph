@@ -1287,6 +1287,13 @@ namespace pyoomph
       // equation remap and must stay unconditional) would get two identical entry points, so its
       // _NoHang twin is not emitted at all and the function table aliases the slots as before.
       bool hang_parameter_was_used = false;
+      // Which contribution's shape flags are currently being collected ("ResJac[0]", "Hessian[2]", ""
+      // for none). Routine-scoped for the same reason as the two above. Every site that EMITS a read of
+      // d_dx_shape_dcoord marks dx_psi_dcoord through this - there is more than one such site (the
+      // interpolation loop and the Jacobian expression printer), and a flag derived from only one of
+      // them under-requests, which for this family means silently dropped Jacobian columns. That is the
+      // same trap as the Hessian shape flags of dev_docs/code_generation.md 9.4.15.
+      std::string current_shapeflag_func_type;
       // residual index -> (row test field, column unknown field) -> (Jacobian half, mass-matrix half),
       // summed over every emitted contribution. Lives on the code rather than on the field (unlike
       // jacobian_contribution_for_code) because proving block (i,j) = +-transpose(block (j,i)) needs

@@ -2126,6 +2126,12 @@ namespace pyoomph
 				if (s.basis->is_eulerian_deriv())
 				{
 					required_coorddiffs.insert(s);
+					// The rank-4 nodal-coordinate sensitivity of this space is about to be READ below.
+					// Marking the flag from this very set is what keeps the fill and the reads in step -
+					// deriving it a second time from the residual would be another predicate to keep
+					// synchronised by hand, which is how the Hessian flags went wrong (see 9.4.15).
+					if (!for_code->current_shapeflag_func_type.empty())
+						for_code->mark_shapes_required(for_code->current_shapeflag_func_type, const_cast<FiniteElementSpace *>(s.basis->get_space()), "dx_psi_dcoord");
 				}
 			}
 		}
@@ -5685,6 +5691,7 @@ namespace pyoomph
 	// implementations elsewhere know a Hessian derivative is in progress.
 	bool FiniteElementCode::write_generic_Hessian(std::ostream &os, std::string funcname, GiNaC::ex resi, bool)
 	{
+		this->current_shapeflag_func_type = "Hessian[" + std::to_string(residual_index) + "]";
 		__in_hessian = true;
 		bool has_contribs = false;
 		std::ostringstream osh; // Header
@@ -6003,6 +6010,7 @@ namespace pyoomph
 	// integration-point loop.
 	void FiniteElementCode::write_generic_RJM(std::ostream &os, std::string funcname, GiNaC::ex resi, bool, bool may_be_asked_for_mass_matrix, bool allow_hang_split)
 	{
+		this->current_shapeflag_func_type = "ResJac[" + std::to_string(residual_index) + "]";
 		__in_hessian = false;
 		emitted_mass_matrix_contribution = false;
 		// Emitted as an implementation with a CONSTANT flag plus a dispatcher below, so that the three
@@ -6313,6 +6321,9 @@ namespace pyoomph
 	// same name (which would make the two indistinguishable to users of the generated evaluation API).
 	void FiniteElementCode::write_code_integral_or_local_expressions(std::ostream &os, std::map<std::string, GiNaC::ex> &exprs, std::map<std::string, GiNaC::ex> &units, std::string funcname, std::string reqname, bool integrate)
 	{
+		// Not an assembled contribution: nothing here may mark dx_psi_dcoord, and leaving the
+		// last routine's value standing would attribute its reads to the wrong contribution.
+		this->current_shapeflag_func_type.clear();
 		os << "static double " << funcname << "(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo, unsigned index)" << std::endl;
 		os << "{" << std::endl;
 		os << "  const unsigned flag=0;" << std::endl;
@@ -6467,6 +6478,9 @@ namespace pyoomph
 	// which could only ever be first order in a varying-dt run.
 	void FiniteElementCode::write_code_tracer_advection(std::ostream &os)
 	{
+		// Not an assembled contribution: nothing here may mark dx_psi_dcoord, and leaving the
+		// last routine's value standing would attribute its reads to the wrong contribution.
+		this->current_shapeflag_func_type.clear();
 		// Past-level geometry must be materialised even on a code without position dofs: a mesh moved
 		// by macro elements or by direct node manipulation still has a nodal position history, and a
 		// gradient inside a past-level advection expression has to be taken on the matching
@@ -6688,6 +6702,9 @@ namespace pyoomph
 	// error estimation instead of the regular one.
 	void FiniteElementCode::write_code_get_z2_flux(std::ostream &os,bool for_eigen)
 	{
+		// Not an assembled contribution: nothing here may mark dx_psi_dcoord, and leaving the
+		// last routine's value standing would attribute its reads to the wrong contribution.
+		this->current_shapeflag_func_type.clear();
 		os << "static void GetZ2Fluxes"<<(for_eigen ? "ForEigen" : "")<<"(const JITElementInfo_t * eleminfo, const JITShapeInfo_t * shapeinfo, double * Z2Flux)" << std::endl;
 		os << "{" << std::endl;
 		os << std::endl;
@@ -8688,7 +8705,7 @@ namespace pyoomph
 			{
 				if (psientry.second)
 				{
-					if (psientry.first=="psi" || psientry.first=="dx_psi" || psientry.first=="dX_psi" || psientry.first=="d2x_psi" || psientry.first=="d2X_psi")
+					if (psientry.first=="psi" || psientry.first=="dx_psi" || psientry.first=="dX_psi" || psientry.first=="d2x_psi" || psientry.first=="d2X_psi" || psientry.first=="dx_psi_dcoord")
 					{
 						if (fieldentry.first->get_name()=="C1" || fieldentry.first->get_name()=="C1TB"||  fieldentry.first->get_name()=="C2" || fieldentry.first->get_name()=="C2TB")
 						{
@@ -11840,6 +11857,10 @@ namespace GiNaC
 								throw_runtime_error("DD")
 							}
 							std::string shapename = dcoord_shape_array(sp.basis, false);
+							// Second site that emits a rank-4 read; marks through the same channel as the
+							// interpolation loop so the flag stays a superset of the reads.
+							if (!femprint.FEM_opts->for_code->current_shapeflag_func_type.empty())
+								femprint.FEM_opts->for_code->mark_shapes_required(femprint.FEM_opts->for_code->current_shapeflag_func_type, const_cast<pyoomph::FiniteElementSpace *>(sp.basis->get_space()), "dx_psi_dcoord");
 							const std::string dirstr = dcoord_shape_index(sp.basis);
 							if (sp.nodal_coord_dir >= 0)
 							{
@@ -12318,6 +12339,12 @@ namespace GiNaC
 				}
 				else if (sp.nodal_coord_dir2 == -1)
 				{
+					// Third site emitting a rank-4 read (test-function side); same channel again. Only
+					// THIS branch reads d_dx_shape_dcoord - the one above reads no sensitivity at all and
+					// the one below reads the rank-6 array, so marking before the branch over-requests
+					// and gives the space back its full fill for nothing.
+					if (!femprint.FEM_opts->for_code->current_shapeflag_func_type.empty())
+						femprint.FEM_opts->for_code->mark_shapes_required(femprint.FEM_opts->for_code->current_shapeflag_func_type, const_cast<pyoomph::FiniteElementSpace *>(sp.basis->get_space()), "dx_psi_dcoord");
 					std::string shapestr = femprint.FEM_opts->for_code->get_shape_info_str(sp.basis->get_space()) + "->"+ shapename;
 					shapestr += "[l_test][" + dcoord_shape_index(sp.basis) + "][" + (sp.is_derived_other_index ? "l_shape2" : "l_shape") + "][" + std::to_string(sp.nodal_coord_dir) + "]";
 					c.s << shapestr;

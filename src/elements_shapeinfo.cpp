@@ -995,6 +995,10 @@ namespace pyoomph
 	// single binary (the PYOOMPH_DISABLE_NOHANG_DISPATCH pattern). The poison keys on the same helper,
 	// so it follows the lever automatically.
 	static const bool __disable_shape_family_split = getenv("PYOOMPH_DISABLE_SHAPE_FAMILY_SPLIT") != NULL;
+	// Its own lever, not folded into the one above: getting this family wrong does not produce a NaN or
+	// a crash, it silently drops nodal-position columns of the Jacobian, so it needs to be switched -
+	// and compared against the FD Jacobian - on its own.
+	static const bool __disable_dcoord_split = getenv("PYOOMPH_DISABLE_DCOORD_SPLIT") != NULL;
 
 	static inline BulkElementBase::RequiredShapeFamilies __widen_if_lever(BulkElementBase::RequiredShapeFamilies f)
 	{
@@ -1005,6 +1009,8 @@ namespace pyoomph
 		// what the fill sites restore instead (see the space_d2x lines).
 		if (__disable_shape_family_split && f.any())
 			f.psi = f.dx = f.dX = true;
+		if (__disable_dcoord_split && f.any())
+			f.dcoord = true;
 		return f;
 	}
 
@@ -1030,6 +1036,7 @@ namespace pyoomph
 		f.dx = rs.dx_psi || (dominant && required.Pos.dx_psi);
 		f.dX = rs.dX_psi || (dominant && required.Pos.dX_psi);
 		f.d2x = rs.d2x_psi || (dominant && required.Pos.d2x_psi);
+		f.dcoord = rs.dx_psi_dcoord || (dominant && required.Pos.dx_psi_dcoord);
 		return __widen_if_lever(f);
 	}
 
@@ -1040,6 +1047,7 @@ namespace pyoomph
 		f.dx = required.DL.dx_psi;
 		f.dX = required.DL.dX_psi;
 		f.d2x = required.DL.d2x_psi;
+		f.dcoord = required.DL.dx_psi_dcoord;
 		return __widen_if_lever(f);
 	}
 
@@ -1130,10 +1138,10 @@ namespace pyoomph
 				__poison2(si->d2S_shapes[ispace], nn, MAX_N2DERIV);
 				__poison4(si->d_d2x_shape_dcoord[ispace], nn, MAX_N2DERIV, n_node, n_dim);
 			}
-			// The nodal-coordinate sensitivities are still gated by require_dxdshape rather than per
-			// space (stage 6), and their fill sits inside the "is this space needed at all" block - so
-			// any() is the honest predicate for them, not fam.dx.
-			if (!fam.any())
+			// Now per space: the fill still sits inside the "is this space needed at all" block, so a
+			// space that is not required at all is poisoned as before, and one that is required but
+			// whose gradient nothing differentiates by the nodal positions is poisoned too.
+			if (!fam.any() || !fam.dcoord)
 				__poison4(si->d_dx_shape_dcoord[ispace], nn, n_dim, n_node, n_dim);
 		}
 
@@ -1733,8 +1741,11 @@ namespace pyoomph
 							}
 						}
 					}
-					// TODO: Only if neccessary!
-					if (require_dxdshape)
+					// Only for the spaces whose Eulerian gradient an assembled entry actually
+					// differentiates by the nodal positions - fam.dcoord is marked from the same set of
+					// shape expansions that emits those reads. This used to run for EVERY required
+					// space and is the most expensive family of a moving-mesh fill.
+					if (require_dxdshape && fam.dcoord)
 					{
 						for (unsigned int i = 0; i < n_dim; i++)
 						{
@@ -2039,7 +2050,7 @@ namespace pyoomph
 							}
 						}
 					}
-				if (require_dxdshape)
+				if (require_dxdshape && fam_DL.dcoord)
 				{
 					for (unsigned int i = 0; i < n_dim; i++)
 					{

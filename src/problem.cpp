@@ -71,6 +71,7 @@ namespace pyoomph
 		dest.dX_psi |= src.dX_psi;
 		dest.d2x_psi |= src.d2x_psi;
 		dest.d2X_psi |= src.d2X_psi;
+		dest.dx_psi_dcoord |= src.dx_psi_dcoord;
 	}
 
 	void RequiredShapes_merge(JITFuncSpec_RequiredShapes_FiniteElement_t *src, JITFuncSpec_RequiredShapes_FiniteElement_t *dest)

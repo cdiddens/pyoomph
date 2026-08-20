@@ -353,6 +353,13 @@ typedef void (*JITFuncSpec_GeometricJacobianSpatialDerivative)(const JITElementI
 typedef struct JITFuncSpec_RequiredShapes_For_Space
 {
   bool psi,dx_psi,dX_psi,d2x_psi,d2X_psi;
+  // Does an ASSEMBLED entry differentiate this space's Eulerian shape derivative with respect to the
+  // nodal positions, i.e. does the generated code read d_dx_shape_dcoord for this space? Marked from
+  // the very set of shape expansions that emits those reads (write_spatial_interpolation's
+  // required_coorddiffs), so the flag and the reads cannot drift apart. Only meaningful on a moving
+  // mesh; the rank-4 fill it gates is the single most expensive item of a moving-mesh Jacobian
+  // assembly, and it used to run for every required space whether it was read or not.
+  bool dx_psi_dcoord;
 } JITFuncSpec_RequiredShapes_For_Space_t;
 
 typedef struct JITFuncSpec_RequiredShapes_FiniteElement

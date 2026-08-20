@@ -765,6 +765,10 @@ namespace pyoomph
                          // derivative has no flag of its own and is marked as dX_psi by the code
                          // generator (D1XBasisFunctionLocalCoord derives from D1XBasisFunctionLagr).
       bool d2x = false;  // d2x_shapes[], d2S_shapes[] and d_d2x_shape_dcoord[]
+      bool dcoord = false; // d_dx_shape_dcoord[]: the rank-4 sensitivity of this space's Eulerian
+                         // gradient to the nodal positions. Only ever set on a moving mesh, and only
+                         // for spaces whose gradient an assembled entry really differentiates - it is
+                         // the most expensive single family of a moving-mesh Jacobian fill.
       bool any() const { return psi || dx || dX || d2x; }
     };
     // The single place that decides the above. fill_shape_info_at_s, set_remaining_shapes_appropriately
