@@ -123,11 +123,9 @@ class ProjectionInternalInterpolator(BaseMeshToMeshInterpolator):
         # During remeshing neither mesh is guaranteed to have its problem pointer set - get_problem()
         # raises rather than returning None - so try the equation trees as well before giving up.
         problem=None
-        # via get_equations(): EquationTree itself has no get_problem, so the tree fallbacks used to
-        # raise AttributeError and be swallowed by the except below, i.e. never fall back at all.
         for getter in (lambda: self.old.get_problem(), lambda: self.new.get_problem(),
-                       lambda: self.old.get_eqtree().get_equations().get_problem(),
-                       lambda: self.new.get_eqtree().get_equations().get_problem()):
+                       lambda: self.old.get_eqtree().get_problem(),
+                       lambda: self.new.get_eqtree().get_problem()):
             try:
                 problem=getter()
             except Exception:

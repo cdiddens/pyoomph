@@ -247,9 +247,6 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
         return res._codegen
 
 
-    def _set_problem(self,problem:"Problem | None"): #type:ignore
-        super()._set_problem(problem) #type:ignore
-
     def get_element_dimension(self) -> int:
         return self.dimension
 
@@ -1586,6 +1583,12 @@ class BaseEquations(_pyoomph.Equations):
         cg=self._assert_codegen()
         cg._register_field(name,space)
 
+
+    def __radd__(self, other:"Literal[0]")->"EquationTree | BaseEquations":
+        # So that sum() over equations works; only EquationTree had this before.
+        if other==0:
+            return self
+        raise RuntimeError("Cannot add "+str(other)+" and "+str(self))
 
     def __add__(self, other:"Literal[0] | BaseEquations | EquationTree")->"EquationTree | BaseEquations":
         """Adding equations yields an unrestricted domain holding both.
@@ -3181,7 +3184,6 @@ class EquationTree(Equations):
         if self._codegen is not None:
             raise RuntimeError("Cannot reuse an equation tree that is already part of an initialized problem")
         res = EquationTree(self._equations, parent=None)
-        res._name = getattr(self,"_name",None) #type:ignore
         for k, v in self._children.items():
             child = v._clone_structure()
             child._parent = res
@@ -3213,8 +3215,7 @@ class EquationTree(Equations):
                 return self._clone_structure() @ other
             res = EquationTree(None, parent=None)
             res._children[splt[-1]] = self
-            res._name = splt[-1]
-            _check_domain_name_or_pattern(res._name)
+            _check_domain_name_or_pattern(splt[-1])
             self._parent = res
             for k in reversed(splt[:-1]):
                 res = res @ k
