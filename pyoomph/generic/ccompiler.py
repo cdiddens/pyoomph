@@ -304,30 +304,54 @@ int main (int argc, char **argv) {
             pass
         return self.compiler_id+"|"+str(self.comp.compiler_type)+"|"+exe+"|"+version #type:ignore
 
+    def _compute_preargs(self) -> list[str]:
+        """The compile flags, without the per-Problem extra_compiler_flags (which the cache key hashes
+        separately).
+
+        Factored out of _compile_impl so that get_cache_flag_state() can return the flags THEMSELVES.
+        That is what dev_docs/code_generation.md 7 asked for: the key used to hash the few pieces of
+        state today's flags happen to be derivable from, so a flag hardcoded into the defaults was
+        invisible to it and every previously cached .so was silently reused. Hashing the computed list
+        means no flag change ever needs a cache epoch again.
+        """
+        if self.compile_args is not None:
+            # A copy, not the caller's list: get_ccompiler() memoises one compiler instance per backend,
+            # so the += below used to append -ffast-math and the Problem's extra flags to the user's own
+            # list on every single element compile, and the cache key drifted along with it.
+            return list(self.compile_args)
+        if self.comp.compiler_type=="unix": #type:ignore
+            if os.environ.get('PYOOMPH_DEBUG') == "1":
+                return ["-O0","-g3","-fPIC"]
+            # -fno-math-errno lets the compiler treat libm calls as pure, so it may CSE them and hoist
+            # them out of the trial loop. It changes no arithmetic - residuals are bit-identical (7) -
+            # and pyoomph never reads errno. On polynomial weak forms it is noise, which is why 7
+            # originally left it out; the case it was left out for was a transcendental weak form where
+            # subexpression() beats it. But the transcendental forms also arise inside pyoomph's OWN
+            # equations, where the user cannot reach in and wrap anything: measured on a 16x16 quad
+            # Navier-Stokes, elemental residual+Jacobian, only the mesh-motion class changed:
+            #   LaplaceSmoothedMesh 16.3 -> 16.5 ms, PseudoElasticMesh 16.9 -> 16.9 ms (the controls),
+            #   HyperelasticSmoothedMesh 41.9 -> 20.7 ms, YeohSmoothedMesh 127.2 -> 22.3 ms.
+            # Yeoh mesh smoothing is 7.8x slower than Laplace without it and 1.35x slower with it.
+            preargs=["-O3","-fPIC","-fno-math-errno"]
+            if sys.platform!="darwin":
+                preargs+=["-march=native"]
+            return preargs
+        elif self.comp.compiler_type=="msvc": #type:ignore
+            # No MSVC equivalent of -fno-math-errno that does not also change the arithmetic (/fp:fast
+            # does, and is what optimize_for_max_speed opts into).
+            return ["/O2"] #Optionally set things like /arch:AVX2 /O2 /Ob2
+        else:
+            raise RuntimeError("Compiler type "+str(self._comp.compiler_type)) #type:ignore
+
     def get_cache_flag_state(self) -> str:
-        return super().get_cache_flag_state()+"|"+repr(self._optimize_full_speed)+"|"+repr(self.compile_args)
+        return super().get_cache_flag_state()+"|"+repr(self._optimize_full_speed)+"|"+repr(self._compute_preargs())
 
     def _compile_impl(self, suppress_compilation:bool, suppress_code_writing:bool,quiet:bool,extra_flags:Sequence[str]) -> bool:
         if suppress_compilation:
             return True
         distutils.log.set_verbosity(2 if not quiet else 0) #type:ignore
-        preargs=[]
         link_extra_postargs=[]
-        if self.compile_args is None:
-            if self.comp.compiler_type=="unix": #type:ignore
-                if os.environ.get('PYOOMPH_DEBUG') == "1":
-                    preargs = ["-O0","-g3","-fPIC"]
-                else:
-                    preargs=["-O3","-fPIC"]
-                    if sys.platform!="darwin":
-                        preargs+=["-march=native"]                   
-
-            elif self.comp.compiler_type=="msvc": #type:ignore
-                preargs = ["/O2"] #Optionally set things like /arch:AVX2 /O2 /Ob2 #Test /fp:fast
-            else:
-                raise RuntimeError("Compiler type "+str(self._comp.compiler_type)) #type:ignore
-        else:
-            preargs=self.compile_args
+        preargs=self._compute_preargs()
 
         if self._optimize_full_speed:
             if self.comp.compiler_type=="msvc": #type:ignore

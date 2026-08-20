@@ -96,6 +96,15 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   store -- unchanged, and every residual, Jacobian and mass matrix bitwise identical. `-O3` cannot do
   this itself: it is not allowed to. Revertible with `PYOOMPH_DISABLE_BUFFER_ALIASES`.
 
+- **`-fno-math-errno` is now a default compile flag** for the system compiler. It changes no
+  arithmetic -- residuals are bit-identical -- but it lets the compiler treat libm calls as pure and so
+  hoist them out of the trial loop. On polynomial weak forms it is noise; on pyoomph's own hyperelastic
+  mesh smoothers, where the user cannot reach in and wrap anything in `subexpression()`, it halves
+  `HyperelasticSmoothedMesh` (41.9 -> 20.7 ms elemental residual+Jacobian) and cuts `YeohSmoothedMesh`
+  by a factor of 5.7 (127.2 -> 22.3 ms). `SystemCCompiler.get_cache_flag_state()` now hashes the
+  computed flag list itself, so a future flag change invalidates the JIT cache on its own and needs no
+  epoch.
+
 - **An adaptation that refines and unrefines nothing no longer touches the problem.** Deciding to do
   nothing is the normal end state rather than an edge case: oomph-lib only leaves its own adaption loop
   once an `adapt()` has reported 0/0, so with `spatial_adapt>0` the last adaptation of every solve is a

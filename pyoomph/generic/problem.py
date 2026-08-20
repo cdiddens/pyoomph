@@ -3003,7 +3003,10 @@ class Problem(_pyoomph.Problem):
         # once, and caches its derivatives, instead of leaving redundant libm calls for the compiler to
         # eliminate), and once it is used -ffast-math adds under a percent. On polynomial weak forms the
         # flag is within noise either way, since -O3 -march=native is already the default.
-        self.cmdlineparser.add_argument('--fast-math', help="activate fast math compiler flags (only with distutils, not with tcc). Rarely pays off: consider wrapping expensive terms in subexpression() instead, which is faster and does not change the arithmetic", action='store_true')
+        # What actually mattered in that measurement was -fno-math-errno, the one part of -ffast-math
+        # that changes no arithmetic - and that is now a DEFAULT (SystemCCompiler._compute_preargs), so
+        # what is left under this flag is only the reassociating half.
+        self.cmdlineparser.add_argument('--fast-math', help="activate fast math compiler flags (only with distutils, not with tcc). Rarely pays off: the part that mattered (-fno-math-errno) is already on by default, and wrapping expensive terms in subexpression() beats the rest without changing the arithmetic", action='store_true')
         self.cmdlineparser.add_argument('--distribute',help="Distribute mesh in parallel",action='store_true')
         # Registered here mainly so that it shows up in --help and is consumed rather than handed on
         # to PETSc as an unrecognised option; it is read from sys.argv much earlier than this, in

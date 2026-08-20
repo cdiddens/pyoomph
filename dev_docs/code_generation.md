@@ -316,6 +316,43 @@ which is why its advantage is much larger in the Jacobian (−91.1% vs −86.5%)
 alone (−46.5% vs −42.9%). Once it is used, the flags are worth ~0.7%. `-fno-math-errno` was therefore
 not added to the defaults.
 
+> **Superseded — it is a default now (§7.1).** The argument above is one of redundancy, not of risk,
+> and it has a premise: that the transcendental weak form is *user* code, which somebody can go and
+> wrap. That premise fails for pyoomph's own equations.
+
+### 7.1 …and why it is a default after all
+
+`HyperelasticSmoothedMesh` and `YeohSmoothedMesh` (`pyoomph/equations/ALE.py`) emit
+`pow(J,-2/3)`, `pow(J,-5/3)`, `pow(J,-8/3)` throughout their residual — 60 genuinely fractional powers
+in `beads_on_string`'s bulk element alone. A user cannot wrap them, and `use_subexpressions=True`,
+which those classes used to offer for exactly that purpose, is a **pessimisation** there (§7.2). So
+`subexpression()` — the thing §7 pointed at instead of the flag — does not exist as an option in the
+one case where the flag is worth a factor of several.
+
+Measured on a 16×16 quad Navier-Stokes on a moving mesh, 200 elemental residual+Jacobian assemblies via
+`Problem._benchmark_elemental_assembly`, with only the mesh-motion class changed:
+
+| mesh motion | default | `-fno-math-errno` | Δ | converged dof norm |
+|---|---|---|---|---|
+| `LaplaceSmoothedMesh` | 16.3 ms | 16.5 ms | +1.5% | identical |
+| `PseudoElasticMesh` | 16.9 ms | 16.9 ms | 0% | identical |
+| `HyperelasticSmoothedMesh` | 41.9 ms | 20.7 ms | **−50.7%** | identical |
+| `YeohSmoothedMesh` | 127.2 ms | 22.3 ms | **−82.5%** | agrees to 1e-16 |
+
+The first two rows are the control and reproduce §7's "noise on polynomial forms" exactly. The last
+one is the point: Yeoh mesh smoothing is **7.8× slower than Laplace smoothing** without the flag and
+1.35× slower with it — most of what looked like the intrinsic cost of a Yeoh mesh was `errno`
+bookkeeping stopping GCC from hoisting a `pow` out of the trial loop.
+
+It is in `SystemCCompiler._compute_preargs` (unix, non-debug only; MSVC has no equivalent that does not
+also change the arithmetic, and tcc has no default flags at all).
+
+**The cache-key warning below is now structurally answered** rather than worked around:
+`get_cache_flag_state()` returns `repr(self._compute_preargs())`, i.e. the flags themselves, so any
+future change to the default flag list invalidates the affected cache entries by itself and no epoch is
+ever needed again. `FORMAT_VERSION` was deliberately *not* bumped — it would also throw away tcc-built
+objects, which the flag does not affect.
+
 > Note for anyone re-adding a hardcoded flag: the compile flags are **not** fully covered by the JIT
 > cache key. `SystemCCompiler.get_cache_flag_state()` covers `PYOOMPH_DEBUG`, `_optimize_full_speed`
 > and `compile_args`, from all of which today's flags are derivable; a flag hardcoded into the defaults
@@ -485,7 +522,7 @@ compiler cannot differentiate anything.
 |---|---|---|---|
 | CSE with loop-level placement in the emitter | −11% achievable, **−1.9% achieved** | −25% achievable | tried, **reverted** (§8.3) |
 | `pow(x,2)` → `x*x` in the C printer | 0 | −53% | tried, **reverted** (§8.1) |
-| `-fno-math-errno` in the default flags | −86% on transcendental forms, 0 elsewhere | n/a | tried, **reverted** (§7) |
+| `-fno-math-errno` in the default flags | −86% on transcendental forms, 0 elsewhere | n/a | **done** (§7.1) — reverted once, then re-decided when the transcendental case turned out to arise inside pyoomph's own mesh smoothers, where `subexpression()` is not available and in fact backfires |
 | **`subexpression()` in user code** | **−91% on transcendental forms** | — | **the recommendation** |
 | drop the `IGNORED RESIDUAL` comment payload | 0 | 0 | **done** (§8.5) — compile time only, but 66% of one 5.8 MB file |
 | remove the dead `d_subexpr_*` stores | ~0 | ~0 | not attempted; symptom of §9.2 |
