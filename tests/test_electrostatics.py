@@ -53,6 +53,7 @@ from pyoomph.expressions import *
 from pyoomph.expressions.units import *
 from pyoomph.expressions.phys_consts import *
 from pyoomph.equations.electrostatics import *
+from pyoomph.equations.stabilization import ScalarTransportStabilization
 from pyoomph.meshes.simplemeshes import LineMesh, RectangularQuadMesh
 
 _run_counter = itertools.count()
@@ -595,11 +596,13 @@ class _PNPDiffuseLayer(Problem):
     """
 
     def __init__(self, *, zeta, lambda_D, eps_r=78.4, N=300, L_over_lambda=20.0, valence=1,
-                 T=298.15 * kelvin, D=1e-9 * meter ** 2 / second):
+                 T=298.15 * kelvin, D=1e-9 * meter ** 2 / second, stabilization=None,
+                 stab_factor=1, dc_factor=1):
         super().__init__()
         self.zeta, self.lambda_D, self.eps_r, self.valence, self.T, self.D = \
             zeta, lambda_D, eps_r, valence, T, D
         self.N, self.L = N, L_over_lambda * lambda_D
+        self.stabilization, self.stab_factor, self.dc_factor = stabilization, stab_factor, dc_factor
 
     def bulk_concentration(self):
         eps = self.eps_r * epsilon_0
@@ -613,10 +616,17 @@ class _PNPDiffuseLayer(Problem):
         set_electrostatic_scaling(self, potential=thermal_voltage(self.T), temperature=self.T,
                                   ion_concentration=cinf)
         self.add_mesh(LineMesh(N=self.N, size=self.L))
+        # A stabilized Nernst-Planck is advective even at wind=0, because the migration drift is
+        # not zero, so it does reference the velocity scale. D/lambda_D is that drift.
+        self.set_scaling(velocity=self.D / self.lambda_D)
         ions = symmetric_electrolyte(cinf, self.valence, cation_diffusivity=self.D,
                                      anion_diffusivity=self.D)
+        stab = self.stabilization
+        if stab is not None:
+            stab = ScalarTransportStabilization(stab, stab_factor=self.stab_factor,
+                                                dc_factor=self.dc_factor)
         eqs = PoissonNernstPlanck(ions, relative_permittivity=self.eps_r, wind=0,
-                                  temperature=self.T)
+                                  temperature=self.T, stabilization=stab)
         eqs += ElectrodeBC(self.zeta) @ "left"
         eqs += (ElectrodeBC(0) + DirichletBC(c_cation=cinf, c_anion=cinf)) @ "right"
         # Boltzmann reference, evaluated on the SOLVED potential: if the transport equation is right
@@ -926,3 +936,146 @@ def test_charge_relaxation_flag_explains_itself():
     with pytest.raises(NotImplementedError, match="stiff"):
         OhmicConductionEquations(conductivity=1 * siemens / meter, permittivity=epsilon_0,
                                  charge_relaxation=True)
+
+
+# ---------------------------------------------------------------------------------------------
+# Per-species SUPG
+# ---------------------------------------------------------------------------------------------
+
+def _pnp_dofs(**kw):
+    prob = _PNPDiffuseLayer(zeta=2.0 * thermal_voltage(298.15 * kelvin),
+                            lambda_D=3 * nano * meter, N=120, **kw)
+    with _fresh(prob) as p:
+        p.solve()
+        return numpy.array(p.get_current_dofs()[0])
+
+
+def test_pnp_stabilization_is_off_by_default_and_at_zero_factor():
+    """Invariant 2 of tests/test_stabilized_transport.py, restated for Nernst-Planck.
+
+    Bitwise, not merely close: that is what catches a term added unconditionally, or a prefactor
+    that does not reach every contribution.
+    """
+    plain = _pnp_dofs()
+    # Both factors, as the sibling test in test_stabilized_transport.py does: stab_factor scales
+    # tau, dc_factor scales nu_dc, and neither scales the other.
+    zeroed = _pnp_dofs(stabilization="GLS+DC", stab_factor=0, dc_factor=0)
+    assert plain.shape == zeroed.shape
+    assert numpy.array_equal(plain, zeroed)
+
+
+class _ManufacturedPNP(Problem):
+    r"""A Poisson-Nernst-Planck solution that lies in C2 AND satisfies the equations strongly.
+
+    Both are needed for a consistency test. Lying in the space makes the Galerkin solution exact;
+    satisfying the PDE pointwise makes the strong residual identically zero, which is what SUPG,
+    GLS and ASGS all multiply. So switching them on must not move a single dof.
+
+    Construction: pick phi quadratic, then phi'' is constant, so Gauss forces c_+ - c_- to be the
+    constant q = -eps*phi''/F. Any common quadratic profile may be added to both species on top of
+    that without disturbing it. The Nernst-Planck source terms are then whatever the chosen fields
+    leave over, supplied through ``reactions``, which the strong residual subtracts again.
+    """
+
+    def __init__(self, *, stabilization=None, N=8, L=1 * micro * meter, T=300 * kelvin,
+                 D=1e-9 * meter ** 2 / second, eps_r=78.4, c0=1 * mol / meter ** 3,
+                 B=0.2 * mol / meter ** 3):
+        super().__init__()
+        self.stabilization, self.N, self.L, self.T, self.D = stabilization, N, L, T, D
+        self.eps_r, self.c0, self.B = eps_r, c0, B
+        self.A = thermal_voltage(T)
+
+    def _fields(self):
+        x = var("coordinate_x")
+        shape = x * (self.L - x) / self.L ** 2
+        eps = self.eps_r * epsilon_0
+        phi = self.A * shape
+        # phi'' = -2A/L^2, so Gauss needs F*(c_p - c_m) = -eps*phi'' = 2*eps*A/L^2.
+        q = 2 * eps * self.A / (self.L ** 2 * faraday_constant)
+        return phi, self.c0 + q / 2 + self.B * shape, self.c0 - q / 2 + self.B * shape
+
+    def define_problem(self):
+        phi_e, cp, cm = self._fields()
+        self.set_scaling(spatial=self.L, temperature=self.T, temporal=self.L ** 2 / self.D,
+                         velocity=self.D / self.L)
+        set_electrostatic_scaling(self, potential=self.A, temperature=self.T,
+                                  ion_concentration=self.c0)
+        self.add_mesh(LineMesh(N=self.N, size=self.L))
+        m = lambda z: z * (self.D / (gas_constant * self.T)) * faraday_constant
+        src = lambda c, z: -div(self.D * grad(c)) - div(m(z) * c * grad(phi_e))
+        ions = [IonSpec("cation", +1, self.D), IonSpec("anion", -1, self.D)]
+        eqs = PoissonNernstPlanck(ions, relative_permittivity=self.eps_r, wind=0, temperature=self.T,
+                                  stabilization=self.stabilization, set_bulk_initial_conditions=False,
+                                  reactions={"cation": src(cp, +1), "anion": src(cm, -1)})
+        for b in ("left", "right"):
+            eqs += DirichletBC(phi=phi_e, c_cation=cp, c_anion=cm) @ b
+        eqs += InitialCondition(phi=phi_e, c_cation=cp, c_anion=cm)
+        eqs += IntegralObservables(
+            _length=1,
+            err=subexpression((var("phi") - phi_e) ** 2 / self.A ** 2
+                              + (var("c_cation") - cp) ** 2 / self.c0 ** 2
+                              + (var("c_anion") - cm) ** 2 / self.c0 ** 2))
+        self.add_equations(eqs @ "domain")
+
+
+def _manufactured_pnp(stabilization=None):
+    with _fresh(_ManufacturedPNP(stabilization=stabilization)) as p:
+        p.solve()
+        o = p.get_mesh("domain").evaluate_all_observables()
+        return numpy.array(p.get_current_dofs()[0]), float(o["err"] / o["_length"])
+
+
+def test_manufactured_pnp_is_solved_exactly():
+    # If this fails, the consistency test below proves nothing.
+    _, err = _manufactured_pnp()
+    assert err == pytest.approx(0.0, abs=1e-14)
+
+
+@pytest.mark.parametrize("stabilization", ["SUPG", "GLS", "ASGS"])
+def test_pnp_stabilization_is_consistent(stabilization):
+    """SUPG/GLS/ASGS all multiply the strong residual, so where it vanishes they must return the
+    unstabilized answer -- including with the per-species migration wind and the migration reaction
+    rate in tau, neither of which is zero here."""
+    plain, _ = _manufactured_pnp()
+    stabilized, err = _manufactured_pnp(stabilization)
+    assert err == pytest.approx(0.0, abs=1e-14)
+    rel = numpy.max(numpy.abs(stabilized - plain)) / numpy.max(numpy.abs(plain))
+    assert rel < 1e-8, "stabilization moved a zero-residual solution by %g" % rel
+
+
+def test_migration_wind_is_per_species():
+    """The point of the per-field hook: a cation and an anion drift in opposite directions.
+
+    Sized from the fluid velocity alone -- which is zero here -- tau would see no advection at all
+    and the SUPG weight would be identically zero, which is what the base class did before
+    stabilization_wind_for_field existed.
+    """
+    D_p, D_m = 1e-9 * meter ** 2 / second, 2e-9 * meter ** 2 / second
+    ions = symmetric_electrolyte(1 * mol / meter ** 3, 1, cation_diffusivity=D_p,
+                                 anion_diffusivity=D_m)
+    eqs = NernstPlanckEquations(ions, wind=0, temperature=300 * kelvin, stabilization="SUPG")
+    a_p = eqs.stabilization_wind_for_field("c_cation")
+    a_m = eqs.stabilization_wind_for_field("c_anion")
+    assert not (a_p - a_m).is_zero(), "the two species must not share a wind"
+    # Opposite charges drift oppositely, and the Einstein relation makes the magnitudes scale with
+    # the diffusivities, so a_m = -2*a_p exactly.
+    assert (a_m + 2 * a_p).is_zero()
+    # The shared part is still the fluid velocity, i.e. zero here.
+    assert is_zero(convert_to_expression(eqs.stabilization_wind()))
+
+
+def test_migration_contributes_a_reaction_rate_to_tau():
+    # -div(m c grad(phi)) is an advective part PLUS a term linear in c, which tau has a slot for.
+    # Zero for a plain advection-diffusion equation, so the default must stay zero.
+    from pyoomph.equations.advection_diffusion import AdvectionDiffusionEquations
+    ad = AdvectionDiffusionEquations("c", diffusivity=1, stabilization="SUPG")
+    assert is_zero(convert_to_expression(ad.stabilization_reaction_rate("c")))
+
+    ions = symmetric_electrolyte(1 * mol / meter ** 3, 1,
+                                 cation_diffusivity=1e-9 * meter ** 2 / second,
+                                 anion_diffusivity=1e-9 * meter ** 2 / second)
+    eqs = NernstPlanckEquations(ions, wind=0, temperature=300 * kelvin, stabilization="SUPG")
+    r_p = eqs.stabilization_reaction_rate("c_cation")
+    r_m = eqs.stabilization_reaction_rate("c_anion")
+    assert not is_zero(convert_to_expression(r_p))
+    assert (r_p + r_m).is_zero(), "opposite valences give opposite rates"

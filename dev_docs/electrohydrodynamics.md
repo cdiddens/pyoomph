@@ -4,11 +4,12 @@ Status: **in the tree** as `pyoomph/equations/electrostatics.py` (field solvers,
 electrostatic interface conditions) and `pyoomph/equations/electrohydrodynamics.py` (coupling into
 the flow). Covered by `tests/test_electrostatics.py` and `tests/test_ehd.py`. Four pre-existing
 files were touched, each in one place: `pyoomph/expressions/phys_consts.py`,
-`pyoomph/expressions/units.py`, `pyoomph/equations/poisson.py` (a pure extraction) and
-`pyoomph/equations/navier_stokes.py` (one new keyword, `extra_stress`, whose `None` default
-generates byte-identical C).
+`pyoomph/expressions/units.py`, `pyoomph/equations/poisson.py` (a pure extraction), `pyoomph/equations/navier_stokes.py` (one new
+keyword, `extra_stress`) and `pyoomph/equations/stabilization.py` (two new hooks). The last two both
+generate byte-identical C when unused, checked by md5 rather than asserted.
 
-Not built: magnetics, full transient Maxwell, AC electrokinetics. Reasons in §8.
+Not built: magnetics, full transient Maxwell, AC electrokinetics. Reasons in §8. The per-species
+SUPG limitation this document originally recorded has since been fixed, see §6.
 
 ## 1. Why the potential formulation, and nothing else
 
@@ -242,22 +243,63 @@ Validated against the Maxwell-Wagner interfacial charge of two leaky layers in s
 case is `eps_1/sigma_1 == eps_2/sigma_2`: matched charge relaxation times mean the interfacial charge
 must be **exactly** zero, which no wrong prefactor or sign survives.
 
-### Known limitation: tau is undersized for migration
+### Stabilization is per-species
 
-`ScalarTransportEquations.stabilization_wind(self)` takes no fieldname, but the Nernst-Planck wind is
-**per species**, `a_i = u - z_i m_i F grad(phi)`. Worse, expanding the conservative migration term
-gives an advective part *plus* `+m_i z_i F c_i rho_e/eps`, a **reaction** rate that
-`tau_advective_diffusive` has no slot for and which dominates inside a thin Debye layer. So `tau` is
-undersized exactly where migration matters.
+`ScalarTransportEquations.stabilization_wind(self)` takes no fieldname, but the Nernst-Planck wind
+is per species, `a_i = u - z_i m_i F grad(phi)` — a cation and an anion drift in *opposite*
+directions in the same field. Worse, expanding the conservative migration term gives an advective
+part **plus** `-z_i m_i F c_i lap(phi)`, a term linear in `c_i` itself, i.e. a reaction rate. In a
+thin Debye layer that rate is of order `D/lambda_D^2` and dominates every other rate in `tau`.
+Sizing every species from the fluid velocity and omitting the reaction therefore left `tau` far too
+large exactly where the stabilization is being asked to work — and `tau` too large is not a mild
+error, see the Hele-Shaw measurement in `stabilized_scalar_transport.md`.
 
-Deliberately not fixed in this round. Threading a `fieldname` through `convective_velocity`,
-`stabilization_velocity_magnitude`, `_stabilization_is_advective`, `tau`, `dc_gradient` and
-`get_stabilization_flux` touches a base class shared with `advection_diffusion.py` and
-`multi_component.py`; the correct way to do it is a backward-compatible
-`stabilization_wind_for_field(fieldname)` defaulting to `stabilization_wind()`, shipped alone and
-verified by the bitwise-identical invariant that `tests/test_stabilized_transport.py` already
-asserts. A resolved double layer is finely meshed anyway, so the practical cost is low — but do not
-rely on SUPG to rescue an under-resolved one.
+Both are now supplied, through two new hooks on the base class:
+
+* `stabilization_wind_for_field(fieldname)`, defaulting to `stabilization_wind()`.
+* `stabilization_reaction_rate(fieldname)`, defaulting to 0.
+
+`tau_advective_diffusive` already had a `reaction` argument; `ScalarTransportEquations.tau` simply
+never passed it. It does now, along with a new `c_r` and `reaction_eps` on the settings object. The
+rate is passed as a *regularized magnitude*: `"codina"` and `"tezduyar"` add it linearly, so a
+negative rate — which is exactly what the co-ion has — would inflate `tau` instead of reducing it,
+and `absolute()` has a 0/0 derivative at the origin, which is where a rate proportional to the
+solution sits on a uniform initial condition. That is the trap `dc_diffusivity` already records.
+
+**Backward compatibility was the whole difficulty, and it is established by measurement, not by
+inspection.** `fieldname` is threaded through `_stabilization_is_advective`, `convective_velocity`
+and `stabilization_velocity_magnitude` as an *optional* argument whose `None` case routes through
+`stabilization_wind()` rather than `stabilization_wind_for_field()`, so an equation overriding only
+the old hook produces the identical expression tree. Nothing in the tree overrides those three (the
+`convective_velocity` in `stabilized_ns.py` belongs to `NavierStokesEquations`, an unrelated
+hierarchy), so widening their signatures is safe. Verified two ways: the generated `domain.c` for a
+`GLS+DC` advection-diffusion is **byte-identical** before and after (md5 `23b8368c…`), and
+`test_stabilized_transport.py` — whose invariant 2 is precisely "bitwise identical" — passes
+unchanged.
+
+`add_stabilization_residuals` now decides advectiveness and builds the wind *per field* rather than
+once, since with a per-species wind one field can be advected while another is not. For every
+equation whose fields share a wind that is the same decision and the same expression for all of
+them, which is what the byte-identical check confirms.
+
+Consequence worth knowing: a stabilized Nernst-Planck is **advective even at `wind=0`**, because
+the migration drift is not zero. So a quiescent stabilized electrolyte does reference
+`scale_factor("velocity")`, which a quiescent stabilized advection-diffusion does not. The natural
+value is the migration drift `D/lambda_D`.
+
+Consistency is tested against a manufactured PNP solution that lies in C2 **and** satisfies the
+equations strongly, so the strong residual is identically zero and SUPG/GLS/ASGS must all return
+the unstabilized answer. Construction: pick `phi` quadratic, so `phi''` is constant and Gauss forces
+`c_+ - c_-` to the constant `-eps*phi''/F`; any common quadratic may be added to both species on
+top. The Nernst-Planck sources are whatever is left over, supplied through `reactions`, which the
+strong residual subtracts again. Measured: the manufactured solution is reproduced to 1e-14 and no
+dof moves by more than 1e-8 when stabilization is switched on.
+
+### Corrected while in there
+
+`stab_factor` was documented as "a global prefactor on tau **and** nu_dc". It only scales `tau`;
+`nu_dc` has its own `dc_factor`, and `test_stab_factor_zero_is_bitwise_identical` has always passed
+both. The docstring now says so.
 
 ## 7. Constants and units
 

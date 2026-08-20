@@ -928,15 +928,14 @@ class NernstPlanckEquations(ScalarTransportEquations):
     subtract the footprint the stabilization leaves behind.
 
     .. note::
-        Stabilization is available through the ``stabilization`` argument, but :math:`\tau` is
-        currently sized from the **fluid** velocity only. The true Nernst-Planck wind is
-        per-species, :math:`\vec{a}_i=\vec{u}-z_i m_i F\nabla\phi`, and the base class
-        :py:meth:`~pyoomph.equations.stabilization.ScalarTransportEquations.stabilization_wind` has
-        no field argument to express that. Furthermore, expanding the conservative migration term
-        gives an advective part *plus* a reaction term :math:`m_i z_i F c_i\rho_\mathrm{e}/\varepsilon`,
-        which the advective-diffusive :math:`\tau` has no slot for and which dominates inside a thin
-        Debye layer. Both mean :math:`\tau` is undersized where migration dominates; a resolved
-        double layer is finely meshed anyway, but do not rely on SUPG to rescue an under-resolved one.
+        Stabilization is per-species: both the wind
+        (:py:meth:`stabilization_wind_for_field`) and the reaction rate
+        (:py:meth:`stabilization_reaction_rate`) that migration contributes are supplied, so
+        :math:`\tau` is sized from the drift each ion actually experiences rather than from the
+        fluid velocity. A consequence worth knowing: a Nernst-Planck equation is *advective* even
+        with ``wind=0``, since the migration drift is not zero, so a stabilized quiescent
+        electrolyte does reference ``scale_factor("velocity")`` -- set it to the migration drift
+        scale, or pass a ``ScalarTransportStabilization`` with a different ``velocity_scale``.
 
     Args:
         ions: The species, as :py:class:`IonSpec` objects or a ``{name: valence}`` mapping.
@@ -1115,7 +1114,43 @@ class NernstPlanckEquations(ScalarTransportEquations):
         return [self.fieldname_of(i.name) for i in self.ions]
 
     def stabilization_wind(self)->ExpressionOrNum:
+        # The part every species shares. The migration drift is per-species and lives in
+        # stabilization_wind_for_field below.
         return self.wind
+
+    def stabilization_wind_for_field(self,fieldname:str)->ExpressionOrNum:
+        r"""The species' own wind :math:`\vec{u}-z_i m_i F\nabla\phi`.
+
+        Both the streamline direction of the SUPG weight and the cell Peclet number in
+        :math:`\tau` differ per species -- a cation and an anion drift in *opposite* directions in
+        the same field -- so sizing either from the fluid velocity alone is wrong wherever migration
+        dominates, which is precisely inside a Debye layer. Note that this is nonzero even in a
+        quiescent electrolyte, so a stabilized Nernst-Planck is advective while a stabilized
+        advection-diffusion with the same ``wind=0`` is not.
+        """
+        ion=self._ion_of(fieldname)
+        return self.wind-self.get_migration_mobility(ion.name)*grad(var(self.potential_name))
+
+    def stabilization_reaction_rate(self,fieldname:str)->ExpressionOrNum:
+        r"""The rate :math:`-z_i m_i F\nabla^2\phi`, i.e. :math:`z_i m_i F\rho_\mathrm{e}/\varepsilon`.
+
+        Expanding the conservative migration term gives
+        :math:`-\nabla\cdot(z_i m_i F c_i\nabla\phi)
+        = -z_i m_i F\nabla\phi\cdot\nabla c_i - z_i m_i F c_i\nabla^2\phi`: an advective part,
+        which is in :py:meth:`stabilization_wind_for_field`, **plus a term linear in** :math:`c_i`
+        **itself**, which is a reaction rate. In a thin Debye layer that rate is of order
+        :math:`D/\lambda_\mathrm{D}^2` and dominates every other rate in :math:`\tau`, so leaving
+        it out leaves :math:`\tau` far too large exactly where the stabilization is being asked to
+        work.
+
+        Written as the Laplacian of the potential rather than as
+        :math:`\rho_\mathrm{e}/\varepsilon` so that it mirrors, term for term, what
+        :py:meth:`strong_residual` assembles -- which is the whole point of a residual-based
+        stabilization. It needs second derivatives of the potential, as the migration term of the
+        strong residual already does.
+        """
+        ion=self._ion_of(fieldname)
+        return -self.get_migration_mobility(ion.name)*div(grad(var(self.potential_name)))
 
     def stabilization_diffusivity(self,fieldname:str)->ExpressionOrNum:
         return self.get_diffusivity(self._ion_of(fieldname).name)
