@@ -217,9 +217,8 @@ class HyperelasticSmoothedMesh(BaseMovingMeshEquations):
         kappa (float): The bulk modulus. Default is 1.
         coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian.
     """
-    def __init__(self,mu:float=1,kappa:float=1, coordsys: BaseCoordinateSystem | None = cartesian,use_subexpressions:bool=False):
+    def __init__(self,mu:float=1,kappa:float=1, coordsys: BaseCoordinateSystem | None = cartesian):
         super().__init__(coordsys)
-        self.use_subexpressions=use_subexpressions
         self.mu=mu
         self.kappa=kappa
         
@@ -227,13 +226,17 @@ class HyperelasticSmoothedMesh(BaseMovingMeshEquations):
     def define_residuals(self):
         x=var("mesh")
         dxdX=grad(x,lagrangian=True,coordsys=self.coordsys)
+        # NB: J and I1min are deliberately NOT wrapped in subexpression(). This class activates the
+        # coordinates as dofs (BaseMovingMeshEquations.define_fields), so GiNaCSubExpression::derivative
+        # always takes the position-symbol escape hatch of dev_docs/code_generation.md 9.2: it
+        # differentiates the body on the spot and inlines the result at every use site, and the cached
+        # scalar is written but never read. Measured on a 16x16 quad Navier-Stokes with this smoother:
+        # +87% elemental residual+Jacobian (41.9 -> 78.5 ms), 82 kB -> 95 kB of generated C, and the
+        # pow() count up from 172 to 420. There used to be a use_subexpressions=True option here; it
+        # could not pay off on any element this class can be attached to, and was removed.
         J=determinant(dxdX)
-        if self.use_subexpressions:
-            J=subexpression(J)
         I1=trace( matproduct(transpose(dxdX),dxdX) )*J**rational_num(-2,3)        
         I1min=I1-self.get_nodal_dimension() # or 3?
-        if self.use_subexpressions:
-            I1min=subexpression(I1min)
         F=self.mu/2*I1min+self.kappa/2*(J-1)**2
         self.add_functional_minimization(F,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
         
@@ -252,9 +255,8 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
         coordsys (Optional[BaseCoordinateSystem]): The coordinate system. Default is cartesian
 
     """
-    def __init__(self,kappa:float=1, C1:float=1,C2:float=10,C3:float=0, coordsys: BaseCoordinateSystem | None = cartesian,use_subexpressions:bool=False):
+    def __init__(self,kappa:float=1, C1:float=1,C2:float=10,C3:float=0, coordsys: BaseCoordinateSystem | None = cartesian):
         super().__init__(coordsys)
-        self.use_subexpressions=use_subexpressions
         self.C1=C1
         self.C2=C2
         self.C3=C3
@@ -264,9 +266,9 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
     def define_residuals(self):
         x=var("mesh")
         dxdX=grad(x,lagrangian=True,coordsys=self.coordsys)
+        # Not wrapped in subexpression() - see HyperelasticSmoothedMesh.define_residuals for why the
+        # option that used to do that was removed.
         J=determinant(dxdX)
-        if self.use_subexpressions:
-            J=subexpression(J)
         I1=trace( matproduct(transpose(dxdX),dxdX) )*J**rational_num(-2,3)
         I1min=I1-self.get_nodal_dimension()
         F=(self.C1*I1min+self.C2*I1min**2+self.C3*I1min**3+self.kappa*(J-1)**2)/2                                

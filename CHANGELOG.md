@@ -105,6 +105,13 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   computed flag list itself, so a future flag change invalidates the JIT cache on its own and needs no
   epoch.
 
+- **`use_subexpressions` removed from `HyperelasticSmoothedMesh` and `YeohSmoothedMesh`.** Both
+  activate the coordinates as dofs by construction, so the subexpression derivative cache always took
+  the position-symbol escape hatch: the body was differentiated on the spot and inlined at every use
+  site, and the cached scalar was written and never read. Passing `True` was measured at **+87%**
+  elemental residual+Jacobian, 16% more generated C and 2.4x the `pow()` calls, i.e. the option could
+  not pay off on any element these classes can be attached to. Nothing in the repository passed it.
+
 - **An adaptation that refines and unrefines nothing no longer touches the problem.** Deciding to do
   nothing is the normal end state rather than an edge case: oomph-lib only leaves its own adaption loop
   once an `adapt()` has reported 0/0, so with `spatial_adapt>0` the last adaptation of every solve is a

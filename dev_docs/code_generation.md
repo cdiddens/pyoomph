@@ -353,6 +353,29 @@ future change to the default flag list invalidates the affected cache entries by
 ever needed again. `FORMAT_VERSION` was deliberately *not* bumped — it would also throw away tcc-built
 objects, which the flag does not affect.
 
+### 7.2 `use_subexpressions` on the moving-mesh smoothers was a trap
+
+Same problem, same benchmark, only the flag changed:
+
+| `HyperelasticSmoothedMesh` | res+jac | generated C | `pow(` calls |
+|---|---|---|---|
+| `use_subexpressions=False` (the default) | 41.9 ms | 81 819 B | 172 |
+| `use_subexpressions=True` | **78.5 ms (+87%)** | 95 170 B | 420 |
+
+This is §9.2's escape hatch: on a moving mesh `GiNaCSubExpression::derivative` sees a position symbol,
+differentiates the body on the spot and inlines the result at every use site, so the cached scalar is
+written and never read. §8.2 measured those dead `d_subexpr_*` stores as free — and they are; the cost
+here is the tripled `pow` count, which is a different consequence of the same mechanism.
+
+The sharp edge was that these are *mesh-motion* classes: they call `activate_coordinates_as_dofs()` in
+`define_fields`, so they are `coordinates_as_dofs` **by construction** and the escape hatch fires
+always. The option was offered in precisely the one place it could never pay, and has been removed.
+
+Not extrapolated to `pyoomph/equations/solid.py`, which has its own `use_subexpressions` defaulting to
+**True** on classes that are equally `coordinates_as_dofs` (`BaseDeformableSolidEquations` derives from
+`BaseMovingMeshEquations`). Whether it wins or loses there is unmeasured and the sign is genuinely
+unknown — the `solid3d` case in `tests/benchmarks/bench_assembly.py` is the place to find out.
+
 > Note for anyone re-adding a hardcoded flag: the compile flags are **not** fully covered by the JIT
 > cache key. `SystemCCompiler.get_cache_flag_state()` covers `PYOOMPH_DEBUG`, `_optimize_full_speed`
 > and `compile_args`, from all of which today's flags are derivable; a flag hardcoded into the defaults
