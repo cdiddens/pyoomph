@@ -414,7 +414,7 @@ class BaseEquations(_pyoomph.Equations):
 
     def _iter_helper(self,visited:set[int])->Iterator["BaseEquations"]:
         # Leaf equations: a bare (non-combined) equation just yields itself once.
-        # CombinedEquations overrides __iter__ directly to iterate over its _subelements instead.
+        # An EquationTree node overrides __iter__ to iterate over its own equations instead.
         if id(self) not in visited:
             visited.add(id(self))
             yield self
@@ -860,9 +860,6 @@ class BaseEquations(_pyoomph.Equations):
         assert isinstance(cg,FiniteElementCodeGenerator)
         return cg
 
-    def _set_final_element(self, final:"BaseEquations | None"):
-        self._final_element = final
-
     def define_field_by_substitution(self, fieldname:str, expr:"ExpressionOrNum", also_on_interface:bool=False):
         master = self._master()
         master._additional_fields[fieldname] = expr
@@ -1182,14 +1179,8 @@ class BaseEquations(_pyoomph.Equations):
         cg._activate_residual("")
         return self
 
-    def _setup_combined_element(self):
-        self._set_final_element(None)
-
     def _define_fields(self):
-        self._setup_combined_element()
-        master = self._master()
-#        print("IN DEFINE FIELDS. Master is ",master,self._assert_codegen())
-        master._perform_define_fields()
+        self._master()._perform_define_fields()
 
 
     def _check_scalings(self):
@@ -1216,9 +1207,7 @@ class BaseEquations(_pyoomph.Equations):
     def _define_element(self):
         
 
-        self._setup_combined_element()
         master = self._master()
-        #master._perform_define_fields()
         master.define_scaling()
         cg=self._assert_codegen()
 
@@ -1532,12 +1521,13 @@ class BaseEquations(_pyoomph.Equations):
         """
         if isinstance(other, (list,tuple,set,)):
             res=EquationTree(None, None)
-            cmb=self if isinstance(self,CombinedEquations) else CombinedEquations(self)
             for d in other:
+                # The same instance goes to every domain named here; each of them resolves it
+                # independently, so no wrapping is needed to keep them apart.
                 if d is None or d==".":
-                    res+=cmb
+                    res+=self
                 else:
-                    res+=cmb@d
+                    res+=self@d
             return res
             #return sum([self @ d for d in other], EquationTree(None, None))
         if isinstance(other, str): #type:ignore
@@ -1592,31 +1582,20 @@ class BaseEquations(_pyoomph.Equations):
         cg._register_field(name,space)
 
 
-    @overload
-    def __add__(self, other:"BaseEquations")->"CombinedEquations": ...
+    def __add__(self, other:"Literal[0] | BaseEquations | EquationTree")->"EquationTree | BaseEquations":
+        """Adding equations yields an unrestricted domain holding both.
 
-    @overload
-    def __add__(self, other:"EquationTree")->"EquationTree": ...
-
-    def __add__(self, other:"Literal[0] | BaseEquations | EquationTree")->"CombinedEquations | EquationTree | BaseEquations":
+        There is no separate class for a combination: a domain is a list of equations, and one
+        that has not been restricted to a name yet is simply a node without a parent, which
+        @ "name" then places exactly as it places a single equation."""
         if other==0:
             return self
-        # EquationTree is tested first: it is about to become a BaseEquations subclass, and an
-        # "eqs + tree" that fell into the BaseEquations branch would build a combined equation
-        # containing a tree node instead of merging the two trees.
+        # EquationTree is a BaseEquations too, so it has to be tested first - otherwise
+        # "eqs + tree" would put a whole tree into a domain's equation list.
         if isinstance(other, EquationTree):
-            mytree = EquationTree(self, None)
-            return mytree + other
+            return EquationTree(self, None) + other
         if isinstance(other, BaseEquations):
-            if isinstance(self,CombinedEquations):
-                if isinstance(other,CombinedEquations):
-                    return CombinedEquations(*(self._subelements+other._subelements)) 
-                else:
-                    return CombinedEquations(*(self._subelements+[other])) 
-            elif isinstance(other,CombinedEquations):
-                return CombinedEquations(*([self]+other._subelements)) 
-            else:
-                return CombinedEquations(self, other)
+            return EquationTree([self, other], None)
         else:
             raise RuntimeError("Cannot add (+) Equation and " + other.__class__.__name__)
 
@@ -2230,366 +2209,6 @@ class ODEEquations(BaseEquations):
                 e.internal_data_pt(index).unpin(0)
 
 
-class CombinedEquations(Equations):
-
-    def get_weak_dirichlet_terms_for_DG(self,fieldname:str,value:"ExpressionOrNum")->"ExpressionNumOrNone":
-        res=None
-        for e in self._subelements:
-            if isinstance(e,Equations):
-                contrib=e.get_weak_dirichlet_terms_for_DG(fieldname,value)
-                if contrib is not None:
-                    if res is None:
-                        res=contrib
-                    else:
-                        res+=contrib
-        return res
-
-        
-    
-    def setup_remeshing_size(self,remesher:"RemesherBase",preorder:bool):
-        for e in self._subelements:
-            e.setup_remeshing_size(remesher,preorder)
-            
-    def change_output_directory(self,newdir:str,eqtree:"EquationTree"):
-        for e in self._subelements:
-            e.change_output_directory(newdir,eqtree)
-
-    def after_fill_dummy_equations(self,problem:"Problem",eqtree:"EquationTree",pathname:str,elem_dim:int | None=None):
-        for e in self._subelements:
-            e.after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)
-
-    def before_precice_initialise(self,eqtree:"EquationTree"):
-        for e in self._subelements:
-            e.before_precice_initialise(eqtree)
-
-
-    def before_precice_solve(self,eqtree:"EquationTree",precice_dt:float):
-        for e in self._subelements:
-            e.before_precice_solve(eqtree,precice_dt)
-
-    def after_precice_solve(self,eqtree:"EquationTree",precice_dt:float):
-        for e in self._subelements:
-            e.after_precice_solve(eqtree,precice_dt)
-
-
-    def calculate_error_overrides(self):
-        for e in self._subelements:
-            e.calculate_error_overrides()
-
-    def before_mesh_to_mesh_interpolation(self,eqtree:"EquationTree",interpolator:"BaseMeshToMeshInterpolator"):
-        for e in self._subelements:
-            e.before_mesh_to_mesh_interpolation(eqtree,interpolator)
-
-    def interior_facet_terms_required(self):        
-        for e in self._subelements:
-            if e.requires_interior_facet_terms:
-                return True
-        return False
-
-    def _is_ode(self)->bool | None:
-        res=None
-        for e in self._subelements:
-            isode=e._is_ode()
-            if isode==True:
-                if res is None:
-                    res=True
-                elif res==False:
-                    info=[repr(ei)+" is ODE: "+str(ei._is_ode()) for ei in self._subelements]
-                    raise RuntimeError("Combined Equations and ODEEquations does not work yet:\n"+"\n".join(info))
-            elif isode==False:
-                if res is None:
-                    res=False
-                elif res==True:
-                    info = [repr(ei) + " is ODE: " + str(ei._is_ode()) for ei in self._subelements]
-                    raise RuntimeError("Combined Equations and ODEEquations does not work yet:\n" + "\n".join(info))
-        return res
-        
-
-    def _tree_string(self,indent:str) -> str:
-        res="Combined Equations:"
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                res=res+"\n"+indent+e._tree_string(indent)
-        return res
-    
-    def _fill_interinter_connections(self,eqtree:"EquationTree",interinter:set[str]):
-        for e in self._subelements:
-            if isinstance(e, BaseEquations):
-                e._fill_interinter_connections(eqtree,interinter)
-
-    def _init_output(self,eqtree:"EquationTree",continue_info:dict[str, Any] | None,rank:int):
-        for e in self._subelements:
-            if isinstance(e,BaseEquations): #type:ignore
-                e._init_output(eqtree,continue_info,rank)
-
-    def _do_output(self,eqtree:"EquationTree",step:int,stage:str,only_every_step:bool=False):
-        for e in self._subelements:
-            if isinstance(e,BaseEquations): #type:ignore
-                e._do_output(eqtree,step,stage,only_every_step)
-
-    def _before_stationary_or_transient_solve(self, eqtree:"EquationTree", stationary:bool)->bool:
-        must_reapply=False
-        for e in self._subelements:
-            if isinstance(e,BaseEquations): #type:ignore
-                must_reapply=must_reapply or e._before_stationary_or_transient_solve(eqtree, stationary)
-        return must_reapply
-
-    def _before_eigen_solve(self, eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_m:int | None=None,normal_k:float | None=None) -> bool:
-        must_reapply=False
-        for e in self._subelements:
-            if isinstance(e,BaseEquations):  #type:ignore
-                must_reapply=must_reapply or e._before_eigen_solve(eqtree, eigensolver,angular_m,normal_k)
-        return must_reapply
-
-    def _get_forced_zero_dofs_for_eigenproblem(self,eqtree:"EquationTree", eigensolver:"GenericEigenSolver",angular_mode:int | float | None,normal_k:float | None)->set[str | int]:
-        res:set[str | int] = set()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                upd=e._get_forced_zero_dofs_for_eigenproblem(eqtree, eigensolver,angular_mode,normal_k)
-                #print("UPDATE WITH",upd)
-                res.update(upd)
-                #print("UPDATE IS",res)
-        return res
-
-
-    def on_apply_boundary_conditions(self,mesh:"AnyMesh"):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e,BaseEquations): #type:ignore
-                e.on_apply_boundary_conditions(mesh)
-        self._rstr_final_elem(bck)
-
-    def before_fill_dummy_equations(self,problem:"Problem",eqtree:"EquationTree",pathname:str):
-        #bck = self._bckup_final_elem()
-        #self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e,BaseEquations): #type:ignore
-                e.before_fill_dummy_equations(problem,eqtree,pathname)
-        #self._rstr_final_elem(bck)
-        
-
-    def before_finalization(self,codegen:FiniteElementCodeGenerator):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                e.before_finalization(codegen)
-        self._rstr_final_elem(bck)
-
-    def before_compilation(self,codegen:FiniteElementCodeGenerator):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e,BaseEquations): #type:ignore
-                e.before_compilation(codegen)
-        self._rstr_final_elem(bck)
-
-    def after_compilation(self,codegen:FiniteElementCodeGenerator):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e,BaseEquations): #type:ignore
-                e.after_compilation(codegen)
-        self._rstr_final_elem(bck)
-
-    def register_refinement_directives(self,codegen:FiniteElementCodeGenerator):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e,BaseEquations): #type:ignore
-                e.register_refinement_directives(codegen)
-        self._rstr_final_elem(bck)
-
-    def after_newton_solve(self):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                e.after_newton_solve()
-        self._rstr_final_elem(bck)
-
-    def after_transient_solve(self):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                e.after_transient_solve()
-        self._rstr_final_elem(bck)
-
-    def before_newton_convergence_check(self,eqtree:"EquationTree")->bool:
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        res=True
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                res=e.before_newton_convergence_check(eqtree) and res
-        self._rstr_final_elem(bck)   
-        return res     
-
-    def before_newton_solve(self):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                e.before_newton_solve()
-        self._rstr_final_elem(bck)
-
-    def before_assigning_equations_preorder(self, mesh:"AnyMesh"):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                e.before_assigning_equations_preorder(mesh)
-        self._rstr_final_elem(bck)
-
-    def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations):  #type:ignore
-                e.before_assigning_equations_postorder(mesh)
-        self._rstr_final_elem(bck)
-
-    def after_remeshing(self,eqtree:"EquationTree"):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations):  #type:ignore
-                e.after_remeshing(eqtree)
-        self._rstr_final_elem(bck)
-
-    def _release_output_files(self)->None:
-        for e in self._subelements:
-            if isinstance(e, BaseEquations):  #type:ignore
-                e._release_output_files()
-
-    def after_mapping_on_macro_elements(self):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations):  #type:ignore
-                e.after_mapping_on_macro_elements()
-        self._rstr_final_elem(bck)
-
-    def sanity_check(self):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations):  #type:ignore
-                e.sanity_check()
-        self._rstr_final_elem(bck)
-
-    def __init__(self, *args:BaseEquations):
-        super(CombinedEquations, self).__init__()
-        self._subelements:list[BaseEquations] = [*args]
-
-    def _bckup_final_elem(self):
-        return [e._master() for e in self._subelements]
-
-    def _rstr_final_elem(self,bck:list[BaseEquations]):
-        for e,fe in zip(self._subelements,bck):
-            e._set_final_element(fe)
-
-    def _setup_combined_element(self):
-        for e in self._subelements:
-            e._set_final_element(self)
-
-
-    @overload
-    def get_equation_of_type(self, typ:type[BaseEquations], *, exact_type:bool=False,always_as_list:Literal[True])->list["BaseEquations"]: ...
-
-    @overload
-    def get_equation_of_type(self, typ:type[BaseEquations], *, exact_type:bool=False,always_as_list:Literal[False]=False)->"BaseEquations | None": ...
-
-    def get_equation_of_type(self, typ:type[BaseEquations], *, exact_type:bool=False,always_as_list:bool=False)->'list["BaseEquations"] | BaseEquations | None':
-        res:list["BaseEquations"] | None = None
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                localL = e.get_equation_of_type(typ, exact_type=exact_type,always_as_list=always_as_list) #type:ignore
-                if localL is not None:
-                    if not isinstance(localL, list):
-                        local = [localL]
-                    else:
-                        local= localL
-                    if res is None:
-                        res = local
-                    elif isinstance(res, list): #type:ignore
-                        res = res + local
-                    else:
-                        res = [res] + local
-        if isinstance(res, list) and len(res) == 1 and not always_as_list:
-            return res[0]
-        if res is None:
-            return [] if always_as_list else None
-        if always_as_list and not (isinstance(res,list)):  #type:ignore
-            res=[res]
-        return res
-
-    def _set_final_element(self, final:BaseEquations | None):
-        for e in self._subelements:
-            e._set_final_element(final)
-        self._final_element = final
-
-    def define_scaling(self):
-        bck=self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                e.define_scaling()
-        self._rstr_final_elem(bck)
-
-    def define_fields(self):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if _pyoomph.get_verbosity_flag() != 0:
-                print("DEF SUB", e)
-            if isinstance(e, BaseEquations): #type:ignore
-                e.define_fields()
-        self._rstr_final_elem(bck)
-
-    def define_residuals(self):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        retres=None
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                ret=e.define_residuals()
-                if ret is not None:
-                    if retres is None:
-                        retres=ret
-                    else:
-                        retres+=ret
-        self._rstr_final_elem(bck)
-        return retres
-
-    def define_error_estimators(self):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                e.define_error_estimators()
-        self._rstr_final_elem(bck)
-
-    def define_additional_functions(self):
-        bck = self._bckup_final_elem()
-        self._setup_combined_element()
-        for e in self._subelements:
-            if isinstance(e, BaseEquations): #type:ignore
-                e.define_additional_functions()
-        self._rstr_final_elem(bck)
-        
-    def get_coordinate_system(self) -> BaseCoordinateSystem:
-        if self._is_ode() is True:
-            return _ode_coordinate_system
-        else:
-            return super(CombinedEquations, self).get_coordinate_system()
-
-    def __iter__(self):
-        return iter(self._subelements)
-
-
 class InterfaceEquations(Equations):
     """
     Same as normal :py:class:`~pyoomph.generic.codegen.Equations` but with some extra functions for equations defined on interfaces.    
@@ -2801,13 +2420,7 @@ def _as_equation_list(eqs:"BaseEquations | list[BaseEquations] | None")->"list[B
         raise RuntimeError("Cannot put an EquationTree into the equations of a domain")
     elif isinstance(eqs,BaseEquations):
         eqs=[eqs]
-    res:"list[BaseEquations]"=[]
-    for e in eqs:
-        # Combined equations are unpacked rather than nested. A domain binds the equations in
-        # its list to its code generator, and anything hidden one level below that would be left
-        # unbound and unable to resolve its master.
-        res.extend(e._subelements if isinstance(e,CombinedEquations) else [e])
-    return res
+    return list(eqs)
 
 
 class EquationTree(Equations):
@@ -2831,7 +2444,6 @@ class EquationTree(Equations):
         self._mesh:"AnyMesh | None"=None
         self._children:dict[str,"EquationTree"] = {}
         self._compilation_flags:"EquationCompilationFlags | None"=None
-        self._combined_cache:"CombinedEquations | None"=None
 
     @property
     def _equations(self)->"list[BaseEquations]":
@@ -2862,34 +2474,6 @@ class EquationTree(Equations):
             self._test_scales_to_check_for_fields|=eq._test_scales_to_check_for_fields
             if self.default_timestepping_scheme is None:
                 self.default_timestepping_scheme=eq.default_timestepping_scheme
-
-    def _single_equations(self)->"BaseEquations | None":
-        """The domain's equations as the single object the code generator still expects.
-
-        Transitional: FiniteElementCode holds one Equations pointer, so a domain carrying more
-        than one has to hand it a combining wrapper. Cached, because that wrapper is the object
-        every sub-equation resolves its master to and its identity has to stay put."""
-        if not self._equations:
-            return None
-        if len(self._equations)==1:
-            # Returned as-is, never re-wrapped: a glob expansion hands the very same object to
-            # each of the domains it produced, and that object's _final_element is what those
-            # domains resolve their master through.
-            return self._equations[0]
-        # Flattened, for the same reason BaseEquations.__add__ flattens: nesting a shared object
-        # one level deeper makes its _final_element point at this domain's wrapper, and the
-        # sibling domains sharing it then resolve their master to a code generator that is not
-        # currently being compiled.
-        flat:list[BaseEquations]=[]
-        for e in self._equations:
-            flat.extend(e._subelements if isinstance(e,CombinedEquations) else [e])
-        if self._combined_cache is None or self._combined_cache._subelements!=flat:
-            self._combined_cache=CombinedEquations(*flat)
-        # The wrapper is made behind the tree's back, so it never took part in the _problem
-        # stamping that _fill_dummy_equations does on the equations themselves. Refreshed on
-        # every access rather than at creation, since the stamping may come later.
-        self._combined_cache._problem=self._equations[0]._problem
-        return self._combined_cache
 
     @contextlib.contextmanager
     def _on_this_domain(self):

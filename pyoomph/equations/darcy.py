@@ -30,7 +30,8 @@ from __future__ import annotations
  
 from ..materials.generic import AnyFluidProperties
 from ..meshes.mesh import AnyMesh, InterfaceMesh
-from ..generic import Equations,InterfaceEquations,CombinedEquations
+from ..generic import Equations,InterfaceEquations
+from ..generic.codegen import EquationTree
 from ..equations.generic import SpatialErrorEstimator,InitialCondition,ConnectFieldsAtInterface
 from ..expressions import *  # Import grad et al
 from ..expressions.units import meter
@@ -165,7 +166,7 @@ class PorousFront(InterfaceEquations):
 ## The ones to use for multi-component flow
 
 # Darcy + Advection diffusion
-def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteElementSpaceEnum="C2",permeability:ExpressionOrNum=1e-15*meter**2,porosity:ExpressionOrNum=0.3,with_IC:bool=True,spatial_errors:float | None=None,isothermal:bool=True,initial_temperature:ExpressionOrNum | None=None,thermal_overrides:dict[str, ExpressionOrNum] | None=None) -> CombinedEquations:
+def CompositionDarcyEquations(fluid_props:AnyFluidProperties,compo_space:FiniteElementSpaceEnum="C2",permeability:ExpressionOrNum=1e-15*meter**2,porosity:ExpressionOrNum=0.3,with_IC:bool=True,spatial_errors:float | None=None,isothermal:bool=True,initial_temperature:ExpressionOrNum | None=None,thermal_overrides:dict[str, ExpressionOrNum] | None=None) -> EquationTree:
     from .multi_component import CompositionAdvectionDiffusionEquations,TemperatureAdvectionConductionEquation
     dc=DarcyEquation(fluid_props,permeability=permeability,porosity=porosity,solve_also_velocity=True)
 

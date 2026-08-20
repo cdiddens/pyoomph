@@ -31,8 +31,8 @@ from .problem import Problem,GenericProblemHooks
 # from where the top-level "from pyoomph import *" picks them up. They are deliberately not
 # re-imported here: pyoomph.generic is imported first while the package is still initialising, and
 # pulling pyoomph.equations in at that point would make the import order circular.
-from .codegen import Equations,CombinedEquations,ODEEquations,ScalingException,InterfaceEquations
+from .codegen import Equations,ODEEquations,ScalingException,InterfaceEquations
 
 __all__ = ["Problem", "GenericProblemHooks","Equations",
-           "CombinedEquations", "ScalingException",
+           "ScalingException",
            "ODEEquations","InterfaceEquations"]

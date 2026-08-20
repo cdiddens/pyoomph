@@ -49,7 +49,7 @@ from pathlib import Path
 import argparse
 import numpy
 from ..meshes.mesh import  AnyMesh,AnySpatialMesh,BulkTemplateMesh, MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d, ODEStorageMesh, InterfaceMesh,MeshFromTemplate,MeshFromTemplateBase,MeshTemplate
-from .codegen import EquationTree,BaseEquations, FiniteElementCodeGenerator,CombinedEquations,DummyEquations, InterfaceEquations #ODEEquations
+from .codegen import EquationTree,BaseEquations, FiniteElementCodeGenerator,DummyEquations, InterfaceEquations #ODEEquations
 from ..equations.additional import EquationCompilationFlags
 from ..solvers.generic import DefaultMatrixType, EigenSolverWhich, GenericLinearSystemSolver,GenericEigenSolver
 from ..expressions.units import *
@@ -9183,7 +9183,6 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.invalidate_cached_mesh_data()
         #eqs=self._equation_system.get_by_path("domain")
         
-        #out=cast(CombinedEquations,eqs)
         #out.
         #print(eqs)
         #exit()
