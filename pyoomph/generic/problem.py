@@ -517,7 +517,6 @@ class Problem(_pyoomph.Problem):
         default_timestepping_scheme (Literal["BDF2", "BDF1", "Newmark2"]): Default timestepping scheme.
         eigen_data_in_states (Union[int, bool]): Flag indicating whether to store eigen data in the states.
         eigenvector_position_scale (float): Scaling factor for eigenvector positions.
-        equation_compilation_flags (EquationCompilationFlags): Code generation settings inherited by all domains.
         extra_compiler_flags (List[str]): Extra compiler flags for the problem.
         ignore_command_line (bool): Flag indicating whether to ignore command line arguments.
         latex_printer (Optional[LaTeXPrinter]): LaTeX printer for the problem.
