@@ -996,7 +996,7 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("Cannot get equations at "+path)
             else:
                 return None
-        return eqtree._single_equations()
+        return eqtree if eqtree._equations else None
 
 
     @overload

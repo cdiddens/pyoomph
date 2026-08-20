@@ -672,7 +672,10 @@ class BaseEquations(_pyoomph.Equations):
     def __init__(self):
         super().__init__()
         self._created_at:str | None
-        self._final_element:BaseEquations | None = None
+        #: Every domain this instance was added to, weakly. One instance may sit in several,
+        #: which is why it records all of them and resolves the active one per call rather than
+        #: storing "the" owner. Weak, so that dropping a domain does not keep it alive.
+        self._owner_trees:"list[weakref.ref[EquationTree]]" = []
         self._coordinate_system:"BaseCoordinateSystem | None" = None
         self._additional_fields:dict[str,ExpressionOrNum] = {}
         self._additional_fields_also_on_interface:dict[str,ExpressionOrNum] = {}
@@ -938,13 +941,36 @@ class BaseEquations(_pyoomph.Equations):
         return var("normal",domain=cg)
 
     def _master(self)->"BaseEquations":
-        """The object holding this domain's shared state (scalings, additional fields, initial and
-        Dirichlet conditions, ...). For an equation that has been combined with others it is the
-        enclosing combined object, otherwise the equation itself."""
-        if self._final_element is None:
-            return self
-        else:
-            return self._final_element._master()
+        """The domain this instance is currently acting on, which owns the state its equations
+        share: scalings, fields defined by substitution, initial and Dirichlet conditions.
+
+        Resolved per call, never stored. One Equations instance may be added to several domains -
+        eqs @ ["left","right"], a glob expansion, a reused sub-equation - and each of them must
+        see its own state, so the answer is "whichever domain is being compiled or traversed
+        right now", not "the domain this was last put into"."""
+        cg=self._get_current_codegen()
+        if cg is not None:
+            eqs=cg.get_equations()
+            if eqs is not None:
+                return eqs
+        # Not bound: something in another domain reached in, e.g. through
+        # InterfaceEquations.get_parent_equations(). Its domain is bound even though this
+        # instance is not, so look for it among the domains holding this instance.
+        active=[]
+        for ref in self._owner_trees:
+            node=ref()
+            if node is not None and node._get_current_codegen() is not None:
+                active.append(node)
+        if len(active)==1:
+            return active[0]
+        elif len(active)>1:
+            # Several at once happens while an interface is compiled, which binds its bulk, the
+            # opposite interface and the opposite bulk too. Innermost wins.
+            for node in reversed(_domains_being_traversed):
+                if any(node is a for a in active):
+                    return node
+            return active[-1]
+        return self
 
     def _get_combined_element(self)->"BaseEquations":
         # Former name of _master(), kept because it leaked into user subclasses.
@@ -2757,6 +2783,11 @@ class InterfaceEquations(Equations):
 
 
 
+#: Domains currently being compiled or traversed, innermost last. Only consulted to break a tie
+#: when one Equations instance sits in several domains that are bound at the same time.
+_domains_being_traversed:"list[EquationTree]" = []
+
+
 def _as_equation_list(eqs:"BaseEquations | list[BaseEquations] | None")->"list[BaseEquations]":
     """Normalise whatever was handed to an EquationTree node into its own list.
 
@@ -2769,9 +2800,14 @@ def _as_equation_list(eqs:"BaseEquations | list[BaseEquations] | None")->"list[B
         # would otherwise be stored as if it were a single equation.
         raise RuntimeError("Cannot put an EquationTree into the equations of a domain")
     elif isinstance(eqs,BaseEquations):
-        return [eqs]
-    else:
-        return list(eqs)
+        eqs=[eqs]
+    res:"list[BaseEquations]"=[]
+    for e in eqs:
+        # Combined equations are unpacked rather than nested. A domain binds the equations in
+        # its list to its code generator, and anything hidden one level below that would be left
+        # unbound and unable to resolve its master.
+        res.extend(e._subelements if isinstance(e,CombinedEquations) else [e])
+    return res
 
 
 class EquationTree(Equations):
@@ -2789,13 +2825,43 @@ class EquationTree(Equations):
         super(EquationTree, self).__init__()
         #: All equations added to this domain. Merging two domains concatenates the lists, which
         #: is what makes a separate combining equation class unnecessary.
-        self._equations:list[BaseEquations] = _as_equation_list(eqs)
+        self._equations = eqs
         self._parent = parent
         self._codegen:"FiniteElementCodeGenerator | None"=None
         self._mesh:"AnyMesh | None"=None
         self._children:dict[str,"EquationTree"] = {}
         self._compilation_flags:"EquationCompilationFlags | None"=None
         self._combined_cache:"CombinedEquations | None"=None
+
+    @property
+    def _equations(self)->"list[BaseEquations]":
+        return self._equation_list
+
+    @_equations.setter
+    def _equations(self,eqs:"BaseEquations | list[BaseEquations] | None"):
+        # Normalised and copied here rather than at the call sites: __add__ and _clone_structure
+        # hand an existing node's list straight over, and an alias would let a later addition
+        # mutate the source tree.
+        self._equation_list=_as_equation_list(eqs)
+        for e in self._equation_list:
+            # Building a tree makes plenty of short-lived nodes (every + creates one), so the
+            # dead entries they leave behind are dropped here rather than accumulating.
+            e._owner_trees=[r for r in e._owner_trees if r() is not None]
+            if not any(r() is self for r in e._owner_trees):
+                e._owner_trees.append(weakref.ref(self))
+
+    def _absorb_equation_state(self):
+        """Take over what the equations set on themselves before any domain existed.
+
+        Scalings set in a constructor land on the equation, but everything reads them off the
+        domain. That used to be the same object whenever a domain held exactly one equation."""
+        for eq in self._equations:
+            self._scaling.update(eq._scaling)
+            self._test_scaling.update(eq._test_scaling)
+            self._scales_to_check_for_fields|=eq._scales_to_check_for_fields
+            self._test_scales_to_check_for_fields|=eq._test_scales_to_check_for_fields
+            if self.default_timestepping_scheme is None:
+                self.default_timestepping_scheme=eq.default_timestepping_scheme
 
     def _single_equations(self)->"BaseEquations | None":
         """The domain's equations as the single object the code generator still expects.
@@ -2837,16 +2903,15 @@ class EquationTree(Equations):
         # The combining wrapper of a merged domain has to be bound as well, not just the
         # equations themselves: it is what they resolve their master to, and reading anything
         # off it (a scaling, the mesh) goes through its code generator.
-        targets=list(eqs)
-        master=self._single_equations()
-        if master is not None and all(master is not t for t in targets):
-            targets.append(master)
+        targets=list(eqs)+[self]
         old=[t._get_current_codegen() for t in targets]
         for t in targets:
             t._set_current_codegen(self._codegen)
+        _domains_being_traversed.append(self)
         try:
             yield eqs
         finally:
+            _domains_being_traversed.pop()
             for t,o in zip(targets,old):
                 t._set_current_codegen(o)
 
@@ -2886,6 +2951,99 @@ class EquationTree(Equations):
     def __iter__(self)->Iterator["BaseEquations"]:
         return iter(self._equations)
 
+    # ---- what the code generator and the meshes now call straight on the domain --------------
+    # Each opens _on_my_current_codegen(), so an equation running one of these resolves its
+    # master back to this domain even though it may also belong to others.
+    def define_fields(self):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                if _pyoomph.get_verbosity_flag() != 0:
+                    print("DEF SUB", eq)
+                eq.define_fields()
+
+    def define_scaling(self):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                eq.define_scaling()
+
+    def define_residuals(self):
+        res=None
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                contrib=eq.define_residuals()
+                if contrib is not None:
+                    res=contrib if res is None else res+contrib
+        return res
+
+    def define_error_estimators(self):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                eq.define_error_estimators()
+
+    def define_additional_functions(self):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                eq.define_additional_functions()
+
+    def sanity_check(self):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                eq.sanity_check()
+
+    def calculate_error_overrides(self):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                eq.calculate_error_overrides()
+
+    def on_apply_boundary_conditions(self,mesh:"AnyMesh"):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                eq.on_apply_boundary_conditions(mesh)
+
+    def before_finalization(self,codegen:"FiniteElementCodeGenerator"):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                eq.before_finalization(codegen)
+
+    def before_compilation(self,codegen:"FiniteElementCodeGenerator"):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                eq.before_compilation(codegen)
+
+    def after_compilation(self,codegen:"FiniteElementCodeGenerator"):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                eq.after_compilation(codegen)
+
+    def register_refinement_directives(self,codegen:"FiniteElementCodeGenerator"):
+        with self._on_my_current_codegen() as eqs:
+            for eq in eqs:
+                eq.register_refinement_directives(codegen)
+
+    def _release_output_files(self)->None:
+        for eq in self._equations:
+            eq._release_output_files()
+
+    @contextlib.contextmanager
+    def _on_my_current_codegen(self):
+        """Bind this domain's equations to whichever code generator the node is bound to.
+
+        Not self._codegen: while the dummy domains for interior facets are defined, the node is
+        deliberately bound to a dummy generator instead of its own. Restored afterwards, so that
+        an instance shared with another domain is not left pointing at this one.
+        """
+        cg=self._get_current_codegen()
+        old=[e._get_current_codegen() for e in self._equations]
+        for e in self._equations:
+            e._set_current_codegen(cg)
+        _domains_being_traversed.append(self)
+        try:
+            yield self._equations
+        finally:
+            _domains_being_traversed.pop()
+            for e,o in zip(self._equations,old):
+                e._set_current_codegen(o)
+
     @overload
     def get_equation_of_type(self, typ:type["BaseEquations"], *, exact_type:bool=False,always_as_list:Literal[True])->list["BaseEquations"]: ...
 
@@ -2910,6 +3068,10 @@ class EquationTree(Equations):
     def get_weak_dirichlet_terms_for_DG(self,fieldname:str,value:"ExpressionOrNum")->"ExpressionNumOrNone":
         res=None
         for eq in self._equations:
+            # Only spatial equations have this hook; ODEEquations and the plain BaseEquations
+            # helpers (Scaling, InitialCondition, ...) do not.
+            if not isinstance(eq,Equations):
+                continue
             contrib=eq.get_weak_dirichlet_terms_for_DG(fieldname,value)
             if contrib is not None:
                 res=contrib if res is None else res+contrib
@@ -2934,10 +3096,10 @@ class EquationTree(Equations):
                 raise RuntimeError("Combined Equations and ODEEquations does not work yet:\n"+"\n".join(info))
         return res
 
-    def get_equations(self)->BaseEquations:
-        eqs=self._single_equations()
-        assert eqs is not None
-        return eqs
+    def get_equations(self)->"EquationTree":
+        """The equation object of this domain, which is the node itself."""
+        assert self._equations
+        return self
     
     def get_children(self) -> dict[str, "EquationTree"]:
         return self._children
@@ -3133,22 +3295,6 @@ class EquationTree(Equations):
                     return True
         return False
 
-    def _wrap_equations_for_sharing(self):
-        """Puts every Equations object in this subtree into a CombinedEquations, unless it already is one.
-
-        The clones an expansion makes share their Equations objects, so one object can end up as the
-        top-level equations of one domain and, once it is merged with an explicitly given sibling, as a
-        subelement of that sibling's CombinedEquations. Those two roles are incompatible: a top-level
-        Equations resets its own _final_element to None in _setup_combined_element(), whereupon the
-        enclosing CombinedEquations backs that None up and _rstr_final_elem() restores it as a pointer to
-        itself - a cycle that makes _get_combined_element() recurse until the stack runs out. Wrapping
-        keeps the shared object away from the top level, which is exactly why the list form
-        (eqs@["left","right"]) builds a CombinedEquations before sharing."""
-        if len(self._equations)==1 and not isinstance(self._equations[0],CombinedEquations):
-            self._equations=[CombinedEquations(self._equations[0])]
-        for child in self._children.values():
-            child._wrap_equations_for_sharing()
-
     def _expand_domain_name_patterns(self,candidates_getter:Callable[["EquationTree",int],tuple[set[str],str]],depth:int=0):
         """Replaces every glob child (e.g. "*", "wall*", "[lr]*") by one clone of its subtree per matching
         name, merging into an explicit sibling of the same name if there already is one. Called once from
@@ -3168,7 +3314,6 @@ class EquationTree(Equations):
             candidates,descr=candidates_getter(self,depth)
             for pat in patterns:
                 node=self._children.pop(pat)
-                node._wrap_equations_for_sharing()
                 matches=sorted(n for n in candidates if fnmatch.fnmatchcase(n,pat))
                 if not matches:
                     raise RuntimeError("The domain name pattern '"+pat+"' at '"+self.get_full_path()+"' does not match anything, i.e. '"+self.get_full_path().rstrip("/")+"/"+pat+"' does not exist. "+descr+" are "+str(sorted(candidates)))
@@ -3197,6 +3342,9 @@ class EquationTree(Equations):
             child._expand_domain_name_patterns(candidates_getter,depth+1)
 
     def _fill_dummy_equations(self,problem:"Problem",is_bulk_root:bool=True,pathname:str=""):
+        # The node is the master of its domain, so it needs the Problem as much as the equations
+        # do - get_coordinate_system() and the timestepping defaults read it off the master.
+        self._problem=problem
         if len(self._children)>0 and not self._equations:
             if self._has_sub_equations_defined() and not is_bulk_root:
                 self._equations=[DummyEquations()]
@@ -3208,8 +3356,10 @@ class EquationTree(Equations):
                 eq.before_fill_dummy_equations(problem,self,pathname)
             if any(eq.interior_facet_terms_required() for eq in self._equations):
                 if "_internal_facets_" not in self._children.keys():
-                    self._children["_internal_facets_"]=EquationTree(DummyEquations(),self)
-                    self._children["_internal_facets_"].get_equations()._problem=problem
+                    facets=EquationTree(DummyEquations(),self)
+                    facets._problem=problem
+                    facets._equations[0]._problem=problem
+                    self._children["_internal_facets_"]=facets
         #for dn in list(self._children.keys()):
         for dn,v in self._children.items():
             #v=self._children[dn] # Cannot use .items() here
@@ -3343,7 +3493,8 @@ class EquationTree(Equations):
                 self._codegen.set_latex_printer(problem.latex_printer)
                 self._codegen._set_problem(problem) 
                 if second_loop and self._is_ode():
-                    self._codegen._set_equations(self.get_equations())
+                    self._absorb_equation_state()
+                    self._codegen._set_equations(self)
                     backup=self.setup_codegen_to_equations(with_bulk_and_opp=False)                    
                     self.setup_codegen_to_equations(reset_info=backup)
                     meshname=self.get_my_path_name()
@@ -3358,7 +3509,8 @@ class EquationTree(Equations):
             # _codegen is only ever created above, inside the "if self._equations:" branch,
             # so its presence implies self._equations is also set.
             assert self._equations
-            self._codegen._set_equations(self.get_equations())
+            self._absorb_equation_state()
+            self._codegen._set_equations(self)
         for _,v in self._children.items():
             v._finalize_equations(problem,second_loop=second_loop)
 
@@ -3404,13 +3556,16 @@ class EquationTree(Equations):
         if (not self._equations) and (self!=root):
             self._equations=[DummyEquations()]
             self._equations[0]._problem=problem
+            self._problem=problem
         if path=="":
             return
         pth=path.split("/")
         chld=self._children.get(pth[0])
         if chld is None:
-            self._children[pth[0]]=EquationTree(DummyEquations(),parent=self)
-            self._children[pth[0]].get_equations()._problem=problem
+            node=EquationTree(DummyEquations(),parent=self)
+            node._problem=problem
+            node._equations[0]._problem=problem
+            self._children[pth[0]]=node
         self._children.get(pth[0])._create_dummy_equations_at_path("/".join(pth[1:]),root,problem) #type:ignore
 
     def get_child(self, name:str) -> "EquationTree":
@@ -3524,7 +3679,14 @@ class EquationTree(Equations):
         pth=self.get_my_path_name()
         res=indent
         if self._equations:
-            res+="--"+pth+" : "+self.get_equations()._tree_string(indent+" "*(len(pth)+6)) 
+            sub=indent+" "*(len(pth)+6)
+            # One line per equation of the domain. A domain holding several used to print through
+            # a combining equation, which contributed a "Combined Equations:" header line of its
+            # own; the equations are listed directly now.
+            if len(self._equations)==1:
+                res+="--"+pth+" : "+self._equations[0]._tree_string(sub)
+            else:
+                res+="--"+pth+" : "+("\n"+sub).join(e._tree_string(sub) for e in self._equations)
         elif self._parent is not None:
             res+="--"+pth
         else:
