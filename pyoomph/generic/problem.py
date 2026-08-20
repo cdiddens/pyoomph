@@ -425,9 +425,10 @@ def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
     # by this mesh's equations before dropping the reference to them -- see the log-file
     # comment in Problem.release() for why this must happen proactively rather than being
     # left to eventual garbage collection.
-    if m._eqtree is not None and m._eqtree._equations is not None:
-        m._eqtree._equations._release_output_files()
-    m._eqtree._equations=None
+    if m._eqtree is not None:
+        for eq in m._eqtree._equations:
+            eq._release_output_files()
+        m._eqtree._equations=[]
     m._eqtree=None #type:ignore
     # Break the remaining back-references specific to the mesh's own class:
     # MeshFromTemplate1d/2d/3d hold a reference to their originating MeshTemplate (which
@@ -995,7 +996,7 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("Cannot get equations at "+path)
             else:
                 return None
-        return eqtree._equations
+        return eqtree._single_equations()
 
 
     @overload
@@ -1152,29 +1153,15 @@ class Problem(_pyoomph.Problem):
                 raise RuntimeError("No equations found at the path "+str(path))
             else:
                 return
-        eqs = eqtree._equations 
-        if isinstance(eqs, CombinedEquations):
-            if (of_type is None) or (isinstance(of_type, CombinedEquations)):
-                if only_if(eqs):
-                    eqtree._equations = DummyEquations() 
-                    eqtree._equations._problem=self
-            else:
-                if of_type is None:
-                    if only_if(eqs):
-                        eqtree._equations = DummyEquations() 
-                        eqtree._equations._problem=self
-                else:
-                    eqs._subelements = [e for e in eqs._subelements if not (isinstance(e, of_type) and only_if(e))] 
-                    if len(eqs._subelements) == 0: 
-                        eqtree._equations = DummyEquations() 
-                        eqtree._equations._problem=self
-        else:
-            if (of_type is not None):
-                if not isinstance(eqs, of_type):
-                    return
-            if eqs is not None and only_if(eqs):
-                eqtree._equations = DummyEquations() 
-                eqtree._equations._problem=self
+        def drop(eq:BaseEquations)->bool:
+            return (of_type is None or isinstance(eq, of_type)) and only_if(eq)
+        eqtree._equations = [eq for eq in eqtree._equations if not drop(eq)]
+        if not eqtree._equations:
+            # A domain with no equations at all is not a valid tree node - the codegen still has
+            # to exist for the mesh that was built from it.
+            eqtree._equations = [DummyEquations()]
+            eqtree._equations[0]._problem = self
+        eqtree._combined_cache = None
 
     def get_default_timestepping_scheme(self,order:int) -> Literal['Newmark2', 'BDF2', 'BDF1']:
         if order==2:
@@ -1255,8 +1242,9 @@ class Problem(_pyoomph.Problem):
                 cg=m.get_code_gen()
                 cg._code=None
                 cg._set_problem(None) #type:ignore
-                if m._eqtree is not None and m._eqtree._equations is not None:
-                    m._eqtree._equations._release_output_files()
+                if m._eqtree is not None:
+                    for eq in m._eqtree._equations:
+                        eq._release_output_files()
                 m._eqtree=None
                 m._element=None
                 m._set_problem(None,None) #type:ignore
@@ -2806,8 +2794,8 @@ class Problem(_pyoomph.Problem):
                 if isinstance(mesh,ODEStorageMesh):
                     mesh._set_problem(self,mesh.get_code_gen()._code)
                 assert mesh._eqtree is not None
-                assert mesh._eqtree._equations is not None
-                mesh._eqtree._equations.get_combined_equations()._problem=self
+                assert mesh._eqtree._equations
+                mesh._eqtree.get_equations().get_combined_equations()._problem=self
                 if isinstance(mesh,ODEStorageMesh): continue
                 mesh._pre_compile_interface_equations(tree_depth)
 
@@ -2945,7 +2933,7 @@ class Problem(_pyoomph.Problem):
         if isinstance(other,MeshTemplate):
             self.add_mesh(other)
         elif isinstance(other,EquationTree):
-            if other._equations is not None:
+            if other._equations:
                 raise RuntimeError("You try to add an EquationTree to the Problem with Equations defined on the root level. This is not allowed. Please restrict all Equations to a domain using e.g. @'domain'")
             
             self.additional_equations+=other        
@@ -3605,7 +3593,7 @@ class Problem(_pyoomph.Problem):
             inters=m._find_interface_intersections()
             for im in inters:
                 dom=im.split("/")[0]
-                if dom in self._equation_system._children and self._equation_system._children[dom]._equations is not None:
+                if dom in self._equation_system._children and self._equation_system._children[dom]._equations:
                     self._interinter_connections.add(im)
         if len(self._interinter_connections)>0:
             self._equation_system._fill_interinter_connections(self._interinter_connections)
@@ -3622,16 +3610,14 @@ class Problem(_pyoomph.Problem):
         #TODO: ODEs added to the root
         for meshname,eqtree in self._equation_system.get_children().items(): 
             #Find the mesh that generates the mesh we want to have
-            if eqtree._equations is None: 
+            if not eqtree._equations:
                 raise RuntimeError("Empty bulk equations")
             mesh=None
             for m in self._meshtemplate_list:
                 if m.has_domain(meshname):
                     mesh=MeshFromTemplate(self,m,meshname,eqtree)
                     self._meshdict[meshname]=mesh
-                    assert eqtree._equations is not None
-                    eqtree._equations._mesh=mesh  #type:ignore
-            if eqtree._equations._is_ode(): 
+            if eqtree._is_ode(): 
                 if mesh is not None:
                     if not isinstance(mesh,ODEStorageMesh):
                         raise RuntimeError("Cannot add an ODE to a spatial mesh yet")
@@ -9151,7 +9137,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         print("Building mesh in Python","On enter, we have",self.nsub_mesh(),"submeshes, and the mesh dict keys are: "+str(self._meshdict.keys()))
         for meshname,eqtree in self._equation_system.get_children().items(): 
             #Find the mesh that generates the mesh we want to have
-            if eqtree._equations is None: 
+            if not eqtree._equations:
                 raise RuntimeError("Empty bulk equations")
             mesh=None
             for m in self._meshtemplate_list:
@@ -9161,12 +9147,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     mesh=MeshFromTemplate(self,m,meshname,eqtree,previous_mesh=previous_mesh)
 
                     self._meshdict[meshname]=mesh
-                    assert eqtree._equations is not None
-                    eqtree._equations._mesh=mesh  #type:ignore
                     eqtree.get_code_gen()._mesh=mesh
                     mesh._finalise_creation()
                     print("Mesh '"+meshname+"' generated from template '"+str(m)+"'","NELEMENTS: ",mesh.nelement())
-            if eqtree._equations._is_ode(): 
+            if eqtree._is_ode(): 
                 if mesh is not None:
                     if not isinstance(mesh,ODEStorageMesh):
                         raise RuntimeError("Cannot add an ODE to a spatial mesh yet")

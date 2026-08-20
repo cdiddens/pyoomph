@@ -1367,7 +1367,7 @@ class MeshFromTemplateBase(BaseMesh):
             for b, imsh in imsh1._interfacemeshes.items():
                 if not (b in bn) and b!="_internal_facets_":
                     raise RuntimeError("Boundary " + b + " not in mesh")
-                ieqs = imsh._eqtree._equations
+                ieqs = imsh._eqtree.get_equations()
                 icg = imsh._eqtree._codegen
                 assert icg is not None
                 assert ieqs is not None
@@ -2007,9 +2007,9 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
             oppblk.get_equations()._set_current_codegen(old_oppblkcg)  # type:ignore
 
         blk.get_equations()._set_current_codegen(oldblk)
-        self._eqtree._equations._set_current_codegen(oldmy)  # type:ignore
+        self._eqtree.get_equations()._set_current_codegen(oldmy)
 
-        self._eqtree._equations.after_compilation(self._codegen)  # type:ignore
+        self._eqtree.get_equations().after_compilation(self._codegen)
                 
         mpi_barrier()
 

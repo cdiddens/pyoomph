@@ -1685,21 +1685,20 @@ class AxisymmetryBC(InterfaceEquations):
                     continue # Nothing to be done. There is no interface added
                 if splt[-1] in dom._children:
                     iface=dom.get_child(splt[-1])
-                    if iface.get_equations() is not None:
+                    if iface._equations:
                         axieq_list=iface.get_equations().get_equation_of_type(AxisymmetryBC,always_as_list=True)
                         if len(axieq_list)>0:
                             continue # Already added
                         else:
-                            assert iface._equations is not None
-                            oldeqs=iface._equations
-                            iface._equations=iface._equations+AxisymmetryBC(verbose=self.verbose,recurse=self.recurse)
-                            iface._equations._problem=oldeqs._problem
+                            newbc=AxisymmetryBC(verbose=self.verbose,recurse=self.recurse)
+                            newbc._problem=iface._equations[0]._problem
+                            iface._equations=iface._equations+[newbc]
+                            iface._combined_cache=None
                 else:
                     new_child=EquationTree(AxisymmetryBC(verbose=self.verbose,recurse=self.recurse),dom)
                     dom._children[splt[-1]]=new_child
-                    assert new_child._equations is not None
-                    assert dom._equations is not None
-                    new_child._equations._problem=dom._equations._problem
+                    assert dom._equations
+                    new_child._equations[0]._problem=dom._equations[0]._problem
                     
             
         return super()._fill_interinter_connections(eqtree, interinter)

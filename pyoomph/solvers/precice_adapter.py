@@ -131,8 +131,8 @@ class _PyoomphPreciceAdapater:
         received_meshes:set[tuple[str,str,str]]=set() # (preCICE name, participant it comes from, pyoomph domain)
         pyoomph_mesh_name_to_provide_name:dict[str,str]={}
         def recursive_scan_data(eqtree:EquationTree):
-            if eqtree._equations is not None:
-                read_datas=eqtree._equations.get_equation_of_type(PreciceReadData,always_as_list=True)
+            if eqtree._equations:
+                read_datas=eqtree.get_equations().get_equation_of_type(PreciceReadData,always_as_list=True)
                 for read_data in read_datas:                                 
                     read_data=cast(PreciceReadData,read_data)
                     meshname=eqtree.get_full_path().lstrip("/")
@@ -144,7 +144,7 @@ class _PyoomphPreciceAdapater:
                         mesh_read_data[meshname].append(precice_name)                        
                         
                 
-                write_datas=eqtree._equations.get_equation_of_type(PreciceWriteData,always_as_list=True)
+                write_datas=eqtree.get_equations().get_equation_of_type(PreciceWriteData,always_as_list=True)
                 for write_data in write_datas:                                 
                     write_data=cast(PreciceWriteData,write_data)
                     meshname=eqtree.get_full_path().lstrip("/")
@@ -159,12 +159,12 @@ class _PyoomphPreciceAdapater:
                 recursive_scan_data(subeqs)    
                         
         def recursive_scan_meshes(eqtree:EquationTree):
-            if eqtree._equations is not None:
-                mesh_provides=eqtree._equations.get_equation_of_type(PreciceProvideMesh,always_as_list=True)
+            if eqtree._equations:
+                mesh_provides=eqtree.get_equations().get_equation_of_type(PreciceProvideMesh,always_as_list=True)
                 for mesh_provide in mesh_provides:                    
                     mesh_provide=cast(PreciceProvideMesh,mesh_provide)
                     meshname=eqtree.get_full_path().lstrip("/")
-                    if eqtree._equations.get_combined_equations()._is_ode() is True:
+                    if eqtree._is_ode() is True:
                         meshdim=2 # Must be 2 for ODEs
                     else:
                         mesh=problem.get_mesh(meshname)
@@ -191,11 +191,11 @@ class _PyoomphPreciceAdapater:
                         raise RuntimeError("Mesh "+meshname+" has multiple PreciceProvideMesh entries")
                     pyoomph_mesh_name_to_provide_name[meshname]=mesh_provide.name
                     
-                mesh_receives=eqtree._equations.get_equation_of_type(PreciceReceiveMesh,always_as_list=True)
+                mesh_receives=eqtree.get_equations().get_equation_of_type(PreciceReceiveMesh,always_as_list=True)
                 for mesh_receive in mesh_receives:
                     mesh_receive=cast(PreciceReceiveMesh,mesh_receive)
                     meshname=eqtree.get_full_path().lstrip("/")
-                    if eqtree._equations.get_combined_equations()._is_ode() is True:
+                    if eqtree._is_ode() is True:
                         meshdim=2 # Must be 2 for ODEs
                     else:
                         mesh=problem.get_mesh(meshname)

@@ -539,7 +539,7 @@ class BifurcationController:
             obs:dict[str,Callable[...,float]]={}
             self._observable_unit_probes={}
             def recursive_add_spatial_domains(eqtree:EquationTree):
-                if eqtree._equations is not None and eqtree.get_equations()._is_ode()==False:
+                if eqtree._equations and eqtree._is_ode()==False:
                     ifuncs_list=eqtree.get_mesh().list_integral_functions()
                     deps = eqtree.get_code_gen()._dependent_integral_funcs
                     ifuncs: set[str] = set(ifuncs_list)
@@ -583,7 +583,7 @@ class BifurcationController:
                     recursive_add_spatial_domains(child)
 
             for name,eqtree in self.problem._equation_system.get_children().items():
-                if eqtree.get_equations()._is_ode()==True:
+                if eqtree._is_ode()==True:
                     ode=self.problem.get_ode(name)
                     _vals, inds = ode.get_element()._ode_elem_to_numpy()
                     for valn in inds.keys():

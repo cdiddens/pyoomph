@@ -26,6 +26,7 @@ from __future__ import annotations
 #
 # ========================================================================
  
+import contextlib
 import fnmatch
 import weakref
 from .. import _pyoomph_core as _pyoomph
@@ -1717,16 +1718,94 @@ class BaseEquations(_pyoomph.Equations):
 #########
 
 
+def _as_equation_list(eqs:"BaseEquations | list[BaseEquations] | None")->"list[BaseEquations]":
+    """Normalise whatever was handed to an EquationTree node into its own list.
+
+    The copy matters: __add__ and _clone_structure pass an existing node's list straight into a
+    new node, and an alias would let a later addition (see AxisymmetryBC) mutate the source tree."""
+    if eqs is None:
+        return []
+    elif isinstance(eqs,BaseEquations):
+        return [eqs]
+    else:
+        return list(eqs)
+
+
 class EquationTree:
-    def __init__(self, eqs:BaseEquations | None=None, parent:"EquationTree | None"=None):
+    def __init__(self, eqs:"BaseEquations | list[BaseEquations] | None"=None, parent:"EquationTree | None"=None):
         super(EquationTree, self).__init__()
-        self._name:str
-        self._equations = eqs
+        #: All equations added to this domain. Merging two domains concatenates the lists, which
+        #: is what makes a separate combining equation class unnecessary.
+        self._equations:list[BaseEquations] = _as_equation_list(eqs)
         self._parent = parent
         self._codegen:"FiniteElementCodeGenerator | None"=None
         self._mesh:"AnyMesh | None"=None
         self._children:dict[str,"EquationTree"] = {}
         self._compilation_flags:"EquationCompilationFlags | None"=None
+        self._combined_cache:"CombinedEquations | None"=None
+
+    def _single_equations(self)->"BaseEquations | None":
+        """The domain's equations as the single object the code generator still expects.
+
+        Transitional: FiniteElementCode holds one Equations pointer, so a domain carrying more
+        than one has to hand it a combining wrapper. Cached, because that wrapper is the object
+        every sub-equation resolves its master to and its identity has to stay put."""
+        if not self._equations:
+            return None
+        if len(self._equations)==1:
+            # Returned as-is, never re-wrapped: a glob expansion hands the very same object to
+            # each of the domains it produced, and that object's _final_element is what those
+            # domains resolve their master through.
+            return self._equations[0]
+        # Flattened, for the same reason BaseEquations.__add__ flattens: nesting a shared object
+        # one level deeper makes its _final_element point at this domain's wrapper, and the
+        # sibling domains sharing it then resolve their master to a code generator that is not
+        # currently being compiled.
+        flat:list[BaseEquations]=[]
+        for e in self._equations:
+            flat.extend(e._subelements if isinstance(e,CombinedEquations) else [e])
+        if self._combined_cache is None or self._combined_cache._subelements!=flat:
+            self._combined_cache=CombinedEquations(*flat)
+        # The wrapper is made behind the tree's back, so it never took part in the _problem
+        # stamping that _fill_dummy_equations does on the equations themselves. Refreshed on
+        # every access rather than at creation, since the stamping may come later.
+        self._combined_cache._problem=self._equations[0]._problem
+        return self._combined_cache
+
+    @contextlib.contextmanager
+    def _on_this_domain(self):
+        """Bind this domain's code generator while its equations run a hook.
+
+        Everything an equation resolves through _master() - scalings, additional fields, the code
+        generator itself - is relative to the domain it is running on, so the binding has to be
+        restored afterwards: an interface hook routinely runs while its bulk is bound as well.
+        """
+        eqs=self._equations
+        # The combining wrapper of a merged domain has to be bound as well, not just the
+        # equations themselves: it is what they resolve their master to, and reading anything
+        # off it (a scaling, the mesh) goes through its code generator.
+        targets=list(eqs)
+        master=self._single_equations()
+        if master is not None and all(master is not t for t in targets):
+            targets.append(master)
+        old=[t._get_current_codegen() for t in targets]
+        for t in targets:
+            t._set_current_codegen(self._codegen)
+        try:
+            yield eqs
+        finally:
+            for t,o in zip(targets,old):
+                t._set_current_codegen(o)
+
+    def _dispatch(self,hook:str,*args:Any,needs_mesh:bool=False)->list[Any]:
+        """Run `hook` on every equation of this domain and collect the results.
+
+        The list is built eagerly on purpose: several hooks combine the results with `and`/`or`,
+        and every equation has to run regardless of what an earlier one returned."""
+        if not self._equations or (needs_mesh and self._mesh is None):
+            return []
+        with self._on_this_domain() as eqs:
+            return [getattr(e,hook)(*args) for e in eqs]
 
     def get_compilation_flags(self,problem:"Problem")->"EquationCompilationFlags":
         """The code generation flags in effect on this domain.
@@ -1741,8 +1820,8 @@ class EquationTree:
                 flags=self._parent.get_compilation_flags(problem)
             else:
                 flags=problem.equation_compilation_flags
-            if self._equations is not None:
-                for own in self._equations.get_equation_of_type(EquationCompilationFlags,always_as_list=True):
+            for eq in self._equations:
+                for own in eq.get_equation_of_type(EquationCompilationFlags,always_as_list=True):
                     flags=cast(EquationCompilationFlags,own).with_defaults_from(flags)
             self._compilation_flags=flags
         return self._compilation_flags
@@ -1751,9 +1830,24 @@ class EquationTree:
         assert self._mesh is not None
         return self._mesh
 
+    def _is_ode(self)->bool | None:
+        """Whether this domain is an ODE domain. None while nothing has an opinion."""
+        res=None
+        for eq in self._equations:
+            isode=eq._is_ode()
+            if isode is None:
+                continue
+            if res is None:
+                res=isode
+            elif res!=isode:
+                info=[repr(e)+" is ODE: "+str(e._is_ode()) for e in self._equations]
+                raise RuntimeError("Combined Equations and ODEEquations does not work yet:\n"+"\n".join(info))
+        return res
+
     def get_equations(self)->BaseEquations:
-        assert self._equations is not None
-        return self._equations
+        eqs=self._single_equations()
+        assert eqs is not None
+        return eqs
     
     def get_children(self) -> dict[str, "EquationTree"]:
         return self._children
@@ -1825,41 +1919,22 @@ class EquationTree:
 
 
     def _change_output_directory(self,newdir:str):
-        if (self._mesh is not None) and (self._equations is not None):            
-            assert self._codegen is not None
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations.change_output_directory(newdir,self)
-            self._equations._set_current_codegen(oldcg)
-            
+        self._dispatch("change_output_directory",newdir,self,needs_mesh=True)
         for _,c in self._children.items():
             c._change_output_directory(newdir)
 
-    def _before_assigning_equations(self,dof_selector:"_DofSelector | None"):                
-        if (self._mesh is not None) and (self._equations is not None):            
-            assert self._codegen is not None
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations.before_assigning_equations_preorder(self._mesh)
-            self._equations._set_current_codegen(oldcg)
+    def _before_assigning_equations(self,dof_selector:"_DofSelector | None"):
+        self._dispatch("before_assigning_equations_preorder",self._mesh,needs_mesh=True)
 
         if dof_selector is not None:
-            dof_selector._apply_on_domain(self._mesh)  
+            dof_selector._apply_on_domain(self._mesh)
 
         for _,c in self._children.items():
             c._before_assigning_equations(dof_selector)
-        if (self._mesh is not None) and (self._equations is not None):
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations.before_assigning_equations_postorder(self._mesh)
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("before_assigning_equations_postorder",self._mesh,needs_mesh=True)
 
     def _after_remeshing(self):
-        if (self._mesh is not None) and (self._equations is not None):
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen) 
-            self._equations.after_remeshing(self)
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("after_remeshing",self,needs_mesh=True)
         for _,c in self._children.items():
             c._after_remeshing()
 
@@ -1869,173 +1944,98 @@ class EquationTree:
         Called after a mesh replacement (remeshing, or a state file with a different template) for
         the subtree of each replaced domain only - the new meshes carry no directives yet, whereas
         a domain that was not replaced still has its own and would collect a duplicate per remesh."""
-        if (self._mesh is not None) and (self._equations is not None):
-            assert self._codegen is not None
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations.register_refinement_directives(self._codegen)
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("register_refinement_directives",self._codegen,needs_mesh=True)
         for _,c in self._children.items():
             c._register_refinement_directives()
 
     def _before_mesh_to_mesh_interpolation(self,interpolator:"BaseMeshToMeshInterpolator"):
-        if (self._mesh is not None) and (self._equations is not None):
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen) 
-            self._equations.before_mesh_to_mesh_interpolation(self,interpolator)
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("before_mesh_to_mesh_interpolation",self,interpolator,needs_mesh=True)
         for _,c in self._children.items():
             c._before_mesh_to_mesh_interpolation(interpolator)
-
 
     def _setup_remeshing_size(self,remesher:"RemesherBase",preorder:bool):
         if preorder:
             for _, c in self._children.items():
                 c._setup_remeshing_size(remesher, preorder)
-        if (self._equations is not None):
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations.setup_remeshing_size(remesher,preorder)
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("setup_remeshing_size",remesher,preorder)
         if not preorder:
             for _,c in self._children.items():
                 c._setup_remeshing_size(remesher,preorder)
 
-
     def _after_mapping_on_macro_elements(self):
-        if (self._mesh is not None) and (self._equations is not None):
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen) 
-            self._equations.after_mapping_on_macro_elements()
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("after_mapping_on_macro_elements",needs_mesh=True)
         for _,c in self._children.items():
             c._after_mapping_on_macro_elements()
 
-
     def _before_newton_solve(self):
-        if self._equations is not None:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen) 
-            self._equations.before_newton_solve()
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("before_newton_solve")
         for _,c in self._children.items():
             c._before_newton_solve()
 
     def _after_newton_solve(self):
-        if self._equations is not None:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations.after_newton_solve()
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("after_newton_solve")
         for _,c in self._children.items():
             c._after_newton_solve()
 
     def _after_transient_solve(self):
-        if self._equations is not None:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations.after_transient_solve()
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("after_transient_solve")
         for _,c in self._children.items():
             c._after_transient_solve()
 
     def _before_newton_convergence_check(self)->bool:
-        res=True
-        if self._equations is not None:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            res=self._equations.before_newton_convergence_check(self)
-            self._equations._set_current_codegen(oldcg)
+        # all() over an already built list: a rejecting equation must not stop the others running
+        res=all(self._dispatch("before_newton_convergence_check",self))
         for _,c in self._children.items():
             res=c._before_newton_convergence_check() and res
         return res
 
-
     def _before_precice_initialise(self):
-        if self._equations is not None:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations.before_precice_initialise(self)
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("before_precice_initialise",self)
         for _,c in self._children.items():
             c._before_precice_initialise()
 
     def _before_precice_solve(self,precice_dt:float):
-        if self._equations is not None:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations.before_precice_solve(self,precice_dt)
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("before_precice_solve",self,precice_dt)
         for _,c in self._children.items():
             c._before_precice_solve(precice_dt)
 
     def _after_precice_solve(self,precice_dt:float):
-        if self._equations is not None:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations.after_precice_solve(self,precice_dt)
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("after_precice_solve",self,precice_dt)
         for _,c in self._children.items():
             c._after_precice_solve(precice_dt)
 
-
     def _init_output(self,continue_info:dict[str, Any] | None=None,rank:int=0):
-        if self._equations:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations._init_output(self,continue_info=continue_info,rank=rank) 
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("_init_output",self,continue_info,rank)
         for _,child in self._children.items():
             child._init_output(continue_info=continue_info,rank=rank)
 
     def _before_stationary_or_transient_solve(self, stationary:bool)->bool:
-        must_reapply:bool=False
-        if self._equations:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            res=self._equations._before_stationary_or_transient_solve(self, stationary)
-            if res is True:
-                must_reapply=True
-            self._equations._set_current_codegen(oldcg)
+        must_reapply=any(r is True for r in self._dispatch("_before_stationary_or_transient_solve",self,stationary))
         for _, child in self._children.items():
             must_reapply=child._before_stationary_or_transient_solve(stationary=stationary) or must_reapply
         return must_reapply
 
     def _before_eigen_solve(self, eigensolver:"GenericEigenSolver",angular_m:int | None=None,normal_k:float | None=None)->bool:
-        must_reapply = False
-        if self._equations:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            res = self._equations._before_eigen_solve(self, eigensolver,angular_m,normal_k) 
-            if res is True:
-                must_reapply = True
-            self._equations._set_current_codegen(oldcg)
+        must_reapply=any(r is True for r in self._dispatch("_before_eigen_solve",self,eigensolver,angular_m,normal_k))
         for _, child in self._children.items():
             must_reapply = child._before_eigen_solve(eigensolver,angular_m,normal_k) or must_reapply
         return must_reapply
 
     def _get_forced_zero_dofs_for_eigenproblem(self,eigensolver:"GenericEigenSolver",angular_mode:int | float | None,normal_k:float | None)->set[str | int]:
         res:set[str | int]=set()
-        if self._equations:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            res.update(self._equations._get_forced_zero_dofs_for_eigenproblem(self, eigensolver,angular_mode,normal_k)) 
-            self._equations._set_current_codegen(oldcg)
+        for upd in self._dispatch("_get_forced_zero_dofs_for_eigenproblem",self,eigensolver,angular_mode,normal_k):
+            res.update(upd)
         for _, child in self._children.items():
             res.update(child._get_forced_zero_dofs_for_eigenproblem(eigensolver,angular_mode,normal_k))
         return res
 
     def _do_output(self,step:int,stage:str,only_every_step:bool=False):
-        if self._equations:
-            oldcg = self._equations._get_current_codegen()
-            self._equations._set_current_codegen(self._codegen)
-            self._equations._do_output(self,step,stage,only_every_step)
-            self._equations._set_current_codegen(oldcg)
+        self._dispatch("_do_output",self,step,stage,only_every_step)
         for _,child in self._children.items():
             child._do_output(step,stage,only_every_step)
 
     def _has_sub_equations_defined(self):
-        if self._equations is not None:
+        if self._equations:
             return True
         else:
             for _,v in self._children.items():
@@ -2054,8 +2054,8 @@ class EquationTree:
         itself - a cycle that makes _get_combined_element() recurse until the stack runs out. Wrapping
         keeps the shared object away from the top level, which is exactly why the list form
         (eqs@["left","right"]) builds a CombinedEquations before sharing."""
-        if self._equations is not None and not isinstance(self._equations,CombinedEquations):
-            self._equations=CombinedEquations(self._equations)
+        if len(self._equations)==1 and not isinstance(self._equations[0],CombinedEquations):
+            self._equations=[CombinedEquations(self._equations[0])]
         for child in self._children.values():
             child._wrap_equations_for_sharing()
 
@@ -2107,14 +2107,16 @@ class EquationTree:
             child._expand_domain_name_patterns(candidates_getter,depth+1)
 
     def _fill_dummy_equations(self,problem:"Problem",is_bulk_root:bool=True,pathname:str=""):
-        if len(self._children)>0 and self._equations is None:
+        if len(self._children)>0 and not self._equations:
             if self._has_sub_equations_defined() and not is_bulk_root:
-                self._equations=DummyEquations()
-                self._equations._problem=problem
+                self._equations=[DummyEquations()]
+                self._equations[0]._problem=problem
         if self._equations:
-            self._equations._problem = problem             
-            self._equations.before_fill_dummy_equations(problem,self,pathname)
-            if self._equations.interior_facet_terms_required():
+            for eq in self._equations:
+                eq._problem = problem
+            for eq in self._equations:
+                eq.before_fill_dummy_equations(problem,self,pathname)
+            if any(eq.interior_facet_terms_required() for eq in self._equations):
                 if "_internal_facets_" not in self._children.keys():
                     self._children["_internal_facets_"]=EquationTree(DummyEquations(),self)
                     self._children["_internal_facets_"].get_equations()._problem=problem
@@ -2128,7 +2130,8 @@ class EquationTree:
     def _fill_interinter_connections(self,iconns:set[str]):
         if self._equations:
             myiconns=set([x for x in iconns if x.startswith(self.get_full_path().lstrip("/"))])
-            self._equations._fill_interinter_connections(self,myiconns)
+            for eq in self._equations:
+                eq._fill_interinter_connections(self,myiconns)
         for _,v in self._children.items():
             v._fill_interinter_connections(iconns)
 
@@ -2152,7 +2155,7 @@ class EquationTree:
         #print("ELEM DIM",elemdim)
         #print(self)
         #print("############")
-        if self._equations is not None:
+        if self._equations:
             assert self._codegen is not None
             cg_self=self._codegen
             if cg_self._name=="_internal_facets_":
@@ -2191,7 +2194,7 @@ class EquationTree:
                 parent=self.get_parent()
                 if parent is not None:
                     grandparent=parent.get_parent()
-                    if grandparent is not None and grandparent._equations is not None:
+                    if grandparent is not None and grandparent._equations:
                         #print(grandparent,grandparent.get_equations())
                         dummy_pp=generate_dummy_domain(grandparent)
                         dummy_p._set_bulk_element(dummy_pp)
@@ -2229,7 +2232,8 @@ class EquationTree:
                 facets._do_define_fields(elemdim)
 
             backup=self.setup_codegen_to_equations()
-            self._equations.after_fill_dummy_equations(problem,self,self.get_full_path(),elem_dim=elemdim)
+            for eq in self._equations:
+                eq.after_fill_dummy_equations(problem,self,self.get_full_path(),elem_dim=elemdim)
             self.setup_codegen_to_equations(reset_info=backup)
 
         for _, v in self._children.items():
@@ -2238,7 +2242,7 @@ class EquationTree:
 
     #This will create new equations multiple occuring equations (Important, since the same equation might occur on different nodal dims, etc)
     def _finalize_equations(self,problem:"Problem",second_loop:bool=False):
-        if self._equations is not None:
+        if self._equations:
             if self._codegen is None:
                 self._codegen=FiniteElementCodeGenerator()                
                 # Inherited from the parent domains and the problem. The flags of this domain itself
@@ -2248,8 +2252,8 @@ class EquationTree:
                 self._codegen._name=self.get_my_path_name()
                 self._codegen.set_latex_printer(problem.latex_printer)
                 self._codegen._set_problem(problem) 
-                if second_loop and self._equations._is_ode():
-                    self._codegen._set_equations(self._equations)
+                if second_loop and self._is_ode():
+                    self._codegen._set_equations(self.get_equations())
                     backup=self.setup_codegen_to_equations(with_bulk_and_opp=False)                    
                     self.setup_codegen_to_equations(reset_info=backup)
                     meshname=self.get_my_path_name()
@@ -2261,10 +2265,10 @@ class EquationTree:
 
         if self._codegen:
             self._codegen._set_problem(problem)
-            # _codegen is only ever created above, inside the "if self._equations is not None:" branch,
+            # _codegen is only ever created above, inside the "if self._equations:" branch,
             # so its presence implies self._equations is also set.
-            assert self._equations is not None
-            self._codegen._set_equations(self._equations)
+            assert self._equations
+            self._codegen._set_equations(self.get_equations())
         for _,v in self._children.items():
             v._finalize_equations(problem,second_loop=second_loop)
 
@@ -2307,9 +2311,9 @@ class EquationTree:
             return chld.get_by_path("/".join(pth[1:]))
 
     def _create_dummy_equations_at_path(self,path:str,root:"EquationTree",problem:"Problem"):
-        if (self._equations is None) and (self!=root):
-            self._equations=DummyEquations()            
-            self._equations._problem=problem
+        if (not self._equations) and (self!=root):
+            self._equations=[DummyEquations()]
+            self._equations[0]._problem=problem
         if path=="":
             return
         pth=path.split("/")
@@ -2393,8 +2397,7 @@ class EquationTree:
             return self
         if isinstance(other,EquationTree):
             res=EquationTree(self._equations,parent=None)
-            if other._equations:
-                res._equations=(res._equations+other._equations if res._equations is not None else other._equations)
+            res._equations=res._equations+other._equations
             for k,v in self._children.items():
                 if k in other._children.keys():
                     res._children[k]=v+other._children[k]
@@ -2414,8 +2417,8 @@ class EquationTree:
     def numerical_factors_to_string(self,indent:str="")->str:
         pth = self.get_my_path_name()
         res = indent
-        if self._equations is not None:
-            res += "--" + pth + " : " #+ self._equations._tree_string(indent + " " * (len(pth) + 6))
+        if self._equations:
+            res += "--" + pth + " : "
             assert self._codegen is not None
             for k,v in self._codegen._named_numerical_factors.items():
                 res = res + "\n" + indent + " " * (len(pth) + 6) + str(k)+" = "+str(v)
@@ -2430,8 +2433,8 @@ class EquationTree:
     def _tree_string(self,indent:str="") -> str:
         pth=self.get_my_path_name()
         res=indent
-        if self._equations is not None:
-            res+="--"+pth+" : "+self._equations._tree_string(indent+" "*(len(pth)+6)) 
+        if self._equations:
+            res+="--"+pth+" : "+self.get_equations()._tree_string(indent+" "*(len(pth)+6)) 
         elif self._parent is not None:
             res+="--"+pth
         else:
