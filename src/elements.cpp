@@ -1256,6 +1256,23 @@ namespace pyoomph
 		if (eleminfo.nnode_DL)
 			numfields += functable->info_DL.numfields;
 		numfields += functable->info_D0.numfields + functable->info_ED0.numfields;
+		// InterfaceElementBase is the only pyoomph element that is an oomph::FaceElement, so this is
+		// exactly the "am I a face element" test the code below wants - and it is a virtual call rather
+		// than a dynamic_cast down the virtual-inheritance diamond. Hoisted too: it does not depend on
+		// the node, and asking per node made fill_element_info one of the costliest cast sites here.
+		InterfaceElementBase *const this_as_face = this->as_interface_element();
+		const unsigned zeta_offset = eleminfo.nodal_dim + functable->lagr_dim + this->dim();
+		bool face_zeta_defined = false;
+		if (this_as_face && functable->info_Pos.numfields > zeta_offset)
+		{
+			oomph::Mesh *themesh = this->get_code_instance()->get_bulk_mesh();
+			while (pyoomph::InterfaceMesh *im = dynamic_cast<pyoomph::InterfaceMesh *>(themesh))
+			{
+				themesh = im->get_bulk_mesh();
+			}
+			pyoomph::Mesh *pmesh = dynamic_cast<pyoomph::Mesh *>(themesh);
+			face_zeta_defined = pmesh && pmesh->is_boundary_coordinate_defined(this_as_face->boundary_number_in_bulk_mesh());
+		}
 		for (unsigned int i = 0; i < eleminfo.nnode; i++)
 		{
 			oomph::Vector<double> snode(this->dim(),0.0);
@@ -1264,38 +1281,28 @@ namespace pyoomph
 				this->local_coordinate_of_node(i,snode);
 			}
 						
-			
+			pyoomph::Node *const nod_pt = static_cast<pyoomph::Node *>(node_pt(i));
 			eleminfo.nodal_coords[i] = (double **)calloc(functable->info_Pos.numfields, sizeof(double *));
 			
 			for (unsigned int j = 0; j < eleminfo.nodal_dim; j++)
-				eleminfo.nodal_coords[i][j] = dynamic_cast<Node *>(node_pt(i))->variable_position_pt()->value_pt(j);
+				eleminfo.nodal_coords[i][j] = nod_pt->variable_position_pt()->value_pt(j);
 			for (unsigned int j = 0; j < functable->lagr_dim; j++)
-				eleminfo.nodal_coords[i][eleminfo.nodal_dim + j] = &(dynamic_cast<Node *>(node_pt(i))->xi(j));
+				eleminfo.nodal_coords[i][eleminfo.nodal_dim + j] = &(nod_pt->xi(j));
 			for (unsigned int j = 0; j < this->dim(); j++)
 				eleminfo.nodal_coords[i][eleminfo.nodal_dim + functable->lagr_dim +j] = new double(snode[j]); // Local coordinate buffer
 
 			// FaceElements additionally expose boundary (zeta) coordinates per node, appended after
 			// Eulerian/Lagrangian/local-coordinate slots; these are newly allocated doubles (owned
 			// here, freed in free_element_info) since Node does not store them contiguously.
-			if (dynamic_cast<oomph::FaceElement*>(this))
+			if (this_as_face)
 			{
-				unsigned zeta_offset=eleminfo.nodal_dim + functable->lagr_dim+this->dim();
+				const bool have_zeta = face_zeta_defined && nod_pt->as_boundary_node() && nod_pt->boundary_coordinates_have_been_set_up();
 				for (unsigned int j=zeta_offset;j<functable->info_Pos.numfields;j++)
 				{
 					double zeta=0.0;
-					
-					if ( dynamic_cast<oomph::BoundaryNodeBase*>(this->node_pt(i))  && this->node_pt(i)->boundary_coordinates_have_been_set_up()) 
+					if (have_zeta)
 					{
-						oomph::Mesh * themesh=this->get_code_instance()->get_bulk_mesh();
-						while (dynamic_cast<pyoomph::InterfaceMesh*>(themesh))
-						{
-							themesh = dynamic_cast<pyoomph::InterfaceMesh*>(themesh)->get_bulk_mesh();
-						}					
-						if (dynamic_cast<pyoomph::Mesh*>(themesh)->is_boundary_coordinate_defined(dynamic_cast<oomph::FaceElement*>(this)->boundary_number_in_bulk_mesh()))
-						{
-							
-							zeta= this->zeta_nodal(i,0,j-zeta_offset);							
-						}
+						zeta= this->zeta_nodal(i,0,j-zeta_offset);							
 					}
 					eleminfo.nodal_coords[i][j] =   new double(zeta); // zeta coordinate buffer
 				}
@@ -1317,7 +1324,7 @@ namespace pyoomph
 			{
 				for (unsigned int j = 0; j < eleminfo.nodal_dim; j++)
 				{
-					if (dynamic_cast<pyoomph::Node *>(this->node_pt(i))->is_hanging())
+					if (static_cast<pyoomph::Node *>(this->node_pt(i))->is_hanging())
 					{
 						eleminfo.pos_local_eqn[i][j] = -2; //->constrain
 					}
@@ -1500,6 +1507,30 @@ namespace pyoomph
 		return functable->total_num_fields_basebulk;
 	}
 
+	// See the declaration in elements.hpp: one dynamic_cast per element object, then cached. The
+	// QuadElementBase and BrickElementBase are siblings under QElementBase (2d vs 3d), and
+	// TElementBase/wedge/pyramid are unrelated to both, so the families are mutually exclusive and
+	// the test order only decides how early the common cases stop.
+	BulkElementBase::ElementFamily BulkElementBase::element_family() const
+	{
+		if (element_family_cache == EF_UNKNOWN)
+		{
+			if (dynamic_cast<const oomph::BrickElementBase *>(this))
+				element_family_cache = EF_BRICK;
+			else if (dynamic_cast<const oomph::QuadElementBase *>(this))
+				element_family_cache = EF_QUAD;
+			else if (dynamic_cast<const oomph::TElementBase *>(this))
+				element_family_cache = EF_SIMPLEX;
+			else if (dynamic_cast<const oomph::RefineableWedgeElement *>(this))
+				element_family_cache = EF_WEDGE;
+			else if (dynamic_cast<const oomph::RefineablePyramidElement *>(this))
+				element_family_cache = EF_PYRAMID;
+			else
+				element_family_cache = EF_OTHER;
+		}
+		return element_family_cache;
+	}
+
 	// oomph-lib node-construction hooks (plain / with explicit timestepper, interior / boundary):
 	// create a pyoomph::Node (or BoundaryNode) with the right Lagrangian/nodal dimensions and
 	// enough values to hold every base-bulk field.
@@ -1612,13 +1643,13 @@ namespace pyoomph
 		if (this->nnode() == 1)
 		{
 			for (unsigned int i = 0; i < this->nlagrangian(); i++)
-				res[i] = dynamic_cast<pyoomph::Node *>(this->node_pt(0))->xi(i);
+				res[i] = static_cast<pyoomph::Node *>(this->node_pt(0))->xi(i);
 			return res;
 		}
 		oomph::Vector<double> s = this->get_midpoint_s();
 	  oomph::Shape psi(this->nnode());
 	  this->shape(s,psi);
-	  const unsigned n_lagrangian = dynamic_cast<pyoomph::Node *>(this->node_pt(0))->nlagrangian();
+	  const unsigned n_lagrangian = static_cast<pyoomph::Node *>(this->node_pt(0))->nlagrangian();
 	  for(unsigned i=0;i<n_lagrangian;i++)
 		{
 		 res[i] = 0.0;

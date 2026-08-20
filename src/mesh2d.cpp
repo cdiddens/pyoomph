@@ -220,12 +220,14 @@ namespace pyoomph
       // MIXED quad+tri meshes: every element (quad or tri) refines 1->4 on the shared QuadTree 4-son
       // bookkeeping, and DynamicQuadTreeForest::find_neighbours resolves quad<->tri root neighbours
       // topologically (shared corner nodes). Any OTHER element type disables adaptation.
+      // One cast per element, not one per element per shape family: element_family() is cached on the
+      // element, whereas each dynamic_cast here walks the virtual-inheritance diamond (~1500 cycles).
       bool all_refineable = true;
       for (unsigned int i = 0; i < this->nelement(); i++)
       {
-        bool is_quad = (dynamic_cast<oomph::QuadElementBase *>(this->element_pt(i)) != NULL);
-        bool is_tri = (dynamic_cast<oomph::TElementBase *>(this->element_pt(i)) != NULL);
-        if (!is_quad && !is_tri) { all_refineable = false; break; }
+        pyoomph::BulkElementBase *be = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(i));
+        BulkElementBase::ElementFamily fam = (be ? be->element_family() : BulkElementBase::EF_OTHER);
+        if (fam != BulkElementBase::EF_QUAD && fam != BulkElementBase::EF_SIMPLEX) { all_refineable = false; break; }
       }
       if (all_refineable)
       {

@@ -47,6 +47,7 @@ namespace pyoomph
   class FieldDescriptor;
   class Mesh;
   class BulkElementBase;
+  class BoundaryNode;
   // Empty tag/marker base class that lets pyoomph's node types (see NodeWithFieldIndices
   // below) be identified/friended independently of the oomph-lib node template they wrap.
   class NodeWithFieldIndicesBase
@@ -85,6 +86,14 @@ namespace pyoomph
     // from outside the Newton solver.
     std::vector<std::pair<oomph::Node*, long long>> refinement_generating_key;
   public:
+    // Is this node a pyoomph::BoundaryNode? Overridden there to return `this`; the base returns NULL.
+    // Every node in a mesh is a pyoomph::Node (see the Node typedef below), so a caller holding an
+    // oomph::Node* answers "is it a boundary node, and if so which one" with a static_cast to
+    // pyoomph::Node plus this virtual call, instead of a dynamic_cast down a diamond that costs a
+    // few hundred cycles per query in the dof-numbering and interface-setup loops.
+    virtual pyoomph::BoundaryNode *as_boundary_node() { return NULL; }
+    const pyoomph::BoundaryNode *as_boundary_node() const { return const_cast<NodeWithFieldIndicesBase *>(this)->as_boundary_node(); }
+
     // See refinement_generating_key. Set once, when a refinement creates the node.
     virtual void set_refinement_generating_key(const std::vector<std::pair<oomph::Node*, long long>> &k) { refinement_generating_key = k; }
     virtual const std::vector<std::pair<oomph::Node*, long long>> &get_refinement_generating_key() const { return refinement_generating_key; }
@@ -120,7 +129,7 @@ namespace pyoomph
     // Returns -1 if this node is not a boundary node, or has no such assignment.
     virtual int additional_value_index(unsigned interf_id)
     {
-      oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(this);
+      oomph::BoundaryNodeBase *bn = this->as_boundary_node();
       if (!bn)
         return -1;
       std::map<unsigned, unsigned> *&mp = bn->index_of_first_value_assigned_by_face_element_pt();
@@ -136,6 +145,17 @@ namespace pyoomph
   // pyoomph's standard node type: an oomph::SolidNode (i.e. a node that carries both
   // Eulerian and Lagrangian position, for use with moving/deforming meshes) extended with
   // the field-index bookkeeping of NodeWithFieldIndices.
+  //
+  // INVARIANT: every node of every pyoomph mesh is a pyoomph::Node (or the pyoomph::BoundaryNode
+  // below, which derives from it). Nodes are only ever made by BulkElementBase::construct_node /
+  // construct_boundary_node, by the mesh templates, and - under MPI - by the external-halo master
+  // reconstruction in missing_masters.hpp; all of them build this type. Because oomph::Node ->
+  // oomph::SolidNode -> pyoomph::Node is a plain non-virtual chain, the downcast from an
+  // oomph::Node* is therefore a static_cast, and that is how it is written throughout: a
+  // dynamic_cast here is not a safety net, it is just a slower way to compute the same pointer,
+  // and it is on the per-node path of assembly, dof numbering and hanging-node interpolation.
+  // (The one oomph::Node in the codebase that is NOT one of these is bifurcation.cpp's TimeNode,
+  // which lives in its own standalone collocation mesh that no mesh/element code ever sees.)
   typedef NodeWithFieldIndices<oomph::SolidNode> Node;
   // pyoomph's boundary node type, adding storage/lookup for extra ("additional") dof
   // indices that FaceElements attached to this boundary node assign beyond the bulk node's
@@ -143,6 +163,9 @@ namespace pyoomph
   class BoundaryNode : public oomph::BoundaryNode<pyoomph::Node>
   {
   public:
+    using NodeWithFieldIndicesBase::as_boundary_node; // keep the const overload visible past the override
+    pyoomph::BoundaryNode *as_boundary_node() override { return this; }
+
     // std::map<void*,std::set<int>> nullified_dofs; //Nullify the dofs on element/element class indiced by the pointer, negative dofs are for positions
     std::map<unsigned, unsigned> *get_additional_dof_map() { return Index_of_first_value_assigned_by_face_element_pt; }
     bool has_additional_dof(const unsigned index)

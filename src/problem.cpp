@@ -1289,7 +1289,7 @@ namespace pyoomph
 			pyoomph::Mesh *m = dynamic_cast<pyoomph::Mesh *>(this->mesh_pt(ism));
 			for (unsigned int in = 0; in < m->nnode(); in++)
 			{
-				auto *n = dynamic_cast<pyoomph::Node *>(m->node_pt(in));
+				auto *n = static_cast<pyoomph::Node *>(m->node_pt(in));
 				auto *vp = n->variable_position_pt();
 				for (unsigned int iv = 0; iv < vp->nvalue(); iv++)
 				{
@@ -1348,7 +1348,7 @@ namespace pyoomph
 	  //std::cout << "GET HISTORY DOFS " << t << std::endl;
 	  for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
       {
-       pyoomph::Node* node_pt = dynamic_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
+       pyoomph::Node* node_pt = static_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
 	   if (!node_pt) continue;
        for (unsigned j = 0, nj = node_pt->variable_position_pt()->nvalue(); j < nj; j++)
        {        
@@ -1380,7 +1380,7 @@ namespace pyoomph
 	 // But oomph-lib forgot the variable position pt of moving nodes...
      for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
      {
-      pyoomph::Node* node_pt = dynamic_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
+      pyoomph::Node* node_pt = static_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
 	  if (!node_pt) continue;
       for (unsigned j = 0, nj = node_pt->variable_position_pt()->nvalue(); j < nj; j++)
       {        
@@ -1411,7 +1411,7 @@ namespace pyoomph
 	 // But oomph-lib forgot the variable position pt of moving nodes...
      for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
      {
-      pyoomph::Node* node_pt = dynamic_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
+      pyoomph::Node* node_pt = static_cast<pyoomph::Node*>(mesh_pt()->node_pt(i));
 	  if (!node_pt) continue;
       for (unsigned j = 0, nj = node_pt->variable_position_pt()->nvalue(); j < nj; j++)
       {        
@@ -1464,8 +1464,8 @@ namespace pyoomph
 				{
 					for (unsigned int iv = 0; iv < n->ndim(); iv++)
 					{
-						if (dynamic_cast<pyoomph::Node *>(n)->variable_position_pt()->is_pinned(iv))
-							res.push_back(dynamic_cast<pyoomph::Node *>(n)->variable_position_pt()->value(iv));
+						if (static_cast<pyoomph::Node *>(n)->variable_position_pt()->is_pinned(iv))
+							res.push_back(static_cast<pyoomph::Node *>(n)->variable_position_pt()->value(iv));
 					}
 				}
 			}
@@ -2840,8 +2840,8 @@ namespace pyoomph
 				{
 					for (unsigned int iv = 0; iv < n->ndim(); iv++)
 					{
-						if (dynamic_cast<pyoomph::Node *>(n)->variable_position_pt()->is_pinned(iv))
-							dynamic_cast<pyoomph::Node *>(n)->variable_position_pt()->set_value(t,iv, inp[pos++]);
+						if (static_cast<pyoomph::Node *>(n)->variable_position_pt()->is_pinned(iv))
+							static_cast<pyoomph::Node *>(n)->variable_position_pt()->set_value(t,iv, inp[pos++]);
 					}
 				}
 			}

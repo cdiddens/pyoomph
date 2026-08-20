@@ -351,7 +351,7 @@ namespace pyoomph
 		virtual int has_interface_dof_id(std::string n);		  //-1 if not present
 		virtual unsigned resolve_interface_dof_id(std::string n); // add it if not present
 		virtual unsigned count_nnode(bool discontinuous = false);
-		virtual Node *get_some_node() { return (this->nnode() ? dynamic_cast<Node *>(this->node_pt(0)) : NULL); }
+		virtual Node *get_some_node() { return (this->nnode() ? static_cast<Node *>(this->node_pt(0)) : NULL); }
 		virtual void fill_node_map(std::map<oomph::Node *, unsigned> &nodemap);
 		virtual std::vector<oomph::Node *> fill_reversed_node_map(bool discontinuous = false);
 		virtual void enlarge_elemental_error_max_override_to_only_nodal_connected_elems(unsigned bind);
@@ -570,7 +570,7 @@ namespace pyoomph
 		}
 		std::string get_full_domain_path() override;
 		unsigned count_nnode(bool discontinuous = false) override; // Interface meshes don't have their own nodes...
-		Node *get_some_node() override { return (this->nelement() ? dynamic_cast<Node *>(dynamic_cast<oomph::FiniteElement *>(this->element_pt(0))->node_pt(0)) : NULL); }
+		Node *get_some_node() override { return (this->nelement() ? static_cast<Node *>(dynamic_cast<oomph::FiniteElement *>(this->element_pt(0))->node_pt(0)) : NULL); }
 		void fill_node_map(std::map<oomph::Node *, unsigned> &nodemap) override;
 		std::vector<oomph::Node *> fill_reversed_node_map(bool discontinuous = false) override;
 		std::vector<int> get_shared_node_numpy_indices(unsigned p) override; // Delegates to the bulk mesh's scheme

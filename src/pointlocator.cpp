@@ -72,7 +72,7 @@ namespace pyoomph
     case LocatorSpace::Eulerian:
       return e->node_pt(n)->x(setup.time_index, d);
     case LocatorSpace::Lagrangian:
-      return dynamic_cast<pyoomph::Node *>(e->node_pt(n))->xi(d);
+      return static_cast<pyoomph::Node *>(e->node_pt(n))->xi(d);
     case LocatorSpace::BoundaryZeta:
     default:
       return e->zeta_nodal(n, 0, d);
@@ -120,7 +120,7 @@ namespace pyoomph
     case LocatorSpace::Lagrangian:
       // The Lagrangian coordinates carried by the NODES, which on an interface mesh is the bulk
       // nodal dimension rather than the face element's own dimension.
-      space_dim = dynamic_cast<pyoomph::Node *>(e0->node_pt(0))->nlagrangian();
+      space_dim = static_cast<pyoomph::Node *>(e0->node_pt(0))->nlagrangian();
       break;
     case LocatorSpace::BoundaryZeta:
       // The interface's intrinsic boundary coordinate has one component per element dimension.
@@ -184,7 +184,7 @@ namespace pyoomph
 
       for (unsigned in = 0; in < e->nnode(); in++)
       {
-        pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(e->node_pt(in));
+        pyoomph::Node *n = static_cast<pyoomph::Node *>(e->node_pt(in));
         if (!n)
           continue;
         auto found = node_lookup.find(n);
@@ -1261,7 +1261,7 @@ namespace pyoomph
           // on-surface query match a neighbour whose closest point was half an element away.
           for (unsigned in = 0; in < previous->nnode() && (!hit || rank_by_offset); in++)
           {
-            pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(previous->node_pt(in));
+            pyoomph::Node *n = static_cast<pyoomph::Node *>(previous->node_pt(in));
             if (!n)
               continue;
             auto ni = node_lookup.find(n);
@@ -1417,7 +1417,7 @@ namespace pyoomph
       return;
     for (unsigned n = 0; n < e->nnode(); n++)
     {
-      auto it = node_lookup.find(dynamic_cast<pyoomph::Node *>(e->node_pt(n)));
+      auto it = node_lookup.find(static_cast<pyoomph::Node *>(e->node_pt(n)));
       if (it == node_lookup.end())
         continue;
       const unsigned ni = it->second;

@@ -1748,11 +1748,11 @@ namespace pyoomph
       double dist1 = 0.0;
       for (unsigned int i = 0; i < this->nvertex_node(); i++)
       {
-        pyoomph::Node *nthis = dynamic_cast<pyoomph::Node *>(this->vertex_node_pt(i));
-        pyoomph::Node *nopp = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(i));
+        pyoomph::Node *nthis = static_cast<pyoomph::Node *>(this->vertex_node_pt(i));
+        pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(i));
         for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
           dist0 += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
-        nopp = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1 - i));
+        nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1 - i));
         for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
           dist1 += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
       }
@@ -1900,10 +1900,10 @@ namespace pyoomph
 
       double dist0 = 0.0;
       double dist1 = 0.0;
-      pyoomph::Node *nopp0 = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(0));
-      pyoomph::Node *nopp1 = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1));
-      pyoomph::Node *nthis0 = dynamic_cast<pyoomph::Node *>(this->vertex_node_pt(0));
-      pyoomph::Node *nthis1 = dynamic_cast<pyoomph::Node *>(this->vertex_node_pt(1));            
+      pyoomph::Node *nopp0 = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(0));
+      pyoomph::Node *nopp1 = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1));
+      pyoomph::Node *nthis0 = static_cast<pyoomph::Node *>(this->vertex_node_pt(0));
+      pyoomph::Node *nthis1 = static_cast<pyoomph::Node *>(this->vertex_node_pt(1));            
       for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
         dist0 += (nthis0->x(k) - nopp0->x(k)+offset[k]) * (nthis0->x(k) - nopp0->x(k)+offset[k]);
       for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
@@ -2030,13 +2030,13 @@ namespace pyoomph
       double dist1 = 0.0;
       for (unsigned int i = 0; i < this->nvertex_node(); i++)
       {
-        pyoomph::Node *nthis = dynamic_cast<pyoomph::Node *>(this->vertex_node_pt(i));
+        pyoomph::Node *nthis = static_cast<pyoomph::Node *>(this->vertex_node_pt(i));
         /*        for (unsigned int j = 0; j < opposite_side->nvertex_node(); j++)
                 {*/
-        pyoomph::Node *nopp = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(i));
+        pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(i));
         for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
           dist0 += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
-        nopp = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1 - i));
+        nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1 - i));
         for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
           dist1 += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
         //        }
@@ -2164,10 +2164,10 @@ namespace pyoomph
 
       double dist0 = 0.0;
       double dist1 = 0.0;
-      pyoomph::Node *nopp0 = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(0));
-      pyoomph::Node *nopp1 = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1));
-      pyoomph::Node *nthis0 = dynamic_cast<pyoomph::Node *>(this->vertex_node_pt(0));
-      pyoomph::Node *nthis1 = dynamic_cast<pyoomph::Node *>(this->vertex_node_pt(1));
+      pyoomph::Node *nopp0 = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(0));
+      pyoomph::Node *nopp1 = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1));
+      pyoomph::Node *nthis0 = static_cast<pyoomph::Node *>(this->vertex_node_pt(0));
+      pyoomph::Node *nthis1 = static_cast<pyoomph::Node *>(this->vertex_node_pt(1));
       for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
         dist0 += (nthis0->x(k) - nopp0->x(k)+offset[k]) * (nthis0->x(k) - nopp0->x(k)+offset[k]);
       for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
@@ -2410,10 +2410,10 @@ namespace pyoomph
       std::vector<double> pdists(perms.size(), 0.0);
       for (unsigned int i = 0; i < this->nvertex_node(); i++)
       {
-        pyoomph::Node *nthis = dynamic_cast<pyoomph::Node *>(this->vertex_node_pt(i));
+        pyoomph::Node *nthis = static_cast<pyoomph::Node *>(this->vertex_node_pt(i));
         for (unsigned int p = 0; p < perms.size(); p++)
         {
-          pyoomph::Node *nopp = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(perms[p][i]));
+          pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(perms[p][i]));
           for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
             pdists[p] += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
         }
@@ -2502,10 +2502,10 @@ namespace pyoomph
       std::vector<double> pdists(perms.size(), 0.0);
       for (unsigned int i = 0; i < this->nvertex_node(); i++)
       {
-        pyoomph::Node *nthis = dynamic_cast<pyoomph::Node *>(this->vertex_node_pt(i));
+        pyoomph::Node *nthis = static_cast<pyoomph::Node *>(this->vertex_node_pt(i));
         for (unsigned int p = 0; p < perms.size(); p++)
         {
-          pyoomph::Node *nopp = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(perms[p][i]));
+          pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(perms[p][i]));
           for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
             pdists[p] += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
         }
@@ -2621,10 +2621,10 @@ namespace pyoomph
       std::vector<double> pdists(perms.size(), 0.0);
       for (unsigned int i = 0; i < this->nvertex_node(); i++)
       {
-        pyoomph::Node *nthis = dynamic_cast<pyoomph::Node *>(this->vertex_node_pt(i));
+        pyoomph::Node *nthis = static_cast<pyoomph::Node *>(this->vertex_node_pt(i));
         for (unsigned int p = 0; p < perms.size(); p++)
         {
-          pyoomph::Node *nopp = dynamic_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(perms[p][i]));
+          pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(perms[p][i]));
           for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
             pdists[p] += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
         }

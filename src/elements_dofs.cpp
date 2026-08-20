@@ -50,7 +50,7 @@ namespace pyoomph
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
 			oomph::Node *const on = node_pt(l);
-			Node *const pn = dynamic_cast<Node *>(on);
+			Node *const pn = static_cast<Node *>(on);
 			for (unsigned int i = 0; i < ndim_nodal; i++)
 			{
 				pn->unpin_position(i);
@@ -91,7 +91,7 @@ namespace pyoomph
 			const unsigned ndim_nodal = this->nodal_dimension();
 			for (unsigned int l = 0; l < nnode(); l++)
 			{
-				Node *const pn = dynamic_cast<Node *>(node_pt(l)); // hoisted out of the direction loop
+				Node *const pn = static_cast<Node *>(node_pt(l)); // hoisted out of the direction loop
 				for (unsigned int i = 0; i < ndim_nodal; i++)
 				{
 					pn->pin_position(i);
@@ -150,7 +150,7 @@ namespace pyoomph
 			bool any = false;
 			for (unsigned int l = 0; l < nnode(); l++)
 			{
-				Node *n = dynamic_cast<Node *>(node_pt(l));
+				Node *n = static_cast<Node *>(node_pt(l));
 				if (n && n->get_additional_dof_constraints()) { any = true; break; }
 			}
 			if (!any) return;
@@ -171,7 +171,7 @@ namespace pyoomph
 		}
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
-			Node *n = dynamic_cast<Node *>(node_pt(l));
+			Node *n = static_cast<Node *>(node_pt(l));
 			bool is_hanging_on_C1 = elem_to_C1_map[l]>=0 && has_C1_fields && n->is_hanging(functable->continuous_spaces[SPACE_INDEX_C1].hangindex) && this->refinement_level()>0;
 			for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; )
 			{
@@ -271,7 +271,7 @@ namespace pyoomph
 		for (const std::vector<unsigned> & entry : c1_dummy_map)
 		{
 			if (entry.size() < 2) continue;
-			Node *tgt = dynamic_cast<Node *>(node_pt(entry[0]));
+			Node *tgt = static_cast<Node *>(node_pt(entry[0]));
 			if (!tgt || tgt->get_additional_dof_constraints() == NULL) continue;
 			const unsigned nc = entry.size() - 1;
 			tgt->c1_constraint_corners.clear();
@@ -300,7 +300,7 @@ namespace pyoomph
 		{
 			for (unsigned int l = 0; l < nnode(); l++)
 			{
-				oomph::Data * x=dynamic_cast<Node *>(this->node_pt(l))->variable_position_pt();
+				oomph::Data * x=static_cast<Node *>(this->node_pt(l))->variable_position_pt();
 				for (unsigned int i = 0; i < this->nodal_dimension(); i++)
 				{
 				  if (x->is_pinned(i)) info.add_dirichlet_dof(x,i);
@@ -456,7 +456,7 @@ namespace pyoomph
 						set_contrib(dest, this->nodal_local_eqn(elem_node_index, val_index),
 									space_info->field_contribution_index, slot);
 					}
-					else if (auto *ielem = dynamic_cast<InterfaceElementBase *>(this))
+					else if (auto *ielem = this->as_interface_element())
 					{
 						// Resolving a hanging interface dof to its masters is an interface-element
 						// operation. On a bulk element these are somebody else's dofs anyway, and the
@@ -651,7 +651,7 @@ namespace pyoomph
 				res[eleminfo.nodal_local_eqn[0][node_index]] = std::string(functable->info_ED0.fieldnames[j]) + "__ExternalODE";
 		}		
 
-		if (!dynamic_cast<InterfaceElementBase *>(this))
+		if (!this->as_interface_element())
 		{
 			// Check if we have unknown fields. It should not happen at the end
 			for (unsigned int i = 0; i < res.size(); i++)

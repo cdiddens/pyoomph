@@ -93,7 +93,7 @@ namespace pyoomph
 					return true;
 				if (!has_additional_dof_constraints)
 					continue;
-				Node *n = dynamic_cast<Node *>(node_pt(s2e[l]));
+				Node *n = static_cast<Node *>(node_pt(s2e[l]));
 				if (!n)
 					continue;
 				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info; info = info->next)
@@ -178,7 +178,7 @@ namespace pyoomph
 			for (unsigned int l = 0; l < nnode_space; l++)
 			{
 				const unsigned l_elem = space_node_to_elem_node[l];
-				Node *n = dynamic_cast<Node *>(node_pt(l_elem));
+				Node *n = static_cast<Node *>(node_pt(l_elem));
 				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
 				{
 					if (info->mode != INTERFACE_DOF_CONSTRAIN_TO_C1)
@@ -316,7 +316,7 @@ namespace pyoomph
 			// A facet whose two sides are the same element has no far side to speak of, and the
 			// disjointness the split relies on would not hold: adopt it as near-side throughout.
 			const bool self_facet = (opposite_side->bulk_element_pt() == this->bulk_element_pt());
-			adopt(dynamic_cast<BulkElementBase *>(opposite_side), opp_interf_eqn_map, !self_facet);
+			adopt(opposite_side, opp_interf_eqn_map, !self_facet);
 			adopt(dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt()), opp_bulk_eqn_map, !self_facet);
 		}
 	}
@@ -481,7 +481,7 @@ namespace pyoomph
 			if (space_info->numfields<=space_info->numfields_basebulk) continue;
 			for (unsigned int inode=0;inode<nnode;inode++)
 			{
-				pyoomph::Node * node=dynamic_cast<pyoomph::Node*>(this->node_pt(get_nodal_space_index_to_element_index[inode]));
+				pyoomph::Node * node=static_cast<pyoomph::Node*>(this->node_pt(get_nodal_space_index_to_element_index[inode]));
 				if (node->is_hanging(hangindex))
 				{					
 					pyoomph::BoundaryNode * dest_bn=dynamic_cast<pyoomph::BoundaryNode*>(node);
@@ -496,7 +496,7 @@ namespace pyoomph
 						   double val=0.0;
 						   for (unsigned int m=0;m<hang_info->nmaster();m++)
 						   {
-								pyoomph::Node * master_node=dynamic_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
+								pyoomph::Node * master_node=static_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
 								BoundaryNode * boundnode=dynamic_cast<BoundaryNode*>(master_node);
 								if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
 								unsigned master_value_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
@@ -514,7 +514,7 @@ namespace pyoomph
 			{
 				for (unsigned int idummy=0;idummy<dummy_value_interpolation.size();idummy++)
 				{
-					pyoomph::Node * dummynode=dynamic_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][0]));
+					pyoomph::Node * dummynode=static_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][0]));
 					pyoomph::BoundaryNode * dest_boundnode=dynamic_cast<pyoomph::BoundaryNode*>(dummynode);
 					if (!dest_boundnode) throw_runtime_error("dummynode is not a BoundaryNode");
 					for (unsigned int t=0;t<dummynode->ntstorage();t++)
@@ -525,7 +525,7 @@ namespace pyoomph
 						   double val=0.0;
 						   for (unsigned int m=1;m<dummy_value_interpolation[idummy].size();m++)
 						   {
-							  pyoomph::Node * master_node=dynamic_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][m]));
+							  pyoomph::Node * master_node=static_cast<pyoomph::Node*>(this->node_pt(dummy_value_interpolation[idummy][m]));
 							  pyoomph::BoundaryNode * boundnode=dynamic_cast<pyoomph::BoundaryNode*>(master_node);
 							  if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
 							  unsigned master_index=boundnode->index_of_first_value_assigned_by_face_element(add_field_index);
@@ -562,7 +562,7 @@ namespace pyoomph
 
 			for (unsigned int l_elem = 0; l_elem < this->nnode(); l_elem++)
 			{
-				pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(node_pt(l_elem));
+				pyoomph::Node *n = static_cast<pyoomph::Node *>(node_pt(l_elem));
 				pyoomph::BoundaryNode *dest_bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
 				bool hangs_on_C1 = has_C1_hanging && n->is_hanging(ft->continuous_spaces[SPACE_INDEX_C1].hangindex);
 				for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; info = info->next)
@@ -637,13 +637,13 @@ namespace pyoomph
 			std::vector<std::map<oomph::Node*, bool>> local_eqn_number_done(addfields, std::map<oomph::Node*, bool>());									
 			for (unsigned int inode=0;inode<eleminfo.nnode_of_space[space->space_index];inode++)
 			{
-				pyoomph::Node * node=dynamic_cast<pyoomph::Node*>(this->node_pt(space_node_to_elem_map[inode]));
+				pyoomph::Node * node=static_cast<pyoomph::Node*>(this->node_pt(space_node_to_elem_map[inode]));
 				if (node->is_hanging(space->hangindex))
 				{
 					oomph::HangInfo * hang_info=node->hanging_pt(space->hangindex);
 					for (unsigned int m=0;m<hang_info->nmaster();m++)
 					{
-						pyoomph::Node * master_node=dynamic_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
+						pyoomph::Node * master_node=static_cast<pyoomph::Node*>(hang_info->master_node_pt(m));
 						pyoomph::BoundaryNode * boundnode=dynamic_cast<pyoomph::BoundaryNode*>(master_node);
 						if (!boundnode) throw_runtime_error("master_node is not a BoundaryNode");
 
@@ -743,7 +743,7 @@ namespace pyoomph
 		}
 		if (attach_req.opposite_shapes && !is_internal_facet_opposite_dummy())
 		{
-			if (!dynamic_cast<InterfaceElementBase *>(opposite_side))
+			if (!opposite_side)
 			{
 				throw_runtime_error("Missing opposite element");
 			}
@@ -752,11 +752,11 @@ namespace pyoomph
 				update_equation_remapping_from_element(opposite_side,attach_req.opposite_shapes,  opp_interf_eqn_map,-1);
 				if (attach_req.opposite_shapes->bulk_shapes)
 				{
-					if (!dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt())
+					if (!opposite_side->bulk_element_pt())
 					{
 						throw_runtime_error("Missing opposite bulk element");
 					}			
-					update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt()),attach_req.opposite_shapes->bulk_shapes , opp_bulk_eqn_map,-2);
+					update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt()),attach_req.opposite_shapes->bulk_shapes , opp_bulk_eqn_map,-2);
 				}
 			}
 		}
@@ -1011,11 +1011,11 @@ namespace pyoomph
     std::vector<double> pdists(8, 0.0);
     for (unsigned int i = 0; i < self->nvertex_node(); i++)
     {
-      pyoomph::Node *nthis = dynamic_cast<pyoomph::Node *>(self->vertex_node_pt(i));
+      pyoomph::Node *nthis = static_cast<pyoomph::Node *>(self->vertex_node_pt(i));
       for (int p = 0; p < 8; p++)
       {
         std::vector<int> perm = node_index_map(p, 2);
-        pyoomph::Node *nopp = dynamic_cast<pyoomph::Node *>(opposite->vertex_node_pt(perm[i]));
+        pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite->vertex_node_pt(perm[i]));
         for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
           pdists[p] += (nthis->x(k) - nopp->x(k) + offset[k]) * (nthis->x(k) - nopp->x(k) + offset[k]);
       }
@@ -1359,7 +1359,7 @@ namespace pyoomph
 			//	std::cout << "  ALREADY PART OF THE ELEMENT AT NODE INDEX " << k << std::endl;		
 				return true;
 			}
-			if (data==dynamic_cast<pyoomph::Node *>(this->node_pt(k))->variable_position_pt())
+			if (data==static_cast<pyoomph::Node *>(this->node_pt(k))->variable_position_pt())
 			{
 				return true;
 			}
@@ -1377,14 +1377,14 @@ namespace pyoomph
 			// dominant space", which is exactly what is_hanging(-1)/hanging_pt(-1) (geometric) answer.
 			for (unsigned int j=0;j<eleminfo.nnode_of_space[space_info->space_index];j++)
 			{
-				auto *nod_pt = dynamic_cast<pyoomph::Node *>(this->node_pt(space_to_elem_index[space_info->space_index][j]));
+				auto *nod_pt = static_cast<pyoomph::Node *>(this->node_pt(space_to_elem_index[space_info->space_index][j]));
 				if (nod_pt->is_hanging(space_info->hangindex)) // TODO: In principle, it can also hang elsewhere, i.e. on another index!
 				{
 					oomph::HangInfo *const hang_pt = nod_pt->hanging_pt(space_info->hangindex);
 					const unsigned nmaster = hang_pt->nmaster();
 					for (unsigned m = 0; m < nmaster; m++)
 					{
-						auto *const master_nod_pt = dynamic_cast<pyoomph::Node *>(hang_pt->master_node_pt(m));
+						auto *const master_nod_pt = static_cast<pyoomph::Node *>(hang_pt->master_node_pt(m));
 						if (data==master_nod_pt) return true;
 						if (data==master_nod_pt->variable_position_pt()) return true;
 					}
@@ -1410,7 +1410,7 @@ namespace pyoomph
 		}; // External data already added		
 		for (unsigned int k = 0; k < this->nnode(); k++)
 		{
-			if (data == dynamic_cast<pyoomph::Node *>(this->node_pt(k))->variable_position_pt())
+			if (data == static_cast<pyoomph::Node *>(this->node_pt(k))->variable_position_pt())
 			{
 			//	std::cout << "  IS ALREADY VARIABLE POSITION AT INDEX " << k << std::endl;		
 				return true;
@@ -1488,14 +1488,14 @@ namespace pyoomph
 				
 				for (unsigned int j = 0; j < from_elem->get_eleminfo()->nnode; j++)
 				{
-					auto *nod_pt = dynamic_cast<pyoomph::Node *>(from_elem->node_pt(j));
+					auto *nod_pt = static_cast<pyoomph::Node *>(from_elem->node_pt(j));
 					if (nod_pt->is_hanging())
 					{						
 						oomph::HangInfo *const hang_pt = nod_pt->hanging_pt();
 						const unsigned nmaster = hang_pt->nmaster();
 						for (unsigned m = 0; m < nmaster; m++)
 						{
-							auto *const master_nod_pt = dynamic_cast<pyoomph::Node *>(hang_pt->master_node_pt(m));
+							auto *const master_nod_pt = static_cast<pyoomph::Node *>(hang_pt->master_node_pt(m));
 							this->add_required_ext_data(master_nod_pt->variable_position_pt(), true);
 						}
 					}
@@ -1972,11 +1972,11 @@ namespace pyoomph
 							{						
 								for (unsigned int jp = 0; jp < spatial_dim; jp++)
 								{	
-								   double old=dynamic_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->value(jp);
-								   dynamic_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->set_value(jp,old+FD_eps);								   
+								   double old=static_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->value(jp);
+								   static_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->set_value(jp,old+FD_eps);								   
                				this->get_dnormal_dcoords_at_s(s, dnormal_dcoord1, NULL);	
                				d2nodal_FD[i][l][j][lp][jp]= (dnormal_dcoord1[i][l][j]-dnormal_dcoord0[i][l][j])/FD_eps;
-								   dynamic_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->set_value(jp,old);								                  				
+								   static_cast<pyoomph::Node*>(Bulk_element_pt->node_pt(lp))->variable_position_pt()->set_value(jp,old);								                  				
 								}
 							}
 						}
@@ -2400,13 +2400,13 @@ namespace pyoomph
 			}
 			oomph::Vector<double> sopp = this->local_coordinate_in_opposite_side(s);
 			double JLagrOpp;
-			dynamic_cast<InterfaceElementBase *>(opposite_side)->fill_shape_info_at_s(sopp, index, *(required.opposite_shapes), shape_info->opposite_shapeinfo, JLagrOpp, flag, NULL, history_index);
+			opposite_side->fill_shape_info_at_s(sopp, index, *(required.opposite_shapes), shape_info->opposite_shapeinfo, JLagrOpp, flag, NULL, history_index);
 			if (required.opposite_shapes->bulk_shapes)
 			{
-				oomph::Vector<double> sopp_blk = dynamic_cast<InterfaceElementBase *>(opposite_side)->local_coordinate_in_bulk(sopp);
+				oomph::Vector<double> sopp_blk = opposite_side->local_coordinate_in_bulk(sopp);
 				double JLagrOppBlk;
 				// std::cout << "FILLING OPPBLK HERE " << index << std::endl;
-				dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt())->fill_shape_info_at_s(sopp_blk, index, *(required.opposite_shapes->bulk_shapes), shape_info->opposite_shapeinfo->bulk_shapeinfo, JLagrOppBlk, flag, NULL, history_index);
+				dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt())->fill_shape_info_at_s(sopp_blk, index, *(required.opposite_shapes->bulk_shapes), shape_info->opposite_shapeinfo->bulk_shapeinfo, JLagrOppBlk, flag, NULL, history_index);
 			}
 		}
 
@@ -2435,10 +2435,10 @@ namespace pyoomph
 			{
 				throw_runtime_error("The interface element requires the opposite site to be set!");
 			}
-			dynamic_cast<InterfaceElementBase *>(this->opposite_side)->interpolate_hang_values(); // TODO: This might be put somewhere else
+			this->opposite_side->interpolate_hang_values(); // TODO: This might be put somewhere else
 			if (required_shapes.opposite_shapes->bulk_shapes)
 			{
-				dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->opposite_side)->bulk_element_pt())->interpolate_hang_values(); // TODO: This might be put somewhere else
+				dynamic_cast<BulkElementBase *>(this->opposite_side->bulk_element_pt())->interpolate_hang_values(); // TODO: This might be put somewhere else
 			}
 		}
 		}
@@ -2460,10 +2460,10 @@ namespace pyoomph
 		}
 		if (required_shapes.opposite_shapes)
 		{
-			dynamic_cast<InterfaceElementBase *>(this->opposite_side)->set_remaining_shapes_appropriately(shape_info->opposite_shapeinfo, *(required_shapes.opposite_shapes));
+			this->opposite_side->set_remaining_shapes_appropriately(shape_info->opposite_shapeinfo, *(required_shapes.opposite_shapes));
 			if (required_shapes.opposite_shapes->bulk_shapes)
 			{
-				dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->opposite_side)->bulk_element_pt())->set_remaining_shapes_appropriately(shape_info->opposite_shapeinfo->bulk_shapeinfo, *(required_shapes.opposite_shapes->bulk_shapes));
+				dynamic_cast<BulkElementBase *>(this->opposite_side->bulk_element_pt())->set_remaining_shapes_appropriately(shape_info->opposite_shapeinfo->bulk_shapeinfo, *(required_shapes.opposite_shapes->bulk_shapes));
 			}
 		}
 	}
@@ -2513,7 +2513,7 @@ namespace pyoomph
 		{
 
 			// We need to fill the hang info of the bulk
-			InterfaceElementBase *opp = dynamic_cast<InterfaceElementBase *>(this->opposite_side);
+			InterfaceElementBase *opp = this->opposite_side;
 			try
 			{
 				//std::cout << "Filling opposite hang info for interface element " << this << " with opposite " << opp << std::endl;
@@ -2644,7 +2644,7 @@ namespace pyoomph
 					}
 				}
 			}
-			InterfaceElementBase *iopp = dynamic_cast<InterfaceElementBase *>(opp);
+			InterfaceElementBase *iopp = opp->as_interface_element();
 			if (iopp)
 			{
 				BulkElementBase *oppblk = dynamic_cast<BulkElementBase *>(iopp->bulk_element_pt());
@@ -2733,7 +2733,7 @@ namespace pyoomph
 		bool has_C1_fields=functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0 ;
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
-			Node *n = dynamic_cast<Node *>(node_pt(l));
+			Node *n = static_cast<Node *>(node_pt(l));
 			pyoomph::BoundaryNode *bn = dynamic_cast<pyoomph::BoundaryNode *>(n);
 			// Interface elements on the interior-facet skeleton sit on ordinary interior nodes, which
 			// are not BoundaryNodes: dereferencing bn below segfaulted as soon as the bulk had any
@@ -2857,10 +2857,10 @@ namespace pyoomph
 	// then lets the base classes assign this element's own additional (hanging/interface) equations.
 	void InterfaceElementBase::assign_additional_local_eqn_numbers()
 	{
-		if (opposite_side && dynamic_cast<InterfaceElementBase *>(opposite_side)->is_internal_facet_opposite_dummy() && !(opposite_side->ndof()))
+		if (opposite_side && opposite_side->is_internal_facet_opposite_dummy() && !(opposite_side->ndof()))
 		{
 
-		  dynamic_cast<InterfaceElementBase *>(opposite_side)->assign_local_eqn_numbers(true);
+		  opposite_side->assign_local_eqn_numbers(true);
 		}
 		BulkElementBase::assign_additional_local_eqn_numbers();
 		oomph::FaceElement::assign_additional_local_eqn_numbers();

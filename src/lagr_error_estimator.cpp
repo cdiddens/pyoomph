@@ -820,7 +820,7 @@ namespace pyoomph
       for (unsigned n = 0; n < el_pt->nnode(); n++)
       {
         oomph::Node *nod_pt = el_pt->node_pt(n);
-        pyoomph::Node *pnod_pt = (use_Lagrangian ? dynamic_cast<pyoomph::Node *>(nod_pt) : NULL);
+        pyoomph::Node *pnod_pt = (use_Lagrangian ? static_cast<pyoomph::Node *>(nod_pt) : NULL);
         Vector<double> p(nodal_dim, 0.0);
         for (unsigned i = 0; i < nodal_dim; i++)
         {
@@ -1577,7 +1577,7 @@ namespace pyoomph
         Vector<double> xglob(nodal_dim, 0.0);
         for (unsigned i = 0; i < nodal_dim; i++)
         {
-          pyoomph::Node *pnod_pt = (use_Lagrangian ? dynamic_cast<pyoomph::Node *>(nod_pt) : NULL);
+          pyoomph::Node *pnod_pt = (use_Lagrangian ? static_cast<pyoomph::Node *>(nod_pt) : NULL);
           xglob[i] = ((pnod_pt && i < pnod_pt->nlagrangian()) ? pnod_pt->xi(i) : nod_pt->x(i));
         }
 
@@ -1643,7 +1643,7 @@ namespace pyoomph
       for (unsigned i = 0; i < dim; i++)
       {
 
-        x[i] = (use_Lagrangian ? dynamic_cast<pyoomph::Node *>(nod_pt)->xi(i) : nod_pt->x(i));
+        x[i] = (use_Lagrangian ? static_cast<pyoomph::Node *>(nod_pt)->xi(i) : nod_pt->x(i));
       }
 
       // Evaluate global recovery functions at node

@@ -156,7 +156,7 @@ namespace pyoomph
 
 	bool BulkElementBase::node_is_c1_constrained_for_value(oomph::Node *n, unsigned v) const
 	{
-		Node *pn = dynamic_cast<Node *>(n);
+		Node *pn = static_cast<Node *>(n);
 		if (!pn) return false;
 		for (const AdditionalDofConstrainingInfo *info = pn->get_additional_dof_constraints(); info != NULL; info = info->next)
 			if (info->mode == CONTINUOUS_BASE_DOF_CONSTRAIN_TO_C1 && info->index == v)
@@ -166,7 +166,7 @@ namespace pyoomph
 
 	bool BulkElementBase::node_is_c1_constrained_for_position(oomph::Node *n, unsigned i) const
 	{
-		Node *pn = dynamic_cast<Node *>(n);
+		Node *pn = static_cast<Node *>(n);
 		if (!pn) return false;
 		for (const AdditionalDofConstrainingInfo *info = pn->get_additional_dof_constraints(); info != NULL; info = info->next)
 			if (info->mode == POSITION_CONSTRAIN_TO_C1 && info->index == i)
@@ -610,7 +610,7 @@ namespace pyoomph
 	{
 		if (depth > 32)
 			throw_runtime_error("flatten_hang_for_value: recursion too deep - cyclic hang/constraint chain?");
-		Node *pn = dynamic_cast<Node *>(n);
+		Node *pn = static_cast<Node *>(n);
 		// 1. Locally reduced to C1 for this value: expand via the stored C1-corner average, then recurse
 		//    (a corner may itself be constrained and/or hanging).
 		if (pn && !pn->c1_constraint_corners.empty() && node_is_c1_constrained_for_value(pn, v))
@@ -639,7 +639,7 @@ namespace pyoomph
 	{
 		if (depth > 32)
 			throw_runtime_error("flatten_hang_for_position: recursion too deep - cyclic hang/constraint chain?");
-		Node *pn = dynamic_cast<Node *>(n);
+		Node *pn = static_cast<Node *>(n);
 		if (pn && !pn->c1_constraint_corners.empty() && node_is_c1_constrained_for_position(pn, i))
 		{
 			for (const auto &cw : pn->c1_constraint_corners)
@@ -663,7 +663,7 @@ namespace pyoomph
 	{
 		if (depth > 32)
 			throw_runtime_error("flattened_value: recursion too deep - cyclic hang/constraint chain?");
-		Node *pn = dynamic_cast<Node *>(n);
+		Node *pn = static_cast<Node *>(n);
 		if (pn && !pn->c1_constraint_corners.empty() && node_is_c1_constrained_for_value(pn, v))
 		{
 			double val = 0.0;
@@ -687,7 +687,7 @@ namespace pyoomph
 	{
 		if (depth > 32)
 			throw_runtime_error("flattened_position: recursion too deep - cyclic hang/constraint chain?");
-		Node *pn = dynamic_cast<Node *>(n);
+		Node *pn = static_cast<Node *>(n);
 		if (pn && !pn->c1_constraint_corners.empty() && node_is_c1_constrained_for_position(pn, i))
 		{
 			double val = 0.0;
@@ -716,7 +716,7 @@ namespace pyoomph
 		const unsigned nm = h->nmaster();
 		for (unsigned m = 0; m < nm; m++)
 		{
-			pyoomph::Node *mn = dynamic_cast<pyoomph::Node *>(h->master_node_pt(m));
+			pyoomph::Node *mn = static_cast<pyoomph::Node *>(h->master_node_pt(m));
 			if (mn && mn->get_additional_dof_constraints() != NULL)
 				return false;
 		}
@@ -941,7 +941,7 @@ namespace pyoomph
 			for (unsigned l = 0; l < nnode_space; l++)
 			{
 				oomph::Node *n = node_pt(s2e[l]);
-				Node *pn = dynamic_cast<Node *>(n);
+				Node *pn = static_cast<Node *>(n);
 				if (pn && pn->get_additional_dof_constraints())
 					to_interpolate = true;
 				for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
@@ -974,7 +974,7 @@ namespace pyoomph
 			for (unsigned l = 0; l < n_real_nodes; l++)
 			{
 				oomph::Node *n = node_pt(l);
-				Node *pn = dynamic_cast<Node *>(n);
+				Node *pn = static_cast<Node *>(n);
 				if (n->is_hanging() || (pn && pn->get_additional_dof_constraints()))
 				{
 					to_interpolate = true;
@@ -1096,7 +1096,7 @@ namespace pyoomph
 			// Deliberately node-level rather than keyed on the element's has_additional_dof_constraints
 			// flag: that flag is maintained by pin_dummy_values, and interpolate_hang_values is also
 			// called outside assembly, where its validity would have to be proven rather than assumed.
-			Node *pn = dynamic_cast<Node *>(n);
+			Node *pn = static_cast<Node *>(n);
 			const bool constrained = pn && pn->get_additional_dof_constraints();
 			if (!n->is_hanging() && !constrained)
 				continue;
@@ -1124,7 +1124,7 @@ namespace pyoomph
 				// Same node-level gate as for the positions above: without a constraint list the
 				// per-field node_is_c1_constrained_for_value walk cannot say anything, so a node that
 				// hangs in no value and carries no constraint is skipped entirely.
-				Node *pn = dynamic_cast<Node *>(n);
+				Node *pn = static_cast<Node *>(n);
 				const bool constrained = pn && pn->get_additional_dof_constraints();
 				const unsigned ntstorage = n->ntstorage();
 				for (unsigned f = 0; f < space_info->numfields_basebulk; f++)
@@ -1273,15 +1273,15 @@ namespace pyoomph
 
 	 if (name=="mesh_x" && this->nodal_dimension()>0)
 	 {
-		for (unsigned int i=0;i<this->nnode();i++) result.push_back(std::make_pair(dynamic_cast<pyoomph::Node*>(this->node_pt(i))->variable_position_pt(),0));
+		for (unsigned int i=0;i<this->nnode();i++) result.push_back(std::make_pair(static_cast<pyoomph::Node*>(this->node_pt(i))->variable_position_pt(),0));
 	 }
 	 else if (name=="mesh_y"  && this->nodal_dimension()>1)
 	 {
-		for (unsigned int i=0;i<this->nnode();i++) result.push_back(std::make_pair(dynamic_cast<pyoomph::Node*>(this->node_pt(i))->variable_position_pt(),1));
+		for (unsigned int i=0;i<this->nnode();i++) result.push_back(std::make_pair(static_cast<pyoomph::Node*>(this->node_pt(i))->variable_position_pt(),1));
 	 }
 	 else if (name=="mesh_z"  && this->nodal_dimension()>2)
 	 {
-		for (unsigned int i=0;i<this->nnode();i++) result.push_back(std::make_pair(dynamic_cast<pyoomph::Node*>(this->node_pt(i))->variable_position_pt(),2));
+		for (unsigned int i=0;i<this->nnode();i++) result.push_back(std::make_pair(static_cast<pyoomph::Node*>(this->node_pt(i))->variable_position_pt(),2));
 	 }
 	 else
 	 {
@@ -1676,7 +1676,7 @@ namespace pyoomph
 	void BulkElementBase::collect_position_leaf_nodes(oomph::Node *n, std::set<oomph::Node *> &out, int depth)
 	{
 		if (!n || depth > 32) return;
-		Node *pn = dynamic_cast<Node *>(n);
+		Node *pn = static_cast<Node *>(n);
 		if (pn && !pn->c1_constraint_corners.empty())
 		{
 			bool constrained = false;
@@ -1722,7 +1722,7 @@ namespace pyoomph
 		std::set<oomph::Node *> leaves;
 		for (unsigned l = 0; l < nn; l++)
 		{
-			Node *n = dynamic_cast<Node *>(node_pt(l));
+			Node *n = static_cast<Node *>(node_pt(l));
 			if (!n) continue;
 			bool constrained = false;
 			for (unsigned d = 0; d < nd; d++)
@@ -1781,7 +1781,7 @@ namespace pyoomph
 		// heap corruption that surfaced much later as an unrelated-looking std::bad_alloc whose own exception
 		// unwinding then segfaulted. Raise here, consistently with the sibling guards, until tesselating
 		// interface meshes is actually supported.
-		if (dynamic_cast<InterfaceElementBase *>(this))
+		if (this->as_interface_element())
 			throw_runtime_error("Cannot yet tesselate interface meshes [will fail in connecting hanging nodes and have to go via the parent mesh]");
 		for (unsigned ni = 0; ni < this->nnode(); ni++)
 		{
@@ -2021,7 +2021,7 @@ namespace pyoomph
 	void BulkElementBase::tess_inform_coarser_tri(const std::vector<std::pair<unsigned, unsigned>> &edge_corner_pairs, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes)
 	{
 		(void)edge_corner_pairs;
-		if (dynamic_cast<InterfaceElementBase *>(this))
+		if (this->as_interface_element())
 			throw_runtime_error("Cannot yet tesselate interface meshes [will fail in connecting hanging nodes and have to go via the parent mesh]");
 		oomph::RefineableTElement<2> *re = dynamic_cast<oomph::RefineableTElement<2> *>(this);
 		if (!re)

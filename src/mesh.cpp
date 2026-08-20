@@ -365,7 +365,7 @@ namespace pyoomph
     lengths.reserve(this->nnode());
     for (unsigned ni = 0; ni < this->nnode(); ni++)
     {
-      pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      pyoomph::Node *n = static_cast<pyoomph::Node *>(this->node_pt(ni));
       size_t before = data.size();
       unsigned ntstor = n->ntstorage();
       for (unsigned iv = 0; iv < n->ndim(); iv++)
@@ -387,7 +387,7 @@ namespace pyoomph
     size_t s = 0;
     for (unsigned ni = 0; ni < this->nnode(); ni++)
     {
-      pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      pyoomph::Node *n = static_cast<pyoomph::Node *>(this->node_pt(ni));
       size_t before = s;
       unsigned ntstor = n->ntstorage();
       for (unsigned iv = 0; iv < n->ndim(); iv++)
@@ -645,7 +645,7 @@ namespace pyoomph
     meshdata.clear();
     for (auto nii : nodes)
     {
-      pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(nii);
+      pyoomph::Node *n = static_cast<pyoomph::Node *>(nii);
       unsigned ntstor = n->ntstorage();
       for (unsigned int iv = 0; iv < n->ndim(); iv++)
       {
@@ -696,10 +696,10 @@ namespace pyoomph
 
     //for (unsigned nii = 0; nii < this->nnode(); nii++)
     //{
-    //  pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(this->node_pt(nii));
+    //  pyoomph::Node *n = static_cast<pyoomph::Node *>(this->node_pt(nii));
     for (auto * nn : nodes)
     {
-      pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(nn);
+      pyoomph::Node *n = static_cast<pyoomph::Node *>(nn);
       unsigned ntstor = n->ntstorage();
       for (unsigned int iv = 0; iv < n->ndim(); iv++)
       {
@@ -1062,7 +1062,7 @@ namespace pyoomph
             pyoomph::BulkElementBase *blk = el;
             while (true)
             {
-              InterfaceElementBase *ie_el = dynamic_cast<InterfaceElementBase *>(blk);
+              InterfaceElementBase *ie_el = blk->as_interface_element();
               if (!ie_el) break;
               pyoomph::BulkElementBase *parent = dynamic_cast<pyoomph::BulkElementBase *>(ie_el->bulk_element_pt());
               if (!parent) break;
@@ -1103,16 +1103,25 @@ namespace pyoomph
     // unnecessary (post_adapt_setup_hanging_nodes now hangs boundary sub-faces too) and harmful: all 6
     // pyramids of a cube share its boundary edges, so the spread cascades and a selective refinement
     // collapses to uniform. Skip it there and let the cross-shape hanging handle the boundary interface.
-    for (unsigned int ie = 0; ie < this->nelement(); ie++)
-      if (dynamic_cast<oomph::RefineablePyramidElement *>(this->element_pt(ie)))
-        return;
-
-    std::set<pyoomph::BulkElementBase *> elems_with_boundnodes;
+    // The pyramid test and the sweep below used to be two separate passes, i.e. two dynamic_casts per
+    // element down the virtual-inheritance diamond. One pass, one cast: the family comes off the
+    // element itself (BulkElementBase::element_family()). The pyramid check must still complete before
+    // anything is collected, hence the two-stage loop rather than doing the work inline.
+    std::vector<pyoomph::BulkElementBase *> all_elems;
+    all_elems.reserve(this->nelement());
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
       pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
       if (!el)
         continue;
+      if (el->element_family() == pyoomph::BulkElementBase::EF_PYRAMID)
+        return;
+      all_elems.push_back(el);
+    }
+
+    std::set<pyoomph::BulkElementBase *> elems_with_boundnodes;
+    for (pyoomph::BulkElementBase *el : all_elems)
+    {
       for (unsigned int in = 0; in < el->nnode(); in++)
       {
         if (el->node_pt(in)->is_on_boundary(bind))
@@ -1189,7 +1198,7 @@ namespace pyoomph
           //			std::cout << "N IS " << n << std::endl;
           if (n->is_on_boundary(ib) && n->is_a_copy())
           {
-            if (n->nvalue() > 0 || (dynamic_cast<pyoomph::Node*>(n)->variable_position_pt()->nvalue() > 0 && dynamic_cast<pyoomph::Node*>(n)->variable_position_pt()->is_a_copy()))
+            if (n->nvalue() > 0 || (static_cast<pyoomph::Node*>(n)->variable_position_pt()->nvalue() > 0 && static_cast<pyoomph::Node*>(n)->variable_position_pt()->is_a_copy()))
             {
               throw_runtime_error("Distributed parallel with copied nodes (i.e. PeriodicBC) does not work with nodal degrees of freedom. Either use pure DG or implement a periodic boundary condition by Lagrange multipliers");
             }
@@ -1806,7 +1815,7 @@ namespace pyoomph
       // Conti fields
       for (unsigned int in = 0; in < el->nnode(); in++)
       {
-        pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(el->node_pt(in));
+        pyoomph::Node *n = static_cast<pyoomph::Node *>(el->node_pt(in));
         for (unsigned ind : posindices)
           n->variable_position_pt()->pin(ind);
         for (unsigned ind : valindices)
@@ -2218,7 +2227,7 @@ namespace pyoomph
     for (unsigned int ni = 0; ni < rev_nodemap.size(); ni++)
     {
 
-      pyoomph::Node *node = dynamic_cast<pyoomph::Node *>(rev_nodemap[ni]);
+      pyoomph::Node *node = static_cast<pyoomph::Node *>(rev_nodemap[ni]);
       for (unsigned nd = 0; nd < nodal_dim; nd++)
       {
         xbuffer[ni * contstride + nd] = node->position(history_index, nd) * spatial_scale;
@@ -3253,15 +3262,15 @@ namespace pyoomph
 
       if (this->interpolated_lagrangian_coordinates_at_remeshing) // Interpolate also the Lagrangian coordinates
         {
-          if (dynamic_cast<pyoomph::Node*>(n)->nlagrangian()!=dynamic_cast<pyoomph::Node*>(bestnode)->nlagrangian())
+          if (static_cast<pyoomph::Node*>(n)->nlagrangian()!=static_cast<pyoomph::Node*>(bestnode)->nlagrangian())
           {
             throw_runtime_error("Cannot interpolate Lagrangian coordinates if the number of Lagrangian nodes is different");
           }                    
-          for (unsigned int i = 0; i < dynamic_cast<pyoomph::Node*>(n)->nlagrangian(); i++)
+          for (unsigned int i = 0; i < static_cast<pyoomph::Node*>(n)->nlagrangian(); i++)
           {            
-            double xl=dynamic_cast<pyoomph::Node*>(bestnode)->lagrangian_position(i)*lambda1+dynamic_cast<pyoomph::Node*>(bestnode2)->lagrangian_position(i)*lambda2;
-            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << dynamic_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
-            dynamic_cast<pyoomph::Node*>(n)->xi(i)=xl;
+            double xl=static_cast<pyoomph::Node*>(bestnode)->lagrangian_position(i)*lambda1+static_cast<pyoomph::Node*>(bestnode2)->lagrangian_position(i)*lambda2;
+            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << static_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
+            static_cast<pyoomph::Node*>(n)->xi(i)=xl;
           }
         }
     }
@@ -3456,7 +3465,7 @@ namespace pyoomph
           values.push_back(have * n->x(t, i));
       if (this->interpolated_lagrangian_coordinates_at_remeshing)
       {
-        pyoomph::Node *pn = dynamic_cast<pyoomph::Node *>(n);
+        pyoomph::Node *pn = static_cast<pyoomph::Node *>(n);
         for (unsigned i = 0; pn && i < pn->nlagrangian(); i++)
           values.push_back(have * pn->xi(i));
       }
@@ -3490,7 +3499,7 @@ namespace pyoomph
         }
       if (this->interpolated_lagrangian_coordinates_at_remeshing)
       {
-        pyoomph::Node *pn = dynamic_cast<pyoomph::Node *>(n);
+        pyoomph::Node *pn = static_cast<pyoomph::Node *>(n);
         for (unsigned i = 0; pn && i < pn->nlagrangian(); i++)
         {
           double v = take();
@@ -4031,8 +4040,8 @@ namespace pyoomph
           for (unsigned int i = 0; i < srcelem->nlagrangian(); i++)
           {            
             double xl=srcelem->interpolated_xi(s,i);
-            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << dynamic_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
-            dynamic_cast<pyoomph::Node*>(n)->xi(i)=xl;
+            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << static_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
+            static_cast<pyoomph::Node*>(n)->xi(i)=xl;
           }
         }
 
@@ -4289,15 +4298,15 @@ namespace pyoomph
 
         if (this->interpolated_lagrangian_coordinates_at_remeshing) // Interpolate also the Lagrangian coordinates
         {
-          if (dynamic_cast<pyoomph::Node*>(n)->nlagrangian()!=dynamic_cast<pyoomph::Node*>(bestnode)->nlagrangian())
+          if (static_cast<pyoomph::Node*>(n)->nlagrangian()!=static_cast<pyoomph::Node*>(bestnode)->nlagrangian())
           {
             throw_runtime_error("Cannot interpolate Lagrangian coordinates if the number of Lagrangian nodes is different");
           }                    
-          for (unsigned int i = 0; i < dynamic_cast<pyoomph::Node*>(n)->nlagrangian(); i++)
+          for (unsigned int i = 0; i < static_cast<pyoomph::Node*>(n)->nlagrangian(); i++)
           {            
-            double xl=dynamic_cast<pyoomph::Node*>(bestnode)->lagrangian_position(i)*lambda1+dynamic_cast<pyoomph::Node*>(bestnode2)->lagrangian_position(i)*lambda2;
-            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << dynamic_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
-            dynamic_cast<pyoomph::Node*>(n)->xi(i)=xl;
+            double xl=static_cast<pyoomph::Node*>(bestnode)->lagrangian_position(i)*lambda1+static_cast<pyoomph::Node*>(bestnode2)->lagrangian_position(i)*lambda2;
+            //std::cout << "SETTING LAGRANGIAN COORDINATE " << i << " from " << static_cast<pyoomph::Node*>(n)->xi(i) << " to "  << xl << std::endl;
+            static_cast<pyoomph::Node*>(n)->xi(i)=xl;
           }
         }
 
@@ -4350,7 +4359,7 @@ namespace pyoomph
   {
     std::vector<pyoomph::Node*> res;
     pyoomph::BulkElementBase* el0=dynamic_cast<pyoomph::BulkElementBase*>(this->element_pt(0));
-    pyoomph::Node * n0=dynamic_cast<pyoomph::Node*>(el0->node_pt(0));
+    pyoomph::Node * n0=static_cast<pyoomph::Node*>(el0->node_pt(0));
 
     // All the requested points are located in one batch; the index is what costs, and building it
     // once for the whole list rather than once per call is the point.
@@ -4619,7 +4628,7 @@ namespace pyoomph
       BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
       for (unsigned nn = 0; nn < e->nnode(); nn++)
       {
-        Node *n = dynamic_cast<Node *>(e->node_pt(nn));
+        Node *n = static_cast<Node *>(e->node_pt(nn));
         for (unsigned int nv = 0; nv < num_bulk_nodal; nv++)
         {
           if (n->eqn_number(nv) >= 0)
@@ -4690,7 +4699,7 @@ namespace pyoomph
       {
         for (unsigned nn = 0; nn < e->nnode(); nn++)
         {
-          Node *n = dynamic_cast<Node *>(e->node_pt(nn));
+          Node *n = static_cast<Node *>(e->node_pt(nn));
           for (unsigned int nv = 0; nv < ft->nodal_dim; nv++)
           {
             if (n->variable_position_pt()->eqn_number(nv) >= 0)
@@ -4909,7 +4918,7 @@ namespace pyoomph
         auto *ele = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
         for (unsigned int in = 0; in < ele->nnode(); in++)
         {
-          pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(ele->node_pt(in));
+          pyoomph::Node *nodept = static_cast<pyoomph::Node *>(ele->node_pt(in));
           oomph::Vector<double> s(eldim);
           ele->local_coordinate_of_node(in, s);
           oomph::Vector<double> n(nodal_dim);
@@ -4940,7 +4949,7 @@ namespace pyoomph
     // First set the coordinates
     for (unsigned int ni = 0; ni < this->nnode(); ni++)
     {
-      pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      pyoomph::Node *nodept = static_cast<pyoomph::Node *>(this->node_pt(ni));
       for (unsigned int i = 0; i < nodept->ndim(); i++)
         x_buffer[i] = nodept->x((resetting_first_step ? 1 : 0), i);
       for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -4967,7 +4976,7 @@ namespace pyoomph
 
     for (unsigned int ni = 0; ni < this->nnode(); ni++)
     {
-      pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      pyoomph::Node *nodept = static_cast<pyoomph::Node *>(this->node_pt(ni));
       for (unsigned int i = 0; i < nodept->ndim(); i++)
         x_buffer[i] = nodept->x(i);
       for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -5010,7 +5019,7 @@ namespace pyoomph
         const std::vector<std::vector<unsigned>> & space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
         for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[space_info->space_index]; ni++)
         {
-          pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[space_info->space_index][ni]));
+          pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[space_info->space_index][ni]));
           for (unsigned int i = 0; i < nodept->ndim(); i++)
             x_buffer[i] = nodept->x(i);
           for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -5029,7 +5038,7 @@ namespace pyoomph
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
       {
         auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
-        auto *iel = dynamic_cast<InterfaceElementBase *>(this->element_pt(ei));
+        auto *iel = el->as_interface_element();
         for (unsigned int ni = 0; ni < el->nnode(); ni++)
         {
           normal[0] = normal[1] = normal[2] = 0.0;
@@ -5042,7 +5051,7 @@ namespace pyoomph
             for (unsigned int jnormd = 0; jnormd < iel->nodal_dimension(); jnormd++)
               normal[jnormd] = nbuff[jnormd];
           }
-          pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+          pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
           for (unsigned int i = 0; i < nodept->ndim(); i++)
             x_buffer[i] = nodept->x(i);
           for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -5295,7 +5304,7 @@ namespace pyoomph
       auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
       for (unsigned int ni=0;ni<el->nnode();ni++)
       {
-        pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+        pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
         // Handle moving mesh dofs
         for (unsigned int d = 0; d < nodept->ndim(); d++)
         {
@@ -5331,11 +5340,11 @@ namespace pyoomph
       }
 
       // Handling interface dofs
-      if (dynamic_cast<InterfaceElementBase*>(el))
+      if (el->as_interface_element())
       {
           for (unsigned int ni=0;ni<el->nnode();ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+            pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
             for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
             {
               auto * space_info=ft->present_continuous_spaces[si];
@@ -5395,7 +5404,7 @@ namespace pyoomph
       auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
       for (unsigned int ni=0;ni<el->nnode();ni++)
       {
-        pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+        pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
         // Handle moving mesh dofs
         for (unsigned int d = 0; d < nodept->ndim(); d++)
         {
@@ -5427,11 +5436,11 @@ namespace pyoomph
 
             
       // Handling interface dofs
-      if (dynamic_cast<InterfaceElementBase*>(el))
+      if (el->as_interface_element())
       {
           for (unsigned int ni=0;ni<el->nnode();ni++)
           {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+            pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
             for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
             {
               auto * space_info=ft->present_continuous_spaces[si];
@@ -5531,7 +5540,7 @@ namespace pyoomph
     // Nodal position dofs (Dirichlet conditions on mesh coordinates, e.g. for ALE)
     for (unsigned int ni = 0; any_position_active && ni < this->nnode(); ni++)
     {
-      pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      pyoomph::Node *nodept = static_cast<pyoomph::Node *>(this->node_pt(ni));
       for (unsigned int i = 0; i < nodept->ndim(); i++)
         x_buffer[i] = nodept->x(i);
       for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -5550,7 +5559,7 @@ namespace pyoomph
     // Nodally-interpolated continuous field dofs (basebulk part only)
     for (unsigned int ni = 0; any_continuous_active && ni < this->nnode(); ni++)
     {
-      pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(this->node_pt(ni));
+      pyoomph::Node *nodept = static_cast<pyoomph::Node *>(this->node_pt(ni));
       for (unsigned int i = 0; i < nodept->ndim(); i++)
         x_buffer[i] = nodept->x(i);
       for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -5587,7 +5596,7 @@ namespace pyoomph
         const std::vector<std::vector<unsigned>> & space_to_elem_node_index = el->get_nodal_space_index_to_element_index_map();
         for (unsigned int ni = 0; ni < el->get_eleminfo()->nnode_of_space[space_info->space_index]; ni++)
         {
-            pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[space_info->space_index][ni]));
+            pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(space_to_elem_node_index[space_info->space_index][ni]));
             for (unsigned int i = 0; i < nodept->ndim(); i++)
               x_buffer[i] = nodept->x(i);
             for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -5616,7 +5625,7 @@ namespace pyoomph
       for (unsigned int ei = 0; ei < this->nelement(); ei++)
       {
         auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
-        auto *iel = dynamic_cast<InterfaceElementBase *>(el);
+        auto *iel = el->as_interface_element();
         for (unsigned int ni = 0; ni < el->nnode(); ni++)
         {
           normal[0] = normal[1] = normal[2] = 0.0;
@@ -5630,7 +5639,7 @@ namespace pyoomph
               normal[jnormd] = nbuff[jnormd];
           }
 
-          pyoomph::Node *nodept = dynamic_cast<pyoomph::Node *>(el->node_pt(ni));
+          pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
           for (unsigned int i = 0; i < nodept->ndim(); i++)
             x_buffer[i] = nodept->x(i);
           for (unsigned int i = 0; i < nodept->nlagrangian(); i++)
@@ -6034,7 +6043,7 @@ namespace pyoomph
         auto * space_info=ft->present_continuous_spaces[is];
         for (unsigned int in=0;in<be->get_eleminfo()->nnode_of_space[space_info->space_index];in++)
         {
-          pyoomph::Node *n = dynamic_cast<pyoomph::Node *>(be->node_pt(node_index_to_elem[space_info->space_index][in]));
+          pyoomph::Node *n = static_cast<pyoomph::Node *>(be->node_pt(node_index_to_elem[space_info->space_index][in]));
           if (handled_nodes_on_conti_spaces[is].count(n))
             continue;
           handled_nodes_on_conti_spaces[is].insert(n);
@@ -6631,7 +6640,7 @@ namespace pyoomph
   {
     if (!e->get_eleminfo()->alloced)
       e->fill_element_info(true);
-    InterfaceElementBase *ie = dynamic_cast<InterfaceElementBase *>(e);
+    InterfaceElementBase *ie = e->as_interface_element();
     if (!ie)
       return;
     if (BulkElementBase *b = dynamic_cast<BulkElementBase *>(ie->bulk_element_pt()))
@@ -7709,8 +7718,8 @@ namespace pyoomph
       }
       BulkElementBase *eB = nodes_to_elemB[indices];
 
-      InterfaceElementBase *iA = dynamic_cast<InterfaceElementBase *>(eA);
-      InterfaceElementBase *iB = dynamic_cast<InterfaceElementBase *>(eB);
+      InterfaceElementBase *iA = eA->as_interface_element();
+      InterfaceElementBase *iB = eB->as_interface_element();
       iA->set_opposite_interface_element(iB,this->opposite_offset_vector);
       iB->set_opposite_interface_element(iA,this->reversed_opposite_offset_vector);
     }
@@ -8821,7 +8830,7 @@ namespace pyoomph
           // periodic seam one facet with incidence 2 rather than two unrelated boundary facets. The
           // 1d/2d interior-facet enumerators resolve copies for exactly this reason. On a
           // non-periodic mesh is_a_copy() is false everywhere and nothing changes.
-          if (n->is_a_copy()) n = dynamic_cast<pyoomph::Node *>(n->copied_node_pt());
+          if (n->is_a_copy()) n = static_cast<pyoomph::Node *>(n->copied_node_pt());
           key.insert(n);
         }
         adj[key].push_back(std::make_pair(el, face_id));
@@ -8860,7 +8869,7 @@ namespace pyoomph
       for (unsigned int i=0;i<templ->get_nodes().size();i++)
       {
         //MeshTemplateNode *tnode = templ->get_nodes()[i];
-        //pyoomph::Node *onode = dynamic_cast<pyoomph::Node *>(tnode->oomph_node);
+        //pyoomph::Node *onode = static_cast<pyoomph::Node *>(tnode->oomph_node);
         /*std::cout << "Template Node " << i << " is on boundaries: ";
         for (unsigned b : tnode->on_boundaries)
         {
@@ -8910,7 +8919,7 @@ namespace pyoomph
 
         for (nodeindex_t nindex : tfacet->nodeinds)
         {
-          pyoomph::Node *tnode = dynamic_cast<pyoomph::Node *>(templ_nodes[nindex]->oomph_node);
+          pyoomph::Node *tnode = static_cast<pyoomph::Node *>(templ_nodes[nindex]->oomph_node);
           oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(tnode);
           if (!bn || !tnode)
           {

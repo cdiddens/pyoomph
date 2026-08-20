@@ -458,7 +458,7 @@ void PyReg_Mesh(nb::module_ &m)
 				oomph::HangInfo *h = n->hanging_pt(index);
 				if (!h) return res;
 				for (unsigned k = 0; k < h->nmaster(); k++)
-					res.push_back(std::make_pair(dynamic_cast<pyoomph::Node *>(h->master_node_pt(k)), h->master_weight(k)));
+					res.push_back(std::make_pair(static_cast<pyoomph::Node *>(h->master_node_pt(k)), h->master_weight(k)));
 				return res;
 			},
 			nb::rv_policy::reference, "index"_a = -1,
@@ -686,7 +686,7 @@ void PyReg_Mesh(nb::module_ &m)
 			{
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return NULL;
-			return dynamic_cast<pyoomph::Node*>(be->node_pt(i)); },
+			return static_cast<pyoomph::Node*>(be->node_pt(i)); },
 			nb::rv_policy::reference, nb::arg("local_node_index"), "Returns the node at the given local node index of this element")
 		.def("nodes",[](oomph::GeneralisedElement *self)
 			{
@@ -694,7 +694,7 @@ void PyReg_Mesh(nb::module_ &m)
 			std::vector<pyoomph::Node*> nodes;
 			if (be)
 			{
-				for (unsigned int i=0;i<be->nnode();i++) nodes.push_back(dynamic_cast<pyoomph::Node*>(be->node_pt(i)));
+				for (unsigned int i=0;i<be->nnode();i++) nodes.push_back(static_cast<pyoomph::Node*>(be->node_pt(i)));
 			}
 			return nodes;
 			},nb::rv_policy::reference, "Returns the list of all nodes of this element")
@@ -706,11 +706,11 @@ void PyReg_Mesh(nb::module_ &m)
 			{		
 				if (boundary_index<0)	
 				{
-					for (unsigned int i=0;i<be->nnode();i++) if (be->node_pt(i)->is_on_boundary()) nodes.push_back(dynamic_cast<pyoomph::Node*>(be->node_pt(i)));
+					for (unsigned int i=0;i<be->nnode();i++) if (be->node_pt(i)->is_on_boundary()) nodes.push_back(static_cast<pyoomph::Node*>(be->node_pt(i)));
 				}
 				else
 				{
-					for (unsigned int i=0;i<be->nnode();i++) if (be->node_pt(i)->is_on_boundary(boundary_index)) nodes.push_back(dynamic_cast<pyoomph::Node*>(be->node_pt(i)));
+					for (unsigned int i=0;i<be->nnode();i++) if (be->node_pt(i)->is_on_boundary(boundary_index)) nodes.push_back(static_cast<pyoomph::Node*>(be->node_pt(i)));
 				}
 			}
 			return nodes;
@@ -721,7 +721,7 @@ void PyReg_Mesh(nb::module_ &m)
 			std::vector<pyoomph::Node*> nodes;
 			if (be)
 			{
-				for (unsigned int i=0;i<be->nvertex_node();i++) if (be->vertex_node_pt(i)->is_on_boundary(boundary_index)) nodes.push_back(dynamic_cast<pyoomph::Node*>(be->vertex_node_pt(i)));
+				for (unsigned int i=0;i<be->nvertex_node();i++) if (be->vertex_node_pt(i)->is_on_boundary(boundary_index)) nodes.push_back(static_cast<pyoomph::Node*>(be->vertex_node_pt(i)));
 			}
 			return nodes;
 			},nb::rv_policy::reference, nb::arg("boundary_index"), "Returns the list of vertex (corner) nodes of this element that lie on the given mesh boundary")
@@ -761,7 +761,7 @@ void PyReg_Mesh(nb::module_ &m)
 			{
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return NULL;
-			return dynamic_cast<pyoomph::Node*>(be->vertex_node_pt(i)); },
+			return static_cast<pyoomph::Node*>(be->vertex_node_pt(i)); },
 			nb::rv_policy::reference, nb::arg("local_vertex_index"), "Returns the vertex (corner) node at the given local vertex index of this element")
 		.def("ndof", [](oomph::GeneralisedElement *self) -> int
 			 {
@@ -919,7 +919,7 @@ void PyReg_Mesh(nb::module_ &m)
 			{
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return 0;
-			return dynamic_cast<pyoomph::Node*>(be->boundary_node_pt(dir,index)); },
+			return static_cast<pyoomph::Node*>(be->boundary_node_pt(dir,index)); },
 			nb::rv_policy::reference, nb::arg("direction"), nb::arg("index"), "Returns the node at the given index along the given local edge/face direction of this element")
 		.def("_ode_elem_to_numpy", [](oomph::GeneralisedElement *self)
 			 {
@@ -1176,7 +1176,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("resolve_copy_master_node",oomph_mesh_method([](oomph::Mesh *self, pyoomph::Node *n)->pyoomph::Node *
 			 {
 				if (!dynamic_cast<pyoomph::Mesh*>(self)) return NULL;
-				return dynamic_cast<pyoomph::Node *>(dynamic_cast<pyoomph::Mesh*>(self)->resolve_copy_master(n));
+				return static_cast<pyoomph::Node *>(dynamic_cast<pyoomph::Mesh*>(self)->resolve_copy_master(n));
 			}),nb::rv_policy::reference, nb::arg("node")
 			, "If the given node is a copy (e.g. due to periodic boundaries), returns its master node; otherwise returns None"
 			)
@@ -1214,11 +1214,11 @@ void PyReg_Mesh(nb::module_ &m)
 			return vector_to_ndarray(res); }), "Returns the per-element spatial error estimate (as used by adaptive mesh refinement) for every element in this mesh; zero everywhere if adaptation is disabled")
 		.def(
 			"node_pt",oomph_mesh_method([](oomph::Mesh *self, unsigned int i) -> pyoomph::Node *
-			{ return dynamic_cast<pyoomph::Node *>(self->node_pt(i)); }),
+			{ return static_cast<pyoomph::Node *>(self->node_pt(i)); }),
 			nb::rv_policy::reference, nb::arg("node_index"), "Returns the node at the given index in this mesh")
 		.def(
 			"boundary_node_pt",oomph_mesh_method([](oomph::Mesh *self, const unsigned &b, const unsigned &n)
-			{ return dynamic_cast<pyoomph::Node *>(self->boundary_node_pt(b, n)); }),
+			{ return static_cast<pyoomph::Node *>(self->boundary_node_pt(b, n)); }),
 			nb::rv_policy::reference, nb::arg("boundary_index"), nb::arg("node_index"), "Returns the node at the given index among the nodes on the given mesh boundary")
 		// pyoomph's own mesh-level functionality, adding boundary/interface handling, adaptive
 		// refinement control, (de)serialization of the mesh state and various evaluation helpers.
@@ -1397,7 +1397,7 @@ void PyReg_Mesh(nb::module_ &m)
 			{std::map<oomph::Node *, unsigned> node2index;
 			self->fill_node_map(node2index);
 			std::vector<pyoomph::Node *> index2node(node2index.size(),NULL);;
-			for (auto & n2i : node2index){index2node[n2i.second]=dynamic_cast<pyoomph::Node*>(n2i.first);}
+			for (auto & n2i : node2index){index2node[n2i.second]=static_cast<pyoomph::Node*>(n2i.first);}
 			return index2node;
 			}), nb::rv_policy::reference, "Returns the list of all nodes of this mesh, ordered consistently with the internal node-to-index map")
 		.def("setup_interior_boundary_elements",mesh_method([](pyoomph::Mesh *self, unsigned bindex)
@@ -1450,7 +1450,7 @@ void PyReg_Mesh(nb::module_ &m)
 	    oomph::Vector<oomph::Node*> nodes;
 	    self->get_node_reordering(nodes,old_ordering);
 	    std::vector<pyoomph::Node*> result(nodes.size());
-	    for (unsigned int i=0;i<result.size();i++) result[i]=dynamic_cast<pyoomph::Node*>(nodes[i]);
+	    for (unsigned int i=0;i<result.size();i++) result[i]=static_cast<pyoomph::Node*>(nodes[i]);
 	    return result; }),
 			nb::rv_policy::reference, nb::arg("old_ordering"), "Returns the nodes of this mesh in the (potential) reordering used by reorder_nodes, without actually reordering the internal storage")
 		.def("evaluate_local_expression_at_nodes",mesh_method([](pyoomph::Mesh *self, unsigned index, bool nondimensional,bool discontinuous)

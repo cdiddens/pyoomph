@@ -481,7 +481,7 @@ namespace pyoomph
 			{
 				for (unsigned j = 0; j < el_dim; j++)
 				{
-					// interpolated_T(j,i) += dynamic_cast<pyoomph::Node*>(this->node_pt(l))->xi(i)*dpsids_Element(l,j);
+					// interpolated_T(j,i) += static_cast<pyoomph::Node*>(this->node_pt(l))->xi(i)*dpsids_Element(l,j);
 					interpolated_T(j, i) += this->raw_lagrangian_position_gen(l, 0, i) * dpsids_Element(l, j);
 				}
 			}
@@ -707,17 +707,17 @@ namespace pyoomph
         }
 		}	
 		
-		if ( dynamic_cast<const InterfaceElementBase *>(this))
+		if ( this->as_interface_element())
 		{
 			if (required.bulk_shapes)
 			{
-			 const BulkElementBase *bel = dynamic_cast<const BulkElementBase *>(dynamic_cast<const InterfaceElementBase *>(this)->bulk_element_pt());
+			 const BulkElementBase *bel = dynamic_cast<const BulkElementBase *>(this->as_interface_element()->bulk_element_pt());
 			 bel->fill_shape_info_element_sizes(*(required.bulk_shapes),shape_info->bulk_shapeinfo,flag,history_index);		 
 			}
 			
 			if (required.opposite_shapes)
 			{
-			 const BulkElementBase *opp = dynamic_cast<const BulkElementBase *>(dynamic_cast<const InterfaceElementBase *>(this)->get_opposite_side());
+			 const BulkElementBase *opp = this->as_interface_element()->get_opposite_side(); // an InterfaceElementBase already IS a BulkElementBase
 			 opp->fill_shape_info_element_sizes(*(required.opposite_shapes),shape_info->opposite_shapeinfo,flag,history_index);		 
 			}
 	   }	   

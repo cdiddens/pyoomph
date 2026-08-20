@@ -340,6 +340,7 @@ namespace pyoomph
   class MeshTemplateElement;
   class DynamicBulkElementInstance;
   class Problem;
+  class InterfaceElementBase;
   // The central base class for all pyoomph "bulk" finite elements (as opposed to face/interface
   // elements, see InterfaceElementBase below). A concrete element type (e.g. BulkElementTri2dC2)
   // combines this class with the appropriate oomph-lib geometric element (shape functions,
@@ -374,6 +375,39 @@ namespace pyoomph
     // Releases/resets the JITElementInfo_t buffers owned by this element (nodal/external/internal
     // data pointers etc. handed to the generated code).
     void free_element_info();
+
+  public:
+    // Which of oomph-lib's geometric shape families this element belongs to. The four 3d families are
+    // mutually exclusive (a wedge/pyramid is neither a BrickElementBase nor a TElementBase), as are
+    // quad and simplex in 2d.
+    enum ElementFamily
+    {
+      EF_UNKNOWN = 0, // not yet determined - never returned by element_family()
+      EF_QUAD,        // oomph::QuadElementBase - 2d quadrilateral
+      EF_SIMPLEX,     // oomph::TElementBase - triangle or tetrahedron
+      EF_BRICK,       // oomph::BrickElementBase - 3d hexahedron
+      EF_WEDGE,       // oomph::RefineableWedgeElement
+      EF_PYRAMID,     // oomph::RefineablePyramidElement
+      EF_OTHER        // none of the above (a line element, a point/ODE element, ...)
+    };
+
+    // Cached: determining the family means dynamic_cast-ing across the virtual-inheritance diamond,
+    // and the mesh-level refinement_possible() asks it once per element on every call (several times
+    // per adaptation). An element never changes shape, so one cast per element object is enough.
+    ElementFamily element_family() const;
+
+    // Is this element an InterfaceElementBase? Overridden there to return `this`; the base returns
+    // NULL. Every element is a BulkElementBase, so this replaces dynamic_cast<InterfaceElementBase*>
+    // at every call site that already holds one. That cast is NOT cheap: the whole element hierarchy
+    // is joined by virtual inheritance (see ElementBase/FiniteElementBase above), so it takes
+    // libstdc++'s __vmi_class_type_info graph walk - measured at ~1900 cycles a call, and
+    // fill_shape_info_element_sizes asks the question once per element per integration sweep.
+    virtual InterfaceElementBase *as_interface_element() { return NULL; }
+    const InterfaceElementBase *as_interface_element() const { return const_cast<BulkElementBase *>(this)->as_interface_element(); }
+
+  protected:
+    // See element_family(). EF_UNKNOWN until first asked.
+    mutable ElementFamily element_family_cache = EF_UNKNOWN;
 
     // Allocates internal/external Data for fields stored discontinuously per element (D0: constant,
     // DL: discontinuous-Lagrange, DG: discontinuous on a sub-space) rather than as ordinary nodal data.
@@ -1448,6 +1482,10 @@ namespace pyoomph
   // conventions between the two potentially differently-oriented/refined element types.
   class InterfaceElementBase : public virtual BulkElementBase, public virtual oomph::SolidFaceElement
   {
+  public:
+    using BulkElementBase::as_interface_element; // keep the const overload visible past the override
+    InterfaceElementBase *as_interface_element() override { return this; }
+
   protected:
     InterfaceElementBase *opposite_side;
     bool Is_internal_facet_opposite_dummy;
@@ -1582,11 +1620,11 @@ namespace pyoomph
     // optional periodic "offset" applied before matching coordinates).
     void set_opposite_interface_element(BulkElementBase *_opposite_side,std::vector<double>  offset)
     {
-      if (_opposite_side && !dynamic_cast<InterfaceElementBase *>(_opposite_side))
+      if (_opposite_side && !_opposite_side->as_interface_element())
       {
         throw_runtime_error("Can only set an Interface Element as the opposite side of and interface element");
       }
-      opposite_side = dynamic_cast<InterfaceElementBase *>(_opposite_side);
+      opposite_side = (_opposite_side ? _opposite_side->as_interface_element() : NULL);
       const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
       // Attachment reads the assembled requirements only - see attachment_required_shapes.
       const JITFuncSpec_RequiredShapes_FiniteElement_t &attach_req = *attachment_required_shapes(functable);
@@ -1594,11 +1632,11 @@ namespace pyoomph
       if (attach_req.opposite_shapes)
       {
         // std::cout << "INTERFACE ELEM MERGED " << attach_req.opposite_shapes->psi_D0 << std::endl;
-        add_required_external_data(attach_req.opposite_shapes, dynamic_cast<BulkElementBase *>(opposite_side));
+        add_required_external_data(attach_req.opposite_shapes, opposite_side);
         if (attach_req.opposite_shapes->bulk_shapes)
         {
           //        std::cout << "INTERFACE ELEM MERGED BULK " <<  attach_req.opposite_shapes->bulk_shapes->psi_D0 << std::endl;
-          auto *opp_blk = dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt());
+          auto *opp_blk = dynamic_cast<BulkElementBase *>(opposite_side->bulk_element_pt());
           add_required_external_data(attach_req.opposite_shapes->bulk_shapes, opp_blk);
           // ...and register the same data on the OPPOSITE element as well.
           //
@@ -1639,7 +1677,7 @@ namespace pyoomph
     {
       if (!opposite_side || opposite_node_index[i] < 0)
         return NULL;
-      return dynamic_cast<pyoomph::Node *>(opposite_side->node_pt(opposite_node_index[i]));
+      return static_cast<pyoomph::Node *>(opposite_side->node_pt(opposite_node_index[i]));
     }
     InterfaceElementBase *get_opposite_side() { return opposite_side; }
     const InterfaceElementBase *get_opposite_side() const { return opposite_side; }

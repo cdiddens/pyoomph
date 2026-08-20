@@ -1173,14 +1173,14 @@ namespace pyoomph
 			for (unsigned int l = 0; l < this->nnode(); l++)
 			{
 				std::cout << "\t" << l;
-				for (unsigned int i = 0; i < dynamic_cast<Node *>(this->node_pt(l))->variable_position_pt()->nvalue(); i++)
+				for (unsigned int i = 0; i < static_cast<Node *>(this->node_pt(l))->variable_position_pt()->nvalue(); i++)
 				{
 					std::cout << "\t" << eleminfo.pos_local_eqn[l][i];
 				}
 				std::cout << "\t@\t";
-				for (unsigned int i = 0; i < dynamic_cast<Node *>(this->node_pt(l))->variable_position_pt()->nvalue(); i++)
+				for (unsigned int i = 0; i < static_cast<Node *>(this->node_pt(l))->variable_position_pt()->nvalue(); i++)
 				{
-					std::cout << "\t" << dynamic_cast<Node *>(this->node_pt(l))->variable_position_pt()->value(i);
+					std::cout << "\t" << static_cast<Node *>(this->node_pt(l))->variable_position_pt()->value(i);
 				}
 				std::cout << std::endl;
 			}
@@ -1231,9 +1231,9 @@ namespace pyoomph
 				}
 			}
 
-			if (functable->shapes_required_ResJac[functable->current_res_jac].bulk_shapes && dynamic_cast<InterfaceElementBase *>(this))
+			if (functable->shapes_required_ResJac[functable->current_res_jac].bulk_shapes && this->as_interface_element())
 			{
-				BulkElementBase *bel = dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this)->bulk_element_pt());
+				BulkElementBase *bel = dynamic_cast<BulkElementBase *>(this->as_interface_element()->bulk_element_pt());
 				std::cout << "BULK HANG INFO POS" << std::endl;
 				for (unsigned int l = 0; l < bel->nnode(); l++)
 				{
@@ -1259,7 +1259,7 @@ namespace pyoomph
 				}
 			}
 
-			InterfaceElementBase *ie = dynamic_cast<InterfaceElementBase *>(this);
+			InterfaceElementBase *ie = this->as_interface_element();
 			std::string prefix = "";
 			while (ie)
 			{
@@ -1271,7 +1271,7 @@ namespace pyoomph
 				{
 					std::cout << "\t" << i << "\t" << pdofnames[i] << std::endl;
 				}
-				ie = dynamic_cast<InterfaceElementBase *>(be);
+				ie = be->as_interface_element();
 			}
 
 			throw_runtime_error("Mismatch in Jacobian in code: " + this->codeinst->get_code()->get_file_name());

@@ -631,29 +631,29 @@ namespace pyoomph
 	// bounding that face, in a fixed order (used e.g. to build the face's outline or to identify it geometrically).
 	std::vector<pyoomph::Node*> BulkElementLine1dC1::get_vertex_nodes_of_face(const int &face) const
 	{
-      if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
-	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(1))};	  
+      if (face==-1) return {static_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {static_cast<pyoomph::Node*>(this->node_pt(1))};	  
 	  else throw_runtime_error("Invalid face index for line element");
 	}
 
 	std::vector<pyoomph::Node*> BulkElementLine1dC2::get_vertex_nodes_of_face(const int &face) const
 	{
-	  if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
-	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(2))};
+	  if (face==-1) return {static_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {static_cast<pyoomph::Node*>(this->node_pt(2))};
 	  else throw_runtime_error("Invalid face index for line element");
 	}
 
 	std::vector<pyoomph::Node*> BulkTElementLine1dC1::get_vertex_nodes_of_face(const int &face) const
 	{
-	  if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
-	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(1))};	  
+	  if (face==-1) return {static_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {static_cast<pyoomph::Node*>(this->node_pt(1))};	  
 	  else throw_runtime_error("Invalid face index for line element");
 	}
 
 	std::vector<pyoomph::Node*> BulkTElementLine1dC2::get_vertex_nodes_of_face(const int &face) const
 	{
-	  if (face==-1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(0))};
-	  else if (face==1) return {dynamic_cast<pyoomph::Node*>(this->node_pt(2))};
+	  if (face==-1) return {static_cast<pyoomph::Node*>(this->node_pt(0))};
+	  else if (face==1) return {static_cast<pyoomph::Node*>(this->node_pt(2))};
 	  else throw_runtime_error("Invalid face index for line element");
 	}
 
