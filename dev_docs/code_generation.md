@@ -1545,6 +1545,7 @@ All change how pyoomph gets there or what it reports, never what it computes.
 | `PYOOMPH_DISABLE_SHAPE_FAMILY_SPLIT`, `PYOOMPH_*_HANG_FILL_CACHE`, `PYOOMPH_DISABLE_ASSEMBLY_EXTDATA_SPLIT` | the assembly-overhead levers, [assembly_overhead.md](assembly_overhead.md) §6 |
 | `PYOOMPH_TIME_ADD_RESIDUAL` | per-phase timing of `add_residual`/`expand_placeholders` on stderr, with mapper entries, memo hits and distinct-subexpression counts |
 | `PYOOMPH_DEBUG_HOIST` | report on stderr why a **Hessian** entry could not be split for hoisting, with the atoms and their trial-index classes (§9.4.8). It is read only in `hoist_hessian_entry`; the Jacobian half has no reporting, contrary to what this table used to claim |
+| `PYOOMPH_DISABLE_BUFFER_ALIASES` | emit the fully qualified `shapeinfo->`/`eleminfo->` access at every use site instead of binding the loop-invariant part to a local at the top of the integration-point body (§13) |
 | `PYOOMPH_DISABLE_RJM_SPLIT` | emit one Residual/Jacobian/Mass function with a runtime flag instead of three specialised bodies behind a dispatcher (§9.4.6) |
 | `PYOOMPH_DISABLE_JACOBIAN_HOIST` | emit each Jacobian entry inside the trial loop as before, instead of hoisting its `l_shape`-independent coefficients (§9.4.5) |
 | `PYOOMPH_JACOBIAN_HOIST_MIN` | how many expression nodes a coefficient must have before it is worth naming; default **1**, i.e. hoist everything. §9.4.7 item 1 predicted the optimum would move down once the flag split (§9.4.6) took the coefficients out of the residual-only path, and it did — the sweep on the split build reads 1 → −63.7%, 32 → −62.6%, 64 → −48.5%. The knob still matters with `PYOOMPH_DISABLE_RJM_SPLIT`, where 32 remains right (§9.4.5) |
@@ -1576,3 +1577,119 @@ One thing to know when comparing compilers: gcc and tcc residuals for the same e
 relative, consistent with gcc contracting multiply-adds into FMA under `-march=native` (where
 `-ffp-contract=fast` is the default) while tcc does not. Far above round-off, far below anything a
 solver notices — but a tcc-vs-gcc comparison is not a bit-for-bit one.
+
+## 13. The addressing around the arithmetic
+
+§8's verdict was that redundancy in the *arithmetic* is the C compiler's job and it does it well. That
+verdict stands. This section is about the other half of a generated entry — how it *reaches* its
+operands — where the compiler is not merely good enough but actively forbidden from helping.
+
+### 13.1 The innermost trial loop re-read `shapeinfo` on every iteration
+
+As emitted before this section, the test side of every entry read a hoisted local
+(`testfunction`, `dx_testfunction`, …, `src/codegen.cpp` write_generic_RJM_contribution) while the
+trial side read the fully qualified access:
+
+```c
+for (unsigned int l_shape=0; l_shape<eleminfo->nnode_of_space[SPACE_INDEX_C2]; l_shape++)
+{
+  BEGIN_JACOBIAN_HANG(pyoomph_hang_on, eleminfo->nodal_local_eqn[l_shape][this_nodalind_velocity_x],
+      _jc24*(shapeinfo->dx_shapes[0][SPACE_INDEX_C2][l_shape][0]), ...)
+    jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight*hang_weight2*_J_contrib;
+  END_JACOBIAN_HANG()
+}
+```
+
+`PYOOMPH_RESTRICT` is empty, so that store may modify `shapeinfo`. GCC therefore reloads the pointer
+chain, the row stride and even the **loop bound** after every scatter. In one small Navier-Stokes
+element `offsetof(JITShapeInfo_t, jacobian_size)` was loaded **168 times** in an 8841-instruction
+residual/Jacobian pair, each load followed by re-doing the `imul`.
+
+**`restrict` does not fix it.** Rebuilding with `#define PYOOMPH_RESTRICT __restrict` produced a
+*byte-identical* object file — same 8841 instructions, same 168 loads. GCC does not carry the
+qualifier through the `always_inline` `_impl` body. The comment in `jitbridge.h` now records this so
+nobody re-tries it.
+
+### 13.2 What was done
+
+Every string producer that emits such an access — `ShapeExpansion::get_shape_string`,
+`get_nodal_data_string`, `FiniteElementField::get_hanginfo_str`,
+`FiniteElementSpace::get_eqn_number_str` / `get_num_nodes_str` and their position-space overrides, and
+the timestepper weights — now registers the loop-invariant prefix in a per-function map and returns a
+local name. `FiniteElementCode::write_buffer_alias_declarations` emits the declarations at the top of
+the integration-point body. Names are `_<owner>_<buffer>_<space>[_h<history>]`, deterministic and
+collision-free by construction, and the declarations are emitted in sorted order — the generated text
+is the JIT cache key, and Tier-2 shadow mode compares it byte for byte.
+
+Three details that are not optional:
+
+* **The scatter macros had to change too.** `jacobian_size`/`mass_matrix_size` live in
+  `jitbridge.h`, not in the emitted file, so the emitter alone cannot reach them; `write_generic_RJM`
+  now declares `_jacsize`/`_msize` and the `ADD_TO_JACOBIAN_*`/`ADD_TO_MASS_MATRIX_*` families index
+  with those. (`HessianVectorProduct` has had the equivalent local, `n_dof`, all along.) A **partial**
+  hoist is worth nothing: stride only 0%, shape pointers only −0.9%, everything together −12.9%. One
+  surviving `shapeinfo->` read in the loop forces the reload of all the others.
+* **Only aliases the body actually mentions are declared.** Printing is not the same as emitting:
+  `write_generic_RJM_contribution` buffers a whole space block and discards it when the space turns out
+  to contribute nothing, and the Hessian harvests over spaces it then skips. A leftover shape alias
+  would be a harmless unused local, but a leftover *hanginfo* alias is indexed by a `this_nodalind_*`
+  constant that is only declared for the surviving fields — a compile error in the generated C, which
+  is exactly what the azimuthal element's external-ODE field produced.
+* **Integration-point scope, not function scope.** Function scope is equally *correct* —
+  `prepare_shape_buffer_for_integration` re-points the buffers once per assembly, before the generated
+  function is entered, and `fill_shape_buffer_for_point` only writes into them. It was implemented that
+  way first, and it is measurably worse. See below.
+
+### 13.3 The scope mistake, and how it was caught
+
+Function-scope aliases are live across the indirect `fill_shape_buffer_for_point` call inside the
+integration loop. There are far more of them than there are callee-saved registers, so they spill, and
+every use pays a stack reload instead of a register read — cancelling exactly what the hoist bought.
+
+Wall-clock could not tell the two apart on this machine (±5% run to run). **Callgrind could**, and this
+is the measurement to repeat rather than a timing loop; it is also immune to machine load:
+
+| heated-cylinder element, 300 elemental assemblies | Ir | **Dr** |
+|---|---|---|
+| baseline | 268 667 536 | 107 579 148 |
+| function-scope aliases | 267 286 250 | 107 548 756 — *nothing gained* |
+| integration-point scope | 264 943 550 | **102 485 256** |
+
+The second row is the trap: a 20% drop in *static* instruction count, an unchanged number of executed
+data reads, and no speed-up at all.
+
+The same measurement found the last missing piece. `shapeinfo->timestepper_weights_dt_BDF2_degr[0]`
+appears inside Jacobian *entries*, i.e. in the innermost loop; aliasing the **array** still left a load
+per iteration there. Aliasing slot 0 as a plain `double` closed the last 5 M data reads and made the
+implementation match the reference rewrite to within 12 instructions out of 265 million.
+
+### 13.4 Measured
+
+Bit-identical residual, Jacobian and mass matrix in every case.
+
+| element | insn | Δ | elemental res+jac |
+|---|---|---|---|
+| `heated_cylinder/fluid` | 8 841 → 6 795 | −23.1% | 0.7702 → 0.6934 s (−10.0%) |
+| `azimuthal/domain` rj0 | 48 101 → 37 209 | −22.6% | −12.6% (flag 1), −11.2% (flag 2) |
+| `azimuthal/domain` rj1 (m-mode) | | | −15.3% (flag 1), −13.7% (flag 2) |
+| `azimuthal/domain` rj2 | | | −10.7% (flag 1), −12.7% (flag 2) |
+| `beads_on_string/liquid` | 42 966 → 34 644 | −19.4% | |
+| `beads_on_string/liquid__interface` | 12 317 → 8 958 | −27.3% | |
+| `evaporating/droplet__droplet_gas` | 19 734 → 14 029 | −28.9% | |
+| **30 generated elements, total** | **181 789 → 145 261** | **−20.1%** | |
+
+Residual-only assembly is unchanged (+0.8%, within noise) — it contains no `jacobian[]` store, so it
+had nothing to alias against. That is the control, and it is what makes the mechanism credible.
+
+`PYOOMPH_DISABLE_BUFFER_ALIASES` restores the old emission on the same binary.
+
+### 13.6 Still open here
+
+* `_jcN` declarations sit inside `BEGIN_JACOBIAN()` **and** inside the hanging-master loop opened by
+  `BEGIN_RESIDUAL_CONTINUOUS_SPACE`, so each is recomputed once per hanging master although it depends
+  only on `l_test`. Same for `_hcN` inside `BEGIN_HESSIAN_SHAPE_LOOP1_CONTINUOUS_SPACE`. Hoisting the
+  `pre` stream above the residual macro would fix it — carefully, since that macro is also what decides
+  whether the row exists. Measure on an adaptively refined mesh; a static mesh shows nothing.
+* `GetZ2Fluxes`, `EvalTracerAdvection` and the local/extremum expression evaluators have no alias scope
+  yet, so they still emit the fully qualified accesses. They are not on the assembly hot path, but they
+  are the remaining sources of `shapeinfo->` in a generated file.

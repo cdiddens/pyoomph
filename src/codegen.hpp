@@ -574,6 +574,23 @@ namespace pyoomph
       virtual std::string get_dx_str() const { return "d0x"; } // Suffix identifying which (if any) derivative table this basis function reads from in the generated code
       virtual std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const; // C++ expression for this basis function's shape value/derivative at the given nodal index
       virtual std::string get_c_varname(FiniteElementCode *forcode, std::string test_index);
+
+      // ---- Buffer aliasing -------------------------------------------------------------------
+      // get_shape_string() is get_shape_buffer_base() + "[node]" + get_shape_index_suffix(). The
+      // split exists so the generator can bind the buffer to a local pointer once per integration
+      // point and index THAT in the trial loop, instead of walking shapeinfo->...->... on every
+      // iteration. It has to: the jacobian[] store in the same loop may alias shapeinfo as far as
+      // the C compiler knows (PYOOMPH_RESTRICT is empty, and defining it changes nothing - see
+      // jitbridge.h), so every shapeinfo-> read in there is reloaded after every scatter. This is
+      // exactly what write_generic_RJM_contribution has always done for the TEST side
+      // (testfunction, dx_testfunction, ...); these three let the trial side do the same.
+      virtual std::string get_shape_buffer_base() const;                    // e.g. "shapes[SPACE_INDEX_C2]", "dx_shape_DL"
+      virtual std::string get_shape_index_suffix() const { return ""; }     // "" / "[dir]" / "[slot]"
+      virtual std::string get_shape_alias_stem() const { return "psi"; }    // name fragment, must be stable across runs
+      // How a hoisted alias of get_shape_buffer_base() is declared. The DX_/D2X_ macros are used so
+      // that the FIXED_SIZE_SHAPE_BUFFER variant keeps working, and so the emitted C stays valid
+      // under tcc (no __auto_type).
+      virtual std::string get_shape_alias_decl(const std::string &name) const { return "double const * " + name; }
    };
 
    // First Eulerian spatial derivative of a basis function, d(phi)/dx_direction
@@ -591,8 +608,11 @@ namespace pyoomph
       bool is_eulerian_deriv() const override { return true; }
       std::string to_string() override;
       std::string get_dx_str() const override { return "d1x" + std::to_string(direction); }
-      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+      std::string get_shape_buffer_base() const override;
+      std::string get_shape_index_suffix() const override { return "[" + std::to_string(direction) + "]"; }
+      std::string get_shape_alias_stem() const override { return "dxpsi"; }
+      std::string get_shape_alias_decl(const std::string &name) const override { return "DX_SHAPE_FUNCTION_DECL(" + name + ")"; }
       virtual unsigned get_direction() const { return direction; }
    };
 
@@ -609,8 +629,9 @@ namespace pyoomph
       bool is_eulerian_deriv() const override { return false; }
       std::string to_string() override;
       std::string get_dx_str() const override { return "d1X" + std::to_string(direction); }
-      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+      std::string get_shape_buffer_base() const override;
+      std::string get_shape_alias_stem() const override { return "dXpsi"; }
    };
 
    // First local/reference-element-coordinate derivative of a basis function, d(phi)/dS_direction
@@ -621,8 +642,9 @@ namespace pyoomph
       BasisFunction *get_diff_S(unsigned direction) override;
       std::string to_string() override;
       std::string get_dx_str() const override { return "d1S" + std::to_string(direction); }
-      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+      std::string get_shape_buffer_base() const override;
+      std::string get_shape_alias_stem() const override { return "dSpsi"; }
    };
 
    // Second Eulerian spatial derivative of a basis function, d2(phi)/(dx_direction dx_direction2).
@@ -646,8 +668,11 @@ namespace pyoomph
       unsigned get_slot() const { return PYOOMPH_D2_SLOT(direction, direction2); }
       std::string to_string() override;
       std::string get_dx_str() const override { return "d2x" + std::to_string(direction) + std::to_string(direction2); }
-      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+      std::string get_shape_buffer_base() const override;
+      std::string get_shape_index_suffix() const override { return "[" + std::to_string(get_slot()) + "]"; }
+      std::string get_shape_alias_stem() const override { return "d2xpsi"; }
+      std::string get_shape_alias_decl(const std::string &name) const override { return "D2X_SHAPE_FUNCTION_DECL(" + name + ")"; }
    };
 
    // Second local/reference-element-coordinate derivative, d2(phi)/(dS_direction dS_direction2).
@@ -659,8 +684,9 @@ namespace pyoomph
       bool is_eulerian_deriv() const override { return false; }
       std::string to_string() override;
       std::string get_dx_str() const override { return "d2S" + std::to_string(direction) + std::to_string(direction2); }
-      std::string get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const override;
       std::string get_c_varname(FiniteElementCode *forcode, std::string test_index) override;
+      std::string get_shape_buffer_base() const override;
+      std::string get_shape_alias_stem() const override { return "d2Spsi"; }
    };
 
    class FiniteElementCode;
@@ -1109,6 +1135,33 @@ namespace pyoomph
       std::vector<std::vector<bool>> local_parameter_has_deriv; // Per residual, per local parameter: whether a derivative w.r.t. that parameter is required
       std::vector<GiNaC::ex> local_parameter_symbols;
       std::set<unsigned> params_declared_in_current_function; // Local parameter indices hoisted into const double locals of the generated function currently being written (managed by GlobalParameterFunctionScope, read by GiNaCGlobalParameterWrapper::print)
+
+      // --- Buffer aliases ------------------------------------------------------------------------
+      // Loop-invariant shapeinfo->/eleminfo-> accesses bound to a local pointer at the top of the
+      // generated function, so that the innermost trial loop indexes a local instead of re-walking the
+      // struct. It has to be re-walked otherwise: the jacobian[] store in that loop may alias
+      // shapeinfo as far as the C compiler is concerned, and PYOOMPH_RESTRICT does not help (see
+      // jitbridge.h for the measurement). Worth -12% of an elemental Jacobian and -20% of the emitted
+      // instructions; the residual-only path, which has no such store, is unaffected.
+      //
+      // Function scope is safe because prepare_shape_buffer_for_integration() (elements_shapeinfo.cpp)
+      // runs once per assembly and calls set_remaining_shapes_appropriately() before the generated
+      // function is entered; fill_shape_buffer_for_point() only writes INTO the buffers, it never
+      // re-points them.
+      //
+      // Filled as a side effect of printing, so every emitter buffers its body into an ostringstream
+      // and writes the declarations ahead of it. Keyed name -> declaration line and emitted in map
+      // (i.e. sorted) order, for the same reason the nodalind_ constants are sorted: the generated text
+      // is the JIT cache key and the Tier-2 shadow mode compares it byte for byte.
+      std::map<std::string, std::string> buffer_alias_by_access; // access string -> alias name
+      std::map<std::string, std::string> buffer_alias_decls;     // alias name -> full declaration line
+      bool buffer_aliases_active = false;
+      // Returns the alias for `access`, registering `decl` on first use. When no scope is collecting
+      // declarations (or the feature is switched off) it returns `access` unchanged, so callers can use
+      // it unconditionally.
+      std::string alias_buffer_access(const std::string &access, const std::string &name, const std::string &decl);
+      std::string alias_nodal_data(const FiniteElementSpace *sp); // alias for eleminfo->nodal_data / ->nodal_coords of sp's owner
+      std::string write_buffer_alias_declarations(const std::string &indent, const std::string &body) const; // only the aliases `body` mentions
       void register_global_parameters_in(const GiNaC::ex &e, std::set<unsigned> &used_local_indices); // Print-free registration pre-pass over an expression (descends into subexpressions and multi-ret invocations); fills used_local_indices with the local slots occurring in e
       std::vector<FiniteElementCodeSubExpression> subexpressions; // All CSE'd subexpressions registered for this code, in creation order (indices referenced by GiNaCSubExpression)
       std::vector<GiNaC::ex> multi_return_calls; // All distinct multi-return callback invocations registered for this code, in creation order

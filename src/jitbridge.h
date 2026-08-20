@@ -87,8 +87,18 @@ float __mzerosf=-0.0;
 #define PYOOMPH_NULL NULL
 #endif
 
+// Deliberately empty, and measured: defining it as __restrict changes nothing. Rebuilding the heated-
+// cylinder Navier-Stokes element with `#define PYOOMPH_RESTRICT __restrict` produced a BYTE-IDENTICAL
+// object file - 8841 instructions either way, and still 168 loads of shapeinfo->jacobian_size inside
+// the assembly. GCC does not carry the qualifier through the always_inline _impl body, so the store to
+// jacobian[] keeps aliasing every shapeinfo-> read in the innermost trial loop.
+//
+// The fix for that aliasing is not this macro but the buffer aliases the code generator emits (the
+// trial-side counterpart of the testfunction/dx_testfunction pointers), together with the _jacsize /
+// _msize locals the scatter macros below use. Do not re-try the qualifier expecting a win.
+// It is also still incomplete: the Hessian signature takes no PYOOMPH_RESTRICT at all.
 //#define PYOOMPH_RESTRICT __restrict
-#define PYOOMPH_RESTRICT  // Does not really help so far, but also not completed in e.g. the args for e.g. Hessian, etc
+#define PYOOMPH_RESTRICT
 
 // This file defines the structures which are required to transfer the oomph-lib data (e.g. shape functions) to the C-compiled code
 
@@ -789,12 +799,12 @@ static double signum(double x)
   if (flag)              \
   {
 
-#define ADD_TO_JACOBIAN_NOHANG_NOHANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += _J_contrib;
+#define ADD_TO_JACOBIAN_NOHANG_NOHANG() jacobian[local_eqn * _jacsize + local_unknown] += _J_contrib;
 
 #define ADD_TO_MASS_MATRIX_NOHANG_NOHANG(MPART)                                    \
   if (flag == 2)                                                                   \
   {                                                                                \
-    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += MPART; \
+    mass_matrix[local_eqn * _msize + local_unknown] += MPART; \
   }
 
 #define END_JACOBIAN() }
@@ -896,24 +906,24 @@ static double signum(double x)
       if (local_unknown >= 0)                                             \
       {
 
-#define ADD_TO_JACOBIAN_HANG_NOHANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight * _J_contrib;
-#define ADD_TO_JACOBIAN_NOHANG_HANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight2 * _J_contrib;
-#define ADD_TO_JACOBIAN_HANG_HANG() jacobian[local_eqn * shapeinfo->jacobian_size + local_unknown] += hang_weight * hang_weight2 * _J_contrib;
+#define ADD_TO_JACOBIAN_HANG_NOHANG() jacobian[local_eqn * _jacsize + local_unknown] += hang_weight * _J_contrib;
+#define ADD_TO_JACOBIAN_NOHANG_HANG() jacobian[local_eqn * _jacsize + local_unknown] += hang_weight2 * _J_contrib;
+#define ADD_TO_JACOBIAN_HANG_HANG() jacobian[local_eqn * _jacsize + local_unknown] += hang_weight * hang_weight2 * _J_contrib;
 
 #define ADD_TO_MASS_MATRIX_HANG_NOHANG(MPART)                                                      \
   if (flag == 2)                                                                                   \
   {                                                                                                \
-    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += hang_weight * (MPART); \
+    mass_matrix[local_eqn * _msize + local_unknown] += hang_weight * (MPART); \
   }
 #define ADD_TO_MASS_MATRIX_NOHANG_HANG(MPART)                                                       \
   if (flag == 2)                                                                                    \
   {                                                                                                 \
-    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += hang_weight2 * (MPART); \
+    mass_matrix[local_eqn * _msize + local_unknown] += hang_weight2 * (MPART); \
   }
 #define ADD_TO_MASS_MATRIX_HANG_HANG(MPART)                                                                       \
   if (flag == 2)                                                                                                  \
   {                                                                                                               \
-    mass_matrix[local_eqn * shapeinfo->mass_matrix_size + local_unknown] += hang_weight * hang_weight2 * (MPART); \
+    mass_matrix[local_eqn * _msize + local_unknown] += hang_weight * hang_weight2 * (MPART); \
   }
 
 #define END_JACOBIAN_HANG() \
@@ -1025,6 +1035,12 @@ static double signum(double x)
    if (!symmetry_assembly_same_field) hessian_buffer[local_eqn*n_dof*n_dof+local_deriv*n_dof+local_unknown] +=_H_symm_contrib;\
 
 // Mass matrix not symmetric!
+//
+// DEAD: these two are never expanded. The generated code composes the name
+// "ADD_TO_MASS_HESSIAN_<HANG>_<HANG>_<HANG>" (src/codegen.cpp), which resolves to the aliases further
+// down that forward to the UNDERSCORE-FREE ADD_TO_MASS_HESSIAN_FACTOR - and that one is defined
+// unconditionally outside this #ifdef, so it wins in both branches. Kept only because deleting them
+// would look like a behaviour change in a diff; nothing reaches them.
 #define __ADD_TO_MASS_HESSIAN_FACTOR(FACTOR, MCONTRIB)                               \
   if (flag >= 2)                                                                   \
   { \

@@ -236,7 +236,9 @@ def tier2_shadow_enabled() -> bool:
 # without a bump every affected code reports a Tier-2 MISMATCH once, blaming the
 # fingerprint's coverage for a change that was intended.
 # 9: contribution classes distinguish the two sides of an interior facet (@opposite).
-FINGERPRINT_FORMAT_VERSION = 9
+# 10: buffer aliases - the emitted code binds loop-invariant shapeinfo->/eleminfo-> accesses to
+#     locals at the top of each integration-point body, so unchanged inputs emit different text.
+FINGERPRINT_FORMAT_VERSION = 10
 
 
 class JITCache:

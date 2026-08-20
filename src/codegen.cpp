@@ -28,6 +28,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <chrono>
 #include <unordered_set>
 #include <cmath>
+#include <functional>
 
 namespace pyoomph
 {
@@ -247,6 +248,92 @@ namespace pyoomph
 		}
 		~GlobalParameterFunctionScope() { code->params_declared_in_current_function.clear(); }
 	};
+
+	//////////////
+
+	// Buffer aliases, see FiniteElementCode::alias_buffer_access and the comment on the members in
+	// codegen.hpp. The switch is the A/B lever: it leaves the emitted code exactly as it was before
+	// the aliases existed, on the same binary, which is the only way to re-measure them later.
+	static const bool __buffer_aliases_disabled = getenv("PYOOMPH_DISABLE_BUFFER_ALIASES") != NULL;
+
+	// One per emitted function. Aliases are function-scoped (legal because the shape buffers are
+	// re-pointed by prepare_shape_buffer_for_integration, i.e. once per assembly and before the
+	// generated function is entered), so the registry is cleared per function and the declarations
+	// go at the top of it, after the nodal-index constants the hanginfo aliases reference.
+	class BufferAliasFunctionScope
+	{
+		FiniteElementCode *code;
+		bool was_active;
+
+	public:
+		BufferAliasFunctionScope(FiniteElementCode *code_) : code(code_), was_active(code_->buffer_aliases_active)
+		{
+			code->buffer_alias_by_access.clear();
+			code->buffer_alias_decls.clear();
+			code->buffer_aliases_active = true;
+		}
+		std::string declarations(const std::string &indent, const std::string &body) const { return code->write_buffer_alias_declarations(indent, body); }
+		~BufferAliasFunctionScope()
+		{
+			code->buffer_aliases_active = was_active;
+			code->buffer_alias_by_access.clear();
+			code->buffer_alias_decls.clear();
+		}
+	};
+
+	// Turns aliasing off for a stretch of printing that lands OUTSIDE the region the declarations will
+	// be emitted into. The Hessian needs it: its assembly body is printed before its header, so the
+	// scope is open while the pre-loop time-interpolation is printed, and an alias declared inside the
+	// integration loop must not be referenced above it.
+	class BufferAliasSuspend
+	{
+		FiniteElementCode *code;
+		bool was_active;
+
+	public:
+		BufferAliasSuspend(FiniteElementCode *code_) : code(code_), was_active(code_->buffer_aliases_active) { code->buffer_aliases_active = false; }
+		~BufferAliasSuspend() { code->buffer_aliases_active = was_active; }
+	};
+
+	std::string FiniteElementCode::alias_buffer_access(const std::string &access, const std::string &name, const std::string &decl)
+	{
+		if (!buffer_aliases_active || __buffer_aliases_disabled)
+			return access;
+		auto it = buffer_alias_by_access.find(access);
+		if (it != buffer_alias_by_access.end())
+			return it->second;
+		// A name must stand for exactly one access. If it ever did not, the generated code would read
+		// the wrong buffer and still compile - so this is checked rather than assumed.
+		auto clash = buffer_alias_decls.find(name);
+		if (clash != buffer_alias_decls.end())
+			throw_runtime_error("Buffer alias '" + name + "' would stand for '" + access + "' as well as for '" + clash->second + "'");
+		buffer_alias_by_access[access] = name;
+		buffer_alias_decls[name] = decl + " = " + access + ";";
+		return name;
+	}
+
+	std::string FiniteElementCode::alias_nodal_data(const FiniteElementSpace *sp)
+	{
+		const std::string nds = get_nodal_data_string(sp);
+		const std::string access = get_elem_info_str(sp) + "->" + nds;
+		const std::string name = "_" + get_owner_prefix(sp) + (nds == "nodal_coords" ? "ncoord" : "ndata");
+		return alias_buffer_access(access, name, "double *** const " + name);
+	}
+
+	// Only the aliases the body actually mentions. Registration happens while printing, and printing is
+	// not the same as emitting: write_generic_RJM_contribution buffers a whole space block and throws it
+	// away when the space turns out to contribute nothing, and the Hessian harvests over spaces it then
+	// skips. A left-over shape alias would merely be an unused local, but a left-over hanginfo alias is
+	// indexed by a this_nodalind_* constant that is only declared for the fields that survived - which
+	// is a compile error in the generated C, and was one on the azimuthal element's external-ODE field.
+	std::string FiniteElementCode::write_buffer_alias_declarations(const std::string &indent, const std::string &body) const
+	{
+		std::ostringstream oss;
+		for (const auto &e : buffer_alias_decls)
+			if (body.find(e.first) != std::string::npos)
+				oss << indent << e.second << std::endl;
+		return oss.str();
+	}
 
 	//////////////
 
@@ -1538,14 +1625,13 @@ namespace pyoomph
 	{
 		// The position space has its own dimension-indexed buffer; every other space (continuous,
 		// DG, DL, D0) shares one unified buffer indexed by this field's global nodal-data index.
-		if (dynamic_cast<PositionFiniteElementSpace *>(space))
-		{
-			return forcode->get_shape_info_str(space) + "->hanginfo_Pos[" + get_nodal_index_str(forcode) + "]";
-		}
-		else
-		{
-			return forcode->get_shape_info_str(space) + "->hanginfo[" + get_nodal_index_str(forcode) + "]";
-		}
+		// The whole hanginfo table is loop-invariant; the [node] index that follows at the use site is
+		// not. Aliasing the row (i.e. including the field index, which is a const declared above) means
+		// the macros index a local instead of walking shapeinfo-> once per test/trial node.
+		const bool is_pos = dynamic_cast<PositionFiniteElementSpace *>(space) != NULL;
+		const std::string access = forcode->get_shape_info_str(space) + (is_pos ? "->hanginfo_Pos[" : "->hanginfo[") + get_nodal_index_str(forcode) + "]";
+		const std::string alias_name = "_" + forcode->get_owner_prefix(space) + "hang_" + (is_pos ? "Pos_" : "") + this->name;
+		return forcode->alias_buffer_access(access, alias_name, "JITHangInfo_t * const " + alias_name);
 	}
 
 	std::string ShapeExpansion::get_num_nodes_str(FiniteElementCode *forcode) const
@@ -1553,33 +1639,81 @@ namespace pyoomph
 		return this->basis->get_space()->get_num_nodes_str(forcode);
 	}
 
+	// The single place that mints buffer-alias names for the six shape buffers. Both the trial-side
+	// accesses printed inside the loops (ShapeExpansion::get_shape_string) and the test-function
+	// pointers emitted per space block go through it, so they share one declaration instead of loading
+	// the same buffer twice. Only the Eulerian derivatives carry a history index.
+	static std::string alias_shape_buffer(FiniteElementCode *forcode, const FiniteElementSpace *sp,
+										  std::string base, const std::string &stem, int history,
+										  const std::function<std::string(const std::string &)> &decl)
+	{
+		std::string hist_suffix;
+		if (history >= 0)
+		{
+			size_t br = base.find('[');
+			if (br == std::string::npos)
+				base = base + "[" + std::to_string(history) + "]"; // flat per-space buffer, e.g. dx_shape_DL
+			else
+				base = base.substr(0, br) + "[" + std::to_string(history) + "]" + base.substr(br);
+			if (history)
+				hist_suffix = "_h" + std::to_string(history);
+		}
+		const std::string access = forcode->get_shape_info_str(sp) + "->" + base;
+		// Collision-free by construction: (owner, buffer, space, history) determines the access.
+		const std::string name = "_" + forcode->get_owner_prefix(sp) + stem + "_" + sp->get_shape_name() + hist_suffix;
+		return forcode->alias_buffer_access(access, name, decl(name));
+	}
+
+	// The timestepper weight arrays are re-pointed by prepare_shape_buffer_for_integration (the
+	// "_degr" variants switch between BDF1 and BDF2 on the first unsteady step), i.e. before the
+	// generated function is entered, so they alias like the shape buffers. This one matters more than
+	// it looks: weights[0] appears inside Jacobian ENTRIES, i.e. in the innermost trial loop, and one
+	// surviving shapeinfo-> read in there costs the hoist of all the others.
+	static std::string alias_timestepper_weights(FiniteElementCode *forcode, const std::string &kind, const std::string &scheme)
+	{
+		const std::string access = "shapeinfo->timestepper_weights_" + kind + "_" + scheme;
+		const std::string name = "_tsw_" + kind + "_" + scheme;
+		return forcode->alias_buffer_access(access, name, "const double * const " + name);
+	}
+
+	// Slot 0 of the same array, as a plain double. The Jacobian entries only ever read that one slot,
+	// and they read it in the innermost trial loop - aliasing the ARRAY there would still cost a load
+	// per iteration, which is most of what the aliases are trying to remove.
+	static std::string alias_timestepper_weight0(FiniteElementCode *forcode, const std::string &kind, const std::string &scheme)
+	{
+		const std::string access = "shapeinfo->timestepper_weights_" + kind + "_" + scheme + "[0]";
+		const std::string name = "_tsw0_" + kind + "_" + scheme;
+		return forcode->alias_buffer_access(access, name, "const double " + name);
+	}
+
 	std::string ShapeExpansion::get_shape_string(FiniteElementCode *forcode, std::string nodal_index) const
 	{
-		std::string shape_str = basis->get_shape_string(forcode, nodal_index);
-		if (shape_str == "1")
-			return shape_str;
+		// D0 basis functions print as the literal 1 - nothing to index and nothing to alias.
+		if (basis->get_shape_string(forcode, nodal_index) == "1")
+			return "1";
 		// Only the EULERIAN derivative of a shape function depends on where the nodes are, so only that
 		// one carries a history index: dx_shapes[k][...] rather than dx_shapes[...], with 0 being the
 		// current configuration - the same convention as int_pt_weight[]. The undifferentiated shapes
 		// and the Lagrangian/local-coordinate derivatives are properties of the reference element and
 		// do not move with the mesh, so they have no such index.
+		int history = -1;
 		if (basis->is_eulerian_deriv())
 		{
 			const bool past = history_geometry && time_history_index > 0 && forcode->history_geometry_is_relevant();
-			size_t br = shape_str.find('[');
-			if (br == std::string::npos)
-				throw_runtime_error("Cannot index the shape access " + shape_str + " by history");
-			shape_str = shape_str.substr(0, br) + "[" + std::to_string(past ? time_history_index : 0) + "]" + shape_str.substr(br);
+			history = past ? (int)time_history_index : 0;
 		}
-		return forcode->get_shape_info_str(basis->get_space()) + "->" + shape_str;
+		BasisFunction *bf = basis;
+		const std::string alias = alias_shape_buffer(forcode, bf->get_space(), bf->get_shape_buffer_base(),
+													bf->get_shape_alias_stem(), history,
+													[bf](const std::string &n) { return bf->get_shape_alias_decl(n); });
+		return alias + "[" + nodal_index + "]" + bf->get_shape_index_suffix();
 	}
 
 	std::string ShapeExpansion::get_nodal_data_string(FiniteElementCode *forcode, std::string indexstr) const
 	{
 		if (this->dt_order > 0)
 			return this->get_dt_values_name(forcode) + "[" + indexstr + "]";
-		std::string nds = forcode->get_nodal_data_string(this->basis->get_space());
-		return forcode->get_elem_info_str(this->basis->get_space()) + "->" + nds + "[" + indexstr + "][" + get_nodal_index_str(forcode) + "][" + std::to_string(time_history_index) + "]";
+		return forcode->alias_nodal_data(this->basis->get_space()) + "[" + indexstr + "][" + get_nodal_index_str(forcode) + "][" + std::to_string(time_history_index) + "]";
 	}
 
 	// BasisFunction represents an (undifferentiated or spatially differentiated) shape function of a
@@ -1628,16 +1762,30 @@ namespace pyoomph
 		return local_coord_deriv_x[direction];
 	}
 
+	// The four continuous spaces share one buffer indexed by SPACE_INDEX_*; every other space (DL,
+	// D0, the DG family) has a buffer of its own named after the space.
+	static bool basis_space_is_indexed(const std::string &sn)
+	{
+		return sn == "C2TB" || sn == "C2" || sn == "C1TB" || sn == "C1";
+	}
+
+	static std::string basis_buffer_base(const std::string &array, const std::string &sn)
+	{
+		if (basis_space_is_indexed(sn))
+			return array + "s[SPACE_INDEX_" + sn + "]";
+		return array + "_" + sn;
+	}
+
+	std::string BasisFunction::get_shape_buffer_base() const
+	{
+		return basis_buffer_base("shape", space->get_shape_name());
+	}
+
+	// Assembled from the three pieces above rather than spelled out per subclass, so that a buffer
+	// alias built from get_shape_buffer_base() cannot drift away from the access it replaces.
 	std::string BasisFunction::get_shape_string(FiniteElementCode *, std::string nodal_index) const
 	{
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "]";
-		}
-		else
-		{
-			return "shape_" + space->get_shape_name() + "[" + nodal_index + "]";
-		}
+		return get_shape_buffer_base() + "[" + nodal_index + "]" + get_shape_index_suffix();
 	}
 
 	// Second derivatives. The cache deliberately sits here, on the space's root BasisFunction, so
@@ -1772,16 +1920,9 @@ namespace pyoomph
 		return dx + "of BASIS of " + space->get_name();
 	}
 
-	std::string D1XBasisFunction::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	std::string D1XBasisFunction::get_shape_buffer_base() const
 	{
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "dx_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
-		else
-		{
-			return "dx_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
+		return basis_buffer_base("dx_shape", space->get_shape_name());
 	}
 
 	std::string D1XBasisFunctionLagr::get_c_varname(FiniteElementCode *, std::string test_index)
@@ -1800,16 +1941,9 @@ namespace pyoomph
 		return dx + "of BASIS of " + space->get_name();
 	}
 
-	std::string D1XBasisFunctionLagr::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	std::string D1XBasisFunctionLagr::get_shape_buffer_base() const
 	{
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "dX_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
-		else
-		{
-			return "dX_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
+		return basis_buffer_base("dX_shape", space->get_shape_name());
 	}
 
 
@@ -1830,16 +1964,9 @@ namespace pyoomph
 		return dx + "of BASIS of " + space->get_name();
 	}
 
-	std::string D1XBasisFunctionLocalCoord::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	std::string D1XBasisFunctionLocalCoord::get_shape_buffer_base() const
 	{
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "dS_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
-		else
-		{
-			return "dS_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + std::to_string(direction) + "]";
-		}
+		return basis_buffer_base("dS_shape", space->get_shape_name());
 	}
 
 	// -------------------------------------------------------------------------------------------
@@ -1863,17 +1990,9 @@ namespace pyoomph
 		return "d^2/(d" + d2_direction_string(direction) + " d" + d2_direction_string(direction2) + ") of BASIS of " + space->get_name();
 	}
 
-	std::string D2XBasisFunction::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	std::string D2XBasisFunction::get_shape_buffer_base() const
 	{
-		const std::string slot = std::to_string(PYOOMPH_D2_SLOT(direction, direction2));
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "d2x_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + slot + "]";
-		}
-		else
-		{
-			return "d2x_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + slot + "]";
-		}
+		return basis_buffer_base("d2x_shape", space->get_shape_name());
 	}
 
 	std::string D2XBasisFunctionLocalCoord::get_c_varname(FiniteElementCode *, std::string test_index)
@@ -1886,17 +2005,9 @@ namespace pyoomph
 		return "d^2/(ds^" + std::to_string(direction + 1) + " ds^" + std::to_string(direction2 + 1) + ") of BASIS of " + space->get_name();
 	}
 
-	std::string D2XBasisFunctionLocalCoord::get_shape_string(FiniteElementCode *, std::string nodal_index) const
+	std::string D2XBasisFunctionLocalCoord::get_shape_buffer_base() const
 	{
-		const std::string slot = std::to_string(PYOOMPH_D2_SLOT(direction, direction2));
-		if (space->get_shape_name()=="C2TB" || space->get_shape_name()=="C2" || space->get_shape_name()=="C1TB" || space->get_shape_name()=="C1")
-		{
-			return "d2S_shapes[SPACE_INDEX_" + space->get_shape_name() + "][" + nodal_index + "][" + slot + "]";
-		}
-		else
-		{
-			return "d2S_shape_" + space->get_shape_name() + "[" + nodal_index + "][" + slot + "]";
-		}
+		return basis_buffer_base("d2S_shape", space->get_shape_name());
 	}
 
 	// Name of, and index into, the shape-function sensitivity arrays w.r.t. the nodal coordinates
@@ -1933,18 +2044,28 @@ namespace pyoomph
 
 	std::string FiniteElementSpace::get_eqn_number_str(FiniteElementCode *forcode) const
 	{
-		std::string eleminfo = forcode->get_elem_info_str(this);
-		return eleminfo + "->nodal_local_eqn";
+		const std::string access = forcode->get_elem_info_str(this) + "->nodal_local_eqn";
+		const std::string name = "_" + forcode->get_owner_prefix(this) + "leqn";
+		return forcode->alias_buffer_access(access, name, "int * const * const " + name);
 	}
 
 	std::string FiniteElementSpace::get_num_nodes_str(FiniteElementCode *forcode) const
 	{
-		std::string eleminfo = forcode->get_elem_info_str(this);
-		if (this->get_shape_name()=="DL") //TODO: Make this in another way
+		const std::string eleminfo = forcode->get_elem_info_str(this);
+		// Aliased like the buffers, and for the same reason: this is a LOOP BOUND, re-read on every
+		// iteration of every trial loop because the jacobian[] store in the body may alias eleminfo.
+		std::string access, name;
+		if (this->get_shape_name() == "DL") // TODO: Make this in another way
 		{
-			return eleminfo + "->" + "nnode_DL";
+			access = eleminfo + "->nnode_DL";
+			name = "_" + forcode->get_owner_prefix(this) + "nnode_DL";
 		}
-		else return eleminfo + "->" + "nnode_of_space[SPACE_INDEX_" + this->get_shape_name() + "]";
+		else
+		{
+			access = eleminfo + "->nnode_of_space[SPACE_INDEX_" + this->get_shape_name() + "]";
+			name = "_" + forcode->get_owner_prefix(this) + "nnode_" + this->get_shape_name();
+		}
+		return forcode->alias_buffer_access(access, name, "const unsigned " + name);
 	}
 
 	std::string D0FiniteElementSpace::get_num_nodes_str(FiniteElementCode *) const
@@ -1954,14 +2075,16 @@ namespace pyoomph
 
 	std::string PositionFiniteElementSpace::get_num_nodes_str(FiniteElementCode *forcode) const
 	{
-		std::string eleminfo = forcode->get_elem_info_str(this);
-		return eleminfo + "->" + "nnode";
+		const std::string access = forcode->get_elem_info_str(this) + "->nnode";
+		const std::string name = "_" + forcode->get_owner_prefix(this) + "nnode";
+		return forcode->alias_buffer_access(access, name, "const unsigned " + name);
 	}
 
 	std::string PositionFiniteElementSpace::get_eqn_number_str(FiniteElementCode *forcode) const
 	{
-		std::string eleminfo = forcode->get_elem_info_str(this);
-		return eleminfo + "->pos_local_eqn";
+		const std::string access = forcode->get_elem_info_str(this) + "->pos_local_eqn";
+		const std::string name = "_" + forcode->get_owner_prefix(this) + "posleqn";
+		return forcode->alias_buffer_access(access, name, "int * const * const " + name);
 	}
 
 	// Emits C code that pre-computes, for every distinct time-derivative shape expansion in
@@ -2066,12 +2189,12 @@ namespace pyoomph
 				if (s.dt_order == 1)
 				{
 					//os << indent << "    " << varname << "[l_shape] += " <<  "shapeinfo->timestepper_weights_dt_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
-					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + "shapeinfo->timestepper_weights_dt_" + timedisc_scheme + "[tindex]*" + eleminfo + "->" + nds + "[l_shape][" + nodalindex + "][tindex];");
+					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + alias_timestepper_weights(for_code, "dt", timedisc_scheme) + "[tindex]*" + for_code->alias_nodal_data(s.basis->get_space()) + "[l_shape][" + nodalindex + "][tindex];");
 				}
 				else if (s.dt_order == 2)
 				{
 					//os << indent << "    " << varname << "[l_shape] += " <<   "shapeinfo->timestepper_weights_d2t_" << timedisc_scheme << "[tindex]*" << eleminfo << "->" << nds << "[l_shape][" << nodalindex << "][tindex];" << std::endl;
-					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + "shapeinfo->timestepper_weights_d2t_" + timedisc_scheme + "[tindex]*" + eleminfo + "->" + nds + "[l_shape][" + nodalindex + "][tindex];");
+					compute_lines.push_back(indent + "    " + varname + "[l_shape] += " + alias_timestepper_weights(for_code, "d2t", timedisc_scheme) + "[tindex]*" + for_code->alias_nodal_data(s.basis->get_space()) + "[l_shape][" + nodalindex + "][tindex];");
 				}
 				else
 					throw_runtime_error("TODO Higher order time derivatives");
@@ -3465,24 +3588,22 @@ namespace pyoomph
 		if (numnodes_str != "1")
 		{
 
-			if (this->get_shape_name()=="C2TB" || this->get_shape_name()=="C2" || this->get_shape_name()=="C1TB" || this->get_shape_name()=="C1")
-			{
-				oss << indent << "  double const * testfunction = " << shapeinfo << "->shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shapes[0][SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2x_testfunction) = " << shapeinfo << "->d2x_shapes[0][SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2S_testfunction) = " << shapeinfo << "->d2S_shapes[SPACE_INDEX_" << this->get_shape_name() << "];" << std::endl;
-			}
-			else
-			{
-				oss << indent << "  double const * testfunction = " << shapeinfo << "->shape_" << this->get_shape_name() << ";" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << shapeinfo << "->dx_shape_" << this->get_shape_name() << "[0];" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << shapeinfo << "->dX_shape_" << this->get_shape_name() << ";" << std::endl;
-				oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << shapeinfo << "->dS_shape_" << this->get_shape_name() << ";" << std::endl;
-				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2x_testfunction) = " << shapeinfo << "->d2x_shape_" << this->get_shape_name() << "[0];" << std::endl;
-				oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2S_testfunction) = " << shapeinfo << "->d2S_shape_" << this->get_shape_name() << ";" << std::endl;
-			}
+			// Sourced from the function-scope buffer aliases rather than from shapeinfo directly, so
+			// that a space block re-entered on every integration point does not re-walk the struct, and
+			// so that the test and trial sides of the same buffer share one load. When the aliases are
+			// switched off, alias_shape_buffer hands back the plain access and this is what it was.
+			const bool indexed_space = (this->get_shape_name()=="C2TB" || this->get_shape_name()=="C2" || this->get_shape_name()=="C1TB" || this->get_shape_name()=="C1");
+			const std::string sn = this->get_shape_name();
+			auto ptr_decl = [](const std::string &n) { return "double const * " + n; };
+			auto dx_decl = [](const std::string &n) { return "DX_SHAPE_FUNCTION_DECL(" + n + ")"; };
+			auto d2x_decl = [](const std::string &n) { return "D2X_SHAPE_FUNCTION_DECL(" + n + ")"; };
+			auto buf = [&](const std::string &array) { return indexed_space ? array + "s[SPACE_INDEX_" + sn + "]" : array + "_" + sn; };
+			oss << indent << "  double const * testfunction = " << alias_shape_buffer(for_code, this, buf("shape"), "psi", -1, ptr_decl) << ";" << std::endl;
+			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dx_testfunction) = " << alias_shape_buffer(for_code, this, buf("dx_shape"), "dxpsi", 0, dx_decl) << ";" << std::endl;
+			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dX_testfunction) = " << alias_shape_buffer(for_code, this, buf("dX_shape"), "dXpsi", -1, dx_decl) << ";" << std::endl;
+			oss << indent << "  DX_SHAPE_FUNCTION_DECL(dS_testfunction) = " << alias_shape_buffer(for_code, this, buf("dS_shape"), "dSpsi", -1, dx_decl) << ";" << std::endl;
+			oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2x_testfunction) = " << alias_shape_buffer(for_code, this, buf("d2x_shape"), "d2xpsi", 0, d2x_decl) << ";" << std::endl;
+			oss << indent << "  D2X_SHAPE_FUNCTION_DECL(d2S_testfunction) = " << alias_shape_buffer(for_code, this, buf("d2S_shape"), "d2Spsi", -1, d2x_decl) << ";" << std::endl;
 
 			oss << indent << "  for (unsigned int l_test=0;l_test<" << numnodes_str << ";l_test++)" << std::endl;
 			oss << indent << "  {" << std::endl;
@@ -5722,6 +5843,14 @@ namespace pyoomph
 		// osh header stream later, which precedes osm in the assembled function text
 		GlobalParameterFunctionScope gp_scope(this, {resi});
 
+		// Same buffer aliases as the Residual/Jacobian/Mass path, and they pay more here: a Hessian entry
+		// sits in a THREE-deep loop (l_test, l_shape, l_shape2) whose innermost body stores into
+		// hessian_buffer, so every shapeinfo-> read in there was reloaded per iteration of the innermost
+		// loop. The scope has to open here, before the contributions are printed into osm, because osm is
+		// generated before the osh header it will be concatenated behind; the declarations are emitted
+		// into osh, right after the integration-loop header (see below).
+		BufferAliasFunctionScope alias_scope(this);
+
 		osm << "    //START: Contribution of the spaces" << std::endl;
 		osm << "    double _H_contrib;" << std::endl;
 		for (auto *sp : allspaces)
@@ -5879,19 +6008,24 @@ namespace pyoomph
 		{
 			osh << l << std::endl;
 		}
-		osh << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
-		for (auto *sp : allspaces)
 		{
-			sp->write_nodal_time_interpolation(this, osh, "  ", all_shapeexps);
-		}
-		osh << "  //END: Precalculate time derivatives of the necessary data" << std::endl
-			<< std::endl;
-		// First assign the "interpolated D0" values
-		for (auto *sp : allspaces)
-		{
-			if (!sp->need_interpolation_loop())
+			// Above the integration loop, i.e. above where the alias declarations will land - see
+			// BufferAliasSuspend. The scope is still open here because osm was printed with it.
+			BufferAliasSuspend no_aliases(this);
+			osh << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
+			for (auto *sp : allspaces)
 			{
-				sp->write_spatial_interpolation(this, osh, "    ", all_shapeexps, this->coordinates_as_dofs, true);
+				sp->write_nodal_time_interpolation(this, osh, "  ", all_shapeexps);
+			}
+			osh << "  //END: Precalculate time derivatives of the necessary data" << std::endl
+				<< std::endl;
+			// First assign the "interpolated D0" values
+			for (auto *sp : allspaces)
+			{
+				if (!sp->need_interpolation_loop())
+				{
+					sp->write_spatial_interpolation(this, osh, "    ", all_shapeexps, this->coordinates_as_dofs, true);
+				}
 			}
 		}
 
@@ -5900,6 +6034,7 @@ namespace pyoomph
 			osh << "  //START: Spatial integration loop" << std::endl;
 			std::string required_name = "&(my_func_table->shapes_required_Hessian[" + std::to_string(residual_index) + "]), 3";
 			write_generic_spatial_integration_header(osh, "  ", spatial_integral_portion_Eulerian, spatial_integral_portion_Lagrangian, required_name);
+			std::ostringstream osh_ipt; // in-loop part, so the alias declarations can be emitted ahead of it
 			std::set<ShapeExpansion> spatial_shape_exps = get_all_shape_expansions_in(spatial_integral_portion); // TODO: This is wrong!
 			std::set<ShapeExpansion> shape_intersect;
 
@@ -5917,20 +6052,21 @@ namespace pyoomph
 
 			//			std::set_intersection(spatial_shape_exps.begin(), spatial_shape_exps.end(), all_shapeexps.begin(), all_shapeexps.end(), std::inserter(shape_intersect, shape_intersect.begin()));
 			//			std::set<ShapeExpansion> spatial_shape_exps = get_all_shape_expansions_in(spatial_integral_portion);
-			osh << "    //START: Interpolate all required fields" << std::endl;
+			osh_ipt << "    //START: Interpolate all required fields" << std::endl;
 			for (auto *sp : allspaces)
 			{
 				if (sp->need_interpolation_loop())
 				{
-					//					sp->write_spatial_interpolation(this, osh, "    ", spatial_shape_exps, this->coordinates_as_dofs,true);
-					//					sp->write_spatial_interpolation(this, osh, "    ", all_shapeexps, this->coordinates_as_dofs,true);
-					sp->write_spatial_interpolation(this, osh, "    ", merged_shapeexps, this->coordinates_as_dofs, true);
-					//					sp->write_spatial_interpolation(this, osh, "    ", shape_intersect, false,true);
+					sp->write_spatial_interpolation(this, osh_ipt, "    ", merged_shapeexps, this->coordinates_as_dofs, true);
 				}
 			}
-			osh << "    // SUBEXPRESSIONS" << std::endl
+			osh_ipt << "    // SUBEXPRESSIONS" << std::endl
 				<< std::endl;
-			spatial_integral_portion = this->write_code_subexpressions(osh, "     ", spatial_integral_portion, spatial_shape_exps, true);
+			spatial_integral_portion = this->write_code_subexpressions(osh_ipt, "     ", spatial_integral_portion, spatial_shape_exps, true);
+			// osm as well as osh_ipt: the Hessian assembly body was printed first and lives in osm, which
+			// is concatenated after this header.
+			osh << alias_scope.declarations("    ", osh_ipt.str() + osm.str());
+			osh << osh_ipt.str();
 		}
 		osh << "    //END: Interpolate all required fields" << std::endl
 			<< std::endl;
@@ -6041,6 +6177,16 @@ namespace pyoomph
 
 		os << "  const double * t=shapeinfo->t;" << std::endl;
 		os << "  const double * dt=shapeinfo->dt;" << std::endl;
+		// The scatter macros index with these instead of re-reading shapeinfo->jacobian_size /
+		// ->mass_matrix_size, which they may not keep in a register: the jacobian[]/mass_matrix[] store
+		// in the same statement can alias shapeinfo (PYOOMPH_RESTRICT is empty and does not help, see
+		// jitbridge.h), so both the load and the row multiply were repeated per inner-loop iteration.
+		// Both are set by prepare_shape_buffer_for_integration before this function is entered and do
+		// not change inside it. Hoisting them alone is worth nothing - it only pays together with the
+		// buffer aliases, because one surviving shapeinfo-> read in the loop forces the reload of all
+		// the others. HessianVectorProduct has had the same local (n_dof) all along.
+		os << "  const unsigned _jacsize = shapeinfo->jacobian_size;" << std::endl;
+		os << "  const unsigned _msize = shapeinfo->mass_matrix_size;" << std::endl;
 		if (stage == 0)
 			index_fields();
 
@@ -6122,12 +6268,14 @@ namespace pyoomph
 			os << l << std::endl;
 		}
 
-		os << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
+		std::ostringstream body;
+
+		body << "  //START: Precalculate time derivatives of the necessary data" << std::endl;
 		for (auto *sp : allspaces)
 		{
-			sp->write_nodal_time_interpolation(this, os, "  ", all_shapeexps);
+			sp->write_nodal_time_interpolation(this, body, "  ", all_shapeexps);
 		}
-		os << "  //END: Precalculate time derivatives of the necessary data" << std::endl
+		body << "  //END: Precalculate time derivatives of the necessary data" << std::endl
 		   << std::endl;
 
 		// First assign the "interpolated D0" values
@@ -6135,7 +6283,7 @@ namespace pyoomph
 		{
 			if (!sp->need_interpolation_loop())
 			{
-				sp->write_spatial_interpolation(this, os, "    ", all_shapeexps, false, false);
+				sp->write_spatial_interpolation(this, body, "    ", all_shapeexps, false, false);
 			}
 		}
 
@@ -6156,50 +6304,67 @@ namespace pyoomph
 
 		if (!spatial_integral_portion.is_zero())
 		{
-			os << "  //START: Spatial integration loop" << std::endl;
+			body << "  //START: Spatial integration loop" << std::endl;
 			std::string required_name = "&(my_func_table->shapes_required_ResJac[" + std::to_string(residual_index) + "]), flag";
-			write_generic_spatial_integration_header(os, "  ", spatial_integral_portion_Eulerian, spatial_integral_portion_Lagrangian, required_name);
+			write_generic_spatial_integration_header(body, "  ", spatial_integral_portion_Eulerian, spatial_integral_portion_Lagrangian, required_name);
+
+			// The buffer aliases are declared HERE, at the top of the integration-point body, and not at
+			// function scope - even though function scope would be equally correct, since
+			// prepare_shape_buffer_for_integration re-points the buffers once per assembly and
+			// fill_shape_buffer_for_point never does. It was tried, and it is measurably worse: the
+			// aliases would then be live across the indirect fill_shape_buffer_for_point call, there are
+			// far more of them than there are callee-saved registers, and every use pays a stack reload
+			// instead of a register read. Callgrind on the heated-cylinder element, 300 assemblies:
+			// 107.6M data reads unaliased, 108.0M with function-scope aliases (i.e. nothing gained),
+			// 102.5M with these. Redeclaring per integration point costs a handful of loads per point
+			// and buys the whole trial loop.
+			BufferAliasFunctionScope alias_scope(this);
+			std::ostringstream ipt_body;
 
 			std::set<ShapeExpansion> spatial_shape_exps = get_all_shape_expansions_in(spatial_integral_portion);
-			os << "    //START: Interpolate all required fields" << std::endl;
+			ipt_body << "    //START: Interpolate all required fields" << std::endl;
 			for (auto *sp : allspaces)
 			{
 				if (sp->need_interpolation_loop())
 				{
-					sp->write_spatial_interpolation(this, os, "    ", spatial_shape_exps, this->coordinates_as_dofs, false);
+					sp->write_spatial_interpolation(this, ipt_body, "    ", spatial_shape_exps, this->coordinates_as_dofs, false);
 				}
 			}
-			os << "    //END: Interpolate all required fields" << std::endl
+			ipt_body << "    //END: Interpolate all required fields" << std::endl
 			   << std::endl;
 
-			os << std::endl;
+			ipt_body << std::endl;
 
-			os << "    // SUBEXPRESSIONS" << std::endl
+			ipt_body << "    // SUBEXPRESSIONS" << std::endl
 			   << std::endl;
-			spatial_integral_portion = this->write_code_subexpressions(os, "     ", spatial_integral_portion, spatial_shape_exps, false);
+			spatial_integral_portion = this->write_code_subexpressions(ipt_body, "     ", spatial_integral_portion, spatial_shape_exps, false);
 
-			os << "    //START: Contribution of the spaces" << std::endl;
-			os << "    double _res_contrib,_J_contrib;" << std::endl;
+			ipt_body << "    //START: Contribution of the spaces" << std::endl;
+			ipt_body << "    double _res_contrib,_J_contrib;" << std::endl;
 			for (auto *sp : allspaces)
 			{
-				sp->write_generic_RJM_contribution(this, os, "    ", spatial_integral_portion, false);
+				sp->write_generic_RJM_contribution(this, ipt_body, "    ", spatial_integral_portion, false);
 			}
-			os << "    //END: Contribution of the spaces" << std::endl;
+			ipt_body << "    //END: Contribution of the spaces" << std::endl;
 
-			write_generic_spatial_integration_footer(os, "  ");
-			os << "  //END: Spatial integration loop" << std::endl
+			const std::string ipt_text = ipt_body.str();
+			body << alias_scope.declarations("    ", ipt_text);
+			body << ipt_text;
+
+			write_generic_spatial_integration_footer(body, "  ");
+			body << "  //END: Spatial integration loop" << std::endl
 			   << std::endl;
 		}
 
 		if (!spatial_integral_portion_NodalDelta.is_zero())
 		{
-			os << "  //START: Nodal delta" << std::endl;
-			os << "  //END: Nodal delta" << std::endl;
+			body << "  //START: Nodal delta" << std::endl;
+			body << "  //END: Nodal delta" << std::endl;
 			//	write_generic_nodal_delta_header(os,"  "); //TODO
 
 			std::set<ShapeExpansion> nodal_shape_exps = get_all_shape_expansions_in(spatial_integral_portion_NodalDelta);
-			os << "    //START: Interpolate all required fields" << std::endl;
-			os << "    double _res_contrib,_J_contrib;" << std::endl;
+			body << "    //START: Interpolate all required fields" << std::endl;
+			body << "    double _res_contrib,_J_contrib;" << std::endl;
 			// 			throw_runtime_error("TODO: Spatial interpolation! Psi->nodal_Psi");
 			for (auto *sp : allspaces)
 			{
@@ -6218,7 +6383,7 @@ namespace pyoomph
 					}
 					if (dynamic_cast<D0FiniteElementSpace *>(se.field->get_space()))
 					{
-						sp->write_generic_RJM_contribution(this, os, "    ", spatial_integral_portion_NodalDelta, false);
+						sp->write_generic_RJM_contribution(this, body, "    ", spatial_integral_portion_NodalDelta, false);
 					}
 					else
 					{
@@ -6226,13 +6391,15 @@ namespace pyoomph
 					}
 				}
 			}
-			os << "    //END: Interpolate all required fields" << std::endl
+			body << "    //END: Interpolate all required fields" << std::endl
 			   << std::endl;
 
 			//			write_generic_nodal_delta_footer(os,"  "); //TODO
 
-			os << std::endl;
+			body << std::endl;
 		}
+
+		os << body.str();
 
 		os << "}" << std::endl
 		   << std::endl;
@@ -11836,10 +12003,10 @@ namespace GiNaC
 						throw_runtime_error("Too high dt order");
 					}
 					else if (sp.dt_order == 2)
-						c.s << "shapeinfo->timestepper_weights_d2t_" << timedisc_scheme << "[0]*";
+						c.s << alias_timestepper_weight0(femprint.FEM_opts->for_code, "d2t", timedisc_scheme) << "*";
 					else if (sp.dt_order == 1)
 					{
-						c.s << "shapeinfo->timestepper_weights_dt_" << timedisc_scheme << "[0]*";
+						c.s << alias_timestepper_weight0(femprint.FEM_opts->for_code, "dt", timedisc_scheme) << "*";
 					}
 					if (femprint.FEM_opts->in_subexpr_deriv)
 					{

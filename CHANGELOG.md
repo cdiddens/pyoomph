@@ -84,6 +84,18 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Changed / Improved
 
+- **The generated element code binds its loop-invariant buffer reads to locals.** Every
+  `shapeinfo->`/`eleminfo->` access whose leading indices do not depend on the test/trial node -- the
+  shape buffers, the nodal data, the hanging-node rows, the local-equation table, the loop bounds, the
+  timestepper weights, and the Jacobian/mass row strides inside the scatter macros -- is now read once
+  at the top of the integration-point body and indexed from there. It had to be re-read at every use:
+  the `jacobian[...] +=` store in the innermost trial loop may alias `shapeinfo` as far as the C
+  compiler knows, and qualifying the output pointers with `restrict` does not help (it was tried, and
+  produces a byte-identical object file). Worth 20% of the emitted instructions and 11-15% of an
+  elemental Jacobian across the tutorial elements, with the residual-only path -- which has no such
+  store -- unchanged, and every residual, Jacobian and mass matrix bitwise identical. `-O3` cannot do
+  this itself: it is not allowed to. Revertible with `PYOOMPH_DISABLE_BUFFER_ALIASES`.
+
 - **An adaptation that refines and unrefines nothing no longer touches the problem.** Deciding to do
   nothing is the normal end state rather than an edge case: oomph-lib only leaves its own adaption loop
   once an `adapt()` has reported 0/0, so with `spatial_adapt>0` the last adaptation of every solve is a
