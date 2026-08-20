@@ -74,4 +74,4 @@ if __name__=="__main__":
         # Then start the actual Lyapunov exponent calculation                
         problem+=LyapunovExponentCalculator(k=3,waiting_time=10,prerelaxation_time=10,store_as_eigenvectors=False,use_crank_nicholson_integration=False)
         # Run it with a rather fine time step 
-        problem.run(endtime=200,outstep=0.001)        
+        problem.run(endtime=200,outstep=False,maxstep=0.01)        
