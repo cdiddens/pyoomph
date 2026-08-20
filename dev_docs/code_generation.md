@@ -1606,6 +1606,7 @@ All change how pyoomph gets there or what it reports, never what it computes.
 | `PYOOMPH_TIME_ADD_RESIDUAL` | per-phase timing of `add_residual`/`expand_placeholders` on stderr, with mapper entries, memo hits and distinct-subexpression counts |
 | `PYOOMPH_DEBUG_HOIST` | report on stderr why a **Hessian** entry could not be split for hoisting, with the atoms and their trial-index classes (§9.4.8). It is read only in `hoist_hessian_entry`; the Jacobian half has no reporting, contrary to what this table used to claim |
 | `PYOOMPH_DISABLE_BUFFER_ALIASES` | emit the fully qualified `shapeinfo->`/`eleminfo->` access at every use site instead of binding the loop-invariant part to a local at the top of the integration-point body (§13) |
+| `PYOOMPH_DISABLE_PARAM_RECIPROCALS` | divide by a global parameter instead of multiplying by a hoisted `_rgp_<i>` reciprocal (§13.7). The one switch here that changes the arithmetic, so it is also the A/B lever for that |
 | `PYOOMPH_DISABLE_RJM_SPLIT` | emit one Residual/Jacobian/Mass function with a runtime flag instead of three specialised bodies behind a dispatcher (§9.4.6) |
 | `PYOOMPH_DISABLE_JACOBIAN_HOIST` | emit each Jacobian entry inside the trial loop as before, instead of hoisting its `l_shape`-independent coefficients (§9.4.5) |
 | `PYOOMPH_JACOBIAN_HOIST_MIN` | how many expression nodes a coefficient must have before it is worth naming; default **1**, i.e. hoist everything. §9.4.7 item 1 predicted the optimum would move down once the flag split (§9.4.6) took the coefficients out of the residual-only path, and it did — the sweep on the split build reads 1 → −63.7%, 32 → −62.6%, 64 → −48.5%. The knob still matters with `PYOOMPH_DISABLE_RJM_SPLIT`, where 32 remains right (§9.4.5) |
@@ -1772,3 +1773,39 @@ these elements).
 * `GetZ2Fluxes`, `EvalTracerAdvection` and the local/extremum expression evaluators have no alias scope
   yet, so they still emit the fully qualified accesses. They are not on the assembly hot path, but they
   are the remaining sources of `shapeinfo->` in a generated file.
+
+### 13.7 Reciprocals for a divided-by global parameter
+
+GiNaC's `mul::do_print_csrc` reassociates a negative-exponent factor into an infix `/`, so a global
+parameter in a denominator is printed as `.../pyoomph_gparam_0` — and GCC will not turn that into a
+reciprocal multiply without `-freciprocal-math`. Across the tutorial corpus there are **265** divisions
+by something that is constant within an integration point: 137 by a global parameter and 128 by an
+interpolated field. The global-parameter ones sit inside Jacobian and Hessian *entries*, i.e. in the
+innermost trial loop, so each is a hardware divide per matrix entry.
+
+`GlobalParameterFunctionScope::write_declarations` now emits `const double _rgp_<i> = 1.0/pyoomph_gparam_<i>;`
+next to each parameter, and a pre-print pass (`ParameterReciprocals`, alongside the existing
+`ExactifyWholeNumberExponents` in `print_simplest_form`) substitutes `param^(-n)` by `_rgp_<i>^n`.
+
+| azimuthal `domain` rj0, res+jac+mass | time | vs baseline |
+|---|---|---|
+| as emitted before §13 | 0.4467 s | — |
+| + reciprocals only | 0.3805 s | −14.8% |
+| + buffer aliases only (§13.2) | 0.3893 s | −12.9% |
+| **both** | **0.3316 s** | **−25.8%** |
+
+**This is the one place in code generation that deliberately changes the arithmetic.** `a*(1/b)` is not
+`a/b` in the last bits — the same class of difference gcc and tcc already show against each other
+through FMA contraction (§12). Everything else in §13 is bitwise identical.
+
+Two deliberate restrictions. It applies only to **global parameters**, whose value is fixed for the
+whole assembly and which are already function-scope locals — not to the 128 interpolated-field
+divisors, which would need a per-integration-point declaration and a stream to emit it into. And only
+to negative *integer* exponents. Do not widen it to arbitrary printed subtrees: that is §8.3's general
+CSE pass, which was built, measured at −1.9%, and reverted.
+
+The reciprocal is declared for every parameter the function declares, not only for the ones actually
+divided by — which of them those are is only known once the derivatives have been printed, and the
+declarations have to come first. An unused one is a dead local the compiler drops.
+
+`PYOOMPH_DISABLE_PARAM_RECIPROCALS` restores the division.

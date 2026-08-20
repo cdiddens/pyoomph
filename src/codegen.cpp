@@ -111,6 +111,61 @@ namespace pyoomph
 		return false;
 	}
 
+	static const bool __reciprocals_disabled = getenv("PYOOMPH_DISABLE_PARAM_RECIPROCALS") != NULL;
+
+	// A global parameter appearing with a negative exponent is printed by GiNaC's mul printer as an
+	// infix division - `.../pyoomph_gparam_0` - and GCC will not turn that into a reciprocal multiply
+	// without -freciprocal-math. Across the tutorial corpus there are 137 such divisions, and they sit
+	// inside Jacobian and Hessian ENTRIES, i.e. in the innermost trial loop, so each is a hardware
+	// divide per matrix entry. Substituting the reciprocal of the parameter (declared once per function
+	// by GlobalParameterFunctionScope, right next to the parameter itself) turns every one of them into
+	// a multiply: measured at -14.8% on the azimuthal element, composing with the buffer aliases of 13
+	// to -25.8%.
+	//
+	// This is the ONE place in code generation that deliberately changes the arithmetic: a*(1/b) is not
+	// bit-identical to a/b. It is a reassociation, nothing more - the same class of difference gcc and
+	// tcc already show against each other through FMA contraction (12).
+	//
+	// Only negative INTEGER exponents, and only global parameters, whose value is fixed for the whole
+	// assembly. Do not widen this to arbitrary printed subtrees: that is the general CSE pass of 8.3,
+	// which was built, measured at -1.9% and reverted.
+	class ParameterReciprocals : public GiNaC::map_function
+	{
+		FiniteElementCode *code;
+
+	public:
+		ParameterReciprocals(FiniteElementCode *code_) : code(code_) {}
+		GiNaC::ex operator()(const GiNaC::ex &inp) override
+		{
+			if (GiNaC::is_a<GiNaC::power>(inp) && GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(inp.op(0)) &&
+				GiNaC::is_a<GiNaC::numeric>(inp.op(1)) && inp.op(1).info(GiNaC::info_flags::negint))
+			{
+				const unsigned global_index = GiNaC::ex_to<GiNaC::GiNaCGlobalParameterWrapper>(inp.op(0)).get_struct().cme->get_global_index();
+				auto it = code->global_parameter_to_local_indices.find(global_index);
+				// Only where the parameter really is a local of this function: outside a
+				// GlobalParameterFunctionScope it prints as the indirect table access, which is not what
+				// _rgp_<i> was declared from.
+				if (it != code->global_parameter_to_local_indices.end() && code->params_declared_in_current_function.count(it->second))
+				{
+					const unsigned local_index = it->second;
+					const GiNaC::ex recip = GiNaC::potential_real_symbol("_rgp_" + std::to_string(local_index));
+					const long n = -(long)GiNaC::ex_to<GiNaC::numeric>(inp.op(1)).to_long();
+					return (n == 1 ? recip : GiNaC::power(recip, GiNaC::numeric(n)));
+				}
+			}
+			return inp.map(*this);
+		}
+	};
+
+	static bool has_parameter_reciprocal(const GiNaC::ex &e)
+	{
+		for (GiNaC::const_preorder_iterator it = e.preorder_begin(); it != e.preorder_end(); ++it)
+			if (GiNaC::is_a<GiNaC::power>(*it) && GiNaC::is_a<GiNaC::GiNaCGlobalParameterWrapper>(it->op(0)) &&
+				GiNaC::is_a<GiNaC::numeric>(it->op(1)) && it->op(1).info(GiNaC::info_flags::negint))
+				return true;
+		return false;
+	}
+
 	// Prints a GiNaC expression as C source code, after applying an optional simplification
 	// strategy selected at runtime via FiniteElementCode::ccode_expression_mode (e.g. "factor",
 	// "normal", "expand", "collect_common_factors" - mostly useful for debugging/benchmarking
@@ -149,6 +204,12 @@ namespace pyoomph
 		{
 			ExactifyWholeNumberExponents exactify;
 			towrite = exactify(towrite);
+		}
+		// After exactify, so that an inexact -1.0 exponent is an exact -1 by the time negint is tested.
+		if (!__reciprocals_disabled && csrc_opts.for_code && has_parameter_reciprocal(towrite))
+		{
+			ParameterReciprocals reciprocals(csrc_opts.for_code);
+			towrite = reciprocals(towrite);
 		}
 		towrite.print(GiNaC::print_csrc_FEM(os, &csrc_opts));
 	}
@@ -244,6 +305,14 @@ namespace pyoomph
 			{
 				const auto &p = GiNaC::ex_to<GiNaC::GiNaCGlobalParameterWrapper>(code->local_parameter_symbols[i]).get_struct();
 				os << indent << "const double pyoomph_gparam_" << i << " = *(my_func_table->global_parameters[" << i << "]); // " << p.cme->get_name() << std::endl;
+				// Emitted for every declared parameter rather than only for the ones that turn out to be
+				// divided by: which those are is only known once the derivatives have been printed, and
+				// these declarations have to come first. An unused one is a dead local that the compiler
+				// drops; a division by a zero-valued parameter that is never read yields an unused inf,
+				// and pyoomph does not unmask FP exceptions (see the note on BEGIN_RESIDUAL_* skipping
+				// contribution evaluation in jitbridge.h).
+				if (!__reciprocals_disabled)
+					os << indent << "const double _rgp_" << i << " = 1.0/pyoomph_gparam_" << i << ";" << std::endl;
 			}
 		}
 		~GlobalParameterFunctionScope() { code->params_declared_in_current_function.clear(); }
