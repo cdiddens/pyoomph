@@ -1294,10 +1294,10 @@ class EnforcedBC(InterfaceEquations):
         assert mesh._eqtree._parent is not None #type: ignore
         bulkmesh = mesh._eqtree._parent._mesh #type: ignore
         assert bulkmesh is not None
-        codeinst_inside=mesh.get_code_gen().get_code()
-        #codeinst_inside = mesh.element_pt(0).get_code_instance()
+        jitcode_inside=mesh.get_code_gen().get_code()
+        #jitcode_inside = mesh.element_pt(0).get_jit_code()
         for k, _ in self.constraints.items():            
-            index = [codeinst_inside.get_nodal_field_index(k)]  # TODO: Vectors
+            index = [jitcode_inside.get_nodal_field_index(k)]  # TODO: Vectors
             #print("Index is ",index," for field ",k)
             psindex = None
             nfi=None
@@ -1898,7 +1898,7 @@ class PythonDirichletBC(Equations):
         self.additional_vals:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
         self.pinnedpositions:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
         self.internal_vals:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
-        codeinst = self.mesh.element_pt(0).get_code_instance()
+        jitcode = self.mesh.element_pt(0).get_jit_code()
 
         currcodegen = self.get_current_code_generator()
 
@@ -1908,9 +1908,9 @@ class PythonDirichletBC(Equations):
             if k == "mesh_x" or k == "mesh_y" or k == "mesh_z":
                 vals[k] = val
                 continue
-            nodalfield = codeinst.get_nodal_field_index(k)
+            nodalfield = jitcode.get_nodal_field_index(k)
             if nodalfield < 0:
-                internalfield = codeinst.get_discontinuous_field_index(k)
+                internalfield = jitcode.get_discontinuous_field_index(k)
                 if internalfield < 0:
                     interfid = self.mesh.has_interface_dof_id(k)
                     if interfid == -1:
@@ -1978,7 +1978,7 @@ class PythonDirichletBC(Equations):
                 elif k == "mesh_z":
                     self.pinnedpositions[2] = fval
                     continue
-            nodalfield = codeinst.get_nodal_field_index(k)
+            nodalfield = jitcode.get_nodal_field_index(k)
             scal = self.mesh._codegen.get_scaling(k)  
             fval:float | bool | tuple[Callable[..., ExpressionOrNum], list[int], Expression]
             if not isinstance(val, bool) or val != True:
@@ -2001,7 +2001,7 @@ class PythonDirichletBC(Equations):
                 fval=True
             
             if nodalfield < 0:
-                internalfield = codeinst.get_discontinuous_field_index(k)
+                internalfield = jitcode.get_discontinuous_field_index(k)
                 if internalfield < 0:
                     # Last chance: Get the index from an additional interface field
                     interfid = self.mesh.has_interface_dof_id(k)

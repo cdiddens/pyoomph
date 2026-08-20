@@ -537,7 +537,7 @@ void PyReg_Mesh(nb::module_ &m)
 	    slv->make_periodic(mst);
 	    mesh->store_copy_master(slv,mst); }, nb::arg("master"), nb::arg("mesh"))
 		// Currently disabled: was meant to suppress a node's residual contribution for a specific dof index.
-		.def("_nullify_residual_contribution", [](pyoomph::Node *n, pyoomph::DynamicBulkElementInstance *for_ci, int index)
+		.def("_nullify_residual_contribution", [](pyoomph::Node *n, pyoomph::DynamicJITCode *for_ci, int index)
 			 {
 		 throw_runtime_error("Nullified dofs are deactivated for now... Never used so far");
 		 /*
@@ -645,12 +645,12 @@ void PyReg_Mesh(nb::module_ &m)
 	   if (!be) return -1;
 	   return be->get_nodal_index_by_name(n,name); }, nb::arg("node"), nb::arg("field_name"), "Returns the nodal value index of the given field name at the given node of this element, or -1 if not present")
 		.def(
-			"get_code_instance", [](oomph::GeneralisedElement *self) -> pyoomph::DynamicBulkElementInstance *
+			"get_jit_code", [](oomph::GeneralisedElement *self) -> pyoomph::DynamicJITCode *
 			{
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
 			if (!be) return NULL;
-			return be->get_code_instance(); },
-			nb::rv_policy::reference, "Returns the compiled equation/code instance (generated from the Python equation definitions) associated with this element")
+			return be->get_jit_code(); },
+			nb::rv_policy::reference, "Returns the JIT-compiled equation code (generated from the Python equation definitions) backing this element")
 		.def("get_macro_element_coordinate_at_s",[](oomph::GeneralisedElement *self, std::vector<double> s) -> std::vector<double>
 		   {
 			pyoomph::BulkElementBase * be=dynamic_cast<pyoomph::BulkElementBase*>(self);
@@ -926,13 +926,13 @@ void PyReg_Mesh(nb::module_ &m)
 
 			 pyoomph::BulkElementODE0d * ode=dynamic_cast<pyoomph::BulkElementODE0d *>(self);
 			 if (!ode) { throw_runtime_error("Not an ODE element"); }
-			 unsigned ndata=ode->get_code_instance()->get_func_table()->info_D0.numfields;
+			 unsigned ndata=ode->get_jit_code()->get_func_table()->info_D0.numfields;
 			 double *dbuf = new double[ndata];
 			 ode->to_numpy(dbuf);
 			 nb::capsule owner(dbuf, [](void *p) noexcept { delete[] (double *) p; });
 			 nb::ndarray<nb::numpy, double> data(dbuf, {(size_t)ndata}, owner);
 			 std::map<std::string,unsigned> field_desc;
-			 auto  nfd=ode->get_code_instance()->get_elemental_field_indices();
+			 auto  nfd=ode->get_jit_code()->get_elemental_field_indices();
 			 for (auto & nf : nfd)
 			 {
 				field_desc[nf.first]=nf.second;
@@ -975,7 +975,7 @@ void PyReg_Mesh(nb::module_ &m)
 			std::vector<std::vector<bool>> jac, mass;
 			if (be)
 			{
-				auto *ft=be->get_code_instance()->get_func_table();
+				auto *ft=be->get_jit_code()->get_func_table();
 				int r=ft->current_res_jac;
 				for (unsigned i=0;i<ft->contribution_entries_size;i++) names.push_back(ft->contribution_names[i]);
 				if (r>=0 && ft->contributes_to_jacobian && ft->contributes_to_mass_matrix)
@@ -1003,7 +1003,7 @@ void PyReg_Mesh(nb::module_ &m)
 			std::vector<std::vector<int>> jac, mass;
 			if (be)
 			{
-				auto *ft=be->get_code_instance()->get_func_table();
+				auto *ft=be->get_jit_code()->get_func_table();
 				int r=ft->current_res_jac;
 				if (r>=0 && ft->jacobian_block_flags && ft->mass_matrix_block_flags && ft->jacobian_block_flags[r] && ft->mass_matrix_block_flags[r])
 				{
@@ -1244,8 +1244,8 @@ void PyReg_Mesh(nb::module_ &m)
 			 {std::ostringstream oss;self->describe_my_dofs(oss,in);return oss.str(); }), nb::arg("indent")="", "Returns a human-readable description of all degrees of freedom of this mesh, useful for debugging")
 		.def("_pin_all_my_dofs",mesh_method([](pyoomph::Mesh *self, std::set<std::string> only_dofs, std::set<std::string> ignore_dofs, std::set<unsigned> ignore_continuous_at_interfaces)
 			 { self->pin_all_my_dofs(only_dofs, ignore_dofs, ignore_continuous_at_interfaces); }), nb::arg("only_dofs"), nb::arg("ignore_dofs"), nb::arg("ignore_continuous_at_interfaces"), "Pins (Dirichlet-constrains) all degrees of freedom of this mesh, optionally restricted to only_dofs or excluding ignore_dofs/ignore_continuous_at_interfaces")
-		.def("generate_interface_elements",mesh_method([](pyoomph::Mesh *m, const std::string &bn, MeshHandleBase *im, pyoomph::DynamicBulkElementInstance *jitcode)
-			 { m->generate_interface_elements(bn, im->mesh(), jitcode); }), nb::arg("boundary_name"), nb::arg("interface_mesh"), nb::arg("code_instance"), "Creates interface elements attached to the given boundary of this (bulk) mesh, using the given compiled equation code, and adds them to the given interface mesh")
+		.def("generate_interface_elements",mesh_method([](pyoomph::Mesh *m, const std::string &bn, MeshHandleBase *im, pyoomph::DynamicJITCode *jitcode)
+			 { m->generate_interface_elements(bn, im->mesh(), jitcode); }), nb::arg("boundary_name"), nb::arg("interface_mesh"), nb::arg("jitcode"), "Creates interface elements attached to the given boundary of this (bulk) mesh, using the given compiled equation code, and adds them to the given interface mesh")
 		.def("is_mesh_distributed",mesh_method([](pyoomph::Mesh *m)
 			 { return m->is_mesh_distributed(); }), "Returns whether this mesh is distributed across multiple MPI processes")
 		.def("assign_global_base_element_indices",mesh_method([](pyoomph::Mesh *m)
@@ -1475,7 +1475,7 @@ void PyReg_Mesh(nb::module_ &m)
 			 	int my_rank = self->communicator_pt()->my_rank();
       			int n_proc = self->communicator_pt()->nproc();
 				// A mesh with no local element still has to describe its fields, so borrow the
-				// element code instance from a neighbour's haloed element. Silently: this is an
+				// element code from a neighbour's haloed element. Silently: this is an
 				// ordinary situation on a distributed mesh (an interface lying entirely in another
 				// partition), it is not quiet()-able, and it printed once per rank per call.
 				for (int nrnk=0;nrnk<n_proc;nrnk++)
@@ -1498,7 +1498,7 @@ void PyReg_Mesh(nb::module_ &m)
 			 unsigned ncontfields=(be ? be->ncont_interpolated_values() : 0);
 			 unsigned nDGfields=(be ? be->num_DG_fields(false) :0);
 			 unsigned nadd_interf=0;
-			 auto *ft=be->get_code_instance()->get_func_table();
+			 auto *ft=be->get_jit_code()->get_func_table();
 			 for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
 			 {
 				nadd_interf+=ft->present_continuous_spaces[si]->numfields-ft->present_continuous_spaces[si]->numfields_basebulk;
@@ -1517,8 +1517,8 @@ void PyReg_Mesh(nb::module_ &m)
 			 int *elem_node_inds_buf=new int[(size_t)nelem*numelem_indices];
 			 nb::capsule elem_node_inds_owner(elem_node_inds_buf, [](void *p) noexcept { delete[] (int *) p; });
 			 nb::ndarray<nb::numpy, int> elem_node_inds(elem_node_inds_buf, {(size_t)nelem,(size_t)numelem_indices}, elem_node_inds_owner);
-			 unsigned numD0=be->get_code_instance()->get_func_table()->info_D0.numfields;
-			 unsigned numDL=be->get_code_instance()->get_func_table()->info_DL.numfields;
+			 unsigned numD0=be->get_jit_code()->get_func_table()->info_D0.numfields;
+			 unsigned numDL=be->get_jit_code()->get_func_table()->info_DL.numfields;
 			 unsigned DL_stride=(be->dim()+1);
 			 unsigned D0_rows=(discontinuous ? nnode : nelem);
 			 double *D0_data_buf=new double[(size_t)D0_rows*numD0];
@@ -1542,7 +1542,7 @@ void PyReg_Mesh(nb::module_ &m)
 			 std::map<std::string,unsigned> nodal_field_desc;
 			 if (nodal_dim>0) {nodal_field_desc["coordinate_x"]=0; if (nodal_dim>1) {nodal_field_desc["coordinate_y"]=1;} if (nodal_dim>2) {nodal_field_desc["coordinate_z"]=2;}}
 			 if (nlagrange>0) {nodal_field_desc["lagrangian_x"]=nodal_dim; if (nlagrange>1) {nodal_field_desc["lagrangian_y"]=nodal_dim+1; if (nlagrange>2) {nodal_field_desc["lagrangian_z"]=nodal_dim+2; }}}
-			 auto  nfd=be->get_code_instance()->get_nodal_field_indices();
+			 auto  nfd=be->get_jit_code()->get_nodal_field_indices();
 			 for (auto & nf : nfd)
 			 {
 				nodal_field_desc[nf.first]=nlagrange+nodal_dim+nf.second;
@@ -1553,7 +1553,7 @@ void PyReg_Mesh(nb::module_ &m)
 			   nodal_field_desc["normal_"+dir[nn]]=nlagrange+nodal_dim+nfd.size()+nn;
 			 }
 			 std::map<std::string,unsigned> elemental_field_desc;
-			 auto  efd=be->get_code_instance()->get_elemental_field_indices();
+			 auto  efd=be->get_jit_code()->get_elemental_field_indices();
 			 for (auto & ef : efd)
 			 {
 				elemental_field_desc[ef.first]=ef.second;
@@ -1580,14 +1580,14 @@ void PyReg_Mesh(nb::module_ &m)
 		   pyoomph::BulkElementBase* el=dynamic_cast<pyoomph::BulkElementBase*>(self->element_pt(0));
 			std::map<std::string,unsigned> descs;
 			if (nodal_dim>0) {descs["coordinate_x"]=0; if (nodal_dim>1) {descs["coordinate_y"]=1;} if (nodal_dim>2) {descs["coordinate_z"]=2;}}
-			auto  nfd=el->get_code_instance()->get_nodal_field_indices();
+			auto  nfd=el->get_jit_code()->get_nodal_field_indices();
 			unsigned offset=nodal_dim;
 			for (auto & nf : nfd)
 			{
 				descs[nf.first]=nodal_dim+nf.second;
 				if (nodal_dim+nf.second>=offset) offset=nodal_dim+nf.second+1;
 			}
-			auto  efd=el->get_code_instance()->get_elemental_field_indices();
+			auto  efd=el->get_jit_code()->get_elemental_field_indices();
 			for (auto & ef : efd)
 			{
 				descs[ef.first]=offset+ef.second;
@@ -1600,7 +1600,7 @@ void PyReg_Mesh(nb::module_ &m)
 	 std::vector<std::string> names;
 	 self->describe_global_dofs(types,names);
 	 return std::make_tuple(vector_to_ndarray(types),names); }), "Returns, for every global degree of freedom associated with this mesh, its dof type and a human-readable name")
-		.def("set_output_scale",mesh_method(&pyoomph::Mesh::set_output_scale), nb::arg("name"), nb::arg("scale"), nb::arg("code_instance"), "Sets an output (dimensional rescaling) factor for the field of the given name, used e.g. when exporting to numpy/VTK")
+		.def("set_output_scale",mesh_method(&pyoomph::Mesh::set_output_scale), nb::arg("name"), nb::arg("scale"), nb::arg("jitcode"), "Sets an output (dimensional rescaling) factor for the field of the given name, used e.g. when exporting to numpy/VTK")
 		.def("get_output_scale",mesh_method(&pyoomph::Mesh::get_output_scale), nb::arg("name"), "Returns the output (dimensional rescaling) factor previously set for the field of the given name")
 		.def("get_element_dimension",mesh_method(&pyoomph::Mesh::get_element_dimension), "Returns the spatial dimension of the elements of this mesh")
 		.def("set_initial_condition",mesh_method(&pyoomph::Mesh::set_initial_condition), nb::keep_alive<1, 3>(), nb::arg("fieldname"), nb::arg("expression"), "Sets the initial condition expression for the given field on this mesh")
@@ -1688,25 +1688,25 @@ void PyReg_Mesh(nb::module_ &m)
 			nb::rv_policy::reference)
 		.def("to_numpy", [](pyoomph::BulkElementODE0d *self)
 			 {
-			 unsigned ndata=self->get_code_instance()->get_func_table()->numfields_D0;
+			 unsigned ndata=self->get_jit_code()->get_func_table()->numfields_D0;
 			 auto data=py::array_t<double>({ndata});
 			 self->to_numpy((double*)data.request().ptr);
 			 std::map<std::string,unsigned> field_desc;
-			 auto  nfd=self->get_code_instance()->get_elemental_field_indices();
+			 auto  nfd=self->get_jit_code()->get_elemental_field_indices();
 			 for (auto & nf : nfd)
 			 {
 				field_desc[nf.first]=nf.second;
 			 }
 			 return std::make_tuple(data,field_desc); })
 		.def_static("construct_new", &pyoomph::BulkElementODE0d::construct_new, nb::rv_policy::reference)
-		.def(nb::init<pyoomph::DynamicBulkElementInstance *, oomph::TimeStepper *>()); // Constructor does not work
+		.def(nb::init<pyoomph::DynamicJITCode *, oomph::TimeStepper *>()); // Constructor does not work
 */
 	// A special mesh consisting of a single ODE (0-dimensional) element, used to store the degrees
 	// of freedom of ODE-based equations (e.g. global ODEs not tied to any spatial domain).
 	nb::class_<ODEStorageMeshHandle, MeshHandleBase>(m, "ODEStorageMesh", "A mesh holding a single ODE element, used to store degrees of freedom that are not associated with a spatial mesh")
 		.def(nb::init<>())
-		.def("_set_problem", [](ODEStorageMeshHandle *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->get()->_set_problem(p, inst); }, nb::arg("problem").none(), nb::arg("code_instance").none())
+		.def("_set_problem", [](ODEStorageMeshHandle *self, pyoomph::Problem *p, pyoomph::DynamicJITCode *inst)
+			 { self->get()->_set_problem(p, inst); }, nb::arg("problem").none(), nb::arg("jitcode").none())
 		.def(
 			"_get_problem", [](ODEStorageMeshHandle *self)
 			{ return self->get()->get_problem(); },
@@ -1752,7 +1752,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("get_element_dimension", &pyoomph::MeshTemplateElementCollection::get_element_dimension, "Returns the spatial dimension of the elements in this domain")
 		.def("get_adjacent_boundary_names", &pyoomph::MeshTemplateElementCollection::get_adjacent_boundary_names, "Returns the names of all mesh boundaries adjacent to this domain")
 		.def("set_all_nodes_as_boundary_nodes",&pyoomph::MeshTemplateElementCollection::set_all_nodes_as_boundary_nodes, "Marks every node of this domain as a boundary node, e.g. for domains that consist purely of interface elements")
-		.def("set_element_code", &pyoomph::MeshTemplateElementCollection::set_element_code, nb::arg("code_instance"), "Assigns the compiled equation code instance used to create the elements of this domain").
+		.def("set_element_code", &pyoomph::MeshTemplateElementCollection::set_element_code, nb::arg("jitcode"), "Assigns the compiled equation code used to create the elements of this domain").
 		doc()="A collection of bulk elements, i.e. a bulk domain of a mesh. Must be created as part of a :py:class:`~pyoomph.meshes.mesh.MeshTemplate` by :py:meth:`~pyoomph.meshes.mesh.MeshTemplate.new_domain`";
 
 	nb::class_<pyoomph::MeshTemplate, pyoomph::PyMeshTemplateTrampoline>(m, "MeshTemplate")
@@ -1782,8 +1782,8 @@ void PyReg_Mesh(nb::module_ &m)
 	// adaptive-refinement and boundary-setup machinery specific to one spatial dimension.
 	nb::class_<TemplatedMeshBase1dHandle, MeshHandleBase>(m, "TemplatedMeshBase1d")
 		.def(nb::init<>())
-		.def("_set_problem",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self, pyoomph::Problem *p, pyoomph::DynamicJITCode *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("jitcode").none())
 		.def(
 			"_get_problem",handle_method<TemplatedMeshBase1dHandle>([](pyoomph::TemplatedMeshBase1d *self)
 			{ return self->get_problem(); }),
@@ -1817,8 +1817,8 @@ void PyReg_Mesh(nb::module_ &m)
 	// quadtree-based adaptive-refinement and boundary-setup machinery.
 	nb::class_<TemplatedMeshBase2dHandle, MeshHandleBase>(m, "TemplatedMeshBase2d")
 		.def(nb::init<>())
-		.def("_set_problem",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self, pyoomph::Problem *p, pyoomph::DynamicJITCode *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("jitcode").none())
 		.def(
 			"_get_problem",handle_method<TemplatedMeshBase2dHandle>([](pyoomph::TemplatedMeshBase2d *self)
 			{ return self->get_problem(); }),
@@ -1855,8 +1855,8 @@ void PyReg_Mesh(nb::module_ &m)
 	// octree-based adaptive-refinement and boundary-setup machinery.
 	nb::class_<TemplatedMeshBase3dHandle, MeshHandleBase>(m, "TemplatedMeshBase3d")
 		.def(nb::init<>())
-		.def("_set_problem",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self, pyoomph::Problem *p, pyoomph::DynamicJITCode *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("jitcode").none())
 		.def(
 			"_get_problem",handle_method<TemplatedMeshBase3dHandle>([](pyoomph::TemplatedMeshBase3d *self)
 			{ return self->get_problem(); }),
@@ -1919,8 +1919,8 @@ void PyReg_Mesh(nb::module_ &m)
 			"_get_problem",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self)
 			{ return self->get_problem(); }),
 			nb::rv_policy::reference)
-		.def("_set_problem",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self, pyoomph::Problem *p, pyoomph::DynamicBulkElementInstance *inst)
-			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("code_instance").none())
+		.def("_set_problem",handle_method<InterfaceMeshHandle>([](pyoomph::InterfaceMesh *self, pyoomph::Problem *p, pyoomph::DynamicJITCode *inst)
+			 { self->_set_problem(p, inst); }), nb::arg("problem"), nb::arg("jitcode").none())
 		//  .def(nb::init<pyoomph::Problem*>());
 		.def(nb::init<>());
 

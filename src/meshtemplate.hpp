@@ -813,7 +813,7 @@ namespace pyoomph
   };
 
   // A named group ("domain") of MeshTemplateElement objects that all share
-  // the same generated oomph-lib element code (code_instance), e.g. "bulk"
+  // the same generated oomph-lib element code (jitcode), e.g. "bulk"
   // vs. named interface/boundary domains. This is the level at which the
   // Python side attaches an element implementation (via set_element_code())
   // to a set of geometric elements, and at which the nodal/Lagrangian
@@ -825,7 +825,7 @@ namespace pyoomph
     MeshTemplate *mesh_template;
     std::string name;
     std::vector<MeshTemplateElement *> elements;
-    DynamicBulkElementInstance *code_instance;
+    DynamicJITCode *jitcode;
     int Nodal_dimension = -1;
     int Lagr_dimension = -1;
     int dim = -1;
@@ -865,7 +865,7 @@ namespace pyoomph
 
     const std::vector<MeshTemplateElement *> &get_elements() const { return elements; }
     std::vector<std::string> get_adjacent_boundary_names();
-    void set_element_code(DynamicBulkElementInstance *code_inst);
+    void set_element_code(DynamicJITCode *jit_code);
     //	void set_element_class(BaseFiniteElementCode & cls);
     MeshTemplate *get_template() { return mesh_template; }
     virtual ~MeshTemplateElementCollection();

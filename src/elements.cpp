@@ -294,7 +294,7 @@ namespace pyoomph
 	//JITShapeInfo_t *temp_shape_info_buffer = NULL;
 
 	// What the (process-wide, shared) shape buffer must be able to hold. The optional parts are kept
-	// out of the buffer unless some code instance actually asks for them, and the buffer is grown
+	// out of the buffer unless some code actually asks for them, and the buffer is grown
 	// when a later instance needs more than the one already allocated (see BulkElementBase's ctor).
 	//
 	// The second-derivative arrays are sized from the nodal dimension rather than from the global
@@ -349,7 +349,7 @@ namespace pyoomph
 			if (r->continuous_spaces[i].d2x_psi) return true;
 		return required_shapes_want_d2x(r->bulk_shapes) || required_shapes_want_d2x(r->opposite_shapes);
 	}
-	DynamicBulkElementInstance *BulkElementBase::__CurrentCodeInstance = NULL;
+	DynamicJITCode *BulkElementBase::__CurrentJITCode = NULL;
 	unsigned BulkElementBase::zeta_time_history = 0;
 	unsigned BulkElementBase::zeta_coordinate_type = 0; // 0 means Lagrangian, 1 Eulerian, on co-dimensional meshes it will be the boundary coordinate (if set)
 	bool BulkElementBase::use_eigen_error_estimators=false;
@@ -362,7 +362,7 @@ namespace pyoomph
 		throw_runtime_error("Implement");
 	}
 
-	// Rebuilds this element's external-data list from scratch based on the JIT code instance's
+	// Rebuilds this element's external-data list from scratch based on the JIT code's
 	// linked external data (data shared/globally coupled across elements, e.g. global parameters).
 	const JITFuncSpec_RequiredShapes_FiniteElement_t *BulkElementBase::attachment_required_shapes(const JITFuncSpec_Table_FiniteElement_t *ft)
 	{
@@ -373,7 +373,7 @@ namespace pyoomph
 	void BulkElementBase::ensure_external_data()
 	{
 		this->flush_external_data();
-		for (auto &e : codeinst->linked_external_data.get_required_external_data())
+		for (auto &e : jitcode->linked_external_data.get_required_external_data())
 		{
 			this->add_external_data(e);
 		}
@@ -387,40 +387,40 @@ namespace pyoomph
 	// generated code.
     oomph::Data *BulkElementBase::get_D0_nodal_data(const unsigned &fieldindex)
     {
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
 		
         return this->internal_data_pt(ft->info_D0.internal_offset_new+fieldindex);
     }
 
 	oomph::Data *BulkElementBase::get_DL_nodal_data(const unsigned &fieldindex)
     {
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
         return this->internal_data_pt(ft->info_DL.internal_offset_new+fieldindex);
     }
 
 	oomph::Data *BulkElementBase::get_DG_nodal_data(const unsigned &space_index,const unsigned &fieldindex)
 	{
-		auto * ft=this->get_code_instance()->get_func_table();		
+		auto * ft=this->get_jit_code()->get_func_table();		
 		const JITFuncSpec_Table_FiniteElement_SpaceInfo_t & space_info = ft->dg_spaces[space_index];
 		return this->internal_data_pt(space_info.internal_offset_new+fieldindex);
 	}
 
 	unsigned BulkElementBase::get_DG_buffer_index(const unsigned &space_index,const unsigned &fieldindex)
 	{
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
 		const JITFuncSpec_Table_FiniteElement_SpaceInfo_t & space_info = ft->dg_spaces[space_index];
 		return space_info.buffer_offset_basebulk+fieldindex;
 	}
 
 	unsigned BulkElementBase::get_DL_buffer_index(const unsigned &fieldindex)
     {
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
         return ft->info_DL.buffer_offset_basebulk+ fieldindex;
     }
 
 	unsigned BulkElementBase::get_D0_buffer_index(const unsigned &fieldindex)
     {
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
         return ft->info_D0.buffer_offset_basebulk+ fieldindex;
     }
 
@@ -428,19 +428,19 @@ namespace pyoomph
 	int BulkElementBase::get_DG_local_equation(const unsigned &space_index,const unsigned &fieldindex,const unsigned & nodeindex)
 	{
 		
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
 		const JITFuncSpec_Table_FiniteElement_SpaceInfo_t & space_info = ft->dg_spaces[space_index];
 		return this->internal_local_eqn(space_info.internal_offset_new+fieldindex,nodeindex);
 	}
 
     int BulkElementBase::get_DL_local_equation(const unsigned &fieldindex,const unsigned & nodeindex)
 	{
-	  auto * ft=this->get_code_instance()->get_func_table();
+	  auto * ft=this->get_jit_code()->get_func_table();
 	  return this->internal_local_eqn(ft->info_DL.internal_offset_new+fieldindex,nodeindex);						
 	}
     int BulkElementBase::get_D0_local_equation(const unsigned &fieldindex)
 	{
-	  auto * ft=this->get_code_instance()->get_func_table();
+	  auto * ft=this->get_jit_code()->get_func_table();
 	  return this->internal_local_eqn(ft->info_D0.internal_offset_new+fieldindex,0);								
 	}
 
@@ -520,8 +520,8 @@ namespace pyoomph
 	// the undeformed macro element.
 	bool BulkElementBase::macro_element_may_set_positions() const
 	{
-		if (!this->codeinst) return true;
-		const JITFuncSpec_Table_FiniteElement_t *ft = this->codeinst->get_func_table();
+		if (!this->jitcode) return true;
+		const JITFuncSpec_Table_FiniteElement_t *ft = this->jitcode->get_func_table();
 		return !(ft && ft->moving_nodes);
 	}
 
@@ -599,7 +599,7 @@ namespace pyoomph
 
 	// Factory that instantiates the concrete BulkElement* subclass matching a MeshTemplateElement's
 	// geometric type index (the same meshio-style codes as get_meshio_type_index()) and the current
-	// JIT code instance's "dominant space" (the highest interpolation order actually used by any
+	// JIT code's "dominant space" (the highest interpolation order actually used by any
 	// field, C1/C1TB/C2/C2TB/...). Where the dominant space is lower order than the template
 	// element's own geometry (e.g. a template C2 triangle but the code only ever uses C1 fields), a
 	// lower-order element is created instead together with "nodemap": the subset (and reordering) of
@@ -609,7 +609,7 @@ namespace pyoomph
 	{
 		BulkElementBase *res = NULL;
 		std::vector<int> nodemap;
-		std::string domspace=std::string(BulkElementBase::__CurrentCodeInstance->get_func_table()->dominant_space);
+		std::string domspace=std::string(BulkElementBase::__CurrentJITCode->get_func_table()->dominant_space);
 		if (el->get_geometric_type_index() == 1)
 		{
 			res = new BulkElementLine1dC1();
@@ -809,9 +809,9 @@ namespace pyoomph
 		res->initial_cartesian_nondim_size = res->size();
 		res->initial_quality_factor = res->get_quality_factor();
 
-		if (BulkElementBase::__CurrentCodeInstance->get_func_table()->integration_order)
+		if (BulkElementBase::__CurrentJITCode->get_func_table()->integration_order)
 		{
-			res->set_integration_order(BulkElementBase::__CurrentCodeInstance->get_func_table()->integration_order);
+			res->set_integration_order(BulkElementBase::__CurrentJITCode->get_func_table()->integration_order);
 		}
 		return res;
 	}
@@ -824,7 +824,7 @@ namespace pyoomph
 	// the largest supported element type, so the same buffer can be reused across all element types
 	// without reallocation. The optional parts selected by "caps" (analytic Hessians on a moving
 	// (ALE) mesh, and the second-spatial-derivative family) are left out - and their pointers NULLed
-	// - unless some code instance actually asks for them.
+	// - unless some code actually asks for them.
 	void alloc_dealloc_single_shape_buffer(bool do_alloc, JITShapeInfo_t * PYOOMPH_RESTRICT *buff, const ShapeBufferCaps &caps)
 	{
 		const bool with_analytical_hessian_moving_mesh = caps.hessian_moving_mesh;
@@ -1072,18 +1072,18 @@ namespace pyoomph
 	// Constructs the element and lazily allocates the process-wide Default_shape_info_buffer
 	// (shared by all elements of the same "shape", since only one element is assembled at a time).
 	// If a previously allocated buffer lacks the second-derivative (Hessian) storage but the
-	// current code instance requires it, the buffer is reallocated with that storage included.
+	// current code requires it, the buffer is reallocated with that storage included.
 	BulkElementBase::BulkElementBase()
 	{
 		memset(&eleminfo, 0, sizeof(eleminfo));
 
-		codeinst = BulkElementBase::__CurrentCodeInstance;
-		if (!codeinst)
+		jitcode = BulkElementBase::__CurrentJITCode;
+		if (!jitcode)
 		{
 			throw_runtime_error("Element generated without jit code");
 		}
 
-		const JITFuncSpec_Table_FiniteElement_t *ft = this->codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *ft = this->jitcode->get_func_table();
 
 		ShapeBufferCaps needed;
 		needed.hessian_moving_mesh = ft->hessian_generated && ft->moving_nodes;
@@ -1107,7 +1107,7 @@ namespace pyoomph
 		}
 		else if (!Default_shape_info_buffer_caps.covers(needed))
 		{
-			// A later code instance needs more than the buffer was built with. Free with the caps it
+			// A later code needs more than the buffer was built with. Free with the caps it
 			// was allocated with (otherwise the recursive free walks the wrong depths), then grow.
 			alloc_dealloc_all_shape_buffers(false, &Default_shape_info_buffer, Default_shape_info_buffer_caps);
 			Default_shape_info_buffer_caps.absorb(needed);
@@ -1115,7 +1115,7 @@ namespace pyoomph
 		}
 		shape_info = Default_shape_info_buffer;
 
-		this->set_nlagrangian_and_ndim(this->codeinst->get_func_table()->lagr_dim, this->codeinst->get_func_table()->nodal_dim);
+		this->set_nlagrangian_and_ndim(this->jitcode->get_func_table()->lagr_dim, this->jitcode->get_func_table()->nodal_dim);
 		this->ensure_external_data();
 		
 	}
@@ -1153,7 +1153,7 @@ namespace pyoomph
 				// after every mesh adaption, so an adaptive run leaked ~1 MB per adaption (measured on
 				// a 1900-dof adaptive Poisson problem) and grew without bound; under mpirun every rank
 				// pays it separately.
-				for (unsigned int j = eleminfo.nodal_dim + codeinst->get_func_table()->lagr_dim ; j < this->codeinst->get_func_table()->info_Pos.numfields; j++)
+				for (unsigned int j = eleminfo.nodal_dim + jitcode->get_func_table()->lagr_dim ; j < this->jitcode->get_func_table()->info_Pos.numfields; j++)
 				{
 
 					if (eleminfo.nodal_coords[i][j]) delete eleminfo.nodal_coords[i][j];
@@ -1198,7 +1198,7 @@ namespace pyoomph
 	// 1.0 (Cartesian, no extra factor) otherwise.
 	double BulkElementBase::geometric_jacobian(const oomph::Vector<double> &x)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (functable->GeometricJacobian)
 		{
 			return functable->GeometricJacobian(&eleminfo, &(x[0]));
@@ -1226,7 +1226,7 @@ namespace pyoomph
 		// here would see a half-built element.
 		hang_state_valid = false;
 
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		/*eleminfo.nodal_coords = (double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT )malloc(eleminfo.nnode * sizeof(double **));		
 		eleminfo.nodal_data = (double * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT * PYOOMPH_RESTRICT )calloc(eleminfo.nnode, sizeof(double **));
@@ -1265,7 +1265,7 @@ namespace pyoomph
 		bool face_zeta_defined = false;
 		if (this_as_face && functable->info_Pos.numfields > zeta_offset)
 		{
-			oomph::Mesh *themesh = this->get_code_instance()->get_bulk_mesh();
+			oomph::Mesh *themesh = this->get_jit_code()->get_bulk_mesh();
 			while (pyoomph::InterfaceMesh *im = dynamic_cast<pyoomph::InterfaceMesh *>(themesh))
 			{
 				themesh = im->get_bulk_mesh();
@@ -1438,23 +1438,23 @@ namespace pyoomph
 			if (!without_equations)
 			{
 				//		std::cout << "NODE INDEX oF " << functable->fieldnames_ED0[i] << " IS " << node_index << std::endl;
-				if (!codeinst->linked_external_data[i].data)
+				if (!jitcode->linked_external_data[i].data)
 					throw_runtime_error("Element has an external data contribution, which is not assigned: " + std::string(functable->info_ED0.fieldnames[i]));
-				if (codeinst->linked_external_data[i].elemental_index < 0)
+				if (jitcode->linked_external_data[i].elemental_index < 0)
 				{
 					// Read by output/integral expressions only, so it was deliberately not registered as
 					// external data (reindex_elemental_data). Those evaluators want the value and never an
 					// equation; -1 is what every other unassembled dof carries, so a residual or Jacobian
 					// term that referenced it after all would be skipped rather than write somewhere wrong.
-					int value_i = codeinst->linked_external_data[i].value_index;
-					eleminfo.nodal_data[0][node_index] = codeinst->linked_external_data[i].data->value_pt(value_i);
+					int value_i = jitcode->linked_external_data[i].value_index;
+					eleminfo.nodal_data[0][node_index] = jitcode->linked_external_data[i].data->value_pt(value_i);
 					eleminfo.nodal_local_eqn[0][node_index] = -1;
 					continue;
 				}
-				int extdata_i = codeinst->linked_external_data[i].elemental_index+functable->info_ED0.external_offset_bulk;
+				int extdata_i = jitcode->linked_external_data[i].elemental_index+functable->info_ED0.external_offset_bulk;
 				if (extdata_i >= (int)this->nexternal_data())
-					throw_runtime_error("Somehow the external data array was not done well when trying to index data: " + std::string(functable->info_ED0.fieldnames[i]) + "  ext_data_index is " + std::to_string(extdata_i) + ", but only " + std::to_string((int)this->nexternal_data()) + " ext data slots present. Happened in " + codeinst->get_code()->get_file_name());
-				int value_i = codeinst->linked_external_data[i].value_index;
+					throw_runtime_error("Somehow the external data array was not done well when trying to index data: " + std::string(functable->info_ED0.fieldnames[i]) + "  ext_data_index is " + std::to_string(extdata_i) + ", but only " + std::to_string((int)this->nexternal_data()) + " ext data slots present. Happened in " + jitcode->get_file_name());
+				int value_i = jitcode->linked_external_data[i].value_index;
 				if (value_i < 0 || value_i >= (int)this->external_data_pt(extdata_i)->nvalue())
 					throw_runtime_error("Somehow the external data array was not done, i.e. wrong value index, well when trying to index data: " + std::string(functable->info_ED0.fieldnames[i]) + " at value " + std::to_string(value_i));
 				eleminfo.nodal_data[0][node_index] = this->external_data_pt(extdata_i)->value_pt(value_i); // This is a bit an issue. You cannot access this data if you don't need equations to be linked 
@@ -1476,10 +1476,10 @@ namespace pyoomph
 		  BoundaryNode *bn=dynamic_cast<BoundaryNode*>(this->node_pt(l));
 		  if (bn)
 		  {
-		   if (bn->nullified_dofs.count(codeinst))
+		   if (bn->nullified_dofs.count(jitcode))
 		   {
 			 if (!eleminfo.nullified_residual_dof) eleminfo.nullified_residual_dof=(bool*)calloc(eleminfo.ndof,sizeof(bool));
-			 for (int i : bn->nullified_dofs[codeinst])
+			 for (int i : bn->nullified_dofs[jitcode])
 			 {
 			   if (i<0)
 			   {
@@ -1503,7 +1503,7 @@ namespace pyoomph
 	// generator laid out for this element, regardless of which node index n is asked about).
 	unsigned BulkElementBase::required_nvalue(const unsigned &) const
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		return functable->total_num_fields_basebulk;
 	}
 
@@ -1569,7 +1569,7 @@ namespace pyoomph
 	// required_nvalue(), exposed under the name oomph-lib's projection/interpolation code uses).
 	unsigned BulkElementBase::ncont_interpolated_values() const
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		return functable->total_num_fields_basebulk;
 	}
 
@@ -1673,7 +1673,7 @@ namespace pyoomph
 	// Returns -1 if no such field exists (e.g. it lives in a non-nodal/discontinuous space).
 	int BulkElementBase::get_nodal_index_by_name(oomph::Node *, std::string fieldname)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
@@ -1827,7 +1827,7 @@ namespace pyoomph
 	// after the DG spaces' internal data, hence dg_offset).
 	void BulkElementBase::get_interpolated_fields_DL(const oomph::Vector<double> &s, std::vector<double> &res, const unsigned &t) const
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		res.resize(functable->info_DL.numfields);
 		oomph::Shape psi(eleminfo.nnode_DL);
 		this->shape_at_s_DL(s, psi);
@@ -1851,7 +1851,7 @@ namespace pyoomph
 	// so the local coordinate s is not actually needed for interpolation.
 	void BulkElementBase::get_interpolated_fields_D0(const oomph::Vector<double> &, std::vector<double> &res, const unsigned &t) const
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		res.resize(functable->info_D0.numfields);
 		unsigned dg_offset=0;
 		for (unsigned int i_space=0;i_space<functable->num_present_dg_spaces;i_space++)
@@ -1869,7 +1869,7 @@ namespace pyoomph
 	// coordinate s and history index t, in the same field ordering used throughout eleminfo.
 	void BulkElementBase::get_interpolated_values(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &values)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		const std::vector<std::vector<unsigned>> & node_to_element_index = this->get_nodal_space_index_to_element_index_map();
 		values.resize(ncont_interpolated_values(),0.0);
 		unsigned index=0;
@@ -1894,7 +1894,7 @@ namespace pyoomph
 	// of get_interpolated_fields_DL() and get_interpolated_fields_D0().
 	void BulkElementBase::get_interpolated_discontinuous_values(const unsigned &t, const oomph::Vector<double> &s, oomph::Vector<double> &values)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		oomph::Vector<double> resDL;
 		oomph::Vector<double> resD0;
 		if (functable->info_DL.numfields)
@@ -1924,8 +1924,8 @@ namespace pyoomph
 	// primary solution to drive mesh refinement.
 	unsigned BulkElementBase::num_Z2_flux_terms()
 	{
-		if (BulkElementBase::use_eigen_error_estimators) return codeinst->get_func_table()->num_Z2_flux_terms_for_eigen;
-		else return codeinst->get_func_table()->num_Z2_flux_terms;
+		if (BulkElementBase::use_eigen_error_estimators) return jitcode->get_func_table()->num_Z2_flux_terms_for_eigen;
+		else return jitcode->get_func_table()->num_Z2_flux_terms;
 	}
 
 	// The compound-flux grouping of this element's Z2 fluxes. Everything below returns the
@@ -1933,14 +1933,14 @@ namespace pyoomph
 	// groups, i.e. unless some error criterion on this domain asked to be normalised on its own.
 	unsigned BulkElementBase::ncompound_fluxes()
 	{
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 		const unsigned n = (BulkElementBase::use_eigen_error_estimators ? ft->num_Z2_compound_fluxes_for_eigen : ft->num_Z2_compound_fluxes);
 		return (n ? n : 1);
 	}
 
 	void BulkElementBase::get_Z2_compound_flux_indices(oomph::Vector<unsigned> &flux_index)
 	{
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 		const unsigned *idx = (BulkElementBase::use_eigen_error_estimators ? ft->Z2_flux_group_index_for_eigen : ft->Z2_flux_group_index);
 		if (!idx) return; // caller initialised the vector to all-zero, which is the single-group case
 		for (unsigned int i = 0; i < flux_index.size(); i++) flux_index[i] = idx[i];
@@ -1951,14 +1951,14 @@ namespace pyoomph
 	// norm, no weighting.
 	double BulkElementBase::Z2_compound_flux_normalize_relative(const unsigned &g)
 	{
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 		const double *v = (BulkElementBase::use_eigen_error_estimators ? ft->Z2_group_normalize_relative_for_eigen : ft->Z2_group_normalize_relative);
 		return (v ? v[g] : 1.0);
 	}
 
 	double BulkElementBase::Z2_compound_flux_weight(const unsigned &g)
 	{
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 		const double *v = (BulkElementBase::use_eigen_error_estimators ? ft->Z2_group_weight_for_eigen : ft->Z2_group_weight);
 		return (v ? v[g] : 1.0);
 	}
@@ -1968,21 +1968,21 @@ namespace pyoomph
 	// drive adaptive mesh refinement.
 	void BulkElementBase::get_Z2_flux(const oomph::Vector<double> &s, oomph::Vector<double> &flux)
 	{
-		bool has_fluxes=(BulkElementBase::use_eigen_error_estimators ? codeinst->get_func_table()->GetZ2FluxesForEigen : codeinst->get_func_table()->GetZ2Fluxes );
+		bool has_fluxes=(BulkElementBase::use_eigen_error_estimators ? jitcode->get_func_table()->GetZ2FluxesForEigen : jitcode->get_func_table()->GetZ2Fluxes );
 		if (has_fluxes)
 		{
 			this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
-			this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_Z2Fluxes, 0);
+			this->prepare_shape_buffer_for_integration(jitcode->get_func_table()->shapes_required_Z2Fluxes, 0);
 			double JLagr;
-			this->fill_shape_info_at_s(s, 0, codeinst->get_func_table()->shapes_required_Z2Fluxes, JLagr, 0);
-			this->set_remaining_shapes_appropriately(shape_info,codeinst->get_func_table()->shapes_required_Z2Fluxes);
+			this->fill_shape_info_at_s(s, 0, jitcode->get_func_table()->shapes_required_Z2Fluxes, JLagr, 0);
+			this->set_remaining_shapes_appropriately(shape_info,jitcode->get_func_table()->shapes_required_Z2Fluxes);
 			if (BulkElementBase::use_eigen_error_estimators)
 			{
-				codeinst->get_func_table()->GetZ2FluxesForEigen(&eleminfo, shape_info, &(flux[0]));
+				jitcode->get_func_table()->GetZ2FluxesForEigen(&eleminfo, shape_info, &(flux[0]));
 			}
 			else
 			{
-				codeinst->get_func_table()->GetZ2Fluxes(&eleminfo, shape_info, &(flux[0]));
+				jitcode->get_func_table()->GetZ2Fluxes(&eleminfo, shape_info, &(flux[0]));
 			}
 		}
 	}
@@ -1992,7 +1992,7 @@ namespace pyoomph
    // itself, excluding additional fields only present on interfaces.
    unsigned BulkElementBase::num_DG_fields(bool base_bulk_only)
    {
-    auto *ft=codeinst->get_func_table();
+    auto *ft=jitcode->get_func_table();
     if (base_bulk_only)
     {
 	  unsigned cnt=0;
@@ -2018,7 +2018,7 @@ namespace pyoomph
    // data; genuinely new fields defined at this level are read from internal data.
    void BulkElementBase::get_DG_fields_at_s(unsigned int space_index, unsigned history_index,const oomph::Vector<double> &s, oomph::Vector<double> &result) const
    {
-	auto *ft=codeinst->get_func_table();
+	auto *ft=jitcode->get_func_table();
 	auto & space_info=ft->dg_spaces[space_index];
 	result.resize(space_info.numfields);
      for (unsigned int i=0;i<space_info.numfields;i++) result[i]=0.0;
@@ -2050,9 +2050,9 @@ namespace pyoomph
 	{
 	   // DG Fields.
 		//Only add the fields directly added in this dimension. Parent degrees will be external data	   
-		for (unsigned int i_space=0;i_space<codeinst->get_func_table()->num_present_dg_spaces;i_space++)
+		for (unsigned int i_space=0;i_space<jitcode->get_func_table()->num_present_dg_spaces;i_space++)
 		{
-			auto * space_info=codeinst->get_func_table()->present_dg_spaces[i_space];
+			auto * space_info=jitcode->get_func_table()->present_dg_spaces[i_space];
 			if (eleminfo.nnode_of_space[space_info->space_index] > 0)
 			{
 				for (unsigned int fi = 0; fi < space_info->numfields_new; fi++)
@@ -2065,7 +2065,7 @@ namespace pyoomph
 			
 		if (eleminfo.nnode_DL > 0)
 		{
-			for (unsigned int fi = 0; fi < codeinst->get_func_table()->info_DL.numfields; fi++)
+			for (unsigned int fi = 0; fi < jitcode->get_func_table()->info_DL.numfields; fi++)
 			{
 				this->add_internal_data(new oomph::Data(eleminfo.nnode_DL), false);
 				//		          std::cout << "  AFTER DL " << fi << "  " << this->ninternal_data() << " INT DATA" << std::endl <<std::flush;
@@ -2073,7 +2073,7 @@ namespace pyoomph
 			}
 		}
 
-		for (unsigned int fi = 0; fi < codeinst->get_func_table()->info_D0.numfields; fi++)
+		for (unsigned int fi = 0; fi < jitcode->get_func_table()->info_D0.numfields; fi++)
 		{
 			this->add_internal_data(new oomph::Data(1), false);
 		}

@@ -51,7 +51,7 @@ namespace pyoomph
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *, int ) override {throw_runtime_error("ODE Elements do not have faces"); return NULL;}
+    oomph::FaceElement * construct_face_element(DynamicJITCode *, int ) override {throw_runtime_error("ODE Elements do not have faces"); return NULL;}
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & ) const override { return std::vector<pyoomph::Node*>(); }
     int nedges() const override { return 0; }
@@ -82,16 +82,16 @@ namespace pyoomph
     }
     void fill_element_nodal_indices_for_numpy(int *, unsigned, bool, std::vector<std::vector<std::set<oomph::Node *>>> &) const override {}
 
-    BulkElementODE0d(DynamicBulkElementInstance *code_inst, oomph::TimeStepper *tstepper);
+    BulkElementODE0d(DynamicJITCode *jit_code, oomph::TimeStepper *tstepper);
     ~BulkElementODE0d() override;
 
-    // Factory that sets the __CurrentCodeInstance "side channel" (see BulkElementBase) around
-    // construction so the new element picks up the right JIT code instance, then clears it again.
-    static BulkElementODE0d *construct_new(DynamicBulkElementInstance *code_inst, oomph::TimeStepper *tstepper)
+    // Factory that sets the __CurrentJITCode "side channel" (see BulkElementBase) around
+    // construction so the new element picks up the right JIT code, then clears it again.
+    static BulkElementODE0d *construct_new(DynamicJITCode *jit_code, oomph::TimeStepper *tstepper)
     {
-      BulkElementBase::__CurrentCodeInstance = code_inst;
-      BulkElementODE0d *res = new BulkElementODE0d(code_inst, tstepper);
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      BulkElementBase::__CurrentJITCode = jit_code;
+      BulkElementODE0d *res = new BulkElementODE0d(jit_code, tstepper);
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     double get_quality_factor() override { return 1.0; }
@@ -174,7 +174,7 @@ namespace pyoomph
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 2; }
@@ -206,10 +206,10 @@ namespace pyoomph
     std::vector<double> get_outline(bool lagrangian) override;
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkElementLine1dC1();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
 
@@ -243,7 +243,7 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 2; }
@@ -282,10 +282,10 @@ namespace pyoomph
     void further_setup_hanging_nodes() override {};
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkElementLine1dC2();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 1, order)); }
@@ -307,7 +307,7 @@ namespace pyoomph
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 2; }
@@ -340,10 +340,10 @@ namespace pyoomph
     std::vector<double> get_outline(bool lagrangian) override;
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkTElementLine1dC1();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
 
@@ -376,7 +376,7 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 2; }
@@ -417,10 +417,10 @@ namespace pyoomph
     void further_setup_hanging_nodes() override {};
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkTElementLine1dC2();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 1, order)); }
@@ -438,7 +438,7 @@ namespace pyoomph
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 4; }
@@ -488,10 +488,10 @@ namespace pyoomph
     }
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkElementQuad2dC1();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
@@ -514,7 +514,7 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support) override;
@@ -574,10 +574,10 @@ namespace pyoomph
     void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override;
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkElementQuad2dC2();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
@@ -596,7 +596,7 @@ namespace pyoomph
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     oomph::Node *boundary_node_pt(const int &face_index, const unsigned int index) override;
@@ -639,10 +639,10 @@ namespace pyoomph
     void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkElementTri2dC1();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order)); }
@@ -697,10 +697,10 @@ namespace pyoomph
     // Same failure mode as the C2TB case, see BulkElementTri2dC2::create_son_instance.
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkElementTri2dC1TB();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
 
@@ -724,7 +724,7 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;    
     void get_supporting_C1_nodes_of_C2_node(const unsigned &n, std::vector<oomph::Node *> &support) override;
@@ -839,7 +839,7 @@ namespace pyoomph
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 8; }
@@ -884,10 +884,10 @@ namespace pyoomph
     void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkElementBrick3dC1();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 3, order)); }
@@ -910,7 +910,7 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 8; }
@@ -966,10 +966,10 @@ namespace pyoomph
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkElementBrick3dC2();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 3, order)); }
@@ -993,7 +993,7 @@ namespace pyoomph
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 6; }
@@ -1044,10 +1044,10 @@ namespace pyoomph
     void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkElementTetra3dC1();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order)); }
@@ -1096,10 +1096,10 @@ namespace pyoomph
     }
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       auto res = new BulkElementTetra3dC1TB();
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order,true)); }
@@ -1123,7 +1123,7 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
     int nedges() const override { return 6; }
@@ -1207,7 +1207,7 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+    oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
     // The 15-node enriched tet adds one bubble node per face (10..13) plus one cell-interior bubble
     // (14). The face bubbles live OUTSIDE oomph::TElement<3,3>::Node_on_face, which is only [4][6],
     // so build_face_element() has to wire them in by hand -- and so does node_index_on_face() below.
@@ -1270,7 +1270,7 @@ namespace pyoomph
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-      oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+      oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
       const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementWedge3dC1();
@@ -1320,10 +1320,10 @@ namespace pyoomph
       void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
       BulkElementBase *create_son_instance() const override
       {
-          BulkElementBase::__CurrentCodeInstance = codeinst;
+          BulkElementBase::__CurrentJITCode = jitcode;
           auto res = new BulkElementWedge3dC1();
-          res->codeinst = codeinst;
-          BulkElementBase::__CurrentCodeInstance = NULL;
+          res->jitcode = jitcode;
+          BulkElementBase::__CurrentJITCode = NULL;
           return res;
       }
       void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
@@ -1343,7 +1343,7 @@ namespace pyoomph
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-      oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+      oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
       const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementPyramid3dC1();
@@ -1387,13 +1387,13 @@ namespace pyoomph
       void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
       BulkElementBase *create_son_instance() const override
       {
-          BulkElementBase::__CurrentCodeInstance = codeinst;
+          BulkElementBase::__CurrentJITCode = jitcode;
           auto res = new BulkElementPyramid3dC1();
-          res->codeinst = codeinst;
-          BulkElementBase::__CurrentCodeInstance = NULL;
+          res->jitcode = jitcode;
+          BulkElementBase::__CurrentJITCode = NULL;
           return res;
       }
-      // Factory for a TETRAHEDRAL son of the same physics (same codeinst) -- used by
+      // Factory for a TETRAHEDRAL son of the same physics (same jitcode) -- used by
       // PyramidMixedRefinementPattern for the 4 tet children of the 6-pyramid+4-tet red split.
       BulkElementBase *create_tet_son_instance() const;
       // Mixed (pyramid -> 6 pyramids + 4 tets) split scheme; see PyramidMixedRefinementPattern.
@@ -1417,7 +1417,7 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
       const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}    
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-      oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+      oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
       const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementWedge3dC2();
@@ -1465,10 +1465,10 @@ namespace pyoomph
       oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override { return this->generic_get_interpolating_node_at_local_coordinate(s, value_id); }
       BulkElementBase *create_son_instance() const override
       {
-          BulkElementBase::__CurrentCodeInstance = codeinst;
+          BulkElementBase::__CurrentJITCode = jitcode;
           auto res = new BulkElementWedge3dC2();
-          res->codeinst = codeinst;
-          BulkElementBase::__CurrentCodeInstance = NULL;
+          res->jitcode = jitcode;
+          BulkElementBase::__CurrentJITCode = NULL;
           return res;
       }
       void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
@@ -1485,7 +1485,7 @@ namespace pyoomph
   //     static const std::vector<std::vector<unsigned>> Nodal_Space_Index_To_Element_Index_Map;
   //   public:
   //     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-  //     oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+  //     oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
   //     virtual const std::vector<int> & get_possible_face_indices() const { return Possible_Face_Indices; }
   //     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
   //     BulkElementPyramid3dC2();
@@ -1523,10 +1523,10 @@ namespace pyoomph
   //     void further_setup_hanging_nodes() { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
   //     virtual BulkElementBase *create_son_instance() const
   //     {
-  //         BulkElementBase::__CurrentCodeInstance = codeinst;
+  //         BulkElementBase::__CurrentJITCode = jitcode;
   //         auto res = new BulkElementPyramid3dC2();
-  //         res->codeinst = codeinst;
-  //         BulkElementBase::__CurrentCodeInstance = NULL;
+  //         res->jitcode = jitcode;
+  //         BulkElementBase::__CurrentJITCode = NULL;
   //         return res;
   //     }
   //     virtual void set_integration_order(unsigned int order) { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
@@ -1548,7 +1548,7 @@ namespace pyoomph
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
       const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}    
       const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-      oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+      oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
       const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
       std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const override;
       BulkElementPyramid3dC2();
@@ -1596,10 +1596,10 @@ namespace pyoomph
       oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override { return this->generic_get_interpolating_node_at_local_coordinate(s, value_id); }
       BulkElementBase *create_son_instance() const override
       {
-          BulkElementBase::__CurrentCodeInstance = codeinst;
+          BulkElementBase::__CurrentJITCode = jitcode;
           auto res = new BulkElementPyramid3dC2();
-          res->codeinst = codeinst;
-          BulkElementBase::__CurrentCodeInstance = NULL;
+          res->jitcode = jitcode;
+          BulkElementBase::__CurrentJITCode = NULL;
           return res;
       }
       // Mixed red-split of a C2 pyramid: 6 sub-pyramids (create_son_instance) + 4 tets. The tet son is a
@@ -1625,7 +1625,7 @@ namespace pyoomph
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
-    oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *, int ) override {throw_runtime_error("A point element has no faces");}
+    oomph::FaceElement * construct_face_element(DynamicJITCode *, int ) override {throw_runtime_error("A point element has no faces");}
     const std::vector<int> & get_possible_face_indices() const override { return Possible_Face_Indices; }
     std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & ) const override {return std::vector<pyoomph::Node*>{}; }
     int nedges() const override { return 0; }
@@ -1689,7 +1689,7 @@ namespace pyoomph
   {
   protected:
   public:
-    InterfaceElementPoint0d(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<PointElement0d>(jitcode, bulk_el_pt, face_index)
+    InterfaceElementPoint0d(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<PointElement0d>(interface_jitcode, bulk_el_pt, face_index)
     {
     }
     oomph::Vector<double> local_coordinate_in_opposite_side(const oomph::Vector<double> &s) const override
@@ -1716,7 +1716,7 @@ namespace pyoomph
     double partial_opposite_s_at_smin, partial_opposite_s_at_smax;
 
   public:
-    InterfaceElementLine1dC1(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementLine1dC1>(jitcode, bulk_el_pt, face_index), partial_opposite_internal_facet(false)
+    InterfaceElementLine1dC1(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementLine1dC1>(interface_jitcode, bulk_el_pt, face_index), partial_opposite_internal_facet(false)
     {
     }
 
@@ -1868,7 +1868,7 @@ namespace pyoomph
     double partial_opposite_s_at_smin, partial_opposite_s_at_smax;
 
   public:
-    InterfaceElementLine1dC2(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementLine1dC2>(jitcode, bulk_el_pt, face_index), partial_opposite_internal_facet(false)
+    InterfaceElementLine1dC2(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementLine1dC2>(interface_jitcode, bulk_el_pt, face_index), partial_opposite_internal_facet(false)
     {
     }
 
@@ -2012,7 +2012,7 @@ namespace pyoomph
   {
   protected:
   public:
-    InterfaceTElementLine1dC1(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkTElementLine1dC1>(jitcode, bulk_el_pt, face_index)
+    InterfaceTElementLine1dC1(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkTElementLine1dC1>(interface_jitcode, bulk_el_pt, face_index)
     {
     }
     void analyze_opposite_orientation(const std::vector<double> & offset) override
@@ -2139,7 +2139,7 @@ namespace pyoomph
   {
   protected:
   public:
-    InterfaceTElementLine1dC2(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkTElementLine1dC2>(jitcode, bulk_el_pt, face_index)
+    InterfaceTElementLine1dC2(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkTElementLine1dC2>(interface_jitcode, bulk_el_pt, face_index)
     {
     }
 
@@ -2282,7 +2282,7 @@ namespace pyoomph
   protected:
   //  std::map<Node*, int>* add_interf_local_hang_eqs_C1, *add_interf_local_hang_eqs_C1TB;
   public:
-    InterfaceElementQuad2dC1(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC1>(jitcode, bulk_el_pt, face_index)//, add_interf_local_hang_eqs_C1(NULL), add_interf_local_hang_eqs_C1TB(NULL)
+    InterfaceElementQuad2dC1(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC1>(interface_jitcode, bulk_el_pt, face_index)//, add_interf_local_hang_eqs_C1(NULL), add_interf_local_hang_eqs_C1TB(NULL)
     {
     }
     //void assign_hanging_additional_interface_local_equations(const bool &store_local_dof_pt) override;
@@ -2312,7 +2312,7 @@ namespace pyoomph
   protected:
     //std::map<Node*, int>* add_interf_local_hang_eqs_C1, *add_interf_local_hang_eqs_C1TB,* add_interf_local_hang_eqs_C2, *add_interf_local_hang_eqs_C2TB;
   public:
-    InterfaceElementQuad2dC2(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC2>(jitcode, bulk_el_pt, face_index)//, add_interf_local_hang_eqs_C1(NULL), add_interf_local_hang_eqs_C1TB(NULL), add_interf_local_hang_eqs_C2(NULL), add_interf_local_hang_eqs_C2TB(NULL)
+    InterfaceElementQuad2dC2(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementQuad2dC2>(interface_jitcode, bulk_el_pt, face_index)//, add_interf_local_hang_eqs_C1(NULL), add_interf_local_hang_eqs_C1TB(NULL), add_interf_local_hang_eqs_C2(NULL), add_interf_local_hang_eqs_C2TB(NULL)
     {
     }
     
@@ -2350,7 +2350,7 @@ namespace pyoomph
   {
   protected:
   public:
-    InterfaceElementTri2dC1(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementTri2dC1>(jitcode, bulk_el_pt, face_index)
+    InterfaceElementTri2dC1(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementTri2dC1>(interface_jitcode, bulk_el_pt, face_index)
     {
     }
 
@@ -2442,7 +2442,7 @@ namespace pyoomph
   {
   protected:
   public:
-    InterfaceElementTri2dC2(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementTri2dC2>(jitcode, bulk_el_pt, face_index)
+    InterfaceElementTri2dC2(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementTri2dC2>(interface_jitcode, bulk_el_pt, face_index)
     {
     }
 
@@ -2566,7 +2566,7 @@ namespace pyoomph
   {
   protected:
   public:
-    InterfaceElementTri2dC2TB(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementTri2dC2TB>(jitcode, bulk_el_pt, face_index)
+    InterfaceElementTri2dC2TB(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index) : InterfaceElement<BulkElementTri2dC2TB>(interface_jitcode, bulk_el_pt, face_index)
     {
     }
 

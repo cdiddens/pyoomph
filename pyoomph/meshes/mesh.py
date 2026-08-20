@@ -1392,7 +1392,7 @@ class MeshFromTemplateBase(BaseMesh):
                     icg._coordinate_space = self._codegen._coordinate_space
                     icg._do_define_fields(self._codegen.dimension - 2)
 
-    def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
+    def _compile_bulk_equations(self) -> _pyoomph.DynamicJITCode:
         problem = self.get_problem()
         assert problem is not None
         assert self._codegen is not None
@@ -2140,7 +2140,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
             scales[i]=s
         codegen.get_equations()._set_current_codegen(ocg)
 
-    def _compile_bulk_equations(self) -> _pyoomph.DynamicBulkElementInstance:
+    def _compile_bulk_equations(self) -> _pyoomph.DynamicJITCode:
         assert self._eqtree is not None
         assert self._codegen is not None
         problem=self.get_problem()

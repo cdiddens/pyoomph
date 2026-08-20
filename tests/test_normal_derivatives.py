@@ -307,7 +307,7 @@ def _moving_curvature_problem(hessian):
         n.set_x(0, a + 0.30 * a * b)
         n.set_x(1, b - 0.20 * a * b + 0.15 * a * (1 - a))   # curves the interface itself
     im = p.get_mesh("domain/bottom")
-    idx = im.element_pt(0).get_code_instance().get_nodal_field_indices()["u"]
+    idx = im.element_pt(0).get_jit_code().get_nodal_field_indices()["u"]
     for n in im.nodes():
         n.set_value(idx, 0.3 + 0.5 * n.x(0))
     return p

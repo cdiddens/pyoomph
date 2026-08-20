@@ -374,7 +374,7 @@ class AxisymmetryBCForScalarD0Field(InterfaceEquations):
             for ie in eqtree._mesh.elements():
                 be=ie.get_bulk_element()
                 for f in self.fields:
-                    fi=be.get_code_instance().get_discontinuous_field_index(f)
+                    fi=be.get_jit_code().get_discontinuous_field_index(f)
                     if fi<0:
                         raise RuntimeError("Discontinuous parent field '"+str(f)+"' not known here")                
                     eqs.add(be.internal_data_pt(fi).eqn_number(0))

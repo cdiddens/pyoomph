@@ -287,7 +287,7 @@ class DisjunctDomainMarkerNSCH(Equations):
 
         if mesh.nelement()==0:
             return
-        marker_index=mesh.element_pt(0).get_code_instance().get_discontinuous_field_index(self.name)
+        marker_index=mesh.element_pt(0).get_jit_code().get_discontinuous_field_index(self.name)
         # Reset all markers
         unhandled_nodes:set[Node]=set()
         unhandled_elems:set[Element]=set()

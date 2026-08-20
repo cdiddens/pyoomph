@@ -151,11 +151,11 @@ class PressureFixationTaylorHood(_PressureFixation):
 
     def setup(self):
         assert self.mesh is not None
-        self.pindex = self.mesh.element_pt(0).get_code_instance().get_nodal_field_index(self.pname)
+        self.pindex = self.mesh.element_pt(0).get_jit_code().get_nodal_field_index(self.pname)
         if self.pindex < 0:
-            allfields = self.mesh.element_pt(0).get_code_instance().get_nodal_field_indices()
+            allfields = self.mesh.element_pt(0).get_jit_code().get_nodal_field_indices()
             for k,v in allfields.items():
-                print(k,v,self.mesh.element_pt(0).get_code_instance().get_nodal_field_index(k))
+                print(k,v,self.mesh.element_pt(0).get_jit_code().get_nodal_field_index(k))
             raise RuntimeError("Missing nodal data for 'pressure'. Found only: "+str(allfields))
 
     def _select_node(self)->"Node | None":
@@ -236,7 +236,7 @@ class PressureFixationCrouzeixRaviart(_PressureFixation):
 
     def setup(self):
         assert self.mesh is not None
-        self.pindex = self.mesh.element_pt(0).get_code_instance().get_discontinuous_field_index(self.pname)
+        self.pindex = self.mesh.element_pt(0).get_jit_code().get_discontinuous_field_index(self.pname)
         if self.pindex < 0:
             raise RuntimeError("Missing internal data for 'pressure'")
 

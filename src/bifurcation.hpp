@@ -36,7 +36,7 @@ This file is strongly based  on the oomph-lib library (see thirdparty/oomph-lib/
 namespace pyoomph
 {
   class Problem;
-  class DynamicBulkElementCode; // Forward decl.
+  class DynamicJITCode; // Forward decl.
 
   // A description of an augmented elemental block in terms of the patterns it is MADE of.
   //
@@ -400,9 +400,9 @@ namespace pyoomph
   class PitchForkResidualContributionList
   {
   public:
-    DynamicBulkElementCode *code;
+    DynamicJITCode *code;
     std::vector<int> residual_indices; // index 0 is base state, 1 is mass matrix residual
-    PitchForkResidualContributionList(DynamicBulkElementCode *_code, int _base, int _massmat) : code(_code) { residual_indices = {_base, _massmat}; }
+    PitchForkResidualContributionList(DynamicJITCode *_code, int _base, int _massmat) : code(_code) { residual_indices = {_base, _massmat}; }
     PitchForkResidualContributionList() {}
   };
 
@@ -442,7 +442,7 @@ namespace pyoomph
     AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
   protected:
     // Per generated-code lookup of which residual-assembly variant is the base state vs. mass matrix
-    std::map<const pyoomph::DynamicBulkElementCode *, PitchForkResidualContributionList> residual_contribution_indices;
+    std::map<const pyoomph::DynamicJITCode *, PitchForkResidualContributionList> residual_contribution_indices;
     // Builds residual_contribution_indices by inspecting all generated element codes once up front.
     void setup_U_times_Psi_residual_indices();
     // Computes the element-local contribution to the integral of U.Psi (used to fill in the
@@ -604,9 +604,9 @@ namespace pyoomph
   class AzimuthalSymmetryBreakingResidualContributionList
   {
   public:
-    DynamicBulkElementCode *code;
+    DynamicJITCode *code;
     std::vector<int> residual_indices; // index 0 is base state(axisymm), 1 is real azimuthal and 2 is imag azimuthal
-    AzimuthalSymmetryBreakingResidualContributionList(DynamicBulkElementCode *_code, int _base, int _real, int _imag) : code(_code) { residual_indices = {_base, _real, _imag}; }
+    AzimuthalSymmetryBreakingResidualContributionList(DynamicJITCode *_code, int _base, int _real, int _imag) : code(_code) { residual_indices = {_base, _real, _imag}; }
     AzimuthalSymmetryBreakingResidualContributionList() {}
   };
 
@@ -637,7 +637,7 @@ namespace pyoomph
     AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
 
     // Each generated C code has three residual forms: These are stored in this mapping
-    std::map<const pyoomph::DynamicBulkElementCode *, AzimuthalSymmetryBreakingResidualContributionList>
+    std::map<const pyoomph::DynamicJITCode *, AzimuthalSymmetryBreakingResidualContributionList>
         residual_contribution_indices;
     // We setup this mapping in beforehand
 
@@ -841,9 +841,9 @@ namespace pyoomph
   class CustomMultiAssembleHandlerContributionList
   {
   public:
-    DynamicBulkElementCode *code;
+    DynamicJITCode *code;
     std::vector<int> residual_indices; // index 0 is base state, 1 is mass matrix residual
-    CustomMultiAssembleHandlerContributionList(DynamicBulkElementCode *_code, const std::vector<int> &resinds) : code(_code) { residual_indices = resinds; }
+    CustomMultiAssembleHandlerContributionList(DynamicJITCode *_code, const std::vector<int> &resinds) : code(_code) { residual_indices = resinds; }
     CustomMultiAssembleHandlerContributionList() {}
   };
 
@@ -890,7 +890,7 @@ namespace pyoomph
     std::vector<CustomMultiAssembleReturnIndexInfo> contribution_return_indices; // Output-slot bookkeeping, one entry per unique_contributions
     unsigned nmatrix, nvector;                                           // Total number of matrix-valued / vector-valued outputs to allocate
     int resolve_assembled_residual(oomph::GeneralisedElement *const &elem_pt, int residual_mode);
-    std::map<const pyoomph::DynamicBulkElementCode *, CustomMultiAssembleHandlerContributionList> residual_contribution_indices;
+    std::map<const pyoomph::DynamicJITCode *, CustomMultiAssembleHandlerContributionList> residual_contribution_indices;
     // Builds residual_contribution_indices by inspecting all generated element codes once up front.
     void setup_residual_contribution_map();
 

@@ -1472,7 +1472,7 @@ namespace pyoomph
   {
     // Sizes of each block of one time level, in the fixed order evaluate() writes them. Taken from a
     // representative source element rather than the request, because every count except field_map's
-    // is a property of the source mesh's code instance.
+    // is a property of the source mesh's code.
     struct EvalLayout
     {
       unsigned ncont = 0, nDL = 0, nD0 = 0, nDG = 0, npos = 0, nlag = 0, nzeta = 0;
@@ -1484,7 +1484,7 @@ namespace pyoomph
       EvalLayout L;
       if (!e)
         return L;
-      const JITFuncSpec_Table_FiniteElement_t *ft = e->get_code_instance()->get_func_table();
+      const JITFuncSpec_Table_FiniteElement_t *ft = e->get_jit_code()->get_func_table();
       if (what.continuous_fields)
       {
         // With a field_map the caller is asking for ITS OWN field layout, so the count is the map's
@@ -1602,7 +1602,7 @@ namespace pyoomph
           // lays out before the DL and D0 entries. Only the fields the element owns
           // (numfields_new); anything inherited from the bulk is external data and not the source
           // element's to report.
-          const JITFuncSpec_Table_FiniteElement_t *ft = e->get_code_instance()->get_func_table();
+          const JITFuncSpec_Table_FiniteElement_t *ft = e->get_jit_code()->get_func_table();
           unsigned idata = 0, f = 0;
           for (unsigned si = 0; si < ft->num_present_dg_spaces; si++)
           {

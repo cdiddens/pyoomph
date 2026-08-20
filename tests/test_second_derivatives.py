@@ -68,7 +68,7 @@ class _Carrier(Equations):
 
 
 def _set_nodal(mesh, fn, name="w"):
-    idx = mesh.element_pt(0).get_code_instance().get_nodal_field_indices()[name]
+    idx = mesh.element_pt(0).get_jit_code().get_nodal_field_indices()[name]
     for n in mesh.nodes():
         n.set_value(idx, fn(*[n.x(i) for i in range(n.ndim())]))
 

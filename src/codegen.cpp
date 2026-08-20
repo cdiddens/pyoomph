@@ -10833,11 +10833,11 @@ namespace pyoomph
 		}
 		
 		// domain_name is deliberately NOT set here (nor freed in cleanup below): baking a
-		// per-instance string into the generated C code made otherwise textually-identical
+		// per-domain string into the generated C code made otherwise textually-identical
 		// codes on different domains (e.g. a DirichletBC(u=0) on both "left" and "right" of a
 		// rectangle) compile to different .c/.so content, defeating the JIT code cache's
 		// ability to share one compiled artifact between them. It is instead set by the host
-		// (DynamicBulkElementCode's constructor in problem.cpp, right after calling this
+		// (DynamicJITCode's constructor in problem.cpp, right after calling this
 		// init function) and freed there too - see the comment there for why that keeps
 		// alloc/free symmetric regardless of the compiler backend's C runtime.
 		init << " functable->clean_up=&clean_up;" << std::endl;

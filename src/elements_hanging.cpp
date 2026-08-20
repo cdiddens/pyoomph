@@ -234,7 +234,7 @@ namespace pyoomph
 	bool BulkElementBase::interpolation_value_is_C1(const int &value_id) const
 	{
 		if (value_id < 0) return false; // geometry/position: always the geometric basis
-		const JITFuncSpec_Table_FiniteElement_t *ft = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *ft = jitcode->get_func_table();
 		return value_id >= static_cast<int>(ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk +
 											ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk);
 	}
@@ -803,7 +803,7 @@ namespace pyoomph
 	bool BulkElementBase::fill_hang_info_with_equations_basebulk(JITShapeInfo_t *shape_info)
 	{
 		bool res=false;
-		auto * ft = codeinst->get_func_table();
+		auto * ft = jitcode->get_func_table();
 		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
 		{
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
@@ -898,7 +898,7 @@ namespace pyoomph
 	unsigned char BulkElementBase::compute_hang_state() const
 	{
 		bool has_hang = false, to_interpolate = false;
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 
 		// Positions. Bounded by nnode(), NOT by eleminfo.nnode: an ODE element reports eleminfo.nnode
 		// = 1 for a node slot that is a null pointer, which is exactly why it overrides
@@ -1036,7 +1036,7 @@ namespace pyoomph
 			hb.masters[0].weight = nan_w;
 			hb.masters[0].local_eqn = 0;
 		};
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 		if (eleminfo.nnode && shape_info->hanginfo_Pos)
 			for (unsigned f = 0; f < this->nodal_dimension(); f++)
 				for (unsigned l = 0; l < eleminfo.nnode; l++)
@@ -1081,7 +1081,7 @@ namespace pyoomph
 		if (__gate.skip())
 			return;
 
-		auto * ft = codeinst->get_func_table();
+		auto * ft = jitcode->get_func_table();
 
 		// Positions: geometrically hanging nodes, and nodes whose position was locally reduced to C1
 		// (ConstrainPositionsToC1Space). Both are flattened down to real free leaf dofs, so the pushed
@@ -1169,7 +1169,7 @@ namespace pyoomph
 	// a compact list over just the nodes of the field's own interpolation space.
 	std::vector<std::pair<oomph::Data*,int> > BulkElementBase::get_field_data_list(std::string name,bool use_elemental_indices)
 	{
-	 auto *ft=codeinst->get_func_table();
+	 auto *ft=jitcode->get_func_table();
 	 std::vector<std::pair<oomph::Data*,int> > result;
 	 auto find_by_name=[name](char **fnames,unsigned numf)->int {for(unsigned int i=0;i<numf;i++) if (name==std::string(fnames[i])) return i;  return -1;};
 
@@ -1312,7 +1312,7 @@ namespace pyoomph
 		bool res=this->fill_hang_info_with_equations_for_pos(shape_info); // Potentially only do if required
 		res=this->fill_hang_info_with_equations_basebulk(shape_info) || res;
 		res=this->fill_hang_info_with_equations_interface(shape_info) || res;
-		auto * ft=codeinst->get_func_table();
+		auto * ft=jitcode->get_func_table();
 		// DG spaces, DL and D0 fields can never actually be hanging; their hanginfo slots in the
 		// unified per-field buffer are only (ab)used below for the eqn_remap indirection, so start
 		// from a clean nummaster=0 state (mirrors what used to be a single flat hanginfo_Discont zero).
@@ -1357,7 +1357,7 @@ namespace pyoomph
 		{
 		   // If we access e.g. a bulk element from an interface element, we have to remap the local equations, since the interface element has a different local equation numbering.
 		   // This is done via the hanging information, which is abused here to store the remapped local equations.
-		   auto * ft=codeinst->get_func_table();
+		   auto * ft=jitcode->get_func_table();
 			// If the mesh moves, we have to setup the mapping in the hanging scheme
 			if (ft->moving_nodes)
 			{
@@ -1468,8 +1468,8 @@ namespace pyoomph
 										throw_runtime_error("MISSING EXTERNAL DEPENDENCY: " + oss.str() + ". The opposite/bulk element "
 															"holds this dof, but it is not registered as external data of this interface "
 															"element, so its equation cannot be remapped. Element " +
-															std::string(this->get_code_instance() && this->get_code_instance()->get_code()
-																			? this->get_code_instance()->get_code()->get_file_name() : "?"));
+															std::string(this->get_jit_code()
+																			? this->get_jit_code()->get_file_name() : "?"));
 									}
 								}
 							}
@@ -1517,7 +1517,7 @@ namespace pyoomph
 
 
 			// TODO: DG loop
-			for (unsigned int i_space=0;i_space<codeinst->get_func_table()->num_present_dg_spaces;i_space++)
+			for (unsigned int i_space=0;i_space<jitcode->get_func_table()->num_present_dg_spaces;i_space++)
 			{
 				const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_dg_spaces[i_space];
 				if (space_info->numfields && (required.continuous_spaces[space_info->space_index].psi || required.continuous_spaces[space_info->space_index].dx_psi || required.continuous_spaces[space_info->space_index].dX_psi) && space_info->numfields>0)
@@ -1588,9 +1588,9 @@ namespace pyoomph
 
 
 
-			if (codeinst->get_func_table()->info_DL.numfields && (required.DL.dx_psi || required.DL.psi || required.DL.dX_psi))
+			if (jitcode->get_func_table()->info_DL.numfields && (required.DL.dx_psi || required.DL.psi || required.DL.dX_psi))
 			{
-				for (unsigned int f = 0; f < codeinst->get_func_table()->info_DL.numfields; f++)
+				for (unsigned int f = 0; f < jitcode->get_func_table()->info_DL.numfields; f++)
 				{
 					unsigned foffs = f + ft->info_DL.buffer_offset_basebulk;
 					JITHangInfo_t * hangbuffer=shape_info->hanginfo[foffs];
@@ -1623,9 +1623,9 @@ namespace pyoomph
 			}
 
 
-			if (codeinst->get_func_table()->info_D0.numfields && (required.D0.psi))
+			if (jitcode->get_func_table()->info_D0.numfields && (required.D0.psi))
 			{
-				for (unsigned int f = 0; f < codeinst->get_func_table()->info_D0.numfields; f++)
+				for (unsigned int f = 0; f < jitcode->get_func_table()->info_D0.numfields; f++)
 				{
 					unsigned foffs = f + ft->info_D0.buffer_offset_basebulk;
 					JITHangInfo_t * hangbuffer=shape_info->hanginfo[foffs];

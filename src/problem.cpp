@@ -128,7 +128,7 @@ namespace pyoomph
 	// continuous/DG spaces that are actually present, determines the dominant space used for the element's
 	// nodal positions, and merges the "required shapes" flags of all residual/Jacobian/Hessian/integral/
 	// extremum/Z2-flux/tracer-advection contributions into a single merged_required_shapes).
-	DynamicBulkElementCode::DynamicBulkElementCode(Problem *prob, CCompiler *ccompiler, std::string fnam, FiniteElementCode *elem) : problem(prob), compiler(ccompiler), filename(fnam), functable(NULL), element_class(elem), so_handle(NULL)
+	DynamicJITCode::DynamicJITCode(Problem *prob, CCompiler *ccompiler, std::string fnam, FiniteElementCode *cg, pyoomph::Mesh *bm) : problem(prob), compiler(ccompiler), filename(fnam), functable(NULL), code_gen(cg), so_handle(NULL), bulkmesh(bm)
 	{
 		JIT_ELEMENT_init_SPEC initfunc = ccompiler->get_init_func();
 		if (!initfunc)
@@ -154,7 +154,7 @@ namespace pyoomph
 		// pyoomph_core's own - which would otherwise be a real hazard on Windows, where a DLL's
 		// static CRT can have its own private heap distinct from the calling process's.
 		{
-			std::string dn = elem->get_domain_name();
+			std::string dn = cg->get_domain_name();
 			functable->domain_name = (char *)malloc(sizeof(char) * (dn.size() + 1));
 			memcpy(functable->domain_name, dn.c_str(), dn.size() + 1);
 		}
@@ -243,11 +243,15 @@ namespace pyoomph
 			integral_function_map[functable->integral_expressions_names[i]] = i;
 		for (unsigned int i = 0; i < functable->numextremum_expressions; i++)
 			extremum_function_map[functable->extremum_expressions_names[i]] = i;
+
+		// Sized here rather than in the member initialiser list: the ED0 field count only
+		// becomes known once initfunc() above has filled the function table.
+		linked_external_data = ExternalDataLinkVector(functable->info_ED0.numfields);
 	}
 
 	// Cleans up the function table (invoking the code's own clean_up callback first, if any) and closes
 	// the dlopen handle of the compiled shared library.
-	DynamicBulkElementCode::~DynamicBulkElementCode()
+	DynamicJITCode::~DynamicJITCode()
 	{
 		// std::cout << "UNLOADING ELEMENT CODE " << filename << " FUNCTABLE " << functable << " SO HANDLE " << so_handle  << std::endl << std::flush;
 		// std::cout << "COMPILER  " << compiler  << std::endl << std::flush;
@@ -282,14 +286,14 @@ namespace pyoomph
 		functable = NULL;
 	}
 
-	int DynamicBulkElementCode::get_integral_function_index(std::string n)
+	int DynamicJITCode::get_integral_function_index(std::string n)
 	{
 		if (!integral_function_map.count(n))
 			return -1;
 		return integral_function_map[n];
 	}
 
-	int DynamicBulkElementCode::get_extremum_function_index(std::string n)
+	int DynamicJITCode::get_extremum_function_index(std::string n)
 	{
 		if (!extremum_function_map.count(n))
 			return -1;
@@ -299,7 +303,7 @@ namespace pyoomph
 	// Looks up the residual/Jacobian contribution named "name" in this code and, if found and non-NULL,
 	// makes it the active one (functable->current_res_jac) for subsequent assembly calls into this code.
 	// Returns 1 on success, 0 if no matching (non-NULL) contribution exists.
-	unsigned DynamicBulkElementCode::_set_solved_residual(std::string name)
+	unsigned DynamicJITCode::_set_solved_residual(std::string name)
 	{
 		int res_jac_index = -1;
 		for (unsigned int i = 0; i < functable->num_res_jacs; i++)
@@ -317,10 +321,6 @@ namespace pyoomph
 			return 1;
 		else
 			return 0;
-	}
-	DynamicBulkElementInstance *DynamicBulkElementCode::factory_instance(pyoomph::Mesh *bulkmesh)
-	{
-		return new DynamicBulkElementInstance(this, bulkmesh);
 	}
 
 	//////////////////////////////////////////
@@ -353,42 +353,16 @@ namespace pyoomph
 
 	///////////////////////////////////////////
 
-	// Constructs a new instance of code d bound to mesh bm; allocates the (initially empty) external-data
-	// link slots sized to the code's declared ED0 (external-data-field) count.
-	DynamicBulkElementInstance::DynamicBulkElementInstance(DynamicBulkElementCode *d, pyoomph::Mesh *bm) : dyn(d), // local_field_to_global_field_index_C1(d->functable->numfields_C1,-1),
-																												   //		local_field_to_global_field_index_C2(d->functable->numfields_C2,-1),
-																												   //		local_global_parameter_to_global_index(d->functable->numglobal_params,-1),
-																										   linked_external_data(d->functable->info_ED0.numfields),
-																										   bulkmesh(bm)
-	{
-		/*
-		  for (unsigned int i=0; i<d->functable->num_nullified_bulk_residuals;i++)
-		  {
-			std::string fn=d->functable->nullified_bulk_residuals[i];
-			int index;
-			if (fn=="coordinate_x") index=-1;
-			else if (fn=="coordinate_y") index=-2;
-			else if (fn=="coordinate_z") index=-3;
-			else
-			{
-			  index=get_nodal_field_index(fn);
-			  if (index==-1) throw_runtime_error("Cannot nullify the bulk DoF " +fn);
-			}
-			nullify_bulk_residuals.insert(index);
-		  }
-		 */
-	}
-
 	// Binds the external field named "name" (as declared by the compiled code's ED0 space) to a specific
 	// (Data, index) pair, and patches the code's contribution name for that field (used in diagnostic
 	// output such as get_jacobian_information_string()) to full_source_name so it reflects where the
 	// linked value actually comes from. Throws if "name" is not among the code's required external fields.
-	void DynamicBulkElementInstance::link_external_data(std::string name, oomph::Data *data, int index,std::string full_source_name)
+	void DynamicJITCode::link_external_data(std::string name, oomph::Data *data, int index,std::string full_source_name)
 	{
 		int found = -1;
-		for (unsigned int i = 0; i < dyn->functable->info_ED0.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_ED0.numfields; i++)
 		{
-			if (name == std::string(dyn->functable->info_ED0.fieldnames[i]))
+			if (name == std::string(functable->info_ED0.fieldnames[i]))
 			{
 				found = i;
 				break;
@@ -398,31 +372,31 @@ namespace pyoomph
 			throw_runtime_error("Cannot link external data '" + name + "' since this is not required by the equation code");
 		linked_external_data[found] = ExternalDataLink(data, index);
 		// Replace the residual and jacobian information as well
-		std::string look_for=this->get_element_class()->get_full_domain_name()+"/"+name;
-		for (unsigned int i = 0; i < dyn->functable->contribution_entries_size; i++)
+		std::string look_for=this->get_code_gen()->get_full_domain_name()+"/"+name;
+		for (unsigned int i = 0; i < functable->contribution_entries_size; i++)
 		{
-			std::string res_name = dyn->functable->contribution_names[i];
+			std::string res_name = functable->contribution_names[i];
 			if (res_name == look_for)
 			{
-				free((char*)dyn->functable->contribution_names[i]);
-				dyn->functable->contribution_names[i] = strdup(full_source_name.c_str());
+				free((char*)functable->contribution_names[i]);
+				functable->contribution_names[i] = strdup(full_source_name.c_str());
 				break;
 			}
 		}
-		linked_external_data.reindex_elemental_data(dyn->functable->info_ED0.field_contribution_index);
+		linked_external_data.reindex_elemental_data(functable->info_ED0.field_contribution_index);
 	}
 
 	// Maps every nodal field name to its index into the node's value array, in the order in which the
 	// element code lays out nodal fields: first the "base bulk" fields of all present continuous spaces,
 	// then the base-bulk fields of all present DG spaces, then the remaining (non-base-bulk, i.e.
 	// interface-only) fields of the continuous spaces, then the remaining fields of the DG spaces.
-	std::map<std::string, unsigned> DynamicBulkElementInstance::get_nodal_field_indices()
+	std::map<std::string, unsigned> DynamicJITCode::get_nodal_field_indices()
 	{
 		std::map<std::string, unsigned> res;
 		unsigned offs = 0;
-		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
-			auto *space = dyn->functable->present_continuous_spaces[si];
+			auto *space = functable->present_continuous_spaces[si];
 			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
 				res[space->fieldnames[i]] = offs + i;
@@ -431,9 +405,9 @@ namespace pyoomph
 		}		
 
 
-		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_dg_spaces;si++)
 		{
-			auto *space = dyn->functable->present_dg_spaces[si];
+			auto *space = functable->present_dg_spaces[si];
 			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
 				res[space->fieldnames[i]] = offs + i;
@@ -443,9 +417,9 @@ namespace pyoomph
 
 
 		// Now the additional ones
-		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
-			auto *space = dyn->functable->present_continuous_spaces[si];
+			auto *space = functable->present_continuous_spaces[si];
 			for (unsigned int i = 0; i < space->numfields - space->numfields_basebulk; i++)
 			{
 				res[space->fieldnames[i + space->numfields_basebulk]] = offs + i;
@@ -453,9 +427,9 @@ namespace pyoomph
 			offs += space->numfields - space->numfields_basebulk;
 		}
 
-		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_dg_spaces;si++)
 		{
-			auto *space = dyn->functable->present_dg_spaces[si];
+			auto *space = functable->present_dg_spaces[si];
 			for (unsigned int i = 0; i < space->numfields - space->numfields_basebulk; i++)
 			{
 				res[space->fieldnames[i + space->numfields_basebulk]] = offs + i;
@@ -470,36 +444,36 @@ namespace pyoomph
 	// Maps every elemental (internal, non-nodal) field name to its index among the element's internal
 	// Data values: DL (discontinuous Lagrange, one value per element node) fields first, then D0
 	// (piecewise-constant) fields, offset after the DL ones.
-	std::map<std::string, unsigned> DynamicBulkElementInstance::get_elemental_field_indices()
+	std::map<std::string, unsigned> DynamicJITCode::get_elemental_field_indices()
 	{
 		std::map<std::string, unsigned> res;
-		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_DL.numfields; i++)
 		{
-			res[dyn->functable->info_DL.fieldnames[i]] = i;
+			res[functable->info_DL.fieldnames[i]] = i;
 		}
-		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_D0.numfields; i++)
 		{
-			res[dyn->functable->info_D0.fieldnames[i]] = i + dyn->functable->info_DL.numfields;
+			res[functable->info_D0.fieldnames[i]] = i + functable->info_DL.numfields;
 		}
 		return res;
 	}
 
 	// Index of a DL or D0 (discontinuous/elemental) field by name, offset by internal_offset_new so it
 	// directly indexes into the element's internal Data array; -1 if not a discontinuous field.
-	int DynamicBulkElementInstance::get_discontinuous_field_index(std::string name)
+	int DynamicJITCode::get_discontinuous_field_index(std::string name)
 	{
-		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_DL.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->info_DL.fieldnames[i]))
+			if (!strcmp(name.c_str(), functable->info_DL.fieldnames[i]))
 			{
-				return i + dyn->functable->info_DL.internal_offset_new;
+				return i + functable->info_DL.internal_offset_new;
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_D0.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->info_D0.fieldnames[i]))
+			if (!strcmp(name.c_str(), functable->info_D0.fieldnames[i]))
 			{
-				return i + dyn->functable->info_D0.internal_offset_new;
+				return i + functable->info_D0.internal_offset_new;
 			}
 		}
 		return -1;
@@ -507,11 +481,11 @@ namespace pyoomph
 
 	// Index of a base-bulk nodal field by name (offset by the space's nodal_offset_basebulk into the
 	// node's value array); -1 if "name" is not a base-bulk field of any present continuous space.
-	int DynamicBulkElementInstance::get_nodal_field_index(std::string name)
+	int DynamicJITCode::get_nodal_field_index(std::string name)
 	{
-		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
-			auto *space = dyn->functable->present_continuous_spaces[si];
+			auto *space = functable->present_continuous_spaces[si];
 			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
 				if (!strcmp(name.c_str(), space->fieldnames[i]))
@@ -524,7 +498,7 @@ namespace pyoomph
 	}
 
 	// Forwards to the bulk mesh's interface-dof-id registry, adding a new id for field n if not present yet
-	unsigned DynamicBulkElementInstance::resolve_interface_dof_id(std::string n)
+	unsigned DynamicJITCode::resolve_interface_dof_id(std::string n)
 	{
 		//std::cout << "->Resolving interface dof for field " << n << " on mesh " <<  this->get_bulk_mesh() << std::endl;
 		return this->get_bulk_mesh()->resolve_interface_dof_id(n);
@@ -535,13 +509,13 @@ namespace pyoomph
 	// interface dof id in the function table's interface_dof_indices array so that interface elements can
 	// find the additional dof slot on shared nodes. Required whenever this instance participates in an
 	// interface coupling. Returns the resolved field-name -> dof-id map for convenience.
-	std::map<std::string, unsigned> DynamicBulkElementInstance::setup_interface_dof_indices()
+	std::map<std::string, unsigned> DynamicJITCode::setup_interface_dof_indices()
 	{
 		std::map<std::string, unsigned> res;		
 
-		for (unsigned int i = 0; i < dyn->functable->num_present_continuous_spaces; i++	)
+		for (unsigned int i = 0; i < functable->num_present_continuous_spaces; i++	)
 		{
-			JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info= dyn->functable->present_continuous_spaces[i];
+			JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info= functable->present_continuous_spaces[i];
 
 			if (space_info->interface_dof_indices) {
 				free(space_info->interface_dof_indices);
@@ -565,11 +539,11 @@ namespace pyoomph
 	}
 
 	// Returns the name of the function space ("C2","C1",...,"DL","D0") a field belongs to, or "" if unknown
-	std::string DynamicBulkElementInstance::get_space_of_field(std::string name)
+	std::string DynamicJITCode::get_space_of_field(std::string name)
 	{
-		for (unsigned int si=0;si<dyn->functable->num_present_continuous_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
-			auto *space = dyn->functable->present_continuous_spaces[si];
+			auto *space = functable->present_continuous_spaces[si];
 			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
 				if (!strcmp(name.c_str(), space->fieldnames[i]))
@@ -579,9 +553,9 @@ namespace pyoomph
 			}
 		}
 
-		for (unsigned int si=0;si<dyn->functable->num_present_dg_spaces;si++)
+		for (unsigned int si=0;si<functable->num_present_dg_spaces;si++)
 		{
-			auto *space = dyn->functable->present_dg_spaces[si];
+			auto *space = functable->present_dg_spaces[si];
 			for (unsigned int i = 0; i < space->numfields_basebulk; i++)
 			{
 				if (!strcmp(name.c_str(), space->fieldnames[i]))
@@ -591,16 +565,16 @@ namespace pyoomph
 			}
 		}
 		
-		for (unsigned int i = 0; i < dyn->functable->info_DL.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_DL.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->info_DL.fieldnames[i]))
+			if (!strcmp(name.c_str(), functable->info_DL.fieldnames[i]))
 			{
 				return "DL";
 			}
 		}
-		for (unsigned int i = 0; i < dyn->functable->info_D0.numfields; i++)
+		for (unsigned int i = 0; i < functable->info_D0.numfields; i++)
 		{
-			if (!strcmp(name.c_str(), dyn->functable->info_D0.fieldnames[i]))
+			if (!strcmp(name.c_str(), functable->info_D0.fieldnames[i]))
 			{
 				return "D0";
 			}
@@ -610,36 +584,36 @@ namespace pyoomph
 
 	// Placeholder for consistency checks of the instance's field/parameter binding; currently a no-op,
 	// the binding checks it used to perform are now handled elsewhere (kept here, commented out, for reference)
-	void DynamicBulkElementInstance::sanity_check()
+	void DynamicJITCode::sanity_check()
 	{
 		/*
-		 for (unsigned int i=0;i<dyn->functable->numglobal_params;i++)
+		 for (unsigned int i=0;i<functable->numglobal_params;i++)
 		 {
-			if (local_global_parameter_to_global_index[i]<0) throw_runtime_error("Elemental parameter "+std::string(dyn->functable->global_paramnames[i])+" not bound");
+			if (local_global_parameter_to_global_index[i]<0) throw_runtime_error("Elemental parameter "+std::string(functable->global_paramnames[i])+" not bound");
 		 }
 		*/
 		/*
-		 for (unsigned int i=0;i<dyn->functable->numfields_C2;i++)
+		 for (unsigned int i=0;i<functable->numfields_C2;i++)
 		 {
-			if (local_field_to_global_field_index_C2[i]<0) throw_runtime_error("C2 field "+std::string(dyn->functable->fieldnames_C2[i])+" not bound");
+			if (local_field_to_global_field_index_C2[i]<0) throw_runtime_error("C2 field "+std::string(functable->fieldnames_C2[i])+" not bound");
 		 }
-		 for (unsigned int i=0;i<dyn->functable->numfields_C1;i++)
+		 for (unsigned int i=0;i<functable->numfields_C1;i++)
 		 {
-			if (local_field_to_global_field_index_C1[i]<0) throw_runtime_error("C1 field "+std::string(dyn->functable->fieldnames_C1[i])+" not bound");
+			if (local_field_to_global_field_index_C1[i]<0) throw_runtime_error("C1 field "+std::string(functable->fieldnames_C1[i])+" not bound");
 		 }
 		*/
 	}
 
     // Whether this instance's compiled code has any residual/Jacobian contribution that depends on the
     // named global parameter (i.e. the parameter is among the code's registered global params).
-    bool DynamicBulkElementInstance::has_parameter_contribution(const std::string &param)
+    bool DynamicJITCode::has_parameter_contribution(const std::string &param)
 	{
 		if (!this->get_problem()->has_global_parameter(param))
 			return false;
 		pyoomph::GlobalParameterDescriptor * parameter=this->get_problem()->get_global_parameter(param);
-		for (unsigned int i = 0; i < dyn->functable->numglobal_params; i++)
+		for (unsigned int i = 0; i < functable->numglobal_params; i++)
 		{
-			if (dyn->functable->global_paramindices[i] == parameter->get_global_index())
+			if (functable->global_paramindices[i] == parameter->get_global_index())
 				return true;
 		}
 		return false;
@@ -735,31 +709,22 @@ namespace pyoomph
 	unsigned Problem::get_max_dt_order() const
 	{
 		unsigned max_order = 0;
-		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
+		for (unsigned int i = 0; i < jit_codes.size(); i++)
 		{
-			max_order = std::max(max_order, (unsigned)bulk_element_codes[i]->functable->max_dt_order);
+			max_order = std::max(max_order, (unsigned)jit_codes[i]->functable->max_dt_order);
 		}
 		return max_order;
 	}
 
-	// Deletes all loaded DynamicBulkElementCode objects (closing their shared libraries) and all global
+	// Deletes all loaded DynamicJITCode objects (closing their shared libraries) and all global
 	// parameter descriptors, and releases the cached eigenproblem matrices. Used both from the destructor
 	// and explicitly (e.g. before recompiling/reloading equation code).
 	void Problem::unload_all_dlls(bool clear_all)
 	{		
-		for (unsigned int i=0;i< this->nsub_mesh();i++)
-		{
-			Mesh *m=dynamic_cast<Mesh *>(this->mesh_pt(i));
-			for (unsigned int j=0;j<m->nelement();j++)
-			{
-				BulkElementBase *e=dynamic_cast<BulkElementBase *>(m->element_pt(j));
-				DynamicBulkElementInstance *dyninst=dynamic_cast<DynamicBulkElementInstance *>(e);
-				if (dyninst)
-				{
-					dyninst->linked_external_data.clear();
-				}
-			}
-		}
+		// A loop over all elements used to sit here, cross-casting each one to the JIT code class and
+		// clearing its external data links. BulkElementBase and the JIT code class are unrelated
+		// types, so that dynamic_cast always yielded NULL and the clear() never ran once - removed
+		// rather than "fixed", since nothing has ever depended on it happening.
 		if (clear_all)
 		{
 			for (unsigned int i=0;i< this->nsub_mesh();i++)
@@ -789,12 +754,12 @@ namespace pyoomph
 		if (pyoomph_verbose)
 			std::cout << "Unloading all DLLs" << std::endl
 					  << std::flush;
-		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
+		for (unsigned int i = 0; i < jit_codes.size(); i++)
 		{
 			if (pyoomph_verbose)
-				std::cout << "Unloading DLL " << bulk_element_codes[i]->get_file_name() << std::endl
+				std::cout << "Unloading DLL " << jit_codes[i]->get_file_name() << std::endl
 						  << std::flush;
-			delete bulk_element_codes[i];
+			delete jit_codes[i];
 		}
 		if (pyoomph_verbose)
 			std::cout << "DLLs unloaded " << std::endl
@@ -805,7 +770,7 @@ namespace pyoomph
 			delete gp.second;
 		}
 
-		bulk_element_codes.clear();
+		jit_codes.clear();
 
 		global_params_by_name.clear();
 
@@ -840,33 +805,42 @@ namespace pyoomph
 		}
 	}
 
-	Problem::Problem() : oomph::Problem(), compiler(NULL), logfile(NULL), _is_quiet(false), bulk_element_codes(0) // , meshtemplate(new MeshTemplate(this))
+	Problem::Problem() : oomph::Problem(), compiler(NULL), logfile(NULL), _is_quiet(false), jit_codes(0) // , meshtemplate(new MeshTemplate(this))
 	{
 	}
 
-	// Loads (or returns the already-loaded) DynamicBulkElementCode for the shared library dynamic_lib,
-	// associates it with element_class (which fills in the callback function pointers of the function
-	// table), and binds each of the code's declared global parameters to the corresponding
-	// GlobalParameterDescriptor's value in this problem (creating parameters as needed).
-	DynamicBulkElementCode *Problem::load_dynamic_bulk_element_code(std::string dynamic_lib, FiniteElementCode *element_class)
+	// Loads the shared library dynamic_lib as a new DynamicJITCode bound to bulkmesh, associates it
+	// with code_gen (which fills in the callback function pointers of the function table), and binds
+	// each of the code's declared global parameters to the corresponding GlobalParameterDescriptor's
+	// value in this problem (creating parameters as needed).
+	DynamicJITCode *Problem::load_jit_code(std::string dynamic_lib, FiniteElementCode *code_gen, pyoomph::Mesh *bulkmesh)
 	{
-		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
+		// This used to silently hand back the already-loaded code for a repeated file name, on the
+		// premise that one compiled library could serve several domains. It cannot: the returned
+		// object kept the *first* compilation's code generator, which redefine_problem() has by then
+		// replaced, and it now also carries the first compilation's bulk mesh. Every domain and
+		// interface compiles to its own uniquely named trunk, so a collision here means two of them
+		// were written to the same path - report it instead of corrupting one of them.
+		for (unsigned int i = 0; i < jit_codes.size(); i++)
 		{
-			if (bulk_element_codes[i]->get_file_name() == dynamic_lib)
-				return bulk_element_codes[i];
+			if (jit_codes[i]->get_file_name() == dynamic_lib)
+			{
+				throw_runtime_error("Two element codes resolved to the same shared library '" + dynamic_lib +
+									"'. If this happened during redefine_problem(), pass a code_dir that differs from the current one.");
+			}
 		}
 		CCompiler *ccompiler = this->get_ccompiler();
-		bulk_element_codes.push_back(new DynamicBulkElementCode(this, ccompiler, dynamic_lib, element_class));
-		element_class->fill_callback_info(bulk_element_codes.back()->functable);
-		auto *ft = bulk_element_codes.back()->functable;
+		jit_codes.push_back(new DynamicJITCode(this, ccompiler, dynamic_lib, code_gen, bulkmesh));
+		code_gen->fill_callback_info(jit_codes.back()->functable);
+		auto *ft = jit_codes.back()->functable;
 		for (unsigned int i = 0; i < ft->numglobal_params; i++)
 		{
 			//		std::cout << "LINKING GLOBAL PARAM " << i << " of " << functable->numglobal_params << std::endl;
-			//		std::cout << "codeinst->get_problem()->get_global_parameter(functable->global_paramindices[i]) << std::endl;
+			//		std::cout << "jitcode->get_problem()->get_global_parameter(functable->global_paramindices[i]) << std::endl;
 			ft->global_parameters[i] = &(this->get_global_parameter(ft->global_paramindices[i])->value());
 		}
 
-		return bulk_element_codes.back();
+		return jit_codes.back();
 	}
 
 	/*
@@ -902,9 +876,9 @@ namespace pyoomph
 		{
 			for (unsigned int i=0;i<removed_fields_due_to_missing_jacobian_row_or_col.size();i++) removed_fields_due_to_missing_jacobian_row_or_col[i]=false;
 		}
-		for (unsigned int i = 0; i < bulk_element_codes.size(); i++)
+		for (unsigned int i = 0; i < jit_codes.size(); i++)
 		{
-			numfound += bulk_element_codes[i]->_set_solved_residual(name);
+			numfound += jit_codes[i]->_set_solved_residual(name);
 		}
 		if (!numfound && raise_error)
 		{
@@ -2283,7 +2257,7 @@ namespace pyoomph
 	{
 		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
 		if (!be) return false;
-		const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *ft = be->get_jit_code()->get_func_table();
 		const int resind = (residual_override >= 0 ? residual_override : ft->current_res_jac);
 		if (resind >= 0 && (unsigned)resind >= ft->num_res_jacs) return false; // Not a residual this code has
 		if (resind < 0)
@@ -2362,7 +2336,7 @@ namespace pyoomph
 
 		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
 		if (!be) return decline("not a BulkElementBase");
-		const bool have_hessian_code = be->get_code_instance()->get_func_table()->hessian_generated;
+		const bool have_hessian_code = be->get_jit_code()->get_func_table()->hessian_generated;
 
 		// Collect the distinct (matrix, residual) pairs the spec refers to BEFORE filling any of them, so
 		// that the buffer indices stay valid while several are held at once. A tracker can mix residuals
@@ -3821,8 +3795,8 @@ namespace pyoomph
 			for (unsigned ie = 0; ie < ne; ie++)
 			{
 				auto *el = dynamic_cast<BulkElementBase *>(m->element_pt(ie));
-				if (!el || !el->get_code_instance()) continue;
-				const JITFuncSpec_Table_FiniteElement_t *ft = el->get_code_instance()->get_func_table();
+				if (!el || !el->get_jit_code()) continue;
+				const JITFuncSpec_Table_FiniteElement_t *ft = el->get_jit_code()->get_func_table();
 				auto found = located.find(ft);
 				if (found == located.end())
 				{
@@ -3908,7 +3882,7 @@ namespace pyoomph
 			}
 			if (hits.empty()) continue;
 			const std::vector<std::string> names = be->get_dof_names();
-			const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
+			const JITFuncSpec_Table_FiniteElement_t *ft = be->get_jit_code()->get_func_table();
 			const std::string domain = (ft && ft->domain_name ? std::string(ft->domain_name) : std::string("?"));
 			for (const auto &h : hits)
 			{
@@ -6283,7 +6257,7 @@ namespace pyoomph
 				if (!be) continue;
 				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
 				if (!nvar) continue;
-				const JITFuncSpec_Table_FiniteElement_t *ft = be->get_code_instance()->get_func_table();
+				const JITFuncSpec_Table_FiniteElement_t *ft = be->get_jit_code()->get_func_table();
 				const std::vector<int> &cidx = be->get_local_dof_contribution_indices();
 				if (cidx.size() != nvar) continue;
 				for (unsigned m = 0; m < n_matrix; m++)
@@ -7752,7 +7726,7 @@ namespace pyoomph
 		std::set<std::string> res_jac_combis;
 		std::map<std::string,unsigned> field_name_to_index;
 		
-		for (auto * dc : bulk_element_codes)
+		for (auto * dc : jit_codes)
 		{
 			auto *ft=dc->get_func_table();
 			//std::cout << "Processing element code " << dc->get_file_name() << " has fields " << ft->num_defined_fields_on_this_domain << std::endl;
@@ -7789,14 +7763,14 @@ namespace pyoomph
 		{
 			residual_contributing_fields[i].resize(defined_fields.size(),false);
 			jacobian_contributing_fields[i].resize(defined_fields.size(),std::vector<bool>(defined_fields.size(),false));
-			jacobian_contributing_codes[i].resize(defined_fields.size(),std::vector<std::set<DynamicBulkElementCode*>>(defined_fields.size(),std::set<DynamicBulkElementCode*>()));
-			residual_contributing_codes[i].resize(defined_fields.size(),std::set<DynamicBulkElementCode*>());
+			jacobian_contributing_codes[i].resize(defined_fields.size(),std::vector<std::set<DynamicJITCode*>>(defined_fields.size(),std::set<DynamicJITCode*>()));
+			residual_contributing_codes[i].resize(defined_fields.size(),std::set<DynamicJITCode*>());
 			mass_matrix_contributing_fields[i].assign(defined_fields.size(),std::vector<bool>(defined_fields.size(),false));
 			// Start from all-bits-set and AND per contributor; blocks without any contributor are zeroed below
 			jacobian_block_flags_union[i].assign(defined_fields.size(),std::vector<unsigned char>(defined_fields.size(),0xFF));
 			mass_matrix_block_flags_union[i].assign(defined_fields.size(),std::vector<unsigned char>(defined_fields.size(),0xFF));
 			// Go over all bulk codes and check the contributions
-			for (auto * dc : bulk_element_codes)
+			for (auto * dc : jit_codes)
 			{
 				auto *ft=dc->get_func_table();
 				int my_i=-1;
@@ -7933,7 +7907,7 @@ namespace pyoomph
 
 		
 		// Loop once more to fill all dirichlet_field_index_to_global_field_index
-		for (auto * dc : bulk_element_codes)
+		for (auto * dc : jit_codes)
 		{
 			auto *ft=dc->get_func_table();
 			//std::cout << "Processing element code " << dc->get_file_name() << " has dirichlet fields " << ft->Dirichlet_set_size << std::endl;
@@ -7943,7 +7917,7 @@ namespace pyoomph
 				if (dn=="" || dn.find("__EXT_ODE_")==0) continue;
 				if (!ft->moving_nodes && (dn=="coordinate_x" || dn=="coordinate_y" || dn=="coordinate_z")) continue;				
 				//std::cout << "Looking for a field index for dirichlet field " << dn << std::endl;
-				FiniteElementCode *current=dc->get_code();
+				FiniteElementCode *current=dc->get_code_gen();
 				bool found=false;
 				while (current)
 				{
@@ -8092,7 +8066,7 @@ namespace pyoomph
 			};
 			print_column_header();
 			
-			std::vector<std::set<DynamicBulkElementCode*>> listed_domain_contributions;
+			std::vector<std::set<DynamicJITCode*>> listed_domain_contributions;
 			for (unsigned int i=0;i<defined_fields.size();i++)
 			{				
 				if (pin_due_to_empty_jacobian_row_or_col[ri][i]) continue;
@@ -8160,7 +8134,7 @@ namespace pyoomph
 							listed_domain_contributions.push_back(residual_contributing_codes[ri][i]);
 						}
 						std::string symbol=" ";
-						for  (auto * dc : listed_domain_contributions[found]) if (!dc->get_code()->is_residual_assembly_ignored(residual_names[ri])) ignored_residuals=false;
+						for  (auto * dc : listed_domain_contributions[found]) if (!dc->get_code_gen()->is_residual_assembly_ignored(residual_names[ri])) ignored_residuals=false;
 						symbol[0]=(char)('A' + found + (found>25 ? 6 : 0));						
 						ss << symbol << " ";
 					}
@@ -8177,7 +8151,7 @@ namespace pyoomph
 				// grouping is unaffected, but the dump could not be diffed across runs.
 				std::vector<std::string> contrib_names;
 				for (auto * dc : listed_domain_contributions[k])
-					contrib_names.push_back(dc->get_code()->get_full_domain_name());
+					contrib_names.push_back(dc->get_code_gen()->get_full_domain_name());
 				std::sort(contrib_names.begin(), contrib_names.end());
 				unsigned int count=contrib_names.size();
 				for (auto const &nm : contrib_names)
@@ -8250,7 +8224,7 @@ namespace pyoomph
 			if (!has_any_contributions[i])
 			{
 				// Check if it is pinned, then it is fine
-				DynamicBulkElementCode * dc=defined_fields_to_domain[i];
+				DynamicJITCode * dc=defined_fields_to_domain[i];
 				auto *ft=dc->get_func_table();
 				bool pinned=false;
 				for (unsigned int j=0;j<ft->Dirichlet_set_size;j++)

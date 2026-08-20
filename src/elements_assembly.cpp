@@ -121,7 +121,7 @@ namespace pyoomph
 				if (this->external_local_eqn(ed, i) >= 0)
 					extdofs++;
 		}
-		__ext_data_hist[std::string(codeinst->get_code()->get_file_name())]
+		__ext_data_hist[std::string(jitcode->get_file_name())]
 					   [{next, extdofs, (unsigned)this->ndof()}]++;
 	}
 
@@ -166,7 +166,7 @@ namespace pyoomph
 	// function, and/or Hessian-vector-product function.
 	void BulkElementBase::get_multi_assembly(std::vector<SinglePassMultiAssembleInfo> &info)
 	{
-		JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		JITFuncSpec_RequiredShapes_FiniteElement_t *required_shapes = (JITFuncSpec_RequiredShapes_FiniteElement_t *)std::calloc(1, sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));
 		int shapeflag = -1;
 		// std::cout << "MERGED ASSEMBLY " << std::endl;
@@ -201,7 +201,7 @@ namespace pyoomph
 			{
 				for (auto &pdiff : inf.dparams)
 				{
-					unsigned global_param_index = codeinst->get_problem()->resolve_parameter_value_ptr(pdiff.parameter);
+					unsigned global_param_index = jitcode->get_problem()->resolve_parameter_value_ptr(pdiff.parameter);
 					int paramindex = -1;
 					for (unsigned int i = 0; i < functable->numglobal_params; i++)
 					{
@@ -369,7 +369,7 @@ namespace pyoomph
 					{
 						if (!functable->ParameterDerivative[inf.contribution])
 							continue;
-						unsigned global_param_index = codeinst->get_problem()->resolve_parameter_value_ptr(pinf.parameter);
+						unsigned global_param_index = jitcode->get_problem()->resolve_parameter_value_ptr(pinf.parameter);
 						int paramindex = -1;
 						for (unsigned int i = 0; i < functable->numglobal_params; i++)
 						{
@@ -453,14 +453,14 @@ namespace pyoomph
 	void BulkElementBase::fill_in_generic_dresidual_contribution_jit(double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam, oomph::DenseMatrix<double> &dmass_matrix_dparam, unsigned flag)
 	{
 
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (functable->current_res_jac < 0)
 			return;
 		if (!functable->ParameterDerivative)
 			return;
 		if (!functable->ParameterDerivative[functable->current_res_jac])
 			return;
-		unsigned global_param_index = codeinst->get_problem()->resolve_parameter_value_ptr(parameter_pt);
+		unsigned global_param_index = jitcode->get_problem()->resolve_parameter_value_ptr(parameter_pt);
 		int paramindex = -1;
 		for (unsigned int i = 0; i < functable->numglobal_params; i++)
 		{
@@ -529,7 +529,7 @@ namespace pyoomph
 			return;
 		}
 
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (functable->current_res_jac < 0)
 			return;
 		if (!this->ndof())
@@ -771,7 +771,7 @@ namespace pyoomph
 	// the code to have been JIT-compiled with analytic Hessians enabled.
    void BulkElementBase::assemble_hessian_and_mass_hessian(oomph::RankThreeTensor<double> & hbuffer,oomph::RankThreeTensor<double> & mbuffer)
    {
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (functable->current_res_jac < 0)
 			return;
 		if (!this->ndof())
@@ -820,8 +820,8 @@ namespace pyoomph
 		unsigned t =this->projection_time;
 
 		// Create a field map to loop through all fields in element.
-		auto *code_instance = this->get_code_instance();
-		auto *func_table = code_instance->get_func_table();
+		auto *jitcode = this->get_jit_code();
+		auto *func_table = jitcode->get_func_table();
 		std::vector<int> field_map;
 		for (unsigned int si=0;si<func_table->num_present_dg_spaces;si++)
 		{
@@ -995,7 +995,7 @@ namespace pyoomph
 	// see the JITFuncSpec_HessianVectorProduct_FiniteElement calling convention).
 	void BulkElementBase::fill_in_generic_hessian(oomph::Vector<double> const &Y, oomph::DenseMatrix<double> &C, oomph::DenseMatrix<double> &product, unsigned flag)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (functable->current_res_jac < 0)
 			return;
 		if (!this->ndof())
@@ -1050,9 +1050,9 @@ namespace pyoomph
 		int local_unknown = 0;
 
 		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map=this->get_nodal_space_index_to_element_index_map();
-		for (unsigned int ispace=0;ispace<codeinst->get_func_table()->num_present_continuous_spaces;ispace++)
+		for (unsigned int ispace=0;ispace<jitcode->get_func_table()->num_present_continuous_spaces;ispace++)
 		{
-			auto *space_info=codeinst->get_func_table()->present_continuous_spaces[ispace];
+			auto *space_info=jitcode->get_func_table()->present_continuous_spaces[ispace];
 			if (space_info->numfields_basebulk)
 			{
 				for (unsigned n = 0; n < this->eleminfo.nnode_of_space[space_info->space_index]; n++)
@@ -1124,9 +1124,9 @@ namespace pyoomph
 //		std::cout << "DB NDOF " << this->ndof() << std::endl  << std::flush;
 //		std::cout << "   J" << jacobian.nrow() << " x " << jacobian.ncol() << std::endl << std::flush;
 		oomph::DenseMatrix<double> fd_jacobian(jacobian.nrow(), jacobian.ncol(), 0.0);
-		if (codeinst->get_func_table()->missing_residual_assembly[codeinst->get_func_table()->current_res_jac])
+		if (jitcode->get_func_table()->missing_residual_assembly[jitcode->get_func_table()->current_res_jac])
 		{
-		    throw_runtime_error("The Jacobian of the residual "+std::string(codeinst->get_func_table()->res_jac_names[codeinst->get_func_table()->current_res_jac])+" cannot be calculated by finite differences, since the residual is not calculated at all.");
+		    throw_runtime_error("The Jacobian of the residual "+std::string(jitcode->get_func_table()->res_jac_names[jitcode->get_func_table()->current_res_jac])+" cannot be calculated by finite differences, since the residual is not calculated at all.");
 		}
 		this->RefineableSolidElement::fill_in_contribution_to_jacobian(fd_residuals, fd_jacobian);
 		//	this->fill_in_jacobian_from_lagragian_by_fd(fd_residuals,fd_jacobian);
@@ -1150,9 +1150,9 @@ namespace pyoomph
 				}
 			}
 		}
-		if (header_written && codeinst->get_func_table()->stop_on_jacobian_difference)
+		if (header_written && jitcode->get_func_table()->stop_on_jacobian_difference)
 		{
-			const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+			const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 			// Now a very detailed list:
 			std::cout << "DOF LIST" << std::endl;
 			for (unsigned int i = 0; i < dofnames.size(); i++)
@@ -1274,7 +1274,7 @@ namespace pyoomph
 				ie = be->as_interface_element();
 			}
 
-			throw_runtime_error("Mismatch in Jacobian in code: " + this->codeinst->get_code()->get_file_name());
+			throw_runtime_error("Mismatch in Jacobian in code: " + this->jitcode->get_file_name());
 		}
 	}
 
@@ -1298,7 +1298,7 @@ namespace pyoomph
 		}
 
 		// Test if this is a complete finite difference loop
-		//  const JITFuncSpec_Table_FiniteElement_t * functable=codeinst->get_func_table();
+		//  const JITFuncSpec_Table_FiniteElement_t * functable=jitcode->get_func_table();
 
 		update_before_solid_position_fd();
 		const unsigned n_position_type = this->nnodal_position_type();
@@ -1431,7 +1431,7 @@ namespace pyoomph
 	
 	void BulkElementBase::update_in_solid_position_fd(const unsigned &) // For FD with element_sizes, we have to update the element size buffer
 	{
-	 const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+	 const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 	 if (functable->moving_nodes && (functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian_cartesian || functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian))
 	 {
 //	  std::cout << "UPDATE CALL" << std::endl;
@@ -1448,7 +1448,7 @@ namespace pyoomph
 	// Jacobian.
 	void BulkElementBase::fill_in_contribution_to_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (!functable->fd_jacobian)
 		{
 			fill_in_generic_residual_contribution_jit(residuals, jacobian, oomph::GeneralisedElement::Dummy_matrix, 1);
@@ -1529,14 +1529,14 @@ namespace pyoomph
 	// JIT-generated assembly with flag=2 (residuals + Jacobian + mass matrix).
 	void BulkElementBase::fill_in_contribution_to_jacobian_and_mass_matrix(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &mass_matrix)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (functable->fd_jacobian)
 		{
 			throw_runtime_error("FD Mass matrix not implemented");
 			//WARNING: This takes the analytic mass matrix
-			codeinst->get_func_table()->fd_jacobian=false;
+			jitcode->get_func_table()->fd_jacobian=false;
 			fill_in_generic_residual_contribution_jit(residuals, jacobian, mass_matrix, 2);
-			codeinst->get_func_table()->fd_jacobian=true;
+			jitcode->get_func_table()->fd_jacobian=true;
 			residuals.initialise(0.0);
 			jacobian.initialise(0.0);
 			fill_in_generic_residual_contribution_jit(residuals, jacobian, mass_matrix, 1);

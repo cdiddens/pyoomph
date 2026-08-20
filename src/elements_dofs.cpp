@@ -83,7 +83,7 @@ namespace pyoomph
 	// constrained (tied to its masters) rather than pinned.
 	void BulkElementBase::pin_dummy_values()
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 
 		if (!functable->moving_nodes)
@@ -155,7 +155,7 @@ namespace pyoomph
 			}
 			if (!any) return;
 		}
-		auto * functable = codeinst->get_func_table();
+		auto * functable = jitcode->get_func_table();
 		const std::vector<int> & elem_to_C1_map = this->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1];
 		bool has_C1_fields=functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0;
 		// Lookup from a non-vertex node's local index to its element C1-corner local indices (the same
@@ -289,7 +289,7 @@ namespace pyoomph
 	// the recorded info.
 	void BulkElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 
 		// TODO: Check if the entire field is pinned
@@ -368,7 +368,7 @@ namespace pyoomph
 	// is attributed to the field of the constrained node, which is what its master dofs contribute to.
 	void BulkElementBase::fill_local_dof_contribution_indices(std::vector<int> &dest)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		// Positions (nodal coordinates), non-hanging then hanging
 		const unsigned npos = std::min(functable->nodal_dim, functable->info_Pos.numfields);
@@ -533,7 +533,7 @@ namespace pyoomph
 	// names line up with the residual/Jacobian ordering.
 	std::vector<std::string> BulkElementBase::get_dof_names(bool)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		std::vector<std::string> res(this->ndof(), "<unknown>");
 
 		// First nonhanging pos

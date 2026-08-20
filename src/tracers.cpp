@@ -314,7 +314,7 @@ namespace pyoomph
     auto *be = dynamic_cast<BulkElementBase *>(mesh->element_pt(0));
     if (!be)
       return;
-    auto *ft = be->get_code_instance()->get_func_table();
+    auto *ft = be->get_jit_code()->get_func_table();
     for (unsigned ind = 0; ind < ft->numtracer_advections; ind++)
     {
       const std::string nm(ft->tracer_advection_names[ind]);

@@ -580,37 +580,38 @@ void PyReg_Problem(nb::module_ &m)
 */
 
 
-	nb::class_<pyoomph::DynamicBulkElementInstance>(
-		m, "DynamicBulkElementInstance",
-		"A JIT-compiled and instantiated finite element code, attached to a particular mesh. Created via "
+	nb::class_<pyoomph::DynamicJITCode>(
+		m, "DynamicJITCode",
+		"One JIT-compiled finite element code: a shared library generated from a symbolic equation definition, "
+		"loaded and bound to the bulk mesh it was compiled for. Created via "
 		"Problem.generate_and_compile_bulk_element_code(); provides the low-level bookkeeping (field indices, "
 		"external data links, ...) required by the Python-level Equations/Mesh classes.")
-		.def("_exchange_mesh", [](pyoomph::DynamicBulkElementInstance *self, MeshHandleBase *mesh_h)
+		.def("_exchange_mesh", [](pyoomph::DynamicJITCode *self, MeshHandleBase *mesh_h)
 			 { self->set_bulk_mesh(mesh_h->mesh()); }, nb::arg("mesh"),
-			 "Change the bulk mesh this element code instance is associated with.")
-		.def("link_external_data", &pyoomph::DynamicBulkElementInstance::link_external_data,
+			 "Change the bulk mesh this element code is bound to (used when remeshing replaces the mesh underneath it).")
+		.def("link_external_data", &pyoomph::DynamicJITCode::link_external_data,
 			 nb::arg("name"), nb::arg("data"), nb::arg("index"), nb::arg("full_source_name"),
 			 "Link an external (non-local) Data value, identified by ``name`` in the generated code, to the given "
 			 "oomph-lib ``data`` object and value ``index``; ``full_source_name`` is used for diagnostics.")
-		.def("get_nodal_field_index", &pyoomph::DynamicBulkElementInstance::get_nodal_field_index, nb::arg("name"),
+		.def("get_nodal_field_index", &pyoomph::DynamicJITCode::get_nodal_field_index, nb::arg("name"),
 			 "Return the local index of the nodal field ``name`` in this element code, or a negative value if it is not present.")
-		.def("get_discontinuous_field_index", &pyoomph::DynamicBulkElementInstance::get_discontinuous_field_index, nb::arg("name"),
+		.def("get_discontinuous_field_index", &pyoomph::DynamicJITCode::get_discontinuous_field_index, nb::arg("name"),
 			 "Return the local index of the discontinuous (elemental, DG-type) field ``name`` in this element code, or a negative value if it is not present.")
-		.def("has_moving_nodes", &pyoomph::DynamicBulkElementInstance::has_moving_nodes,
+		.def("has_moving_nodes", &pyoomph::DynamicJITCode::has_moving_nodes,
 			 "Whether this element code moves its nodes, i.e. uses an ALE (Arbitrary Lagrangian-Eulerian) formulation.")
-		.def("get_max_dt_order", &pyoomph::DynamicBulkElementInstance::get_max_dt_order,
+		.def("get_max_dt_order", &pyoomph::DynamicJITCode::get_max_dt_order,
 			 "Return the highest time derivative order (0: steady, 1: first order in time, ...) occurring in this element code.")
-		.def("can_be_time_adaptive", &pyoomph::DynamicBulkElementInstance::can_be_time_adaptive,
+		.def("can_be_time_adaptive", &pyoomph::DynamicJITCode::can_be_time_adaptive,
 			 "Whether this element code provides the temporal error estimators required for adaptive time stepping.")
-		.def("has_parameter_contribution", &pyoomph::DynamicBulkElementInstance::has_parameter_contribution, nb::arg("parameter_name"),
+		.def("has_parameter_contribution", &pyoomph::DynamicJITCode::has_parameter_contribution, nb::arg("parameter_name"),
 			 "Whether the residuals of this element code depend on the global parameter ``parameter_name``.")
-		.def("setup_interface_dof_indices", &pyoomph::DynamicBulkElementInstance::setup_interface_dof_indices,
+		.def("setup_interface_dof_indices", &pyoomph::DynamicJITCode::setup_interface_dof_indices,
 			 "Populate and return the mapping of interface degree-of-freedom names to indices, required for continuous "
 			 "fields defined only on parts of the mesh boundary (e.g. C2TB-C1 interface fields).")
-		.def("get_nodal_field_indices", &pyoomph::DynamicBulkElementInstance::get_nodal_field_indices,
+		.def("get_nodal_field_indices", &pyoomph::DynamicJITCode::get_nodal_field_indices,
 			 "Return a mapping from nodal field name to its local index in this element code.")
 		.def(
-			"set_analytical_jacobian", [](pyoomph::DynamicBulkElementInstance *self, bool ana, bool anapos)
+			"set_analytical_jacobian", [](pyoomph::DynamicJITCode *self, bool ana, bool anapos)
 			{
 				self->get_func_table()->fd_jacobian = !ana;
 				self->get_func_table()->fd_position_jacobian = !anapos;
@@ -619,7 +620,7 @@ void PyReg_Problem(nb::module_ &m)
 			"Select whether the Jacobian is assembled analytically (via the generated derivative code) or by finite "
 			"differences, separately for the ordinary degrees of freedom (``analytic``) and for the nodal position "
 			"degrees of freedom in moving-mesh problems (``analytic_positions``).")
-		.def("get_elemental_field_indices", &pyoomph::DynamicBulkElementInstance::get_elemental_field_indices,
+		.def("get_elemental_field_indices", &pyoomph::DynamicJITCode::get_elemental_field_indices,
 			 "Return a mapping from elemental (discontinuous) field name to its local index in this element code.");
 
 	nb::class_<pyoomph::Problem, pyoomph::PyProblemTrampoline>(
@@ -1578,13 +1579,11 @@ void PyReg_Problem(nb::module_ &m)
 #endif
 
 				std::string lib = compiler->get_shared_library(code_trunk);
-				pyoomph::DynamicBulkElementCode *code = problem->load_dynamic_bulk_element_code(lib, my_element);
-				pyoomph::DynamicBulkElementInstance *code_instance = code->factory_instance(bulkmesh);
-				return code_instance;
+				return problem->load_jit_code(lib, my_element, bulkmesh);
 			},
 			nb::rv_policy::reference,
 			nb::arg("my_element"), nb::arg("code_trunk"), nb::arg("suppress_writing"), nb::arg("suppress_compilation"), nb::arg("bulkmesh"), nb::arg("quiet"), nb::arg("extra_flags"),
 			"Generate the C source code for the symbolic finite element definition ``my_element`` (writing it to ``code_trunk``.c unless ``suppress_writing`` is True), "
 			"compile it with the problem's C compiler (unless ``suppress_compilation`` is True, passing ``extra_flags`` to the compiler) and load the resulting shared "
-			"library, instantiating it on ``bulkmesh``. Returns the resulting DynamicBulkElementInstance. ``quiet`` suppresses progress output.");
+			"library, binding it to ``bulkmesh``. Returns the resulting DynamicJITCode. ``quiet`` suppresses progress output.");
 }

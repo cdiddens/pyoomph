@@ -449,7 +449,7 @@ def _teardown_spatial_mesh(m:"AnySpatialMesh") -> None:
     # as-yet-undiscovered reference cycle remains). Callers must ensure this mesh is no longer
     # needed for anything (e.g. field interpolation into a replacement mesh) before calling
     # this, and, if unloading equation code DLLs afterwards, must do so only after this call:
-    # an element destructed afterwards would dereference its DynamicBulkElementCode's function
+    # an element destructed afterwards would dereference its DynamicJITCode's function
     # table in an already-unloaded shared library and crash.
     m._destroy_now()
 
@@ -1317,7 +1317,7 @@ class Problem(_pyoomph.Problem):
         self._open_log_file("",False)
         # Run gc.collect() BEFORE unloading the compiled-equation-code DLLs, not after: any
         # mesh/element C++ object destructed after the DLLs are unloaded would dereference a
-        # dangling codeinst/function-table pointer into already-dlclose()'d memory and crash.
+        # dangling jitcode/function-table pointer into already-dlclose()'d memory and crash.
         # This ordering only starts to matter once the cycle-breaking above actually lets
         # gc.collect() free such objects here instead of leaving that to interpreter exit.
         gc.collect()
@@ -2802,7 +2802,7 @@ class Problem(_pyoomph.Problem):
                 # get_problem() resolves it live via the C++ side (see mesh.py). ODEStorageMesh
                 # instances can be reused across a redefine_problem() cycle with a new owning
                 # Problem, so still need re-stamping here - preserving the existing compiled
-                # code instance (if any), since _set_problem() would otherwise reset it to None.
+                # code (if any), since _set_problem() would otherwise reset it to None.
                 if isinstance(mesh,ODEStorageMesh):
                     mesh._set_problem(self,mesh.get_code_gen()._code)
                 assert mesh._eqtree is not None
@@ -4982,7 +4982,7 @@ class Problem(_pyoomph.Problem):
             
 
 
-    def compile_bulk_element_code(self,elementtype:FiniteElementCodeGenerator,bulkmesh:AnyMesh,subname:str) -> _pyoomph.DynamicBulkElementInstance:
+    def compile_bulk_element_code(self,elementtype:FiniteElementCodeGenerator,bulkmesh:AnyMesh,subname:str) -> _pyoomph.DynamicJITCode:
         if self._outdir is not None:
             destpath=os.path.join(self._outdir,self._ccode_dir)
             Path(destpath).mkdir(parents=True, exist_ok=True)

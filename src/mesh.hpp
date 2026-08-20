@@ -37,7 +37,7 @@ namespace pyoomph
 	class MeshTemplateElementCollection;
 	class Problem;
 	class BulkElementBase;
-	class DynamicBulkElementInstance;
+	class DynamicJITCode;
 
 	class Mesh;
 
@@ -67,7 +67,7 @@ namespace pyoomph
 	// Base class for all pyoomph meshes. Wraps an oomph-lib (Refineable)Mesh and adds
 	// everything pyoomph needs on top: named boundaries, per-field initial/Dirichlet
 	// conditions, output scaling, interface-dof bookkeeping, JIT-compiled element code
-	// binding (codeinst) and helpers for interpolation/projection between meshes.
+	// binding (jitcode) and helpers for interpolation/projection between meshes.
 	class Mesh : public virtual oomph::RefineableMeshBase, public virtual oomph::Mesh
 	{
 	protected:
@@ -81,7 +81,7 @@ namespace pyoomph
 		std::vector<bool> dirichlet_active; // Whether each Dirichlet condition (by index) is currently active
 		std::map<pyoomph::Node *, pyoomph::Node *> copied_masters; // Maps a copied node to its master node (see resolve_copy_master)
 		unsigned long topology_generation = 0; // Bumped whenever cached element pointers/coordinates go stale, see bump_topology_generation()
-		DynamicBulkElementInstance *codeinst = NULL; // JIT-compiled element code instance backing the elements of this mesh
+		DynamicJITCode *jitcode = NULL; // JIT-compiled element code backing the elements of this mesh
 
 	public:
 		bool interpolated_lagrangian_coordinates_at_remeshing=false;
@@ -228,8 +228,8 @@ namespace pyoomph
 		void pool_boundary_interpolation_across_ranks(const std::vector<oomph::Node *> &newnodes,
 													  const std::vector<double> &local_dist,
 													  Mesh *oldimesh, const std::string &where);
-		// Bind this mesh to its owning Problem and the JIT-compiled element code instance used to create its elements.
-		virtual void _set_problem(Problem *p, DynamicBulkElementInstance *code);
+		// Bind this mesh to its owning Problem and the JIT-compiled element code used to create its elements.
+		virtual void _set_problem(Problem *p, DynamicJITCode *code);
 		// Evaluate all fields at a list of local coordinates ("zetas") per element; masked_lines flags entries to
 		// skip. with_scales selects whether output_scales are applied (dimensional vs. nondimensional output).
 		std::vector<std::vector<double>> get_values_at_zetas(const std::vector<std::vector<double>> &zetas, std::vector<bool> &masked_lines, bool with_scales);
@@ -247,12 +247,12 @@ namespace pyoomph
 		// periodic/interface meshes, their opposite-side counterparts. Dimension-specific; base class throws.
 		virtual void fill_internal_facet_buffers(std::vector<BulkElementBase *> &, std::vector<int> &, std::vector<BulkElementBase *> &, std::vector<int> &, std::vector<int> &) { throw_runtime_error("Please specify this function for each dimension"); }
 		// Build an InterfaceMesh of elements attached to the boundary/interface named intername, using the
-		// JIT-compiled interface element code jitcode; imesh is the interface mesh to populate.
-		virtual void generate_interface_elements(std::string intername, Mesh *imesh, DynamicBulkElementInstance *jitcode);
+		// JIT-compiled interface element code interface_jitcode; imesh is the interface mesh to populate.
+		virtual void generate_interface_elements(std::string intername, Mesh *imesh, DynamicJITCode *interface_jitcode);
 		virtual void ensure_external_data();
 		virtual double get_temporal_error_norm_contribution();
 		// Store the output scale factor s (a symbolic expression, evaluated via _code) used to nondimensionalize field fname on output.
-		void set_output_scale(std::string fname, GiNaC::ex s, DynamicBulkElementInstance *_code);
+		void set_output_scale(std::string fname, GiNaC::ex s, DynamicJITCode *_code);
 		double get_output_scale(std::string fname);
 		int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nelem, bool discontinuous); // Gets the number of required elemental indices
 		// Same, but also fills source_element_indices (if non-NULL) with the mesh element index behind each output row
@@ -433,7 +433,10 @@ namespace pyoomph
 	class InterfaceMesh : public Mesh
 	{
 	protected:
-		DynamicBulkElementInstance *code; // JIT-compiled code for the interface elements
+		// JIT code defining the interface elements. Deliberately kept separate from the inherited
+		// Mesh::jitcode: set_rebuild_information() fills this one, _set_problem() the other, and
+		// the two are set at different points of interface construction.
+		DynamicJITCode *code;
 		std::string interfacename;
 		Mesh *bulkmesh; // The bulk mesh this interface is attached to
 		// Build boundary information (which interface elements/nodes lie on which sub-boundary) for a 1d interface
@@ -557,7 +560,7 @@ namespace pyoomph
 		virtual void nullify_selected_bulk_dofs();
 		// Store the information (bulk mesh, interface name, JIT code) needed to rebuild this interface mesh later,
 		// e.g. after adaptation via rebuild_after_adapt.
-		virtual void set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicBulkElementInstance *jitcode);
+		virtual void set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicJITCode *interface_jitcode);
 		virtual Mesh *get_bulk_mesh() { return bulkmesh; }
 		const std::string &get_interface_name() const { return interfacename; }
 		// Drop the halo/haloed element lists. They point at elements this mesh is about to delete, and

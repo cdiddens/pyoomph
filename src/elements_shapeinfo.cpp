@@ -552,7 +552,7 @@ namespace pyoomph
 	// normal residuals but require a pre-integrated scalar (and its coordinate sensitivities).
 	void BulkElementBase::fill_shape_info_element_sizes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *shape_info,unsigned flag, unsigned history_index) const
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		bool require_hessian = flag > 2;
 		bool require_dxdshape = (flag && functable->moving_nodes && (!functable->fd_position_jacobian)); //&& (required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_DL)			
 		bool require_dx_elemsize=require_dxdshape && (required.elemsize_Eulerian ||  required.elemsize_Eulerian_cartesian);
@@ -1025,7 +1025,7 @@ namespace pyoomph
 	//    alternative that was ANDed with nnode_of_space != 0, i.e. dead. It is simply gone.
 	BulkElementBase::RequiredShapeFamilies BulkElementBase::required_shape_families(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, unsigned ispace) const
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		const JITFuncSpec_RequiredShapes_For_Space_t &rs = required.continuous_spaces[ispace];
 		// The Pos.* flags name whichever space carries the geometry; set_remaining_shapes_appropriately
 		// resolves the shape_Pos aliases onto exactly that space, so there they widen the request.
@@ -1283,7 +1283,7 @@ namespace pyoomph
 		double gab_gai[el_dim][n_dim];		// stores [g^{ab} g_a]_i . First index is b second i
 		double gab_gai_Lagr[el_dim][n_dim]; // stores [g^{ab} g_a]_i . First index is b second i
 
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		bool require_dxdshape = (flag && functable->moving_nodes && (!functable->fd_position_jacobian)); //&& (required.dx_psi_C2 || required.dx_psi_C1 || required.dx_psi_DL)
 		// XXX: The last condition may not be used, since even dx depends on the coordinates
@@ -2560,8 +2560,8 @@ namespace pyoomph
 				oss << "Inverted element: the signed determinant of the Eulerian mapping dx/ds is "
 					<< detJ << " (must be > 0) at integration point " << ipt << " of a "
 					<< this->dim() << "-dimensional element";
-				if (codeinst && codeinst->get_func_table() && codeinst->get_func_table()->domain_name)
-					oss << " on domain '" << codeinst->get_func_table()->domain_name << "'";
+				if (jitcode && jitcode->get_func_table() && jitcode->get_func_table()->domain_name)
+					oss << " on domain '" << jitcode->get_func_table()->domain_name << "'";
 				oss << "." << std::endl
 					<< "This usually means the mesh has been distorted too far, e.g. by too large a "
 					<< "time step or continuation step." << std::endl
@@ -2583,8 +2583,8 @@ namespace pyoomph
 			{
 				std::ostringstream oss;
 				oss << "J=" << J << " at integration point " << ipt << " of domain '"
-					<< ((codeinst && codeinst->get_func_table() && codeinst->get_func_table()->domain_name)
-							? codeinst->get_func_table()->domain_name : "?")
+					<< ((jitcode && jitcode->get_func_table() && jitcode->get_func_table()->domain_name)
+							? jitcode->get_func_table()->domain_name : "?")
 					<< "', node positions:";
 				for (unsigned l = 0; l < this->nnode(); l++)
 				{
@@ -2618,7 +2618,7 @@ namespace pyoomph
 			// they alias is deliberate: it is exactly the assumption that the position space IS the
 			// geometry space that the generated code makes, and that ConstrainPositionsToC1Space could
 			// in principle break.
-			const JITFuncSpec_Table_FiniteElement_t *ft = codeinst->get_func_table();
+			const JITFuncSpec_Table_FiniteElement_t *ft = jitcode->get_func_table();
 			if (flag && ft->moving_nodes && !ft->fd_position_jacobian && shape_info->dx_shape_Pos[0])
 			{
 				const unsigned ND = this->nodal_dimension();
@@ -2666,7 +2666,7 @@ namespace pyoomph
 	// called before fill_shape_buffer_for_integration_point() is used for the individual points.
 	void BulkElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (__poison_unrequired)
 			this->poison_unrequired_shapes(required_shapes, shape_info, true);
 		shape_info->n_int_pt = integral_pt()->nweight();
@@ -2748,7 +2748,7 @@ namespace pyoomph
 	// EvalIntegralExpression, which reads the prepared shape_info buffer.
 	double BulkElementBase::eval_integral_expression(unsigned index)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numintegral_expressions)
 			throw_runtime_error("Cannot evaluate integral expression at too large index " + std::to_string(index));		
 		this->interpolate_hang_values();
@@ -2768,16 +2768,16 @@ namespace pyoomph
 	// Evaluates a user-defined "local expression" at an arbitrary local coordinate s.
 	double BulkElementBase::eval_local_expression_at_s(unsigned index, const oomph::Vector<double> &s)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numlocal_expressions)
 			throw_runtime_error("Cannot evaluate local expression at too large index " + std::to_string(index));
 		
 		this->interpolate_hang_values();
 
 		double JLagr;
-		this->fill_shape_info_at_s(s, 0, codeinst->get_func_table()->shapes_required_LocalExprs, JLagr, 0);
-		this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_LocalExprs, 0);
-//		set_remaining_shapes_appropriately(shape_info, codeinst->get_func_table()->shapes_required_LocalExprs);
+		this->fill_shape_info_at_s(s, 0, jitcode->get_func_table()->shapes_required_LocalExprs, JLagr, 0);
+		this->prepare_shape_buffer_for_integration(jitcode->get_func_table()->shapes_required_LocalExprs, 0);
+//		set_remaining_shapes_appropriately(shape_info, jitcode->get_func_table()->shapes_required_LocalExprs);
       _currently_assembled_element = this;
 	    //std::cout << "CALLING EVAL LOCAL EXPRESSION  " << this << " ELEMINFO " << &eleminfo << std::endl;
 		return functable->EvalLocalExpression(&eleminfo, this->shape_info, index);
@@ -2795,15 +2795,15 @@ namespace pyoomph
 	// Evaluates a user-defined "extremum expression" at an arbitrary local coordinate s.
 	double BulkElementBase::eval_extremum_expression_at_s(unsigned index, const oomph::Vector<double> &s)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numextremum_expressions)
 			throw_runtime_error("Cannot evaluate extremum expression at too large index " + std::to_string(index));
 		
 		this->interpolate_hang_values();
 
 		double JLagr;
-		this->fill_shape_info_at_s(s, 0, codeinst->get_func_table()->shapes_required_ExtremumExprs, JLagr, 0);
-		this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_ExtremumExprs, 0);
+		this->fill_shape_info_at_s(s, 0, jitcode->get_func_table()->shapes_required_ExtremumExprs, JLagr, 0);
+		this->prepare_shape_buffer_for_integration(jitcode->get_func_table()->shapes_required_ExtremumExprs, 0);
       _currently_assembled_element = this;	    
 		return functable->EvalExtremumExpression(&eleminfo, this->shape_info, index);
 	}	
@@ -2866,7 +2866,7 @@ namespace pyoomph
 	void BulkElementBase::tracer_prepare_element()
 	{
 		this->interpolate_hang_values();
-		this->prepare_shape_buffer_for_integration(codeinst->get_func_table()->shapes_required_TracerAdvection, 0);
+		this->prepare_shape_buffer_for_integration(jitcode->get_func_table()->shapes_required_TracerAdvection, 0);
 	}
 
 	// Evaluates a user-defined tracer-advection velocity field, in physical/Eulerian components, at
@@ -2882,7 +2882,7 @@ namespace pyoomph
 	// drop them silently.
 	void BulkElementBase::eval_tracer_advection_at_s(unsigned index, const oomph::Vector<double> &s, oomph::Vector<double> &xvelo)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numtracer_advections)
 			throw_runtime_error("Cannot evaluate tracer advection at too large index " + std::to_string(index));
 		const JITFuncSpec_RequiredShapes_FiniteElement_t &required = functable->shapes_required_TracerAdvection;

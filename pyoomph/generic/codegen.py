@@ -141,7 +141,7 @@ def sorted_field_kwargs(kwargs:dict[str,_KwargValue])->dict[str,_KwargValue]:
 class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
     def __init__(self):
         super(FiniteElementCodeGenerator, self).__init__()
-        self._code:_pyoomph.DynamicBulkElementInstance | None=None
+        self._code:_pyoomph.DynamicJITCode | None=None
         self._name:str | None=None
         self._mesh:"AnyMesh | None"=None
         self._dependent_integral_funcs:dict[str,Callable[...,ExpressionOrNum]]={}
@@ -160,7 +160,7 @@ class FiniteElementCodeGenerator(_pyoomph.FiniteElementCode):
     def get_default_timestepping_scheme(self,dt_order:int):
         return self.get_equations().get_default_timestepping_scheme(dt_order,cg=self)
 
-    def get_code(self)->_pyoomph.DynamicBulkElementInstance:
+    def get_code(self)->_pyoomph.DynamicJITCode:
         assert self._code is not None
         return self._code
 
@@ -679,7 +679,7 @@ class BaseEquations(_pyoomph.Equations):
         self._additional_testfuncs_also_on_interface:dict[str,ExpressionOrNum] = {}
         self._initial_conditions:dict[str,dict[str,tuple[ExpressionOrNum,str,"BaseEquations"]]] = {}
         self._Dirichlet_conditions:dict[str,tuple[ExpressionOrNum,"BaseEquations"]] = {}
-        self._code:_pyoomph.DynamicBulkElementInstance | None = None
+        self._code:_pyoomph.DynamicJITCode | None = None
         self._scaling:dict[str,"ExpressionOrNum | str"] = {}
         self._test_scaling:dict[str,"ExpressionOrNum | str"]={}
         self._scales_to_check_for_fields:set[str] = set()

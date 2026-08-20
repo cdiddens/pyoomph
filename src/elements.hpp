@@ -338,7 +338,7 @@ namespace pyoomph
 
   class MeshTemplate;
   class MeshTemplateElement;
-  class DynamicBulkElementInstance;
+  class DynamicJITCode;
   class Problem;
   class InterfaceElementBase;
   // The central base class for all pyoomph "bulk" finite elements (as opposed to face/interface
@@ -349,7 +349,7 @@ namespace pyoomph
   // BulkElementBase does *not* itself know the governing equations: the actual residuals, Jacobian
   // and (optionally) Hessian and mass matrix are produced by C code that is generated from the
   // user's symbolic (GiNaC) weak-form expressions, compiled at runtime, and reached through the
-  // JIT function table stored in the associated DynamicBulkElementInstance (codeinst). This class
+  // JIT function table stored in the associated DynamicJITCode (jitcode). This class
   // provides the glue: it evaluates shape functions/derivatives at integration points and fills a
   // JITShapeInfo_t buffer, maps nodal/internal/external data to local equation numbers (including
   // hanging-node constraints from mesh refinement and "dummy" values used for mixed-order
@@ -360,7 +360,7 @@ namespace pyoomph
   class BulkElementBase : public virtual FiniteElementBase
   {
   protected:
-    DynamicBulkElementInstance *codeinst;
+    DynamicJITCode *jitcode;
 
     JITElementInfo_t eleminfo;
     JITShapeInfo_t *shape_info;
@@ -674,7 +674,7 @@ namespace pyoomph
     double initial_quality_factor = 0.0;
     // Factory for the FaceElement (interface element) attached to a given face/edge of this bulk
     // element; concrete element types override this to return the matching Interface*Element* type.
-    virtual oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *, int ) {throw_runtime_error(std::string("Specify the face element constructor for the element type ")+typeid(*this).name()); return NULL;}
+    virtual oomph::FaceElement * construct_face_element(DynamicJITCode *, int ) {throw_runtime_error(std::string("Specify the face element constructor for the element type ")+typeid(*this).name()); return NULL;}
     virtual const std::vector<int> & get_possible_face_indices() const=0;
     virtual  std::vector<pyoomph::Node*> get_vertex_nodes_of_face(const int & face_index) const=0;
 
@@ -929,19 +929,19 @@ namespace pyoomph
     // position, which is what lets a test sample the curved geometry over the whole reference domain
     // -- interior included -- rather than only where nodes happen to sit.
     virtual std::vector<double> get_macro_element_position_at_s(oomph::Vector<double> s);
-    DynamicBulkElementInstance *get_code_instance() { return codeinst; }
-    const DynamicBulkElementInstance *get_code_instance() const { return codeinst; }
-    // Bind this element to a physics (codeinst). Needed when a factory creates a son of a DIFFERENT element
+    DynamicJITCode *get_jit_code() { return jitcode; }
+    const DynamicJITCode *get_jit_code() const { return jitcode; }
+    // Bind this element to a physics (jitcode). Needed when a factory creates a son of a DIFFERENT element
     // type than the parent (e.g. a pyramid's tet son), where the parent cannot touch the son's protected
-    // codeinst directly. Same-type factories set codeinst inline.
-    void set_code_instance(DynamicBulkElementInstance *c) { codeinst = c; }
+    // jitcode directly. Same-type factories set jitcode inline.
+    void set_jit_code(DynamicJITCode *c) { jitcode = c; }
 
-    // Global "current code instance" used to pass the DynamicBulkElementInstance through
+    // Global "current code" used to pass the DynamicJITCode through
     // oomph-lib's mesh/element construction machinery (e.g. Mesh::build, refinement son-element
     // creation), which offers no direct way to pass extra constructor arguments. Set immediately
     // before creating a new element instance of a given code, and read (then typically cleared) by
     // that element's constructor/create_son_instance.
-    static DynamicBulkElementInstance *__CurrentCodeInstance; // Really annoying, but no other way to pass it through the entire mesh stur
+    static DynamicJITCode *__CurrentJITCode; // Really annoying, but no other way to pass it through the entire mesh stur
 
     static unsigned zeta_time_history;    // Index in time for zeta. Only Eulerian
     static unsigned zeta_coordinate_type; // 0: Lagrangian, 1: Eulerian -- On interfaces usually boundary coordinate
@@ -1625,7 +1625,7 @@ namespace pyoomph
         throw_runtime_error("Can only set an Interface Element as the opposite side of and interface element");
       }
       opposite_side = (_opposite_side ? _opposite_side->as_interface_element() : NULL);
-      const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
+      const JITFuncSpec_Table_FiniteElement_t *functable = this->jitcode->get_func_table();
       // Attachment reads the assembled requirements only - see attachment_required_shapes.
       const JITFuncSpec_RequiredShapes_FiniteElement_t &attach_req = *attachment_required_shapes(functable);
 
@@ -1745,19 +1745,19 @@ namespace pyoomph
     }
 
     // Builds this face element from face "face_index" of bulk_el_pt (which must be built from the
-    // JIT code instance jitcode): sets up the shared geometry via oomph-lib's build_face_element,
+    // JIT code interface_jitcode): sets up the shared geometry via oomph-lib's build_face_element,
     // wires up the interface's own dofs and required external data (including the bulk element's
     // data, and - if the interface's dominant space is higher order than the bulk's - rejects the
     // combination since bulk fields could not represent the interface's higher-order dofs).
-    InterfaceElement(DynamicBulkElementInstance *jitcode, FiniteElement *const &bulk_el_pt, const int &face_index)
+    InterfaceElement(DynamicJITCode *interface_jitcode, FiniteElement *const &bulk_el_pt, const int &face_index)
     {
       bulk_el_pt->build_face_element(face_index, this);
-      this->codeinst = jitcode;
+      this->jitcode = interface_jitcode;
       this->eleminfo.bulk_eleminfo = dynamic_cast<BulkElementBase *>(bulk_el_pt)->get_eleminfo();
       this->add_interface_dofs();
-      const JITFuncSpec_Table_FiniteElement_t *functable = this->get_code_instance()->get_func_table();
+      const JITFuncSpec_Table_FiniteElement_t *functable = this->get_jit_code()->get_func_table();
 
-      const JITFuncSpec_Table_FiniteElement_t *bfunctable = dynamic_cast<BulkElementBase *>(bulk_el_pt)->get_code_instance()->get_func_table();
+      const JITFuncSpec_Table_FiniteElement_t *bfunctable = dynamic_cast<BulkElementBase *>(bulk_el_pt)->get_jit_code()->get_func_table();
       
       if (std::string(functable->dominant_space) == "C2")
       {      
@@ -1778,7 +1778,7 @@ namespace pyoomph
       this->add_DG_external_data();
       //      std::cout << "DONE ADDING INTERFACE ELEM DG DATA " << this->nexternal_data() << std::endl;
 
-      for (auto &e : this->codeinst->get_linked_external_data().get_required_external_data())
+      for (auto &e : this->jitcode->get_linked_external_data().get_required_external_data())
       {
         //        std:: cout << "ADDING ED0 " << std::endl;
         this->add_required_ext_data(e, false);

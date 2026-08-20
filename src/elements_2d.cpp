@@ -107,7 +107,7 @@ namespace pyoomph
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 4;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 4;
 		eleminfo.nnode_DL = 3;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		allocate_discontinous_fields();
 	}
@@ -392,7 +392,7 @@ namespace pyoomph
 		eleminfo.nnode_of_space[SPACE_INDEX_C2] = 9;		
 		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = 9;
 		eleminfo.nnode_DL = 3;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		allocate_discontinous_fields();
 	}
@@ -541,7 +541,7 @@ namespace pyoomph
 	void BulkElementQuad2dC2::further_setup_hanging_nodes()
 	{
 		BulkElementBase::further_setup_hanging_nodes();
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 		const int c2_hang = ft->continuous_spaces[SPACE_INDEX_C2].hangindex;
 		const bool has_c1 = ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk;
 		if (has_c1 || c2_hang >= 0)
@@ -568,7 +568,7 @@ namespace pyoomph
 	// C2/C2TB fields, node n itself is the interpolating node.
 	oomph::Node *BulkElementQuad2dC2::interpolating_node_pt(const unsigned &n, const int &value_id)
 	{
-		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
+		if (value_id >= static_cast<int>(jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
 		{
 			return this->node_pt(this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1][n]);
 		}
@@ -583,7 +583,7 @@ namespace pyoomph
 	// element edges); for the C2 space, delegates to the standard quadratic 1-d fraction.
 	double BulkElementQuad2dC2::local_one_d_fraction_of_interpolating_node(const unsigned &n1d, const unsigned &i, const int &value_id)
 	{
-		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
+		if (value_id >= static_cast<int>(jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
 		{
 			// The C1 nodes are just located on the boundaries at 0 or 1
 			return double(n1d);
@@ -600,7 +600,7 @@ namespace pyoomph
 	// get_node_at_local_coordinate().
 	oomph::Node *BulkElementQuad2dC2::get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id)
 	{
-		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
+		if (value_id >= static_cast<int>(jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
 		{
 			unsigned total_index = 0;
 			unsigned NNODE_1D = 2;
@@ -641,7 +641,7 @@ namespace pyoomph
 	/// nodes is the same as the number of 1d geometric nodes.
 	unsigned BulkElementQuad2dC2::ninterpolating_node_1d(const int &value_id)
 	{
-		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
+		if (value_id >= static_cast<int>(jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
 		{
 			return 2;
 		}
@@ -655,7 +655,7 @@ namespace pyoomph
 	/// velocity nodes is the same as the number of geometric nodes.
 	unsigned BulkElementQuad2dC2::ninterpolating_node(const int &value_id)
 	{
-		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
+		if (value_id >= static_cast<int>(jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
 		{
 			return 4;
 		}
@@ -722,7 +722,7 @@ namespace pyoomph
 	// completing the "two co-located spaces" interpolation interface used by oomph-lib.
 	void BulkElementQuad2dC2::interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const
 	{
-		if (value_id >= static_cast<int>(codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + codeinst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
+		if (value_id >= static_cast<int>(jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + jitcode->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk))
 		{
 			return this->shape_at_s_C1(s, psi);
 		}
@@ -962,7 +962,7 @@ namespace pyoomph
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = (has_bubble ? 4 : 3);
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 3;
 		eleminfo.nnode_DL = 3;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		allocate_discontinous_fields();
 	}
@@ -1076,7 +1076,7 @@ namespace pyoomph
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = (with_bubble ? 4 : 3);		
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 3;
 		eleminfo.nnode_DL = 3;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		allocate_discontinous_fields();
 	}
@@ -1085,7 +1085,7 @@ namespace pyoomph
     // BulkElementTri2dC2) matching this element, for dynamic_split()/mesh refinement.
     BulkElementBase * BulkElementTri2dC2::create_son_instance() const
 	    {
-      BulkElementBase::__CurrentCodeInstance = codeinst;
+      BulkElementBase::__CurrentJITCode = jitcode;
       // A C2TB (bubble-enriched) father must spawn a genuine BulkElementTri2dC2TB son: the bubble
       // needs a real 7th (centroid) node slot and the 7-node nodal-space map. A plain
       // BulkElementTri2dC2(true) only bumps nnode_of_space[C2TB] to 7 while keeping 6 oomph node
@@ -1093,8 +1093,8 @@ namespace pyoomph
       BulkElementTri2dC2 *res;
       if (dynamic_cast<const BulkElementTri2dC2TB*>(this) != nullptr) res = new BulkElementTri2dC2TB();
       else res = new BulkElementTri2dC2(false);
-      res->codeinst = codeinst;
-      BulkElementBase::__CurrentCodeInstance = NULL;
+      res->jitcode = jitcode;
+      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
 
@@ -1130,9 +1130,9 @@ namespace pyoomph
 	// A value_id belongs to a C1/C1TB field iff it is >= the number of C2/C2TB base-bulk fields.
 	namespace
 	{
-		inline bool tri_value_is_C1(DynamicBulkElementInstance *codeinst, const int &value_id)
+		inline bool tri_value_is_C1(DynamicJITCode *jitcode, const int &value_id)
 		{
-			auto *ft = codeinst->get_func_table();
+			auto *ft = jitcode->get_func_table();
 			return value_id >= static_cast<int>(ft->continuous_spaces[SPACE_INDEX_C2].numfields_basebulk + ft->continuous_spaces[SPACE_INDEX_C2TB].numfields_basebulk);
 		}
 	}
@@ -1142,7 +1142,7 @@ namespace pyoomph
 	void BulkElementTri2dC2::further_setup_hanging_nodes()
 	{
 		BulkElementBase::further_setup_hanging_nodes();
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 		const int c2_hang = ft->continuous_spaces[SPACE_INDEX_C2].hangindex;
 		const bool has_c1 = ft->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk || ft->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk;
 		if (has_c1 || c2_hang >= 0)
@@ -1193,7 +1193,7 @@ namespace pyoomph
 
 	oomph::Node *BulkElementTri2dC2::interpolating_node_pt(const unsigned &n, const int &value_id)
 	{
-		if (tri_value_is_C1(codeinst, value_id))
+		if (tri_value_is_C1(jitcode, value_id))
 			return this->node_pt(this->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1][n]);
 		return this->node_pt(n);
 	}
@@ -1203,14 +1203,14 @@ namespace pyoomph
 	// C1 corner nodes sit at the ends (0 or 1); C2 delegates to the standard node fraction.
 	double BulkElementTri2dC2::local_one_d_fraction_of_interpolating_node(const unsigned &n1d, const unsigned &i, const int &value_id)
 	{
-		if (tri_value_is_C1(codeinst, value_id))
+		if (tri_value_is_C1(jitcode, value_id))
 			return double(n1d);
 		return this->local_one_d_fraction_of_node(n1d, i);
 	}
 
 	oomph::Node *BulkElementTri2dC2::get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id)
 	{
-		if (tri_value_is_C1(codeinst, value_id))
+		if (tri_value_is_C1(jitcode, value_id))
 		{
 			// C1 corners: node 0 at s=(1,0), node 1 at s=(0,1), node 2 at s=(0,0) (cf. shape_at_s_C1).
 			const double tol = oomph::FiniteElement::Node_location_tolerance;
@@ -1225,19 +1225,19 @@ namespace pyoomph
 
 	unsigned BulkElementTri2dC2::ninterpolating_node_1d(const int &value_id)
 	{
-		if (tri_value_is_C1(codeinst, value_id)) return 2;
+		if (tri_value_is_C1(jitcode, value_id)) return 2;
 		return this->nnode_1d();
 	}
 
 	unsigned BulkElementTri2dC2::ninterpolating_node(const int &value_id)
 	{
-		if (tri_value_is_C1(codeinst, value_id)) return 3;
+		if (tri_value_is_C1(jitcode, value_id)) return 3;
 		return this->nnode();
 	}
 
 	void BulkElementTri2dC2::interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const
 	{
-		if (tri_value_is_C1(codeinst, value_id))
+		if (tri_value_is_C1(jitcode, value_id))
 			return this->shape_at_s_C1(s, psi);
 		return this->shape(s, psi);
 	}
@@ -1381,7 +1381,7 @@ namespace pyoomph
       eleminfo.nnode_of_space[SPACE_INDEX_C1]=3;
       eleminfo.nnode_of_space[SPACE_INDEX_C1TB]=4;
       eleminfo.nnode_DL=3;
-      eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+      eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_n_node(eleminfo.nnode);
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		this->set_integration_scheme(&Default_enriched_integration_scheme);      
@@ -1517,7 +1517,7 @@ namespace pyoomph
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 4;		
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 3;
 		eleminfo.nnode_DL = 3;
-		eleminfo.nodal_dim = codeinst->get_func_table()->nodal_dim;
+		eleminfo.nodal_dim = jitcode->get_func_table()->nodal_dim;
 		this->set_n_node(eleminfo.nnode);
 		this->set_nodal_dimension(eleminfo.nodal_dim);
 		this->set_integration_scheme(&Default_enriched_integration_scheme);
@@ -1731,14 +1731,14 @@ namespace pyoomph
 	  else throw_runtime_error("Invalid face index for triangular element");	  
 	}
 
-	//oomph::FaceElement * construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) override;
+	//oomph::FaceElement * construct_face_element(DynamicJITCode *interface_jitcode, int face_index) override;
 
 	// construct_face_element() implementations: create the appropriate InterfaceElement<...> FaceElement type
 	// for a given bulk element and face index (e.g. a quad's face is a line, a tet's face is a triangle);
 	// most bulk types have a single, fixed face-element type, but pyramids/wedges mix triangular and
 	// quadrilateral faces and therefore dispatch on face_index below.
-	oomph::FaceElement * BulkElementQuad2dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementLine1dC2(jitcode, this, face_index); }
-	oomph::FaceElement * BulkElementQuad2dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceElementLine1dC1(jitcode, this, face_index); }
-    oomph::FaceElement * BulkElementTri2dC1::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceTElementLine1dC1(jitcode, this, face_index); }
-	oomph::FaceElement * BulkElementTri2dC2::construct_face_element(DynamicBulkElementInstance *jitcode, int face_index) { return new InterfaceTElementLine1dC2(jitcode, this, face_index); }
+	oomph::FaceElement * BulkElementQuad2dC2::construct_face_element(DynamicJITCode *interface_jitcode, int face_index) { return new InterfaceElementLine1dC2(interface_jitcode, this, face_index); }
+	oomph::FaceElement * BulkElementQuad2dC1::construct_face_element(DynamicJITCode *interface_jitcode, int face_index) { return new InterfaceElementLine1dC1(interface_jitcode, this, face_index); }
+    oomph::FaceElement * BulkElementTri2dC1::construct_face_element(DynamicJITCode *interface_jitcode, int face_index) { return new InterfaceTElementLine1dC1(interface_jitcode, this, face_index); }
+	oomph::FaceElement * BulkElementTri2dC2::construct_face_element(DynamicJITCode *interface_jitcode, int face_index) { return new InterfaceTElementLine1dC2(interface_jitcode, this, face_index); }
 }

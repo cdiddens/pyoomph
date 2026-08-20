@@ -42,7 +42,7 @@ namespace pyoomph
 	bool InterfaceElementBase::fill_hang_info_with_equations_interface(JITShapeInfo_t *shape_info)
 	{
 		bool res=false;
-		auto * ft = codeinst->get_func_table();
+		auto * ft = jitcode->get_func_table();
 		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
 		{
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t * space_info = ft->present_continuous_spaces[ispace];
@@ -79,7 +79,7 @@ namespace pyoomph
 	// hang, without writing a buffer.
 	bool InterfaceElementBase::scan_hang_interface_fields() const
 	{
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 		for (unsigned ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
 		{
 			const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info = ft->present_continuous_spaces[ispace];
@@ -113,7 +113,7 @@ namespace pyoomph
 	// interface-only fields, or a dummy-value map entry for such a space.
 	bool InterfaceElementBase::scan_interface_has_something_to_interpolate() const
 	{
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 		const std::vector<std::vector<std::vector<unsigned>>> &dummy_map = this->get_dummy_value_interpolation_map();
 		for (unsigned ispace = 0; ispace < ft->num_present_continuous_spaces; ispace++)
 		{
@@ -154,7 +154,7 @@ namespace pyoomph
 		bool res = BulkElementBase::fill_additional_hang_buffer_data(shape_info);
 		if (!has_additional_dof_constraints)
 			return res;
-		auto * ft = codeinst->get_func_table();
+		auto * ft = jitcode->get_func_table();
 		const std::vector<std::vector<unsigned>> &c1_dummy_map = this->get_dummy_value_interpolation_map()[SPACE_INDEX_C1];
 		auto get_c1_masters = [&c1_dummy_map](unsigned l_elem) -> const std::vector<unsigned> *
 		{
@@ -264,7 +264,7 @@ namespace pyoomph
 	{
 		BulkElementBase::fill_local_dof_contribution_indices(dest);
 
-		const JITFuncSpec_Table_FiniteElement_t *ft = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *ft = jitcode->get_func_table();
 		if (!ft || !ft->contribution_names || !ft->contribution_entries_size) return;
 		std::map<std::string, int> my_class;
 		for (unsigned c = 0; c < ft->contribution_entries_size; c++)
@@ -279,7 +279,7 @@ namespace pyoomph
 		auto adopt = [&](BulkElementBase *src, const std::vector<int> &eqn_map, bool opposite)
 		{
 			if (!src || eqn_map.empty() || src == this) return;
-			const JITFuncSpec_Table_FiniteElement_t *sft = src->get_code_instance()->get_func_table();
+			const JITFuncSpec_Table_FiniteElement_t *sft = src->get_jit_code()->get_func_table();
 			if (!sft || !sft->contribution_names) return;
 			const std::vector<int> &sidx = src->get_local_dof_contribution_indices();
 			const size_t n = std::min(eqn_map.size(), sidx.size());
@@ -349,7 +349,7 @@ namespace pyoomph
 		const unsigned n_node = this->nnode();
 		if (n_node == 0) return;
 		this->update_before_nodal_fd();
-		auto *ft=codeinst->get_func_table();
+		auto *ft=jitcode->get_func_table();
 		const std::vector<std::vector<unsigned>> & space_node_to_elem_node_map=this->get_nodal_space_index_to_element_index_map();
 		oomph::Vector<double> newres(residuals.size());
 		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
@@ -465,7 +465,7 @@ namespace pyoomph
 	{
 		if (__measure_skip_hang_fills)
 			return; // measurement lever only, see __measure_skip_hang_fills
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
 		const std::vector<std::vector<std::vector<unsigned>>> & dummy_value_interpolation_map=this->get_dummy_value_interpolation_map();
 		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
 		{
@@ -712,7 +712,7 @@ namespace pyoomph
 	{
 		Local_interface_hang_eqn.clear();
 		
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
 		for (unsigned int ispace=0;ispace<ft->num_present_continuous_spaces;ispace++)
 		{
 			auto space_info=ft->present_continuous_spaces[ispace];
@@ -732,7 +732,7 @@ namespace pyoomph
 			The generated code just accesses the local equations of the bulk element, but then we fake a hanging node, which just hangs on a single master, which is the corresponding local equation (of the external data) in the interface element
 		*/
 
-		const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = this->jitcode->get_func_table();
 		// Must be the very set the attachment used: this hands out local equation numbers OF the attached
 		// external data, so remapping from a wider set would resolve dofs the element does not carry.
 		const JITFuncSpec_RequiredShapes_FiniteElement_t &attach_req = *attachment_required_shapes(functable);
@@ -773,7 +773,7 @@ namespace pyoomph
 	// buffer_offset_basebulk, interface-only DG fields after them at buffer_offset_interf.
 	unsigned InterfaceElementBase::get_DG_buffer_index(const unsigned &space_index,const unsigned &fieldindex)
     {
-		auto * ft=this->get_code_instance()->get_func_table();
+		auto * ft=this->get_jit_code()->get_func_table();
 		auto & space_info=ft->dg_spaces[space_index];
 
 		if (fieldindex<space_info.numfields_basebulk)
@@ -791,7 +791,7 @@ namespace pyoomph
 	// there); for interface-only DG fields the local node index is used directly.
 	unsigned InterfaceElementBase::get_DG_node_index(const unsigned &space_index,const unsigned &fieldindex,const unsigned &nodeindex) const
 	{
-		auto * ft=this->codeinst->get_func_table();
+		auto * ft=this->jitcode->get_func_table();
 		auto & space_info=ft->dg_spaces[space_index];
 		if (fieldindex>=space_info.numfields_bulk) 	return nodeindex;
 		else
@@ -809,7 +809,7 @@ namespace pyoomph
 	// as external data of this interface element).
 	oomph::Data * InterfaceElementBase::get_DG_nodal_data(const unsigned & space_index,const unsigned & fieldindex )
 	{
-		auto * ft=this->codeinst->get_func_table();
+		auto * ft=this->jitcode->get_func_table();
 		auto & space_info=ft->dg_spaces[space_index];
 		if (fieldindex>=space_info.numfields_bulk) return this->internal_data_pt(space_info.internal_offset_new+(fieldindex-space_info.numfields_bulk));
 		else
@@ -822,7 +822,7 @@ namespace pyoomph
 	// DG fields, external dof (resolved through get_DG_node_index) for base-bulk DG fields.
 	int InterfaceElementBase::get_DG_local_equation(const unsigned &space_index,const unsigned &fieldindex,const unsigned & nodeindex)
 	{
-		auto * ft=this->codeinst->get_func_table();
+		auto * ft=this->jitcode->get_func_table();
 		auto space_info=ft->dg_spaces[space_index];
 		if (fieldindex>=space_info.numfields_bulk) return this->internal_local_eqn(space_info.internal_offset_new+(fieldindex-space_info.numfields_bulk),nodeindex);
 		else
@@ -851,7 +851,7 @@ namespace pyoomph
 		if (bres >= 0)
 			return bres;
 		// Interface fields
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
@@ -876,7 +876,7 @@ namespace pyoomph
 	// for the shared/bulk fields.
 	void InterfaceElementBase::fill_element_info_interface_part(bool without_equations)
 	{
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		const std::vector<std::vector<unsigned>> & space_to_elem_index = this->get_nodal_space_index_to_element_index_map();
 
@@ -940,10 +940,10 @@ namespace pyoomph
 		{
 		   unsigned node_index=j+local_field_offset;
 			std::cout << "INTEF NODE INDEX oF " << functable->fieldnames_ED0[i] << " IS " << node_index << std::endl;
-			if (!codeinst->linked_external_data[j].data) throw_runtime_error("Element has an external data contribution, which is not assigned: "+std::string(functable->fieldnames_ED0[j]));
-			int extdata_i=codeinst->linked_external_data[j].elemental_index;
+			if (!jitcode->linked_external_data[j].data) throw_runtime_error("Element has an external data contribution, which is not assigned: "+std::string(functable->fieldnames_ED0[j]));
+			int extdata_i=jitcode->linked_external_data[j].elemental_index;
 			if (extdata_i>=(int)this->nexternal_data())  throw_runtime_error("Somehow the external data array was not done well when trying to index data: "+std::string(functable->fieldnames_ED0[i])+"  ext_data_index is "+std::to_string(extdata_i)+", but only "+std::to_string((int)this->nexternal_data())+" ext data slots present");
-			int value_i=codeinst->linked_external_data[j].value_index;
+			int value_i=jitcode->linked_external_data[j].value_index;
 			if (value_i<0 || value_i>=(int)this->external_data_pt(extdata_i)->nvalue())  throw_runtime_error("Somehow the external data array was not done, i.e. wrong value index, well when trying to index data: "+std::string(functable->fieldnames_ED0[j])+" at value "+std::to_string(value_i));
 			 eleminfo.nodal_data[0][node_index]=this->external_data_pt(extdata_i)->value_pt(value_i);
 			 eleminfo.nodal_local_eqn[0][node_index]=this->external_local_eqn(extdata_i,value_i);
@@ -1154,7 +1154,7 @@ namespace pyoomph
 	// allocated (not previously present) dofs are optionally seeded via interpolate_newly_constructed_additional_dof.
 	void InterfaceElementBase::add_interface_dofs()
 	{
-		auto *ft = codeinst->get_func_table();
+		auto *ft = jitcode->get_func_table();
 
 		// Continuous interface-only fields are stored as oomph-lib "additional values" on the element's
 		// nodes, which only BoundaryNodes provide. The interior-facet skeleton is built from ordinary
@@ -1182,7 +1182,7 @@ namespace pyoomph
 				
 				unsigned value_index=space_info->interface_dof_indices[i-space_info->numfields_basebulk];
 				// TODO: Can be removed once we are sure that the interface dof indices are always correct
-				unsigned value_index1 = codeinst->resolve_interface_dof_id(fieldname);
+				unsigned value_index1 = jitcode->resolve_interface_dof_id(fieldname);
 				if (value_index1!=value_index) throw_runtime_error("Mismatch between resolved interface dof id and space info index for field "+fieldname+" "+std::to_string(value_index1)+" vs. "+std::to_string(value_index));
 				
 				oomph::Vector<unsigned> additional_data_values(eleminfo.nnode, 0);
@@ -1365,9 +1365,9 @@ namespace pyoomph
 			}
 		}; // Nodes can be the same
 		const std::vector<std::vector<unsigned>> & space_to_elem_index = this->get_nodal_space_index_to_element_index_map();
-		for (unsigned int si=0;si<this->get_code_instance()->get_func_table()->num_present_continuous_spaces;si++)
+		for (unsigned int si=0;si<this->get_jit_code()->get_func_table()->num_present_continuous_spaces;si++)
 		{
-			auto * space_info=this->get_code_instance()->get_func_table()->present_continuous_spaces[si];
+			auto * space_info=this->get_jit_code()->get_func_table()->present_continuous_spaces[si];
 			// hangindex, NOT space_index: a hanging scheme is stored per nodal VALUE SLOT, and
 			// Node::is_hanging(i) reads Hanging_pt[i+1] out of an array of size nvalue()+1 without any
 			// bounds check. Asking a node that carries a single value (e.g. a bulk domain with just one
@@ -1429,7 +1429,7 @@ namespace pyoomph
 	// the generated interface code can read (but not directly own) those DG values/fluxes.
 	void InterfaceElementBase::add_DG_external_data()
 	{
-      auto *ft=this->codeinst->get_func_table();
+      auto *ft=this->jitcode->get_func_table();
 	  BulkElementBase * blk=dynamic_cast<BulkElementBase *>(this->bulk_element_pt());
 	  for (unsigned int si=0;si<ft->num_present_dg_spaces;si++)
 	  {
@@ -1464,8 +1464,8 @@ namespace pyoomph
 	{
 		external_data_is_geometric.resize(this->nexternal_data(), false); // Fill with the ED0 fields
 		// std::cout << "EX DA " << this->nexternal_data() << std::endl;
-		DynamicBulkElementInstance *fcodeinst = from_elem->get_code_instance();
-		auto *fft = fcodeinst->get_func_table();		
+		DynamicJITCode *fjitcode = from_elem->get_jit_code();
+		auto *fft = fjitcode->get_func_table();		
 
 		if (fft->moving_nodes)
 		{
@@ -1550,7 +1550,7 @@ namespace pyoomph
 		}
 		
 
-		// std::cout << " AT REQ " << codeinst->get_code()->get_file_name() << " FROM " << fcodeinst->get_code()->get_file_name() << " USE DL " << (required->psi_DL || required->DL.dx_psi || required->DL.dX_psi) << std::endl;
+		// std::cout << " AT REQ " << jitcode->get_file_name() << " FROM " << fjitcode->get_file_name() << " USE DL " << (required->psi_DL || required->DL.dx_psi || required->DL.dX_psi) << std::endl;
 		if (required->DL.psi || required->DL.dx_psi || required->DL.dX_psi)
 		{
 
@@ -2488,7 +2488,7 @@ namespace pyoomph
 			}
 			catch (...)
 			{
-				std::cerr << "AT PERFORMING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->codeinst->get_code()->get_file_name() << std::endl;
+				std::cerr << "AT PERFORMING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->jitcode->get_file_name() << std::endl;
 				throw;
 			}
 			// Now perform the mapping
@@ -2502,7 +2502,7 @@ namespace pyoomph
 				}
 				catch (...)
 				{
-					std::cerr << "AT PERFORMING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->codeinst->get_code()->get_file_name() << std::endl;
+					std::cerr << "AT PERFORMING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->jitcode->get_file_name() << std::endl;
 					throw;
 				}
 			}
@@ -2522,7 +2522,7 @@ namespace pyoomph
 			}
 			catch (...)
 			{
-				std::cerr << "AT PERFORMING OPPOSING INTERGACE EQ REMAPPING OF INTERFACE ELEMENT with code " << this->codeinst->get_code()->get_file_name() << std::endl;
+				std::cerr << "AT PERFORMING OPPOSING INTERGACE EQ REMAPPING OF INTERFACE ELEMENT with code " << this->jitcode->get_file_name() << std::endl;
 				throw;
 			}
 
@@ -2536,7 +2536,7 @@ namespace pyoomph
 				}
 				catch (...)
 				{
-					std::cerr << "AT PERFORMING OPPOSING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->codeinst->get_code()->get_file_name() << std::endl;
+					std::cerr << "AT PERFORMING OPPOSING BULK EQ REMAPPING OF INTERFACE ELEMENT with code " << this->jitcode->get_file_name() << std::endl;
 					throw;
 				}
 			}
@@ -2558,7 +2558,7 @@ namespace pyoomph
 	{
 		/*   BulkElementBase::ensure_external_data(); //This would flush the storage...
 		   external_data_is_geometric.resize(this->nexternal_data(),false);
-			const JITFuncSpec_Table_FiniteElement_t * functable=this->codeinst->get_func_table();
+			const JITFuncSpec_Table_FiniteElement_t * functable=this->jitcode->get_func_table();
 			if (functable->shapes_required_ResJac.bulk_shapes) add_required_external_data(functable->shapes_required_ResJac.bulk_shapes,dynamic_cast<BulkElementBase*>(this->bulk_element_pt())); //TODO:
 
 			if (functable->shapes_required_ResJac.opposite_shapes)
@@ -2576,10 +2576,10 @@ namespace pyoomph
 	// own get_dof_names(), so e.g. "@BULK:..." / "@OPPSIDE:..." / "@OPPBLK:..." names show where a dof really lives.
 	std::vector<std::string> InterfaceElementBase::get_dof_names(bool not_a_root_call)
 	{
-		// const JITFuncSpec_Table_FiniteElement_t * functable=codeinst->get_func_table();
+		// const JITFuncSpec_Table_FiniteElement_t * functable=jitcode->get_func_table();
 		std::vector<std::string> res = BulkElementBase::get_dof_names(not_a_root_call);
 
-		const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = this->jitcode->get_func_table();
 
 
 		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
@@ -2682,7 +2682,7 @@ namespace pyoomph
 	void InterfaceElementBase::pin_dummy_values()
 	{
 		BulkElementBase::pin_dummy_values();
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 		const std::vector<std::vector<unsigned>> & space_nodes_to_element_nodes=this->get_nodal_space_index_to_element_index_map();
 		const std::vector<std::vector<std::vector<unsigned>>> & dummy_interpolation_mapping=this->get_dummy_value_interpolation_map();
@@ -2727,7 +2727,7 @@ namespace pyoomph
 	void InterfaceElementBase::setup_additional_dof_constraints()
 	{
 		BulkElementBase::setup_additional_dof_constraints();
-		auto *functable = codeinst->get_func_table();
+		auto *functable = jitcode->get_func_table();
 
 		const std::vector<int> &elem_to_C1 = this->get_element_index_to_nodal_space_index_map()[SPACE_INDEX_C1];
 		bool has_C1_fields=functable->continuous_spaces[SPACE_INDEX_C1].numfields_basebulk>0 || functable->continuous_spaces[SPACE_INDEX_C1TB].numfields_basebulk>0 ;
@@ -2777,7 +2777,7 @@ namespace pyoomph
 	void InterfaceElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(DirichletMatrixManipulationInfo & info)
 	{
 		BulkElementBase::unpin_Dirichlet_dofs_for_matrix_manipulation(info);
-		const JITFuncSpec_Table_FiniteElement_t *functable = codeinst->get_func_table();
+		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 
 
 		const std::vector<std::vector<unsigned>> & space_node_to_element_map=this->get_nodal_space_index_to_element_index_map();

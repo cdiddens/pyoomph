@@ -1444,7 +1444,7 @@ Index : Local coordinates (s0,s1,s2)
 		res->link_nodes_with_domain(this);		
 	}
 	
-	// Attach the compiled element code `code_inst` to this collection and, if the code's
+	// Attach the compiled element code `jit_code` to this collection and, if the code's
 	// dominant nodal space requires more nodes than what the elements currently have
 	// (e.g. C1TB/C2/C2TB), convert every element in-place to that higher-order space (via
 	// convert_for_C*_space, which creates/reuses the required extra nodes). If any element
@@ -1452,11 +1452,11 @@ Index : Local coordinates (s0,s1,s2)
 	// nodes: an intermediate node is periodic iff *all* of its parent corner nodes have a
 	// periodic master, in which case its master is the intermediate node between those
 	// masters (found by matching the sorted parent-id keys in inter_nodes_periodic).
-	void MeshTemplateElementCollection::set_element_code(DynamicBulkElementInstance *code_inst)
+	void MeshTemplateElementCollection::set_element_code(DynamicJITCode *jit_code)
 	{
-		code_instance = code_inst;
+		jitcode = jit_code;
 		bool has_converted_to_C2 = false;
-		std::string dom_space = code_inst->get_func_table()->dominant_space;
+		std::string dom_space = jit_code->get_func_table()->dominant_space;
 		// Make to C2 or C1TB if not done yet
 		if (dom_space == "C1TB") 
 		{
@@ -1489,7 +1489,7 @@ Index : Local coordinates (s0,s1,s2)
 				}				
 			}
 		}
-		else if (code_inst->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields || dom_space == "C2" || code_inst->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields || dom_space == "C2TB") 
+		else if (jit_code->get_func_table()->continuous_spaces[SPACE_INDEX_C2].numfields || dom_space == "C2" || jit_code->get_func_table()->continuous_spaces[SPACE_INDEX_C2TB].numfields || dom_space == "C2TB") 
 		{
 			for (unsigned int ie = 0; ie < elements.size(); ie++)
 			{
@@ -2165,8 +2165,8 @@ Index : Local coordinates (s0,s1,s2)
 	BulkElementBase *MeshTemplate::factory_element(MeshTemplateElement *el, MeshTemplateElementCollection *coll)
 	{
 		// Generate all nodes if not present
-		const JITFuncSpec_Table_FiniteElement_t *functable = coll->code_instance->get_func_table();
-		BulkElementBase::__CurrentCodeInstance = coll->code_instance;		
+		const JITFuncSpec_Table_FiniteElement_t *functable = coll->jitcode->get_func_table();
+		BulkElementBase::__CurrentJITCode = coll->jitcode;		
 		unsigned ntot = 0;
 		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
@@ -2180,7 +2180,7 @@ Index : Local coordinates (s0,s1,s2)
 		bool require_macro_elem = false;
 
 		std::vector<nodeindex_t> nodeindices = el->get_node_indices();
-		std::string domspace = coll->code_instance->get_func_table()->dominant_space;
+		std::string domspace = coll->jitcode->get_func_table()->dominant_space;
 		if (el->get_geometric_type_index() == 8 && (domspace == "C1" || domspace=="C1TB")) // QC2 -> QC1
 		{
 			// Reduce the element
@@ -2423,7 +2423,7 @@ Index : Local coordinates (s0,s1,s2)
 			}
 		}
 
-		BulkElementBase::__CurrentCodeInstance = NULL;
+		BulkElementBase::__CurrentJITCode = NULL;
 		return res;
 	}
 
@@ -2619,7 +2619,7 @@ Index : Local coordinates (s0,s1,s2)
 	   for (unsigned int ie=0;ie<bulk_element_collections[i]->elements.size();ie++)
 	   {
 			 const MeshTemplateElement * e=bulk_element_collections[i]->elements[ie];
-		 const DynamicBulkElementInstance * code=e->get_dynamic_code();
+		 const DynamicJITCode * code=e->get_dynamic_code();
 
 			 for (unsigned int iC2=0;iC2<code->get_num_fields_C2();iC2++)
 			 {

@@ -604,10 +604,10 @@ namespace pyoomph
     if (this->nelement())
     {
       BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-      if (e && e->get_code_instance() && e->get_code_instance()->get_func_table() &&
-          e->get_code_instance()->get_func_table()->domain_name)
+      if (e && e->get_jit_code() && e->get_jit_code()->get_func_table() &&
+          e->get_jit_code()->get_func_table()->domain_name)
       {
-        return std::string(e->get_code_instance()->get_func_table()->domain_name);
+        return std::string(e->get_jit_code()->get_func_table()->domain_name);
       }
     }
     return "<unnamed mesh>";
@@ -1231,13 +1231,13 @@ namespace pyoomph
   }
 
   // List the names of the named integral expressions defined in this mesh's JIT-compiled element code
-  // (looked up via the first element, since all elements of a mesh share the same code instance).
+  // (looked up via the first element, since all elements of a mesh share the same code).
   std::vector<std::string> Mesh::list_integral_functions()
   {
     unsigned nelement = this->nelement();
     if (!nelement)
       return std::vector<std::string>();
-    auto *cg = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_element_class();
+    auto *cg = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_code_gen();
     return cg->get_integral_expressions();
   }
 
@@ -1248,7 +1248,7 @@ namespace pyoomph
     unsigned nelement = this->nelement();
     if (!nelement)
       return std::vector<std::string>();
-    auto *cg = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_element_class();
+    auto *cg = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_code_gen();
     return cg->get_local_expressions();
   }
 
@@ -1341,7 +1341,7 @@ namespace pyoomph
       extreme_element=NULL;
       return 0;
     }
-    int index = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_extremum_function_index(name);
+    int index = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_extremum_function_index(name);
     if (index < 0) throw_runtime_error("Extremum function " + name + " not defined on this mesh");
     // Get some reference to start with
     extreme_element=dynamic_cast<BulkElementBase *>(this->element_pt(0));
@@ -1405,7 +1405,7 @@ namespace pyoomph
     
     if (flags & 1)
     {
-      GiNaC::ex factor_and_unit = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_element_class()->get_extremum_expression_unit_factor(name);
+      GiNaC::ex factor_and_unit = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_code_gen()->get_extremum_expression_unit_factor(name);
       return factor_and_unit*extreme_value;
       
     }
@@ -1422,7 +1422,7 @@ namespace pyoomph
     unsigned nelement = this->nelement();
     int index;
     if (!nelement) index=0; //Can't skip out here, since it might run into an MPI call later
-     index= dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_integral_function_index(name);
+     index= dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_integral_function_index(name);
     if (index < 0)
       throw_runtime_error("Integral function " + name + " not defined on this mesh");
     double res = 0.0;
@@ -1445,8 +1445,8 @@ namespace pyoomph
     }
 #endif
     
-    GiNaC::ex factor_and_unit = this->codeinst->get_element_class()->get_integral_expression_unit_factor(name);
-    //GiNaC::ex factor_and_unit = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_code_instance()->get_element_class()->get_integral_expression_unit_factor(name);
+    GiNaC::ex factor_and_unit = this->jitcode->get_code_gen()->get_integral_expression_unit_factor(name);
+    //GiNaC::ex factor_and_unit = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_code_gen()->get_integral_expression_unit_factor(name);
     return factor_and_unit * res;
   }
 
@@ -1472,7 +1472,7 @@ namespace pyoomph
   // (reusing already-built opposite elements shared by several smaller facets, via
   // opposite_already_at_index) and linked via set_opposite_interface_element, so the interface element
   // can access fields from both sides of the facet. Finally rebuild/boundary information on imesh is refreshed.
-  void Mesh::generate_interface_elements(std::string intername, Mesh *imesh, DynamicBulkElementInstance *jitcode)
+  void Mesh::generate_interface_elements(std::string intername, Mesh *imesh, DynamicJITCode *interface_jitcode)
   {
     unsigned bind, nbe;
     bool internal_facets;
@@ -1487,8 +1487,8 @@ namespace pyoomph
       nbe = this->nboundary_element(bind);
     }
 
-    BulkElementBase::__CurrentCodeInstance = jitcode;
-    dynamic_cast<InterfaceMesh *>(imesh)->set_rebuild_information(this, intername, jitcode);
+    BulkElementBase::__CurrentJITCode = interface_jitcode;
+    dynamic_cast<InterfaceMesh *>(imesh)->set_rebuild_information(this, intername, interface_jitcode);
 
     unsigned n_element = imesh->nelement();
     for (unsigned e = 0; e < n_element; e++)
@@ -1501,9 +1501,9 @@ namespace pyoomph
     dynamic_cast<InterfaceMesh *>(imesh)->opposite_interior_facets.clear();
 
     int restriction_index = -1;
-    for (unsigned int i = 0; i < jitcode->get_func_table()->numlocal_expressions; i++)
+    for (unsigned int i = 0; i < interface_jitcode->get_func_table()->numlocal_expressions; i++)
     {
-      if (std::string(jitcode->get_func_table()->local_expressions_names[i]) == "__interface_constraint")
+      if (std::string(interface_jitcode->get_func_table()->local_expressions_names[i]) == "__interface_constraint")
       {
         restriction_index = i;
         break;
@@ -1518,12 +1518,12 @@ namespace pyoomph
       nbe = internal_elements.size();
     }
 
-    auto gen_face_elem = [jitcode,internal_facets](BulkElementBase *be, int fi)->oomph::FaceElement *
+    auto gen_face_elem = [interface_jitcode,internal_facets](BulkElementBase *be, int fi)->oomph::FaceElement *
     {
-      oomph::FaceElement *fe = be->construct_face_element(jitcode,fi);      
-      if (jitcode->get_func_table()->integration_order)
+      oomph::FaceElement *fe = be->construct_face_element(interface_jitcode,fi);      
+      if (interface_jitcode->get_func_table()->integration_order)
       {
-        dynamic_cast<BulkElementBase *>(fe)->set_integration_order(jitcode->get_func_table()->integration_order);
+        dynamic_cast<BulkElementBase *>(fe)->set_integration_order(interface_jitcode->get_func_table()->integration_order);
       }
 
       if (!internal_facets)
@@ -1545,7 +1545,7 @@ namespace pyoomph
               }
               oss << " is boundary node: " << dynamic_cast<oomph::BoundaryNodeBase*>(n2) << std::endl;
             }
-            oss << "Boundary is " << jitcode->get_code()->get_file_name() << std::endl;
+            oss << "Boundary is " << interface_jitcode->get_file_name() << std::endl;
             throw_runtime_error(oss.str());
             delete fe;
             return NULL; // Do not create such elements...
@@ -1629,9 +1629,9 @@ namespace pyoomph
 
       imesh->add_element_pt(fe);
     }
-    dynamic_cast<InterfaceMesh *>(imesh)->set_rebuild_information(this, intername, jitcode);
+    dynamic_cast<InterfaceMesh *>(imesh)->set_rebuild_information(this, intername, interface_jitcode);
     dynamic_cast<InterfaceMesh *>(imesh)->setup_boundary_information(this);
-    BulkElementBase::__CurrentCodeInstance = NULL;
+    BulkElementBase::__CurrentJITCode = NULL;
   }
 
   // Build a map from field name to its finite-element space (e.g. "C2", "C1", "DL", "D0"), by
@@ -1646,8 +1646,8 @@ namespace pyoomph
     if (!this->nelement())
       return std::map<std::string, std::string>();
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el->get_code_instance()->get_func_table();
-    // auto *ci = el->get_code_instance();
+    auto *ft = el->get_jit_code()->get_func_table();
+    // auto *ci = el->get_jit_code();
 
     std::map<std::string, std::string> res;
     for (unsigned int i = 0; i < ft->info_DL.numfields; i++)
@@ -1664,7 +1664,7 @@ namespace pyoomph
     while (current)
     {
       auto *cel = dynamic_cast<BulkElementBase *>(current->element_pt(0));
-      auto *cft = cel->get_code_instance()->get_func_table();
+      auto *cft = cel->get_jit_code()->get_func_table();
       if (!dynamic_cast<InterfaceMesh *>(current))
       {
         for (unsigned int si = 0; si < cft->num_present_continuous_spaces; si++)
@@ -1742,7 +1742,7 @@ namespace pyoomph
     if (!this->nelement())
       return;
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el->get_code_instance()->get_func_table();
+    auto *ft = el->get_jit_code()->get_func_table();
     auto mustpin = [&](std::string name)
     {
       if (only_dofs.empty())
@@ -1959,7 +1959,7 @@ namespace pyoomph
   // Bind this mesh to its owning Problem and JIT-compiled element code. On first binding (when
   // dirichlet_active is still empty), initializes the per-dof Dirichlet-active flags from the code's
   // default Dirichlet_set (which fields are Dirichlet-constrained by default in the generated code).
-  void Mesh::_set_problem(Problem *p, DynamicBulkElementInstance *code)
+  void Mesh::_set_problem(Problem *p, DynamicJITCode *code)
   {
     problem = p;
     #ifdef OOMPH_HAS_MPI
@@ -1969,13 +1969,13 @@ namespace pyoomph
       this->set_communicator_pt(p->communicator_pt());
     }*/
     #endif
-    codeinst = code;
+    jitcode = code;
     if (code && dirichlet_active.empty())
     {
       dirichlet_active.resize(code->get_func_table()->Dirichlet_set_size, false);
       for (unsigned int i = 0; i < code->get_func_table()->Dirichlet_set_size; i++)
       {
-        //    std::cout << "SETTING " << code->get_code()->get_file_name() << " INDEX " << i << " to "  << (code->get_func_table()->Dirichlet_set[i] ? "true" : "false") << std::endl;
+        //    std::cout << "SETTING " << code->get_file_name() << " INDEX " << i << " to "  << (code->get_func_table()->Dirichlet_set[i] ? "true" : "false") << std::endl;
         dirichlet_active[i] = code->get_func_table()->Dirichlet_set[i];
       }
     }
@@ -1990,7 +1990,7 @@ namespace pyoomph
     throw_runtime_error("Implement");
     /*
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el->get_code_instance()->get_func_table();
+    auto *ft = el->get_jit_code()->get_func_table();
     unsigned numfields = el->nodal_dimension() + ft->numfields_C2TB + ft->numfields_C2 + ft->numfields_C1TB + ft->numfields_C1 + ft->info_DL.numfields + ft->info_D0.numfields;
     std::vector<std::vector<double>> result(zetas.size(), std::vector<double>(numfields, 0.0));
 
@@ -1998,11 +1998,11 @@ namespace pyoomph
     std::vector<double> scales(numfields, 1.0);
     if (with_scales)
     {
-      for (auto &fi : el->get_code_instance()->get_nodal_field_indices())
+      for (auto &fi : el->get_jit_code()->get_nodal_field_indices())
       {
         scales[fi.second] = (output_scales.count(fi.first) ? output_scales[fi.first] : 1.0);
       }
-      for (auto &fi : el->get_code_instance()->get_elemental_field_indices())
+      for (auto &fi : el->get_jit_code()->get_elemental_field_indices())
       {
         scales[ft->numfields_C2TB + ft->numfields_C2 + ft->numfields_C1TB + ft->numfields_C1 + fi.second] = (output_scales.count(fi.first) ? output_scales[fi.first] : 1.0);
       }
@@ -2153,12 +2153,12 @@ namespace pyoomph
     BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     unsigned nlagrangian = node0->nlagrangian();
     unsigned nelement = this->nelement();
-    auto *ft = be->get_code_instance()->get_func_table();
+    auto *ft = be->get_jit_code()->get_func_table();
     for (unsigned int i = 0; i < nelement; i++)
     {
       dynamic_cast<BulkElementBase *>(this->element_pt(i))->interpolate_hang_values();
     }
-    // pyoomph::DynamicBulkElementInstance * ci=be->get_code_instance();
+    // pyoomph::DynamicJITCode * ci=be->get_jit_code();
     unsigned ncontfields = be->ncont_interpolated_values();
     unsigned nDGfields = (be ? be->num_DG_fields(false) : 0);
     unsigned nDGfields_basebulk = (be ? be->num_DG_fields(true) : 0);
@@ -2183,7 +2183,7 @@ namespace pyoomph
     unsigned contstride = nodal_dim + nlagrangian + ncontfields + nDGfields + nadd_interface + nnormal;
     double spatial_scale = (output_scales.count("spatial") && (!nondimensional) ? output_scales["spatial"] : 1.0);
     std::vector<double> nodal_scales(ncontfields + nDGfields + nadd_interface+ nnormal, 1.0);
-    for (auto &fi : be->get_code_instance()->get_nodal_field_indices())
+    for (auto &fi : be->get_jit_code()->get_nodal_field_indices())
     {
       nodal_scales[fi.second] = (output_scales.count(fi.first) && (!nondimensional) ? output_scales[fi.first] : 1.0);
     }
@@ -2390,11 +2390,11 @@ namespace pyoomph
     }
 
     unsigned current_subelem = 0;
-    unsigned numD0 = be->get_code_instance()->get_func_table()->info_D0.numfields;
-    unsigned numDL = be->get_code_instance()->get_func_table()->info_DL.numfields;
+    unsigned numD0 = be->get_jit_code()->get_func_table()->info_D0.numfields;
+    unsigned numDL = be->get_jit_code()->get_func_table()->info_DL.numfields;
 
     std::vector<double> D_scales(numDL + numD0, 1.0);
-    for (auto &fi : be->get_code_instance()->get_elemental_field_indices())
+    for (auto &fi : be->get_jit_code()->get_elemental_field_indices())
     {
       D_scales[fi.second] = (output_scales.count(fi.first) && (!nondimensional) ? output_scales[fi.first] : 1.0);
     }
@@ -2557,7 +2557,7 @@ namespace pyoomph
     if (!this->nelement())
       return 0.0;
     BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    DynamicBulkElementInstance *ci = be->get_code_instance();
+    DynamicJITCode *ci = be->get_jit_code();
     auto *ft = ci->get_func_table();
     if (!ft->has_temporal_estimators)
       return 0.0;
@@ -2877,7 +2877,7 @@ namespace pyoomph
   // a full-mesh nodal_interpolate_from would be inaccurate or too expensive right at the boundary.
   // High-level algorithm:
   //  1. Build a field_map from this mesh's continuous field indices to the old mesh's field indices by
-  //     matching field names (only needed if the two meshes use different JIT code instances, i.e.
+  //     matching field names (only needed if the two meshes use different JIT codes, i.e.
   //     potentially different field sets/ordering).
   //  2. For every node on this mesh's boundary bind, find the nearest and second-nearest node (by
   //     Euclidean distance in physical space) on the old mesh's boundary oldbind. If the nearest match
@@ -2935,8 +2935,8 @@ namespace pyoomph
     // Bulk field mapping
     BulkElementBase *my_be0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     BulkElementBase *from_be0 = dynamic_cast<BulkElementBase *>(old->element_pt(0));
-    auto *my_ci = my_be0->get_code_instance();
-    auto *from_ci = from_be0->get_code_instance();
+    auto *my_ci = my_be0->get_jit_code();
+    auto *from_ci = from_be0->get_jit_code();
     auto *my_ft = my_ci->get_func_table();
     auto *from_ft = from_ci->get_func_table();
     std::vector<int> field_map;
@@ -3006,8 +3006,8 @@ namespace pyoomph
     BulkElementBase *from_fe0 = NULL;
     if (oldimesh && oldimesh->nelement())
       from_fe0 = dynamic_cast<BulkElementBase *>(oldimesh->element_pt(0));
-    auto *my_fci = (my_fe0 ? my_fe0->get_code_instance() : NULL);
-    auto *from_fci = (from_fe0 ? from_fe0->get_code_instance() : NULL);
+    auto *my_fci = (my_fe0 ? my_fe0->get_jit_code() : NULL);
+    auto *from_fci = (from_fe0 ? from_fe0->get_jit_code() : NULL);
     auto *my_fft = (my_fci ? my_fci->get_func_table() : NULL);
     auto *from_fft = (from_fci ? from_fci->get_func_table() : NULL);
 
@@ -3418,7 +3418,7 @@ namespace pyoomph
   // using the point locator, and then evaluates/interpolates the `from` element's
   // shape functions at that local coordinate to obtain exact interpolated values, rather than picking
   // the value at a nearby existing node. As in the boundary variant, a field_map translates field
-  // indices between the two mesh's JIT-compiled code instances (identity if they are the same code),
+  // indices between the two mesh's JIT-compiled codes (identity if they are the same code),
   // and DG/DL/D0 (discontinuous) fields are not supported (throws if present).
   // See declaration in mesh.hpp. Collective, and deliberately so.
   bool Mesh::interpolation_is_shared_across_ranks(Mesh *from) const
@@ -3577,7 +3577,7 @@ namespace pyoomph
     if (this->nelement())
     {
       BulkElementBase *e0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-      auto *ft = e0->get_code_instance()->get_func_table();
+      auto *ft = e0->get_jit_code()->get_func_table();
       ndisc = dg_internal_data_offset(ft) + ft->info_DL.numfields + ft->info_D0.numfields;
       // A DL block is only allocated where the element has DL "nodes" at all, so the static offsets
       // can overshoot on an element family that has none.
@@ -3668,8 +3668,8 @@ namespace pyoomph
     }
     BulkElementBase *my_be0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     BulkElementBase *from_be0 = dynamic_cast<BulkElementBase *>(from->element_pt(0));
-    auto *my_ci = my_be0->get_code_instance();
-    auto *from_ci = from_be0->get_code_instance();
+    auto *my_ci = my_be0->get_jit_code();
+    auto *from_ci = from_be0->get_jit_code();
     auto *my_ft = my_ci->get_func_table();
     auto *from_ft = from_ci->get_func_table();
     std::vector<int> field_map;
@@ -4551,17 +4551,17 @@ namespace pyoomph
   // intrinsic scaling (from the generated code) divided by s, with any symbolic placeholders/global
   // parameters resolved to their current numeric values. Throws if the resulting expression is not a
   // pure number (i.e. s has incompatible units/dimension with the field).
-  void Mesh::set_output_scale(std::string fname, GiNaC::ex s, DynamicBulkElementInstance *_code)
+  void Mesh::set_output_scale(std::string fname, GiNaC::ex s, DynamicJITCode *_code)
   {
     if (!_code)
     {
       BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-      _code = be->get_code_instance();
+      _code = be->get_jit_code();
     }
-    GiNaC::ex fscale = _code->get_element_class()->get_scaling(fname);
+    GiNaC::ex fscale = _code->get_code_gen()->get_scaling(fname);
     GiNaC::ex scale = fscale / s;
     // Expand the scale (to remove any scale factors)
-    scale = _code->get_element_class()->expand_placeholders(scale, "OutputScale", true);
+    scale = _code->get_code_gen()->expand_placeholders(scale, "OutputScale", true);
     scale = pyoomph::expressions::replace_global_params_by_current_values(scale);
     try
     {
@@ -4592,7 +4592,7 @@ namespace pyoomph
       return;
     doftype.resize(problem->ndof(), -1);
     BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    DynamicBulkElementInstance *ci = be->get_code_instance();
+    DynamicJITCode *ci = be->get_jit_code();
 
     auto *ft = ci->get_func_table();
 
@@ -4743,7 +4743,7 @@ namespace pyoomph
     if ((!this->nnode()) || (!this->nelement()))
       return;
     BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    DynamicBulkElementInstance *ci = be->get_code_instance();
+    DynamicJITCode *ci = be->get_jit_code();
     int i = ci->get_nodal_field_index(fieldname);
     if (i < 0)
     {
@@ -4754,8 +4754,8 @@ namespace pyoomph
       }
     }
 
-    ReplaceFieldsToNonDimFields repl(ci->get_element_class(), "InitialCondition");
-    initial_conditions[fieldname] = 0 + repl(expression) / ci->get_element_class()->get_scaling(fieldname);
+    ReplaceFieldsToNonDimFields repl(ci->get_code_gen(), "InitialCondition");
+    initial_conditions[fieldname] = 0 + repl(expression) / ci->get_code_gen()->get_scaling(fieldname);
     // Test if the initial condition is nondimensional and has no free parameters
     auto *n = this->node_pt(0);
     GiNaC::lst subslist;
@@ -4802,7 +4802,7 @@ namespace pyoomph
   // evaluating the actual symbolic expression; when resetting_first_step is set, position dofs at the
   // current time level (t==0) are instead re-seeded from the previous time level's value, so a fresh
   // restart doesn't discard the last known velocity/history information.
-  void Generic_SetInitialCondition(BulkElementBase *elempt, oomph::Data *data, DynamicBulkElementInstance *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool use_identity, bool resetting_first_step, unsigned icindex)
+  void Generic_SetInitialCondition(BulkElementBase *elempt, oomph::Data *data, DynamicJITCode *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool use_identity, bool resetting_first_step, unsigned icindex)
   {
     auto *ts = data->time_stepper_pt();
     auto *Time_pt = ts->time_pt();
@@ -4889,7 +4889,7 @@ namespace pyoomph
       return;
 
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el->get_code_instance()->get_func_table();
+    auto *ft = el->get_jit_code()->get_func_table();
     unsigned nodal_dim = el->nodal_dimension();
     unsigned eldim = el->dim();
 
@@ -4945,7 +4945,7 @@ namespace pyoomph
       }
     }
 
-    // std::cout << "IC SETTING " << el->get_code_instance()->get_func_table()->numfields_C2 << "  " << el->get_code_instance()->get_func_table()->numfields_C1 << "  NNODE " << this->nnode() << std::endl;
+    // std::cout << "IC SETTING " << el->get_jit_code()->get_func_table()->numfields_C2 << "  " << el->get_jit_code()->get_func_table()->numfields_C1 << "  NNODE " << this->nnode() << std::endl;
     // First set the coordinates
     for (unsigned int ni = 0; ni < this->nnode(); ni++)
     {
@@ -4970,7 +4970,7 @@ namespace pyoomph
       for (unsigned int d = 0; d < nodept->ndim(); d++)
       {
         int valindex = -1 - d;
-        Generic_SetInitialCondition(el, nodept->variable_position_pt(), el->get_code_instance(), valindex, d, x_buffer, x_lagr, normal, true, resetting_first_step, ic_index);
+        Generic_SetInitialCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, true, resetting_first_step, ic_index);
       }
     }
 
@@ -4999,7 +4999,7 @@ namespace pyoomph
         auto * space_info=ft->present_continuous_spaces[si];
         for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
         {
-          Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, true, false, ic_index);
+          Generic_SetInitialCondition(el, nodept, el->get_jit_code(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, true, false, ic_index);
         }
         offset += space_info->numfields_basebulk;
       }      
@@ -5026,7 +5026,7 @@ namespace pyoomph
             x_lagr[i] = nodept->xi(i);
           for (unsigned int fieldindex = 0; fieldindex < space_info->numfields; fieldindex++)
           {
-            Generic_SetInitialCondition(el, el->get_DG_nodal_data(space_info->space_index, fieldindex), el->get_code_instance(), el->get_DG_buffer_index(space_info->space_index, fieldindex), el->get_DG_node_index(space_info->space_index, fieldindex, ni), x_buffer, x_lagr, normal, true, false, ic_index);
+            Generic_SetInitialCondition(el, el->get_DG_nodal_data(space_info->space_index, fieldindex), el->get_jit_code(), el->get_DG_buffer_index(space_info->space_index, fieldindex), el->get_DG_node_index(space_info->space_index, fieldindex, ni), x_buffer, x_lagr, normal, true, false, ic_index);
           }
         }        
       }
@@ -5060,7 +5060,7 @@ namespace pyoomph
           for (unsigned int d = 0; d < nodept->ndim(); d++)
           {
             int valindex = -1 - d;
-            Generic_SetInitialCondition(el, nodept->variable_position_pt(), el->get_code_instance(), valindex, d, x_buffer, x_lagr, normal, true, resetting_first_step, ic_index);
+            Generic_SetInitialCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, true, resetting_first_step, ic_index);
           }
 
           for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
@@ -5068,7 +5068,7 @@ namespace pyoomph
             auto * space_info=ft->present_continuous_spaces[si];
             for (unsigned int fieldindex = 0; fieldindex < space_info->numfields_basebulk; fieldindex++)
             {
-              Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, true, false, ic_index);
+              Generic_SetInitialCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, true, false, ic_index);
             }
           }
           for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
@@ -5077,7 +5077,7 @@ namespace pyoomph
             for (unsigned int fieldindex = 0; fieldindex < space_info->numfields-space_info->numfields_basebulk; fieldindex++)
             {              
               unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
-              Generic_SetInitialCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, true, false, ic_index);
+              Generic_SetInitialCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, true, false, ic_index);
             }
           }
         }
@@ -5094,7 +5094,7 @@ namespace pyoomph
       for (unsigned int i = 0; i < xlagr.size(); i++)
         x_lagr[i] = xlagr[i];
 
-      for (unsigned int fieldindex = 0; fieldindex < el->get_code_instance()->get_func_table()->info_DL.numfields; fieldindex++)
+      for (unsigned int fieldindex = 0; fieldindex < el->get_jit_code()->get_func_table()->info_DL.numfields; fieldindex++)
       {
         oomph::Vector<double> np(el->nodal_dimension(), 0.0);
         oomph::Vector<double> np_lagr(el->nodal_dimension(), 0.0);
@@ -5109,7 +5109,7 @@ namespace pyoomph
             x_buffer[i] = np[i];
           for (unsigned int i = 0; i < xlagr.size(); i++)
             x_lagr[i] = np_lagr[i];
-          Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
+          Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
 
           auto *ts = this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new)->time_stepper_pt();
           oomph::Vector<double> vmin(ts->ntstorage());
@@ -5123,7 +5123,7 @@ namespace pyoomph
             x_buffer[i] = np[i];
           for (unsigned int i = 0; i < xlagr.size(); i++)
             x_lagr[i] = np_lagr[i];
-          Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
+          Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
           oomph::Vector<double> vmax(ts->ntstorage());
           for (unsigned t = 0; t < vmax.size(); t++)
             vmax[t] = this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new)->value(t, 0);
@@ -5135,22 +5135,22 @@ namespace pyoomph
           s[j] = old;
         }
 
-        Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
+        Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
       }
 
       for (unsigned int i = 0; i < xcenter.size(); i++)
         x_buffer[i] = xcenter[i];
       for (unsigned int i = 0; i < xlagr.size(); i++)
         x_lagr[i] = xlagr[i];
-      for (unsigned int fieldindex = 0; fieldindex < el->get_code_instance()->get_func_table()->info_D0.numfields; fieldindex++)
+      for (unsigned int fieldindex = 0; fieldindex < el->get_jit_code()->get_func_table()->info_D0.numfields; fieldindex++)
       {
         //        std::cout << "d0 ic " << x_lagr[0] << "  " << x_lagr[1] << "  " << xlagr[0] << "  " << xlagr[1] << std::endl;
-        Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_D0.internal_offset_new), el->get_code_instance(), fieldindex + ft->info_D0.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
+        Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_D0.internal_offset_new), el->get_jit_code(), fieldindex + ft->info_D0.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
       }
     }
   }
 
-  void Generic_SetDirichletCondition(BulkElementBase *elempt, oomph::Data *data, DynamicBulkElementInstance *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool only_update_vals)
+  void Generic_SetDirichletCondition(BulkElementBase *elempt, oomph::Data *data, DynamicJITCode *ci, int fieldindex, unsigned valindex, double *x_buffer, double *x_lagr, double *normal, bool only_update_vals)
   {
     auto *ts = data->time_stepper_pt();
     auto *Time_pt = ts->time_pt();
@@ -5169,7 +5169,7 @@ namespace pyoomph
   // Toggle whether the named Dirichlet condition is currently enforced. "mesh_x"/"y"/"z" are aliased
   // to the generated code's "coordinate_x"/"y"/"z" Dirichlet names (mesh-motion boundary conditions).
   // The name is resolved to an index into dirichlet_active via the code's Dirichlet_names table (using
-  // codeinst directly if this mesh has no elements yet, e.g. before the mesh is built).
+  // jitcode directly if this mesh has no elements yet, e.g. before the mesh is built).
   void Mesh::set_dirichlet_active(std::string name, bool active)
   {
     int index = -1;
@@ -5182,14 +5182,14 @@ namespace pyoomph
     JITFuncSpec_Table_FiniteElement_t *ft;
     if (!this->nelement())
     {
-      if (!codeinst)
-        throw_runtime_error("Cannot toggle a Dirichlet active without elements or JIT code instance."); // Note: throw_runtime_error already expands to a statement ending in ';'
-      ft = codeinst->get_func_table();
+      if (!jitcode)
+        throw_runtime_error("Cannot toggle a Dirichlet active without elements or JIT code."); // Note: throw_runtime_error already expands to a statement ending in ';'
+      ft = jitcode->get_func_table();
     }
     else
     {
       auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-      ft = el->get_code_instance()->get_func_table();
+      ft = el->get_jit_code()->get_func_table();
     }
 
     for (unsigned int i = 0; i < ft->Dirichlet_set_size; i++)
@@ -5237,11 +5237,11 @@ namespace pyoomph
       name = "coordinate_y";
     if (name == "mesh_z")
       name = "coordinate_z";
-    DynamicBulkElementInstance *ci=this->codeinst;
+    DynamicJITCode *ci=this->jitcode;
     if (!ci)
     {	
     	auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    	ci=el->get_code_instance();
+    	ci=el->get_jit_code();
     }
     auto *ft = ci->get_func_table();
     for (unsigned int i = 0; i < ft->Dirichlet_set_size; i++)
@@ -5291,7 +5291,7 @@ namespace pyoomph
     if (!this->nelement()) return;
     if (!this->problem->has_empty_jacobian_rows_marked()) return;
     auto *el0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el0->get_code_instance()->get_func_table();
+    auto *ft = el0->get_jit_code()->get_func_table();
     int Doffset = 3;
     unsigned int ncontfields=0;
     for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
@@ -5390,7 +5390,7 @@ namespace pyoomph
   {
     if (!this->nelement()) return;
     auto *el0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el0->get_code_instance()->get_func_table();
+    auto *ft = el0->get_jit_code()->get_func_table();
     int Doffset = 3;
     long eqn_number=0;
     unsigned int ncontfields=0;
@@ -5490,7 +5490,7 @@ namespace pyoomph
     if (!this->nelement())
       return;
     auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    auto *ft = el->get_code_instance()->get_func_table();
+    auto *ft = el->get_jit_code()->get_func_table();
     int Doffset = 3;
 
     // Every loop below fills the x/xi buffers - and, for the elemental dofs, evaluates two element
@@ -5551,7 +5551,7 @@ namespace pyoomph
         int valindex = -1 - d;
         if (dirichlet_active[valindex + Doffset])
         {
-          Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_code_instance(), valindex, d, x_buffer, x_lagr, normal, only_update_vals);
+          Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, only_update_vals);
         }
       }
     }
@@ -5573,7 +5573,7 @@ namespace pyoomph
         {
           if (dirichlet_active[fieldindex + offset + Doffset])
           {
-            Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals);
+            Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + offset, fieldindex + offset, x_buffer, x_lagr, normal, only_update_vals);
           }
         }
         offset += space_info->numfields_basebulk;
@@ -5606,7 +5606,7 @@ namespace pyoomph
               unsigned bindex = el->get_DG_buffer_index(space_info->space_index, fieldindex);
               if (dirichlet_active[bindex + Doffset])
               {
-                Generic_SetDirichletCondition(el, el->get_DG_nodal_data(space_info->space_index, fieldindex), el->get_code_instance(), bindex, el->get_DG_node_index(space_info->space_index, fieldindex, ni), x_buffer, x_lagr, normal, only_update_vals);
+                Generic_SetDirichletCondition(el, el->get_DG_nodal_data(space_info->space_index, fieldindex), el->get_jit_code(), bindex, el->get_DG_node_index(space_info->space_index, fieldindex, ni), x_buffer, x_lagr, normal, only_update_vals);
               }
             }
         }
@@ -5649,7 +5649,7 @@ namespace pyoomph
             int valindex = -1 - d;
             if (dirichlet_active[valindex + Doffset])
             {
-              Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_code_instance(), valindex, d, x_buffer, x_lagr, normal, only_update_vals);
+              Generic_SetDirichletCondition(el, nodept->variable_position_pt(), el->get_jit_code(), valindex, d, x_buffer, x_lagr, normal, only_update_vals);
             }
           }
 
@@ -5660,7 +5660,7 @@ namespace pyoomph
             {
               if (dirichlet_active[fieldindex + space_info->buffer_offset_basebulk + Doffset])
               {
-                Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, only_update_vals);
+                Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_basebulk, fieldindex + space_info->buffer_offset_basebulk, x_buffer, x_lagr, normal, only_update_vals);
               }
             }
           }
@@ -5677,7 +5677,7 @@ namespace pyoomph
               unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
               if (dirichlet_active[fieldindex + space_info->buffer_offset_interf + Doffset])
               {
-                Generic_SetDirichletCondition(el, nodept, el->get_code_instance(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, only_update_vals);
+                Generic_SetDirichletCondition(el, nodept, el->get_jit_code(), fieldindex + space_info->buffer_offset_interf, valindex, x_buffer, x_lagr, normal, only_update_vals);
               }
             }
           }
@@ -5718,7 +5718,7 @@ namespace pyoomph
             x_lagr[i] = np_lagr[i];
           if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
           {
-            Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+            Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
 
             auto *ts = this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex)->time_stepper_pt();
             oomph::Vector<double> vmin(ts->ntstorage());
@@ -5734,7 +5734,7 @@ namespace pyoomph
               x_lagr[i] = np_lagr[i];
             if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
             {
-              Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+              Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
             }
             oomph::Vector<double> vmax(ts->ntstorage());
             for (unsigned t = 0; t < vmax.size(); t++)
@@ -5755,7 +5755,7 @@ namespace pyoomph
         // Finally reapply the Dirichlet condition at the midpoint itself (value slot 0)
         if (dirichlet_active[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset])
         {
-          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_code_instance(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
         }
       }
 
@@ -5768,7 +5768,7 @@ namespace pyoomph
       {
         if (dirichlet_active[fieldindex + ft->info_D0.buffer_offset_basebulk + Doffset])
         {
-          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_D0.internal_offset_new + fieldindex), el->get_code_instance(), fieldindex + ft->info_D0.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
+          Generic_SetDirichletCondition(el, this->element_pt(ei)->internal_data_pt(ft->info_D0.internal_offset_new + fieldindex), el->get_jit_code(), fieldindex + ft->info_D0.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, only_update_vals);
         }
       }
     }
@@ -5791,14 +5791,14 @@ namespace pyoomph
 		}
 
   // Creates a new "0d" pseudo-element wrapping a single ODE, using the code
-  // instance's generated residual/Jacobian routines. __CurrentCodeInstance is a
+  // instance's generated residual/Jacobian routines. __CurrentJITCode is a
   // thread-local-like hook that BulkElementODE0d's constructor reads to know which
   // generated code table it belongs to.
   oomph::GeneralisedElement *ODEStorageMesh::_create_ode_element(oomph::TimeStepper *ts)
   {
-    BulkElementBase::__CurrentCodeInstance = this->codeinst;
-    oomph::GeneralisedElement *ode = new BulkElementODE0d(this->codeinst, ts);
-    BulkElementBase::__CurrentCodeInstance = NULL;
+    BulkElementBase::__CurrentJITCode = this->jitcode;
+    oomph::GeneralisedElement *ode = new BulkElementODE0d(this->jitcode, ts);
+    BulkElementBase::__CurrentJITCode = NULL;
     this->add_element_pt(ode);
     return ode;
   }
@@ -5813,7 +5813,7 @@ namespace pyoomph
     {
       int ic_index = -1;
       auto *ode = dynamic_cast<BulkElementODE0d *>(this->element_pt(ei));
-      auto *ft = ode->get_code_instance()->get_func_table();
+      auto *ft = ode->get_jit_code()->get_func_table();
       for (unsigned int i = 0; i < ft->num_ICs; i++)
       {
         if (std::string(ft->IC_names[i]) == ic_name)
@@ -5825,9 +5825,9 @@ namespace pyoomph
       if (ic_index < 0)
         continue;
 
-      for (unsigned int fieldindex = 0; fieldindex < ode->get_code_instance()->get_func_table()->info_D0.numfields; fieldindex++)
+      for (unsigned int fieldindex = 0; fieldindex < ode->get_jit_code()->get_func_table()->info_D0.numfields; fieldindex++)
       {
-        Generic_SetInitialCondition(ode, ode->internal_data_pt(fieldindex), ode->get_code_instance(), fieldindex, 0, x_buffer, x_buffer, normal, false, false, ic_index);
+        Generic_SetInitialCondition(ode, ode->internal_data_pt(fieldindex), ode->get_jit_code(), fieldindex, 0, x_buffer, x_buffer, normal, false, false, ic_index);
       }
     }
   }
@@ -5843,11 +5843,11 @@ namespace pyoomph
     for (unsigned int ei = 0; ei < this->nelement(); ei++)
     {
       auto *ode = dynamic_cast<BulkElementODE0d *>(this->element_pt(ei));
-      for (unsigned int fieldindex = 0; fieldindex < ode->get_code_instance()->get_func_table()->info_D0.numfields; fieldindex++)
+      for (unsigned int fieldindex = 0; fieldindex < ode->get_jit_code()->get_func_table()->info_D0.numfields; fieldindex++)
       {
         if (dirichlet_active[fieldindex + Doffset])
         {
-          Generic_SetDirichletCondition(ode, ode->internal_data_pt(fieldindex), ode->get_code_instance(), fieldindex, 0, x_buffer, x_buffer, normal, only_update_vals);
+          Generic_SetDirichletCondition(ode, ode->internal_data_pt(fieldindex), ode->get_jit_code(), fieldindex, 0, x_buffer, x_buffer, normal, only_update_vals);
         }
         else if (!only_update_vals)
         {
@@ -5888,7 +5888,7 @@ namespace pyoomph
     for (unsigned int i = 0; i < this->nelement(); i++)
     {
       auto *ode = dynamic_cast<BulkElementBase *>(this->element_pt(i));
-      DynamicBulkElementInstance *ci = ode->get_code_instance();
+      DynamicJITCode *ci = ode->get_jit_code();
       auto *ft = ci->get_func_table();
       if (!ft->has_temporal_estimators)
         continue;
@@ -5948,7 +5948,7 @@ namespace pyoomph
     for (unsigned int ie = 0; ie < this->nelement(); ie++)
     {
       BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
-      DynamicBulkElementInstance *ci = be->get_code_instance();
+      DynamicJITCode *ci = be->get_jit_code();
       auto *functable = ci->get_func_table();
       auto &eleminfo = *be->get_eleminfo();
       unsigned offset_zeta=eleminfo.nodal_dim + functable->lagr_dim +be->dim(); // This is the offset for the zeta coordinate in the nodal data ( first Eulerian, then Lagrangian, then local coords. Finally zeta coords)
@@ -6024,7 +6024,7 @@ namespace pyoomph
     if (!this->nelement())
       return 0.0;
     BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    DynamicBulkElementInstance *ci = be->get_code_instance();
+    DynamicJITCode *ci = be->get_jit_code();
     auto *ft = ci->get_func_table();
     if (!ft->has_temporal_estimators)
       return 0.0;
@@ -6112,7 +6112,7 @@ namespace pyoomph
   }
 
   // Falls back from the generic Mesh implementation (which needs an actual node to
-  // inspect, and interface meshes may have none) to the code instance's declared
+  // inspect, and interface meshes may have none) to the code's declared
   // nodal dimension, or finally to the bulk mesh's dimension if no code is set yet.
   unsigned InterfaceMesh::get_nodal_dimension()
   {
@@ -6246,7 +6246,7 @@ namespace pyoomph
 
   // Currently disabled/unused feature (kept for reference): would zero out selected
   // bulk residual contributions at boundary nodes touched by this interface, for
-  // bulk equations that this interface's code instance flags for nullification.
+  // bulk equations that this interface's code flags for nullification.
   void InterfaceMesh::nullify_selected_bulk_dofs()
   {
     throw_runtime_error("Nullified dofs are deactivated for now... Never used so far");
@@ -6254,8 +6254,8 @@ namespace pyoomph
     if (!bulkmesh || !bulkmesh->nelement()) return;
     unsigned n_element = this->nelement();
     if (!n_element) return;
-    auto * for_ci=dynamic_cast<BulkElementBase*>(bulkmesh->element_pt(0))->get_code_instance(); //Code instance to nullify the dofs
-    auto * my_ci=dynamic_cast<BulkElementBase*>(this->element_pt(0))->get_code_instance(); //My code instance to nullify the dofs
+    auto * for_ci=dynamic_cast<BulkElementBase*>(bulkmesh->element_pt(0))->get_jit_code(); //Code to nullify the dofs
+    auto * my_ci=dynamic_cast<BulkElementBase*>(this->element_pt(0))->get_jit_code(); //My code to nullify the dofs
     for (auto index : my_ci->nullify_bulk_residuals)
     {
       for(unsigned e=0;e<n_element;e++)
@@ -6869,7 +6869,7 @@ namespace pyoomph
       snap.clear();
       return;
     }
-    // A snapshot taken against a different code instance describes different fields; there is nothing
+    // A snapshot taken against a different code describes different fields; there is nothing
     // sensible to fit from it, but the recovery pass below can still do its job. The nodal DG spaces
     // are part of that signature: same field COUNTS but a different space is still a different layout.
     DiscontinuousSnapshot now;
@@ -7092,7 +7092,7 @@ namespace pyoomph
     if (!old->code)
       throw_runtime_error("Cannot transfer the discontinuous fields of interface '" + interfacename + "': the previous mesh has no generated code attached");
     auto *oft = old->code->get_func_table();
-    // Normally both meshes are driven by the very same code instance, so this can only fire when the
+    // Normally both meshes are driven by the very same code, so this can only fire when the
     // equations were redefined together with the mesh (Problem.redefine_problem).
     std::string mismatch;
     if (oft->info_DL.numfields != nDL || oft->info_D0.numfields != nD0)
@@ -7633,11 +7633,11 @@ namespace pyoomph
   // (via rebuild_after_adapt/generate_interface_elements): which bulk mesh it is
   // attached to, under which boundary/interface name, and which generated code
   // instance defines its fields. Also pre-resolves the interface dof indices.
-  void InterfaceMesh::set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicBulkElementInstance *jitcode)
+  void InterfaceMesh::set_rebuild_information(Mesh *_bulkmesh, std::string intername, DynamicJITCode *interface_jitcode)
   {
     bulkmesh = _bulkmesh;
     interfacename = intername;
-    code = jitcode;
+    code = interface_jitcode;
     auto idofs=code->setup_interface_dof_indices();
     /*for (auto &idof : idofs)
     {
@@ -7791,9 +7791,9 @@ namespace pyoomph
     new_el->initial_cartesian_nondim_size = new_el->size();
     new_el->initial_quality_factor = new_el->get_quality_factor();
 
-    if (BulkElementBase::__CurrentCodeInstance->get_func_table()->integration_order)
+    if (BulkElementBase::__CurrentJITCode->get_func_table()->integration_order)
     {
-      new_el->set_integration_order(BulkElementBase::__CurrentCodeInstance->get_func_table()->integration_order);
+      new_el->set_integration_order(BulkElementBase::__CurrentJITCode->get_func_table()->integration_order);
     }
     return res;
   }
