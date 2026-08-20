@@ -419,3 +419,37 @@ def test_symmetric_saddle_point_reaches_machine_zero():
         assert conv[1] / conv[0] < 1e-12, \
             "one Newton step only reduced the residual by %.2e -- the linear solve is inaccurate, not " \
             "the Jacobian" % (conv[1] / conv[0])
+
+
+def test_symmetric_mtype_is_not_mistaken_for_an_escalated_one():
+    """mtype -2 must not leave MKL's stronger pivoting switched on behind it.
+
+    pardisoinit hands mtype -2 an IPARM(10) of 8 by itself, which is exactly what _ESCALATED_IPARM
+    asks for, so a check against the live iparm array reads every symmetric factorisation as
+    "already escalated". Two consequences, both tested here: the one-shot escalation is spent before
+    anything can use it, and PardisoSolver carries _ESCALATED_IPARM into iparm_override for the rest
+    of the run. The carried-over IPARM(13)=2 then failed the REORDERING (error -6) of the next
+    general-mtype factorisation whose matrix has unstored diagonal entries -- which is what this
+    problem looks like the moment the symmetric verdict drops and requires_explicit_diagonal() stops
+    forcing them, i.e. exactly what activating a bifurcation tracker does."""
+    with _WeakBCSaddlePointProblem() as p:
+        p.quiet()
+        p.initialise()
+        s = _pardiso_or_skip(p)
+        p.solve()
+        ps = s._current_pardiso
+        assert ps.mtype == -2
+        assert ps.iparm[9] == 8, "premise gone: mtype -2 no longer defaults to the escalated IPARM(10)"
+        assert ps._escalated_iparm is False, "the symmetric default was mistaken for an escalation"
+        assert ps._escalation_spent is False, "the one-shot escalation was spent without being used"
+        assert dict(s.iparm_override) == {}, \
+            "stronger pivoting was carried over into the rest of the run: %r" % dict(s.iparm_override)
+        dofs_sym = numpy.array(p.get_current_dofs()[0])
+
+        # The flip a tracker performs. It must still factorise - this is where the -6 was raised - and
+        # it must land on the same solution.
+        s.exploit_proven_symmetry = False
+        p.set_current_dofs(dofs_sym + 0.01)
+        p.solve()
+        assert s._current_pardiso.mtype == 11
+        assert numpy.max(numpy.abs(numpy.array(p.get_current_dofs()[0]) - dofs_sym)) < 1e-9

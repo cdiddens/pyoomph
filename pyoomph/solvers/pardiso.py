@@ -375,7 +375,17 @@ class pardisoSolver(object):
         # Both start True when the caller already asked for any part of it (via iparm_override,
         # including that carry-over), which skips the pointless retry and leaves a deliberate choice
         # of these two knobs alone.
-        self._escalated_iparm = any(self.iparm[k] == v for k, v in _ESCALATED_IPARM.items())
+        #
+        # Read off iparm_override, NOT off the resulting iparm array: pardisoinit gives mtype -2 an
+        # IPARM(10) of 8 by itself (its default pivot perturbation for symmetric indefinite), which is
+        # the very value _ESCALATED_IPARM asks for, so testing the array declared every single
+        # symmetric factorisation "already escalated". That was wrong twice over -- it spent the
+        # one-shot escalation before it could ever be used, and PardisoSolver then folded
+        # _ESCALATED_IPARM into iparm_override for the REST OF THE RUN. The carried-over IPARM(13)=2
+        # (two-level weighted matching) went on to fail the reordering with error -6 on the next
+        # general-mtype factorisation of a matrix with unstored diagonal entries, i.e. on any
+        # Lagrange-multiplier system whose verdict flips (a bifurcation tracker being activated).
+        self._escalated_iparm = any(iparm_override.get(k + 1) == v for k, v in _ESCALATED_IPARM.items())
         self._escalation_spent = self._escalated_iparm
         self._pre_escalation_iparm:dict[int,int] | None = None
 
