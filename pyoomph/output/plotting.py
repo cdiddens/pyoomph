@@ -881,6 +881,7 @@ class MatplotlibVectorFieldStreams(MatplotlibTriangulationBased):
     linewidths = 0.5
     linecolor = "black"
     density=1
+    arrowsize=1
     minlength=0.1
     maxlength=4.0
     arrowstyle=None
@@ -986,6 +987,7 @@ class MatplotlibVectorFieldStreams(MatplotlibTriangulationBased):
 
         kwargs["linewidth"] = self.linewidths
         kwargs["density"]=self.density
+        kwargs["arrowsize"]=self.arrowsize
         kwargs["minlength"] = self.minlength
         kwargs["maxlength"] = self.maxlength
 

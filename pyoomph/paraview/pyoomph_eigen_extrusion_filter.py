@@ -128,7 +128,30 @@ class PyoomphAzimuthalExtrusion(VTKPythonAlgorithmBase):
         toren={} # Rename fields: old->new
         toren_rev={} # Rename fields: new->old
         new_indices={}
-        for n,i in arr_to_index.items():    
+
+        # Combine the real and imaginary parts of the Eigenfunctions of the coordinate space into a single vector field
+        if "EigenRe_coordinate_x" in arr_to_index and "EigenIm_coordinate_x" in arr_to_index:
+            ReR=vtk_to_numpy(pd.GetArray(arr_to_index["EigenRe_coordinate_x"]))
+            ImR=vtk_to_numpy(pd.GetArray(arr_to_index["EigenIm_coordinate_x"]))
+            Vr=ReR*csmphi+ImR*snmphi
+            Vx=csphi*Vr
+            Vz=snphi*Vr
+            if "EigenRe_coordinate_y" in arr_to_index and "EigenIm_coordinate_y" in arr_to_index:
+                ReZ=vtk_to_numpy(pd.GetArray(arr_to_index["EigenRe_coordinate_y"]))
+                ImZ=vtk_to_numpy(pd.GetArray(arr_to_index["EigenIm_coordinate_y"]))
+                Vy=ReZ*csmphi+ImZ*snmphi
+                torem.append("EigenRe_coordinate_y")
+                torem.append("EigenIm_coordinate_y")
+            else:
+                Vy=numpy.zeros_like(Vx)
+            warpArr=numpy.array([Vx,Vy,Vz]).transpose()
+            newArr=numpy_to_vtk(warpArr)
+            newArr.SetName("Eigen_coordinate")
+            pd.AddArray(newArr)
+            torem.append("EigenRe_coordinate_x")
+            torem.append("EigenIm_coordinate_x")
+
+        for n,i in arr_to_index.items():
             if n.startswith("Eigen"):
                 continue
 
