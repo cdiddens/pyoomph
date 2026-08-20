@@ -485,7 +485,7 @@ class BaseEquations(_pyoomph.Equations):
         return self
 
     def get_dx(self, use_scaling:bool=True, lagrangian:bool=False,coordsys:_pyoomph.CustomCoordinateSystem | None=None)->"Expression":
-        master = self._get_combined_element()  # TODO This does not allow for dx on individual coordinate systems
+        master = self._master()  # TODO This does not allow for dx on individual coordinate systems
         if coordsys is None:
             coordsys = master.get_coordinate_system()
         assert isinstance(coordsys,BaseCoordinateSystem)
@@ -498,7 +498,7 @@ class BaseEquations(_pyoomph.Equations):
         """
         If this domain is a subdomain of another domain, i.e. a boundary, this function returns the parent domain. Otherwise, it returns None.
         """
-        master = self._get_combined_element()
+        master = self._master()
         cg=master._assert_codegen()
         res=cg._get_parent_domain()
         if res is None:
@@ -656,7 +656,7 @@ class BaseEquations(_pyoomph.Equations):
         Entry 1 contains the names of the fields that are pinned at r=0 for azimuthal eigensolves with m=1. This pinning is implemented by modifying the eigenproblem matrices.
         Entry 2 contains the names of the fields that are pinned at r=0 for azimuthal eigensolves with m>=2. This pinning is implemented by modifying the eigenproblem matrices.        
         """
-        master=self._get_combined_element()
+        master=self._master()
         return master._azimuthal_r0_info
 
     def before_precice_initialise(self,eqtree:"EquationTree"):
@@ -712,7 +712,7 @@ class BaseEquations(_pyoomph.Equations):
         return self._residuals_for_tex
 
     def get_combined_equations(self) -> "BaseEquations":
-        return self._get_combined_element()
+        return self._master()
 
     def calculate_error_overrides(self):
         pass
@@ -829,7 +829,7 @@ class BaseEquations(_pyoomph.Equations):
         return cg.get_space_of_field(name)
 
     def add_named_numerical_factor(self,**kwargs:"ExpressionOrNum"):
-        mst=self._get_combined_element()
+        mst=self._master()
         cg=mst._assert_codegen()
         cg.add_named_numerical_factor(**kwargs)
 
@@ -860,19 +860,19 @@ class BaseEquations(_pyoomph.Equations):
         self._final_element = final
 
     def define_field_by_substitution(self, fieldname:str, expr:"ExpressionOrNum", also_on_interface:bool=False):
-        master = self._get_combined_element()
+        master = self._master()
         master._additional_fields[fieldname] = expr
         if also_on_interface:
             master._additional_fields_also_on_interface[fieldname] = expr
 
     def define_testfunction_by_substitution(self, fieldname:str, expr:"ExpressionOrNum", also_on_interface:bool=False):
-        master = self._get_combined_element()
+        master = self._master()
         master._additional_testfuncs[fieldname] = expr
         if also_on_interface:
             master._additional_testfuncs_also_on_interface[fieldname] = expr
 
     def set_scaling(self,_field_scalings:"dict[str,ExpressionOrNum | str] | None"=None,*,allow_scales_with_fields:bool=False, **args:"ExpressionOrNum | str"):
-        mst = self._get_combined_element()
+        mst = self._master()
         all_args:"dict[str,ExpressionOrNum | str]"=dict(args)
         if _field_scalings is not None:
             all_args.update(_field_scalings)
@@ -889,7 +889,7 @@ class BaseEquations(_pyoomph.Equations):
                     mst._scales_to_check_for_fields.remove(n)
 
     def set_test_scaling(self,_field_scalings:"dict[str,ExpressionOrNum | str] | None"=None, *, allow_scales_with_fields:bool=False, **args:"ExpressionOrNum | str"):
-        mst = self._get_combined_element()
+        mst = self._master()
         all_args:"dict[str,ExpressionOrNum | str]"=dict(args)
         if _field_scalings is not None:
             all_args.update(_field_scalings)
@@ -909,7 +909,7 @@ class BaseEquations(_pyoomph.Equations):
         """
         Returns the element dimension of the domain where the equations are defined.
         """
-        master=self._get_combined_element()
+        master=self._master()
         cg=master._assert_codegen()
         return cg.dimension
 
@@ -917,7 +917,7 @@ class BaseEquations(_pyoomph.Equations):
         """
         Returns the nodal (Eulerian) dimension of the domain where the equations are defined.
         """
-        master = self._get_combined_element()
+        master = self._master()
         cg = master._assert_codegen()
         return cg.get_nodal_dimension()
 
@@ -927,7 +927,7 @@ class BaseEquations(_pyoomph.Equations):
         
         Note that ``var("normal")`` is essentially the same.
         """
-        master = self._get_combined_element()
+        master = self._master()
         cg=master._assert_codegen()
         ndim = cg.get_nodal_dimension()
         if ndim == 0:
@@ -936,14 +936,21 @@ class BaseEquations(_pyoomph.Equations):
         #return vector([cg._get_normal_component(i) for i in range(ndim)])
         return var("normal",domain=cg)
 
-    def _get_combined_element(self)->"BaseEquations":
+    def _master(self)->"BaseEquations":
+        """The object holding this domain's shared state (scalings, additional fields, initial and
+        Dirichlet conditions, ...). For an equation that has been combined with others it is the
+        enclosing combined object, otherwise the equation itself."""
         if self._final_element is None:
             return self
         else:
-            return self._final_element._get_combined_element()
+            return self._final_element._master()
+
+    def _get_combined_element(self)->"BaseEquations":
+        # Former name of _master(), kept because it leaked into user subclasses.
+        return self._master()
 
     def get_current_code_generator(self) -> FiniteElementCodeGenerator:
-        mst=self._get_combined_element()
+        mst=self._master()
         assert mst is not None
         return mst._assert_codegen()
 
@@ -953,7 +960,7 @@ class BaseEquations(_pyoomph.Equations):
         return mesh
 
     def _perform_define_fields(self):
-        master = self._get_combined_element()
+        master = self._master()
         parent_domain=self.get_parent_domain()
         if parent_domain is not None:
             p=parent_domain.get_equations().get_azimuthal_r0_info()
@@ -985,7 +992,7 @@ class BaseEquations(_pyoomph.Equations):
     def get_scaling(self, n:str,testscale:Literal["from_parent"])->"ExpressionOrNum | None": ...
 
     def get_scaling(self, n:str,testscale:bool | Literal["from_parent"]=False)->"ExpressionOrNum | None":
-        master = self._get_combined_element()
+        master = self._master()
         cg=master._assert_codegen()
         #print("GETTING SCALE", n, self, master, self._scaling.get(n, None), self._scaling, self._is_ode(),hasattr(self, "get_parent_domain"), cg.get_parent_domain())
         arr=self._test_scaling if testscale else self._scaling
@@ -1018,7 +1025,7 @@ class BaseEquations(_pyoomph.Equations):
 
     def set_initial_condition(self, field:str, expr:"ExpressionOrNum", degraded_start:Literal["auto"] | bool="auto",IC_name:str=""):
         #self._perform_define_fields()
-        master = self._get_combined_element()
+        master = self._master()
         if expr is None:
             raise RuntimeError("Cannot set initial condition to None")
         if type(expr) == float or type(expr) == int:
@@ -1037,7 +1044,7 @@ class BaseEquations(_pyoomph.Equations):
         master._initial_conditions[field][IC_name] = (expr, degraded_startI,self)
 
     def set_Dirichlet_condition(self, field:str, expr:"ExpressionOrNum"):
-        master = self._get_combined_element()
+        master = self._master()
         if type(expr) == float or type(expr) == int:
             expr = _pyoomph.Expression(expr)
         master._Dirichlet_conditions[field] = (expr,self)
@@ -1093,7 +1100,7 @@ class BaseEquations(_pyoomph.Equations):
             destination: Optional residual destination for multiple residuals. Defaults to ``None``.
         """
         
-        master = self._get_combined_element()
+        master = self._master()
         if not self.requires_interior_facet_terms or not master.interior_facet_terms_required():
             raise RuntimeError("Please set the property requires_interior_facet_terms=True in the __init__ of the Equations class before calling add_interior_facet_residual")
         if not isinstance(expr, _pyoomph.Expression):
@@ -1111,7 +1118,7 @@ class BaseEquations(_pyoomph.Equations):
             expr: The expression or number to be added as a residual.
             destination: The destination of the residual. Defaults to ``None``, can be used to specify different residuals.
         """
-        master = self._get_combined_element()
+        master = self._master()
         if not isinstance(expr, _pyoomph.Expression):
             expr = _pyoomph.Expression(expr)
         dn = destination if destination is not None else ""
@@ -1153,7 +1160,7 @@ class BaseEquations(_pyoomph.Equations):
 
     def _define_fields(self):
         self._setup_combined_element()
-        master = self._get_combined_element()
+        master = self._master()
 #        print("IN DEFINE FIELDS. Master is ",master,self._assert_codegen())
         master._perform_define_fields()
 
@@ -1183,7 +1190,7 @@ class BaseEquations(_pyoomph.Equations):
         
 
         self._setup_combined_element()
-        master = self._get_combined_element()
+        master = self._master()
         #master._perform_define_fields()
         master.define_scaling()
         cg=self._assert_codegen()
@@ -1204,7 +1211,7 @@ class BaseEquations(_pyoomph.Equations):
         
 
     def get_coordinate_system(self)->BaseCoordinateSystem:
-        master = self._get_combined_element()
+        master = self._master()
         if master._coordinate_system is not None:
             return master._coordinate_system
         elif (pdom:=master.get_current_code_generator().get_parent_domain()):
@@ -1217,7 +1224,7 @@ class BaseEquations(_pyoomph.Equations):
         #msh=self.get_mesh()
         #if msh is not None:
         #    msh=msh._name
-        master = self._get_combined_element()
+        master = self._master()
         try:
             cg:"FiniteElementCodeGenerator" = master._assert_codegen()
 
@@ -1378,7 +1385,7 @@ class BaseEquations(_pyoomph.Equations):
             "Cannot expand the field '" + name + "' since it is not defined in the equation or any parents.\nCurrent code generator is:"+str(cg)+" : " +cg_dom_name+"\nIn: "+str(self)+"\nAdditional fields are: "+", ".join(self._additional_fields.keys()))
 
     def expand_additional_testfunction(self, name:str, expression:"Expression",in_domain:_pyoomph.FiniteElementCode)->"Expression":
-        master = self._get_combined_element()
+        master = self._master()
         try:
             cg = master._assert_codegen()
         except:
@@ -1424,11 +1431,11 @@ class BaseEquations(_pyoomph.Equations):
             spaceI = "ED0"
         else:
             raise RuntimeError("External fields may only be on space D0 at the moment")
-        master = self._get_combined_element()
+        master = self._master()
         master._register_field(name, spaceI)
 
     def set_temporal_error_factor(self, name:str, factor:float):
-        master = self._get_combined_element()
+        master = self._master()
         cg=master._assert_codegen()
         if isinstance(master,Equations):
             if name in master._vectorfields.keys(): 
@@ -1446,7 +1453,7 @@ class BaseEquations(_pyoomph.Equations):
 
         if self.default_timestepping_scheme is not None:
             return self.default_timestepping_scheme
-        master = self._get_combined_element()
+        master = self._master()
         if master.default_timestepping_scheme is not None:
             return master.default_timestepping_scheme
 
@@ -1524,7 +1531,7 @@ class BaseEquations(_pyoomph.Equations):
                 "Please combine equation with a string (name of the domain) to restrict the equations to a domain")
 
     def get_my_domain(self)->FiniteElementCodeGenerator:
-        master = self._get_combined_element()
+        master = self._master()
         cg = master._assert_codegen()
         return cg
 
@@ -1567,6 +1574,12 @@ class BaseEquations(_pyoomph.Equations):
     def __add__(self, other:"Literal[0] | BaseEquations | EquationTree")->"CombinedEquations | EquationTree | BaseEquations":
         if other==0:
             return self
+        # EquationTree is tested first: it is about to become a BaseEquations subclass, and an
+        # "eqs + tree" that fell into the BaseEquations branch would build a combined equation
+        # containing a tree node instead of merging the two trees.
+        if isinstance(other, EquationTree):
+            mytree = EquationTree(self, None)
+            return mytree + other
         if isinstance(other, BaseEquations):
             if isinstance(self,CombinedEquations):
                 if isinstance(other,CombinedEquations):
@@ -1577,9 +1590,6 @@ class BaseEquations(_pyoomph.Equations):
                 return CombinedEquations(*([self]+other._subelements)) 
             else:
                 return CombinedEquations(self, other)
-        elif isinstance(other, EquationTree): #type:ignore
-            mytree = EquationTree(self, None)
-            return mytree + other
         else:
             raise RuntimeError("Cannot add (+) Equation and " + other.__class__.__name__)
 
@@ -1598,7 +1608,7 @@ class BaseEquations(_pyoomph.Equations):
         """
         
         
-        master = self._get_combined_element()
+        master = self._master()
         cg = master._assert_codegen()
         if not (isinstance(expr,int) or isinstance(expr,float) or isinstance(expr,_pyoomph.Expression)) and  callable(expr):
             expr=expr()
@@ -1660,7 +1670,7 @@ class BaseEquations(_pyoomph.Equations):
         return self.add_local_function("__facet_recovery_"+fieldname,expr)
 
     def add_integral_function(self, name:str, expr:"ExpressionOrNum"):
-        master = self._get_combined_element()
+        master = self._master()
         cg=master._assert_codegen()
         if not isinstance(expr,_pyoomph.Expression):
             expr=_pyoomph.Expression(expr)
@@ -1675,13 +1685,13 @@ class BaseEquations(_pyoomph.Equations):
 
 
     def add_dependent_integral_function(self,name:str,func:Callable[...,"ExpressionOrNum"]):
-        master = self._get_combined_element()
+        master = self._master()
         cg = master._assert_codegen()
         cg._register_dependent_integral_function(name, func)  
 
 
     def expand_expression_for_debugging(self,expr:"ExpressionOrNum",raise_error:bool=True,collect_units:bool=True,unit_error:bool=True,with_mode_expansion:bool=True) -> Expression:
-        master = self._get_combined_element()
+        master = self._master()
         cg = master._assert_codegen()
         if not isinstance(expr,_pyoomph.Expression):
             expr=_pyoomph.Expression(expr)
@@ -2365,9 +2375,16 @@ class EquationTree:
             raise ValueError(
                 "Please combine equation with a string (name of the domain) or a list/tuple/set of strings (names of several domains) to restrict the equations to a domain")
 
-    def __radd__(self, other:Literal[0])->"EquationTree":
+    def __radd__(self, other:"Literal[0] | BaseEquations")->"EquationTree":
         if other==0:
             return self
+        # Once EquationTree derives from BaseEquations, CPython hands "eqs + tree" to the right
+        # operand first (subclass overriding the nb_add slot wins), so this - not
+        # BaseEquations.__add__ - is what runs for the commonest idiom in the whole library,
+        # eqs + SomeBC() @ "boundary". Left operand stays leftmost so that child insertion
+        # order, which decides which of two conditions on a boundary is applied last, is kept.
+        elif isinstance(other,BaseEquations):
+            return EquationTree(other,parent=None)+self
         else:
             raise RuntimeError("Cannot add "+str(other)+" and "+str(self))
 
@@ -2501,7 +2518,7 @@ class Equations(BaseEquations):
         Returns:
             The interface domain at the opposite side.
         """
-        master = self._get_combined_element()
+        master = self._master()
         cg=master._assert_codegen()
         if cg._get_opposite_interface() is None:
             if raise_error_if_none:
@@ -2565,7 +2582,7 @@ class Equations(BaseEquations):
         Returns:
             None
         """
-        master = self._get_combined_element()  # TODO This does not allow for dx on individual coordinate systems
+        master = self._master()  # TODO This does not allow for dx on individual coordinate systems
         cg = master._assert_codegen()
         cg._coordinates_as_dofs = True
         if coordinate_space is not None:
@@ -2590,7 +2607,7 @@ class Equations(BaseEquations):
             master._azimuthal_r0_info[2].add("mesh"+zcomponent)
     
     def _internal_define_scalar_field(self,name:str, space:"FiniteElementSpaceEnum", scale:"ExpressionOrNum | str | None"=None, testscale:"ExpressionOrNum | str | None"=None, discontinuous_refinement_exponent:float | None=None,allow_scales_with_fields:bool=False):
-        master = self._get_combined_element()
+        master = self._master()
         pdom=master.get_parent_domain()
         if pdom is not None:
             # Check a bit what is possible
@@ -2679,7 +2696,7 @@ class Equations(BaseEquations):
         dim = dim if dim is not None else self.get_nodal_dimension()  # TODO: Here, it should be nodal_dimension!
         v, vtest,comps = self.get_coordinate_system().define_vector_field(name, space, dim, self)
         also_on_interface = space in {"C1","D1","C2","D2","C1TB","D1TB","C2TB","D2TB"}
-        mst=self._get_combined_element()
+        mst=self._master()
         assert isinstance(mst,Equations)
         mst._vectorfields[name]=comps
         self.define_field_by_substitution(name, vector(*v), also_on_interface=also_on_interface)
@@ -2720,7 +2737,7 @@ class Equations(BaseEquations):
         dim = dim if dim is not None else self.get_nodal_dimension()  # TODO: Here, it should be nodal_dimension!
         t, ttest,comps = self.get_coordinate_system().define_tensor_field(name, space, dim, self, symmetric)
         also_on_interface:bool = space in { "C1","C2","C1TB","C2TB","D2TB","D2","D1","D1TB"}
-        mst=self._get_combined_element()
+        mst=self._master()
         assert isinstance(mst,Equations)
         mst._tensorfields[name]=comps
         # list is invariant, but matrix() only reads its argument, so a list[list[Expression]] is safe here
@@ -2739,7 +2756,7 @@ class Equations(BaseEquations):
         return nondim("_nodal_delta")
 
     def add_spatial_error_estimator(self, expr:"Expression",for_base:bool=True,for_eigen:bool=True,group:str="",normalize_relative:float=1.0,weight:float=1.0):
-        master = self._get_combined_element()
+        master = self._master()
         cg=master._assert_codegen()
         if for_base:
             cg._add_Z2_flux(expr,False,group,normalize_relative,weight)
@@ -2836,7 +2853,7 @@ class ODEEquations(BaseEquations):
             testscale: Optional scaling factor for the test functions associated with the ODE variable(s).
         """
         for name in names:
-            master = self._get_combined_element()
+            master = self._master()
             if _pyoomph.get_verbosity_flag() != 0:
                 print("REGISTER", name, self, master, self == master)
             master._register_field(name, "D0")
@@ -3170,7 +3187,7 @@ class CombinedEquations(Equations):
         self._subelements:list[BaseEquations] = [*args]
 
     def _bckup_final_elem(self):
-        return [e._get_combined_element() for e in self._subelements]
+        return [e._master() for e in self._subelements]
 
     def _rstr_final_elem(self,bck:list[BaseEquations]):
         for e,fe in zip(self._subelements,bck):

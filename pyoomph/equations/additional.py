@@ -236,7 +236,7 @@ class SetCoordinateSystem(Equations):
         self.coord_sys=coord_sys
 
     def define_fields(self):
-        master = self._get_combined_element()
+        master = self._master()
         master._coordinate_system=self.coord_sys
 
 
@@ -254,7 +254,7 @@ class ApplyMappingOnAddedResidual(BaseEquations):    #
         self.mapping=mapping
 
     def define_fields(self):
-        master=self._get_combined_element()
+        master=self._master()
         master._residual_mapping_functions.append(self.mapping)
 
 

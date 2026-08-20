@@ -642,10 +642,10 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         
     def define_fields(self):
         # Get the coordinate space
-        space=cast(FiniteElementSpaceEnum,self._get_combined_element()._assert_codegen()._coordinate_space)
+        space=cast(FiniteElementSpaceEnum,self._master()._assert_codegen()._coordinate_space)
         # each interface will need a unique name, so that we have individual fields for each interface
         # This won't be necessary in the general case, since usually, you have corners between two boundaries
-        fn=self._get_combined_element()._assert_codegen().get_full_name()
+        fn=self._master()._assert_codegen().get_full_name()
         iname="__".join(fn.split("/")[1:])        
         self.define_scalar_field("_s_fixed_"+iname,space) # Fixed arclength of the reference configuration
         self.define_scalar_field("_s_solved_"+iname,space,testscale=scale_factor("spatial")**2) # solved arclength between start and end points
@@ -658,7 +658,7 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         if self.get_nodal_dimension()!=2: 
             raise RuntimeError("EnforcedInterfacialLaplaceSmoothing is only implemented for 2d meshes")
         # Bind everything
-        fn=self._get_combined_element()._assert_codegen().get_full_name()
+        fn=self._master()._assert_codegen().get_full_name()
         iname="__".join(fn.split("/")[1:])
         s,stest=var_and_test("_s_solved_"+iname)
         
@@ -683,7 +683,7 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
     def before_assigning_equations_postorder(self, mesh:"AnyMesh"):
         # Just make sure to initialize the arclengths of the interface nodes
         assert isinstance(mesh,InterfaceMesh)
-        fn=self._get_combined_element()._assert_codegen().get_full_name()
+        fn=self._master()._assert_codegen().get_full_name()
         iname="__".join(fn.split("/")[1:])
         data=mesh.get_problem().get_cached_mesh_data(mesh)
         segs,_=data.get_interface_line_segments()
@@ -723,7 +723,7 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
             return set()
 
         angular_mode=int(angular_mode)
-        fn=self._get_combined_element()._assert_codegen().get_full_name()
+        fn=self._master()._assert_codegen().get_full_name()
         iname="__".join(fn.split("/")[1:])
 
         if angular_mode==0:
@@ -739,7 +739,7 @@ class EnforcedInterfacialLaplaceSmoothingCorner(InterfaceEquations):
     """Helper class to pin the arclength and deactivate the tangential shift at a corner of an interface. This is used in EnforcedInterfacialLaplaceSmoothing.with_corners"""
     required_parent_type=EnforcedInterfacialLaplaceSmoothing
     def define_residuals(self):
-        fn=self._get_combined_element()._assert_codegen().get_full_name()
+        fn=self._master()._assert_codegen().get_full_name()
         iname="__".join(fn.split("/")[1:-1])
         self.set_Dirichlet_condition("_s_solved_"+iname,True) # fix the arclength of the corner
         self.set_Dirichlet_condition("_tang_shift_"+iname,0) # deactivate the tangential shift of the corner

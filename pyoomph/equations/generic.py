@@ -314,7 +314,7 @@ class SpatialErrorEstimator(Equations):
         # here used to raise "matrix::operator(): index out of range" from vector_gradient. Each
         # component contributes its own criterion to the same group, which is what naming the
         # components by hand would have done anyway.
-        combined=self._get_combined_element()
+        combined=self._master()
         tensorfields=getattr(combined,"_tensorfields",{}) if isinstance(combined,Equations) else {}
         for flux,factor in self.fluxes.items():
             if isinstance(flux,str):
@@ -672,7 +672,7 @@ class LocalExpressions(Equations):
         self.local_expressions = {k:v for k,v in local_expressions.items()}
 
     def define_additional_functions(self):
-        if self._get_combined_element()._is_ode():
+        if self._master()._is_ode():
             raise self.add_exception_info( RuntimeError("LocalExpressions cannot be used with ODE equations. Use IntegralObservables instead."))
         for k,v in self.local_expressions.items():
             self.add_local_function(k, v )
@@ -788,7 +788,7 @@ class ExtremumObservables(Equations):
 
     def add_extremum_function(self,name:str,expr:"ExpressionOrNum | Callable[[], ExpressionOrNum]"):
         from .. import _pyoomph_core as _pyoomph
-        master = self._get_combined_element()
+        master = self._master()
         cg = master._assert_codegen()
         # Equivalent to the original "not(isinstance(expr,int) or isinstance(expr,float) or
         # isinstance(expr,Expression)) and callable(expr)": int/float instances are never

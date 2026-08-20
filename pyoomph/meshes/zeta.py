@@ -555,7 +555,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
 
 class DebugZetaCoordinate(InterfaceEquations):
     def get_zeta_name(self):
-        master=self._get_combined_element()
+        master=self._master()
         name=master._assert_codegen()._name
         return "zeta_"+str(name)
     
