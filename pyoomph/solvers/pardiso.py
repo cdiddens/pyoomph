@@ -255,6 +255,18 @@ def mkl_set_num_threads(num_threads:int):
 # (ndof 240172) about six times faster.
 _ESCALATED_IPARM = {12: 2, 9: 8}  # 0-based indices, i.e. IPARM(13) and IPARM(10)
 
+# How far to refine a symmetric-mtype solve that MKL left unrefined (see _needs_explicit_refinement).
+# TWO steps, because that is exactly what MKL grants a general mtype in the same situation -- this is
+# parity with the path the symmetric factorisation replaced, not a stronger repair, so it must not cost
+# more either. It is enough where it was measured: on the four-domain cross point of
+# tests/test_adaptive_interface_coupling.py it takes the backward error from 4.6e-05 to 5.0e-14 (a
+# third step reaches 1.2e-15, and the Newton residual is 7e-16 from two steps on). Anything left over
+# is caught by the backward-error check in PardisoSolver, and a run that genuinely needs more can ask
+# for repair_bad_solves, which refines up to 20 steps and escalates the pivoting. MKL spends the whole
+# cap once one is given -- it reports IPARM(7) == cap for every value tried -- so the cap IS the cost,
+# and 20 here would be 20 triangular solves on every perturbed factorisation.
+_SYMMETRIC_AUTO_REFINEMENT_STEPS = 2
+
 # Backward error above which a solve is disbelieved and the escalation above is tried. Healthy solves
 # of that same tutorial peak at 1e-6 while the broken ones sit at 1e0, so any threshold in between
 # separates them. 1e-4 keeps two orders of margin on the side that must not fire, because a false
@@ -485,6 +497,19 @@ class pardisoSolver(object):
         finally:
             self.iparm[7] = old
 
+    # Whether MKL will refine this solve on its own, or whether we have to ask for it.
+    #
+    # The "at most two steps when a pivot was perturbed" rule above is what keeps the general mtypes
+    # usable on a saddle-point system, and it is NOT applied to the symmetric ones. Measured on the
+    # Lagrange-multiplier interfaces of tests/test_adaptive_interface_coupling.py: mtype -2 reports 25
+    # perturbed pivots out of 138 dofs (the multiplier rows, whose diagonal is zero) and then performs
+    # ZERO refinement steps -- IPARM(7) comes back 0 -- leaving a backward error of up to 9e-5 and a
+    # Newton step that stalls at 1e-10 instead of machine zero. The same meshes under mtype 11 perturb
+    # too, but come back refined in 2 steps at 1e-16. So on the symmetric mtypes the refinement is not
+    # an extra repair to be opted into, it is the one MKL applies by itself everywhere else.
+    def _needs_explicit_refinement(self)->bool:
+        return self.mtype not in (11, 13) and self.iparm[13] > 0
+
     # Rebuild the factorisation with MKL's stronger pivoting (_ESCALATED_IPARM). IPARM(13) is read by
     # the REORDERING phase, so this cannot reuse the existing analysis -- it has to go back through
     # phase 12, and the handle must be released first or MKL leaks its internal workspace. Returns
@@ -546,15 +571,23 @@ class pardisoSolver(object):
             # the next step on it (see _invalidate_factorisation) -- opting out of repairs is not opting
             # in to reusing a factorisation that has demonstrably stopped working.
             #
-            # Dropping the refinement is deliberate rather than incidental. It is a repair by MKL's own
-            # machinery, and one that raises: on a singular matrix MKL reports the damage refinement
-            # cannot repair as error -4 out of phase 33. The reason it was added is still live, though --
-            # without it the ALE box of tests/test_adaptive_3d_campaign.py stalls at a Newton residual of
-            # 1e-8, so this flag is not free on hard systems.
+            # Dropping the EXTRA refinement is deliberate rather than incidental. It is a repair by
+            # MKL's own machinery, and one that raises: on a singular matrix MKL reports the damage
+            # refinement cannot repair as error -4 out of phase 33. The reason it was added is still
+            # live, though -- without it the ALE box of tests/test_adaptive_3d_campaign.py stalls at a
+            # Newton residual of 1e-8, so this flag is not free on hard systems.
+            #
+            # What is NOT dropped is the refinement MKL would have done by itself: on the symmetric
+            # mtypes it does none (see _needs_explicit_refinement), so asking for it here is what makes
+            # a proven-symmetric factorisation behave like the general one it replaced, rather than an
+            # opt-in repair on top. It costs nothing when no pivot was perturbed, which is the healthy
+            # case. The -4 exposure comes with it, and is the same one every mtype 11 solve has always
+            # had.
             #
             # A factorisation that fails outright (phases 12/22, e.g. out of memory) still raises from
             # run_pardiso; there is no solution vector to hand on in that case. See _check_pardiso_error.
-            x = self.solve(rhs)
+            x = (self._solve_refined(rhs, _SYMMETRIC_AUTO_REFINEMENT_STEPS)
+                 if self._needs_explicit_refinement() else self.solve(rhs))
             self.last_backward_error = self._backward_error(x, rhs)
             if self.last_backward_error is not None and self.last_backward_error > _BACKWARD_ERROR_LIMIT:
                 # Said out loud even though the repairs were opted out of: the alternative is a run that

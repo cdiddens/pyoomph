@@ -125,6 +125,48 @@ class _MovingMeshProblem(Problem):
         self.add_equations(eqs @ "domain")
 
 
+class _WeakBCSaddlePointProblem(Problem):
+    """Poisson whose top boundary condition is imposed weakly, by a Lagrange-multiplier FIELD.
+
+    [[A, B^T], [B, 0]]: symmetric, and every multiplier row has a ZERO diagonal. That is what makes
+    MKL perturb pivots under mtype -2 (13 of them here), which is the situation the symmetric path has
+    to survive - see test_symmetric_saddle_point_reaches_machine_zero.
+    """
+
+    def define_problem(self):
+        self.add_mesh(RectangularQuadMesh(N=6))
+
+        class _Bulk(Equations):
+            def define_fields(self):
+                self.define_scalar_field("u", "C2")
+
+            def define_residuals(self):
+                u, v = var_and_test("u")
+                self.add_residual(weak(grad(u), grad(v)) - weak(1, v))
+
+        class _WeakBC(InterfaceEquations):
+            required_parent_type = Equations
+
+            def define_fields(self):
+                self.define_scalar_field("lambda_u", "C2")
+
+            def define_residuals(self):
+                lam, lamtest = var_and_test("lambda_u")
+                u, utest = var_and_test("u")
+                # Both halves written with the same weak(), so the two off-diagonal blocks really are
+                # each other's transpose and the whole matrix is symmetric.
+                self.add_residual(weak(lam, utest) + weak(u, lamtest))
+
+        eqs = _Bulk()
+        # Strongly pinned on the bottom only. Pinning the sides as well would put a Dirichlet
+        # condition on the two top CORNER nodes, whose multipliers then constrain nothing and are
+        # free to take any value at all -- a genuinely singular pair of rows, which is a different
+        # (and much less interesting) reason for Pardiso to perturb pivots.
+        eqs += DirichletBC(u=0) @ "bottom"
+        eqs += _WeakBC() @ "top"
+        self.add_equations(eqs @ "domain")
+
+
 class _BratuProblem(Problem):
     """u'' + lambda*exp(u) = 0: symmetric Jacobian AND a genuine fold (at lambda ~ 3.5138), so the
     same problem exercises the verdict, the tracker gate and the flip back - end to end."""
@@ -349,3 +391,31 @@ def test_indefinite_mass_matrix_falls_back_to_the_general_driver(solver):
         assert es.last_symmetry_decision is False
         assert "positive semi-definite" in es.last_symmetry_decision_reason
         assert numpy.max(numpy.abs(numpy.sort_complex(evs) - numpy.array([-1j, 1j]))) < 1e-8
+
+
+# ---------------------------------------------------------------------------------------------------
+# Perturbed pivots on the symmetric path
+# ---------------------------------------------------------------------------------------------------
+
+def test_symmetric_saddle_point_reaches_machine_zero():
+    """MKL grants a general mtype up to two iterative-refinement steps by itself whenever it perturbed
+    a pivot, and grants a symmetric one NONE. Left alone, mtype -2 therefore returns this Lagrange-
+    multiplier system with a backward error of ~1e-5 and the Newton step stalls seven digits short - it
+    reaches 5.0e-09 instead of 2.6e-16 (measured by disabling _needs_explicit_refinement), and 1e-10 on
+    the coupled interfaces of test_adaptive_interface_coupling.py, which is how this was found.
+    pardisoSolver asks MKL for those two steps itself."""
+    with _WeakBCSaddlePointProblem() as p:
+        p.quiet()
+        p.initialise()
+        s = _pardiso_or_skip(p)
+        p.solve()
+        ps = s._current_pardiso
+        assert s.last_symmetry_decision is True and ps.mtype == -2
+        # The premise: with no perturbed pivot there is nothing to refine and the test would pass
+        # whatever the refinement does.
+        assert ps.iparm[13] > 0, "no pivot was perturbed, so the refinement under test never applied"
+        assert ps.iparm[6] > 0, "MKL was not asked to refine the symmetric solve"
+        conv = p.get_last_residual_convergence()
+        assert conv[1] / conv[0] < 1e-12, \
+            "one Newton step only reduced the residual by %.2e -- the linear solve is inaccurate, not " \
+            "the Jacobian" % (conv[1] / conv[0])
