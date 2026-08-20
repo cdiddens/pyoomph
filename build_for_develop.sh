@@ -32,7 +32,9 @@ if $PYTHON -c 'import os, sys, sysconfig; sys.exit(0 if sys.prefix == sys.base_p
   PEP668=(--break-system-packages)
 fi
 
-$PYTHON -m pip install "${PEP668[@]}" --no-build-isolation -e . -v \
+# The ${arr[@]+"${arr[@]}"} form (rather than plain "${PEP668[@]}") is needed because macOS ships
+# bash 3.2, where expanding an empty array under `set -u` raises "unbound variable".
+$PYTHON -m pip install ${PEP668[@]+"${PEP668[@]}"} --no-build-isolation -e . -v \
     --config-settings=editable.mode=redirect \
     --config-settings=build-dir=build \
     --config-settings=build.verbose=true \
