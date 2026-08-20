@@ -40,8 +40,55 @@ from ..typings import *
 
 if TYPE_CHECKING:
     from ..generic import Problem
-    from ..materials.generic import AnyMaterialProperties
+    from ..materials.generic import AnyMaterialProperties, BaseInterfaceProperties
     from .navier_stokes import StokesEquations
+
+
+def ion_fieldname_stem(ion_name:str)->str:
+    """
+    The field-name stem of an ion, i.e. its name made into a valid variable name.
+
+    Ions are naturally written ``"Na+"``, ``"Cl-"``, ``"SO4 2-"``, but a pyoomph field name may only
+    contain letters, digits and underscores. The charge signs become ``_p`` and ``_m`` and anything
+    else invalid becomes ``_``, so ``"Na+"`` is solved for as ``c_Na_p``. That is the name a
+    :py:class:`~pyoomph.equations.generic.DirichletBC` on it has to use, and
+    :py:meth:`NernstPlanckEquations.fieldname_of` is the way to ask for it rather than to guess.
+    """
+    res=ion_name.replace("+","_p").replace("-","_m")
+    res="".join(c if (c.isalnum() and c.isascii()) or c=="_" else "_" for c in res)
+    while "__" in res:
+        res=res.replace("__","_")
+    res=res.strip("_")
+    if not res or res[0].isdigit():
+        raise ValueError("Cannot build a field name from the ion name "+repr(ion_name))
+    return res
+
+
+def ions_from_material(fluid_props:"AnyMaterialProperties",*,
+                       temperature:ExpressionOrNum=var("temperature"))->list["IonSpec"]:
+    """
+    The :py:class:`IonSpec` list of whatever is dissolved in a liquid, in a deterministic order.
+
+    Lets the electrolyte equations be driven from a material rather than from literals::
+
+        water = get_pure_liquid("water")
+        water.add_salt("Na+", "Cl-", 1*milli*mol/liter)
+        eqs = PoissonNernstPlanck(ions_from_material(water), fluid_props=water)
+
+    which is also what passing ``fluid_props=`` directly does.
+    """
+    getter=getattr(fluid_props,"get_ions",None)
+    if getter is None:
+        raise ValueError("The material '"+str(getattr(fluid_props,"name","<unnamed>"))+
+                         "' cannot carry dissolved ions (only liquids can).")
+    ions=getter()
+    if not ions:
+        raise ValueError("No ions are dissolved in '"+str(getattr(fluid_props,"name","<unnamed>"))+
+                         "'. Use its add_ion()/add_salt() first, or pass the ions explicitly.")
+    return [IonSpec(n,i.charge_number,i.get_diffusivity(temperature),
+                    bulk_concentration=fluid_props.get_bulk_concentration(n),
+                    molar_mass=getattr(i,"molar_mass",None))
+            for n,i in ions.items()]
 
 
 def _resolve_scale(what:"ExpressionOrNum | str")->ExpressionOrNum:
@@ -109,7 +156,12 @@ class ElectricPotentialEquations(Equations):
             :py:class:`OhmicConductionEquations` if the conductivity should govern the bulk instead.
         name: Name of the potential field. Defaults to ``"phi"``.
         space: Finite element space of the potential. Defaults to ``"C2"``.
-        fluid_props: Material properties to take ``relative_permittivity`` from.
+        fluid_props: Material properties to take ``relative_permittivity`` (and, for
+            :py:class:`OhmicConductionEquations`, ``electric_conductivity``) from.
+        temperature: Temperature at which to evaluate the material properties. ``None`` (the
+            default) leaves them as functions of ``var("temperature")``, which then has to be a
+            field on the domain; an isothermal problem should pass the temperature here. The
+            permittivity of water varies by a third over its liquid range, so this is not a detail.
         permittivity_scale: The permittivity entering the *test function* scale. Either an
             expression or the name of a registered scale. It must be the **same** in all coupled
             domains -- that is what makes the potential rows of e.g. a gas (:math:`\varepsilon_0`)
@@ -134,6 +186,7 @@ class ElectricPotentialEquations(Equations):
                  charge_density:ExpressionNumOrNone=None,conductivity:ExpressionNumOrNone=None,
                  name:str="phi",space:"FiniteElementSpaceEnum"="C2",
                  fluid_props:"AnyMaterialProperties | None"=None,
+                 temperature:ExpressionNumOrNone=None,
                  permittivity_scale:"ExpressionOrNum | str"=epsilon_0,
                  define_electric_field:bool=True,electric_field_name:str="electric_field",
                  add_maxwell_stress_to_momentum:bool=True,electrostriction:ExpressionNumOrNone=None,
@@ -142,7 +195,9 @@ class ElectricPotentialEquations(Equations):
         self.name=name
         self.space:"FiniteElementSpaceEnum"=space
         self.fluid_props=fluid_props
-        self.permittivity=self._resolve_permittivity(permittivity,relative_permittivity,fluid_props)
+        self.temperature=temperature
+        self.permittivity=self._resolve_permittivity(permittivity,relative_permittivity,fluid_props,
+                                                     temperature)
         self.charge_density=charge_density
         if conductivity is None and fluid_props is not None:
             conductivity=getattr(fluid_props,"electric_conductivity",None)
@@ -155,8 +210,13 @@ class ElectricPotentialEquations(Equations):
         self.output_fields=output_fields
         self.consider_scaling=consider_scaling
 
+    def _T(self)->ExpressionOrNum:
+        """The temperature to evaluate material properties at: the given one, or the field."""
+        return self.temperature if self.temperature is not None else var("temperature")
+
     def _resolve_permittivity(self,permittivity:ExpressionNumOrNone,relative_permittivity:ExpressionNumOrNone,
-                              fluid_props:"AnyMaterialProperties | None")->ExpressionOrNum:
+                              fluid_props:"AnyMaterialProperties | None",
+                              temperature:ExpressionNumOrNone=None)->ExpressionOrNum:
         given=[x for x in (permittivity,relative_permittivity) if x is not None]
         if len(given)>1:
             raise ValueError("Please pass either permittivity or relative_permittivity, not both")
@@ -165,6 +225,15 @@ class ElectricPotentialEquations(Equations):
         if relative_permittivity is not None:
             return relative_permittivity*epsilon_0
         if fluid_props is not None:
+            getter=getattr(fluid_props,"get_absolute_permittivity",None)
+            if getter is not None:
+                try:
+                    # With a temperature, the material's expression is evaluated at it. Without one
+                    # it stays a function of var("temperature"), which then has to exist as a field
+                    # on the domain -- an isothermal problem should just pass the temperature.
+                    return getter(temperature)
+                except RuntimeError:
+                    pass  # falls through to the readable message below
             eps_r=getattr(fluid_props,"relative_permittivity",None)
             if eps_r is None:
                 raise ValueError("The material '"+str(getattr(fluid_props,"name","<unnamed>"))+
@@ -434,8 +503,9 @@ class PoissonBoltzmannEquations(ElectricPotentialEquations):
     this solution, which is the sharpest available cross-check on both.
 
     Args:
-        ions: The ionic species, as :py:class:`IonSpec` objects. Alternatively give
-            ``bulk_concentration`` (and ``valence``) for the symmetric shortcut.
+        ions: The ionic species, as :py:class:`IonSpec` objects or a liquid material with ions
+            dissolved in it. Alternatively give ``bulk_concentration`` (and ``valence``) for the
+            symmetric shortcut, or nothing at all if ``fluid_props`` already carries ions.
         bulk_concentration: Reservoir concentration for the symmetric :math:`z\!:\!z` shortcut.
         valence: Charge number for the symmetric shortcut. Defaults to 1.
         temperature: The temperature. Defaults to the field ``var("temperature")``.
@@ -448,21 +518,27 @@ class PoissonBoltzmannEquations(ElectricPotentialEquations):
             the applied potential, or starting from the linearized solution.
     """
 
-    def __init__(self,*,ions:"Sequence[IonSpec] | None"=None,bulk_concentration:ExpressionNumOrNone=None,
-                 valence:int=1,temperature:ExpressionOrNum=var("temperature"),linearized:bool=False,
+    def __init__(self,*,ions:"Sequence[IonSpec] | AnyMaterialProperties | None"=None,bulk_concentration:ExpressionNumOrNone=None,
+                 valence:int=1,temperature:ExpressionNumOrNone=None,linearized:bool=False,
                  reference_potential:ExpressionOrNum=0,exponent_limit:float | None=None,**kwargs:Any):
-        super().__init__(**kwargs)
+        super().__init__(temperature=temperature,**kwargs)
         if ions is None:
-            if bulk_concentration is None:
-                raise ValueError("Please pass either ions=[IonSpec(...), ...] or a bulk_concentration "+
-                                 "for a symmetric z:z electrolyte")
-            ions=symmetric_electrolyte(bulk_concentration,valence)
+            fp=kwargs.get("fluid_props")
+            if bulk_concentration is not None:
+                ions=symmetric_electrolyte(bulk_concentration,valence)
+            elif fp is not None and getattr(fp,"get_ions",lambda:{})():
+                ions=ions_from_material(fp,temperature=temperature)
+            else:
+                raise ValueError("Please pass either ions=[IonSpec(...), ...], a bulk_concentration "+
+                                 "for a symmetric z:z electrolyte, or a fluid_props with ions "+
+                                 "dissolved in it")
+        elif not isinstance(ions,(list,tuple)):
+            ions=ions_from_material(ions,temperature=temperature)
         self.ions=list(ions)
         for ion in self.ions:
             if ion.bulk_concentration is None:
                 raise ValueError("Ion '"+ion.name+"' has no bulk_concentration, which the "+
                                  "Poisson-Boltzmann closure requires")
-        self.temperature=temperature
         self.linearized=linearized
         self.reference_potential=reference_potential
         self.exponent_limit=exponent_limit
@@ -474,7 +550,7 @@ class PoissonBoltzmannEquations(ElectricPotentialEquations):
 
     def thermal_voltage(self)->ExpressionOrNum:
         r"""The thermal voltage :math:`RT/F`, i.e. the potential scale of this model."""
-        return gas_constant*self.temperature/faraday_constant
+        return gas_constant*self._T()/faraday_constant
 
     def ionic_strength(self)->ExpressionOrNum:
         r"""The reservoir molar ionic strength :math:`I=\frac{1}{2}\sum_i z_i^2 c_i^\infty`."""
@@ -482,7 +558,7 @@ class PoissonBoltzmannEquations(ElectricPotentialEquations):
 
     def debye_length(self)->ExpressionOrNum:
         r"""The screening length :math:`\lambda_\mathrm{D}=\sqrt{\varepsilon RT/(2F^2I)}`."""
-        return debye_length(self.permittivity,self.ionic_strength(),self.temperature)
+        return debye_length(self.permittivity,self.ionic_strength(),self._T())
 
     def _is_symmetric(self)->bool:
         if len(self.ions)!=2:
@@ -597,12 +673,20 @@ class SurfaceChargeBC(InterfaceEquations):
 
     Args:
         surface_charge_density: The imposed free surface charge density.
+        interface_props: Interface properties to take ``surface_charge_density`` from instead.
     """
     required_parent_type = ElectricPotentialEquations
 
-    def __init__(self,surface_charge_density:ExpressionOrNum=0):
+    def __init__(self,surface_charge_density:ExpressionNumOrNone=None,*,
+                 interface_props:"BaseInterfaceProperties | None"=None):
         super().__init__()
+        if surface_charge_density is None:
+            if interface_props is None:
+                raise ValueError("SurfaceChargeBC needs either a surface_charge_density or an "+
+                                 "interface_props carrying one")
+            surface_charge_density=interface_props.surface_charge_density
         self.surface_charge_density=surface_charge_density
+        self.interface_props=interface_props
 
     def define_residuals(self):
         parent=self.get_parent_equations(ElectricPotentialEquations)
@@ -938,13 +1022,17 @@ class NernstPlanckEquations(ScalarTransportEquations):
         scale, or pass a ``ScalarTransportStabilization`` with a different ``velocity_scale``.
 
     Args:
-        ions: The species, as :py:class:`IonSpec` objects or a ``{name: valence}`` mapping.
+        ions: The species, as :py:class:`IonSpec` objects, a ``{name: valence}`` mapping, or a
+            liquid material with ions dissolved in it (see
+            :py:meth:`~pyoomph.materials.generic.BaseLiquidProperties.add_salt`). ``None`` reads
+            them from ``fluid_props``.
         potential_name: Name of the potential field this migrates in. Defaults to ``"phi"``.
         space: Finite element space of the concentrations. Defaults to ``"C2"``.
         wind: The advecting velocity. Defaults to ``var("velocity")``; pass 0 for a quiescent
             electrolyte, which also removes the velocity scale from the problem.
         temperature: Temperature entering the Einstein relation. Defaults to ``var("temperature")``.
         field_prefix: Prefix of the concentration field names. Defaults to ``"c_"``.
+        fluid_props: A liquid material whose dissolved ions are read when ``ions`` is not given.
         reactions: Volumetric source terms, as a ``{ion_name: rate}`` mapping.
         dt_factor: Multiplicative factor on the time derivative. Defaults to 1.
         time_scheme: Time stepping scheme. Defaults to None, i.e. the problem's default.
@@ -954,15 +1042,24 @@ class NernstPlanckEquations(ScalarTransportEquations):
         stabilization: Optional residual-based stabilization, see the note above.
     """
 
-    def __init__(self,ions:"Sequence[IonSpec] | dict[str,int]",*,potential_name:str="phi",
+    def __init__(self,ions:"Sequence[IonSpec] | dict[str,int] | AnyMaterialProperties | None"=None,*,potential_name:str="phi",
                  space:"FiniteElementSpaceEnum"="C2",wind:ExpressionOrNum=var("velocity"),
                  temperature:ExpressionOrNum=var("temperature"),field_prefix:str="c_",
+                 fluid_props:"AnyMaterialProperties | None"=None,
                  reactions:"dict[str,ExpressionOrNum] | None"=None,dt_factor:ExpressionOrNum=1,
                  time_scheme:"TimeSteppingScheme | None"=None,advection_by_parts:bool=False,
                  concentration_scale:str="ion_concentration",velocity_name_for_scaling:str="velocity",
                  set_bulk_initial_conditions:bool=True,consider_scaling:bool=True,
                  stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
         super().__init__()
+        if ions is None:
+            if fluid_props is None:
+                raise ValueError("NernstPlanckEquations needs either ions or a fluid_props whose "+
+                                 "dissolved ions it can read")
+            ions=fluid_props
+        if not isinstance(ions,(list,tuple,dict)):
+            # A material: read whatever is dissolved in it.
+            ions=ions_from_material(ions,temperature=temperature)
         if isinstance(ions,dict):
             ions=[IonSpec(n,z) for n,z in sorted(ions.items())]
         # sorted: this list fixes the order the concentration fields are defined in, hence the dof
@@ -984,6 +1081,7 @@ class NernstPlanckEquations(ScalarTransportEquations):
         self.velocity_name_for_scaling=velocity_name_for_scaling
         self.set_bulk_initial_conditions=set_bulk_initial_conditions
         self.consider_scaling=consider_scaling
+        self.fluid_props=fluid_props
         self.spatial_error_estimators=True
         self._init_stabilization(stabilization,velocity_scale=velocity_name_for_scaling)
 
@@ -994,7 +1092,8 @@ class NernstPlanckEquations(ScalarTransportEquations):
         return [i.name for i in self.ions]
 
     def fieldname_of(self,ion_name:str)->str:
-        return self.field_prefix+ion_name
+        """The name of the concentration field of one ion, see :py:func:`ion_fieldname_stem`."""
+        return self.field_prefix+ion_fieldname_stem(ion_name)
 
     def _ion_of(self,fieldname:str)->IonSpec:
         for i in self.ions:
@@ -1248,7 +1347,7 @@ class IonFluxBC(InterfaceEquations):
                     self.add_residual(-weak(corr,c_test))
 
 
-def PoissonNernstPlanck(ions:"Sequence[IonSpec] | dict[str,int]",*,permittivity:ExpressionNumOrNone=None,
+def PoissonNernstPlanck(ions:"Sequence[IonSpec] | dict[str,int] | AnyMaterialProperties | None"=None,*,permittivity:ExpressionNumOrNone=None,
                         relative_permittivity:ExpressionNumOrNone=None,
                         fluid_props:"AnyMaterialProperties | None"=None,
                         potential_name:str="phi",potential_space:"FiniteElementSpaceEnum"="C2",
@@ -1273,11 +1372,12 @@ def PoissonNernstPlanck(ions:"Sequence[IonSpec] | dict[str,int]",*,permittivity:
         permittivity_scale: See :py:class:`ElectricPotentialEquations`.
         **kwargs: Forwarded to :py:class:`NernstPlanckEquations`.
     """
-    np_eqs=NernstPlanckEquations(ions,potential_name=potential_name,**kwargs)
+    np_eqs=NernstPlanckEquations(ions,potential_name=potential_name,fluid_props=fluid_props,**kwargs)
     es_eqs=ElectricPotentialEquations(name=potential_name,space=potential_space,
                                       permittivity=permittivity,
                                       relative_permittivity=relative_permittivity,
                                       fluid_props=fluid_props,
+                                      temperature=kwargs.get("temperature"),
                                       permittivity_scale=permittivity_scale,
                                       charge_density=np_eqs.get_charge_density())
     return np_eqs+es_eqs
@@ -1499,10 +1599,17 @@ class SternLayer(ThinDielectricLayer):
             electrolytes. Alternatively give ``thickness`` and a (much reduced, ~6-30) layer
             ``relative_permittivity``, since the solvent is dielectrically saturated there.
         wall_potential: The potential of the metal behind the layer, if it is not meshed.
+        interface_props: Interface properties to take ``stern_layer_capacitance`` from instead.
     """
     def __init__(self,*,stern_capacitance:ExpressionNumOrNone=None,thickness:ExpressionNumOrNone=None,
                  relative_permittivity:ExpressionNumOrNone=None,permittivity:ExpressionNumOrNone=None,
-                 wall_potential:ExpressionNumOrNone=None,surface_charge_density:ExpressionOrNum=0):
+                 wall_potential:ExpressionNumOrNone=None,surface_charge_density:ExpressionOrNum=0,
+                 interface_props:"BaseInterfaceProperties | None"=None):
+        if stern_capacitance is None and thickness is None and interface_props is not None:
+            stern_capacitance=interface_props.stern_layer_capacitance
+            if stern_capacitance is None:
+                raise ValueError("The given interface properties do not define a "+
+                                 "stern_layer_capacitance")
         super().__init__(capacitance=stern_capacitance,thickness=thickness,
                          relative_permittivity=relative_permittivity,permittivity=permittivity,
                          outside_potential=wall_potential,surface_charge_density=surface_charge_density)

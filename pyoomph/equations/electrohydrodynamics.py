@@ -37,6 +37,7 @@ from ..typings import *
 
 if TYPE_CHECKING:
     from ..generic import Problem
+    from ..materials.generic import BaseInterfaceProperties
 
 
 def maxwell_stress_tensor(permittivity:ExpressionOrNum,electric_field:Expression,*,
@@ -497,14 +498,23 @@ class ElectroosmoticSlip(InterfaceEquations):
         wall_velocity: Velocity of the wall itself, added to the slip. Defaults to 0.
         impose_no_penetration: Also enforce :math:`\vec{u}\cdot\vec{n}=0`. Defaults to True.
         lagr_mult_name: Name of the Lagrange multiplier field.
+        interface_props: Interface properties to take ``zeta_potential`` from instead.
     """
     required_parent_type = StokesEquations
 
     def __init__(self,*,zeta_potential:ExpressionNumOrNone=None,permittivity:ExpressionNumOrNone=None,
                  dynamic_viscosity:ExpressionNumOrNone=None,potential_name:str="phi",
                  wall_velocity:ExpressionOrNum=0,impose_no_penetration:bool=True,
-                 lagr_mult_name:str="_lagr_eo_slip"):
+                 lagr_mult_name:str="_lagr_eo_slip",
+                 interface_props:"BaseInterfaceProperties | None"=None):
         super().__init__()
+        if zeta_potential is None and interface_props is not None:
+            zeta_potential=interface_props.zeta_potential
+            if zeta_potential is None:
+                raise ValueError("The given interface properties do not define a zeta_potential, "+
+                                 "which is what says this interface is described by a thin double "+
+                                 "layer at all.")
+        self.interface_props=interface_props
         self.zeta_potential=zeta_potential
         self.permittivity=permittivity
         self.dynamic_viscosity=dynamic_viscosity

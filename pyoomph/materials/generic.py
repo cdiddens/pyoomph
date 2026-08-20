@@ -35,6 +35,7 @@ from collections import OrderedDict as OrderDict
 from ..expressions import var,grad,subexpression,exp,log,rational_num,square_root,is_zero
 from ..expressions import ExpressionOrNum,ExpressionNumOrNone,Expression
 from ..expressions.units import *
+from ..expressions.phys_consts import gas_constant,faraday_constant,epsilon_0,debye_length
 from .activity import *
 
 
@@ -102,6 +103,19 @@ class BaseInterfaceProperties:
         self._mass_transfer_model:MassTransferModelBase | None=None
         self._surfactant_table:dict[str,Any]={}
         self._latent_heats:dict[str,ExpressionOrNum]={}
+        #: Free surface charge density sitting on this interface.
+        self.surface_charge_density:ExpressionOrNum=0
+        #: Zeta potential of the diffuse layer, for thin-double-layer models such as
+        #: :py:class:`~pyoomph.equations.electrohydrodynamics.ElectroosmoticSlip`. ``None`` means
+        #: this interface is not described that way.
+        self.zeta_potential:ExpressionNumOrNone=None
+        #: Areal capacitance of the compact (Stern) layer, see
+        #: :py:class:`~pyoomph.equations.electrostatics.SternLayer`.
+        self.stern_layer_capacitance:ExpressionNumOrNone=None
+        #: Areal capacitance of the diffuse layer, used by the Lippmann relation.
+        self.double_layer_capacitance:ExpressionNumOrNone=None
+        #: Excess surface conductance, i.e. the numerator of the Dukhin number.
+        self.surface_conductance:ExpressionNumOrNone=None
 
     def set_latent_heat_of(self,name:str,lat_heat:ExpressionOrNum):
         self._latent_heats[name]=lat_heat
@@ -730,14 +744,146 @@ class BaseLiquidProperties(MaterialProperties):
     state_of_matter="liquid"
     passive_field:str | None=None
     required_adv_diff_fields:set[str]=set()
-    possible_properties:set[str]={"mass_density","dynamic_viscosity","default_surface_tension"}
-    _output_properties:OutputPropertiesType={"mass_density":None,"dynamic_viscosity":None,"default_surface_tension_gas":lambda self : cast(DefaultSurfaceTensionType,self.default_surface_tension).get("gas")} #type:ignore
+    possible_properties:set[str]={"mass_density","dynamic_viscosity","default_surface_tension","relative_permittivity","electric_conductivity"}
+    _output_properties:OutputPropertiesType={"mass_density":None,"dynamic_viscosity":None,"relative_permittivity":None,"electric_conductivity":None,"default_surface_tension_gas":lambda self : cast(DefaultSurfaceTensionType,self.default_surface_tension).get("gas")} #type:ignore
     def __init__(self):
         super(BaseLiquidProperties, self).__init__()
         #: Default surface tension of the liquid. This is a dictionary with the keys ``"gas"``, ``"solid"``, and ``"liquid"``. The value for each key is the surface tension of the liquid with the respective other phase. 
         self.default_surface_tension:DefaultSurfaceTensionType={"gas":None}
         #: The dynamic viscosity of the liquid.
         self.dynamic_viscosity:ExpressionOrNum#=None
+        # Annotated, not assigned: make_static and set_by_weighted_average both iterate
+        # possible_properties and test hasattr, so a material that never sets these must not appear
+        # to have them. Assigning None here would make hasattr true and break both.
+        #: Relative permittivity (dielectric constant), dimensionless.
+        self.relative_permittivity:ExpressionOrNum
+        #: Ohmic conductivity of the liquid.
+        self.electric_conductivity:ExpressionOrNum
+        self._ion_table:dict[str,"IonProperties"]={}
+        self._bulk_concentrations:dict[str,ExpressionOrNum]={}
+
+    # A method, not a property: make_static does setattr over possible_properties, and a read-only
+    # property listed there would raise on the way through.
+    def get_absolute_permittivity(self,temperature:ExpressionNumOrNone=None)->ExpressionOrNum:
+        r""":math:`\varepsilon=\varepsilon_\mathrm{r}\varepsilon_0`, i.e. what the electrostatic
+        equations actually want.
+
+        With a ``temperature`` the expression is evaluated at it, as
+        :py:meth:`get_reference_dynamic_viscosity` does -- the permittivity of water varies by a
+        third over the liquid range, so a Debye length asked for at a definite temperature has to
+        use the permittivity at that temperature and not a symbolic field.
+        """
+        if not hasattr(self,"relative_permittivity"):
+            raise RuntimeError("The material '"+str(self.name)+"' does not define a "+
+                               "relative_permittivity")
+        eps=self.relative_permittivity*epsilon_0
+        if temperature is None:
+            return eps
+        ics=self.initial_condition.copy()
+        ics["temperature"]=temperature
+        return self.evaluate_at_condition(eps,ics)
+
+    def add_ion(self,ion:"IonProperties | str",concentration:ExpressionOrNum,*,
+                charge_number:int | None=None,diffusivity:ExpressionNumOrNone=None)->"IonProperties":
+        r"""
+        Dissolve an ionic species in this liquid at a given bulk concentration.
+
+        The concentration is the reservoir value :math:`c_i^\infty`, i.e. what
+        :py:class:`~pyoomph.equations.electrostatics.PoissonBoltzmannEquations` screens with and
+        what :py:class:`~pyoomph.equations.electrostatics.NernstPlanckEquations` uses as the initial
+        condition. Nothing here checks electroneutrality of the set -- see
+        :py:meth:`get_net_charge_number`, which is what :py:meth:`add_salt` guarantees.
+
+        Args:
+            ion: An :py:class:`IonProperties`, or the name of one in the material library. A name
+                that is not in the library is created on the spot, which then needs
+                ``charge_number`` and ``diffusivity``.
+            concentration: The bulk concentration.
+            charge_number: Overrides the ion's own charge number.
+            diffusivity: Overrides the ion's own diffusivity.
+        """
+        if isinstance(ion,str):
+            try:
+                found=get_pure_liquid(ion)
+            except RuntimeError:
+                found=None
+            if isinstance(found,IonProperties):
+                ion=found
+            else:
+                if charge_number is None or diffusivity is None:
+                    raise ValueError("'"+ion+"' is not a known ion, so add_ion needs both a "+
+                                     "charge_number and a diffusivity to create it")
+                ion=new_ion(ion,charge_number=charge_number,diffusivity=diffusivity)
+        if charge_number is not None:
+            ion.charge_number=charge_number
+        if diffusivity is not None:
+            ion.diffusivity=diffusivity
+        if ion.charge_number==0:
+            raise ValueError("Ion '"+ion.name+"' has charge_number 0, which makes it a neutral solute")
+        self._ion_table[ion.name]=ion
+        self._bulk_concentrations[ion.name]=concentration
+        return ion
+
+    def add_salt(self,cation:"IonProperties | str",anion:"IonProperties | str",
+                 concentration:ExpressionOrNum,**kwargs:Any)->None:
+        r"""
+        Dissolve a salt, i.e. the pair of ions that "1 mM KCl" means, in the stoichiometry that
+        makes the solution electroneutral: :math:`|z_-|` cations to :math:`z_+` anions.
+
+        ``concentration`` is the concentration of the *salt*, so for the 1:1 case it is also the
+        concentration of each ion, while for CaCl2 it gives one Ca(2+) per two Cl(-).
+        """
+        c=self.add_ion(cation,concentration,**({"charge_number":kwargs.pop("cation_charge_number")} if "cation_charge_number" in kwargs else {}))
+        a=self.add_ion(anion,concentration,**({"charge_number":kwargs.pop("anion_charge_number")} if "anion_charge_number" in kwargs else {}))
+        if kwargs:
+            raise TypeError("unexpected arguments "+str(sorted(kwargs)))
+        self._bulk_concentrations[c.name]=concentration*abs(a.charge_number)
+        self._bulk_concentrations[a.name]=concentration*abs(c.charge_number)
+
+    def get_ions(self)->"dict[str,IonProperties]":
+        """The dissolved ions, in a deterministic order -- the field order downstream depends on it."""
+        return {n:self._ion_table[n] for n in sorted(self._ion_table)}
+
+    def get_bulk_concentration(self,ion_name:str)->ExpressionOrNum:
+        """The reservoir concentration of one dissolved ion."""
+        if ion_name not in self._bulk_concentrations:
+            raise RuntimeError("No ion '"+ion_name+"' dissolved in '"+str(self.name)+"'")
+        return self._bulk_concentrations[ion_name]
+
+    def get_net_charge_number(self)->ExpressionOrNum:
+        r""":math:`\sum_i z_i c_i^\infty`, which must vanish for an electroneutral reservoir."""
+        return sum(i.charge_number*self._bulk_concentrations[n] for n,i in self.get_ions().items())
+
+    def get_ionic_strength(self)->ExpressionOrNum:
+        r"""The reservoir molar ionic strength :math:`I=\frac{1}{2}\sum_i z_i^2 c_i^\infty`."""
+        return sum(i.charge_number**2*self._bulk_concentrations[n]
+                   for n,i in self.get_ions().items())/2
+
+    def get_debye_length(self,temperature:ExpressionNumOrNone=None)->Expression:
+        r"""
+        The screening length :math:`\lambda_\mathrm{D}` of the dissolved ions in this solvent.
+
+        ``temperature`` defaults to ``None``, i.e. the field ``var("temperature")`` with a symbolic
+        permittivity; pass a definite temperature to get a number out.
+        """
+        T=temperature if temperature is not None else var("temperature")
+        return debye_length(self.get_absolute_permittivity(temperature),self.get_ionic_strength(),T)
+
+    def electric_conductivity_from_ions(self,temperature:ExpressionOrNum=var("temperature"))->ExpressionOrNum:
+        r"""
+        The Nernst-Einstein conductivity
+        :math:`\sigma_\mathrm{c}=\frac{F^2}{RT}\sum_i z_i^2 D_i c_i^\infty`.
+
+        Deriving it from the same ion table that the resolved model uses is what keeps a
+        leaky-dielectric run and a Nernst-Planck run from silently disagreeing about the material.
+        """
+        return faraday_constant**2/(gas_constant*temperature)*sum(
+            i.charge_number**2*i.get_diffusivity(temperature)*self._bulk_concentrations[n]
+            for n,i in self.get_ions().items())
+
+    def set_electric_conductivity_from_ions(self,temperature:ExpressionOrNum=var("temperature"))->None:
+        """Sets :py:attr:`electric_conductivity` to :py:meth:`electric_conductivity_from_ions`."""
+        self.electric_conductivity=self.electric_conductivity_from_ions(temperature)
 
     def get_reference_dynamic_viscosity(self,temperature:ExpressionOrNum | None=None) -> Expression:
         ics=self.initial_condition.copy()
@@ -857,13 +1003,18 @@ class BaseGasProperties(MaterialProperties):
     state_of_matter="gas"
     passive_field:str | None=None
     required_adv_diff_fields:set[str]=set()
-    possible_properties:set[str]={"mass_density","dynamic_viscosity"}
-    _output_properties:OutputPropertiesType = {"mass_density": None, "dynamic_viscosity": None}
+    possible_properties:set[str]={"mass_density","dynamic_viscosity","relative_permittivity","electric_conductivity"}
+    _output_properties:OutputPropertiesType = {"mass_density": None, "dynamic_viscosity": None, "relative_permittivity": None}
     def __init__(self):
         super(BaseGasProperties, self).__init__()
         self.mass_density:ExpressionOrNum
         #: The dynamic viscosity of the gas.
         self.dynamic_viscosity:ExpressionOrNum
+        #: Relative permittivity, dimensionless. About 1.0006 for air at ambient conditions, i.e.
+        #: 1 is almost always good enough. Annotated rather than assigned, see BaseLiquidProperties.
+        self.relative_permittivity:ExpressionOrNum
+        #: Ohmic conductivity of the gas.
+        self.electric_conductivity:ExpressionOrNum
 
 class BaseSolidProperties(MaterialProperties):
     """
@@ -872,7 +1023,7 @@ class BaseSolidProperties(MaterialProperties):
     state_of_matter="solid"
     passive_field:str | None=None
     required_adv_diff_fields:set[str]=set()
-    possible_properties:set[str]={"mass_density"}
+    possible_properties:set[str]={"mass_density","relative_permittivity","electric_conductivity"}
     _output_properties:OutputPropertiesType = {"mass_density": None}
 
 
@@ -1248,6 +1399,48 @@ class SurfactantProperties(PureLiquidProperties):
         super(SurfactantProperties, self).__init__()
         #: The default surface diffusivity of the surfactant
         self.surface_diffusivity=None
+
+
+#An ion is by definition just a pure liquid property, can therefore be dissolved in other liquids
+class IonProperties(PureLiquidProperties):
+    """
+    A dissolved ionic species.
+
+    Like :py:class:`SurfactantProperties`, this is by definition a pure liquid property and can
+    therefore be a component of a liquid mixture -- so its molar mass, diffusivity and mass fraction
+    go through the machinery that is already there. What it adds is the charge it carries.
+
+    Declare one with :py:func:`~pyoomph.materials.generic.new_ion` and dissolve it in a solvent with
+    :py:meth:`BaseLiquidProperties.add_ion`, which is what
+    :py:class:`~pyoomph.equations.electrostatics.NernstPlanckEquations` reads when it is given a
+    ``fluid_props``.
+    """
+    def __init__(self):
+        super(IonProperties, self).__init__()
+        #: The charge number :math:`z_i`, e.g. +1 for Na+ and -2 for SO4(2-).
+        self.charge_number:int=0
+        #: Limiting molar conductivity at infinite dilution, if known. Only used as an alternative
+        #: route to the diffusivity via the Nernst-Einstein relation.
+        self.limiting_molar_conductivity:ExpressionNumOrNone=None
+        #: Diffusivity in the solvent at infinite dilution.
+        self.diffusivity:ExpressionNumOrNone=None
+
+    def get_diffusivity(self,temperature:ExpressionOrNum=var("temperature"))->ExpressionOrNum:
+        r"""
+        The diffusivity, from :py:attr:`limiting_molar_conductivity` by Nernst-Einstein
+        (:math:`D_i=\lambda_i^0 RT/(z_i^2F^2)`) if it was not given directly.
+        """
+        if self.diffusivity is not None:
+            return self.diffusivity
+        if self.limiting_molar_conductivity is None:
+            raise RuntimeError("Ion '"+self.name+"' has neither a diffusivity nor a "+
+                               "limiting_molar_conductivity set")
+        return self.limiting_molar_conductivity*gas_constant*temperature \
+               /(self.charge_number**2*faraday_constant**2)
+
+    def get_mobility(self,temperature:ExpressionOrNum=var("temperature"))->ExpressionOrNum:
+        r"""The molar mobility :math:`m_i=D_i/(RT)`, i.e. the Einstein relation."""
+        return self.get_diffusivity(temperature)/(gas_constant*temperature)
 
 
 class PureGasProperties(BaseGasProperties):
@@ -2212,6 +2405,53 @@ def new_pure_liquid(name:str,mass_density:ExpressionOrNum=1000*kilogram/meter**3
             if vapor_pressure is not None:
                 self.vapor_pressure=vapor_pressure        
     return get_pure_liquid(_name)
+
+
+def new_ion(name:str,charge_number:int,diffusivity:ExpressionNumOrNone=None,*,
+            limiting_molar_conductivity:ExpressionNumOrNone=None,
+            molar_mass:ExpressionOrNum=50*gram/mol,
+            mass_density:ExpressionOrNum=1000*kilogram/meter**3,
+            dynamic_viscosity:ExpressionOrNum=1*milli*pascal*second,
+            override:bool=False)->IonProperties:
+    r"""
+    Shortcut to create and register a new ionic species.
+
+    Give either a ``diffusivity`` or a ``limiting_molar_conductivity``; the latter is converted by
+    Nernst-Einstein, :math:`D_i=\lambda_i^0RT/(z_i^2F^2)`.
+
+    Args:
+        name: Name of the ion, e.g. ``"Na+"``. Also the stem of its concentration field.
+        charge_number: The charge number :math:`z_i`, e.g. +1 for Na+ and -2 for SO4(2-).
+        diffusivity: Diffusivity at infinite dilution.
+        limiting_molar_conductivity: Alternative to the diffusivity.
+        molar_mass: Molar mass, only relevant if the ions also carry mass in a flow model.
+        mass_density: Mass density, inherited from the pure-liquid machinery and rarely meaningful
+            for a dissolved ion.
+        dynamic_viscosity: Likewise.
+        override: Whether to override an existing material of the same name.
+
+    Returns:
+        The registered ion.
+    """
+    if charge_number==0:
+        raise ValueError("An ion with charge_number 0 is a neutral solute, not an ion")
+    if diffusivity is None and limiting_molar_conductivity is None:
+        raise ValueError("new_ion needs either a diffusivity or a limiting_molar_conductivity")
+    _name,_z,_D,_lam=name,charge_number,diffusivity,limiting_molar_conductivity
+    @MaterialProperties.register(override=override)
+    class CustomIon(IonProperties):   #type:ignore
+        name=_name
+        def __init__(self):
+            super().__init__()
+            self.charge_number=_z
+            self.diffusivity=_D
+            self.limiting_molar_conductivity=_lam
+            self.molar_mass=molar_mass
+            self.mass_density=mass_density
+            self.dynamic_viscosity=dynamic_viscosity
+    res=get_pure_liquid(_name)
+    assert isinstance(res,IonProperties)
+    return res
 
 
 def new_pure_gas(name:str,mass_density:ExpressionOrNum=1000*kilogram/meter**3,dynamic_viscosity:ExpressionOrNum=1*milli*pascal*second,molar_mass:ExpressionOrNum=50*gram/mol,override:bool=False,thermal_conductivity:ExpressionNumOrNone=None,specific_heat_capacity:ExpressionNumOrNone=None) -> PureGasProperties:

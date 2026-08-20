@@ -2,14 +2,25 @@
 
 Status: **in the tree** as `pyoomph/equations/electrostatics.py` (field solvers, electrolytes,
 electrostatic interface conditions) and `pyoomph/equations/electrohydrodynamics.py` (coupling into
-the flow). Covered by `tests/test_electrostatics.py` and `tests/test_ehd.py`. Four pre-existing
-files were touched, each in one place: `pyoomph/expressions/phys_consts.py`,
-`pyoomph/expressions/units.py`, `pyoomph/equations/poisson.py` (a pure extraction), `pyoomph/equations/navier_stokes.py` (one new
-keyword, `extra_stress`) and `pyoomph/equations/stabilization.py` (two new hooks). The last two both
-generate byte-identical C when unused, checked by md5 rather than asserted.
+the flow), covered by `tests/test_electrostatics.py` and `tests/test_ehd.py`.
 
-Not built: magnetics, full transient Maxwell, AC electrokinetics. Reasons in §8. The per-species
-SUPG limitation this document originally recorded has since been fixed, see §6.
+Pre-existing files touched: `pyoomph/expressions/phys_consts.py` and `units.py` (constants and
+electric units, §7), `pyoomph/equations/poisson.py` (a pure extraction of the far-field residual),
+`pyoomph/equations/navier_stokes.py` (one new keyword, `extra_stress`),
+`pyoomph/equations/stabilization.py` (two new hooks, §6) and `pyoomph/materials/` (electric
+properties and ions, §8). The `navier_stokes` and `stabilization` changes both generate
+byte-identical C when unused, checked by md5 rather than asserted.
+
+**Two sections say what is missing, and they mean different things.** §9 is deliberate scope: what
+was decided against, and why the decision still stands. §10 is unfinished work: the log formulation
+for Nernst-Planck, the parts of the public API that no test names, and the coordinate systems and
+parallel modes that have never been run. Read §10 before trusting anything here outside 1D and 2D
+Cartesian.
+
+Corrections this document has already needed, kept because the pattern is instructive: it claimed a
+pressure offset between the two EHD routes that does not exist (§5), that `formulation="log"` was
+reserved in a constructor signature when it was not (§10.1), and it recorded a per-species SUPG
+limitation that has since been fixed (§6).
 
 ## 1. Why the potential formulation, and nothing else
 
@@ -355,7 +366,66 @@ confirmation that the signature really is a pressure.
 Still absent: `tesla` and `weber`, the two remaining SI electromagnetic named units. One line each if
 magnetics is ever picked up.
 
-## 8. Not built, and why
+## 8. The material library
+
+`relative_permittivity` and `electric_conductivity` are now in the `possible_properties` whitelist of
+`BaseLiquidProperties`, `BaseGasProperties` and `BaseSolidProperties`, and `IonProperties` sits
+beside `SurfactantProperties` as "a pure liquid property that additionally does something special" —
+so an ion's molar mass, diffusivity and mass fraction go through machinery that already exists, and
+what it adds is the charge it carries.
+
+**The properties are annotated, not assigned.** `self.relative_permittivity: ExpressionOrNum` with no
+value, exactly as `dynamic_viscosity` has always been. Both `make_static` and
+`set_by_weighted_average` iterate `possible_properties` and test `hasattr`, so assigning `None` in
+`__init__` would make every material *look* like it has a permittivity and break both. A test pins
+this: glycerol lists the property and does not have it.
+
+`get_absolute_permittivity(temperature=None)` is a **method, not a property**, because `make_static`
+does `setattr` over `possible_properties` and a read-only property in that set would raise on the way
+through. It takes a temperature because water's permittivity varies by a third over the liquid range
+(87.7 at 0 °C, 78.3 at 25 °C, 55.7 at 100 °C, Malmberg–Maryott), so a Debye length asked for at a
+definite temperature must not use a symbolic field. `ElectricPotentialEquations` grew a matching
+`temperature=` argument for the same reason: without one, taking the permittivity from a material
+makes the equation depend on `var("temperature")`, which then has to exist as a field — a real
+usability cliff for an isothermal EHD problem, and the first thing that went wrong when driving PNP
+from the library.
+
+`add_salt(cation, anion, concentration)` dissolves the pair in the stoichiometry that makes the
+solution electroneutral, `|z_-|` cations to `z_+` anions, so CaCl2 gives one Ca(2+) per two Cl(-).
+`get_net_charge_number()` is the check, and it is tested for the asymmetric case rather than assumed.
+`electric_conductivity_from_ions()` is the Nernst–Einstein closure — deriving the leaky-dielectric
+conductivity from the same table the resolved model uses is what keeps the two from silently
+disagreeing about the material. Measured against the textbook for 1 mM NaCl: λ_D = 9.61 nm,
+σ_c = 12.6 mS/m.
+
+**Ion names are not field names.** A chemist writes `"Na+"` and `"Cl-"`, and `add_salt` should accept
+that, but a pyoomph field name may only contain letters, digits and underscores. `ion_fieldname_stem`
+maps `+` → `_p` and `-` → `_m` and anything else invalid to `_`, so `"Na+"` is solved for as
+`c_Na_p`. That is the name a `DirichletBC` has to use; `NernstPlanckEquations.fieldname_of` is the
+way to ask rather than to guess.
+
+The equations take a material wherever they took literals: `PoissonNernstPlanck(fluid_props=water)`
+reads the ions, their valences, their diffusivities, the bulk concentrations *and* the permittivity.
+The end-to-end test drives a diffuse layer entirely from the library and checks the diffuse charge
+against the Grahame equation.
+
+Interface properties gained `surface_charge_density`, `zeta_potential`, `stern_layer_capacitance`,
+`double_layer_capacitance` and `surface_conductance`; `SurfaceChargeBC`, `SternLayer` and
+`ElectroosmoticSlip` accept an `interface_props=` and read them. `zeta_potential` defaults to `None`
+rather than 0 on purpose — `None` means "this interface is not described by a thin double layer at
+all", which is a different statement from "its zeta potential happens to be zero", and
+`ElectroosmoticSlip` refuses the former.
+
+One caveat worth stating: adding these to `possible_properties` means `set_by_weighted_average()`
+with no argument will mass-average a mixture's permittivity if every component defines one. Linear
+mixing is not a good rule for permittivity (Bruggeman and Looyenga exist for a reason), but it is the
+same coarse assumption the framework already makes for its other properties, and it only fires when
+explicitly asked for.
+
+## 9. Deliberately out of scope
+
+Distinct from §10: these are decisions, not omissions, and each would be a separate piece of work
+rather than the completion of this one.
 
 * **Magnetics.** Deferred by choice to keep this shippable, not by obstacle — magnetostatics through
   a scalar potential `-div(mu*grad(psi_m)) = 0` needs no new spaces and would slot in beside the
@@ -369,12 +439,137 @@ magnetics is ever picked up.
   with that explanation rather than silently producing something that will not converge.
   `SurfaceChargeConservation` keeps its `d_t q`, which is the physically meaningful transient — the
   interfacial RC time, not the bulk one. Tested: the flag raises with that explanation.
-* **`formulation="log"`** for Nernst-Planck (the Slotboom variable). Designed into the constructor
-  signature but not implemented; retrofitting it would change the field names. It is the same trick,
-  for the same reason, as the log-conformation viscoelastic model: it enforces positivity
-  structurally and tames the exponential.
+* **`formulation="log"`** for Nernst-Planck. Not implemented and, contrary to what this document
+  said until the materials work, **not reserved in the constructor signature either** — that claim
+  was wrong when it was written. See §11 for what it would take.
 
-## 9. Pitfalls a user will hit
+## 10. Open issues
+
+Ordered by how likely each is to bite someone, not by effort.
+
+### 10.1 Positivity: the log formulation for Nernst-Planck
+
+**The problem.** Nothing in a Galerkin discretisation keeps `c_i > 0`. The equilibrium profile is
+`c_i = c_inf*exp(-z_i*F*phi/(R*T))`, which at `zeta = 4*RT/F` spans a factor `e^4 ≈ 55` across a few
+nanometres; a C2 interpolant of that overshoots below zero as soon as the layer is under-resolved.
+Once a concentration goes negative:
+
+* the ionic strength and the Debye length go complex in any diagnostic that takes their square root;
+* `tau` picks up a NaN through the same route;
+* the reaction rate `z_i m_i F rho_e/eps` changes sign, so the stabilization pushes the wrong way;
+* Newton usually diverges rather than recovers, because the Jacobian entry through `c_i*grad(phi)`
+  has the wrong sign over the negative region.
+
+**The fix.** Solve for `psi_i = log(c_i/c_ref)` instead — the Slotboom or log-concentration variable.
+Then `c_i = c_ref*exp(psi_i) > 0` structurally, for any nodal value, on any mesh. This is the same
+trick and the same justification as the log-conformation representation in
+`viscoelastic_log_conformation.md`: an exponential field whose positivity is a physical invariant is
+represented by its logarithm so that the invariant survives discretisation.
+
+**What it would take.** The flux is unchanged in form,
+
+    J_i = c_i*u - D_i*grad(c_i) - z_i*m_i*F*c_i*grad(phi)
+        = c_ref*exp(psi_i) * ( u - D_i*grad(psi_i) - z_i*m_i*F*grad(phi) )
+
+so `c_i` factors out of the whole bracket, and the equation becomes
+
+    exp(psi_i)*( d_t(psi_i) + u.grad(psi_i) ) + div( exp(psi_i)*(...) ) = R_i/c_ref
+
+Concretely:
+
+1. `define_fields` defines `psi_<ion>` rather than `c_<ion>`, and supplies `c_<ion>` through
+   `define_field_by_substitution` so that every consumer — `get_charge_density`, the observables, a
+   `DirichletBC` written in concentrations, the output — keeps working unchanged. That substitution
+   must be written **nondimensionally**, see §1.
+2. `get_flux`, `strong_residual`, `stabilization_wind_for_field` and `stabilization_reaction_rate`
+   all rewrite in terms of `psi`. The wind gains the `-D_i*grad(psi_i)` term, i.e. **diffusion
+   becomes advective in the log variable** — which is the whole reason the formulation is
+   well behaved, and also means `tau` must be resized. That is not a detail: get it wrong and the
+   stabilization is inconsistent, which the manufactured-solution test would catch.
+3. Dirichlet conditions and initial conditions need translating, `c -> log(c/c_ref)`, which means a
+   user writing `DirichletBC(c_Na_p=cinf)` has to be intercepted or told. Intercepting is nicer and
+   is what `set_Dirichlet_condition` on the substituted field would have to do.
+4. `c_ref` is `scale_factor("ion_concentration")`, so the log is of a dimensionless quantity.
+
+**Why it was not done.** It is a genuine second discretisation of the same physics, not a flag: two
+code paths through `strong_residual` and four through the stabilization hooks, each needing its own
+manufactured-solution test. Doing it inside the electrokinetics work would have meant shipping it
+untested. It is also **not** a free improvement — the log variable makes the equations more
+nonlinear (Newton on `exp(psi)` has a worse basin than on `c`), so it trades a positivity failure for
+a convergence one, and the honest comparison needs both paths side by side on the same
+under-resolved layer.
+
+**Retrofitting cost.** Low, and lower than this document previously claimed. The field *names* change
+(`c_Na_p` to `psi_Na_p`), but since `c_<ion>` would remain available by substitution, nothing that
+reads a concentration breaks. The claim that the signature already reserved a `formulation` argument
+was simply false — it never did.
+
+### 10.2 Untested surface area
+
+The audit below is by counting references from `tests/test_electrostatics.py` and `tests/test_ehd.py`,
+so "untested" here means *no test names it at all*, not "lightly tested".
+
+| symbol | state |
+|---|---|
+| `ElectroosmoticSlip` | **physics untested.** Only its constructor error path is exercised. The Helmholtz-Smoluchowski plug flow `u = -eps*zeta*E/mu` in a straight channel is the obvious test and was planned; it was never written. This is the biggest gap, because the thin-double-layer route is the one recommended for anything larger than a thin 2D geometry. |
+| `lippmann_surface_tension`, `surface_charge_surface_tension`, `debye_huckel_surface_tension` | untested. They are one-line expressions, but the *sign* of the Lippmann relation (charging always lowers the tension) is exactly the kind of thing that should not be trusted to inspection. |
+| `ElectricFieldProjection` | untested. Verified once by hand — the output columns are correct and do not duplicate the local-expression ones — but that check is not in the suite. |
+| `IonFluxBC` | untested. Its default (blocking) is the natural boundary condition, so the class only matters for a nonzero flux or for the stabilization footprint, neither of which is exercised. |
+| `with_fixed_amounts` | untested. It removes a genuinely singular nullspace, so a wrong sign there shows up as a solver failure rather than a wrong answer, but it is untested all the same. |
+| `helmholtz_smoluchowski_velocity`, `electric_body_force`, `ions_from_material` | untested directly; each is used through a class that is tested. |
+| `SternLayer` | constructor only. `ThinDielectricLayer`, its base, has the series-capacitance test. |
+
+### 10.3 Coordinate systems, adaptivity, MPI
+
+* **Axisymmetry is smoke-tested, not validated.**
+  `test_ehd.py::test_maxwell_stress_assembles_in_axisymmetry` drives an axisymmetric box with the
+  Maxwell stress and checks only that it assembles, produces a flow and stays finite — which
+  establishes that `dyadic` and `identity_matrix` survive a coordinate system where the tensor is
+  3x3 over a 2D mesh. There is no analytic reference behind it, and the test says so. The Taylor
+  leaky-dielectric drop — small-deformation `D = (9/16)*Ca_E*Phi_T/(2+R)^2`, with the sign of the
+  discriminating function distinguishing prolate from oblate — is the test that would validate the
+  axisymmetric Maxwell traction *and* the whole leaky-dielectric interface at once. It was planned
+  and is not written.
+* **`radialsymmetric`** is exercised, by the point-charge far-field test.
+* **Spatial adaptivity** is untested for these equations. `NernstPlanckEquations` registers error
+  estimators on the ion gradients, which is the right criterion for a diffuse layer, but no test
+  refines anything. Interface-coupled adaptivity in particular (the gas/liquid pairing under
+  `enforce_interface_conformity`) has never been run.
+* **MPI** is untested. Nothing in these modules is obviously distribution-sensitive — there is no
+  custom assembly and no node matching — but `ElectricPotentialConnection` relies on the
+  opposite-side interface pairing, which is exactly the machinery that has needed attention before
+  (see `distributed_remeshing.md`, `mpi_augmented_systems.md`).
+* **Transients** are barely covered: one ion-conservation check over a few steps. `SurfaceChargeConservation`'s
+  `d_t q`, which is the physically interesting transient of the leaky-dielectric model, is only ever
+  solved in steady state, where it degenerates to current continuity.
+
+### 10.4 Not implemented, but named in the design
+
+* **`FloatingElectrode`** — a conductor at an unknown uniform potential carrying a prescribed total
+  charge. The construction is settled (a `GlobalLagrangeMultiplier` plus an interface multiplier, the
+  `with_pressure_integral_constraint` pattern) but no code exists.
+* **Charge regulation** — a surface charge that responds to the local pH through site dissociation,
+  `sigma_s(phi) = -e*Gamma/(1 + (K/cH)*exp(-e*phi/(kB*T)))`. `SurfaceChargeBC` takes a fixed charge
+  or an expression, so a user can write this by hand today; what is missing is the named class and,
+  more usefully, the Grahame conversion between a zeta potential and a surface charge, which the
+  design specified as a `zeta_model` argument and which does not exist.
+
+### 10.5 Meshing
+
+Nothing here helps a user build a mesh that resolves a Debye layer. `debye_length_ratio` is reported
+as a named numerical factor so the scale separation is at least visible, but the graded-mesh recipe
+that would make a resolved 2D calculation practical is not written, and `dev_docs/mesh_construction.md`
+covers boundary-layer meshes generically rather than for this case. Until that exists, resolved PNP
+in 2D is only honest for `lambda_D/L` above roughly 1e-3.
+
+### 10.6 Documentation
+
+There is no tutorial chapter. The gas/liquid pairing and the EHD routes exist only as tests, which
+are written to pin behaviour rather than to teach, and the API documentation is autodoc over
+docstrings. A chapter covering a capacitor, a charged wall in both PB and DH, the gas/liquid pairing
+and an EHD drop is the missing piece for anyone who did not write these modules.
+
+## 11. Pitfalls a user will hit
 
 1. **`grad()` on an interface is the surface gradient.** Every accessor in both modules takes
    `domain=`, and every interface class passes `".."` or `"|.."`. The one deliberate exception is

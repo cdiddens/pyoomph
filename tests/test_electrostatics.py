@@ -1079,3 +1079,130 @@ def test_migration_contributes_a_reaction_rate_to_tau():
     r_m = eqs.stabilization_reaction_rate("c_anion")
     assert not is_zero(convert_to_expression(r_p))
     assert (r_p + r_m).is_zero(), "opposite valences give opposite rates"
+
+
+# ---------------------------------------------------------------------------------------------
+# Driving the equations from the material library
+# ---------------------------------------------------------------------------------------------
+
+def _electrolyte(concentration=1 * milli * mol / liter, name="water"):
+    """A fresh water instance with NaCl dissolved in it.
+
+    get_pure_liquid returns a new object each call, so the ion table added here does not leak into
+    another test -- which it would if the library handed out a shared instance.
+    """
+    import pyoomph.materials.default_materials  # noqa: F401  (registers the library)
+    from pyoomph.materials.generic import get_pure_liquid, new_ion
+    Na = new_ion("Na+", +1, 1.33e-9 * meter ** 2 / second, override=True)
+    Cl = new_ion("Cl-", -1, 2.03e-9 * meter ** 2 / second, override=True)
+    w = get_pure_liquid(name)
+    w.add_salt(Na, Cl, concentration)
+    return w
+
+
+def test_material_carries_the_electric_properties():
+    w = _electrolyte()
+    T = 298.15 * kelvin
+    # Malmberg-Maryott: 78.30 at 25 C, and it really does vary by a third over the liquid range,
+    # which is why the equations evaluate it at a temperature rather than freezing a number.
+    assert float(w.get_absolute_permittivity(T) / epsilon_0) == pytest.approx(78.30, rel=1e-3)
+    assert float(w.get_absolute_permittivity(0 * celsius) / epsilon_0) == pytest.approx(87.74, rel=1e-3)
+    # 1 mM 1:1 in water: lambda_D = 9.6 nm, sigma_c = 12.6 mS/m (limiting molar conductivity of
+    # NaCl is 126.4 S cm^2/mol).
+    assert float(w.get_debye_length(T) / (nano * meter)) == pytest.approx(9.6, rel=1e-2)
+    assert float(w.electric_conductivity_from_ions(T) / (milli * siemens / meter)) \
+        == pytest.approx(12.6, rel=1e-2)
+    assert float(w.get_net_charge_number() / (mol / meter ** 3)) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_unset_electric_properties_stay_unset():
+    # make_static and set_by_weighted_average both iterate possible_properties and test hasattr, so
+    # a material that never sets these must not appear to have them. Assigning None in __init__
+    # would silently break both.
+    import pyoomph.materials.default_materials  # noqa: F401
+    from pyoomph.materials.generic import get_pure_liquid
+    glycerol = get_pure_liquid("glycerol")
+    assert "relative_permittivity" in glycerol.possible_properties
+    assert not hasattr(glycerol, "relative_permittivity")
+    assert not hasattr(glycerol, "electric_conductivity")
+    with pytest.raises(RuntimeError, match="does not define a relative_permittivity"):
+        glycerol.get_absolute_permittivity()
+
+
+def test_add_salt_is_electroneutral_for_asymmetric_valences():
+    import pyoomph.materials.default_materials  # noqa: F401
+    from pyoomph.materials.generic import get_pure_liquid, new_ion
+    Ca = new_ion("Ca2+", +2, 0.79e-9 * meter ** 2 / second, override=True)
+    Cl = new_ion("Cl-", -1, 2.03e-9 * meter ** 2 / second, override=True)
+    w = get_pure_liquid("water")
+    w.add_salt(Ca, Cl, 1 * milli * mol / liter)   # CaCl2: one Ca(2+) per two Cl(-)
+    assert float(w.get_net_charge_number() / (mol / meter ** 3)) == pytest.approx(0.0, abs=1e-12)
+    assert float(w.get_bulk_concentration("Cl-") / w.get_bulk_concentration("Ca2+")) \
+        == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("Na+", "Na_p"), ("Cl-", "Cl_m"), ("Ca2+", "Ca2_p"), ("SO4 2-", "SO4_2_m"), ("cation", "cation"),
+])
+def test_ion_field_names_are_valid_identifiers(name, expected):
+    # "Na+" is how a chemist writes it and how add_salt is called, but a pyoomph field name may only
+    # contain letters, digits and underscores.
+    assert ion_fieldname_stem(name) == expected
+    assert expected.replace("_", "a").isalnum()
+
+
+class _MaterialDrivenPNP(Problem):
+    """The same diffuse layer as _PNPDiffuseLayer, but with every material number coming from the
+    library rather than from literals in the script."""
+
+    def __init__(self, *, psi0=2.0, T=298.15 * kelvin, N=200, L_over_lambda=20.0):
+        super().__init__()
+        self.material = _electrolyte()
+        self.T, self.N = T, N
+        self.lambda_D = self.material.get_debye_length(T)
+        self.L = L_over_lambda * self.lambda_D
+        self.zeta = psi0 * thermal_voltage(T)
+        self.D_ref = 1.33e-9 * meter ** 2 / second
+
+    def define_problem(self):
+        cinf = self.material.get_bulk_concentration("Na+")
+        self.set_scaling(spatial=self.lambda_D, temporal=self.lambda_D ** 2 / self.D_ref,
+                         velocity=self.D_ref / self.lambda_D)
+        set_electrostatic_scaling(self, potential=thermal_voltage(self.T), temperature=self.T,
+                                  ion_concentration=cinf)
+        self.add_mesh(LineMesh(N=self.N, size=self.L))
+        # No ions, no permittivity, no diffusivities given here: all of it comes from the material.
+        eqs = PoissonNernstPlanck(fluid_props=self.material, wind=0, temperature=self.T)
+        eqs += ElectrodeBC(self.zeta) @ "left"
+        eqs += (ElectrodeBC(0) + DirichletBC(c_Na_p=cinf, c_Cl_m=cinf)) @ "right"
+        eqs += IntegralObservables(_length=1, charge=var("charge_density"))
+        self.add_equations(eqs @ "domain")
+
+
+def test_material_driven_pnp_reproduces_grahame():
+    # End to end: material -> equations -> the closed-form surface charge. Grahame for a symmetric
+    # z:z electrolyte is sigma_s = sqrt(8*eps*R*T*c_inf)*sinh(z*F*zeta/(2*R*T)), and global
+    # electroneutrality makes the diffuse charge exactly minus that.
+    prob = _MaterialDrivenPNP(psi0=2.0)
+    with _fresh(prob) as p:
+        p.solve()
+        o = p.get_mesh("domain").evaluate_all_observables()
+    T, m = prob.T, prob.material
+    eps, cinf = m.get_absolute_permittivity(T), m.get_bulk_concentration("Na+")
+    expected = -numpy.sqrt(float(8 * eps * gas_constant * T * cinf / (coulomb / meter ** 2) ** 2)) \
+        * numpy.sinh(2.0 / 2)
+    assert float(o["charge"] / (coulomb / meter ** 2)) == pytest.approx(expected, rel=1e-3)
+
+
+def test_interface_properties_feed_the_boundary_conditions():
+    from pyoomph.materials.generic import BaseInterfaceProperties
+    props = BaseInterfaceProperties.__new__(BaseInterfaceProperties)
+    props.surface_charge_density = 1 * milli * coulomb / meter ** 2
+    props.zeta_potential = 25 * milli * volt
+    props.stern_layer_capacitance = 0.2 * farad / meter ** 2
+    assert SurfaceChargeBC(interface_props=props).surface_charge_density is props.surface_charge_density
+    assert SternLayer(interface_props=props).capacitance is props.stern_layer_capacitance
+    props.zeta_potential = None
+    from pyoomph.equations.electrohydrodynamics import ElectroosmoticSlip
+    with pytest.raises(ValueError, match="zeta_potential"):
+        ElectroosmoticSlip(interface_props=props)

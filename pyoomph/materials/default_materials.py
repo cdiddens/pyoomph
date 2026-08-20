@@ -49,6 +49,18 @@ class PureLiquidWater(PureLiquidProperties):
             2.414e-5 * (10 ** (247.8 / (TKelvin - 140))) * pascal * second
         )
 
+        # Malmberg & Maryott, J. Res. Natl. Bur. Stand. 56 (1956) 1, valid 0-100 C. 78.36 at 25 C.
+        TCelsius = TKelvin - 273.15
+        self.relative_permittivity = subexpression(
+            87.740 - 0.40008 * TCelsius + 9.398e-4 * TCelsius ** 2 - 1.410e-6 * TCelsius ** 3
+        )
+
+        # Pure water is not an insulator but very nearly one: this is the self-dissociation
+        # conductivity of ultrapure water at 25 C. Any real electrolyte overwhelms it by orders of
+        # magnitude, so set it from the dissolved ions (see
+        # BaseLiquidProperties.set_electric_conductivity_from_ions) rather than relying on this.
+        self.electric_conductivity = 5.5e-6 * siemens / meter
+
         # https://www.thecalculator.co/others/Water-Density-Calculator-629.html
         self.mass_density = subexpression(
             (
@@ -429,6 +441,11 @@ class PureGasAir(PureGasProperties):
         TKelvin = var("temperature") / kelvin
 
         self.set_mass_density_from_ideal_gas_law()
+
+        # Dry air at ambient conditions. It is 1.00059, and the difference from vacuum matters for
+        # essentially nothing -- but having it set means a gas domain can be handed to the
+        # electrostatics as a fluid_props like any other phase.
+        self.relative_permittivity = 1.00059
 
         # Fit from data at https://www.engineeringtoolbox.com/dry-air-properties-d_973.html
         self.dynamic_viscosity = (

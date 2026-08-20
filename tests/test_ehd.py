@@ -339,3 +339,37 @@ def test_automatic_and_explicit_together_are_refused(explicit):
     with pytest.raises(RuntimeError, match="twice"):
         with _fresh(_Both()) as p:
             p.initialise()
+
+
+def test_maxwell_stress_assembles_in_axisymmetry():
+    """A smoke test, and labelled as one: it establishes that the coordinate system survives, not
+    that the answer is right.
+
+    ``maxwell_stress_tensor`` builds ``dyadic(E,E)`` and ``identity_matrix()``, both of which go
+    through the coordinate system, and in axisymmetry the tensor is 3x3 over a 2D mesh. There is no
+    analytic reference behind this. The test that would validate the axisymmetric electric traction
+    properly is Taylor's leaky-dielectric drop deformation; see dev_docs/electrohydrodynamics.md
+    section 10.3.
+    """
+
+    class _Axi(Problem):
+        def define_problem(self):
+            self.set_coordinate_system(axisymmetric)
+            r, z = var(["coordinate_x", "coordinate_y"])
+            phi_e = 10 * r * (1 - r) * z * (1 - z)
+            self.add_mesh(RectangularQuadMesh(N=4))
+            eqs = StokesEquations(dynamic_viscosity=1).with_pressure_fixation(nondim_p_value=0.0)
+            eqs += ElectricPotentialEquations(permittivity=_EPS, permittivity_scale=1,
+                                              charge_density=-div(_EPS * grad(phi_e)))
+            for b in ["left", "right", "top", "bottom"]:
+                eqs += (DirichletBC(velocity_x=0, velocity_y=0) + ElectrodeBC(phi_e)) @ b
+            eqs += IntegralObservables(
+                u2=subexpression(dot(var("velocity"), var("velocity"))),
+                sM_rr=maxwell_stress_tensor(_EPS, var("electric_field"))[0, 0])
+            self.add_equations(eqs @ "domain")
+
+    with _fresh(_Axi()) as p:
+        p.solve()
+        o = p.get_mesh("domain").evaluate_all_observables()
+    assert float(o["u2"]) > 1e-8, "the electric force should drive a flow"
+    assert numpy.isfinite(float(o["sM_rr"]))
