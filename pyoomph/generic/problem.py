@@ -1160,7 +1160,6 @@ class Problem(_pyoomph.Problem):
             # A domain with no equations at all is not a valid tree node - the codegen still has
             # to exist for the mesh that was built from it.
             eqtree._equations = [DummyEquations()]
-            eqtree._equations[0]._problem = self
         eqtree._combined_cache = None
 
     def get_default_timestepping_scheme(self,order:int) -> Literal['Newmark2', 'BDF2', 'BDF1']:
@@ -2795,7 +2794,7 @@ class Problem(_pyoomph.Problem):
                     mesh._set_problem(self,mesh.get_code_gen()._code)
                 assert mesh._eqtree is not None
                 assert mesh._eqtree._equations
-                mesh._eqtree.get_equations().get_combined_equations()._problem=self
+                mesh._eqtree._problem=self
                 if isinstance(mesh,ODEStorageMesh): continue
                 mesh._pre_compile_interface_equations(tree_depth)
 

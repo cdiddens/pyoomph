@@ -1153,10 +1153,8 @@ class MeshFromTemplateBase(BaseMesh):
         self._templatemesh: MeshTemplate = templatemesh
         self._name = domainname
         self._eqtree: "EquationTree" = eqtree
-        self._eqtree._mesh = self
-        # self._equations = eqtree._equations
         self._codegen = eqtree.get_code_gen()
-        self._codegen._mesh = self
+        self._eqtree._mesh = self
         self.ignore_initial_condition = False
         self._set_problem(problem, self._codegen._code)
         self._error_estimator: Z2ErrorEstimator  # =None
@@ -1977,9 +1975,7 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         self._eqtree.get_equations()._set_current_codegen(self._codegen)
 
         assert self._codegen is not None
-        self._codegen._mesh = self
         eqs = self._eqtree.get_equations()
-
 
         #self._problem.before_compile_equations(self._eqtree)
         eqs.before_finalization(self._codegen)
@@ -2152,7 +2148,6 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         eqs=self._eqtree.get_equations()
         #problem.before_compile_equations(self._eqtree)
         eqs.before_finalization(self._codegen)
-        eqs._problem=problem
         self._codegen._finalise()
         self._codegen.get_equations()._set_current_codegen(self._codegen)
 

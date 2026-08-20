@@ -620,12 +620,18 @@ class BaseEquations(_pyoomph.Equations):
         return res
 
     def get_problem(self)->"Problem":
-        mst=self.get_combined_equations()
+        mst=self._master()
+        # The code generator's pointer is C++-side and is re-stamped whenever the problem is
+        # rebuilt, so it wins over the stored one. The stored one is only there for the window
+        # before any code generator exists (the dummy-equation and interface-connection passes).
+        cg=mst._get_current_codegen()
+        if cg is not None:
+            p=cg.get_problem()
+            if p is not None:
+                return p
         if mst._problem is not None:
             return mst._problem
-        else:
-            cg=mst._assert_codegen()
-            return cg.get_problem()
+        return mst._assert_codegen().get_problem()
 
     @property
     def _problem(self)->"Problem | None":
@@ -1473,21 +1479,20 @@ class BaseEquations(_pyoomph.Equations):
         if master.default_timestepping_scheme is not None:
             return master.default_timestepping_scheme
 
+        # get_problem() rather than self._problem: only the domain is stamped with the problem,
+        # so an equation asking on its own behalf used to assert here instead of resolving.
         if isinstance(self, ODEEquations):
-            assert self._problem is not None
-            return cast(Literal["BDF2","BDF1","Newmark2"],self._problem.get_default_timestepping_scheme(order))
+            return cast(Literal["BDF2","BDF1","Newmark2"],self.get_problem().get_default_timestepping_scheme(order))
         elif cg is not None:
             pdom=cg.get_parent_domain()
             if pdom is not None:
-                return cast(Literal["BDF2","BDF1","Newmark2"],pdom.get_default_timestepping_scheme(order)) 
+                return cast(Literal["BDF2","BDF1","Newmark2"],pdom.get_default_timestepping_scheme(order))
             else:
-                assert self._problem is not None
-                return cast(Literal["BDF2","BDF1","Newmark2"],self._problem.get_default_timestepping_scheme(order))
+                return cast(Literal["BDF2","BDF1","Newmark2"],self.get_problem().get_default_timestepping_scheme(order))
         elif (pdom:=self.get_parent_domain()) is not None:
-            return cast(Literal["BDF2","BDF1","Newmark2"],pdom.get_default_timestepping_scheme(order)) 
+            return cast(Literal["BDF2","BDF1","Newmark2"],pdom.get_default_timestepping_scheme(order))
         else:
-            assert self._problem is not None
-            return cast(Literal["BDF2","BDF1","Newmark2"],self._problem.get_default_timestepping_scheme(order))
+            return cast(Literal["BDF2","BDF1","Newmark2"],self.get_problem().get_default_timestepping_scheme(order))
 
 
 
@@ -2441,9 +2446,25 @@ class EquationTree(Equations):
         self._equations = eqs
         self._parent = parent
         self._codegen:"FiniteElementCodeGenerator | None"=None
-        self._mesh:"AnyMesh | None"=None
         self._children:dict[str,"EquationTree"] = {}
         self._compilation_flags:"EquationCompilationFlags | None"=None
+
+    @property
+    def _mesh(self)->"AnyMesh | None":
+        """The mesh built for this domain, stored once, on the code generator.
+
+        A node used to keep a second copy. The two were written from different places - an
+        InterfaceMesh set the node's but not the generator's, and only
+        rebuild_global_mesh_from_list() re-stamped the latter - so between a remesh and that
+        call the generator pointed at a destroyed mesh. Both warnings about that ordering
+        (Problem._reregister_refinement_directives, register_refinement_directives) refer to it.
+        """
+        return self._codegen._mesh if self._codegen is not None else None
+
+    @_mesh.setter
+    def _mesh(self,mesh:"AnyMesh | None"):
+        assert self._codegen is not None, "A domain gets its code generator before its mesh"
+        self._codegen._mesh=mesh
 
     @property
     def _equations(self)->"list[BaseEquations]":
@@ -2932,17 +2953,13 @@ class EquationTree(Equations):
         if len(self._children)>0 and not self._equations:
             if self._has_sub_equations_defined() and not is_bulk_root:
                 self._equations=[DummyEquations()]
-                self._equations[0]._problem=problem
         if self._equations:
-            for eq in self._equations:
-                eq._problem = problem
             for eq in self._equations:
                 eq.before_fill_dummy_equations(problem,self,pathname)
             if any(eq.interior_facet_terms_required() for eq in self._equations):
                 if "_internal_facets_" not in self._children.keys():
                     facets=EquationTree(DummyEquations(),self)
                     facets._problem=problem
-                    facets._equations[0]._problem=problem
                     self._children["_internal_facets_"]=facets
         #for dn in list(self._children.keys()):
         for dn,v in self._children.items():
@@ -3139,7 +3156,6 @@ class EquationTree(Equations):
     def _create_dummy_equations_at_path(self,path:str,root:"EquationTree",problem:"Problem"):
         if (not self._equations) and (self!=root):
             self._equations=[DummyEquations()]
-            self._equations[0]._problem=problem
             self._problem=problem
         if path=="":
             return
@@ -3148,7 +3164,6 @@ class EquationTree(Equations):
         if chld is None:
             node=EquationTree(DummyEquations(),parent=self)
             node._problem=problem
-            node._equations[0]._problem=problem
             self._children[pth[0]]=node
         self._children.get(pth[0])._create_dummy_equations_at_path("/".join(pth[1:]),root,problem) #type:ignore
 
@@ -3163,7 +3178,7 @@ class EquationTree(Equations):
         stored within are shared with the original. This is exactly the same semantics as restricting a
         single Equations object to several domains at once, i.e. eqs@["domA","domB"], where the very same
         Equations object ends up in both domains."""
-        if self._codegen is not None or self._mesh is not None:
+        if self._codegen is not None:
             raise RuntimeError("Cannot reuse an equation tree that is already part of an initialized problem")
         res = EquationTree(self._equations, parent=None)
         res._name = getattr(self,"_name",None) #type:ignore

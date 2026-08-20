@@ -1690,15 +1690,11 @@ class AxisymmetryBC(InterfaceEquations):
                         if len(axieq_list)>0:
                             continue # Already added
                         else:
-                            newbc=AxisymmetryBC(verbose=self.verbose,recurse=self.recurse)
-                            newbc._problem=iface._equations[0]._problem
-                            iface._equations=iface._equations+[newbc]
-                            iface._combined_cache=None
+                            iface._equations=iface._equations+[AxisymmetryBC(verbose=self.verbose,recurse=self.recurse)]
                 else:
                     new_child=EquationTree(AxisymmetryBC(verbose=self.verbose,recurse=self.recurse),dom)
                     dom._children[splt[-1]]=new_child
-                    assert dom._equations
-                    new_child._equations[0]._problem=dom._equations[0]._problem
+                    new_child._problem=dom._problem
                     
             
         return super()._fill_interinter_connections(eqtree, interinter)
