@@ -101,7 +101,14 @@ namespace pyoomph
 
   public:
     ExternalDataLinkVector(unsigned n) : std::vector<ExternalDataLink>(n, ExternalDataLink(NULL, -1)) {}
-    void reindex_elemental_data(); // Rebuilds elemental_data from the (possibly sparsely filled) link entries, removing duplicates
+    // Rebuilds elemental_data from the (possibly sparsely filled) link entries, removing duplicates.
+    // field_contribution_index is the ED0 array parallel to these links: a field marked -2 takes part
+    // in no contribution of the code, i.e. it is read by output/integral expressions only. Such a link
+    // is not registered as element external data - it would add a dof to every element of the domain,
+    // and with it a row and a column of the dense elemental Jacobian, that no residual ever writes.
+    // Its elemental_index stays -1 unless some assembly-relevant link shares the same Data object, and
+    // fill_element_info reads the value straight from the Data in that case.
+    void reindex_elemental_data(const int *field_contribution_index = NULL);
     std::vector<oomph::Data *> &get_required_external_data() { return elemental_data; }
   };
 

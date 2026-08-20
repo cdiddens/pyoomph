@@ -492,6 +492,14 @@ typedef struct JITFuncSpec_Table_FiniteElement
   JITFuncSpec_RequiredShapes_FiniteElement_t *shapes_required_ResJac;
   JITFuncSpec_RequiredShapes_FiniteElement_t *shapes_required_Hessian;
   JITFuncSpec_RequiredShapes_FiniteElement_t merged_required_shapes;
+  // The same OR restricted to the contributions that are actually ASSEMBLED (residual/Jacobian/mass
+  // and Hessian). merged_required_shapes additionally covers integral, local, extremum, Z2-flux and
+  // tracer-advection expressions, which are evaluated on their own and never build a Jacobian - using
+  // it to decide what to attach as external data let one output observable widen the dense elemental
+  // block of every element of the domain. Attachment and the equation remapping that addresses the
+  // attached dofs must always read the SAME one of the two, or the remap hands out local equation
+  // numbers for data the element does not carry. Buffer sizing and the evaluators keep the full merge.
+  JITFuncSpec_RequiredShapes_FiniteElement_t assembly_required_shapes;
   unsigned numglobal_params;
   unsigned *global_paramindices;
   double **global_parameters;

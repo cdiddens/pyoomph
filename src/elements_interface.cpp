@@ -733,12 +733,15 @@ namespace pyoomph
 		*/
 
 		const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
-		update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(this->bulk_element_pt()),functable->merged_required_shapes.bulk_shapes , bulk_eqn_map,1);	
-		if (functable->merged_required_shapes.bulk_shapes && functable->merged_required_shapes.bulk_shapes->bulk_shapes)
+		// Must be the very set the attachment used: this hands out local equation numbers OF the attached
+		// external data, so remapping from a wider set would resolve dofs the element does not carry.
+		const JITFuncSpec_RequiredShapes_FiniteElement_t &attach_req = *attachment_required_shapes(functable);
+		update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(this->bulk_element_pt()),attach_req.bulk_shapes , bulk_eqn_map,1);	
+		if (attach_req.bulk_shapes && attach_req.bulk_shapes->bulk_shapes)
 		{
-			update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->bulk_element_pt())->bulk_element_pt()),functable->merged_required_shapes.bulk_shapes->bulk_shapes,  bulk_bulk_eqn_map,2);
+			update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(this->bulk_element_pt())->bulk_element_pt()),attach_req.bulk_shapes->bulk_shapes,  bulk_bulk_eqn_map,2);
 		}
-		if (functable->merged_required_shapes.opposite_shapes && !is_internal_facet_opposite_dummy())
+		if (attach_req.opposite_shapes && !is_internal_facet_opposite_dummy())
 		{
 			if (!dynamic_cast<InterfaceElementBase *>(opposite_side))
 			{
@@ -746,14 +749,14 @@ namespace pyoomph
 			}
 			if (!this->is_internal_facet_opposite_dummy())
 			{		
-				update_equation_remapping_from_element(opposite_side,functable->merged_required_shapes.opposite_shapes,  opp_interf_eqn_map,-1);
-				if (functable->merged_required_shapes.opposite_shapes->bulk_shapes)
+				update_equation_remapping_from_element(opposite_side,attach_req.opposite_shapes,  opp_interf_eqn_map,-1);
+				if (attach_req.opposite_shapes->bulk_shapes)
 				{
 					if (!dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt())
 					{
 						throw_runtime_error("Missing opposite bulk element");
 					}			
-					update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt()),functable->merged_required_shapes.opposite_shapes->bulk_shapes , opp_bulk_eqn_map,-2);
+					update_equation_remapping_from_element(dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt()),attach_req.opposite_shapes->bulk_shapes , opp_bulk_eqn_map,-2);
 				}
 			}
 		}
@@ -1431,6 +1434,13 @@ namespace pyoomph
 	  for (unsigned int si=0;si<ft->num_present_dg_spaces;si++)
 	  {
 		  auto * space_info=ft->present_dg_spaces[si];
+		  // Deliberately NOT gated on whether anything requires this space, although a Dirichlet-condition
+		  // element (which requires no shape at all) does carry half its dofs this way: the bulk DG data is
+		  // addressed POSITIONALLY, as external_data_pt(external_offset_bulk + fieldindex), and
+		  // fill_element_info marshals every present DG space unconditionally. Skipping one attachment
+		  // shifts every later index and reads past the end of the external data - it segfaults rather than
+		  // producing a wrong number. Narrowing this needs the DG marshalling to learn which spaces were
+		  // attached, which is a separate change from the external-data split.
 		  for (unsigned i=0;i<space_info->numfields_bulk;i++)
 		  {
 			// DG field values, never positions. The flag has to be recorded here rather than left to

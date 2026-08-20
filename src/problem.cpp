@@ -214,11 +214,15 @@ namespace pyoomph
 
 		// Merge the required shapes to add all external data
 		JITFuncSpec_RequiredShapes_FiniteElement *merged = &(functable->merged_required_shapes);
+		// The assembled contributions are merged separately as well; see the field's declaration.
+		JITFuncSpec_RequiredShapes_FiniteElement *assembly = &(functable->assembly_required_shapes);
 
 		for (unsigned int i = 0; i < functable->num_res_jacs; i++)
 		{
 			RequiredShapes_merge(&functable->shapes_required_ResJac[i], merged);
 			RequiredShapes_merge(&functable->shapes_required_Hessian[i], merged);
+			RequiredShapes_merge(&functable->shapes_required_ResJac[i], assembly);
+			RequiredShapes_merge(&functable->shapes_required_Hessian[i], assembly);
 		}
 		RequiredShapes_merge(&functable->shapes_required_IntegralExprs, merged);
 		RequiredShapes_merge(&functable->shapes_required_LocalExprs, merged);
@@ -323,26 +327,26 @@ namespace pyoomph
 	// Rebuilds the deduplicated elemental_data list from the (name-indexed) link entries: for each link,
 	// finds or inserts its Data pointer in elemental_data and records the resulting position as the
 	// link's elemental_index (the index the compiled element code uses to address this external data).
-	void ExternalDataLinkVector::reindex_elemental_data()
+	// Only links that some contribution actually assembles are registered - see the header for why the
+	// output-only ones are left out. The two passes matter: a Data object shared between an
+	// output-only field and an assembled one is registered by the latter, and the former then simply
+	// finds it and addresses it through the element as before.
+	void ExternalDataLinkVector::reindex_elemental_data(const int *field_contribution_index)
 	{
+		// Same lever as the bulk/opposite attachment split, so the whole stage can be A/B-ed on one binary.
+		static const bool __disabled = getenv("PYOOMPH_DISABLE_ASSEMBLY_EXTDATA_SPLIT") != NULL;
 		elemental_data.clear();
 		for (unsigned int i = 0; i < this->size(); i++)
 		{
-			int found = -1;
-			for (unsigned int e = 0; e < elemental_data.size(); e++)
-			{
-				if (elemental_data[e] == this->at(i).data)
-				{
-					found = e;
-					break;
-				}
-			}
-			if (found < 0)
-			{
-				found = elemental_data.size();
+			if (!__disabled && field_contribution_index && field_contribution_index[i] == -2)
+				continue;
+			if (std::find(elemental_data.begin(), elemental_data.end(), this->at(i).data) == elemental_data.end())
 				elemental_data.push_back(this->at(i).data);
-			}
-			this->at(i).elemental_index = found;
+		}
+		for (unsigned int i = 0; i < this->size(); i++)
+		{
+			auto found = std::find(elemental_data.begin(), elemental_data.end(), this->at(i).data);
+			this->at(i).elemental_index = (found == elemental_data.end() ? -1 : found - elemental_data.begin());
 		}
 	}
 
@@ -404,7 +408,7 @@ namespace pyoomph
 				break;
 			}
 		}
-		linked_external_data.reindex_elemental_data();
+		linked_external_data.reindex_elemental_data(dyn->functable->info_ED0.field_contribution_index);
 	}
 
 	// Maps every nodal field name to its index into the node's value array, in the order in which the

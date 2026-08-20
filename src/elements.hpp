@@ -741,6 +741,12 @@ namespace pyoomph
     // remap tables. Defined in elements_shapeinfo.cpp.
     virtual void poison_unrequired_shapes(const JITFuncSpec_RequiredShapes_FiniteElement_t &required, JITShapeInfo_t *si, bool element_level) const;
 
+    // The requirement set that decides which external data an element attaches and, in lockstep, which
+    // equations the interface remapping hands out. Normally assembly_required_shapes; the env lever
+    // PYOOMPH_DISABLE_ASSEMBLY_EXTDATA_SPLIT restores the old behaviour of attaching from the full
+    // merge, for A/B-ing the split on one and the same binary. Defined in elements.cpp.
+    static const JITFuncSpec_RequiredShapes_FiniteElement_t *attachment_required_shapes(const JITFuncSpec_Table_FiniteElement_t *ft);
+
     // Which shape-function families of ONE interpolation space a fill pass has to produce. They are
     // filled individually: a psi-only space (by far the most common combination) does not pay for the
     // two gradient contractions.
@@ -1578,16 +1584,18 @@ namespace pyoomph
       }
       opposite_side = dynamic_cast<InterfaceElementBase *>(_opposite_side);
       const JITFuncSpec_Table_FiniteElement_t *functable = this->codeinst->get_func_table();
+      // Attachment reads the assembled requirements only - see attachment_required_shapes.
+      const JITFuncSpec_RequiredShapes_FiniteElement_t &attach_req = *attachment_required_shapes(functable);
 
-      if (functable->merged_required_shapes.opposite_shapes)
+      if (attach_req.opposite_shapes)
       {
-        // std::cout << "INTERFACE ELEM MERGED " << functable->merged_required_shapes.opposite_shapes->psi_D0 << std::endl;
-        add_required_external_data(functable->merged_required_shapes.opposite_shapes, dynamic_cast<BulkElementBase *>(opposite_side));
-        if (functable->merged_required_shapes.opposite_shapes->bulk_shapes)
+        // std::cout << "INTERFACE ELEM MERGED " << attach_req.opposite_shapes->psi_D0 << std::endl;
+        add_required_external_data(attach_req.opposite_shapes, dynamic_cast<BulkElementBase *>(opposite_side));
+        if (attach_req.opposite_shapes->bulk_shapes)
         {
-          //        std::cout << "INTERFACE ELEM MERGED BULK " <<  functable->merged_required_shapes.opposite_shapes->bulk_shapes->psi_D0 << std::endl;
+          //        std::cout << "INTERFACE ELEM MERGED BULK " <<  attach_req.opposite_shapes->bulk_shapes->psi_D0 << std::endl;
           auto *opp_blk = dynamic_cast<BulkElementBase *>(dynamic_cast<InterfaceElementBase *>(opposite_side)->bulk_element_pt());
-          add_required_external_data(functable->merged_required_shapes.opposite_shapes->bulk_shapes, opp_blk);
+          add_required_external_data(attach_req.opposite_shapes->bulk_shapes, opp_blk);
           // ...and register the same data on the OPPOSITE element as well.
           //
           // Reaching the opposite side's bulk goes through the opposite INTERFACE element: its shape
@@ -1600,7 +1608,7 @@ namespace pyoomph
           // interface condition needs the gas bulk element's C2 dofs, but the gas-side interface
           // element may only carry a Dirichlet condition on c, which needs no bulk shapes whatsoever.
           // Without this the remap yields "not found" for exactly those dofs.
-          opposite_side->add_required_external_data(functable->merged_required_shapes.opposite_shapes->bulk_shapes, opp_blk);
+          opposite_side->add_required_external_data(attach_req.opposite_shapes->bulk_shapes, opp_blk);
         }
       }
 
@@ -1735,14 +1743,16 @@ namespace pyoomph
       }
       //      std::cout << "DONE ADDING INTERFACE ELEM ED0 DATA " << this->nexternal_data() << std::endl;
 
-      if (functable->merged_required_shapes.bulk_shapes)
+      // Attachment reads the assembled requirements only - see attachment_required_shapes.
+      const JITFuncSpec_RequiredShapes_FiniteElement_t &attach_req = *attachment_required_shapes(functable);
+      if (attach_req.bulk_shapes)
       {
         //	  std::cout << "ADDING BULK EXT DATA" << std::endl;
-        add_required_external_data(functable->merged_required_shapes.bulk_shapes, dynamic_cast<BulkElementBase *>(bulk_el_pt)); // TODO: Also the others? (is it necessary e.g. spatial integration of the stress along interface)
-        if (functable->merged_required_shapes.bulk_shapes->bulk_shapes)
+        add_required_external_data(attach_req.bulk_shapes, dynamic_cast<BulkElementBase *>(bulk_el_pt)); // TODO: Also the others? (is it necessary e.g. spatial integration of the stress along interface)
+        if (attach_req.bulk_shapes->bulk_shapes)
         {
           InterfaceElementBase *ip = dynamic_cast<InterfaceElementBase *>(bulk_el_pt);
-          add_required_external_data(functable->merged_required_shapes.bulk_shapes->bulk_shapes, dynamic_cast<BulkElementBase *>(ip->bulk_element_pt()));
+          add_required_external_data(attach_req.bulk_shapes->bulk_shapes, dynamic_cast<BulkElementBase *>(ip->bulk_element_pt()));
         }
       }
     }

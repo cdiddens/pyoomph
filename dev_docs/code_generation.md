@@ -1473,13 +1473,36 @@ Targeted suites: `test_adaptivity.py` + `test_constrained_adaptivity.py` (32 pas
 `test_adaptive_interface_coupling.py` (137 passed), `test_generated_code_expressions.py` +
 `test_jacobian_block_flags.py` as the non-adaptive smoke test (27 passed).
 
+### 9.4.15 The Hessian shape flags missed every derived expansion
+
+`shapes_required_Hessian[i]` under-requested: a `HessianVectorProduct` body dereferences
+`dx_shapes` for bases the flag walk never marked. Harmless for as long as the runtime fill was
+all-or-nothing per space - one flag pulled the whole space in - and immediately fatal once the fill
+was narrowed per family (`|HVV|` off by 1.9e-1 relative 15, or `nan` under
+`PYOOMPH_POISON_UNREQUIRED`).
+
+The cause is that `__all_Hessian_shapeexps` is the **emission** set, and
+`ShapeExpansion::get_spatial_interpolation_name()` ignores `is_derived`: admitting a derived
+expansion alongside its undifferentiated twin would declare the same C local twice and the generated
+file would not compile. That filter is right and stays; what was wrong is that the same set also fed
+`mark_shapes_required`, so every basis read only by the differentiated columns lost its flag. A
+second accumulator now collects the expansions unfiltered and is walked only for the flag marking.
+
+A **per-function** reverse scan over 2117 current-ABI corpus files confirms only Hessian functions
+were affected (`dx_shapes` in 4, `shape_Pos` in 16 moving-mesh Hessians). `ResJac` is clean - its
+walk is over the undifferentiated residual, and differentiation preserves the basis - parameter
+derivatives share the `ResJac[i]` struct, and the expression categories never differentiate. A
+file-wide union scan finds nothing, which is precisely how this survived: the under-request is
+per pass.
+
 #### Outlook
 
 * The Hessian macros (`src/jitbridge.h`) were left alone on purpose: §9.4.9/§9.4.11 show that path is
   dominated by sparse-tensor inserts, not by the emitted code.
 * Narrowing the `InterfaceElementBase` predicate to elements that really hang.
-* Skipping `fill_hang_info_with_equations` / `interpolate_hang_values` entirely for elements known not
-  to hang - currently both still run in full before the dispatch reads the answer.
+* Skipping `fill_hang_info_with_equations` / `interpolate_hang_values` for elements known not to hang
+  - *done*, see [assembly_overhead.md](assembly_overhead.md) §2, which also records why most of what
+  `interpolate_hang_values` does on a mixed-space mesh is not redundant and cannot be cached away.
 
 ## 10. Things deliberately left alone
 
@@ -1518,6 +1541,8 @@ All change how pyoomph gets there or what it reports, never what it computes.
 | `PYOOMPH_PARANOID_UNIT_PRESCAN` | do the skipped normalisation anyway and raise if it disagrees; covers both the prescan and the fast check |
 | `PYOOMPH_DISABLE_EXPAND_MEMO` | turn off the placeholder-expansion memo (on by default, §3) |
 | `PYOOMPH_ARCHIVE_EXPRESSIONS` | fill `FiniteElementCode::archive` again (§5) |
+| `PYOOMPH_POISON_UNREQUIRED` | signalling NaN into every shape buffer the pass did not require; `=all` is the positive control. See [assembly_overhead.md](assembly_overhead.md) §3.1 - it is what found the Hessian flag defect of §9.4.15 |
+| `PYOOMPH_DISABLE_SHAPE_FAMILY_SPLIT`, `PYOOMPH_*_HANG_FILL_CACHE`, `PYOOMPH_DISABLE_ASSEMBLY_EXTDATA_SPLIT` | the assembly-overhead levers, [assembly_overhead.md](assembly_overhead.md) §6 |
 | `PYOOMPH_TIME_ADD_RESIDUAL` | per-phase timing of `add_residual`/`expand_placeholders` on stderr, with mapper entries, memo hits and distinct-subexpression counts |
 | `PYOOMPH_DEBUG_HOIST` | report on stderr why a Jacobian/Hessian entry could not be split for hoisting, with the atoms and their trial-index classes (§9.4.8) |
 | `PYOOMPH_DISABLE_RJM_SPLIT` | emit one Residual/Jacobian/Mass function with a runtime flag instead of three specialised bodies behind a dispatcher (§9.4.6) |

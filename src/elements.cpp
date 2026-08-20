@@ -364,6 +364,12 @@ namespace pyoomph
 
 	// Rebuilds this element's external-data list from scratch based on the JIT code instance's
 	// linked external data (data shared/globally coupled across elements, e.g. global parameters).
+	const JITFuncSpec_RequiredShapes_FiniteElement_t *BulkElementBase::attachment_required_shapes(const JITFuncSpec_Table_FiniteElement_t *ft)
+	{
+		static const bool __disabled = getenv("PYOOMPH_DISABLE_ASSEMBLY_EXTDATA_SPLIT") != NULL;
+		return __disabled ? &(ft->merged_required_shapes) : &(ft->assembly_required_shapes);
+	}
+
 	void BulkElementBase::ensure_external_data()
 	{
 		this->flush_external_data();
@@ -1427,6 +1433,17 @@ namespace pyoomph
 				//		std::cout << "NODE INDEX oF " << functable->fieldnames_ED0[i] << " IS " << node_index << std::endl;
 				if (!codeinst->linked_external_data[i].data)
 					throw_runtime_error("Element has an external data contribution, which is not assigned: " + std::string(functable->info_ED0.fieldnames[i]));
+				if (codeinst->linked_external_data[i].elemental_index < 0)
+				{
+					// Read by output/integral expressions only, so it was deliberately not registered as
+					// external data (reindex_elemental_data). Those evaluators want the value and never an
+					// equation; -1 is what every other unassembled dof carries, so a residual or Jacobian
+					// term that referenced it after all would be skipped rather than write somewhere wrong.
+					int value_i = codeinst->linked_external_data[i].value_index;
+					eleminfo.nodal_data[0][node_index] = codeinst->linked_external_data[i].data->value_pt(value_i);
+					eleminfo.nodal_local_eqn[0][node_index] = -1;
+					continue;
+				}
 				int extdata_i = codeinst->linked_external_data[i].elemental_index+functable->info_ED0.external_offset_bulk;
 				if (extdata_i >= (int)this->nexternal_data())
 					throw_runtime_error("Somehow the external data array was not done well when trying to index data: " + std::string(functable->info_ED0.fieldnames[i]) + "  ext_data_index is " + std::to_string(extdata_i) + ", but only " + std::to_string((int)this->nexternal_data()) + " ext data slots present. Happened in " + codeinst->get_code()->get_file_name());
