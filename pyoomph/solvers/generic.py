@@ -749,9 +749,9 @@ class GenericEigenSolver:
 		self.ncv:int | None=None
 		self.last_assembly_was_complex:bool=False
 		#: Use a symmetric eigensolver (scipy eigsh / SLEPc GHEP) when J and M are both symbolically
-		#: proven symmetric. This additionally ASSUMES M is positive semi-definite - true for
-		#: pyoomph-generated mass matrices (Gram matrices of the partial_t terms), but not provable
-		#: symbolically, so a hand-written negative mass contribution must set this to False.
+		#: proven symmetric. Those drivers additionally need M positive semi-definite, which the
+		#: symmetry proof does not give: the assembled M is screened for it numerically before the
+		#: symmetric driver is engaged (see _mass_matrix_can_be_positive_semidefinite).
 		self.exploit_proven_symmetry:bool=True
 		#: Outcome/reason of the last _use_symmetric_eigensolver_now() call (None = never asked);
 		#: also read by the Pardiso/Accelerate shift-invert operators to pick a symmetric mode.
@@ -778,8 +778,41 @@ class GenericEigenSolver:
 		jac_sym,mass_sym=self.problem._get_proven_matrix_symmetry(self.real_contribution)
 		decision=jac_sym and mass_sym
 		self.last_symmetry_decision=decision
-		self.last_symmetry_decision_reason="J and M proven symmetric (M assumed PSD)" if decision else "J or M not proven symmetric (or augmented/custom assembly)"
+		self.last_symmetry_decision_reason="J and M proven symmetric" if decision else "J or M not proven symmetric (or augmented/custom assembly)"
 		return decision
+
+	def _mass_matrix_can_be_positive_semidefinite(self,M:Any,first_row:int=0)->bool:
+		"""Cheap necessary condition for a symmetric M to be positive semi-definite.
+
+		_use_symmetric_eigensolver_now only establishes that M is SYMMETRIC, but the symmetric drivers
+		use M as an inner product and need it positive semi-definite on top of that. PSD was initially
+		just assumed, on the grounds that partial_t generates Gram matrices - which is false as soon as
+		partial_t couples two different fields. The pendulum ODE (phi'=psi, psi'=-sin(phi)) assembles
+		M=[[0,1],[1,0]]: symmetric, eigenvalues +-1, and SLEPc aborts with "The inner product is not
+		well defined: indefinite matrix".
+
+		Screened in one pass over the stored entries: a PSD matrix has M[i,i]>=0 everywhere, and a
+		vanishing M[i,i] forces the whole of row i to vanish with it. Necessary, not sufficient - it
+		cannot certify PSD, it only catches the matrices that certainly are not, which is what the
+		cross-coupled mass matrices are.
+
+		``first_row`` is this rank's global row offset when M holds only a local row block (columns are
+		global either way); the verdict is reduced across ranks, so all of them engage or none do.
+		"""
+		Mc=M.tocsr() if not hasattr(M,"indptr") else M
+		ok=True
+		if Mc.nnz>0:
+			absM=abs(Mc)
+			scale=absM.max()
+			if scale>0:
+				tol=1e-12*scale
+				diag=Mc.diagonal(first_row)
+				rowsum=numpy.asarray(absM.sum(axis=1)).ravel()[:len(diag)]
+				# A zero row is fine (pinned dofs, pressure): it only makes M singular, which
+				# shift-invert handles. A zero DIAGONAL with a non-zero row is not.
+				if bool((diag<-tol).any()) or bool(((diag<=tol)&(rowsum>tol)).any()):
+					ok=False
+		return not _mpi_any_rank(not ok)
 
 	@property
 	def problem(self)->"Problem":

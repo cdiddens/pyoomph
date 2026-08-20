@@ -295,13 +295,17 @@ class ScipyEigenSolver(GenericEigenSolver):
 
 		# Symmetric driver (ARPACK eigsh) only in shift-invert mode: without sigma, eigsh requires M
 		# positive DEFINITE, while shift-invert only needs positive SEMI-definite - and pyoomph mass
-		# matrices are PSD-singular (pressure/pinned rows). PSD itself is ASSUMED, not proven (see
-		# GenericEigenSolver.exploit_proven_symmetry). The remaining guards keep the engaged path
-		# exactly equivalent to the eigs call it replaces.
+		# matrices are PSD-singular (pressure/pinned rows). PSD does not follow from the symmetry
+		# proof, so it is screened numerically; a symmetric indefinite M (cross-coupled partial_t, as
+		# in the pendulum ODE) has to stay on the general driver. The remaining guards keep the engaged
+		# path exactly equivalent to the eigs call it replaces.
 		use_sym=(self._use_symmetric_eigensolver_now() and shift is not None and numpy.imag(shift)==0
 				 and which=="LM" and OPpart is None
 				 and J.dtype.kind!="c" and M.dtype.kind!="c"
 				 and (v0 is None or not numpy.iscomplexobj(v0)))
+		if use_sym and not self._mass_matrix_can_be_positive_semidefinite(M):
+			use_sym=False
+			self.last_symmetry_decision_reason="mass matrix is symmetric but not positive semi-definite"
 		self.last_symmetry_decision=use_sym
 
 		if neval>=n-1:

@@ -1243,15 +1243,20 @@ class SlepcEigenSolver(GenericEigenSolver):
                 for manip in self.matrix_manipulators:
                     J,M=manip.apply_on_distributed_J_and_M(self,J,M)
 
-        # Proven-symmetric pencil: solve as GHEP instead of GNHEP. M is additionally ASSUMED positive
-        # semi-definite (see GenericEigenSolver.exploit_proven_symmetry) - with the shift-invert ST
-        # that is SLEPc's supported route for a singular-but-PSD B (eigenvector purification is on by
-        # default). Region (CISS) solves stay GNHEP: nothing gained there and Which.ALL on a Hermitian
-        # problem is a different code path. All decision inputs are rank-replicated, so the branches
-        # below cannot split across ranks.
+        # Proven-symmetric pencil: solve as GHEP instead of GNHEP. GHEP uses M as an inner product, so
+        # M must also be positive semi-definite - symmetry alone does not give that (a cross-coupled
+        # partial_t, as in the pendulum ODE, yields a symmetric indefinite M and SLEPc aborts with
+        # "The inner product is not well defined"), hence the numeric screen. Singular-but-PSD M is
+        # fine with the shift-invert ST, SLEPc's supported route for it (eigenvector purification is
+        # on by default). Region (CISS) solves stay GNHEP: nothing gained there and Which.ALL on a
+        # Hermitian problem is a different code path. All decision inputs are rank-replicated (the
+        # screen reduces its own verdict), so the branches below cannot split across ranks.
         use_sym=(self._use_symmetric_eigensolver_now()
                  and Jin.dtype.kind!="c" and Min.dtype.kind!="c"
                  and self.eigenvalue_region is None)
+        if use_sym and not self._mass_matrix_can_be_positive_semidefinite(Min,first_row if rows_are_local else 0):
+            use_sym=False
+            self.last_symmetry_decision_reason="mass matrix is symmetric but not positive semi-definite"
         self.last_symmetry_decision=use_sym
         if use_sym:
             J.setOption(PETSc.Mat.Option.SYMMETRIC,True) #type:ignore

@@ -306,3 +306,46 @@ def test_slepc_ghep_matches_gnhep():
         assert dec_on is True
         scale = max(1.0, float(numpy.max(numpy.abs(ev_off))))
         assert numpy.max(numpy.abs(ev_on - ev_off)) < 1e-6 * scale
+
+
+# ---------------------------------------------------------------------------------------------------
+# Symmetric but INDEFINITE mass matrix
+# ---------------------------------------------------------------------------------------------------
+
+class _PendulumProblem(Problem):
+    # phi'=psi, psi'=-sin(phi): both J and M are symmetric, but partial_t couples the two DIFFERENT
+    # fields, so M=[[0,1],[1,0]] - symmetric with eigenvalues +-1. Nothing here is a Gram matrix.
+    def define_problem(self):
+        class _Eqs(ODEEquations):
+            def define_fields(self):
+                self.define_ode_variable("phi", "psi")
+
+            def define_residuals(self):
+                phi, phi_test = var_and_test("phi")
+                psi, psi_test = var_and_test("psi")
+                self.add_residual((partial_t(psi) + sin(phi)) * phi_test)
+                self.add_residual((partial_t(phi) - psi) * psi_test)
+
+        self.add_equations(_Eqs() @ "pendulum")
+
+
+@pytest.mark.parametrize("solver", ["scipy", "slepc"])
+def test_indefinite_mass_matrix_falls_back_to_the_general_driver(solver):
+    # The symmetric drivers use M as an inner product and need it positive semi-definite on top of
+    # symmetric. Engaging them here made SLEPc abort outright ("The inner product is not well
+    # defined: indefinite matrix"), so the screen must veto the symmetric path and the eigenvalues
+    # must come out as the exact +-i of the linearised pendulum.
+    if solver == "slepc":
+        pytest.importorskip("slepc4py", reason="slepc4py not available (PYTHONPATH must carry a PETSc build)")
+    with _PendulumProblem() as p:
+        p.quiet()
+        p.set_eigensolver(solver)
+        ode = p.get_ode("pendulum")
+        ode.set_value(phi=0.01, psi=0)
+        p.solve()
+        es = p.get_eigen_solver()
+        es.exploit_proven_symmetry = True
+        evs, _ = p.solve_eigenproblem(2)
+        assert es.last_symmetry_decision is False
+        assert "positive semi-definite" in es.last_symmetry_decision_reason
+        assert numpy.max(numpy.abs(numpy.sort_complex(evs) - numpy.array([-1j, 1j]))) < 1e-8
