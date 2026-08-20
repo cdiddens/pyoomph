@@ -14,6 +14,8 @@ Submodules
    pyoomph.equations.cahn_hilliard
    pyoomph.equations.contact_angle
    pyoomph.equations.darcy
+   pyoomph.equations.electrohydrodynamics
+   pyoomph.equations.electrostatics
    pyoomph.equations.generic
    pyoomph.equations.harmonic_oscillator
    pyoomph.equations.helmholtz

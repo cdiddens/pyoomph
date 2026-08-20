@@ -54,6 +54,7 @@ the useful part. Code examples in `examples/` are runnable companions, not snipp
 | [stabilized_navier_stokes.md](stabilized_navier_stokes.md) | SUPG/PSPG/LSIC/GLS/ASGS/VMS for the momentum equations, the equal-order pairs they enable, and what a bulk stabilization leaves behind on a Neumann boundary. |
 | [stabilized_scalar_transport.md](stabilized_scalar_transport.md) | The same for advection-diffusion, mixture composition and temperature: shared `tau` machinery, why `div(grad(c))` had to be written as `trace(grad(grad(c)))`, and the measurement that no stabilization perturbs the interface physics. |
 | [tracers.md](tracers.md) | Passive tracer particles: formulation, adaptation, remeshing, MPI. |
+| [electrohydrodynamics.md](electrohydrodynamics.md) | Electrostatics, electrolytes (PNP / Poisson-Boltzmann / Debye-Hückel / leaky dielectric) and the coupling into the flow: why the potential formulation, the shared permittivity scale that makes two-domain coupling work, the surface-charge sign, and the three EHD routes — one of which is silently wrong on a free surface. |
 | [coordinate_system_tensor_ops.md](coordinate_system_tensor_ops.md) | Which tensor operators each coordinate system implements, and — §6 — how to test one at all. |
 
 ## Environment
