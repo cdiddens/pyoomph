@@ -1,6 +1,6 @@
 # Assembly overhead: hanging bookkeeping, required-shape flags and external-data bloat
 
-Status: **implemented, validated and benchmarked** (serial). Follow-on to the per-element NoHang
+Status: **implemented, validated, benchmarked and merged** (serial). End-to-end numbers in §6a. Follow-on to the per-element NoHang
 dispatch of [code_generation.md](code_generation.md) §9.4.14, which specialised the *generated* code
 but left everything the C++ side does *around* each call untouched. This document covers three such
 sources of per-assembly overhead, why each is there, what removing it is worth, and the two places
@@ -335,6 +335,41 @@ The FD comparator is mandatory here and was run both ways: zero differences at `
 on and off, while the same check at `1e-14` reports 38 - i.e. it is sensitive enough to have seen a
 dropped column. Poison mode covers the rank-4 buffer when unflagged, and residual/Jacobian are
 bitwise identical against `PYOOMPH_DISABLE_DCOORD_SPLIT` on every moving-mesh case.
+
+## 6a. What the campaign is worth, end to end
+
+All campaign levers off vs. on, **one binary**, interleaved, min of 4 rounds x 20 repeats,
+`_benchmark_elemental_assembly` on a quiet machine:
+
+| case | ndof | residual | Jacobian |
+|---|---|---|---|
+| bulk_mixed (static C2/C1 Navier-Stokes) | 14162 | **-12.1%** | **-8.6%** |
+| bulk_adapt (same, refined, real hanging nodes) | 6692 | **-11.6%** | **-8.3%** |
+| iface_normal (interface with normals) | 6480 | **-15.5%** | **-13.0%** |
+| iface_refined (asymmetrically refined interface) | 2216 | **-13.1%** | **-10.4%** |
+| ale_iface (moving mesh + free surface) | 9695 | **-6.1%** | **-8.0%** |
+| lagr_grad (moving mesh, both spaces differentiated) | 4924 | -3.1% | -1.2% |
+| d2x_user (second derivatives in the residual) | 1882 | **-13.4%** | **-12.7%** |
+| ale_elemsize_both (moving mesh, both element-size variants) | 2945 | -1.9% | **-12.1%** |
+
+**This table understates the campaign**, because only the runtime stages have levers. The
+code-generation changes - the normal branch's bulk-position request (§3.2), the Hessian shape flags
+(§3.3), the element-size variants and the two small fixes of stage 2 - are in *both* arms of every
+row above. §3.2 alone is worth another -11.7%/-10.9% on `iface_refined`, measured base-vs-head.
+
+`lagr_grad` is the honest floor: it differentiates both of its spaces' gradients and carries no
+redundant hang work, so there is nothing for any of this to skip.
+
+Engagement, same runs (a comparison whose specialised path never fired proves nothing):
+
+| case | hang fills skipped / run | interps skipped by class / by stamp |
+|---|---|---|
+| iface_normal | 3360 / 0 | 3360 / 0 |
+| ale_iface | 1152 / 48 | 0 / 48 |
+| bulk_adapt | 1296 / 288 | 0 / 0 |
+
+`bulk_adapt` keeps 288 real fills - those are the genuinely hanging elements, still taking the
+hanging entry point.
 
 ## 7. Open
 * The DG attachment gate (§4.3), once DG marshalling is attachment-aware.
