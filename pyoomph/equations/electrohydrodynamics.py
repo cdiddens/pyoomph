@@ -573,7 +573,19 @@ class ElectroosmoticSlip(InterfaceEquations):
         assert isinstance(mesh,InterfaceMesh)
         flow=self.get_parent_equations(StokesEquations)
         assert isinstance(flow,StokesEquations)
-        self.pin_redundant_lagrange_multipliers(mesh,self.lagr_mult_name,flow.velocity_name)
+        # pin_redundant_lagrange_multipliers needs the names of the actual nodal degrees of freedom.
+        # A vector field has none of its own -- it is a substitution over per-component scalars -- so
+        # the multiplier has to be handed over component by component. How many components there are
+        # and what they are called is the coordinate system's business, hence the lookup instead of
+        # appending "_x"/"_y". (depvars, on the other hand, are expanded for us.)
+        cgen=mesh._codegen
+        comps=None
+        if cgen is not None:
+            vfs=getattr(cgen.get_equations(),"_vectorfields",None)
+            if vfs:
+                comps=vfs.get(self.lagr_mult_name)
+        self.pin_redundant_lagrange_multipliers(mesh,list(comps) if comps else self.lagr_mult_name,
+                                                flow.velocity_name)
         super().before_assigning_equations_postorder(mesh)
 
 

@@ -511,13 +511,47 @@ so "untested" here means *no test names it at all*, not "lightly tested".
 
 | symbol | state |
 |---|---|
-| `ElectroosmoticSlip` | **physics untested.** Only its constructor error path is exercised. The Helmholtz-Smoluchowski plug flow `u = -eps*zeta*E/mu` in a straight channel is the obvious test and was planned; it was never written. This is the biggest gap, because the thin-double-layer route is the one recommended for anything larger than a thin 2D geometry. |
+| `ElectroosmoticSlip` | tested, `test_ehd.py`. The Helmholtz-Smoluchowski plug flow in a straight channel with open ends is exact on a triangle mesh (1e-11), and is checked for the sign of `zeta*E`, for using only the tangential field under an oblique one, for the permittivity lookup, for `wall_velocity`, for `impose_no_penetration=False`, for the default Maxwell-stress coupling not disturbing it, and dimensionally in SI units against 0.347 mm/s for silica-water. Still untested: curved walls, a non-uniform zeta, and any regime where the Dukhin number matters. |
+| `ElectroosmoticSlip` on quadrilaterals | its accuracy floor is ~1e-8, not the formulation's fault: see [the Gauss knot typo](#a-quadrature-typo-caps-2d-quadrilateral-c2-accuracy-at-1e-9). |
 | `lippmann_surface_tension`, `surface_charge_surface_tension`, `debye_huckel_surface_tension` | untested. They are one-line expressions, but the *sign* of the Lippmann relation (charging always lowers the tension) is exactly the kind of thing that should not be trusted to inspection. |
 | `ElectricFieldProjection` | untested. Verified once by hand — the output columns are correct and do not duplicate the local-expression ones — but that check is not in the suite. |
 | `IonFluxBC` | untested. Its default (blocking) is the natural boundary condition, so the class only matters for a nonzero flux or for the stabilization footprint, neither of which is exercised. |
 | `with_fixed_amounts` | untested. It removes a genuinely singular nullspace, so a wrong sign there shows up as a solver failure rather than a wrong answer, but it is untested all the same. |
-| `helmholtz_smoluchowski_velocity`, `electric_body_force`, `ions_from_material` | untested directly; each is used through a class that is tested. |
+| `electric_body_force`, `ions_from_material` | untested directly; each is used through a class that is tested. (`helmholtz_smoluchowski_velocity` is now covered through `ElectroosmoticSlip`.) |
 | `SternLayer` | constructor only. `ThinDielectricLayer`, its base, has the series-capacitance test. |
+
+#### A quadrature typo caps 2D quadrilateral C2 accuracy at 1e-9
+
+Found while writing the electroosmotic plug-flow test, and **not an electrohydrodynamics issue** --
+it is recorded here only because it is what sets the tolerances in `tests/test_ehd.py`.
+
+`src/thirdparty/oomph-lib/include/integral.cc`, `Gauss<2,3>::Knot`, the 3x3 rule used by every 2D
+quadrilateral element, has five of its nine entries written as
+
+    0.774596662941483        instead of        0.774596669241483
+
+-- two digits transposed, a difference of 6.3e-9. Only the *positive* knot is affected, so the rule
+is no longer symmetric, and the integral of a mid-side shape function derivative over an element
+comes out as 7.0e-9 where it should be identically zero.
+
+The consequence is a fixed defect, not a discretisation error: a field that lies exactly in the FE
+space no longer produces a zero residual, so the solution is off by ~1e-9 **however fine the mesh**.
+Measured on a plain `PoissonEquation` with a linear Dirichlet profile on a 2D quad mesh, whose
+solution is exactly linear:
+
+| mesh / space | deviation from the exact linear solution |
+|---|---|
+| quads, `C2` | 8.5e-10 (identical at N=4x2 and N=16x8, and identical under `superlu` / `umfpack` / `pardiso`) |
+| quads, `C1` | 4e-16 |
+| triangles (`split_in_tris="left"` or `"crossed"`), `C2` | 7e-15 |
+
+`Gauss<1,3>` and `Gauss<3,3>` are correct, as are the quadrilateral rules at other orders, so this
+is one table. The 1D tests in `tests/test_electrostatics.py` reach 1e-11 for exactly that reason.
+
+Fixing it means editing vendored oomph-lib and rebuilding the C++ extension, which is outside the
+scope this module was allowed to touch; it is left as a reported finding. Anything that wants to
+assert machine precision on a 2D problem in the meantime should split the mesh into triangles, which
+is what the plug-flow test does.
 
 ### 10.3 Coordinate systems, adaptivity, MPI
 
