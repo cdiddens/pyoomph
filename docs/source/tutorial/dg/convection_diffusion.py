@@ -59,8 +59,8 @@ class ConvectionDiffusionEquation(Equations):
             
             # Assemble the facet terms:
             facet_terms=weak(self.D*(self.alpha_DG/h_avg)*jump(c),jump(ctest))
-            facet_terms=-weak(self.D*jump(c)*n,avg(grad(ctest)))
-            facet_terms=-weak(self.D*avg(grad(c)),jump(ctest)*n)
+            facet_terms+=-weak(self.D*jump(c)*n,avg(grad(ctest)))
+            facet_terms+=-weak(self.D*avg(grad(c)),jump(ctest)*n)
             facet_terms+=weak( jump(un_upwind*c,at_facet=True) ,jump(ctest))
 
             # And add them to the skeleton mesh of the facets
