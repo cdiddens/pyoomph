@@ -249,6 +249,15 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Fixed
 
+- **`EquationTree.__add__` on an already-placed tree.** `+` hands the children of *both* operands to
+  the new node it returns, rewriting their `_parent`. Doing that to a tree that had already been
+  placed with `@ "domain"` (or added to the `Problem`) left the placed children pointing at a new root
+  nobody keeps, and the damage surfaced arbitrarily far away as "Mesh is None" in
+  `pin_redundant_lagrange_multipliers`. Adding to, or with, a placed tree is now refused up front and
+  names the path it was placed at; assemble a domain's equations first and place the result
+  afterwards. The merge itself moved to an internal `_merge_with`, which the recursion and the
+  boundary-pattern expansion still use, since there the operands are nobody else's.
+
 - **Quadrature, 2D quadrilateral elements**: the 3x3 Gauss-Legendre knot table had two digits
   transposed. Five of the nine entries of `Gauss<2,3>::Knot` read `0.774596662941483` for
   `0.774596669241483`, and only on the *positive* knot, so the rule kept the correct total weight but

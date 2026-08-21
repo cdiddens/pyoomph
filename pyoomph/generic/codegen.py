@@ -622,7 +622,7 @@ class BaseEquations(_pyoomph.Equations):
         # rebuilt, so it wins over the stored one. The stored one is only there for the window
         # before any code generator exists (the dummy-equation and interface-connection passes).
         cg=mst._get_current_codegen()
-        if cg is not None:
+        if isinstance(cg,FiniteElementCodeGenerator):
             p=cg.get_problem()
             if p is not None:
                 return p
@@ -950,7 +950,8 @@ class BaseEquations(_pyoomph.Equations):
         right now", not "the domain this was last put into"."""
         cg=self._get_current_codegen()
         if cg is not None:
-            eqs=cg.get_equations()
+            # Typed C++-side as _pyoomph.Equations; every domain actually carries an EquationTree.
+            eqs=cast("BaseEquations | None",cg.get_equations())
             if eqs is not None:
                 return eqs
         # Not bound: something in another domain reached in, e.g. through
@@ -2552,7 +2553,9 @@ class EquationTree(Equations):
             self._compilation_flags=flags
         return self._compilation_flags
 
-    def get_mesh(self)->"AnyMesh":
+    # Wider than Equations.get_mesh, which promises a spatial mesh: a node may be an ODE
+    # domain, and then its mesh is an ODEStorageMesh.
+    def get_mesh(self)->"AnyMesh": # type: ignore[override]
         assert self._mesh is not None
         return self._mesh
 
@@ -2864,24 +2867,28 @@ class EquationTree(Equations):
         for _,c in self._children.items():
             c._after_precice_solve(precice_dt)
 
-    def _init_output(self,continue_info:dict[str, Any] | None=None,rank:int=0):
+    # A node *is* the eqtree its equations are handed, so the five methods below (and
+    # _fill_interinter_connections further down) take one argument less than the BaseEquations
+    # methods of the same name. Nothing ever calls them through that base signature: a node
+    # lives in another node's _children, never in its _equations, so _dispatch never reaches one.
+    def _init_output(self,continue_info:dict[str, Any] | None=None,rank:int=0): # type: ignore[override]
         self._dispatch("_init_output",self,continue_info,rank)
         for _,child in self._children.items():
             child._init_output(continue_info=continue_info,rank=rank)
 
-    def _before_stationary_or_transient_solve(self, stationary:bool)->bool:
+    def _before_stationary_or_transient_solve(self, stationary:bool)->bool: # type: ignore[override]
         must_reapply=any(r is True for r in self._dispatch("_before_stationary_or_transient_solve",self,stationary))
         for _, child in self._children.items():
             must_reapply=child._before_stationary_or_transient_solve(stationary=stationary) or must_reapply
         return must_reapply
 
-    def _before_eigen_solve(self, eigensolver:"GenericEigenSolver",angular_m:int | None=None,normal_k:float | None=None)->bool:
+    def _before_eigen_solve(self, eigensolver:"GenericEigenSolver",angular_m:int | None=None,normal_k:float | None=None)->bool: # type: ignore[override]
         must_reapply=any(r is True for r in self._dispatch("_before_eigen_solve",self,eigensolver,angular_m,normal_k))
         for _, child in self._children.items():
             must_reapply = child._before_eigen_solve(eigensolver,angular_m,normal_k) or must_reapply
         return must_reapply
 
-    def _get_forced_zero_dofs_for_eigenproblem(self,eigensolver:"GenericEigenSolver",angular_mode:int | float | None,normal_k:float | None)->set[str | int]:
+    def _get_forced_zero_dofs_for_eigenproblem(self,eigensolver:"GenericEigenSolver",angular_mode:int | float | None,normal_k:float | None)->set[str | int]: # type: ignore[override]
         res:set[str | int]=set()
         for upd in self._dispatch("_get_forced_zero_dofs_for_eigenproblem",self,eigensolver,angular_mode,normal_k):
             res.update(upd)
@@ -2889,7 +2896,7 @@ class EquationTree(Equations):
             res.update(child._get_forced_zero_dofs_for_eigenproblem(eigensolver,angular_mode,normal_k))
         return res
 
-    def _do_output(self,step:int,stage:str,only_every_step:bool=False):
+    def _do_output(self,step:int,stage:str,only_every_step:bool=False): # type: ignore[override]
         self._dispatch("_do_output",self,step,stage,only_every_step)
         for _,child in self._children.items():
             child._do_output(step,stage,only_every_step)
@@ -2936,9 +2943,9 @@ class EquationTree(Equations):
                         merged=clone
                         fresh.append(name)
                     elif patpos<order.index(name):
-                        merged=clone+existing
+                        merged=clone._merge_with(existing)
                     else:
-                        merged=existing+clone
+                        merged=existing._merge_with(clone)
                     merged._parent=self
                     self._children[name]=merged
                 # The pattern gives up its slot to the names it produced; names that were already there
@@ -2971,7 +2978,7 @@ class EquationTree(Equations):
             v._fill_dummy_equations(problem,False,pathname=(dn if is_bulk_root else pathname+"/"+dn))
         
 
-    def _fill_interinter_connections(self,iconns:set[str]):
+    def _fill_interinter_connections(self,iconns:set[str]): # type: ignore[override]
         if self._equations:
             myiconns=set([x for x in iconns if x.startswith(self.get_full_path().lstrip("/"))])
             for eq in self._equations:
@@ -3237,23 +3244,43 @@ class EquationTree(Equations):
         else:
             raise RuntimeError("Cannot add "+str(other)+" and "+str(self))
 
+    def _merge_with(self,other:"EquationTree")->"EquationTree":
+        """The actual merge behind ``__add__``, without the placement check.
+
+        It hands the children of *both* operands to the new node, i.e. it rewrites their ``_parent``.
+        That is only sound while nobody else still holds the operands, which is true for the recursion
+        here and for the pattern expansion, but not for a node that has already been placed - hence the
+        check sits in ``__add__`` rather than here."""
+        res=EquationTree(self._equations,parent=None)
+        res._equations=res._equations+other._equations
+        for k,v in self._children.items():
+            if k in other._children.keys():
+                res._children[k]=v._merge_with(other._children[k])
+            else:
+                res._children[k]=v
+            res._children[k]._parent=res
+        for k,v in other._children.items():
+            if not k in self._children.keys():
+                res._children[k]=v
+                res._children[k]._parent = res
+        return res
+
+    def _raise_if_already_placed(self,lead:str):
+        if self._parent is None:
+            return
+        raise RuntimeError(
+            lead+" an equation tree that has already been placed at '"+self.get_full_path()+
+            "', e.g. by an earlier @ 'domain' or by adding it to the Problem.\n"            
+            "Assemble all equations of a domain first, and place the result afterwards.")
+
     def __add__(self, other:"EquationTree | BaseEquations | Literal[0]")->"EquationTree":
         if other==0:
             return self
         if isinstance(other,EquationTree):
-            res=EquationTree(self._equations,parent=None)
-            res._equations=res._equations+other._equations
-            for k,v in self._children.items():
-                if k in other._children.keys():
-                    res._children[k]=v+other._children[k]
-                else:
-                    res._children[k]=v
-                res._children[k]._parent=res
-            for k,v in other._children.items():
-                if not k in self._children.keys():
-                    res._children[k]=v
-                    res._children[k]._parent = res
-            return res
+            # Being placed is exactly what makes the merge below unsafe, so neither operand may be.
+            self._raise_if_already_placed("Cannot add to")
+            other._raise_if_already_placed("Cannot add")
+            return self._merge_with(other)
         elif isinstance(other,BaseEquations): #type:ignore
             return self+EquationTree(other,parent=None)
         else:

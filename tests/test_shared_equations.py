@@ -114,3 +114,39 @@ def test_the_shared_instance_is_not_duplicated_in_the_tree(tmp_path):
         for dom in scales:
             node = p._equation_system.get_by_path(dom)
             assert sum(1 for e in node._equations if e is probe) == 1
+
+
+# Sharing works because a placed node keeps its identity, and EquationTree.__add__ hands the children
+# of both operands to the new node it returns. That makes "+" destructive: adding to a node that is
+# already sitting in a tree drops the addition into a new tree and leaves the placed children pointing
+# at that new root. It surfaced as "Mesh is None" in pin_redundant_lagrange_multipliers, arbitrarily
+# far from the line that caused it, so the placement is now checked up front.
+
+def test_adding_to_a_placed_tree_is_refused():
+    eqs = PoissonEquation(name="u") + DirichletBC(u=0) @ "left"
+    placed = eqs @ "domain"
+    with pytest.raises(RuntimeError, match="already been placed"):
+        eqs += DirichletBC(u=1) @ "right"
+    # The refusal has to leave the placed tree intact, not half-merged.
+    node = placed.get_child("domain")
+    assert node.get_child("left")._parent is node
+
+
+def test_adding_a_placed_tree_to_something_else_is_refused():
+    inner = PoissonEquation(name="u") @ "domain"
+    other = DirichletBC(u=0) @ "other"
+    with pytest.raises(RuntimeError, match="already been placed"):
+        _ = other + inner.get_child("domain")
+
+
+def test_assembling_before_placing_still_works():
+    eqs = PoissonEquation(name="u") + DirichletBC(u=0) @ "left" + DirichletBC(u=1) @ "right"
+    placed = eqs @ "domain"
+    assert sorted(placed.get_child("domain")._children) == ["left", "right"]
+
+
+def test_placing_the_same_tree_on_two_domains_still_works():
+    common = PoissonEquation(name="u") + DirichletBC(u=0) @ "left"
+    a, b = common @ "domA", common @ "domB"
+    assert sorted(a._children) == ["domA"] and sorted(b._children) == ["domB"]
+    assert a.get_child("domA").get_child("left") is not b.get_child("domB").get_child("left")
