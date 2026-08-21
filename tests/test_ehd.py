@@ -401,17 +401,16 @@ def test_maxwell_stress_assembles_in_axisymmetry():
 #   * THAT IT IS THE *TANGENTIAL* FIELD. test_slip_ignores_the_normal_field imposes an oblique
 #     uniform field, whose normal component at the wall is large and must not appear in the slip.
 #
-# WHY THE QUAD TOLERANCES ARE 1e-6 AND THE TRIANGLE ONES 1e-11. They are measuring the same thing;
-# the difference is not the physics. The 3x3 Gauss rule used by 2D QUADRILATERAL elements has a typo
-# in its knot table -- src/thirdparty/oomph-lib/include/integral.cc, Gauss<2,3>::Knot, where five
-# entries read 0.774596662941483 instead of 0.774596669241483. The rule is therefore asymmetric, and
-# the integral of a mid-side shape function derivative over an element comes out as 7e-9 instead of
-# 0. On a C2 field that is a fixed ~1e-9 defect, MESH-INDEPENDENT (it is a defect of the rule, not a
-# discretisation error), and it is why the plug is flat only to about 1e-8 on a quad mesh. Split the
-# same mesh into triangles -- a different quadrature -- and the very same problem is flat to 1e-15.
-# So each geometry is asserted at its own floor, and the triangle case is the one that says the plug
-# flow is EXACT. See also the 1D Gauss<1,3> table, which is correct, hence the 1D tests elsewhere in
-# this suite reaching 1e-11.
+# WHY BOTH A QUADRILATERAL AND A TRIANGLE MESH. Writing this test is what turned up the typo in the
+# 3x3 Gauss knot table used by 2D quadrilateral elements -- Gauss<2,3>::Knot in the vendored
+# oomph-lib, where five of nine entries read 0.774596662941483 for 0.774596669241483. The rule was
+# asymmetric as a result, so the integral of a mid-side shape function derivative over an element
+# came out as 7e-9 instead of 0, and a C2 field lying exactly in the finite element space left a
+# residual of that size HOWEVER FINE THE MESH -- a defect of the quadrature, not a discretisation
+# error. It capped the flatness of the plug at 1.8e-8 on quads while the same problem on triangles,
+# which use a different rule, was flat to 1e-14. The knots are now exact and the two geometries
+# agree; the pair is kept as the regression guard, since an asymmetric quadrature is invisible to
+# every test whose reference is itself computed on the same mesh.
 
 
 class _EOFChannel(Problem):
@@ -491,9 +490,9 @@ def _run_eof(**kw):
     return prob, o
 
 
-# Relative floors, see the note at the top of this section: quadrilaterals inherit the ~1e-9
-# absolute defect of the 2D 3x3 Gauss knot table, triangles do not.
-_MESHES = [pytest.param(False, 1e-6, id="quads"), pytest.param("left", 1e-11, id="tris")]
+# Both geometries now hold the plug to the same tolerance; see the note at the top of this section
+# for why they once did not.
+_MESHES = [pytest.param(False, 1e-11, id="quads"), pytest.param("left", 1e-11, id="tris")]
 
 
 @pytest.mark.parametrize("tris,tol", _MESHES)

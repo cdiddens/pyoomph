@@ -249,6 +249,21 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Fixed
 
+- **Quadrature, 2D quadrilateral elements**: the 3x3 Gauss-Legendre knot table had two digits
+  transposed. Five of the nine entries of `Gauss<2,3>::Knot` read `0.774596662941483` for
+  `0.774596669241483`, and only on the *positive* knot, so the rule kept the correct total weight but
+  stopped being symmetric — which is why it survived: an asymmetric quadrature is invisible to any
+  test whose reference value is computed on the same mesh. The effect was a fixed defect in the
+  assembly rather than an error that refinement could remove: the integral of a mid-side shape
+  function derivative over an element came out as 7e-9 instead of identically zero, so a field lying
+  exactly in the C2 space no longer produced a zero residual, and results on 2D quadrilateral meshes
+  were wrong by about 1e-9 *however fine the mesh*. Measured on a Poisson problem whose exact
+  solution is linear, the deviation at the mid-side nodes drops from 8.5e-10 to 4.0e-15 (2e-16 was
+  already reached by `C1`, and by triangles at any order, which use different rules). The knot is now
+  written once and negated, so the rule is symmetric to the last bit. An audit of every `Gauss<D,N>`
+  knot and weight table against exact Legendre roots found no other defect above 4e-15;
+  `tests/test_quadrature.py` now tests the rules directly, across lines, quads, triangles and bricks.
+
 - **Adaptivity, mixed quad+tri meshes**: refining across a quad↔triangle interface could tear the mesh.
   oomph-lib's quad neighbour lookup maps a new node's position into the edge neighbour with the quad box
   map and then asks that neighbour whether it holds a node there; across a mixed interface the neighbour is

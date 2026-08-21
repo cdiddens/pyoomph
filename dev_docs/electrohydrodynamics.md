@@ -511,8 +511,7 @@ so "untested" here means *no test names it at all*, not "lightly tested".
 
 | symbol | state |
 |---|---|
-| `ElectroosmoticSlip` | tested, `test_ehd.py`. The Helmholtz-Smoluchowski plug flow in a straight channel with open ends is exact on a triangle mesh (1e-11), and is checked for the sign of `zeta*E`, for using only the tangential field under an oblique one, for the permittivity lookup, for `wall_velocity`, for `impose_no_penetration=False`, for the default Maxwell-stress coupling not disturbing it, and dimensionally in SI units against 0.347 mm/s for silica-water. Still untested: curved walls, a non-uniform zeta, and any regime where the Dukhin number matters. |
-| `ElectroosmoticSlip` on quadrilaterals | its accuracy floor is ~1e-8, not the formulation's fault: see [the Gauss knot typo](#a-quadrature-typo-caps-2d-quadrilateral-c2-accuracy-at-1e-9). |
+| `ElectroosmoticSlip` | tested, `test_ehd.py`. The Helmholtz-Smoluchowski plug flow in a straight channel with open ends is exact (1e-11 on both a quadrilateral and a triangle mesh), and is checked for the sign of `zeta*E`, for using only the tangential field under an oblique one, for the permittivity lookup, for `wall_velocity`, for `impose_no_penetration=False`, for the default Maxwell-stress coupling not disturbing it, and dimensionally in SI units against 0.347 mm/s for silica-water. Both a quadrilateral and a triangle mesh are run: writing this test is what turned up [the Gauss knot typo](#a-quadrature-typo-that-used-to-cap-2d-quadrilateral-c2-accuracy-at-1e-9-fixed), and keeping the pair guards against it returning. Still untested: curved walls, a non-uniform zeta, and any regime where the Dukhin number matters. |
 | `lippmann_surface_tension`, `surface_charge_surface_tension`, `debye_huckel_surface_tension` | untested. They are one-line expressions, but the *sign* of the Lippmann relation (charging always lowers the tension) is exactly the kind of thing that should not be trusted to inspection. |
 | `ElectricFieldProjection` | untested. Verified once by hand — the output columns are correct and do not duplicate the local-expression ones — but that check is not in the suite. |
 | `IonFluxBC` | untested. Its default (blocking) is the natural boundary condition, so the class only matters for a nonzero flux or for the stabilization footprint, neither of which is exercised. |
@@ -520,38 +519,47 @@ so "untested" here means *no test names it at all*, not "lightly tested".
 | `electric_body_force`, `ions_from_material` | untested directly; each is used through a class that is tested. (`helmholtz_smoluchowski_velocity` is now covered through `ElectroosmoticSlip`.) |
 | `SternLayer` | constructor only. `ThinDielectricLayer`, its base, has the series-capacitance test. |
 
-#### A quadrature typo caps 2D quadrilateral C2 accuracy at 1e-9
+#### A quadrature typo that used to cap 2D quadrilateral C2 accuracy at 1e-9 (fixed)
 
-Found while writing the electroosmotic plug-flow test, and **not an electrohydrodynamics issue** --
-it is recorded here only because it is what sets the tolerances in `tests/test_ehd.py`.
+Found while writing the electroosmotic plug-flow test, **fixed**, and recorded here because this is
+where it surfaced -- it was never an electrohydrodynamics issue.
 
 `src/thirdparty/oomph-lib/include/integral.cc`, `Gauss<2,3>::Knot`, the 3x3 rule used by every 2D
-quadrilateral element, has five of its nine entries written as
+quadrilateral element, had five of its nine entries written as
 
     0.774596662941483        instead of        0.774596669241483
 
--- two digits transposed, a difference of 6.3e-9. Only the *positive* knot is affected, so the rule
-is no longer symmetric, and the integral of a mid-side shape function derivative over an element
-comes out as 7.0e-9 where it should be identically zero.
+-- two digits transposed, a difference of 6.3e-9, and on the **positive** knot only. The rule
+therefore kept the right total weight but stopped being symmetric, which is why nothing caught it:
+an asymmetric quadrature is invisible to any test whose reference value is computed on the same mesh.
+What it did instead was leave a fixed defect in the assembly. The integral of a mid-side shape
+function derivative over an element came out as 7.0e-9 where it is identically zero, so a field
+lying exactly in the C2 space no longer produced a zero residual, and the answer was off by ~1e-9
+**however fine the mesh** -- a defect of the rule, not a discretisation error.
 
-The consequence is a fixed defect, not a discretisation error: a field that lies exactly in the FE
-space no longer produces a zero residual, so the solution is off by ~1e-9 **however fine the mesh**.
-Measured on a plain `PoissonEquation` with a linear Dirichlet profile on a 2D quad mesh, whose
-solution is exactly linear:
+Measured on a plain `PoissonEquation` with a linear Dirichlet profile, whose exact solution is in
+the space, before and after:
 
-| mesh / space | deviation from the exact linear solution |
-|---|---|
-| quads, `C2` | 8.5e-10 (identical at N=4x2 and N=16x8, and identical under `superlu` / `umfpack` / `pardiso`) |
-| quads, `C1` | 4e-16 |
-| triangles (`split_in_tris="left"` or `"crossed"`), `C2` | 7e-15 |
+| mesh / space | before | after |
+|---|---|---|
+| quads, `C2` | 8.5e-10 (identical at N=4x2 and N=16x8, and under `superlu` / `umfpack` / `pardiso`) | 4.0e-15 |
+| quads, `C1` | 4e-16 | 4e-16 |
+| triangles, `C2` | 7e-15 | 7e-15 |
 
-`Gauss<1,3>` and `Gauss<3,3>` are correct, as are the quadrilateral rules at other orders, so this
-is one table. The 1D tests in `tests/test_electrostatics.py` reach 1e-11 for exactly that reason.
+and on the electroosmotic plug flow of section 10.2, quad mesh, N=8x4: nodal spread 1.8e-8 before,
+2.6e-14 after; residual of the exact plug state 6.1e-9 before, 2.6e-15 after.
 
-Fixing it means editing vendored oomph-lib and rebuilding the C++ extension, which is outside the
-scope this module was allowed to touch; it is left as a reported finding. Anything that wants to
-assert machine precision on a 2D problem in the meantime should split the mesh into triangles, which
-is what the plug-flow test does.
+The fix writes the knot once as a named constant and negates it, rather than spelling out both signs:
+negation is exact in IEEE arithmetic, so the rule is now symmetric to the last bit. `Gauss<1,3>` and
+`Gauss<3,3>` were already correct, as were the quadrilateral rules at the other orders; an audit of
+every `Gauss<D,N>` knot and weight table against exact Legendre roots put all the others at 4e-15 or
+better, so this was one table.
+
+`tests/test_quadrature.py` is the regression guard, and tests the rules directly rather than through
+any physics -- odd monomials over a symmetric domain must integrate to exactly zero, and a Poisson
+solution lying in the space must be reproduced to machine precision, both across lines, quads,
+triangles and bricks. Verified to fail on the pre-fix build: three of its sixteen cases go red, all
+three of them the quadrilateral ones.
 
 ### 10.3 Coordinate systems, adaptivity, MPI
 

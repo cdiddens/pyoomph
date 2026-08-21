@@ -673,3 +673,21 @@ nothing to re-derive and Ds_current keeps the value it was given.
 Upstream equivalent: none; upstream never prescribes the tangent by hand, so it cannot reach a
 Parameter_derivative of exactly 0 (calculate_continuation_derivatives_helper builds it as
 1/sqrt(1+theta^2*chi), which is always positive).
+
+integral.cc (Changed on 21st August 2026, Gauss<2,3>::Knot, the 3x3 rule for 2D quadrilaterals):
+five of the nine entries read 0.774596662941483 where the outer Gauss-Legendre knot is
+0.774596669241483 -- two digits transposed, 6.3e-9 -- and only on the positive knot. The rule
+therefore kept the correct total weight, which is why it passed every consistency check, but was no
+longer symmetric. That leaves a defect in the assembly rather than an error refinement can remove:
+the integral of a mid-side shape function derivative over an element came out as 7.0e-9 instead of
+identically zero, so a field lying exactly in the C2 space no longer produced a zero residual and
+results on 2D quadrilateral meshes were wrong by about 1e-9 HOWEVER FINE THE MESH. Measured on a
+Poisson problem with a linear exact solution, the mid-side node deviation drops from 8.5e-10 to
+4.0e-15; C1 quadrilaterals and triangles of any order use different rules and were always exact.
+The knot is now a named constant that is negated for the lower half, so symmetry is exact in IEEE
+arithmetic. An audit of every Gauss<D,N> knot and weight table against exact Legendre roots found no
+other entry worse than 4e-15, so this was the only one. tests/test_quadrature.py guards the rules
+directly -- odd monomials over a symmetric domain, and a Poisson solution lying in the space -- for
+lines, quadrilaterals, triangles and bricks; it was verified to fail on the pre-fix build, on
+exactly the three quadrilateral cases.
+Upstream equivalent: none; this is an upstream oomph-lib typo, present in the same table there.
