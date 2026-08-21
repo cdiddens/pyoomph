@@ -39,6 +39,7 @@ from ..materials.generic import *
 from ..typings import *
 from ..materials.mass_transfer import MassTransferModelBase
 from .generic import get_interface_field_connection_space
+from .surfactants import SurfactantTransportEquations
 
 if TYPE_CHECKING:
     from ..generic.codegen import EquationTree
@@ -529,12 +530,13 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         static_interface_motion_testfunction(ExpressionNumOrNone): If set, we solve that the total outflux is zero by adjusting this.
         project_interface_flux(bool): If set to True, the interface flux (kinematic BC) is projected and used for the kinematic BC. Default is False.
         surface_tension_factor(ExpressionOrNum): The surface tension factor. Multiplicative factor for the imposition of the surface tension. Default is 1.
+        surfactant_transport: How the surfactants registered on the interface properties are transported. ``None`` (the default) uses :py:class:`~pyoomph.equations.surfactants.SurfactantTransportEquations` in its conservative form, which keeps the total amount of an insoluble surfactant exact rather than to the order of the time stepping. Pass a configured instance to change the form, the variable or the stabilization -- ``SurfactantTransportEquations(form="legacy")`` reproduces the pre-2026 behaviour bit for bit. ``False`` switches the surfactant equations off entirely, e.g. to supply your own.
     """
             
         
     def __init__(self, interface_props:AnyFluidFluidInterface, *, kinbc_name:str="_kin_bc", velo_connect_prefix:str="_lagr_conn_",
                  masstransfer_model:MassTransferModelBase | Literal[False] | None=None, static:Literal["auto"] | bool="auto", surface_tension_theta:float=1, total_mass_loss_factor_inside:ExpressionOrNum=1,total_mass_loss_factor_outside:ExpressionOrNum=1,
-                 surface_tension_projection_space:FiniteElementSpaceEnum | None=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:BaseCoordinateSystem | None=None,kinematic_bc_space:FiniteElementSpaceEnum | None=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1):
+                 surface_tension_projection_space:FiniteElementSpaceEnum | None=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:BaseCoordinateSystem | None=None,kinematic_bc_space:FiniteElementSpaceEnum | None=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1,surfactant_transport:"SurfactantTransportEquations | Literal[False] | None"=None):
         super(MultiComponentNavierStokesInterface, self).__init__()
         self.interface_props = interface_props
         self.kinbc_name = kinbc_name
@@ -565,6 +567,47 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         self.static_interface_motion_testfunction=static_interface_motion_testfunction
         self.project_interface_flux=project_interface_flux
         self.surface_tension_factor=surface_tension_factor
+        self.surfactant_transport=surfactant_transport
+        self._surfactant_transport:"SurfactantTransportEquations | None"=None
+        if isinstance(surfactant_transport,SurfactantTransportEquations) and surfactant_transport.requires_interior_facet_terms:
+            # A DG surfactant needs the '_internal_facets_' child of *this* domain, and that child is
+            # created from this flag in EquationTree._fill_dummy_equations - which runs long before any
+            # residual is assembled, so it has to be set here in the constructor rather than when the
+            # delegate first assembles something.
+            self.requires_interior_facet_terms=True
+
+    def _resolve_surfactant_transport(self)->"SurfactantTransportEquations | None":
+        """Pick the surfactant handler and bind it to this interface's material properties.
+
+        Called at the top of every assembly hook, since define_fields/define_scaling/define_residuals
+        each run on their own and none of them may depend on another having gone first.
+        """
+        if self.surfactant_transport is False:
+            self._surfactant_transport=None
+            return None
+        if self._surfactant_transport is None:
+            if self.surfactant_transport is None:
+                self._surfactant_transport=SurfactantTransportEquations(
+                    advection_velocity_name=self.surfactant_advect_velo_name,
+                    advection_velocity_space=self.surfactant_advect_velo_space)
+            else:
+                self._surfactant_transport=cast(SurfactantTransportEquations,self.surfactant_transport)
+        self._surfactant_transport._bind(self.interface_props)
+        return self._surfactant_transport
+
+    def get_surfactant_transport(self)->"SurfactantTransportEquations | None":
+        """The :py:class:`~pyoomph.equations.surfactants.SurfactantTransportEquations` in use, if any."""
+        return self._resolve_surfactant_transport()
+
+    def uses_projected_surfactant_velocity(self)->bool:
+        """Whether the projected advection velocity field ``_uinterf_proj`` exists.
+
+        It only does in the legacy transport form. The conservative form integrates the advection by
+        parts, so its natural end condition is already zero flux and there is nothing for the contact
+        line to constrain - see the module docstring of :py:mod:`~pyoomph.equations.surfactants`.
+        """
+        st=self._resolve_surfactant_transport()
+        return st is not None and st.uses_projected_advection_velocity(self)
 
     def define_fields(self):
         # Add kinematic boundary condition multiplier
@@ -623,21 +666,14 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
 
         facet_space=nseqs.get_velocity_space_from_mode(for_interface=True)
 
-        has_surfactants = False
-        surfsI = self.interface_props.surfactants
-        if surfsI is None:
-            surfs:set[str]=set()
-        elif isinstance(surfsI, str):
-            surfs = {surfsI}
-        else:
-            surfs=surfsI
-        # sorted: interface_props.surfactants is a class-level set, so without this the surfconc_
-        # fields would get a hash-seed-dependent nodal index whenever there is more than one
-        for s in sorted(surfs):
-            self.define_scalar_field("surfconc_" + s, facet_space)
-            has_surfactants = True
-        if has_surfactants:
-            self.define_vector_field(self.surfactant_advect_velo_name, self.surfactant_advect_velo_space)
+        # The surfactant fields, their advection velocity (legacy form only) and the transport
+        # residuals all live in pyoomph.equations.surfactants now, so that the same code serves this
+        # class and a standalone SurfactantTransportEquations on a plain free surface.
+        st = self._resolve_surfactant_transport()
+        if st is not None:
+            if st.space is None:
+                st.space = facet_space
+            st._define_fields_on(self)
 
         if self.masstransfer_model is not None:
             self.masstransfer_model._setup_for_code(self.get_current_code_generator(),self.interface_props) 
@@ -676,12 +712,9 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
 
     def define_scaling(self):
         super(MultiComponentNavierStokesInterface, self).define_scaling()
-        scals:dict[str,str | ExpressionOrNum] = {"surfconc_" + s.name: "surface_concentration" for s in self.interface_props._surfactants.keys()} 
-        if len(scals) > 0:
-            scals[self.surfactant_advect_velo_name] = "velocity"
-            tscals:dict[str,ExpressionOrNum | str] = {"surfconc_" + s.name: scale_factor("temporal") / scale_factor("surfconc_" + s.name) for s in
-                      self.interface_props._surfactants.keys()}
-            self.set_test_scaling(tscals)
+        # The surfactant scalings used to be set here *and* again further down, the second call
+        # overwriting the first with the same values. They are set once now, by the transport class.
+        scals:dict[str,str | ExpressionOrNum] = {}
         scals["mass_transfer_rate"] = scale_factor("velocity") * scale_factor("mass_density")*self.additional_masstransfer_scale
         self.set_scaling(scals)
         self.add_named_numerical_factor(surface_tension_term=test_scale_factor("velocity")/scale_factor("spatial"))
@@ -705,17 +738,9 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             self.set_scaling({self.kinbc_name: 1 / test_scale_factor("mesh")})
             self.set_test_scaling({self.kinbc_name: 1 / scale_factor("velocity")})
 
-        has_surfactants = False
-        surfscales:dict[str,ExpressionOrNum | str] = {self.surfactant_advect_velo_name: "velocity"}
-        tsurfscales:dict[str,ExpressionOrNum | str] = {self.surfactant_advect_velo_name: 1 / scale_factor("velocity")}
-        if self.interface_props.surfactants is not None:
-            for s in self.interface_props.surfactants:
-                surfscales["surfconc_" + s] = "surface_concentration"
-                tsurfscales["surfconc_" + s] = scale_factor("temporal") / scale_factor("surface_concentration")
-                has_surfactants = True
-        if has_surfactants:
-            self.set_scaling(surfscales)
-            self.set_test_scaling(tsurfscales)
+        st = self._resolve_surfactant_transport()
+        if st is not None:
+            st._setup_scaling_on(self)
 
         if self._has_opposite_flow:
             fields = ["velocity_x", "velocity_y", "velocity_z"]
@@ -940,30 +965,13 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                 self.add_residual(weak(l, inside_test))
                 self.add_residual(-weak(l, outside_test))
 
-        if self.interface_props.surfactants is not None and len(self.interface_props.surfactants) > 0:
-            nn = dyadic(n, n)
-            ut_proj = u - nn @ u
-            un_proj = dot(mesh_velocity(), n) * n
-            ui, ui_test = var_and_test(self.surfactant_advect_velo_name)
-            self.add_residual(weak(ui - (ut_proj + un_proj), ui_test))
-
-            for sprops, amount in self.interface_props._surfactants.items(): 
-                self.set_initial_condition("surfconc_" + sprops.name, amount, degraded_start="auto")
-                assert isinstance(self.interface_props,LiquidGasInterfaceProperties)
-                D = self.interface_props.get_surface_diffusivity(sprops.name)
-                assert D is not None
-                G, G_test = var_and_test("surfconc_" + sprops.name)
-                self.add_residual(weak(partial_t(G), G_test))
-                self.add_residual(D * weak(grad(G), grad(G_test)))
-                self.add_residual(weak(div(G * ui), G_test))
-                if self.interface_props.surfactant_adsorption_rate.get(sprops.name) is not None:
-                    assert isinstance(ns_inner.fluid_props,MixtureLiquidProperties)
-                    if sprops.name in ns_inner.fluid_props.components:
-                        rate = subexpression(self.interface_props.surfactant_adsorption_rate[sprops.name])
-                        self.add_residual(-weak(rate, G_test))
-                        w_test = testfunction("massfrac_" + sprops.name)
-                        # This is not accurate: We will lose partial mass of the liquid (but it won't contribute to any interface motion)
-                        self.add_residual(weak(rate * ns_inner.fluid_props.pure_properties[sprops.name].molar_mass, w_test))
+        st = self._resolve_surfactant_transport()
+        if st is not None:
+            # The interface velocity, not the fluid velocity, is what the surfactant follows in the
+            # normal direction: under evaporation the two differ by j/rho and the surfactant stays
+            # with the interface.
+            st._bind(self.interface_props, ns_inner.fluid_props)
+            st._define_residuals_on(self)
 
     def before_assigning_equations_postorder(self, mesh:AnyMesh):
         # Pin kinematic boundary condition where necessary
@@ -1025,6 +1033,9 @@ class MultiComponentNavierStokesInterfaceBalancedEnd(InterfaceEquations):
             sigma=inter_eqs.interface_props.surface_tension
             if sigma is None:
                 raise RuntimeError("No surface tension set in the interface properties " + str(inter_eqs.interface_props))
+            # Same reason as in NavierStokesContactAngle: the surface tension belongs to the interface,
+            # and a discontinuous surfactant inside it is invisible from this co-dimension-2 domain.
+            sigma=evaluate_in_domain(0+sigma,"..")
             if inter_eqs.surface_tension_theta!=1:
                 # Same split as the parent: with theta != 1 the lag replaces the momentum scheme's
                 # treatment rather than being wrapped in it. It has to stay the very same expression
@@ -1393,66 +1404,10 @@ class BalanceGravityAtFarField(InterfaceEquations):
 
 
 
-class SurfactantsAtSolidInterface(InterfaceEquations):
-    """
-    Represents the handling of surfactants at the solid-liquid-gas interface.
-        
-    This class requires the parent equations to be of type CompositionAdvectionDiffusionEquations, meaning that if CompositionAdvectionDiffusionEquations (or subclasses) are not defined in the parent domain, an error will be raised.    
-        
-    Args:
-        ls_properties(LiquidSolidInterfaceProperties): The liquid-solid interface properties.
-        out_surface_tension(bool): Whether to output the surface tension as a local expression. Default is True.
-    """
-    required_parent_type=CompositionAdvectionDiffusionEquations
-    def __init__(self,ls_properties:LiquidSolidInterfaceProperties,out_surface_tension:bool=True) -> None:
-        super().__init__()
-        self.space:FiniteElementSpaceEnum="C2"
-        self.prefix="_surfconcS_" # we cannot use surfconc_, since it would coincide with the LG-surfactants at the contact line
-        self.ls_properties=ls_properties
-        self.out_surface_tension=out_surface_tension # Do we output the surface tension (as local expression)
-
-    def identify_surfactants_in_bulk(self) -> list[str]:
-        parent=self.get_parent_equations(of_type=CompositionAdvectionDiffusionEquations)
-        assert isinstance(parent,CompositionAdvectionDiffusionEquations)
-        res:list[str]=[]
-        for cname in sorted(parent.fluid_props.components):
-            c=parent.fluid_props.get_pure_component(cname)
-            if isinstance(c,SurfactantProperties) and cname in self.ls_properties.get_liquid_properties().components:
-                res.append(cname)
-        return res
-
-    def get_surfactant_field_name(self,cname:str) -> str:
-        return self.prefix+cname
-
-    def define_fields(self) -> None:
-        surfs=self.identify_surfactants_in_bulk()
-        for s in surfs:
-            fieldname=self.get_surfactant_field_name(s)
-            self.define_scalar_field(fieldname,self.space,scale="surface_concentration",testscale=scale_factor("temporal")/scale_factor(fieldname))
-            self.define_field_by_substitution("surfconc_"+s,var(fieldname)) # Bind as substitution for e.g. isotherms
-            self.add_local_function("surfconc_"+s,var(fieldname)) # And also as local expression for output/plotting
-
-    def define_residuals(self) -> None:
-        surfs=self.identify_surfactants_in_bulk()
-        parent=cast(CompositionAdvectionDiffusionEquations,self.get_parent_equations(of_type=CompositionAdvectionDiffusionEquations))
-
-        if self.out_surface_tension:
-#            expd=self.expand_expression_for_debugging(self.ls_properties.surface_tension)
-            self.add_local_function("surface_tension",self.ls_properties.surface_tension)
-                    
-        for s in surfs:
-            fieldname=self.get_surfactant_field_name(s)
-            G,Gtest=var_and_test(fieldname)
-            transfer=self.ls_properties.surfactant_adsorption_rate.get(s,0)
-            transfer=subexpression(transfer)
-            self.add_residual(weak(partial_t(G)-transfer,Gtest))            
-            DS=self.ls_properties.get_surface_diffusivity(s)
-            if DS is not None:
-                self.add_residual(weak(DS*grad(G),grad(Gtest)))
-            liq_c=parent.fluid_props.get_pure_component(s)
-            w_test = testfunction("massfrac_" + s)
-            assert liq_c is not None
-            self.add_residual(weak(transfer * liq_c.molar_mass, w_test))
+# SurfactantsAtSolidInterface moved to pyoomph.equations.surfactants, so that the surfactants on the
+# substrate and the ones on the free surface share one transport implementation. Re-exported here,
+# since that is where every existing script imports it from.
+from .surfactants import SurfactantsAtSolidInterface
 
 
 from ..typings import _set_public_api

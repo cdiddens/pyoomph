@@ -32,7 +32,7 @@ from ..expressions.phys_consts import gas_constant
 from ..expressions.units import *
 from ..expressions import *
 from ..typings import *
-from .generic import BaseInterfaceProperties,LiquidGasInterfaceProperties, LiquidSolidInterfaceProperties
+from .generic import BaseInterfaceProperties,LiquidGasInterfaceProperties, LiquidSolidInterfaceProperties, LiquidLiquidInterfaceProperties
 
 # Default rates: Please use the ones appropriate for the surfactant you are using
 # Not by modifying these parameters here, but by passing k_ads and k_des to the Isotherm constructor
@@ -101,7 +101,12 @@ class SurfactantIsotherm:
             pure_surface_tension: Surface tension without surfactants. If not set, it will be taken from the interface properties.
             min_surface_tension: Minimum surface tension. If set, the surface tension will be limited to this value.
         """
-        assert isinstance(interface_properties,(LiquidGasInterfaceProperties,LiquidSolidInterfaceProperties))
+        # Liquid-liquid is in here too. It used to be excluded, which made a surfactant at a
+        # liquid-liquid interface unreachable although the properties class carries the very
+        # dictionaries this method writes into. Note that, unlike the liquid-gas case, its
+        # surface_tension is a plain attribute rather than the salt-shifted property, so no salt
+        # surface tension shift is applied on top of the isotherm there.
+        assert isinstance(interface_properties,(LiquidGasInterfaceProperties,LiquidSolidInterfaceProperties,LiquidLiquidInterfaceProperties))
         if pure_surface_tension is None:
             pure_surface_tension=interface_properties.surface_tension
         pure_surface_tension=cast(ExpressionOrNum,pure_surface_tension)

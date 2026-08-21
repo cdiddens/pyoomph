@@ -740,7 +740,11 @@ class DynamicContactLineEquations(InterfaceEquations):
         self.model.define_fields(self)
         inter=self.get_parent_equations()
         assert isinstance(inter,MultiComponentNavierStokesInterface)
-        if len(inter.interface_props._surfactants)>0: 
+        # Only the legacy surfactant transport has a projected advection velocity to constrain. The
+        # conservative form integrates the advection by parts, so its natural end condition already
+        # is zero flux out of the contact line and this multiplier has nothing left to do - see the
+        # module docstring of pyoomph.equations.surfactants.
+        if inter.uses_projected_surfactant_velocity():
             self.define_vector_field(self.enforce_proj_interface_velo_for_surfs_name,inter.surfactant_advect_velo_space,scale=1/test_scale_factor(inter.surfactant_advect_velo_name),testscale=1/scale_factor(inter.surfactant_advect_velo_name))
 
     def get_surface_tension_at_cl_expression(self)->ExpressionOrNum:
@@ -789,8 +793,11 @@ class DynamicContactLineEquations(InterfaceEquations):
                 assert sigma0 is not None
                 self.set_initial_condition(self.surface_tension_name,sigma0,degraded_start=True)
 
-        # In case of surfactants, enforce the velocity of the contact line for the projected velocity        
-        if len(parent.interface_props._surfactants) > 0: 
+        # In case of surfactants, enforce the velocity of the contact line for the projected velocity.
+        # Legacy transport only: that form does not integrate the advection by parts, so it retains a
+        # genuine advective outflow of surfactant at the contact line, and pinning the projected
+        # velocity to the mesh velocity is what cancels it. The conservative form has no such term.
+        if parent.uses_projected_surfactant_velocity():
             upro,upro_test=var_and_test(parent.surfactant_advect_velo_name)
             enf_upro,enf_upro_test=var_and_test(self.enforce_proj_interface_velo_for_surfs_name)
             self.add_residual(weak(enf_upro,upro_test))

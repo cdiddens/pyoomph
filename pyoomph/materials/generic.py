@@ -2883,7 +2883,29 @@ class LiquidLiquidInterfaceProperties(BaseInterfaceProperties):
         super(LiquidLiquidInterfaceProperties, self).__init__(phaseA,phaseB)
         self._surfactants=surfactant_dict.copy() if surfactant_dict is not None else {}
         self.surfactant_adsorption_rate:dict[str,ExpressionOrNum]={}
+        #: Per-interface override of the surface diffusivities, by surfactant name
+        self._surface_diffusivity:dict[str,ExpressionOrNum]={}
         self._mass_transfer_model=None
+
+    def get_surface_diffusivity(self,surfactant_name:str) -> ExpressionNumOrNone:
+        """
+        Returns the surface diffusivity of a surfactant: the per-interface override if one was set,
+        otherwise the surfactant's own default.
+        """
+        if surfactant_name in self._surface_diffusivity:
+            return self._surface_diffusivity[surfactant_name]
+        for sp,_ in self._surfactants.items():
+            if sp.name==surfactant_name:
+                return sp.surface_diffusivity
+        raise RuntimeError("Cannot get the surface_diffusivity of surfactant "+str(surfactant_name))
+
+    def set_surface_diffusivity(self,surfactant_name:str,expr:ExpressionOrNum):
+        """
+        Sets the surface diffusivity of a surfactant at this particular interface.
+        """
+        if not surfactant_name in {S.name for S in self._surfactants.keys()}:
+            raise RuntimeError("Cannot set the surface diffusivity of a non-present surfactant "+str(surfactant_name))
+        self._surface_diffusivity[surfactant_name]=expr
 
     def get_mass_transfer_model(self) -> "MassTransferModelBase | None":
         return self._mass_transfer_model

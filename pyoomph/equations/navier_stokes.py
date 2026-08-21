@@ -846,7 +846,10 @@ class NavierStokesFreeSurfaceBalancedEnd(InterfaceEquations):
         inter_eqs=self.get_parent_equations(NavierStokesFreeSurface)
         assert isinstance(inter_eqs,NavierStokesFreeSurface)
         if not inter_eqs.impose_marangoni_directly: # Only when we used the surface divergence theorem, the Neumann terms are there
-            sigma=inter_eqs.surface_tension        
+            # Evaluated on the interface, not on this point domain: identical for a continuous field,
+            # but a discontinuous one lives in the interface element's internal data and cannot be read
+            # here unrestricted at all.
+            sigma=evaluate_in_domain(0+inter_eqs.surface_tension,"..")
             n = self.get_normal() # Outward pointing tangent at the interface boundary
             ns=inter_eqs.get_parent_equations(StokesEquations)
             assert isinstance(ns,StokesEquations)
@@ -1314,12 +1317,16 @@ class NavierStokesContactAngle(InterfaceEquations):
                     nseq=nseq[0]
         if nseq is None:
             raise RuntimeError("Must be applied on NavierStokesFreeSurface or a MultiComponentNavierStokesInterface")
+        # The surface tension is a property of the *interface*, so it is evaluated there rather than on
+        # this point domain. For a continuous field the two are the same number, but a discontinuous
+        # one - a D0 surfactant, say - lives in the interface element's internal data and is simply not
+        # visible from a co-dimension-2 domain unrestricted: without this, sigma(Gamma) fails outright
+        # with "Cannot expand the field 'surfconc_...'".
         if isinstance(nseq,NavierStokesFreeSurface):
-            sigma = 0+nseq.surface_tension
+            sigma = evaluate_in_domain(0+nseq.surface_tension,"..")
         else:
-            # TODO: Use surface tension projection if present
             assert isinstance(nseq,MultiComponentNavierStokesInterface)
-            sigma = 0+nseq.interface_props.surface_tension
+            sigma = evaluate_in_domain(0+nseq.interface_props.surface_tension,"..")
 
         theta=self.contact_angle
         if self.cox_voinov:
