@@ -23,5 +23,15 @@ where the diffusion term has been disregarded since the problem will remain isot
 
 Since the surfactants are insoluble, the total moles of surfactants, i.e. the integral of :math:`\Gamma` over the droplet surface, must be conserved. This is given by :math:`\Gamma(t)=\Gamma_0R_0^2/R^2(t)`. Plugging this in the lhs indeed shows that the surfactant equation conserves the total moles of surfactant. When the fluid velocity :math:`\vec{u}=0` would have been used instead of :math:`\vec{u}_\text{P}`, the total amount of surfactants would not be conserved.
 
-In pyoomph, the surfactant transport equation with :math:`\vec{u}_\text{P}` as advection velocity is already implemented as part of the :py:class:`~pyoomph.equations.multi_component.MultiComponentNavierStokesInterface`. The velocity :math:`\vec{u}_\text{P}` is internally calculated according to :math:numref:`eqmcflowsurftransportupdef` and the rest of the implementation is analogous to :numref:`secALEtimediff`. Furthermore, not only one surfactant may be added, but an arbitrary number.
+In pyoomph, this equation is implemented in :py:mod:`~pyoomph.equations.surfactants` and is added automatically by the :py:class:`~pyoomph.equations.multi_component.MultiComponentNavierStokesInterface` for every surfactant registered on the interface properties, so an arbitrary number of them may be present.
+
+When writing :math:numref:`eqmcflowsurftransport` directly, i.e. as a transient term plus the surface divergence of :math:`\vec{u}_\text{P}\Gamma`, it conserves the total amount only up to the order of the time stepping: on a moving mesh the discrete rate of change of the surface metric is not the discrete :math:`\nabla_S\cdot\vec{u}_\text{I}`. Instead, the equation is assembled as the time derivative of the whole integral plus a flux,
+
+.. math:: :label: eqmcflowsurftransportconservative
+
+   \frac{\mathrm{d}}{\mathrm{d}t}\int_S \Gamma v\,\mathrm{d}S-\int_S \Gamma\left(\vec{u}-\vec{u}_\text{I}\right)\cdot\nabla_S v\,\mathrm{d}S+\int_S D_S\nabla_S\Gamma\cdot\nabla_S v\,\mathrm{d}S=0\,,
+
+where :math:`v` is the test function. Note that :math:`\vec{u}_\text{P}` has disappeared: only the slip relative to the mesh advects, and :math:`\nabla_S v` is tangential to the element anyway, so the normal part of :math:`\vec{u}-\vec{u}_\text{I}` -- which is exactly the mass transfer -- cannot contribute. The  non-conservative form is still available as ``MultiComponentNavierStokesInterface(..., surfactant_transport=SurfactantTransportEquations(form="legacy"))``.
+
+Integrating the advection by parts creates a term at the ends of the interface, e.g. at a contact line. Leaving it out is the natural boundary condition of zero total flux, which is what an insoluble surfactant needs, and it is what makes the conservation above exact. Where a nonzero flux is wanted instead, add a :py:class:`~pyoomph.equations.surfactants.SurfactantEndFlux` at that end point.
 

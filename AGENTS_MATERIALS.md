@@ -176,7 +176,21 @@ Usage: build the isotherm, then `isotherm.apply_on_interface(interface_props, pu
 — this overwrites `interface_props.surface_tension` (subtracting the surface pressure)
 and sets `interface_props.surfactant_adsorption_rate[name]` (net ad-/desorption flux),
 which the flow-interface equations (`MultiComponentNavierStokesInterface`) then pick up
-automatically. Full example (`docs/source/tutorial/mcflow/surfact/soluble_surfactants.py`, trimmed):
+automatically.
+
+The transport itself lives in `pyoomph/equations/surfactants.py`
+(`SurfactantTransportEquations`), which `MultiComponentNavierStokesInterface` drives by
+default and which can also be added standalone to any free surface with nothing but a
+diffusivity. It defaults to the **conservative (GCL) form**, which keeps the total amount of
+an insoluble surfactant to the Newton tolerance; the older non-conservative one is
+`surfactant_transport=SurfactantTransportEquations(form="legacy")` and is bit-for-bit the
+pre-2026 behaviour. Also there: `variable="log"` (positive by construction),
+`stabilization="artificial"`/`"limited"`, `SurfactantEndFlux` for a flux at an interface end
+point, and `SurfactantsAtSolidInterface` (moved from `multi_component`, still re-exported
+from there). Liquid–liquid interfaces carry surfactants now too — they used to trip an
+assert and had no `get_surface_diffusivity` at all.
+
+Full example (`docs/source/tutorial/mcflow/surfact/soluble_surfactants.py`, trimmed):
 
 ```python
 from pyoomph import *

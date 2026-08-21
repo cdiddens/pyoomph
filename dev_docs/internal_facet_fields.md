@@ -220,6 +220,46 @@ was their predicate, stays as a query and is still bound to Python.
 | `Dx` whose parent domain cannot carry it | `pyoomph/generic/codegen.py` | pre-existing and unrelated to the transfer; §5.4 |
 | non-conforming 3d, non-uniform 2d-triangle enumeration | 3d/2d enumerators | `build_facet_adjacency` is the designated basis for both |
 | 1d-bulk and 3d **remeshing** of skeleton fields | untested, no guard | no `LineMesh` remesher exists; 3d transfer should work but has no test. 1d and 3d under `--distribute` *are* covered (`tests/test_mpi_facet_fields.py`) — it is only the remesh transfer that is not |
+| a skeleton of a **2d interface**, i.e. a free surface in 3d | `src/mesh.cpp:5988` | see §7.2 |
+| a skeleton of an interface under `--distribute` | `src/problem.cpp:4343` | see §7.2 |
+
+### 7.2 The skeleton of an INTERFACE, not of a bulk
+
+Everything above is about the `_internal_facets_` domain of a *bulk* mesh. An interface can carry one
+too — `domain/interface/_internal_facets_` — and that is what an upwind DG surfactant needs
+(`dev_docs/surfactant_transport.md` §7). It works, in 2d and axisymmetric, and it had no test or
+mention anywhere until then:
+
+* `InterfaceMesh::fill_internal_facet_buffers` (`src/mesh.cpp:5975`) pairs the two interface elements
+  sharing a vertex node. A closed curve of N elements gives N facets, an open one N−1 — exterior ends
+  are correctly excluded.
+* The facet element is `InterfaceElementPoint0d` (`oomph::PointIntegral`, J = 1), the same class a
+  contact line uses, and `var("normal")` there is the **in-surface conormal**, not the interface
+  normal (which stays reachable as `var("normal", domain="..")`).
+* The residual transfer to the child has its own path at `pyoomph/meshes/mesh.py:1986`, the interface
+  counterpart of the bulk one in `Problem.compile_meshes`.
+* No 2:1 bookkeeping is needed and its absence is not a gap: a facet of a curve is a point, and a
+  point is shared by exactly two elements whatever their sizes. Verified on a Z2-adapted interface
+  with an element-size ratio of 4.
+* **A field owned by the interface is not visible on its own facets.** Unlike a bulk DG field, which
+  the facet element carries as external data, an interface-owned field lives in that interface
+  element's internal data: `var("G")` unrestricted and `jump(G, at_facet=True)` both fail at code
+  generation, while `var("G", domain="+")`, `jump(G)` and `avg(G)` work. Facet terms there must be
+  written with `+`/`-` restrictions.
+
+**3d is the missing piece.** `be->dim() != 1` throws. The fix is a `dim()==2` branch built on
+`TemplatedMeshBase::build_facet_adjacency()` (`src/mesh.cpp:8814`), which is already shape-neutral and
+works off `get_possible_face_indices()` / `get_vertex_nodes_of_face()` — both inherited by
+`InterfaceElement*` from their `BulkElement*` base — so it is a smaller job than it looks. The facet
+elements it would have to produce (`InterfaceElementLine1d*`) already exist. Expect the same
+conforming-meshes-only restriction the 3d bulk enumerator carries.
+
+**MPI is a separate piece of work.** `Problem::setup_interior_facet_halo_scheme` refuses any skeleton
+whose bulk is an `InterfaceMesh`, and the reason is structural: the key it pairs facets across ranks
+with is the bulk element's `(root global_base_index, refinement path, face index)`, and here those
+"bulk" elements are face elements built on the fly rather than mesh elements numbered before the
+distribution. A partition-independent key would have to be built from the *interface's* own bulk
+element first.
 
 ### 7.1 MPI `--distribute`
 

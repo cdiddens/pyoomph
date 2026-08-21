@@ -31,6 +31,7 @@ Submodules
    pyoomph.equations.stabilization
    pyoomph.equations.stabilized_ns
    pyoomph.equations.stokes_stream_func
+   pyoomph.equations.surfactants
    pyoomph.equations.solid
    pyoomph.equations.topological_changes
    pyoomph.equations.tracers
