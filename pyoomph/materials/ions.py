@@ -103,6 +103,24 @@ table_temperature = 298.15 * kelvin
 _lambda_unit = siemens * (centi * meter)**2 / mol   # S cm^2/mol, and cm^2 is not centi*m^2
 
 
+#: Partial molar volume at infinite dilution and 25 degC, in cm^3/mol, on the conventional scale that
+#: sets V(H+) = 0 (Millero, Chem. Rev. 71 (1971) 147). Salts are additive over these to within the
+#: accuracy of the tables -- NaCl 16.62 = -1.21 + 17.83, CaCl2 17.81 against a measured 17.85, MgSO4
+#: -7.19 against -7.28 -- so this is stored per ion and combined by stoichiometry, the same way the
+#: ambipolar diffusivity is. Ions without an entry are refused when a salt is asked to be a
+#: composition field, since there is no harmless default for a volume.
+#:
+#: Negative entries are electrostriction, not typos: a small, highly charged ion draws the
+#: surrounding water in tighter than its own volume displaces.
+PARTIAL_MOLAR_VOLUME = {
+    "H+": 0.0, "Li+": -0.88, "Na+": -1.21, "K+": 9.02, "NH4+": 17.86, "Cs+": 21.34,
+    "Mg2+": -21.17, "Ca2+": -17.85, "Ba2+": -12.47,
+    "F-": -1.16, "Cl-": 17.83, "Br-": 24.71, "I-": 36.22, "OH-": -4.04,
+    "NO3-": 29.00, "ClO4-": 44.12, "HCO3-": 23.40, "CO3 2-": -6.70, "SO4 2-": 13.98,
+    "CH3COO-": 40.46,
+}
+
+
 #: How an ion of this library is spelled as an AIOMFAC subgroup. Only the ones AIOMFAC actually has
 #: middle-range parameters for are listed; the rest have no entry, and an activity model asked about
 #: them says so rather than guessing. AIOMFAC writes a double charge as "++" where this library
@@ -149,6 +167,9 @@ class LibraryIon(IonProperties):
         # independent number here is what would let the two drift apart.
         self.walden_exponent = self.walden_exponent_fit
         self.aiomfac_subgroup = AIOMFAC_SUBGROUP_OF_ION.get(self.name)
+        vol = PARTIAL_MOLAR_VOLUME.get(self.name)
+        if vol is not None:
+            self.partial_molar_volume = vol * (centi * meter)**3 / mol
         # A dissolved ion has neither of these on its own, but it goes through the pure-liquid
         # machinery, which expects them. They only matter if the ions also carry mass in a flow
         # model, and then they are the user's to set.

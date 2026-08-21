@@ -206,15 +206,22 @@ class _EvaporatingFilm(Problem):
 
     def __init__(self, *, GCL=False, byparts=False, N=20, L=1 * milli * meter,
                  c0=100 * milli * molar, salt="NaCl", stabilization=None, salts="auto",
-                 j=1e-4 * kilogram / (meter ** 2 * second), Deff=None):
+                 j=1e-4 * kilogram / (meter ** 2 * second), Deff=None, mode="dilute"):
         super().__init__()
         self.GCL, self.byparts, self.N, self.L = GCL, byparts, N, L
         self.c0, self.salt, self.j, self.Deff = c0, salt, j, Deff
         self.stabilization, self.salts = stabilization, salts
+        #: "dilute" or "component", i.e. whether the salt is a concentration riding along or a
+        #: composition field of its own.
+        self.mode = mode
         self.T = 20 * celsius
 
     def define_problem(self):
-        water = _salted(self.salt, self.c0)
+        if self.mode == "component":
+            water = Mixture(get_pure_liquid("water") + self.c0 * get_salt(self.salt),
+                            temperature=self.T, salt_treatment="component")
+        else:
+            water = _salted(self.salt, self.c0)
         self.water = water
         self.interf = water | get_pure_gas("air")
         self.interf.set_mass_transfer_model(PrescribedMassTransfer(water=self.j)).projection_space = "C2"
@@ -230,15 +237,19 @@ class _EvaporatingFilm(Problem):
 
         eqs = CompositionFlowEquations(water, compo_space="C1", GCL=self.GCL, salts=self.salts,
                                        integrate_advection_by_parts=self.byparts or self.GCL,
-                                       salt_stabilization=self.stabilization)
+                                       salt_stabilization=self.stabilization,
+                                       salt_treatment=self.mode)
         if self.Deff is not None:   # a smaller diffusivity, i.e. a higher Peclet number
-            salt_eqs = eqs.get_equation_of_type(SaltTransportEquations)
-            assert isinstance(salt_eqs, SaltTransportEquations)
-            salt_eqs.diffusivities[self.salt] = self.Deff
+            if self.mode == "component":
+                water.set_diffusion_coefficient(self.salt, self.Deff)
+            else:
+                salt_eqs = eqs.get_equation_of_type(SaltTransportEquations)
+                assert isinstance(salt_eqs, SaltTransportEquations)
+                salt_eqs.diffusivities[self.salt] = self.Deff
         eqs += LaplaceSmoothedMesh()
         eqs += (DirichletBC(mesh_x=0) + DirichletBC(velocity_x=0)) @ "left"
         eqs += MultiComponentNavierStokesInterface(self.interf) @ "right"
-        eqs += IntegralObservables(L=1)
+        eqs += IntegralObservables(L=1, rho=water.mass_density, w_water=var("massfrac_water"))
         eqs += IntegralObservables(sigma=self.interf.surface_tension, A=1) @ "right"
         if self.salts is not False:
             eqs += IntegralObservables(N_salt=var("c_" + self.salt))
@@ -247,17 +258,25 @@ class _EvaporatingFilm(Problem):
         self += eqs @ "domain"
 
 
-def _evaporate(prob, *, nsteps=20, shrink_to=0.5):
+def _evaporate(prob, *, nsteps=20, shrink_to=0.5, end_time=None):
     """Run until the film has lost the given fraction of its height. Fixed steps: the point of these
-    tests is how the error behaves in dt, which an adaptive stepper would hide."""
+    tests is how the error behaves in dt, which an adaptive stepper would hide.
+
+    ``end_time`` overrides the duration. Needed when two problems are to be compared: the default is
+    derived from each problem's own velocity scale, which is j/rho, and a denser liquid would then be
+    run for longer rather than compared at the same instant.
+    """
     with _fresh(prob) as p:
         p.initialise()
         o0 = p.get_mesh("domain").evaluate_all_observables()
-        Tend = (1 - shrink_to) * p.get_scaling("temporal")
+        Tend = end_time if end_time is not None else (1 - shrink_to) * p.get_scaling("temporal")
         p.run(Tend, outstep=False, startstep=Tend / nsteps, maxstep=Tend / nsteps, temporal_error=None)
         o = p.get_mesh("domain").evaluate_all_observables()
         os_ = p.get_mesh("domain/right").evaluate_all_observables()
         res = {"L0": float(o0["L"] / meter), "L": float(o["L"] / meter),
+               "T_end": float(Tend / second),
+               "rho": float(o["rho"] / o["L"] / (kilogram / meter ** 3)),
+               "w_water": float(o["w_water"] / o["L"]),
                "sigma": float(os_["sigma"] / os_["A"] / (milli * newton / meter))}
         if "N_salt" in o:  # absent when the salt transport was switched off
             res["N0"] = float(o0["N_salt"] / (mol / meter ** 2))
@@ -511,3 +530,168 @@ def test_the_surface_tension_law_works_under_nernst_planck_too():
     sigma0 = float(water.evaluate_at_condition((water | gas).surface_tension, "IC", temperature=T)
                    / (milli * newton / meter))
     assert sigma - sigma0 == pytest.approx(1.64 * 0.1, rel=1e-6)   # 100 mM at +1.64 mN/m per M
+
+
+# =================================================================================================
+#  The salt as a real composition field
+# =================================================================================================
+
+def _component_mode_brine(concentration=1 * molar, salt="NaCl", T=20 * celsius):
+    return Mixture(get_pure_liquid("water") + concentration * get_salt(salt),
+                   temperature=T, salt_treatment="component")
+
+
+def test_the_salt_becomes_a_component_with_a_mass_fraction():
+    mix = Mixture(get_pure_liquid("water") + 20 * percent * get_pure_liquid("glycerol")
+                  + 1 * molar * get_salt("NaCl"), temperature=20 * celsius)
+    assert sorted(mix.components) == ["glycerol", "water"]          # dilute: the salt rides along
+    mix.treat_salts_as_components()
+    assert sorted(mix.components) == ["NaCl", "glycerol", "water"]
+    assert sorted(mix.required_adv_diff_fields) == ["NaCl", "glycerol"]
+    assert mix.passive_field == "water"                              # a salt is never the passive one
+    ic = {k: float(v) for k, v in mix.initial_condition.items() if k.startswith("massfrac_")}
+    assert sum(ic.values()) == pytest.approx(1.0, abs=1e-12)
+    # 1 M NaCl is 58.44 g in a litre of a solution weighing about 1.09 kg.
+    assert ic["massfrac_NaCl"] == pytest.approx(0.0535, rel=2e-2)
+    assert mix.treat_salts_as_components() is None                   # idempotent
+
+
+def test_the_partial_molar_volumes_add_up_to_the_measured_salt_values():
+    # Stored per ion and combined by stoichiometry, the same way the ambipolar diffusivity is. The
+    # measured salt values are what says the additivity holds.
+    unit = (centi * meter) ** 3 / mol
+    for name, ref in (("NaCl", 16.62), ("KCl", 26.85), ("CaCl2", 17.85), ("Na2SO4", 11.56),
+                      ("MgSO4", -7.28), ("NaOH", -5.20), ("HCl", 17.83)):
+        got = float(get_salt(name).get_apparent_molar_volume() / unit)
+        assert got == pytest.approx(ref, abs=0.1)
+    # Negative ones are electrostriction rather than an error: the ion pulls water in tighter than
+    # it displaces, and the solution is denser than the solvent by more than the salt's own mass.
+    assert float(get_salt("MgSO4").get_apparent_molar_volume() / unit) < 0
+
+
+@pytest.mark.parametrize("wt,measured", [(0.05, 1034.1), (0.10, 1070.7), (0.20, 1148.0)])
+def test_the_brine_density_follows_volume_additivity(wt, measured):
+    # 1/rho = w_solvent/rho_solvent + w_salt*V_phi/M_salt, with V_phi at infinite dilution. That
+    # volume grows with concentration, so the model is good near dilution and drifts: 0.1% at 5 wt%,
+    # 1.5% at 20. Quoted rather than hidden, because it is the accuracy of this mode.
+    T = 20 * celsius
+    mix = _component_mode_brine()
+    rho = float(mix.evaluate_at_condition(mix.mass_density,
+                                          {"massfrac_water": 1 - wt, "massfrac_NaCl": wt},
+                                          temperature=T) / (kilogram / meter ** 3))
+    assert rho == pytest.approx(measured, rel=0.02)
+    assert abs(rho / measured - 1) < (0.005 if wt <= 0.1 else 0.02)
+
+
+def test_a_salt_with_no_volume_data_is_refused():
+    # There is no harmless default for a volume, unlike the surface tension increment where zero
+    # means "no effect".
+    with pytest.raises(RuntimeError, match="No partial molar volume"):
+        Mixture(get_pure_liquid("water") + 1 * milli * molar * get_salt("ZnSO4"),
+                temperature=20 * celsius, salt_treatment="component")
+
+
+def test_a_pure_liquid_is_told_what_to_do_instead():
+    mix = Mixture(get_pure_liquid("water") + 1 * molar * get_salt("NaCl"))
+    assert mix.is_pure                       # dilute mode leaves a single solvent pure
+    with pytest.raises(RuntimeError, match="pure liquid cannot hold components"):
+        CompositionFlowEquations(mix, salt_treatment="component")
+
+
+def test_component_mode_carries_the_ion_fields_too():
+    # c_<ion> means the same thing in every mode, which is what lets a surface tension law or an
+    # activity coefficient be written once.
+    from pyoomph.equations.salt_transport import SaltConcentrationsFromMassFractions
+    mix = Mixture(get_pure_liquid("water") + 20 * percent * get_pure_liquid("glycerol")
+                  + 1 * molar * get_salt("NaCl"), temperature=20 * celsius)
+    eqs = CompositionFlowEquations(mix, salt_treatment="component")
+    assert isinstance(eqs.get_equation_of_type(SaltConcentrationsFromMassFractions),
+                      SaltConcentrationsFromMassFractions)
+    # ... and the salt is transported by the composition equations, not by a second set of them.
+    assert eqs.get_equation_of_type(SaltTransportEquations) is None
+    compo = eqs.get_equation_of_type(CompositionAdvectionDiffusionEquations)
+    assert isinstance(compo, CompositionAdvectionDiffusionEquations)
+    assert "massfrac_NaCl" in compo.fieldnames
+
+
+def test_both_modes_give_the_same_activity_by_different_routes():
+    # The check that the mole-fraction basis factor is right rather than merely present. AIOMFAC's
+    # coefficient goes with its own mole fraction, which counts the ions; pyoomph's Raoult law
+    # multiplies by molefrac_*, which counts the salt-free solvents in dilute mode and the salt as
+    # one particle per formula unit in component mode. The coefficient and the mole fraction must
+    # therefore *both* differ between the modes, while their product -- the activity, which is the
+    # physical quantity -- must not.
+    T = 298.15 * kelvin
+    m, r = 1.0, 0.2                       # molality of NaCl, and glycerol's share of the solvent
+    M_salt = float(get_salt("NaCl").molar_mass / (kilogram / mol))
+    M_w = float(get_pure_liquid("water").molar_mass / (kilogram / mol))
+    M_g = float(get_pure_liquid("glycerol").molar_mass / (kilogram / mol))
+
+    dilute = Mixture(get_pure_liquid("water") + r * get_pure_liquid("glycerol")
+                     + 1 * molar * get_salt("NaCl"), temperature=T)
+    dilute.set_activity_coefficients_by_unifac("AIOMFAC", use_multi_return=False)
+    rho = dilute.get_reference_mass_density(T)
+    ic_dilute = {"massfrac_water": 1 - r, "massfrac_glycerol": r, "temperature": T,
+                 "c_Na_p": m * (mol / kilogram) * rho, "c_Cl_m": m * (mol / kilogram) * rho}
+    n_w, n_g = (1 - r) / M_w, r / M_g
+    x_saltfree = {"water": n_w / (n_w + n_g), "glycerol": n_g / (n_w + n_g)}
+
+    component = Mixture(get_pure_liquid("water") + r * get_pure_liquid("glycerol")
+                        + 1 * molar * get_salt("NaCl"), temperature=T, salt_treatment="component")
+    component.set_activity_coefficients_by_unifac("AIOMFAC", use_multi_return=False)
+    w_s = m * M_salt / (1 + m * M_salt)   # a molality is per kg of solvent, so this is exact
+    ic_comp = {"massfrac_water": (1 - w_s) * (1 - r), "massfrac_glycerol": (1 - w_s) * r,
+               "massfrac_NaCl": w_s, "temperature": T}
+    n_wc, n_gc, n_s = (1 - w_s) * (1 - r) / M_w, (1 - w_s) * r / M_g, w_s / M_salt
+    total = n_wc + n_gc + n_s
+    x_component = {"water": n_wc / total, "glycerol": n_gc / total}
+
+    for name in ("water", "glycerol"):
+        g_dilute = float(dilute.evaluate_at_condition(dilute.activity_coefficients[name], ic_dilute))
+        g_comp = float(component.evaluate_at_condition(component.activity_coefficients[name], ic_comp))
+        assert g_dilute * x_saltfree[name] == pytest.approx(g_comp * x_component[name], rel=1e-9)
+        assert abs(g_comp / g_dilute - 1) > 0.01      # the factor is not 1, so the test has teeth
+    # And it is the factor the derivation says it is: 1 + n_salt/n_solvent.
+    ratio = (float(component.evaluate_at_condition(component.activity_coefficients["water"], ic_comp))
+             / float(dilute.evaluate_at_condition(dilute.activity_coefficients["water"], ic_dilute)))
+    assert ratio == pytest.approx(1 + n_s / (n_wc + n_gc), rel=1e-9)
+
+
+def _both_modes(c0, nsteps=20, shrink_to=0.6):
+    dilute = _evaporate(_EvaporatingFilm(GCL=True, c0=c0, mode="dilute"),
+                        nsteps=nsteps, shrink_to=shrink_to)
+    # The same physical duration, not the same nondimensional one: each problem takes its velocity
+    # scale from its own density, and a denser liquid would otherwise be run for longer.
+    component = _evaporate(_EvaporatingFilm(GCL=True, c0=c0, mode="component"),
+                           nsteps=nsteps, end_time=dilute["T_end"] * second)
+    return dilute, component
+
+
+def test_component_mode_conserves_the_salt_through_the_ordinary_composition_terms():
+    # No salt-specific interface condition anywhere: a non-volatile component is the j_i = 0 case of
+    # the term the composition equations already write for every component. The three ALE branches
+    # the dilute treatment needed simply do not arise here.
+    _, component = _both_modes(3 * molar)
+    assert abs(component["N"] / component["N0"] - 1) < 1e-10
+    assert component["c_surf"] > 4000.0        # and it really did concentrate
+
+
+@pytest.mark.parametrize("c0,density_ratio,w_water", [(1 * milli * molar, 1.0001, 0.9999),
+                                                      (3 * molar, 1.206, 0.761)])
+def test_the_modes_agree_on_the_film_and_differ_on_what_it_is_made_of(c0, density_ratio, w_water):
+    # A result worth knowing rather than assuming: with the evaporation rate prescribed, the two
+    # modes thin the film *identically*, at any concentration. Under volume additivity the salt's
+    # contribution to the volume is fixed -- it is conserved -- so a film losing water at rate j
+    # loses volume at j/rho_solvent whatever else is dissolved in it. The dilute treatment is exact
+    # for the geometry here.
+    dilute, component = _both_modes(c0)
+    assert component["L"] == pytest.approx(dilute["L"], rel=1e-6)
+    assert component["c_surf"] == pytest.approx(dilute["c_surf"], rel=1e-6)
+    # What it is not exact about is the liquid itself. At 3 molar the dilute treatment still thinks
+    # this is water: same density, and a mass fraction of one. That is what feeds back into anything
+    # that computes an evaporation rate rather than being handed one, into buoyancy, and into every
+    # property that depends on composition.
+    assert dilute["rho"] == pytest.approx(998.2, rel=2e-3)
+    assert dilute["w_water"] == pytest.approx(1.0, abs=1e-12)
+    assert component["rho"] / dilute["rho"] == pytest.approx(density_ratio, rel=1e-2)
+    assert component["w_water"] == pytest.approx(w_water, rel=1e-2)

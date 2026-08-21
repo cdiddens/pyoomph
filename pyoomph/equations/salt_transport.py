@@ -383,5 +383,45 @@ class FrozenSaltConcentrations(Equations):
             cast("BaseLiquidProperties",self.fluid_props).get_salts()))
 
 
+class SaltConcentrationsFromMassFractions(Equations):
+    """
+    Supplies the salt and ion concentration fields of a material whose salts are *composition
+    fields*, deriving them from the mass fractions.
+
+    The counterpart of :py:class:`FrozenSaltConcentrations`, for the other treatment. Whichever way
+    the salt is carried -- a concentration field of its own, a mass fraction, or the ion fields of
+    Poisson-Nernst-Planck -- ``c_<ion>`` means the same thing afterwards, so a surface tension law,
+    an activity coefficient or an observable written against it does not know or care which mode is
+    running. That is what makes the modes interchangeable.
+    """
+    def __init__(self,fluid_props:"AnyMaterialProperties",*,field_prefix:str="c_",
+                 concentration_scale:str="ion_concentration"):
+        super().__init__()
+        self.fluid_props=fluid_props
+        self.field_prefix=field_prefix
+        self.concentration_scale=concentration_scale
+
+    def define_fields(self):
+        liquid=cast("BaseLiquidProperties",self.fluid_props)
+        rho=liquid.mass_density
+        values:dict[str,ExpressionOrNum]={}
+        for name,salt in liquid.get_salts().items():
+            # Moles of salt per unit volume: the mass fraction times the density, over the molar mass.
+            c_salt=rho*var("massfrac_"+name)/salt.molar_mass
+            values[self.field_prefix+ion_fieldname_stem(name)]=c_salt
+            for ion,nu in ((salt.cation,salt.cation_stoichiometry),
+                           (salt.anion,salt.anion_stoichiometry)):
+                fn=self.field_prefix+ion_fieldname_stem(ion.name)
+                values[fn]=values.get(fn,0)+nu*c_salt
+        for fn,value in values.items():
+            self.set_scaling(**{fn:scale_factor(self.concentration_scale)})
+            self.define_field_by_substitution(fn,value/scale_factor(self.concentration_scale),
+                                              also_on_interface=True)
+
+    def get_information_string(self)->str:
+        return "Concentrations from the mass fractions of "+", ".join(sorted(
+            cast("BaseLiquidProperties",self.fluid_props).get_salts()))
+
+
 from ..typings import _set_public_api
 _set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

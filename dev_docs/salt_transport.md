@@ -145,18 +145,81 @@ its scale has to be set separately or `var("c_Na_p")` is a bare number under the
 and a dimensional concentration under Nernst-Planck. An expression written for both would then be
 right in only one of them.
 
-## 6. Dilute solute, and where that stops being true
+## 6. Two treatments: dilute solute, or a composition field
+
+`CompositionFlowEquations(..., salt_treatment="component")` promotes every dissolved salt to an
+ordinary component: a mass fraction that sums to unity with the solvents, a mole fraction, and a
+share of the volume. `treat_salts_as_components()` does the work, **in place** — several things hold
+a reference to the material (the interface properties, the mass transfer model, the vapour
+pressures), and two objects disagreeing about what `massfrac_water` means is the kind of split that
+produces a plausible wrong answer.
+
+**Density is volume-additive**, which is what an apparent molar volume means:
+
+    1/rho = w_solvent/rho_solvent(salt-free composition) + sum_s w_s V_phi,s/M_s
+
+with `rho_solvent` the material's own correlation evaluated at the *renormalised* composition. At the
+raw mass fractions it would think the solvent had been diluted by the salt and misstate e.g. the
+glycerol-to-water ratio. The renormalisation uses `GiNaC_subs` rather than `evaluate_at_condition`:
+the latter runs the unit collector over the whole expression, which cannot get a unit out of a
+subexpression containing a temperature field, and every density correlation here is one of those.
+
+`V_phi` is stored **per ion** and combined by stoichiometry, the same way the ambipolar diffusivity
+is; the additivity is good to 0.1 cm³/mol against the measured salt values (NaCl 16.62 = −1.21 +
+17.83, MgSO4 −7.19 against −7.28). Negative entries are electrostriction, not typos. A salt whose
+ions have no tabulated volume is refused: unlike the surface tension increment, zero is not a
+harmless default for a volume. Against measured brine the model gives 0.1% at 5 wt%, 0.4% at 10 and
+1.5% at 20 — `V_phi` itself grows with concentration, and this uses the infinite-dilution value.
+
+**What the two modes actually differ in.** Less than expected, and not where expected. With a
+prescribed evaporation rate the two thin the film *identically*, at 1 mM and at 3 M alike, to seven
+digits. That is not a coincidence and not a bug: the salt is conserved, so under volume additivity
+its contribution to the volume is fixed, and a film losing water at rate `j` loses volume at
+`j/rho_solvent` whatever is dissolved in it. The plan for this work predicted the opposite — that
+component mode would give a thicker film — and was wrong.
+
+What does differ is the liquid itself. At 3 molar the dilute treatment still thinks it is water:
+
+| | dilute | component |
+|---|---|---|
+| mean density | 998.2 kg/m³ | 1204.1 |
+| mass fraction of water | 1.000000 | 0.761 |
+
+which is what feeds anything that *computes* an evaporation rate rather than being handed one (the
+water activity, hence the vapour pressure), buoyancy, and every property that depends on composition.
+So the mode matters for what the liquid does, not for the bookkeeping of where the salt is.
+
+**Evaporation needs no new terms.** A non-volatile component is the `j_i = 0` case of the interface
+term the composition equations already write, so none of §3's three ALE branches arises. The salt is
+conserved to 1e-14 through machinery that knew nothing about salts.
+
+**The activity coefficients keep their conversion**, in a different form. AIOMFAC's `gamma` goes with
+its own mole fraction, which counts ions; `molefrac_*` counts the salt as one particle per formula
+unit, so
+
+    gamma_pyoomph = gamma_AIOMFAC (1 + f)/(1 + nu f),    f = n_salt/n_solvent
+
+against `1/(1 + nu f)` in dilute mode. It only vanishes if the *ions* are the components, which would
+give up structural electroneutrality — two independent mass fractions held together only by equal
+diffusivities and equal boundary conditions, with no potential in the system to restore them. The
+test that pins this asks the two modes for the same physical state and requires the *activities* to
+agree while the coefficients and mole fractions both differ.
+
+## 7. The dilute treatment, and where it stops being true
 
 The salt does not enter the mass fractions and does not change ρ or μ. At 1 mM a salt is 6e-5 of the
 solution by mass, and pretending it displaces some of the water would be a larger error than ignoring
 it. `DissolvedSpeciesComponent.mass_fraction_in` is how a script checks where it stands.
 
 This is wrong for a drop drying to saturation: NaCl saturates at 26 wt%, where the assumption fails
-completely and crystallisation starts. Nothing here warns about that, and the extension point is a
-ρ(c)/μ(c) hook rather than promoting the salt to a mixture component — which would collide with the
-fraction bookkeeping and needs mixture correlations the library does not have.
+completely and crystallisation starts. §6 is the answer to the first half of that — the salt as a
+composition field, with the volume and the mass it actually takes up. Crystallisation is still not
+modelled, and neither is the salt's effect on **viscosity**: a 20 wt% brine is about 1.6x thicker
+than water and both modes treat it as water, which also means the Walden-corrected ion diffusivities
+do not see the salt's own thickening. Jones-Dole is the standard correction and is another parameter
+table.
 
-## 7. Verified
+## 8. Verified
 
 `tests/test_salt_transport.py`, 22 tests: the ambipolar diffusivities against six measured values;
 the `add_salt` overload and two salts sharing an ion; auto-pickup and its opt-out; the shared field

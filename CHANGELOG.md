@@ -12,6 +12,33 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Added
 
+- **Salt as a real composition field.** `CompositionFlowEquations(..., salt_treatment="component")`
+  promotes every dissolved salt from a dilute solute to an ordinary component: a mass fraction that
+  sums to unity with the solvents, a mole fraction, and a share of the volume. The composition
+  equations then transport it, and the evaporation condition it needs is the `j_i = 0` case of the
+  term they already write for any non-volatile component -- none of the three ALE branches the
+  dilute treatment needed arises, and the salt is conserved to 1e-14 by machinery that knows nothing
+  about salts. `"dilute"` remains the default.
+  - The density becomes volume-additive, `1/rho = w_solv/rho_solv + sum w_s V_phi,s/M_s`, with the
+    solvent correlation evaluated at the *renormalised* salt-free composition. `V_phi` is stored per
+    ion and combined by stoichiometry, the same way the ambipolar diffusivity is -- the additivity
+    holds to 0.1 cm^3/mol against measured salt values -- and reproduces brine density to 0.1% at
+    5 wt%, 0.4% at 10 and 1.5% at 20. A salt whose ions have no tabulated volume is refused: zero is
+    not a harmless default for a volume.
+  - The ion concentration fields survive as substitutions of the mass fraction, so a surface tension
+    law, an activity coefficient or an observable written against `c_Na_p` works in every mode.
+  - **The two modes agree on more than expected**: with a prescribed evaporation rate they thin a
+    film identically at any concentration, because the salt's volume is conserved and the film
+    therefore loses volume at `j/rho_solvent` whatever is dissolved in it. What differs is the liquid
+    -- at 3 molal the dilute treatment still reports the density of water and a water mass fraction
+    of one -- which is what feeds anything that computes an evaporation rate rather than being handed
+    one.
+  - The AIOMFAC conversion changes rather than disappearing: `molefrac_*` now counts a salt as one
+    particle where AIOMFAC counts its `nu` ions, so `gamma_pyoomph = gamma_AIOMFAC (1+f)/(1+nu f)`.
+    A test asks both modes for the same physical state and requires the activities to agree while
+    the coefficients and mole fractions differ.
+  See `dev_docs/salt_transport.md` section 6.
+
 - **AIOMFAC with ions: activity coefficients of a salt solution.** A dissolved salt changed the
   surface tension but not the *activity* of the solvent, so a drying brine evaporated like pure
   water. AIOMFAC is the only model in the library with an electrolyte generalisation and only its

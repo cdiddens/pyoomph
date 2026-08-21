@@ -1017,26 +1017,52 @@ class BaseLiquidProperties(MaterialProperties):
         server=ActivityModel.get_activity_model_by_name(modelname)
         assert isinstance(server,UNIFACLikeActivityModel)
         ion_subgroups=self._aiomfac_ion_subgroups(modelname)
+        salts=self.get_salts()
+        # The solvents only: a salt is described by its ions here, not as a UNIFAC molecule, whether
+        # or not it also happens to be a composition field.
+        solvent_components=[cn for cn in sorted(self.components) if cn not in salts]
         molecule_subgroups:dict[str,dict[str,int]]={}
-        for cn in sorted(self.components):
+        for cn in solvent_components:
             comp=self.get_pure_component(cn)
             assert isinstance(comp,PureLiquidProperties)
-            groups=comp._UNIFAC_groups[modelname]
+            groups=comp._UNIFAC_groups.get(modelname,{})
             if len(groups)==0:
                 raise RuntimeError("Component "+cn+" has no UNIFAC groups defined for model "+modelname)
             molecule_subgroups[cn]=dict(groups)
         self._unifac_electrolyte=AIOMFACElectrolyteMixture(server,molecule_subgroups,
                                                            list(ion_subgroups.values()))
         gen=UNIFACPyoomphExpressionGenerator()
-        # A pure solvent's salt-free mole fraction is one, and saying so keeps the expression free of
-        # a molefrac_ field that a pure liquid does not otherwise define.
-        x:dict[str,ExpressionOrNum]={cn:(1 if self.is_pure else var("molefrac_"+cn))
-                                     for cn in sorted(self.components)}
-        # Nondimensional: the AIOMFAC correlations are written for a molality in mol/kg and a
-        # temperature in Kelvin, so what goes in must be the bare numbers.
-        molal={sub:self.get_ion_molality(name)/(mol/kilogram)
-               for name,sub in ion_subgroups.items()}
-        nspecies=len(self.components)+len(ion_subgroups)
+        basis_factor:ExpressionOrNum=1
+        if getattr(self,"_salts_are_components",False):
+            # Everything follows from the mass fractions, with no density in the way: the molality is
+            # per kg of *solvent*, so it divides by what is left after the salts.
+            n={cn:var("massfrac_"+cn)/self.get_pure_component(cn).molar_mass
+               for cn in solvent_components}
+            n_solvent=subexpression(sum(n.values()))
+            x:dict[str,ExpressionOrNum]={cn:n[cn]/n_solvent for cn in solvent_components}
+            w_salt_total=subexpression(sum(var("massfrac_"+sn) for sn in sorted(salts)))
+            molal={}
+            for name,sub in ion_subgroups.items():
+                per_kg:ExpressionOrNum=0
+                for sn,salt in salts.items():
+                    nu=salt.stoichiometry_of(name)
+                    if nu:
+                        per_kg=per_kg+nu*var("massfrac_"+sn)/(salt.molar_mass*(1-w_salt_total))
+                molal[sub]=per_kg/(mol/kilogram)
+            # molefrac_* now counts a salt as one particle per formula unit where AIOMFAC counts its
+            # nu ions, so the coefficient that goes with pyoomph's mole fraction is larger by the
+            # ratio of the two totals. See dev_docs/salt_transport.md.
+            n_salt=subexpression(sum(var("massfrac_"+sn)/salts[sn].molar_mass for sn in sorted(salts)))
+            basis_factor=1+n_salt/n_solvent
+        else:
+            # A pure solvent's salt-free mole fraction is one, and saying so keeps the expression free
+            # of a molefrac_ field that a pure liquid does not otherwise define.
+            x={cn:(1 if self.is_pure else var("molefrac_"+cn)) for cn in solvent_components}
+            # Nondimensional: the AIOMFAC correlations are written for a molality in mol/kg and a
+            # temperature in Kelvin, so what goes in must be the bare numbers.
+            molal={sub:self.get_ion_molality(name)/(mol/kilogram)
+                   for name,sub in ion_subgroups.items()}
+        nspecies=len(solvent_components)+len(ion_subgroups)
         if use_multi_return==True or ((use_multi_return is not False) and nspecies>=use_multi_return):
             # The same maths, evaluated in generated C with a finite-difference Jacobian rather than
             # differentiated symbolically. Worth it as soon as there are a few species, which a
@@ -1045,8 +1071,8 @@ class BaseLiquidProperties(MaterialProperties):
             coeffs=self._unifac_multi_return.get_activity_coefficients(x,molal,var("temperature"))
         else:
             coeffs=self._unifac_electrolyte.activity_coefficients(gen,x,molal,var("temperature")/kelvin)
-        for cn in sorted(self.components):
-            self.activity_coefficients[cn]=cast(Expression,coeffs[cn])
+        for cn in solvent_components:
+            self.activity_coefficients[cn]=cast(Expression,coeffs[cn]*basis_factor)
         for name,sub in ion_subgroups.items():
             self.ion_activity_coefficients[name]=cast(Expression,coeffs[sub])
 
@@ -1078,6 +1104,106 @@ class BaseLiquidProperties(MaterialProperties):
         gm=self.get_ion_activity_coefficient(s.anion.name)
         nu=s.cation_stoichiometry+s.anion_stoichiometry
         return (gp**s.cation_stoichiometry*gm**s.anion_stoichiometry)**rational_num(1,nu)
+
+    def treat_salts_as_components(self)->None:
+        r"""
+        Promote every dissolved salt from a dilute solute to a real component of the mixture.
+
+        The salt gains a mass fraction that sums to unity with the solvents, a mole fraction, and a
+        share of the volume, so the composition equations transport it the way they transport
+        anything else -- including, at an evaporating interface, the :math:`j_i=0` case of a term
+        they already write. That is the whole point: none of the machinery the dilute treatment
+        needs applies here.
+
+        **In place**, and idempotent. The alternative -- returning a new material -- would leave the
+        interface properties, the mass transfer model and the vapour pressures pointing at the old
+        one, and two objects disagreeing about what ``massfrac_water`` means is exactly the kind of
+        split that produces a plausible wrong answer.
+
+        The density becomes volume-additive,
+
+        .. math:: \frac{1}{\rho}=\frac{w_\mathrm{solv}}{\rho_\mathrm{solv}}+\sum_s\frac{w_sV_{\phi,s}}{M_s}
+
+        with :math:`\rho_\mathrm{solv}` the material's own correlation evaluated at the *renormalised*
+        salt-free composition -- at the raw mass fractions it would think the solvent had been
+        diluted by the salt, and misstate e.g. the glycerol-to-water ratio by the salt's mass
+        fraction.
+        """
+        if getattr(self,"_salts_are_components",False):
+            return
+        salts=self.get_salts()
+        if not salts:
+            raise RuntimeError("Nothing is dissolved in '"+self.describe()+"', so there is no salt "+
+                               "to make a component of.")
+        # Everything that can refuse does so before anything is changed: a half-upgraded material
+        # would be worse than one that never started.
+        volumes={n:s.get_apparent_molar_volume() for n,s in salts.items()}
+        masses={n:s.molar_mass for n,s in salts.items()}
+        solvents=sorted(self.components)
+        if self.passive_field in salts:
+            raise RuntimeError("The passive field cannot be a salt")
+        solvent_density=self.mass_density
+        # At the initial composition, while the material still consists of solvents alone: the
+        # initial mass fractions are worked out from it further down, and by then asking for a
+        # density would mean asking about a composition that includes a salt it does not yet have.
+        rho_solvent_at_IC=self.evaluate_at_condition(solvent_density,self.initial_condition)
+
+        for n,s in salts.items():
+            self.pure_properties[n]=_salt_pseudo_component(n,masses[n],volumes[n])
+        self.components=set(solvents)|set(salts)
+        self.required_adv_diff_fields=self.components-{cast(str,self.passive_field)}
+
+        w_salt={n:var("massfrac_"+n) for n in sorted(salts)}
+        w_salt_total=subexpression(sum(w_salt.values()))
+        # GiNaC_subs, not evaluate_at_condition: substituting through the latter runs the unit
+        # collector over the whole expression, which cannot get a unit out of a subexpression that
+        # contains a temperature field -- and every density correlation here is one of those. This
+        # replaces a symbol by an expression and leaves the rest of the tree alone.
+        rho_solvent=solvent_density
+        for c in solvents:
+            rho_solvent=_pyoomph.GiNaC_subs(0+rho_solvent,var("massfrac_"+c),
+                                            var("massfrac_"+c)/(1-w_salt_total))
+        self.mass_density=1/((1-w_salt_total)/rho_solvent
+                             +sum(w_salt[n]*volumes[n]/masses[n] for n in sorted(salts)))
+
+        for n,s in salts.items():
+            # The ambipolar diffusivity, i.e. the rate the ion pair travels at: what the salt field
+            # meant in the dilute treatment, and what its mass fraction means here.
+            self.set_diffusion_coefficient(n,s.get_diffusivity(self))
+
+        self._set_salt_initial_conditions(salts,volumes,masses,rho_solvent_at_IC)
+        self._salts_are_components=True
+        if getattr(self,"_unifac_model",None) is not None:
+            # The mole fraction basis has changed, so the activity coefficients and the vapour
+            # pressures built on it have to be rebuilt.
+            self.set_activity_coefficients_by_unifac(cast(str,self._unifac_model))
+
+    def _set_salt_initial_conditions(self,salts:"dict[str,DissolvedSalt]",
+                                     volumes:dict[str,ExpressionOrNum],
+                                     masses:dict[str,ExpressionOrNum],
+                                     rho_solvent:ExpressionOrNum)->None:
+        r"""Turn the concentrations the salts were dissolved at into mass fractions.
+
+        Exact under volume additivity: a cubic metre holding :math:`c_s` moles of each salt gives
+        them :math:`\sum c_sV_{\phi,s}` of its volume and the solvent the rest, so the mass of the
+        whole is :math:`\rho_\mathrm{solv}(1-\sum c_sV_{\phi,s})+\sum c_sM_s`.
+        """
+        ic=self.initial_condition
+        rho_solv=rho_solvent
+        conc={n:s.concentration for n,s in salts.items()}
+        salt_volume=sum(conc[n]*volumes[n] for n in sorted(salts))
+        salt_mass=sum(conc[n]*masses[n] for n in sorted(salts))
+        total=rho_solv*(1-salt_volume)+salt_mass
+        w_salt_total:ExpressionOrNum=0
+        for n in sorted(salts):
+            w=conc[n]*masses[n]/total
+            ic["massfrac_"+n]=w
+            w_salt_total=w_salt_total+w
+        # The solvents were a complete composition on their own; they now share with the salt.
+        for c in sorted(self.components):
+            if c in salts:
+                continue
+            ic["massfrac_"+c]=ic.get("massfrac_"+c,0)*(1-w_salt_total)
 
     def get_salt_surface_tension_shift(self,as_field:bool=True,field_prefix:str="c_")->ExpressionOrNum:
         r"""
@@ -1759,6 +1885,11 @@ class IonProperties(PureLiquidProperties):
         #: :py:func:`~pyoomph.expressions.generic.rational_num` for a fitted value rather than a
         #: float: a float exponent on a quantity that still carries units trips GiNaC up.
         self.walden_exponent:ExpressionNumOrNone=1
+        #: The ion's partial molar volume at infinite dilution, on the conventional scale that sets
+        #: it to zero for H+. What a dissolved salt takes up of the solution's volume, and therefore
+        #: what lets a salt be a real composition field rather than a dilute rider. ``None`` where
+        #: the tables have no value, and then a salt built from it is refused rather than guessed.
+        self.partial_molar_volume:ExpressionNumOrNone=None
 
     #: The viscosity the tabulated conductivities and diffusivities refer to: water at 25 degC, as
     #: pyoomph's own water correlation gives it. Taking the measured 0.890 mPa*s instead would leave
@@ -1930,6 +2061,61 @@ def ambipolar_diffusivity(cation_charge:int,anion_charge:int,cation_diffusivity:
            /(cation_charge*cation_diffusivity-anion_charge*anion_diffusivity)
 
 
+def pure_liquid_as_mixture(pure:"PureLiquidProperties")->"MixtureLiquidProperties":
+    """A one-component mixture holding the same liquid, carrying whatever is dissolved in it.
+
+    A salt that is a composition field makes the solution a mixture, and a
+    :py:class:`PureLiquidProperties` cannot host components. Rather than refuse the most ordinary
+    case there is -- brine -- this wraps the solvent so that it can. The pure liquid itself is left
+    untouched and becomes the mixture's single component.
+    """
+    cls=type("SaltedSolvent",(MixtureLiquidProperties,),
+             {"components":{pure.name},"passive_field":pure.name})
+    res=cast("MixtureLiquidProperties",cls({pure.name:pure}))
+    # A one-component mixture has nothing to average, so the properties are the solvent's own.
+    for prop in ("mass_density","dynamic_viscosity","relative_permittivity","electric_conductivity",
+                 "thermal_conductivity","specific_heat_capacity"):
+        if hasattr(pure,prop):
+            setattr(res,prop,getattr(pure,prop))
+    res.default_surface_tension=dict(pure.default_surface_tension)
+    res.initial_condition=dict(pure.initial_condition)
+    res._ion_table=dict(pure._ion_table)
+    res._bulk_concentrations=dict(pure._bulk_concentrations)
+    res._salt_table=dict(pure._salt_table)
+    res.set_vapor_pressure_by_raoults_law()
+    return res
+
+
+def _salt_pseudo_component(name:str,molar_mass:ExpressionOrNum,
+                           apparent_molar_volume:ExpressionOrNum)->"PureLiquidProperties":
+    """The stand-in a salt needs to appear among a mixture's pure components.
+
+    Not a material anybody should look up: it exists so that the mixture machinery -- mole fractions,
+    the passive field, the output properties -- has something to ask for a molar mass. Its density is
+    the one that reproduces the salt's apparent molar volume, and it is left unset where that volume
+    is negative, since no liquid has a negative density and nothing here needs one: the mixture
+    density is built from the volumes directly rather than by averaging.
+    """
+    cls=type("SaltComponent",(PureLiquidProperties,),{"name":name})
+    res=cast("PureLiquidProperties",cls())
+    res.molar_mass=molar_mass
+    if not is_zero(0+apparent_molar_volume) and float(apparent_molar_volume/(meter**3/mol))>0:
+        res.mass_density=molar_mass/apparent_molar_volume
+    return res
+
+
+def _apparent_molar_volume(cation:"IonProperties",anion:"IonProperties",nu_cation:int,
+                           nu_anion:int,salt_name:str)->ExpressionOrNum:
+    missing=[i.name for i in (cation,anion) if i.partial_molar_volume is None]
+    if missing:
+        raise RuntimeError("No partial molar volume for "+", ".join(missing)+", so the volume '"+
+                           salt_name+"' takes up in solution is unknown and it cannot be treated as "+
+                           "a composition field. Set partial_molar_volume on the ion, or keep the "+
+                           "salt dilute.")
+    return (nu_cation*cast(ExpressionOrNum,cation.partial_molar_volume)
+            +nu_anion*cast(ExpressionOrNum,anion.partial_molar_volume))
+
+
 class DissolvedSalt:
     """
     One salt dissolved in a liquid: which ions, in what ratio, how much of it.
@@ -1981,6 +2167,18 @@ class DissolvedSalt:
         """
         from ..equations.electrostatics import ion_fieldname_stem
         return ion_fieldname_stem(self.name)
+
+    @property
+    def molar_mass(self)->ExpressionOrNum:
+        """Molar mass of one formula unit, from the ions."""
+        return (self.cation_stoichiometry*self.cation.molar_mass
+                +self.anion_stoichiometry*self.anion.molar_mass)
+
+    def get_apparent_molar_volume(self)->ExpressionOrNum:
+        r""":math:`V_\phi`, the volume one mole of this salt adds to the solution, see
+        :py:meth:`SaltProperties.get_apparent_molar_volume`."""
+        return _apparent_molar_volume(self.cation,self.anion,self.cation_stoichiometry,
+                                      self.anion_stoichiometry,self.name)
 
     @property
     def surface_tension_increment(self)->ExpressionOrNum:
@@ -2047,6 +2245,23 @@ class SaltProperties(PureSolidProperties):
             salt_stoichiometry(self.cation.charge_number,self.anion.charge_number)
         self.molar_mass=self.cation_stoichiometry*self.cation.molar_mass \
                         +self.anion_stoichiometry*self.anion.molar_mass
+
+    def get_apparent_molar_volume(self)->ExpressionOrNum:
+        r"""
+        :math:`V_\phi=\nu_+V_+^\circ+\nu_-V_-^\circ`, the volume one mole of this salt adds to the
+        solution.
+
+        Additive over the ions to the accuracy of the tables -- NaCl's 16.62 cm^3/mol is
+        -1.21 + 17.83 -- so it is stored per ion and combined here, the same way the ambipolar
+        diffusivity is. It is what turns a salt concentration into a volume, hence into a mass
+        fraction and a density.
+
+        Negative values are ordinary rather than an error: a small, highly charged ion pulls the
+        surrounding water in tighter than it displaces (electrostriction), so Na2SO4 adds 11.6
+        cm^3/mol and MgSO4 takes 7.2 away.
+        """
+        return _apparent_molar_volume(self.cation,self.anion,self.cation_stoichiometry,
+                                      self.anion_stoichiometry,self.name)
 
     def get_ambipolar_diffusivity(self,temperature:ExpressionOrNum=var("temperature"))->ExpressionOrNum:
         """The salt's diffusivity in water, see :py:func:`ambipolar_diffusivity`. The value in an
@@ -3102,7 +3317,7 @@ def Mixture(mdef:GasMixtureDefinitionComponents | GasMixtureDefinitionComponent 
 @overload
 def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyMaterialProperties,temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...)->MaterialProperties: ...
 
-def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyMaterialProperties,temperature:ExpressionNumOrNone=None,quantity:MixQuantityDefinition="mass_fraction",pressure:ExpressionOrNum=1*atm)->AnyMaterialProperties:
+def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyMaterialProperties,temperature:ExpressionNumOrNone=None,quantity:MixQuantityDefinition="mass_fraction",pressure:ExpressionOrNum=1*atm,salt_treatment:Literal["dilute","component"]="dilute")->AnyMaterialProperties:
     """
     Returns a gas or liquid mixture from the given mixture definition components or a single material properties object.
 
@@ -3111,6 +3326,11 @@ def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyM
             Salts and ions may be added by *concentration* -- ``+ 1*milli*molar*get_salt("NaCl")`` --
             in which case they are dissolved in the finished mixture rather than counted among the
             fractions, see :py:class:`DissolvedSpeciesComponent`.
+        salt_treatment: ``"dilute"`` (the default) leaves a dissolved salt out of the mass fractions,
+            which is right to a few percent up to about half molar. ``"component"`` makes it a
+            component of its own, see
+            :py:meth:`BaseLiquidProperties.treat_salts_as_components`; a single solvent then becomes
+            a one-component mixture, since a pure liquid cannot host components.
         temperature: The temperature of the mixture. Used for potential initial conditions and required if you want to use e.g. volume fractions or relative humidity as mixture quantity.
         quantity: Specifies the quantity definition of the mixture. Can be either ``"mass_fraction"``, ``"volume_fraction"``, ``"molar_fraction"``, or ``"relative_humidity"``.
         pressure: Absolute pressure. Necessary for particular conversions.
@@ -3129,6 +3349,9 @@ def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyM
             props.initial_condition["temperature"]=temperature
         # Salts and ions last: they are concentrations, so they take no part in the fractions above
         # and only need the solvent to exist.
+        if mdef.dissolved and salt_treatment=="component" and getattr(props,"is_pure",False):
+            # A salt that is a composition field makes even a single solvent a mixture.
+            props=pure_liquid_as_mixture(cast(PureLiquidProperties,props))
         if mdef.dissolved:
             if any(props is c for c in res):
                 # A one-component "mixture" is the very object that was passed in, so dissolving
@@ -3138,6 +3361,10 @@ def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyM
                 props=_with_its_own_ion_table(props)
             for d in mdef.dissolved:
                 d.dissolve_in(cast(BaseLiquidProperties,props))
+            if salt_treatment=="component":
+                cast(BaseLiquidProperties,props).treat_salts_as_components()
+        elif salt_treatment=="component":
+            raise RuntimeError("salt_treatment='component' but nothing is dissolved in this mixture.")
         return props
     elif isinstance(mdef,DissolvedSpeciesComponent):
         raise RuntimeError("A dissolved species needs a solvent: "+str(mdef)+
