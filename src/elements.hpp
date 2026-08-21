@@ -365,6 +365,10 @@ namespace pyoomph
     JITElementInfo_t eleminfo;
     JITShapeInfo_t *shape_info;
 
+    // [first, last) slots of eleminfo.nodal_coords[i] that this element owns and must delete.
+    // Derived, not stored - see the definition in elements.cpp for why it may not consult the JIT code.
+    std::pair<unsigned, unsigned> owned_nodal_coord_range() const;
+
     // Set by pin_dummy_values (and its InterfaceElementBase override) whenever at least one node of
     // this element carries an additional dof constraint (see
     // NodeWithFieldIndicesBase::add_additional_dof_constraint), reset by unpin_dummy_values. Lets
@@ -1591,6 +1595,11 @@ namespace pyoomph
     }
   public:
     InterfaceElementBase() : opposite_side(NULL), Is_internal_facet_opposite_dummy(false) {}
+    // Frees the nodal-coordinate buffers here, while the object still *is* a face element: the range
+    // to free is derived with the virtual as_interface_element(), which by ~BulkElementBase reports
+    // NULL because this sub-object is already gone. free_element_info() is idempotent, so the later
+    // call from ~BulkElementBase simply finds nothing left to do.
+    ~InterfaceElementBase() override { this->free_element_info(); }
 
     virtual int local_interface_hang_eqn(unsigned int interface_dof_index, oomph::Node * master_node) const;  
     void fill_in_jacobian_from_nodal_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
