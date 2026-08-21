@@ -75,6 +75,7 @@ class BifurcationTkApp:
         self.keymap=KeyMap()
 
         self._busy=False
+        self._torn_down=False
         self._suspend_tree_callback=False
         self._tree_signature=None
         self._actions:dict[str,Action]={}
@@ -90,35 +91,45 @@ class BifurcationTkApp:
         self._eigen_vars:dict[tuple[int,int,str],Any]={}
 
         self.root=tk.Tk()
-        self.root.title(title if title is not None else "pyoomph bifurcation diagram")
-        self.root.geometry("1250x820")
-        self._observable_var=tk.StringVar()
-        self._xaxis_var=tk.StringVar()
-        #: Display string -> axis spec, so the combo boxes and the View submenus never have to parse
-        #: a label back into a (kind, name) pair.
-        self._axis_choices:dict[str,Any]={}
-        self._param_var=tk.StringVar()
-        self._graphs_pane=None
-        self._plot_panes_attached=False
-        #: Re-plot the fields when the current point has moved. A mesh plot is not free, so a
-        #: multistep sweep marks this once and re-plots when it finishes rather than per step.
-        self._plots_dirty=True
-        self.auto_update_plots=True
+        try:
+            self.root.title(title if title is not None else "pyoomph bifurcation diagram")
+            self.root.geometry("1250x820")
+            self._observable_var=tk.StringVar()
+            self._xaxis_var=tk.StringVar()
+            #: Display string -> axis spec, so the combo boxes and the View submenus never have to parse
+            #: a label back into a (kind, name) pair.
+            self._axis_choices:dict[str,Any]={}
+            self._param_var=tk.StringVar()
+            self._graphs_pane=None
+            self._plot_panes_attached=False
+            #: Re-plot the fields when the current point has moved. A mesh plot is not free, so a
+            #: multistep sweep marks this once and re-plots when it finishes rather than per step.
+            self._plots_dirty=True
+            self.auto_update_plots=True
 
-        self._build_actions()
-        self._build_menus()
-        self._build_toolbar()
-        # The status bar has to be packed before the body: pack hands out space in call order, and
-        # the body expands, so a status bar added afterwards would get zero height.
-        self._build_statusbar()
-        self._build_body()
+            self._build_actions()
+            self._build_menus()
+            self._build_toolbar()
+            # The status bar has to be packed before the body: pack hands out space in call order, and
+            # the body expands, so a status bar added afterwards would get zero height.
+            self._build_statusbar()
+            self._build_body()
 
-        self.root.bind_all("<Key>",self._on_key)
-        self.root.protocol("WM_DELETE_WINDOW",self._on_close)
+            self.root.bind_all("<Key>",self._on_key)
+            self.root.protocol("WM_DELETE_WINDOW",self._on_close)
 
-        self.controller.set_observer(on_changed=self.refresh,on_status=self._on_status,
-                                     on_log=self.log,on_busy=self._on_busy)
-        self.plotter.on_drawn=self._blit
+            self.controller.set_observer(on_changed=self.refresh,on_status=self._on_status,
+                                         on_log=self.log,on_busy=self._on_busy)
+            self.plotter.on_drawn=self._blit
+        except BaseException:
+            # A half-built window is still a window, and one that is never destroyed is never freed
+            # either (see teardown()), so the failure would take the controller, the plotter and the
+            # whole problem with it to the end of the process.
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            raise
 
     # ================================================================== actions
 
@@ -883,7 +894,7 @@ class BifurcationTkApp:
                 # the solution ended up. Reconstructing that from the plot alone is guesswork.
                 self.log("> "+action.label)
                 self.controller.run_task(action.label,action.callback)
-                if self.controller.current_point is not None:
+                if not self._torn_down and self.controller.current_point is not None:
                     self.log("  now at "+self.controller.current_point.describe(
                         self.controller._current_observable,self._y_unit(),self.controller.eigen_unit))
             else:
@@ -891,14 +902,16 @@ class BifurcationTkApp:
         except Exception as e:
             self._report_error(action.label,e)
         finally:
-            if action.is_solver_task:
-                self._plots_dirty=True
-            self.refresh()
-            self._autosave()
-            # Deliberately AFTER refresh/autosave and only once the task is over: a multistep sweep
-            # marks the plots dirty on every step but must re-render the mesh only when it finishes.
-            if self._plots_dirty and self.auto_update_plots and not self._busy:
-                self._refresh_plots()
+            if not self._torn_down:     # closed mid-task: there is nothing left to update
+                if action.is_solver_task:
+                    self._plots_dirty=True
+                self.refresh()
+                self._autosave()
+                # Deliberately AFTER refresh/autosave and only once the task is over: a multistep
+                # sweep marks the plots dirty on every step but must re-render the mesh only when it
+                # finishes.
+                if self._plots_dirty and self.auto_update_plots and not self._busy:
+                    self._refresh_plots()
 
     def _autosave(self):
         """Persist after every command, as the key-driven version did after each of its handlers.
@@ -906,6 +919,8 @@ class BifurcationTkApp:
         The saved state covers the axis limits and scales too, so view-only commands are worth
         saving as well - and a session that ends in a crash then still reopens where it was.
         """
+        if self._torn_down:
+            return    # _on_close already saved; what a half-aborted task leaves behind is not better
         if self.controller.current_point is None or self.controller.current_branch is None:
             return
         try:
@@ -917,6 +932,8 @@ class BifurcationTkApp:
         self.log("*** "+what+" failed: "+repr(exc))
         for line in traceback.format_exc().splitlines():
             self.log("    "+line)
+        if self._torn_down:
+            return    # no window to put a dialog on - the lines above went to the terminal
         messagebox.showerror(what+" failed",str(exc),parent=self.root)
 
     def _on_key(self,event):
@@ -967,6 +984,8 @@ class BifurcationTkApp:
 
     def _on_status(self,text:str | None):
         """A long operation reports what it is doing: repaint with the overlay and pump events."""
+        if self._torn_down:
+            return
         if text is not None:
             self.status_var.set(text)
         self.plotter.draw(self.controller,text)
@@ -974,6 +993,8 @@ class BifurcationTkApp:
         self.pump()
 
     def _on_busy(self,name:str | None):
+        if self._torn_down:
+            return
         self._busy=name is not None
         self.status_var.set((name+" ...") if name else "Ready")
         self.abort_button.configure(state="normal" if self._busy else "disabled")
@@ -982,6 +1003,8 @@ class BifurcationTkApp:
 
     def pump(self):
         """Give Tk a chance to repaint and to register an Abort click during a solve."""
+        if self._torn_down:
+            return
         try:
             self.root.update()
         except tk.TclError:
@@ -989,6 +1012,8 @@ class BifurcationTkApp:
 
     def log(self,text:str):
         print(text)
+        if self._torn_down:
+            return    # the log widget is gone; the print above is all that is left of it
         self.logtext.configure(state=tk.NORMAL)
         self.logtext.insert(tk.END,text+"\n")
         self.logtext.see(tk.END)
@@ -997,6 +1022,8 @@ class BifurcationTkApp:
     # ================================================================== refresh
 
     def refresh(self,infotext:str | None=None):
+        if self._torn_down:
+            return
         self.plotter.draw(self.controller,infotext)
         self._update_panels()
         self._update_enabled_state()
@@ -1410,7 +1437,7 @@ class BifurcationTkApp:
 
     def _refresh_plots(self):
         """Re-render every field pane from the problem's current state."""
-        if not self.plot_panes.has_any():
+        if self._torn_down or not self.plot_panes.has_any():
             return
         self.plot_panes.refresh()
         self._plots_dirty=False
@@ -1735,15 +1762,87 @@ class BifurcationTkApp:
             self.controller.save_all()
         except Exception as e:
             self.log("Could not save the diagram on exit: "+repr(e))
-        self.root.destroy()
+        self.teardown()
+
+    def teardown(self):
+        """Destroy the window and let go of the problem. Idempotent.
+
+        A window that is not destroyed is never freed: its widgets and callbacks are held by the Tcl
+        interpreter, which the cyclic collector cannot see into, so the window - and the controller,
+        the plotter and through them the Problem, its meshes and every Expression they hold - lives
+        to the end of the process, and nanobind reports all of it as leaked instances while the
+        interpreter shuts down. Measured on a window built and left alone: 61 leaked instances and
+        the window still alive after del + gc.collect(); destroying it: none, collected.
+
+        The panes need closing on top of that, being pyplot-managed figures that matplotlib keeps in
+        its own process-wide registry (see :py:mod:`~pyoomph.utils.bifurcation_gui.panes`), and the
+        observer callbacks and the facade's ``app`` attribute keep the window reachable from a
+        controller that outlives it.
+        """
+        if self._torn_down:
+            return
+        # A sweep may be running: the close arrived through the event loop that step() pumps. Ask it
+        # to stop at its next check - otherwise it continues stepping into a window that is gone.
+        # Only while one is running, so the flag is not left set for whatever the script does next.
+        if self._busy:
+            self.controller.request_abort()
+        self._torn_down=True
+        try:
+            self.plot_panes.destroy_all()
+        except Exception:
+            pass    # the widgets may already be gone; the figures still have to be closed
+        self.controller.clear_observer()
+        self.plotter.on_drawn=None
+        # The facade is the BifurcationGUI a script keeps after start() returns - it must not go on
+        # holding a window that no longer exists (update_plot() falls back to drawing directly).
+        if getattr(self.facade,"app",None) is self:
+            self.facade.app=None    #type:ignore[union-attr]
+        self._tree_items.clear()
+        self._tree_index.clear()
+        self._branch_index.clear()
+        self._eigen_vars.clear()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass    # already gone: closed by the window manager, or torn down twice
+        # The diagram is drawn into the window's Tk canvas. Hand the figure a plain Agg canvas back,
+        # so a facade that outlives the window can still draw and save the diagram (update_plot(),
+        # savefig()) without reaching into the destroyed widget graph.
+        try:
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            FigureCanvasAgg(self.plotter.figure)
+        except Exception:
+            pass
+        # And finally let go of the problem's side of things: the window object can survive its own
+        # destruction (the Tcl interpreter holds what it registered, and the collector cannot see
+        # into it), so whatever does survive must at least hold nothing of pyoomph's.
+        self._actions.clear()
+        self._menu_entries.clear()
+        self._toolbar_buttons.clear()
+        self._check_vars.clear()
+        self._radio_vars.clear()
+        self._radio_getters.clear()
+        self._axis_choices.clear()
+        self.controller=None    #type:ignore[assignment]
+        self.plotter=None       #type:ignore[assignment]
+        self.plot_panes=None    #type:ignore[assignment]
+        self.facade=None
 
     def run(self):
-        self._rebuild_axis_menus()
-        self._rebuild_fieldplot_menu()
-        self.refresh()
-        if self.plot_panes.has_any() and self.auto_update_plots:
-            self._refresh_plots()
-        self.root.mainloop()
+        # Everything is inside the try, not just the event loop: setting the window up reads the
+        # controller (the axis menus do), and a session that is not far enough along for that used to
+        # leave the whole window standing behind the exception - never freed, see teardown().
+        try:
+            self._rebuild_axis_menus()
+            self._rebuild_fieldplot_menu()
+            self.refresh()
+            if self.plot_panes.has_any() and self.auto_update_plots:
+                self._refresh_plots()
+            self.root.mainloop()
+        finally:
+            # Whatever ended the event loop - the close button, a script calling destroy(), an
+            # exception on the way in - the window has to be destroyed and the problem released.
+            self.teardown()
 
 
 def _real_part(v):

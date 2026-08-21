@@ -230,3 +230,44 @@ Everything else follows from that:
 `arclength_continuation` refuses, while tracking is active, `spatial_adapt > 0` and any
 `--distribute`d problem (it needs history dofs, which are not distributed). Locating a bifurcation
 with `solve()` does work distributed; continuing it does not.
+
+## Closing the window: a Tk window is never freed unless it is destroyed
+
+Two of Python's reference-cycle blind spots meet in this GUI, and between them they used to keep a
+whole `Problem` alive to the end of the process - which nanobind then reports as
+`nanobind: leaked N instances!` while the interpreter shuts down.
+
+- The Tcl interpreter holds the callbacks a window registers (menu entries, bindings, the
+  `WM_DELETE_WINDOW` protocol handler). The cyclic collector cannot see into it, so a window that is
+  never destroyed is never collected either, and neither is anything it references.
+- A C++ object's Python references, held through nanobind, are equally invisible to the collector, so
+  an object graph that joins a window to a `Problem` is beyond it for good.
+
+Measured on the stub session `tests/gui_close_teardown_worker.py --phase raises` uses: a window built
+and left standing costs **61 leaked instances, 19 types and 737 functions**, with no problem in the
+process at all - the module-level `Expression`s alone. Destroy it and the count is zero.
+
+`BifurcationTkApp.teardown()` is therefore the one place that ends a session, and every route into it
+is guarded: `_on_close` (the close button and the Quit command), `run()`'s `finally` (including the
+set-up before `mainloop`, which reads the controller and can raise on a session that has not started),
+`BifurcationGUI.start()`'s `finally`, and the constructor's own `except`, which destroys a half-built
+window before re-raising. It destroys the root, closes the panes' figures, and drops the window's
+references to the controller, the plotter and the panes - so whatever of the window does survive holds
+nothing of pyoomph's. `teardown()` is idempotent; the methods that a sweep still calls on the way out
+(`log`, `refresh`, `pump`, `_on_status`, `_on_busy`, `_report_error`, `_invoke`'s tail) return early
+once it has run, and a sweep that was running when the window closed is sent an abort request.
+
+Two things that are *not* leaks and should not be chased:
+
+- The **facade** keeps the controller, the branches and the diagram plotter after `start()` returns -
+  a script is meant to read the diagram afterwards. The figure gets a plain Agg canvas back on
+  teardown, so `update_plot()` and `savefig()` still work with no window around.
+- The window **object** may survive the teardown, because of the Tcl half above. That is a few
+  kilobytes of dead widgets; what matters is that it no longer reaches the problem, which is what
+  `tests/test_bifurcation_gui.py::test_closing_the_window_lets_go_of_the_problem` asserts.
+
+The panes are the other half of the story: they are pyplot-managed figures (see `panes.py` on why they
+have to be), and matplotlib keeps those in a process-wide registry until they are closed. Dropping a
+pane without `plt.close()` leaves the plotter, the mesh data cache, the meshes and the problem
+reachable from a module global - the same leak by a different route, which is why the test walks
+`Gcf.figs` as well.

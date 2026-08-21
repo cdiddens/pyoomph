@@ -316,6 +316,18 @@ class BifurcationController:
         if on_log is not None: self._on_log=on_log
         if on_busy is not None: self._on_busy=on_busy
 
+    def clear_observer(self):
+        """Forget the user interface's callbacks, once its window is gone.
+
+        They are bound methods of the window, so a controller that outlives it - a script keeps the
+        facade after :py:meth:`~pyoomph.utils.bifurcation_gui.BifurcationGUI.start` returns - would
+        otherwise keep the whole window, and everything it holds, alive with it.
+        """
+        self._on_changed=None
+        self._on_status=None
+        self._on_log=None
+        self._on_busy=None
+
     def _changed(self):
         if self._on_changed is not None:
             self._on_changed()

@@ -280,7 +280,13 @@ class BifurcationGUI:
                 self.controller.start(init_ds,initial_max_newton_iterations,ignore_saved=True)
                 self.plotter.initialise_view(self.controller)
 
-        app.run()
+        try:
+            app.run()
+        finally:
+            # run() tears the window down itself once its event loop ends, but not when it raises on
+            # the way in (rebuilding the menus reads the controller, which a half-set-up session can
+            # trip over). A window left standing is never freed - see BifurcationTkApp.teardown.
+            app.teardown()
 
     def must_init(self,init_ds:float | None=None)->bool:
         """Prepare the problem for a diagram and say whether it still has to be built by hand.

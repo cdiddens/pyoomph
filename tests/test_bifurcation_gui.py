@@ -1953,3 +1953,46 @@ def test_every_default_shortcut_reaches_a_command(tmp_path):
     assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
     assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
     assert "SHORTCUTS OK" in out
+
+
+def test_closing_the_window_lets_go_of_the_problem(tmp_path):
+    """Closing the window must leave nothing of pyoomph behind it.
+
+    The field plots are pyplot-managed figures, so matplotlib's process-wide registry held every
+    pane - and with it the plotter, the mesh data cache, the meshes and the Problem - once the window
+    was gone. Nothing frees such a graph afterwards: what the window registered with Tcl is held by
+    the interpreter, and the references a C++ object holds through nanobind are invisible to the
+    cyclic collector, so a graph joining the two is beyond it for good and nanobind reports it as
+    leaked instances while the interpreter shuts down.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "gui_close_teardown_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker, "--outdir", str(tmp_path)],
+                          cwd=here, capture_output=True, text=True, timeout=600)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "GUI CLOSE TEARDOWN OK" in out
+    assert "nanobind: leaked" not in out, "C++ objects outlived the process:\n" + out[-3000:]
+
+
+def test_a_window_that_fails_to_open_is_not_left_standing(tmp_path):
+    """A window is never freed unless it is destroyed, so a failed set-up has to destroy it.
+
+    Building the window reads the controller (the axis menus do), and a session not far enough along
+    for that used to leave the whole window standing behind the exception - 61 leaked nanobind
+    instances at exit, measured, for a session that had not even started.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "gui_close_teardown_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker, "--phase", "raises"],
+                          cwd=here, capture_output=True, text=True, timeout=300)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "GUI FAILED-SETUP TEARDOWN OK" in out
+    assert "nanobind: leaked" not in out, "C++ objects outlived the process:\n" + out[-3000:]
