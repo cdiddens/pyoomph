@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
 
 from .aiomfac import *
+from . import aiomfac_electrolyte
 from .dortmund import *
 from .original import *
 __all__:list[str]=[]

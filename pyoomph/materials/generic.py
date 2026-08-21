@@ -787,6 +787,12 @@ class BaseLiquidProperties(MaterialProperties):
         self.relative_permittivity:ExpressionOrNum
         #: Ohmic conductivity of the liquid.
         self.electric_conductivity:ExpressionOrNum
+        #: Activity coefficients per component. Filled by set_activity_coefficients_by_unifac; a
+        #: pure liquid only has non-unity ones when something is dissolved in it.
+        self.activity_coefficients:dict[str,ExpressionOrNum]={}
+        #: The same for the dissolved ions, molality-based and referenced to infinite dilution in
+        #: pure water. Only AIOMFAC fills this.
+        self.ion_activity_coefficients:dict[str,ExpressionOrNum]={}
         self._ion_table:dict[str,"IonProperties"]={}
         self._bulk_concentrations:dict[str,ExpressionOrNum]={}
         # Which *salts* were dissolved, as opposed to which ions ended up in the table. The
@@ -967,6 +973,111 @@ class BaseLiquidProperties(MaterialProperties):
         in here, since it is not half of a known pair.
         """
         return {n:self._salt_table[n] for n in sorted(self._salt_table)}
+
+    def get_ion_molality(self,ion_name:str,temperature:ExpressionNumOrNone=None)->ExpressionOrNum:
+        r"""
+        The molality of a dissolved ion, :math:`m_i=c_i/\rho`, in mol per kg of solvent.
+
+        The concentration is the field the salt transport solves for and the density is this
+        material's own -- which, under the dilute-solute convention, is the mass of *solvent* per
+        unit volume, so the ratio is a molality without further correction.
+        """
+        if ion_name not in self._ion_table:
+            raise RuntimeError("No ion '"+ion_name+"' dissolved in '"+self.describe()+"'")
+        from ..equations.electrostatics import ion_fieldname_stem
+        rho=self.mass_density if temperature is None else self.get_reference_mass_density(temperature)
+        return var("c_"+ion_fieldname_stem(ion_name))/rho
+
+    def _aiomfac_ion_subgroups(self,modelname:str)->dict[str,str]:
+        """``{ion name: AIOMFAC subgroup name}`` for the dissolved ions, or a clear refusal."""
+        if modelname!="AIOMFAC":
+            raise RuntimeError("The activity model '"+modelname+"' knows nothing about ions, and "+
+                               "'"+self.describe()+"' has "+", ".join(sorted(self.get_ions()))+
+                               " dissolved. AIOMFAC is the only model here with an electrolyte "+
+                               "extension; use it, or dissolve nothing.")
+        res:dict[str,str]={}
+        unknown:list[str]=[]
+        for name,ion in self.get_ions().items():
+            sub=getattr(ion,"aiomfac_subgroup",None)
+            if sub is None:
+                unknown.append(name)
+            else:
+                res[name]=sub
+        if unknown:
+            raise RuntimeError("AIOMFAC has no electrolyte parameters for "+", ".join(unknown)+
+                               ", so it cannot give an activity coefficient for this solution. The "+
+                               "ions it can do are listed in pyoomph.materials.ions as "+
+                               "AIOMFAC_SUBGROUP_OF_ION.")
+        return res
+
+    def _set_activity_coefficients_with_ions(self,modelname:str,use_multi_return:bool | int=3)->None:
+        """Activity coefficients of a salted mixture, i.e. the full AIOMFAC with its middle- and
+        long-range parts. Sets both the solvents' coefficients and the ions'."""
+        from .activity_electrolyte import AIOMFACElectrolyteMixture,AIOMFACElectrolyteMultiReturnExpression
+        server=ActivityModel.get_activity_model_by_name(modelname)
+        assert isinstance(server,UNIFACLikeActivityModel)
+        ion_subgroups=self._aiomfac_ion_subgroups(modelname)
+        molecule_subgroups:dict[str,dict[str,int]]={}
+        for cn in sorted(self.components):
+            comp=self.get_pure_component(cn)
+            assert isinstance(comp,PureLiquidProperties)
+            groups=comp._UNIFAC_groups[modelname]
+            if len(groups)==0:
+                raise RuntimeError("Component "+cn+" has no UNIFAC groups defined for model "+modelname)
+            molecule_subgroups[cn]=dict(groups)
+        self._unifac_electrolyte=AIOMFACElectrolyteMixture(server,molecule_subgroups,
+                                                           list(ion_subgroups.values()))
+        gen=UNIFACPyoomphExpressionGenerator()
+        # A pure solvent's salt-free mole fraction is one, and saying so keeps the expression free of
+        # a molefrac_ field that a pure liquid does not otherwise define.
+        x:dict[str,ExpressionOrNum]={cn:(1 if self.is_pure else var("molefrac_"+cn))
+                                     for cn in sorted(self.components)}
+        # Nondimensional: the AIOMFAC correlations are written for a molality in mol/kg and a
+        # temperature in Kelvin, so what goes in must be the bare numbers.
+        molal={sub:self.get_ion_molality(name)/(mol/kilogram)
+               for name,sub in ion_subgroups.items()}
+        nspecies=len(self.components)+len(ion_subgroups)
+        if use_multi_return==True or ((use_multi_return is not False) and nspecies>=use_multi_return):
+            # The same maths, evaluated in generated C with a finite-difference Jacobian rather than
+            # differentiated symbolically. Worth it as soon as there are a few species, which a
+            # salted mixture reaches immediately: two ions already count.
+            self._unifac_multi_return=AIOMFACElectrolyteMultiReturnExpression(self._unifac_electrolyte)
+            coeffs=self._unifac_multi_return.get_activity_coefficients(x,molal,var("temperature"))
+        else:
+            coeffs=self._unifac_electrolyte.activity_coefficients(gen,x,molal,var("temperature")/kelvin)
+        for cn in sorted(self.components):
+            self.activity_coefficients[cn]=cast(Expression,coeffs[cn])
+        for name,sub in ion_subgroups.items():
+            self.ion_activity_coefficients[name]=cast(Expression,coeffs[sub])
+
+    def get_ion_activity_coefficient(self,ion_name:str)->ExpressionOrNum:
+        r"""
+        The molality-based activity coefficient of a dissolved ion, with infinite dilution in pure
+        water as its reference -- the convention AIOMFAC reports and the literature tabulates.
+
+        Available once :py:meth:`set_activity_coefficients_by_unifac` has been called on a material
+        that carries ions.
+        """
+        if ion_name not in self.ion_activity_coefficients:
+            raise RuntimeError("No activity coefficient for the ion '"+ion_name+"' in '"+
+                               self.describe()+"'. Call set_activity_coefficients_by_unifac"+
+                               "('AIOMFAC') after dissolving the salts.")
+        return self.ion_activity_coefficients[ion_name]
+
+    def get_mean_ionic_activity_coefficient(self,salt_name:str)->ExpressionOrNum:
+        r"""
+        :math:`\gamma_\pm=(\gamma_+^{\nu_+}\gamma_-^{\nu_-})^{1/(\nu_++\nu_-)}` of one dissolved
+        salt, which is the combination that can actually be measured -- a single ion's coefficient
+        cannot.
+        """
+        salts=self.get_salts()
+        if salt_name not in salts:
+            raise RuntimeError("No salt '"+salt_name+"' dissolved in '"+self.describe()+"'")
+        s=salts[salt_name]
+        gp=self.get_ion_activity_coefficient(s.cation.name)
+        gm=self.get_ion_activity_coefficient(s.anion.name)
+        nu=s.cation_stoichiometry+s.anion_stoichiometry
+        return (gp**s.cation_stoichiometry*gm**s.anion_stoichiometry)**rational_num(1,nu)
 
     def get_salt_surface_tension_shift(self,as_field:bool=True,field_prefix:str="c_")->ExpressionOrNum:
         r"""
@@ -1506,6 +1617,25 @@ class PureLiquidProperties(BaseLiquidProperties):
 
 
     
+    def set_activity_coefficients_by_unifac(self,model:str,set_vapor_pressures:bool=True,
+                                            use_multi_return:bool | int=3):
+        """
+        Activity coefficients of this liquid *with whatever is dissolved in it*.
+
+        A pure liquid is its own reference, so without ions every coefficient is one and there is
+        nothing to compute; with a salt there is, and it is the case that matters most -- brine.
+        Only AIOMFAC can do it, see :py:meth:`MixtureLiquidProperties.set_activity_coefficients_by_unifac`.
+        """
+        if not self.get_ions():
+            raise RuntimeError("'"+str(self.name)+"' is a pure liquid with nothing dissolved in it, "+
+                               "so its activity coefficient is 1 by definition. Dissolve a salt "+
+                               "first, or use a mixture.")
+        self._unifac_model=model
+        self._set_activity_coefficients_with_ions(model,use_multi_return)
+        if set_vapor_pressures and self.vapor_pressure is not None:
+            # Raoult with a salt-free mole fraction of one: the whole effect is in the coefficient.
+            self.vapor_pressure=self.activity_coefficients[self.name]*self.vapor_pressure
+
     def set_unifac_groups(self,grps:dict[str,int],only_for:set[str] | str | None=None):
         """
         Sets the UNIFAC groups for the pure liquid, which are relevant for the activity coefficients in mixtures.
@@ -1618,6 +1748,10 @@ class IonProperties(PureLiquidProperties):
         #: value in the actual solvent, at the actual temperature, is
         #: :py:meth:`get_diffusivity_in_solvent`.
         self.diffusivity:ExpressionNumOrNone=None
+        #: Name of the corresponding AIOMFAC ion subgroup, if the ion has one. AIOMFAC spells some
+        #: of them differently ("Ca++" for "Ca2+") and has parameters for only a subset, so this is
+        #: what says whether an activity model can say anything about this ion at all.
+        self.aiomfac_subgroup:str | None=None
         #: The exponent :math:`n` of the (fractional) Walden rule :math:`\lambda_i^0\mu^n=`const,
         #: which is how :py:meth:`get_diffusivity_in_solvent` carries the tabulated value to another
         #: temperature or another solvent. ``1`` is the plain rule, i.e. Stokes drag, and setting it
@@ -2046,8 +2180,6 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
         
         #: A dict holding the vapor pressures given by the name of each pure component. By default, it will be set to ideal Raoult's law.
         self.vapor_pressure_for:dict[str,ExpressionOrNum]={}
-        #: A dict holding the activity coefficients given by the name of each pure component.
-        self.activity_coefficients:dict[str,ExpressionOrNum]={}
         self.set_vapor_pressure_by_raoults_law()
         self._latent_heat_of_evaporation:dict[str,ExpressionOrNum]={}
 
@@ -2148,6 +2280,11 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
         else:
             raise RuntimeError("Cannot do this right now")
         self._unifac_model=model
+        if self.get_ions():
+            self._set_activity_coefficients_with_ions(modelname,use_multi_return)
+            if set_vapor_pressures:
+                self.set_vapor_pressure_by_raoults_law()
+            return
         if use_multi_return==True or ((use_multi_return is not False) and len(self.components)>=use_multi_return):
             self._unifac_multi_return=UNIFACMultiReturnExpression(self,model)
             for cn in sorted(self.components):

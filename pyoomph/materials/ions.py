@@ -103,6 +103,18 @@ table_temperature = 298.15 * kelvin
 _lambda_unit = siemens * (centi * meter)**2 / mol   # S cm^2/mol, and cm^2 is not centi*m^2
 
 
+#: How an ion of this library is spelled as an AIOMFAC subgroup. Only the ones AIOMFAC actually has
+#: middle-range parameters for are listed; the rest have no entry, and an activity model asked about
+#: them says so rather than guessing. AIOMFAC writes a double charge as "++" where this library
+#: writes "2+", which is the only reason most of these entries exist.
+AIOMFAC_SUBGROUP_OF_ION = {
+    "H+": "H+", "Li+": "Li+", "Na+": "Na+", "K+": "K+", "NH4+": "NH4+",
+    "Mg2+": "Mg++", "Ca2+": "Ca++",
+    "OH-": "OH-", "Cl-": "Cl-", "Br-": "Br-", "I-": "I-", "NO3-": "NO3-", "HCO3-": "HCO3-",
+    "SO4 2-": "SO4--", "CO3 2-": "CO3--",
+}
+
+
 class LibraryIon(IonProperties):
     """
     Base class of the tabulated ions: turns the three class-level data into an
@@ -136,6 +148,7 @@ class LibraryIon(IonProperties):
         # conductivity by Nernst-Einstein at the temperature it is asked for. Storing a second,
         # independent number here is what would let the two drift apart.
         self.walden_exponent = self.walden_exponent_fit
+        self.aiomfac_subgroup = AIOMFAC_SUBGROUP_OF_ION.get(self.name)
         # A dissolved ion has neither of these on its own, but it goes through the pure-liquid
         # machinery, which expects them. They only matter if the ions also carry mass in a flow
         # model, and then they are the user's to set.

@@ -12,6 +12,33 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Added
 
+- **AIOMFAC with ions: activity coefficients of a salt solution.** A dissolved salt changed the
+  surface tension but not the *activity* of the solvent, so a drying brine evaporated like pure
+  water. AIOMFAC is the only model in the library with an electrolyte generalisation and only its
+  short-range half was present; the middle-range ion interactions and the long-range
+  Pitzer-Debye-Hueckel term are now there too, for the solvents as well as the ions. Water activity
+  and molality-based ionic activity coefficients agree with AIOMFAC 3.13 to six digits, for aqueous
+  NaCl and for water + glycerol + NaCl; gamma_pm of NaCl reproduces the literature minimum near 1
+  molal, and the dilute limit follows the Debye-Hueckel limiting law. `set_activity_coefficients_by_unifac`
+  picks the salts up by itself, so the vapour pressure over a brine now drops as it should, and
+  `get_ion_activity_coefficient` and `get_mean_ionic_activity_coefficient` expose the ionic ones. A
+  pure solvent with a salt in it counts: that case had no activity machinery at all before.
+  - **The maths is written once and rendered three ways** -- symbolic GiNaC, numpy, and generated C
+    -- against the expression-generator interface the short-range part already had, rather than
+    written out three times as that part historically was.
+  - **The parameters were regenerated from the AIOMFAC source** by `citools/generate_aiomfac_parameters.py`,
+    which is kept in-tree so the next AIOMFAC release is a rerun. The audit found two ions attached
+    to the wrong species (subgroup 246 was called CH3COO- and is IO3-, 247 was called SCN- and is
+    OH-), ion molar masses in g/mol among neutrals in kg/mol *and discarded on the way in*, seven
+    ions with placeholder parameters AIOMFAC does not have, 155 changed and 528 missing interaction
+    entries, and 246 pairs AIOMFAC marks as never determined -- which now raise rather than being
+    silently treated as ideal. Salt-free mixtures are unchanged to 1e-8; the residual difference is
+    that the old table had been round-tripped through single precision.
+  - AIOMFAC's `BRR`/`CRR` are deliberately **not** imported: they belong to a different temperature
+    parameterisation that AIOMFAC only uses for selected fit datasets, and pyoomph's B and C mean
+    something else again, so importing them would be wrong rather than merely different.
+  See `dev_docs/aiomfac_electrolytes.md`.
+
 - **Salt transport, evaporation and salt-induced Marangoni flow, with no electrostatics involved.**
   A salted material handed to `CompositionFlowEquations` used to generate exactly the same system as
   an unsalted one — the composition equations build their field list from the mixture *components*,
