@@ -12,6 +12,38 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Added
 
+- **Salt transport, evaporation and salt-induced Marangoni flow, with no electrostatics involved.**
+  A salted material handed to `CompositionFlowEquations` used to generate exactly the same system as
+  an unsalted one — the composition equations build their field list from the mixture *components*,
+  and the ion table is a different dictionary that nothing read. It is now picked up automatically
+  (`salts="auto"`), and `pyoomph/equations/salt_transport.py` solves one field per salt with the
+  ambipolar diffusivity `D = (z+-z-)D+D-/(z+D+-z-D-)`, derived from the ion table rather than
+  tabulated: NaCl 1.610, KCl 1.994, CaCl2 1.335, Na2SO4 1.230, HCl 3.336 against measured 1.610,
+  1.990, 1.335, 1.230, 3.340 (1e-9 m²/s). One field per *salt* rather than two per pair is what makes
+  electroneutrality structural — the ion concentrations are stoichiometric substitutions, so
+  `get_charge_density()` is literal zero — and it is the only option without a potential to hold the
+  two ions together.
+  - **A non-volatile solute stays behind when the solvent evaporates**, which is not the natural
+    boundary condition of the weak form: that one is zero *diffusive* flux, and a receding surface
+    then sweeps the salt out with the vapour. `MultiComponentNavierStokesInterface` supplies the
+    condition next to the one it already supplies for the volatile components, and it is a different
+    term for each of the three ALE forms. With `GCL=True` — the conservative form, whose natural
+    condition already is zero flux through a moving boundary — the dissolved amount is conserved to
+    machine precision (3e-15) at any step size; the other two converge at second order in `dt`.
+  - **Salt raises the surface tension** (`SaltProperties.surface_tension_increment`, tabulated for 29
+    salts: NaCl +1.64, CaCl2 +3.66 mN/m per mol/L, and the strong acids negative), so Marangoni flow
+    runs *towards* the enriched region — the opposite of a surfactant, and worth knowing when reading
+    an evaporating drop. The law is written against the *ion* concentrations, which exist under both
+    electrolyte models, so the same interface drives the same Marangoni stress whether the ions come
+    from the electroneutral model or from `PoissonNernstPlanck`.
+  - **The two models agree where they overlap**: an electroneutral gradient relaxing in a 1 µm box
+    decays to 0.610553 of its amplitude under the electroneutral model and 0.610554 under full
+    Poisson-Nernst-Planck, against the analytic 0.610498. They may not share a domain, since a
+    substituted ion concentration shadowed by a solved one would run and be wrong.
+  - `add_salt` now also takes a salt directly, `water.add_salt("NaCl", 1*milli*molar)`, and two salts
+    sharing an ion add up on it instead of overwriting.
+  See `dev_docs/salt_transport.md`.
+
 - **Salts, and mixtures that carry them.** `pyoomph.materials.ions` also registers the common salts
   and strong acids, and `get_salt("NaCl")` fetches one the way `get_ion` and `get_pure_liquid` fetch
   theirs. A salt names two ions and pulls them out of the ion library when it is constructed, so it

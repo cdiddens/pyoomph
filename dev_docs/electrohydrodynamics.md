@@ -504,6 +504,11 @@ A mixture's permittivity is still not averaged automatically — linear mixing i
 but glycerol now carries one (42.5), so `set_by_weighted_average("relative_permittivity")` is an
 available answer, and the error message says so.
 
+**Not solving for the potential at all** is `dev_docs/salt_transport.md`: one field per salt with
+the ambipolar diffusivity, the ion concentrations as substitutions under these same names, and the
+interface condition that keeps a salt in an evaporating liquid. That is the model to reach for when
+the double layer is thin and no field is applied; the two must not be put on one domain.
+
 **Ion names are not field names.** A chemist writes `"Na+"` and `"Cl-"`, and `add_salt` should accept
 that, but a pyoomph field name may only contain letters, digits and underscores. `ion_fieldname_stem`
 maps `+` → `_p` and `-` → `_m` and anything else invalid to `_`, so `"Na+"` is solved for as

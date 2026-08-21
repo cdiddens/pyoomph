@@ -394,6 +394,15 @@ class IonHydrogenPhosphate(LibraryIon):
 # SaltProperties), and the molar mass follows from that, so nothing here can disagree with the ion
 # table above. All of these are strong electrolytes at the concentrations these models are run at,
 # i.e. taken as fully dissociated.
+#
+# surface_tension_increment is dsigma/dc at 25 degC (Weissenborn & Pugh, J. Colloid Interface Sci.
+# 184 (1996) 550; Ozdemir et al., Chem. Eng. Sci. 64 (2009) 2609), given only where the tables have
+# it -- a salt without one contributes no Marangoni stress rather than a guessed one. It is positive
+# because ions are pushed *away* from the surface: an ion there would have to give up part of its
+# hydration shell and is repelled by its own image charge in the low-permittivity vapour, so the
+# surface is a little purer than the bulk and costs more to make. The strong acids are the exception
+# and are negative, since the proton does sit at the surface. The values are the linear coefficient
+# valid from ~0.1 M up; below ~1 mM real solutions show the small Jones-Ray dip, which is not here.
 # ---------------------------------------------------------------------------------------------
 
 @MaterialProperties.register()
@@ -401,6 +410,7 @@ class SaltSodiumChloride(SaltProperties):
     name = "NaCl"
     cation_name = "Na+"
     anion_name = "Cl-"
+    surface_tension_increment = 1.64 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -408,6 +418,7 @@ class SaltPotassiumChloride(SaltProperties):
     name = "KCl"
     cation_name = "K+"
     anion_name = "Cl-"
+    surface_tension_increment = 1.6 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -415,6 +426,7 @@ class SaltLithiumChloride(SaltProperties):
     name = "LiCl"
     cation_name = "Li+"
     anion_name = "Cl-"
+    surface_tension_increment = 1.63 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -422,6 +434,7 @@ class SaltCaesiumChloride(SaltProperties):
     name = "CsCl"
     cation_name = "Cs+"
     anion_name = "Cl-"
+    surface_tension_increment = 1.54 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -429,6 +442,7 @@ class SaltAmmoniumChloride(SaltProperties):
     name = "NH4Cl"
     cation_name = "NH4+"
     anion_name = "Cl-"
+    surface_tension_increment = 1.39 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -436,6 +450,7 @@ class SaltCalciumChloride(SaltProperties):
     name = "CaCl2"
     cation_name = "Ca2+"
     anion_name = "Cl-"
+    surface_tension_increment = 3.66 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -443,6 +458,7 @@ class SaltMagnesiumChloride(SaltProperties):
     name = "MgCl2"
     cation_name = "Mg2+"
     anion_name = "Cl-"
+    surface_tension_increment = 3.16 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -450,6 +466,7 @@ class SaltBariumChloride(SaltProperties):
     name = "BaCl2"
     cation_name = "Ba2+"
     anion_name = "Cl-"
+    surface_tension_increment = 3.15 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -492,6 +509,7 @@ class SaltSodiumBromide(SaltProperties):
     name = "NaBr"
     cation_name = "Na+"
     anion_name = "Br-"
+    surface_tension_increment = 1.53 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -499,6 +517,7 @@ class SaltPotassiumBromide(SaltProperties):
     name = "KBr"
     cation_name = "K+"
     anion_name = "Br-"
+    surface_tension_increment = 1.48 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -506,6 +525,7 @@ class SaltSodiumIodide(SaltProperties):
     name = "NaI"
     cation_name = "Na+"
     anion_name = "I-"
+    surface_tension_increment = 1.21 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -513,6 +533,7 @@ class SaltPotassiumIodide(SaltProperties):
     name = "KI"
     cation_name = "K+"
     anion_name = "I-"
+    surface_tension_increment = 1.15 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -520,6 +541,7 @@ class SaltSodiumFluoride(SaltProperties):
     name = "NaF"
     cation_name = "Na+"
     anion_name = "F-"
+    surface_tension_increment = 2.02 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -527,6 +549,7 @@ class SaltSodiumSulfate(SaltProperties):
     name = "Na2SO4"
     cation_name = "Na+"
     anion_name = "SO4 2-"
+    surface_tension_increment = 2.7 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -534,6 +557,7 @@ class SaltPotassiumSulfate(SaltProperties):
     name = "K2SO4"
     cation_name = "K+"
     anion_name = "SO4 2-"
+    surface_tension_increment = 2.58 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -548,6 +572,7 @@ class SaltMagnesiumSulfate(SaltProperties):
     name = "MgSO4"
     cation_name = "Mg2+"
     anion_name = "SO4 2-"
+    surface_tension_increment = 3.22 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -562,6 +587,7 @@ class SaltZincSulfate(SaltProperties):
     name = "ZnSO4"
     cation_name = "Zn2+"
     anion_name = "SO4 2-"
+    surface_tension_increment = 3.12 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -576,6 +602,7 @@ class SaltSodiumNitrate(SaltProperties):
     name = "NaNO3"
     cation_name = "Na+"
     anion_name = "NO3-"
+    surface_tension_increment = 1.16 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -583,6 +610,7 @@ class SaltPotassiumNitrate(SaltProperties):
     name = "KNO3"
     cation_name = "K+"
     anion_name = "NO3-"
+    surface_tension_increment = 1.06 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -590,6 +618,7 @@ class SaltAmmoniumNitrate(SaltProperties):
     name = "NH4NO3"
     cation_name = "NH4+"
     anion_name = "NO3-"
+    surface_tension_increment = 0.85 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -632,6 +661,7 @@ class SaltSodiumBicarbonate(SaltProperties):
     name = "NaHCO3"
     cation_name = "Na+"
     anion_name = "HCO3-"
+    surface_tension_increment = 1.6 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -639,6 +669,7 @@ class SaltSodiumCarbonate(SaltProperties):
     name = "Na2CO3"
     cation_name = "Na+"
     anion_name = "CO3 2-"
+    surface_tension_increment = 2.85 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -688,6 +719,7 @@ class SaltSodiumHydroxide(SaltProperties):
     name = "NaOH"
     cation_name = "Na+"
     anion_name = "OH-"
+    surface_tension_increment = 1.8 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -695,6 +727,7 @@ class SaltPotassiumHydroxide(SaltProperties):
     name = "KOH"
     cation_name = "K+"
     anion_name = "OH-"
+    surface_tension_increment = 1.75 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -702,6 +735,7 @@ class SaltLithiumHydroxide(SaltProperties):
     name = "LiOH"
     cation_name = "Li+"
     anion_name = "OH-"
+    surface_tension_increment = 1.8 * milli * newton / meter / molar
 
 
 # The strong acids and bases dissociate the same way and are the same object here. H2SO4 is the one
@@ -713,6 +747,7 @@ class AcidHydrochloric(SaltProperties):
     name = "HCl"
     cation_name = "H+"
     anion_name = "Cl-"
+    surface_tension_increment = -0.3 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -720,6 +755,7 @@ class AcidHydrobromic(SaltProperties):
     name = "HBr"
     cation_name = "H+"
     anion_name = "Br-"
+    surface_tension_increment = -0.35 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -727,6 +763,7 @@ class AcidNitric(SaltProperties):
     name = "HNO3"
     cation_name = "H+"
     anion_name = "NO3-"
+    surface_tension_increment = -0.8 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()
@@ -734,6 +771,7 @@ class AcidSulfuric(SaltProperties):
     name = "H2SO4"
     cation_name = "H+"
     anion_name = "SO4 2-"
+    surface_tension_increment = 0.8 * milli * newton / meter / molar
 
 
 @MaterialProperties.register()

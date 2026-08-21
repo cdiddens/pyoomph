@@ -754,7 +754,7 @@ class GasMixtureDefinitionComponents(MixtureDefinitionComponents):
             if not isinstance(a,GasMixtureDefinitionComponent):
                 RuntimeError("You tried to mix a gas with something else: "+str(self)+" contains "+str(a))
 
-    def __add__(self,other:"MixtureDefinitionComponents | MixtureDefinitionComponent | MaterialProperties")->"GasMixtureDefinitionComponents":
+    def __add__(self,other:"MixtureDefinitionComponents | MixtureDefinitionComponent | MaterialProperties | DissolvedSpeciesComponent")->"GasMixtureDefinitionComponents":
         if isinstance(other,GasMixtureDefinitionComponents):
             return GasMixtureDefinitionComponents(self.lst+other.lst)
         elif isinstance(other,GasMixtureDefinitionComponent):
@@ -789,6 +789,11 @@ class BaseLiquidProperties(MaterialProperties):
         self.electric_conductivity:ExpressionOrNum
         self._ion_table:dict[str,"IonProperties"]={}
         self._bulk_concentrations:dict[str,ExpressionOrNum]={}
+        # Which *salts* were dissolved, as opposed to which ions ended up in the table. The
+        # electroneutral transport model solves one field per salt, so it needs the pairing back,
+        # and the ion table cannot give it: NaCl + Na2SO4 leaves three ions whose split into salts
+        # is not recoverable from the concentrations alone.
+        self._salt_table:dict[str,"DissolvedSalt"]={}
 
     # A method, not a property: make_static does setattr over possible_properties, and a read-only
     # property listed there would raise on the way through.
@@ -867,38 +872,132 @@ class BaseLiquidProperties(MaterialProperties):
         self._bulk_concentrations[ion.name]=concentration
         return ion
 
+    @overload
+    def add_salt(self,salt:"SaltProperties | str",concentration:ExpressionOrNum,/)->None: ...
+
+    @overload
     def add_salt(self,cation:"IonProperties | str",anion:"IonProperties | str",
-                 concentration:ExpressionOrNum,**kwargs:Any)->None:
+                 concentration:ExpressionOrNum,**kwargs:Any)->None: ...
+
+    def add_salt(self,*args:Any,**kwargs:Any)->None:
         r"""
         Dissolve a salt, i.e. the pair of ions that "1 mM KCl" means, in the stoichiometry that
         makes the solution electroneutral: :math:`|z_-|` cations to :math:`z_+` anions.
 
+        Two ways to say it, told apart by how many arguments are given::
+
+            water.add_salt(get_salt("NaCl"), 1*milli*molar)   # or just "NaCl"
+            water.add_salt("Na+", "Cl-", 1*milli*molar)
+
         ``concentration`` is the concentration of the *salt*, so for the 1:1 case it is also the
         concentration of each ion, while for CaCl2 it gives one Ca(2+) per two Cl(-).
 
-        Both ions may be given by name, which is looked up with :py:func:`get_ion`; import
-        :py:mod:`pyoomph.materials.ions` for the standard library. Keyword arguments prefixed
-        ``cation_`` and ``anion_`` are passed on to the respective :py:meth:`add_ion`, e.g.
-        ``anion_diffusivity=...`` to override one of them.
+        Ions and salts may be given by name, looked up with :py:func:`get_ion` and :py:func:`get_salt`;
+        import :py:mod:`pyoomph.materials.ions` for the standard library. In the three-argument form,
+        keyword arguments prefixed ``cation_`` and ``anion_`` are passed on to the respective
+        :py:meth:`add_ion`, e.g. ``anion_diffusivity=...`` to override one of them.
         """
+        if len(args)==2 and not kwargs:
+            salt,concentration=args
+            if isinstance(salt,str):
+                if salt not in _registered_salts():
+                    extra=(" '"+salt+"' is an ion, and a salt needs both of them:"+
+                           " add_salt(cation, anion, concentration).") if _lookup_registered_ion(salt) is not None else ""
+                    raise TypeError("add_salt(x, concentration) expects a salt, but '"+salt+
+                                    "' is not a registered one."+extra)
+                salt=get_salt(salt)
+            if not isinstance(salt,SaltProperties):
+                raise TypeError("add_salt(x, concentration) expects a salt, but got "+repr(salt)+
+                                ". Two ions are given as add_salt(cation, anion, concentration).")
+            salt.dissolve_in(self,concentration)
+            return
+        if len(args)!=3:
+            raise TypeError("add_salt takes either (salt, concentration) or (cation, anion, "+
+                            "concentration), but got "+str(len(args))+" positional arguments")
+        cation,anion,concentration=args
+        self._add_salt_from_ions(cation,anion,concentration,**kwargs)
+
+    def _add_salt_from_ions(self,cation:"IonProperties | str",anion:"IonProperties | str",
+                            concentration:ExpressionOrNum,*,_salt:"SaltProperties | None"=None,
+                            **kwargs:Any)->None:
+        """The two-ion form of :py:meth:`add_salt`. ``_salt`` is the library entry it came from, if
+        any, which is what carries the name and the surface tension increment."""
         cation_kwargs={k[len("cation_"):]:kwargs.pop(k) for k in list(kwargs) if k.startswith("cation_")}
         anion_kwargs={k[len("anion_"):]:kwargs.pop(k) for k in list(kwargs) if k.startswith("anion_")}
         if kwargs:
             raise TypeError("unexpected arguments "+str(sorted(kwargs)))
+        # add_ion overwrites the ion's bulk concentration, so what was there before this salt has to
+        # be kept: two salts may share an ion (NaCl + Na2SO4), and then it carries the sum.
+        before=dict(self._bulk_concentrations)
         c=self.add_ion(cation,concentration,**cation_kwargs)
         a=self.add_ion(anion,concentration,**anion_kwargs)
-        # Swapping the two would still give an electroneutral solution by the abs() below, but the
-        # stoichiometry it reports would be that of a different salt, so say so instead.
+        # Swapping the two would still give an electroneutral solution, but the stoichiometry it
+        # reports would be that of a different salt, so say so instead.
         if c.charge_number<0 or a.charge_number>0:
             raise ValueError("add_salt expects the cation first and the anion second, but got '"+
                              c.name+"' (z="+str(c.charge_number)+") and '"+a.name+"' (z="+
                              str(a.charge_number)+")")
-        self._bulk_concentrations[c.name]=concentration*abs(a.charge_number)
-        self._bulk_concentrations[a.name]=concentration*abs(c.charge_number)
+        salt=DissolvedSalt(c,a,concentration,salt=_salt)
+        self._bulk_concentrations[c.name]=before.get(c.name,0)+salt.cation_stoichiometry*concentration
+        self._bulk_concentrations[a.name]=before.get(a.name,0)+salt.anion_stoichiometry*concentration
+        if salt.name in self._salt_table:
+            raise ValueError("'"+salt.name+"' is already dissolved in '"+self.describe()+
+                             "'. Dissolve it once, at the total concentration.")
+        self._salt_table[salt.name]=salt
+        # As initial conditions as well, under the names the transport equations give the fields --
+        # the salt's own, and both ions'. Every material scale is computed by evaluating an
+        # expression "at the IC", and the surface tension is now one of the expressions that mentions
+        # a concentration field. Which one it mentions depends on the model, so record all of them;
+        # CompositionInitialCondition picks out only the mass fractions it needs, so these are inert
+        # for anything that does not ask.
+        from ..equations.electrostatics import ion_fieldname_stem
+        self.initial_condition["c_"+salt.fieldname_stem()]=concentration
+        for ion in (c,a):
+            self.initial_condition["c_"+ion_fieldname_stem(ion.name)]=self._bulk_concentrations[ion.name]
 
     def get_ions(self)->"dict[str,IonProperties]":
         """The dissolved ions, in a deterministic order -- the field order downstream depends on it."""
         return {n:self._ion_table[n] for n in sorted(self._ion_table)}
+
+    def get_salts(self)->"dict[str,DissolvedSalt]":
+        """The dissolved salts, in a deterministic order.
+
+        A salt is what the electroneutral transport model solves for, one field each; the ions it
+        contributes are then substitutions. An ion added on its own with :py:meth:`add_ion` is not
+        in here, since it is not half of a known pair.
+        """
+        return {n:self._salt_table[n] for n in sorted(self._salt_table)}
+
+    def get_salt_surface_tension_shift(self,as_field:bool=True,field_prefix:str="c_")->ExpressionOrNum:
+        r"""
+        :math:`\sum_s (\mathrm{d}\sigma/\mathrm{d}c)_s\,c_s`, i.e. how much the dissolved salts raise
+        the surface tension of this liquid.
+
+        With ``as_field`` (the default) each :math:`c_s` is the *field* the transport equations solve
+        for, which is what makes an evaporating, salt-enriched surface pull on its surroundings.
+        Without it, each is the uniform bulk concentration, which is the right fallback when nothing
+        solves for the salt: the absolute surface tension is then still correct, there is just no
+        gradient to drive anything.
+
+        Salts are surface-depleted, so this is positive and the enriched region has the *higher*
+        surface tension -- Marangoni flow runs towards it, the opposite of the surfactant case.
+        """
+        res:ExpressionOrNum=0
+        salts=self.get_salts()
+        for s in salts.values():
+            if is_zero(0+s.surface_tension_increment):
+                continue
+            if not as_field:
+                res=res+s.surface_tension_increment*s.concentration
+                continue
+            # Written against an *ion* concentration rather than the salt's own field, because that
+            # is the name both electrolyte models have: a substitution under the electroneutral one,
+            # a solved dof under Nernst-Planck. So the same surface tension law drives the same
+            # Marangoni stress either way, which is the entire reason the names are shared.
+            ion,nu=s._identifying_ion(salts)
+            from ..equations.electrostatics import ion_fieldname_stem
+            res=res+s.surface_tension_increment/nu*var(field_prefix+ion_fieldname_stem(ion.name))
+        return res
 
     def get_bulk_concentration(self,ion_name:str)->ExpressionOrNum:
         """The reservoir concentration of one dissolved ion."""
@@ -1663,6 +1762,109 @@ class PureSolidProperties(BaseSolidProperties):
         else:
             return None
 
+def salt_stoichiometry(cation_charge:int,anion_charge:int)->tuple[int,int]:
+    r"""
+    The number of cations and anions per formula unit, :math:`\nu_+=|z_-|/g` and :math:`\nu_-=z_+/g`
+    with :math:`g=\gcd(z_+,|z_-|)` -- the only ratio for which :math:`\nu_+z_++\nu_-z_-=0`.
+    """
+    if cation_charge<=0 or anion_charge>=0:
+        raise ValueError("A salt needs a positive and a negative charge number, got "+
+                         str(cation_charge)+" and "+str(anion_charge))
+    g=math.gcd(cation_charge,-anion_charge)
+    return -anion_charge//g, cation_charge//g
+
+
+def ambipolar_diffusivity(cation_charge:int,anion_charge:int,cation_diffusivity:ExpressionOrNum,
+                          anion_diffusivity:ExpressionOrNum)->ExpressionOrNum:
+    r"""
+    The diffusivity of a dissolved binary salt,
+
+    .. math:: D_\mathrm{s}=\frac{(z_+-z_-)D_+D_-}{z_+D_+-z_-D_-}
+
+    i.e. the rate at which the *pair* moves. The two ions cannot separate: any lead one takes builds
+    a charge separation whose field drags it back, so a fast anion is held up by its slow cation and
+    the salt moves at neither ion's speed. This is the diffusivity of the electroneutral model, and
+    it is what a Nernst-Planck solution reduces to outside the double layer.
+
+    Derived from the ion table rather than tabulated separately, and it agrees with the measured salt
+    diffusivities at 25 degC to better than half a percent -- NaCl 1.610 (measured 1.610), KCl 1.994
+    (1.990), CaCl2 1.335 (1.335), Na2SO4 1.230 (1.230), HCl 3.336 (3.340), in 1e-9 m^2/s. HCl is the
+    telling one: its ions differ in diffusivity by a factor of 4.6, and the salt still moves at a
+    single well-defined rate about a third of the proton's.
+    """
+    return (cation_charge-anion_charge)*cation_diffusivity*anion_diffusivity \
+           /(cation_charge*cation_diffusivity-anion_charge*anion_diffusivity)
+
+
+class DissolvedSalt:
+    """
+    One salt dissolved in a liquid: which ions, in what ratio, how much of it.
+
+    This is what :py:meth:`BaseLiquidProperties.get_salts` hands out and what the electroneutral
+    transport model solves one field for. It is not a material -- the material is
+    :py:class:`SaltProperties`, which this points back at when the salt came from the library.
+    """
+    def __init__(self,cation:"IonProperties",anion:"IonProperties",concentration:ExpressionOrNum,
+                 salt:"SaltProperties | None"=None):
+        self.cation=cation
+        self.anion=anion
+        self.concentration=concentration
+        #: The library entry this came from, if any. ``None`` for a salt given as two loose ions,
+        #: which then has no name of its own and no surface tension increment.
+        self.salt=salt
+        self.cation_stoichiometry,self.anion_stoichiometry= \
+            salt_stoichiometry(cation.charge_number,anion.charge_number)
+        #: Name of the salt, e.g. ``"NaCl"``, or ``"Na+/Cl-"`` when it was given as two loose ions.
+        self.name=salt.name if salt is not None else cation.name+"/"+anion.name
+
+    def stoichiometry_of(self,ion_name:str)->int:
+        """How many of that ion one formula unit provides, 0 if it is not part of this salt."""
+        return (self.cation_stoichiometry if ion_name==self.cation.name else 0) \
+               +(self.anion_stoichiometry if ion_name==self.anion.name else 0)
+
+    def _identifying_ion(self,salts:"dict[str,DissolvedSalt]")->"tuple[IonProperties,int]":
+        """One ion of this salt that no other dissolved salt contributes to, and its stoichiometry.
+
+        Concentrations are additive over the salts, so an ion that two salts share cannot say how
+        much of *this* salt is present. The anion is tried first: sharing a cation is the common case
+        (NaCl and Na2SO4 in the same solution), sharing both is not something the salt-level data can
+        resolve at all.
+        """
+        others=[o for o in salts.values() if o is not self]
+        for ion,nu in ((self.anion,self.anion_stoichiometry),(self.cation,self.cation_stoichiometry)):
+            if all(o.stoichiometry_of(ion.name)==0 for o in others):
+                return ion,nu
+        raise RuntimeError("'"+self.name+"' shares both of its ions with the other dissolved salts, "+
+                           "so no ion concentration says how much of it is present. Set the surface "+
+                           "tension of the interface yourself, or dissolve them separately.")
+
+    def fieldname_stem(self)->str:
+        """What the transport equations call this salt's concentration field, e.g. ``NaCl``.
+
+        A local import, because equations/ imports materials/ and not the other way round. This is
+        the one place a material has to know what the equations will name a field, and it has to be
+        the same function the ion fields go through or the two would sanitize differently.
+        """
+        from ..equations.electrostatics import ion_fieldname_stem
+        return ion_fieldname_stem(self.name)
+
+    @property
+    def surface_tension_increment(self)->ExpressionOrNum:
+        r""":math:`\mathrm{d}\sigma/\mathrm{d}c` of the solution, 0 if unknown."""
+        return getattr(self.salt,"surface_tension_increment",0) if self.salt is not None else 0
+
+    def get_diffusivity(self,liquid:"BaseLiquidProperties",
+                        temperature:ExpressionNumOrNone=None)->ExpressionOrNum:
+        """The salt's :py:func:`ambipolar_diffusivity` *in this liquid*, i.e. through
+        :py:meth:`BaseLiquidProperties.get_ion_diffusivity`, so it carries the solvent correction."""
+        return ambipolar_diffusivity(self.cation.charge_number,self.anion.charge_number,
+                                     liquid.get_ion_diffusivity(self.cation.name,temperature),
+                                     liquid.get_ion_diffusivity(self.anion.name,temperature))
+
+    def __repr__(self)->str:
+        return "DissolvedSalt("+self.name+", "+str(self.concentration)+")"
+
+
 class SaltProperties(PureSolidProperties):
     r"""
     A salt, i.e. the pair of ions that "1 mM NaCl" means, together with the stoichiometry that makes
@@ -1688,6 +1890,12 @@ class SaltProperties(PureSolidProperties):
     cation_name:str
     #: Name of the anion in the ion library, e.g. ``"Cl-"``.
     anion_name:str
+    #: :math:`\mathrm{d}\sigma/\mathrm{d}c`, how much the surface tension of the solution rises per
+    #: unit salt concentration. Salts are surface-*depleted* -- an ion near the surface loses part of
+    #: its hydration shell and is pushed back by its image charge -- so this is positive for a salt
+    #: and negative for the strong acids, whose protons do sit at the surface. Zero unless the salt
+    #: below sets it, so that nothing invents a Marangoni stress out of missing data.
+    surface_tension_increment:ExpressionOrNum=0
 
     def __init__(self):
         super().__init__()
@@ -1699,13 +1907,19 @@ class SaltProperties(PureSolidProperties):
             raise ValueError("Salt '"+self.name+"' names '"+self.cation_name+"' as its cation and '"+
                              self.anion_name+"' as its anion, but their charge numbers are "+
                              str(self.cation.charge_number)+" and "+str(self.anion.charge_number))
-        g=math.gcd(self.cation.charge_number,-self.anion.charge_number)
         #: Number of cations per formula unit, e.g. 2 for Na2SO4.
-        self.cation_stoichiometry=-self.anion.charge_number//g
         #: Number of anions per formula unit, e.g. 2 for CaCl2.
-        self.anion_stoichiometry=self.cation.charge_number//g
+        self.cation_stoichiometry,self.anion_stoichiometry= \
+            salt_stoichiometry(self.cation.charge_number,self.anion.charge_number)
         self.molar_mass=self.cation_stoichiometry*self.cation.molar_mass \
                         +self.anion_stoichiometry*self.anion.molar_mass
+
+    def get_ambipolar_diffusivity(self,temperature:ExpressionOrNum=var("temperature"))->ExpressionOrNum:
+        """The salt's diffusivity in water, see :py:func:`ambipolar_diffusivity`. The value in an
+        actual solvent is :py:meth:`DissolvedSalt.get_diffusivity`."""
+        return ambipolar_diffusivity(self.cation.charge_number,self.anion.charge_number,
+                                     self.cation.get_diffusivity(temperature),
+                                     self.anion.get_diffusivity(temperature))
 
     def dissolve_in(self,liquid:"BaseLiquidProperties",concentration:ExpressionOrNum)->None:
         """
@@ -1716,12 +1930,13 @@ class SaltProperties(PureSolidProperties):
         give the two liquids the same ion objects -- the same isolation ``get_ion`` gives by handing
         out a fresh instance per call.
         """
-        liquid.add_salt(copy.copy(self.cation),copy.copy(self.anion),concentration)
+        liquid._add_salt_from_ions(copy.copy(self.cation),copy.copy(self.anion),concentration,
+                                   _salt=self)
 
-    def __mul__(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent":
+    def __mul__(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent":  #type:ignore[override]
         return DissolvedSpeciesComponent(self,other)
 
-    def __rmul__(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent":
+    def __rmul__(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent":  #type:ignore[override]
         return DissolvedSpeciesComponent(self,other)
 
     def __repr__(self)->str:
@@ -2079,6 +2294,26 @@ class LiquidGasInterfaceProperties(BaseInterfaceProperties):
             return sideB,sideA
         else:
             raise RuntimeError("This liquid-gas interface does not have a liquid and a gas side")
+
+    #: Whether the salts dissolved in the liquid raise the surface tension of this interface, see
+    #: :py:meth:`BaseLiquidProperties.get_salt_surface_tension_shift`. Switch it off for an interface
+    #: whose own correlation already accounts for them.
+    apply_salt_surface_tension_shift:bool=True
+    # A property, so that it does not matter which subclass assigns the surface tension or when: the
+    # salt contribution is added on the way out, once, to whatever is stored. Assigning still works
+    # exactly as before, and reading before anything was assigned still raises (so hasattr is still
+    # False), because the getter reaches for an attribute that is not there yet.
+    @property
+    def surface_tension(self)->ExpressionOrNum:  #type:ignore[override]
+        r""":math:`\sigma` of this interface, including what the dissolved salts add to it."""
+        sigma=self._surface_tension_without_salts
+        if self.apply_salt_surface_tension_shift:
+            sigma=sigma+self._liquid_phase.get_salt_surface_tension_shift()
+        return sigma
+
+    @surface_tension.setter
+    def surface_tension(self,value:ExpressionOrNum)->None:
+        self._surface_tension_without_salts=value
 
     def __init__(self,phaseA:AnyMaterialProperties,phaseB:AnyMaterialProperties,surfactant_dict:dict[SurfactantProperties,ExpressionOrNum]):
         from .mass_transfer import StandardMassTransferModelLiquidGas
@@ -2795,7 +3030,7 @@ def _with_its_own_ion_table(props:"AnyMaterialProperties")->"AnyMaterialProperti
     concerned, and a deep copy of a material full of GiNaC expressions is neither cheap nor needed.
     """
     res=copy.copy(props)
-    for attr in ("_ion_table","_bulk_concentrations","initial_condition"):
+    for attr in ("_ion_table","_bulk_concentrations","_salt_table","initial_condition"):
         if hasattr(res,attr):
             setattr(res,attr,copy.copy(getattr(res,attr)))
     return res

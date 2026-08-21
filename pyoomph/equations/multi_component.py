@@ -34,6 +34,7 @@ from ..equations.generic import InitialCondition, SpatialErrorEstimator, FiniteE
 from ..expressions import *  # Import grad et al
 from .navier_stokes import NavierStokesEquations #type:ignore
 from .stabilization import ScalarTransportEquations,ScalarTransportStabilization
+from .salt_transport import SaltTransportEquations
 from ..materials.generic import *
 from ..typings import *
 from ..materials.mass_transfer import MassTransferModelBase
@@ -64,9 +65,39 @@ def CompositionInitialCondition(fluid_props:AnyFluidProperties,isothermal:bool,i
     return InitialCondition(degraded_start="auto", IC_name="", **icsettings)
 
 
+def _salt_equations_for(fluid_props:AnyFluidProperties,salts:"Literal['auto'] | bool",
+                        space:FiniteElementSpaceEnum,wind:ExpressionOrNum,
+                        advection_by_parts:bool,GCL:bool,dt_factor:ExpressionOrNum,
+                        stabilization:"str | Iterable[str] | ScalarTransportStabilization | None",
+                        scheme:TimeSteppingScheme)->"Equations | None":
+    """The salt transport of a material that carries salts, or None.
+
+    ``salts="auto"`` is the default everywhere: a salted material that silently generated the same
+    system as an unsalted one is exactly the trap this closes, and an unsalted one is unaffected
+    because there is nothing to add.
+    """
+    carries=bool(getattr(fluid_props,"get_salts",lambda:{})())
+    if not carries:
+        if salts is True:
+            raise RuntimeError("salts=True, but no salt is dissolved in this material. Use "+
+                               "add_salt() on it, or leave salts at its default \"auto\".")
+        return None
+    if salts is False:
+        # Not nothing: the surface tension law reads a concentration field, so the salt still has to
+        # have a value even when nobody transports it. FrozenSaltConcentrations stands down if an
+        # electrolyte model turns out to be on the domain, which is how salts=False stays the route
+        # to Poisson-Nernst-Planck.
+        from .salt_transport import FrozenSaltConcentrations
+        return FrozenSaltConcentrations(fluid_props)
+    return SaltTransportEquations(fluid_props=fluid_props,space=space,wind=wind,
+                                  advection_by_parts=advection_by_parts,GCL=GCL,dt_factor=dt_factor,
+                                  stabilization=stabilization,scheme=scheme)
+
+
 def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteElementSpaceEnum="C2", dt_factor:ExpressionOrNum=1, with_IC:bool=True, spatial_errors:float | None=None,isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,
                                   compo_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
-                                  thermal_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None) -> Equations:
+                                  thermal_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
+                                  salts:"Literal['auto'] | bool"="auto") -> Equations:
     """
     Adds diffusion equations for the mass fractions of the components in a multi-component system, but without any Navier-Stokes equations. Can be used e.g. for diffusion-limited species transport in a gas phase.
 
@@ -80,11 +111,15 @@ def CompositionDiffusionEquations(fluid_props:AnyFluidProperties, space:FiniteEl
         initial_temperature: Initial condition for the temperature.
         compo_stabilization: Optional residual-based stabilization of the mass fraction transport. Without a wind there is nothing for SUPG to act on unless the mesh moves, so this is mainly of interest on an ALE mesh.
         thermal_stabilization: The same for the temperature.
+        salts: Whether to transport the salts dissolved in ``fluid_props``, see :py:func:`CompositionFlowEquations`.
 
     Returns:
         A coupled set of equations for the mass fractions for the diffusive transport of the components in the mixture.
     """
     res:Equations = CompositionAdvectionDiffusionEquations(fluid_props, space=space, dt_factor=dt_factor, wind=0, stabilization=compo_stabilization)
+    salt_eqs=_salt_equations_for(fluid_props,salts,space,0,False,False,dt_factor,compo_stabilization,"BDF2")
+    if salt_eqs is not None:
+        res = res + salt_eqs
     if not isothermal:
         res+=TemperatureConductionEquation(fluid_props,space=space,stabilization=thermal_stabilization)
     if with_IC:
@@ -103,7 +138,9 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
                              hele_shaw_thickness:ExpressionNumOrNone=None, spatial_errors:float | None=None, isothermal:bool=True,initial_temperature:ExpressionNumOrNone=None,additional_advection:ExpressionOrNum=0,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",compo_scheme:TimeSteppingScheme="BDF2",integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions=True,thermal_dt_factor:ExpressionOrNum=1,thermal_adv_factor:ExpressionOrNum=1,GCL:bool=False,
                              ns_stabilization:"str | Iterable[str] | None"=None, ns_stabilization_options:"dict[str,Any] | None"=None,
                              compo_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
-                             thermal_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None) -> Equations:
+                             thermal_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None,
+                             salts:"Literal['auto'] | bool"="auto",salt_space:FiniteElementSpaceEnum | None=None,
+                             salt_stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None) -> Equations:
     """
     Assembles a system for multi-component flow with advection-diffusion equations for mass fraction fields of the mixture composition and the Navier-Stokes equations. Potentially, also a temperature field is included.
 
@@ -131,6 +168,15 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
         thermal_dt_factor: Factor for the time derivative of the temperature field.
         thermal_adv_factor: Factor for the advection term of the temperature field.
         GCL: If True, the Geometric Conservation Law is enforced in the ALE formulation of the Navier-Stokes equations and the composition equations.
+        salts: Whether to transport the salts dissolved in ``fluid_props``, see
+            :py:class:`~pyoomph.equations.salt_transport.SaltTransportEquations`. ``"auto"`` (the
+            default) does it whenever the material carries any, which is what makes
+            ``water.add_salt("NaCl", 1*milli*molar)`` actually mean something here. Pass ``False``
+            for the electrohydrodynamic route, where
+            :py:func:`~pyoomph.equations.electrostatics.PoissonNernstPlanck` solves for the ions and
+            the potential instead -- the two must not both define the ion concentrations.
+        salt_space: Space of the salt fields. Defaults to ``compo_space``.
+        salt_stabilization: The same as ``compo_stabilization``, for the salt transport.
         ns_stabilization: Residual-based stabilization of the flow, e.g. ``"SUPG+PSPG"``. Anything but ``None`` switches the flow equations to :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes`. This is what makes the inf-sup unstable equal-order pairs ``ns_mode="C1C1"``/``"C2C2"`` usable.
         ns_stabilization_options: Further arguments of :py:class:`~pyoomph.equations.stabilized_ns.StabilizedNavierStokes`, e.g. ``{"tau_formula":"codina","C_I":36}``.
         compo_stabilization: Residual-based stabilization of the mass fraction transport, see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`.
@@ -185,6 +231,11 @@ def CompositionFlowEquations(fluid_props:AnyFluidProperties, compo_space:FiniteE
     cp = CompositionAdvectionDiffusionEquations(fluid_props=fluid_props, space=compo_space, dt_factor=compo_dt_factor,
                                                 boussinesq=boussinesq, wind=wind,integrate_advection_by_parts=integrate_advection_by_parts,wrap_params_in_subexpressions=wrap_params_in_subexpressions,GCL=GCL,scheme=compo_scheme,stabilization=compo_stabilization)
     res = ns + cp
+    salt_eqs=_salt_equations_for(fluid_props,salts,salt_space if salt_space is not None else compo_space,
+                                 wind,integrate_advection_by_parts,GCL,compo_dt_factor,
+                                 salt_stabilization,compo_scheme)
+    if salt_eqs is not None:
+        res = res + salt_eqs
     if not isothermal:
         res+=TemperatureAdvectionConductionEquation(fluid_props,space=compo_space,wind=wind,adv_factor=thermal_adv_factor,dt_factor=thermal_dt_factor,stabilization=thermal_stabilization)
     if with_IC:
@@ -774,6 +825,35 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                 # orthogonal to the stabilization footprint, so this correction is the same either
                 # way. Zero unless natural_bc_correction is switched on.
                 self.add_residual(-weak(advdiffu_inner.get_stabilization_flux(fname,n,self.get_parent_domain()),wi_test))
+
+            # Salt dynamics inside. A salt does not evaporate, so its interface flux is the j_i = 0
+            # case of the loop above -- but *not* nothing: the liquid keeps flowing through the
+            # receding surface while the salt does not, and without this term the salt would be
+            # carried out with the vapour instead of piling up. Divided by rho because a salt field
+            # is a molar concentration, whereas the mass fractions above are per unit mass.
+            salt_inner = inner_bulk_eqs.get_equation_of_type(SaltTransportEquations)
+            if isinstance(salt_inner,SaltTransportEquations):
+                # Its own scheme, and not advdiffu_inner's: a pure liquid has no mass fraction
+                # fields at all, so the loop above may not have run even once.
+                for salt in salt_inner.salts:
+                    fname = salt_inner.fieldname_of(salt.name)
+                    cs, cs_test = var_and_test(fname)
+                    if salt_inner.GCL:
+                        # The conservative form advects with the velocity relative to the mesh, so
+                        # its natural condition already *is* zero flux through the moving surface.
+                        flux = 0
+                    elif salt_inner.advection_by_parts:
+                        # Integrating the advection by parts leaves its own surface term behind, so
+                        # this branch differs from the one below by exactly c*u.n -- which, with the
+                        # kinematic condition (u-u_mesh).n = j/rho, is what turns -c*j/rho into
+                        # +c*u_mesh.n. Both say the same thing: nothing but the solvent leaves.
+                        flux = cs * dot(mesh_velocity(scheme=salt_inner.scheme), n)
+                    else:
+                        # Natural condition is zero *diffusive* flux, so what is missing is the
+                        # liquid flowing through the surface while the salt does not.
+                        flux = -cs * total_mass_transfer_rate / rho_inner
+                    self.add_residual(weak(time_scheme(salt_inner.scheme, flux), cs_test))
+                    self.add_residual(-weak(salt_inner.get_stabilization_flux(fname,n,self.get_parent_domain()),cs_test))
 
             # Component dynamics outside if necessary
             if self.get_opposite_side_of_interface(raise_error_if_none=False):
