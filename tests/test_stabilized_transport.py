@@ -31,8 +31,10 @@
 #
 #   1. CONSISTENCY. SUPG/GLS/ASGS are proportional to the strong residual, so on a solution the space
 #      represents exactly they must return the unstabilized answer. The manufactured solution here is
-#      chosen to lie in the space AND to satisfy the PDE strongly, so R == 0 pointwise. The
-#      measurement floor is ~1e-8 for a squared-error observable, as the sibling flow module records.
+#      chosen to lie in the space AND to satisfy the PDE strongly, so R == 0 pointwise. The floor is
+#      roundoff, ~1e-15 relative on the dofs. It used to be ~1e-8, which the sibling flow module
+#      still records: that was the asymmetric 3x3 quadrilateral Gauss rule leaving a fixed defect in
+#      the assembly, not a limit of the measurement, and it went away when the rule was fixed.
 #   2. THE DEFAULT IS OFF. With stab_factor=0 the residual must be *bitwise* identical, not merely
 #      close: that is what catches a term that is added unconditionally or a prefactor that does not
 #      reach every contribution. The removed pyoomph.equations.SUPG carried exactly such a bug in a
@@ -131,22 +133,28 @@ def test_consistency_on_a_representable_solution(space, advection_by_parts, stab
     # The *reference* solution really does have a zero strong residual, otherwise the check below
     # proves nothing. Deliberately not checked on the stabilized solution too: its R is a consequence
     # of the amplification measured below, so requiring it to be small would be circular.
-    assert (float(oref["R2"]) / float(oref["A2"])) ** 0.5 < 1e-7
-    # Not roundoff: R is zero only to the accuracy at which it can be *evaluated*, and on C2 it
-    # contains second derivatives, whose cancellation bottoms out near 1e-7 relative. Measured
-    # relative dof differences on C2: SUPG and GLS <= 4e-9, ASGS up to 5e-7 -- the adjoint sign makes
-    # ASGS anti-dissipative in the diffusive part, so it amplifies that floor by ~100x. That is the
-    # same fragility the flow module records for ASGS. An inconsistent stabilization would be off by
-    # ~1e-2 here, so even the loose bound is a real test.
-    tol = 1e-5 if stabilization == "ASGS" else 1e-7
+    # abs(), because R2 integrates a square that the code generator has already expanded into its
+    # cross terms: once those cancel down to roundoff the sum is as likely to land just below zero as
+    # just above, and on C2 it does (-1.4e-17 against A2=128). Without it the sqrt of a negative
+    # returns a Python complex and the comparison raises TypeError instead of failing an assertion.
+    assert (abs(float(oref["R2"])) / float(oref["A2"])) ** 0.5 < 1e-7   # measured: 7.6e-9 on C1
+    # These bounds are roundoff, and only became roundoff when the 3x3 quadrilateral Gauss rule was
+    # made symmetric again: an asymmetric rule left a fixed 1e-9 defect in the assembly of any C2
+    # quadrilateral, which is what the floors quoted here used to be (SUPG/GLS 4e-9, ASGS 5e-7) and
+    # what the second derivatives were wrongly blamed for. Measured now on C2: SUPG and GLS <= 1.7e-15,
+    # ASGS <= 3.5e-13 -- the adjoint sign makes ASGS anti-dissipative in the diffusive part, so it
+    # still amplifies the floor by ~200x, which is the fragility the flow module records for it. The
+    # bounds below keep two orders of margin on that; an inconsistent stabilization is off by ~1e-2.
+    tol = 1e-10 if stabilization == "ASGS" else 1e-12
     scale = numpy.max(numpy.abs(ref))
     assert numpy.max(numpy.abs(got - ref)) < tol * scale, \
         "%s on %s (advection_by_parts=%s) moved a solution it must reproduce" % (
             stabilization, space, advection_by_parts)
     # ... and it must not have made the solution worse either. "err" is the *squared* L2 error, so
-    # the floor is the square of the bound above; a squared error at roundoff is as likely to
-    # integrate to a small negative number as to zero, hence the abs().
-    assert float(o["err"]).real <= max(4 * abs(float(oref["err"]).real), (tol * scale) ** 2)
+    # the floor is the square of the bound above; like R2 it is an expanded square at roundoff and
+    # comes out signed, hence the abs() on the reference. (There used to be a .real here as well,
+    # which never did anything: float() has already raised by the time a complex could reach it.)
+    assert float(o["err"]) <= max(4 * abs(float(oref["err"])), (tol * scale) ** 2)
 
 
 @pytest.mark.parametrize("terms", ["SUPG", "GLS", "ASGS", "SUPG+DC"])
