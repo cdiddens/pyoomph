@@ -26,6 +26,7 @@ Submodules
    pyoomph.equations.navier_stokes
    pyoomph.equations.ode
    pyoomph.equations.poisson
+   pyoomph.equations.salt_transport
    pyoomph.equations.potential_flow
    pyoomph.equations.stabilization
    pyoomph.equations.stabilized_ns

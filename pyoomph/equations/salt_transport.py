@@ -57,8 +57,13 @@ from .stabilization import ScalarTransportEquations, ScalarTransportStabilizatio
 from .electrostatics import ion_fieldname_stem
 from ..typings import *
 
-if TYPE_CHECKING:
-    from ..materials.generic import AnyMaterialProperties, BaseLiquidProperties, DissolvedSalt
+# Imported at runtime, not under TYPE_CHECKING: sphinx evaluates the annotations below and cannot
+# resolve them otherwise - and AnyMaterialProperties is a string alias, so every class it names has to
+# be here too. materials.generic reaches back into this package only from inside functions,
+# so there is no import cycle.
+from ..materials.generic import AnyMaterialProperties, DissolvedSalt, MaterialProperties, \
+    BaseLiquidProperties, BaseGasProperties, BaseSolidProperties, PureSolidProperties, \
+    PureLiquidProperties, PureGasProperties, MixtureLiquidProperties, MixtureGasProperties
 
 
 class SaltTransportEquations(ScalarTransportEquations):

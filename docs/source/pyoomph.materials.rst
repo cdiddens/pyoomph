@@ -16,8 +16,10 @@ Submodules
    :maxdepth: 4
 
    pyoomph.materials.activity
+   pyoomph.materials.activity_electrolyte
    pyoomph.materials.default_materials
    pyoomph.materials.generic
+   pyoomph.materials.ions
    pyoomph.materials.mass_transfer
    pyoomph.materials.surfactant_isotherms
 

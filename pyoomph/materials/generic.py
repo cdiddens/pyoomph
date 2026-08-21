@@ -1146,7 +1146,13 @@ class BaseLiquidProperties(MaterialProperties):
         # At the initial composition, while the material still consists of solvents alone: the
         # initial mass fractions are worked out from it further down, and by then asking for a
         # density would mean asking about a composition that includes a salt it does not yet have.
-        rho_solvent_at_IC=self.evaluate_at_condition(solvent_density,self.initial_condition)
+        # Substituted structurally rather than through evaluate_at_condition, for the same reason as
+        # below and for one more: a mixture built without a temperature leaves the density a function
+        # of var("temperature"), which is a perfectly good initial condition but not something the
+        # unit collector can be asked about.
+        rho_solvent_at_IC=Expression(solvent_density)
+        for field,value in self.initial_condition.items():
+            rho_solvent_at_IC=_pyoomph.GiNaC_subs(rho_solvent_at_IC,var(field),Expression(value))
 
         for n,s in salts.items():
             self.pure_properties[n]=_salt_pseudo_component(n,masses[n],volumes[n])

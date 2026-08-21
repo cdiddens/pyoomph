@@ -18,4 +18,5 @@ pyoomph has a set of predefined equations that allow one to easily add flow of m
    mcflow/contact.rst
    mcflow/surfact.rst
    mcflow/unifac.rst
+   mcflow/salts.rst
 
