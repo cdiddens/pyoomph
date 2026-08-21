@@ -1915,6 +1915,26 @@ def test_the_branch_switch_offset_follows_the_step_size():
     assert abs(c.branch_switch_parameter_offset() - 0.02*1.2716) < 1e-12
 
 
+def test_arclength_metric_radio_group(tmp_path):
+    """The GUI starts in the mass-matrix metric and the menu's dot says which one is in force.
+
+    oomph's dof-sum norm is mesh-dependent - the same ds buys a different step after a refinement -
+    so the controller sets the "l2" inner product in its constructor. The three menu entries are one
+    radio group whose dot is re-read from the problem after every command, so a failed or
+    self-adjusting switch cannot leave it pointing at a metric that is not active.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "arclength_metric_menu_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker],
+                          cwd=here, capture_output=True, text=True, timeout=300)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "ARCLENGTH METRIC OK" in out
+
+
 def test_every_default_shortcut_reaches_a_command(tmp_path):
     """A key in the default map with no action behind it does nothing, silently.
 

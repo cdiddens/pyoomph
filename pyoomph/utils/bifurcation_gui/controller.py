@@ -254,7 +254,9 @@ class BifurcationController:
         self._mode="al"
         self._move_point=False
         self.interpolated_splines=False
-        self.scale_arc_length=True
+        #: Arclength scaling (oomph's Scale_arc_length). Off, because the metric set below is already
+        #: mesh-independent and both tune the same theta^2.
+        self.scale_arc_length=False
         #: D, the fraction of the arclength the continued parameter is given while the scaling is on:
         #: theta^2 is retuned after every step so that (dparameter/ds)^2 == D. oomph's own default.
         self.arclength_proportion=0.5
@@ -288,6 +290,11 @@ class BifurcationController:
         self._on_status:Callable[[str | None],None] | None=None
         self._on_log:Callable[[str],None] | None=None
         self._on_busy:Callable[[str | None],None] | None=None
+
+        # Start in the mass-matrix metric rather than oomph's dof sum: the sum has no continuum limit,
+        # so the same ds buys a different step after a refinement. Set on the problem directly - the
+        # controller's set_arclength_inner_product() logs, and no observer is attached yet.
+        self.problem.set_arclength_inner_product("l2")
 
     # ------------------------------------------------------------------ observers
 
@@ -2967,6 +2974,19 @@ class BifurcationController:
             # is a very small number, since scaling drives theta^2 down as |dU/dparameter| grows. Worth
             # saying out loud, because it silently decides what ds means from here on.
             self.log("Scale arclength is off: theta^2 stays at its current value {:.4g}".format(theta))
+
+    def arclength_metric(self)->str:
+        """Which metric the arclength currently measures the solution in.
+
+        "dofsum" (oomph's own, i.e. no inner product set), "ndof", "l2", or "custom" for a callable
+        weighting installed on the problem directly. This is what the menu's radio group reads.
+        """
+        kind=self.problem._arclength_inner_product
+        if kind is None:
+            return "dofsum"
+        if callable(kind):
+            return "custom"
+        return "l2" if kind=="mass" else str(kind)
 
     def set_arclength_inner_product(self,kind:"str | None"):
         """Choose the norm the arclength measures the solution in; see

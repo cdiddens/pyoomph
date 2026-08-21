@@ -58,12 +58,17 @@ class Action:
     #: Short label if it should also sit on the toolbar.
     toolbar:str | None=None
     tooltip:str=""
-    #: "command", "check" or "separator-before" grouping hint.
+    #: "command", "check", "radio" or "separator-before" grouping hint.
     kind:str="command"
     #: Returns False when the command cannot currently be applied, so it can be greyed out.
     enabled_when:Callable[[],bool] | None=None
-    #: For check items: reads and writes the underlying flag.
-    getter:Callable[[],bool] | None=None
+    #: Check items: reads the underlying flag. Radio items: reads the GROUP's current value, so every
+    #: member of a group gets the same getter and the dot lands on the one that matches radio_value.
+    getter:Callable[[],Any] | None=None
+    #: Radio items: which mutually exclusive group this belongs to (one Tk variable per group) and
+    #: which value of it this entry stands for.
+    radio_group:str | None=None
+    radio_value:str | None=None
     #: Commands that touch the solver are dispatched through the controller's task runner.
     is_solver_task:bool=False
 

@@ -49,12 +49,16 @@ class StubProblem:
     write_states = False
     continuation_data_in_states = False
     plotter = None
+    _arclength_inner_product = None
 
     def get_global_parameter_names(self):
         return ["mu"]
 
     def is_initialised(self):
         return True
+
+    def set_arclength_inner_product(self, kind):
+        self._arclength_inner_product = kind
 
 
 def main() -> int:

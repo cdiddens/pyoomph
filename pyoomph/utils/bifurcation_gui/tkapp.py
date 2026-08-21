@@ -81,6 +81,9 @@ class BifurcationTkApp:
         self._menu_entries:dict[str,list[tuple[tk.Menu,int]]]={}
         self._toolbar_buttons:dict[str,ttk.Button]={}
         self._check_vars:dict[str,tk.BooleanVar]={}
+        #: One StringVar per radio group, plus the getter that says which member is in force.
+        self._radio_vars:dict[str,tk.StringVar]={}
+        self._radio_getters:dict[str,Callable[[],Any]]={}
         self._tree_items:dict[str,tuple[Any,Any]]={}
         self._tree_index:dict[int,str]={}
         self._branch_index:dict[int,str]={}
@@ -192,11 +195,14 @@ class BifurcationTkApp:
         # The metric the arclength measures the solution in. The dof-sum default is mesh-dependent:
         # it is a sum over unknowns, so refining the mesh changes what a given ds buys.
         A("arclength_metric_dofsum","Arclength metric: dof sum (oomph default)",
-          lambda: c.set_arclength_inner_product(None))
+          lambda: c.set_arclength_inner_product(None),kind="radio",
+          radio_group="arclength_metric",radio_value="dofsum",getter=c.arclength_metric)
         A("arclength_metric_ndof","Arclength metric: per dof (mesh-independent)",
-          lambda: c.set_arclength_inner_product("ndof"))
+          lambda: c.set_arclength_inner_product("ndof"),kind="radio",
+          radio_group="arclength_metric",radio_value="ndof",getter=c.arclength_metric)
         A("arclength_metric_l2","Arclength metric: L2 / mass matrix (mesh-independent)",
-          lambda: c.set_arclength_inner_product("l2"))
+          lambda: c.set_arclength_inner_product("l2"),kind="radio",
+          radio_group="arclength_metric",radio_value="l2",getter=c.arclength_metric)
 
         # --- bifurcations
         A("locate_bifurcation","Locate bifurcation / leave it",c.locate_bifurcation_or_switch,
@@ -304,6 +310,17 @@ class BifurcationTkApp:
                 self._check_vars[action_id]=var
             menu.add_checkbutton(label=act.label,accelerator=self._accel(action_id),
                                  variable=var,command=lambda a=act: self._invoke(a))
+        elif act.kind=="radio":
+            group=str(act.radio_group)
+            var=self._radio_vars.get(group)
+            if var is None:
+                var=tk.StringVar(value=str(act.getter()) if act.getter else "")
+                self._radio_vars[group]=var
+                if act.getter is not None:
+                    self._radio_getters[group]=act.getter
+            menu.add_radiobutton(label=act.label,accelerator=self._accel(action_id),
+                                 variable=var,value=act.radio_value,
+                                 command=lambda a=act: self._invoke(a))
         else:
             menu.add_command(label=act.label,accelerator=self._accel(action_id),
                              command=lambda a=act: self._invoke(a))
@@ -984,27 +1001,50 @@ class BifurcationTkApp:
         self._update_panels()
         self._update_enabled_state()
 
+    @staticmethod
+    def _is_focused(widget)->bool:
+        """Whether the widget currently owns the keyboard focus.
+
+        Not just widget.focus_get() is widget: while a menu is posted, Tk reports an internal
+        widget name ("#!menu") that is not in the children dict, and focus_get raises KeyError.
+        """
+        try:
+            return widget.focus_get() is widget
+        except KeyError:
+            return False    # focus is on a Tk-internal widget, i.e. certainly not on this one
+
+    def _sync_radio_vars(self):
+        """Put each radio group's dot on whatever is actually in force.
+
+        The dot follows the state, not the click: a command that fails, or one that moves its group
+        by itself, must not leave the dot lying on something that is not in force.
+        """
+        for group,var in self._radio_vars.items():
+            getter=self._radio_getters.get(group)
+            if getter is not None:
+                var.set(str(getter()))
+
     def _update_panels(self):
         c=self.controller
-        if self.ds_entry.focus_get() is not self.ds_entry:   # do not overwrite what is being typed
+        if not self._is_focused(self.ds_entry):   # do not overwrite what is being typed
             self.ds_var.set("{:.6g}".format(c.ds))
         self.neigen_var.set(str(c.neigen))
         self.shift_var.set("{:g}".format(c.shift) if not isinstance(c.shift,complex) else str(c.shift))
         self.scale_al_var.set(bool(c.scale_arc_length))
-        if self.arc_prop_entry.focus_get() is not self.arc_prop_entry:
+        if not self._is_focused(self.arc_prop_entry):
             self.arc_prop_var.set("{:g}".format(c.arclength_proportion))
         self.arc_prop_entry.configure(state="normal" if c.scale_arc_length else "disabled")
-        if self.stripe_entry.focus_get() is not self.stripe_entry:
+        if not self._is_focused(self.stripe_entry):
             self.stripe_var.set("{:g},{:g},{:d}".format(c.stripe_re,c.stripe_im,int(c.stripe_max)))
         self.adapt_var.set(c.adapt_policy)
-        if self.adapt_n_entry.focus_get() is not self.adapt_n_entry:
+        if not self._is_focused(self.adapt_n_entry):
             self.adapt_n_var.set(str(c.adapt_every_n))
         self.adapt_eig_var.set(bool(c.adapt_to_eigenfunction))
         kind=c.normal_mode_kind()
         state="normal" if kind else "disabled"
         self.modes_entry.configure(state=state)
         self.modes_sweep_check.configure(state=state)
-        if self.modes_entry.focus_get() is not self.modes_entry:
+        if not self._is_focused(self.modes_entry):
             self.modes_var.set(",".join("{:g}".format(m) for m in c.normal_modes))
         self.modes_sweep_var.set(bool(c.compute_modes_during_sweep))
         self.splines_var.set(bool(c.interpolated_splines))
@@ -1023,6 +1063,7 @@ class BifurcationTkApp:
             act=self._actions[aid]
             if act.getter is not None:
                 var.set(bool(act.getter()))
+        self._sync_radio_vars()
 
         self._fill_info(self.current_info,c.current_point,"current")
         self._fill_info(self.selected_info,c.selected_point,"selected")
