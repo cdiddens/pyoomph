@@ -1086,17 +1086,16 @@ def test_migration_contributes_a_reaction_rate_to_tau():
 # ---------------------------------------------------------------------------------------------
 
 def _electrolyte(concentration=1 * milli * mol / liter, name="water"):
-    """A fresh water instance with NaCl dissolved in it.
+    """A fresh water instance with NaCl dissolved in it, both ions taken from the ion library.
 
-    get_pure_liquid returns a new object each call, so the ion table added here does not leak into
-    another test -- which it would if the library handed out a shared instance.
+    get_pure_liquid and get_ion return a new object each call, so the ion table added here does not
+    leak into another test -- which it would if the library handed out a shared instance.
     """
     import pyoomph.materials.default_materials  # noqa: F401  (registers the library)
-    from pyoomph.materials.generic import get_pure_liquid, new_ion
-    Na = new_ion("Na+", +1, 1.33e-9 * meter ** 2 / second, override=True)
-    Cl = new_ion("Cl-", -1, 2.03e-9 * meter ** 2 / second, override=True)
+    import pyoomph.materials.ions  # noqa: F401  (registers the ions)
+    from pyoomph.materials.generic import get_pure_liquid
     w = get_pure_liquid(name)
-    w.add_salt(Na, Cl, concentration)
+    w.add_salt("Na+", "Cl-", concentration)
     return w
 
 
@@ -1131,11 +1130,10 @@ def test_unset_electric_properties_stay_unset():
 
 def test_add_salt_is_electroneutral_for_asymmetric_valences():
     import pyoomph.materials.default_materials  # noqa: F401
-    from pyoomph.materials.generic import get_pure_liquid, new_ion
-    Ca = new_ion("Ca2+", +2, 0.79e-9 * meter ** 2 / second, override=True)
-    Cl = new_ion("Cl-", -1, 2.03e-9 * meter ** 2 / second, override=True)
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import get_pure_liquid
     w = get_pure_liquid("water")
-    w.add_salt(Ca, Cl, 1 * milli * mol / liter)   # CaCl2: one Ca(2+) per two Cl(-)
+    w.add_salt("Ca2+", "Cl-", 1 * milli * mol / liter)   # CaCl2: one Ca(2+) per two Cl(-)
     assert float(w.get_net_charge_number() / (mol / meter ** 3)) == pytest.approx(0.0, abs=1e-12)
     assert float(w.get_bulk_concentration("Cl-") / w.get_bulk_concentration("Ca2+")) \
         == pytest.approx(2.0)
@@ -1151,14 +1149,198 @@ def test_ion_field_names_are_valid_identifiers(name, expected):
     assert expected.replace("_", "a").isalnum()
 
 
+# ---------------------------------------------------------------------------------------------
+# The ion library, pyoomph.materials.ions
+# ---------------------------------------------------------------------------------------------
+
+# CRC Handbook (Vanysek), diffusivity at infinite dilution and 25 C, in 1e-9 m^2/s. The library
+# stores the limiting molar conductivity instead and derives these by Nernst-Einstein, so this is
+# the check that the one datum per ion is the right one -- and that S cm^2/mol was converted as
+# cm^2 and not as centi*m^2, which is a factor of 100 and passes every dimensional check.
+_TABULATED_DIFFUSIVITIES = {
+    "H+": 9.311, "Li+": 1.029, "Na+": 1.334, "K+": 1.957, "NH4+": 1.957, "Cs+": 2.056,
+    "Ag+": 1.648, "Mg2+": 0.706, "Ca2+": 0.792, "Ba2+": 0.847, "Zn2+": 0.703, "Cu2+": 0.714,
+    "Fe2+": 0.719, "Fe3+": 0.604, "Al3+": 0.541, "OH-": 5.273, "F-": 1.475, "Cl-": 2.032,
+    "Br-": 2.080, "I-": 2.045, "NO3-": 1.902, "ClO4-": 1.792, "HCO3-": 1.185, "CO3 2-": 0.923,
+    "SO4 2-": 1.065, "CH3COO-": 1.089, "H2PO4-": 0.959, "HPO4 2-": 0.759,
+}
+
+
+@pytest.mark.parametrize("name,D0", sorted(_TABULATED_DIFFUSIVITIES.items()))
+def test_library_ions_reproduce_the_tabulated_diffusivities(name, D0):
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import get_ion
+    D = get_ion(name).get_diffusivity(298.15 * kelvin)
+    assert float(D / (1e-9 * meter ** 2 / second)) == pytest.approx(D0, rel=5e-3)
+
+
+def test_library_ion_diffusivity_follows_the_temperature_it_is_asked_for():
+    # The stored datum is the conductivity, so the diffusivity is Nernst-Einstein at whatever
+    # temperature the caller has -- var("temperature") by default, which a problem supplies with
+    # define_named_var(temperature=...).
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import get_ion
+    D25 = get_ion("Na+").get_diffusivity(298.15 * kelvin)
+    D50 = get_ion("Na+").get_diffusivity(323.15 * kelvin)
+    assert float(D50 / D25) == pytest.approx(323.15 / 298.15, rel=1e-12)
+
+
+# Measured limiting molar conductivities away from the table temperature, S cm^2/mol (Robinson &
+# Stokes). The library stores only the 25 C value and gets here through the Walden rule, so this is
+# what says the temperature dependence is the solvent viscosity's and not Nernst-Einstein's alone.
+_CONDUCTIVITY_VS_TEMPERATURE = {
+    ("Na+", 0.0): 26.5, ("Na+", 45.0): 73.7,
+    ("Cl-", 0.0): 41.0, ("Cl-", 45.0): 116.0,
+    ("H+", 0.0): 225.0, ("H+", 45.0): 441.4,
+}
+
+
+@pytest.mark.parametrize("key,lambda0", sorted(_CONDUCTIVITY_VS_TEMPERATURE.items()))
+def test_library_ion_diffusivity_tracks_the_measured_temperature_dependence(key, lambda0):
+    import pyoomph.materials.default_materials  # noqa: F401
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import get_pure_liquid
+    name, TC = key
+    T = (273.15 + TC) * kelvin
+    water = get_pure_liquid("water")
+    ion = water.add_ion(name, 1 * milli * mol / liter)
+    # Nernst-Einstein on the conductivity measured at that temperature, which is what the Walden
+    # rule has to reproduce from the 25 C value alone.
+    expected = lambda0 * (siemens * (centi * meter) ** 2 / mol) * gas_constant * T \
+        / (ion.charge_number ** 2 * faraday_constant ** 2)
+    assert float(water.get_ion_diffusivity(name, T) / expected) == pytest.approx(1.0, rel=0.05)
+
+
+def test_walden_reference_viscosity_is_the_water_correlation_at_25C():
+    # The tabulated conductivities are for water at 25 C, so the correction has to be exactly 1
+    # there. It only is if the reference is the viscosity pyoomph's own water correlation gives,
+    # not the measured 0.890 mPa*s that the tables were taken at.
+    import pyoomph.materials.default_materials  # noqa: F401
+    from pyoomph.materials.generic import get_pure_liquid, IonProperties
+    mu25 = get_pure_liquid("water").get_reference_dynamic_viscosity(298.15 * kelvin)
+    assert float(IonProperties.walden_reference_viscosity / mu25) == pytest.approx(1.0, rel=1e-4)
+    w = _electrolyte()
+    assert float(w.get_ion_diffusivity("Na+", 298.15 * kelvin)
+                 / w.get_ions()["Na+"].get_diffusivity(298.15 * kelvin)) == pytest.approx(1.0, rel=1e-4)
+
+
+def test_electrolyte_conductivity_now_rises_with_temperature():
+    # Without the Walden correction the T in Nernst-Einstein cancels the 1/T in the closure exactly
+    # and sigma comes out temperature independent, which is the one thing a conductivity meter is
+    # built to compensate. 1 mM NaCl: 12.6 mS/m at 25 C, 19.0 at 45 C from the measured
+    # conductivities.
+    w = _electrolyte()
+    s25 = float(w.electric_conductivity_from_ions(298.15 * kelvin) / (milli * siemens / meter))
+    s45 = float(w.electric_conductivity_from_ions(318.15 * kelvin) / (milli * siemens / meter))
+    assert s25 == pytest.approx(12.6, rel=1e-2)
+    assert s45 == pytest.approx((73.7 + 116.0) * 1e-4 * 1000, rel=0.05)
+    assert (s45 / s25 - 1) / 20 == pytest.approx(0.023, abs=0.005)   # the ~2 %/K rule of thumb
+
+
+def test_walden_exponents_are_exact_rationals():
+    # Not a style point: a float exponent on a quantity that still carries units is where GiNaC's
+    # unit handling gives up, and the symbolic path (define_named_var) is the one that hits it.
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import _registered_ions
+    for name, cls in _registered_ions().items():
+        n = cls().walden_exponent
+        assert not isinstance(n, float), name + " has a float Walden exponent, use rational_num()"
+
+
+def test_walden_carries_the_ion_to_another_solvent():
+    # The tabulated value is aqueous. Returning it for an ion dissolved in glycerol would be three
+    # orders of magnitude out; the same rule that does the temperature also does this.
+    import pyoomph.materials.default_materials  # noqa: F401
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import get_pure_liquid
+    T = 298.15 * kelvin
+    ratios = []
+    for solvent in ("water", "glycerol"):
+        m = get_pure_liquid(solvent)
+        m.add_salt("Na+", "Cl-", 1 * milli * mol / liter)
+        ratios.append(float(m.get_ion_diffusivity("Na+", T) / (meter ** 2 / second)))
+    assert ratios[0] / ratios[1] > 100     # glycerol is ~1000x more viscous than water
+    assert ratios[1] < 1e-11
+
+
+def test_walden_correction_can_be_switched_off():
+    import pyoomph.materials.default_materials  # noqa: F401
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import get_pure_liquid
+    T = 273.15 * kelvin
+    w = get_pure_liquid("water")
+    w.add_ion("Na+", 1 * milli * mol / liter, walden_exponent=None)
+    assert float(w.get_ion_diffusivity("Na+", T) / w.get_ions()["Na+"].get_diffusivity(T)) \
+        == pytest.approx(1.0)
+
+
+def test_ions_from_material_takes_the_solvent_corrected_diffusivity():
+    # The equations must not reach past the solvent to the ion's own aqueous value.
+    T = 273.15 * kelvin
+    w = _electrolyte()
+    spec = {i.name: i for i in ions_from_material(w, temperature=T)}
+    assert float(spec["Na+"].diffusivity / w.get_ion_diffusivity("Na+", T)) == pytest.approx(1.0)
+    assert float(spec["Na+"].diffusivity / w.get_ions()["Na+"].get_diffusivity(T)) < 0.6
+
+
+def test_get_ion_hands_out_a_fresh_instance():
+    # Same contract as get_pure_liquid: overriding a property on one copy must not reach the next
+    # problem that dissolves "the same" ion.
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import get_ion
+    a, b = get_ion("Na+"), get_ion("Na+")
+    assert a is not b
+    a.diffusivity = 1 * meter ** 2 / second
+    assert float(b.get_diffusivity(298.15 * kelvin) / (1e-9 * meter ** 2 / second)) \
+        == pytest.approx(1.334, rel=5e-3)
+
+
+def test_get_ion_rejects_non_ions_and_unknown_names():
+    import pyoomph.materials.default_materials  # noqa: F401
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import get_ion
+    with pytest.raises(RuntimeError, match="is a pure liquid, not an ion"):
+        get_ion("water")
+    with pytest.raises(RuntimeError, match="Cannot find any ion named"):
+        get_ion("Xe7+")
+
+
+def test_add_ion_still_creates_unregistered_ions_on_the_spot():
+    import pyoomph.materials.default_materials  # noqa: F401
+    from pyoomph.materials.generic import get_pure_liquid
+    w = get_pure_liquid("water")
+    w.add_ion("Xe7+", 1 * mol / meter ** 3, charge_number=+7,
+              diffusivity=1e-9 * meter ** 2 / second)
+    assert w.get_ions()["Xe7+"].charge_number == +7
+    # ... but not without the data it would need to invent
+    with pytest.raises(ValueError, match="not a registered ion"):
+        get_pure_liquid("water").add_ion("Xe8+", 1 * mol / meter ** 3)
+
+
+def test_add_salt_takes_per_ion_overrides_and_insists_on_the_order():
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import get_pure_liquid
+    w = get_pure_liquid("water")
+    w.add_salt("Na+", "Cl-", 1 * milli * mol / liter,
+               anion_diffusivity=1e-9 * meter ** 2 / second)
+    assert float(w.get_ions()["Cl-"].get_diffusivity(298.15 * kelvin)
+                 / (1e-9 * meter ** 2 / second)) == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="cation first"):
+        get_pure_liquid("water").add_salt("Cl-", "Na+", 1 * milli * mol / liter)
+
+
 class _MaterialDrivenPNP(Problem):
     """The same diffuse layer as _PNPDiffuseLayer, but with every material number coming from the
     library rather than from literals in the script."""
 
-    def __init__(self, *, psi0=2.0, T=298.15 * kelvin, N=200, L_over_lambda=20.0):
+    def __init__(self, *, psi0=2.0, T=298.15 * kelvin, N=200, L_over_lambda=20.0,
+                 named_temperature=False):
         super().__init__()
         self.material = _electrolyte()
         self.T, self.N = T, N
+        #: Supply the temperature as a problem-level variable instead of an argument to the
+        #: equations, which is what an isothermal problem does with library ions.
+        self.named_temperature = named_temperature
         self.lambda_D = self.material.get_debye_length(T)
         self.L = L_over_lambda * self.lambda_D
         self.zeta = psi0 * thermal_voltage(T)
@@ -1172,7 +1354,11 @@ class _MaterialDrivenPNP(Problem):
                                   ion_concentration=cinf)
         self.add_mesh(LineMesh(N=self.N, size=self.L))
         # No ions, no permittivity, no diffusivities given here: all of it comes from the material.
-        eqs = PoissonNernstPlanck(fluid_props=self.material, wind=0, temperature=self.T)
+        if self.named_temperature:
+            self.define_named_var(temperature=self.T)
+            eqs = PoissonNernstPlanck(fluid_props=self.material, wind=0)
+        else:
+            eqs = PoissonNernstPlanck(fluid_props=self.material, wind=0, temperature=self.T)
         eqs += ElectrodeBC(self.zeta) @ "left"
         eqs += (ElectrodeBC(0) + DirichletBC(c_Na_p=cinf, c_Cl_m=cinf)) @ "right"
         eqs += IntegralObservables(_length=1, charge=var("charge_density"))
@@ -1184,6 +1370,21 @@ def test_material_driven_pnp_reproduces_grahame():
     # z:z electrolyte is sigma_s = sqrt(8*eps*R*T*c_inf)*sinh(z*F*zeta/(2*R*T)), and global
     # electroneutrality makes the diffuse charge exactly minus that.
     prob = _MaterialDrivenPNP(psi0=2.0)
+    with _fresh(prob) as p:
+        p.solve()
+        o = p.get_mesh("domain").evaluate_all_observables()
+    T, m = prob.T, prob.material
+    eps, cinf = m.get_absolute_permittivity(T), m.get_bulk_concentration("Na+")
+    expected = -numpy.sqrt(float(8 * eps * gas_constant * T * cinf / (coulomb / meter ** 2) ** 2)) \
+        * numpy.sinh(2.0 / 2)
+    assert float(o["charge"] / (coulomb / meter ** 2)) == pytest.approx(expected, rel=1e-3)
+
+
+def test_material_driven_pnp_with_a_problem_level_temperature():
+    # The library stores conductivities, so an ion's diffusivity and the permittivity both depend on
+    # var("temperature"); define_named_var is how an isothermal problem answers that, and it has to
+    # get the same answer as passing temperature= to the equations.
+    prob = _MaterialDrivenPNP(psi0=2.0, named_temperature=True)
     with _fresh(prob) as p:
         p.solve()
         o = p.get_mesh("domain").evaluate_all_observables()

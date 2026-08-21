@@ -784,7 +784,8 @@ class BaseLiquidProperties(MaterialProperties):
         return self.evaluate_at_condition(eps,ics)
 
     def add_ion(self,ion:"IonProperties | str",concentration:ExpressionOrNum,*,
-                charge_number:int | None=None,diffusivity:ExpressionNumOrNone=None)->"IonProperties":
+                charge_number:int | None=None,diffusivity:ExpressionNumOrNone=None,
+                walden_exponent:"ExpressionNumOrNone | Literal[False]"=False)->"IonProperties":
         r"""
         Dissolve an ionic species in this liquid at a given bulk concentration.
 
@@ -795,29 +796,35 @@ class BaseLiquidProperties(MaterialProperties):
         :py:meth:`get_net_charge_number`, which is what :py:meth:`add_salt` guarantees.
 
         Args:
-            ion: An :py:class:`IonProperties`, or the name of one in the material library. A name
-                that is not in the library is created on the spot, which then needs
+            ion: An :py:class:`IonProperties`, or the name of a registered one, which is looked up
+                with :py:func:`get_ion` -- import :py:mod:`pyoomph.materials.ions` for the standard
+                library. A name that is not registered is created on the spot, which then needs
                 ``charge_number`` and ``diffusivity``.
             concentration: The bulk concentration.
             charge_number: Overrides the ion's own charge number.
-            diffusivity: Overrides the ion's own diffusivity.
+            diffusivity: Overrides the ion's own diffusivity, which is then the value in *this*
+                solvent at 25 degC rather than the tabulated aqueous one, so pass
+                ``walden_exponent=None`` with it if you do not want it carried over by the Walden
+                rule as well.
+            walden_exponent: Overrides :py:attr:`IonProperties.walden_exponent`; ``None`` switches
+                the solvent/temperature correction off.
         """
         if isinstance(ion,str):
-            try:
-                found=get_pure_liquid(ion)
-            except RuntimeError:
-                found=None
-            if isinstance(found,IonProperties):
+            found=_lookup_registered_ion(ion)
+            if found is not None:
                 ion=found
             else:
                 if charge_number is None or diffusivity is None:
-                    raise ValueError("'"+ion+"' is not a known ion, so add_ion needs both a "+
-                                     "charge_number and a diffusivity to create it")
+                    raise ValueError("'"+ion+"' is not a registered ion, so add_ion needs both a "+
+                                     "charge_number and a diffusivity to create it. The standard "+
+                                     "ions are registered by importing pyoomph.materials.ions.")
                 ion=new_ion(ion,charge_number=charge_number,diffusivity=diffusivity)
         if charge_number is not None:
             ion.charge_number=charge_number
         if diffusivity is not None:
             ion.diffusivity=diffusivity
+        if walden_exponent is not False:   # None is a meaningful value here, so False means "unset"
+            ion.walden_exponent=walden_exponent
         if ion.charge_number==0:
             raise ValueError("Ion '"+ion.name+"' has charge_number 0, which makes it a neutral solute")
         self._ion_table[ion.name]=ion
@@ -832,11 +839,24 @@ class BaseLiquidProperties(MaterialProperties):
 
         ``concentration`` is the concentration of the *salt*, so for the 1:1 case it is also the
         concentration of each ion, while for CaCl2 it gives one Ca(2+) per two Cl(-).
+
+        Both ions may be given by name, which is looked up with :py:func:`get_ion`; import
+        :py:mod:`pyoomph.materials.ions` for the standard library. Keyword arguments prefixed
+        ``cation_`` and ``anion_`` are passed on to the respective :py:meth:`add_ion`, e.g.
+        ``anion_diffusivity=...`` to override one of them.
         """
-        c=self.add_ion(cation,concentration,**({"charge_number":kwargs.pop("cation_charge_number")} if "cation_charge_number" in kwargs else {}))
-        a=self.add_ion(anion,concentration,**({"charge_number":kwargs.pop("anion_charge_number")} if "anion_charge_number" in kwargs else {}))
+        cation_kwargs={k[len("cation_"):]:kwargs.pop(k) for k in list(kwargs) if k.startswith("cation_")}
+        anion_kwargs={k[len("anion_"):]:kwargs.pop(k) for k in list(kwargs) if k.startswith("anion_")}
         if kwargs:
             raise TypeError("unexpected arguments "+str(sorted(kwargs)))
+        c=self.add_ion(cation,concentration,**cation_kwargs)
+        a=self.add_ion(anion,concentration,**anion_kwargs)
+        # Swapping the two would still give an electroneutral solution by the abs() below, but the
+        # stoichiometry it reports would be that of a different salt, so say so instead.
+        if c.charge_number<0 or a.charge_number>0:
+            raise ValueError("add_salt expects the cation first and the anion second, but got '"+
+                             c.name+"' (z="+str(c.charge_number)+") and '"+a.name+"' (z="+
+                             str(a.charge_number)+")")
         self._bulk_concentrations[c.name]=concentration*abs(a.charge_number)
         self._bulk_concentrations[a.name]=concentration*abs(c.charge_number)
 
@@ -849,6 +869,33 @@ class BaseLiquidProperties(MaterialProperties):
         if ion_name not in self._bulk_concentrations:
             raise RuntimeError("No ion '"+ion_name+"' dissolved in '"+str(self.name)+"'")
         return self._bulk_concentrations[ion_name]
+
+    def get_ion_diffusivity(self,ion_name:str,
+                            temperature:ExpressionNumOrNone=None)->ExpressionOrNum:
+        r"""
+        The diffusivity of one dissolved ion *in this solvent, at this temperature*.
+
+        This is where the tabulated aqueous value gets corrected: the ion owns the Walden rule and
+        its exponent (:py:meth:`IonProperties.get_diffusivity_in_solvent`), and the solvent is the
+        only one that knows the viscosity to put into it. Everything that consumes a diffusivity --
+        :py:func:`~pyoomph.equations.electrostatics.ions_from_material` and
+        :py:meth:`electric_conductivity_from_ions` -- goes through here, so the transport and the
+        conductivity cannot end up using differently corrected numbers.
+
+        ``temperature`` follows the same convention as :py:meth:`get_absolute_permittivity`: ``None``
+        leaves it as ``var("temperature")`` and uses the material's viscosity expression as it
+        stands, a given temperature evaluates both at it and at the material's initial composition.
+        That is not just symmetry -- substituting a temperature *field* into water's viscosity
+        correlation fails outright, because the field sits inside the exponent of
+        :math:`10^{247.8/(T-140)}` and the unit machinery cannot get a unit out of that. The raw
+        expression is fine, since by the time it reaches the code generator the field has a scale.
+        """
+        if ion_name not in self._ion_table:
+            raise RuntimeError("No ion '"+ion_name+"' dissolved in '"+str(self.name)+"'")
+        if temperature is None:
+            return self._ion_table[ion_name].get_diffusivity_in_solvent(self.dynamic_viscosity)
+        return self._ion_table[ion_name].get_diffusivity_in_solvent(
+            self.get_reference_dynamic_viscosity(temperature),temperature)
 
     def get_net_charge_number(self)->ExpressionOrNum:
         r""":math:`\sum_i z_i c_i^\infty`, which must vanish for an electroneutral reservoir."""
@@ -869,19 +916,25 @@ class BaseLiquidProperties(MaterialProperties):
         T=temperature if temperature is not None else var("temperature")
         return debye_length(self.get_absolute_permittivity(temperature),self.get_ionic_strength(),T)
 
-    def electric_conductivity_from_ions(self,temperature:ExpressionOrNum=var("temperature"))->ExpressionOrNum:
+    def electric_conductivity_from_ions(self,temperature:ExpressionNumOrNone=None)->ExpressionOrNum:
         r"""
         The Nernst-Einstein conductivity
         :math:`\sigma_\mathrm{c}=\frac{F^2}{RT}\sum_i z_i^2 D_i c_i^\infty`.
 
         Deriving it from the same ion table that the resolved model uses is what keeps a
         leaky-dielectric run and a Nernst-Planck run from silently disagreeing about the material.
+
+        The diffusivities come from :py:meth:`get_ion_diffusivity`, so this inherits the Walden
+        correction and rises with temperature at roughly the 2%/K a conductivity meter compensates
+        for. Without it the two temperature dependences cancel exactly and the conductivity would
+        come out constant, which it is not.
         """
-        return faraday_constant**2/(gas_constant*temperature)*sum(
-            i.charge_number**2*i.get_diffusivity(temperature)*self._bulk_concentrations[n]
+        T=var("temperature") if temperature is None else temperature
+        return faraday_constant**2/(gas_constant*T)*sum(
+            i.charge_number**2*self.get_ion_diffusivity(n,temperature)*self._bulk_concentrations[n]
             for n,i in self.get_ions().items())
 
-    def set_electric_conductivity_from_ions(self,temperature:ExpressionOrNum=var("temperature"))->None:
+    def set_electric_conductivity_from_ions(self,temperature:ExpressionNumOrNone=None)->None:
         """Sets :py:attr:`electric_conductivity` to :py:meth:`electric_conductivity_from_ions`."""
         self.electric_conductivity=self.electric_conductivity_from_ions(temperature)
 
@@ -1410,8 +1463,9 @@ class IonProperties(PureLiquidProperties):
     therefore be a component of a liquid mixture -- so its molar mass, diffusivity and mass fraction
     go through the machinery that is already there. What it adds is the charge it carries.
 
-    Declare one with :py:func:`~pyoomph.materials.generic.new_ion` and dissolve it in a solvent with
-    :py:meth:`BaseLiquidProperties.add_ion`, which is what
+    The common ones are in :py:mod:`pyoomph.materials.ions` and are fetched by name with
+    :py:func:`get_ion`; declare your own with :py:func:`~pyoomph.materials.generic.new_ion`.
+    Dissolve one in a solvent with :py:meth:`BaseLiquidProperties.add_ion`, which is what
     :py:class:`~pyoomph.equations.electrostatics.NernstPlanckEquations` reads when it is given a
     ``fluid_props``.
     """
@@ -1422,13 +1476,32 @@ class IonProperties(PureLiquidProperties):
         #: Limiting molar conductivity at infinite dilution, if known. Only used as an alternative
         #: route to the diffusivity via the Nernst-Einstein relation.
         self.limiting_molar_conductivity:ExpressionNumOrNone=None
-        #: Diffusivity in the solvent at infinite dilution.
+        #: Diffusivity at infinite dilution in *water at 25 degC*, i.e. what the tables give. The
+        #: value in the actual solvent, at the actual temperature, is
+        #: :py:meth:`get_diffusivity_in_solvent`.
         self.diffusivity:ExpressionNumOrNone=None
+        #: The exponent :math:`n` of the (fractional) Walden rule :math:`\lambda_i^0\mu^n=`const,
+        #: which is how :py:meth:`get_diffusivity_in_solvent` carries the tabulated value to another
+        #: temperature or another solvent. ``1`` is the plain rule, i.e. Stokes drag, and setting it
+        #: to ``None`` switches the correction off, leaving the tabulated value everywhere. Use
+        #: :py:func:`~pyoomph.expressions.generic.rational_num` for a fitted value rather than a
+        #: float: a float exponent on a quantity that still carries units trips GiNaC up.
+        self.walden_exponent:ExpressionNumOrNone=1
+
+    #: The viscosity the tabulated conductivities and diffusivities refer to: water at 25 degC, as
+    #: pyoomph's own water correlation gives it. Taking the measured 0.890 mPa*s instead would leave
+    #: a permanent half-percent correction on an aqueous solution at the table temperature, where
+    #: the correction has to be exactly 1. A test pins the two together.
+    walden_reference_viscosity:ExpressionOrNum=0.890439*milli*pascal*second
 
     def get_diffusivity(self,temperature:ExpressionOrNum=var("temperature"))->ExpressionOrNum:
         r"""
-        The diffusivity, from :py:attr:`limiting_molar_conductivity` by Nernst-Einstein
+        The diffusivity in water, from :py:attr:`limiting_molar_conductivity` by Nernst-Einstein
         (:math:`D_i=\lambda_i^0 RT/(z_i^2F^2)`) if it was not given directly.
+
+        Note that this knows nothing about the solvent the ion is actually dissolved in -- see
+        :py:meth:`get_diffusivity_in_solvent`, which is what
+        :py:meth:`BaseLiquidProperties.get_ion_diffusivity` and therefore the equations use.
         """
         if self.diffusivity is not None:
             return self.diffusivity
@@ -1438,8 +1511,30 @@ class IonProperties(PureLiquidProperties):
         return self.limiting_molar_conductivity*gas_constant*temperature \
                /(self.charge_number**2*faraday_constant**2)
 
+    def get_diffusivity_in_solvent(self,solvent_viscosity:ExpressionOrNum,
+                                   temperature:ExpressionOrNum=var("temperature"))->ExpressionOrNum:
+        r"""
+        The diffusivity in a solvent of the given viscosity, by the (fractional) Walden rule
+
+        .. math:: \lambda_i^0(\mu)=\lambda_i^0\big|_\mathrm{ref}
+                  \left(\frac{\mu_\mathrm{ref}}{\mu}\right)^{n}
+
+        so that :math:`D_i\propto T/\mu^n` -- Stokes-Einstein for :math:`n=1`. Both the temperature
+        dependence and the solvent dependence come from this one rule, since it is the solvent
+        viscosity that carries essentially all of either.
+
+        The rule is good to a few percent over 0-50 degC for the ions whose exponent was fitted (see
+        :py:mod:`pyoomph.materials.ions`) and degrades above roughly 60 degC. Across solvents it is
+        a rough estimate rather than a correlation, but it beats the alternative of returning the
+        aqueous number for an ion dissolved in glycerol, which is three orders of magnitude out.
+        """
+        D=self.get_diffusivity(temperature)
+        if self.walden_exponent is None:
+            return D
+        return D*(self.walden_reference_viscosity/solvent_viscosity)**self.walden_exponent
+
     def get_mobility(self,temperature:ExpressionOrNum=var("temperature"))->ExpressionOrNum:
-        r"""The molar mobility :math:`m_i=D_i/(RT)`, i.e. the Einstein relation."""
+        r"""The molar mobility :math:`m_i=D_i/(RT)` in water, i.e. the Einstein relation."""
         return self.get_diffusivity(temperature)/(gas_constant*temperature)
 
 
@@ -2037,10 +2132,16 @@ def get_pure_material(state_of_matter:str,name:str | list[str],return_class:bool
         return tuple(res)
     else:
         if not name in MaterialProperties.library[state_of_matter]["pure"].keys():
-            print("Available pure " + state_of_matter + " components: " + str(MaterialProperties.library[state_of_matter]["pure"].keys()))
+            table=MaterialProperties.library[state_of_matter]["pure"]
+            # The ions are pure liquids as well, but listing all of them here buries the handful of
+            # solvents the user is actually looking for.
+            plain=sorted(n for n,c in table.items() if not (isinstance(c,type) and issubclass(c,IonProperties)))
+            print("Available pure " + state_of_matter + " components: " + str(plain))
+            if len(plain)<len(table):
+                print("(plus " + str(len(table)-len(plain)) + " registered ions, see get_ion())")
             raise RuntimeError(
                 "Cannot find any materials named '" + name + "' and in state '" + state_of_matter + "'. Make sure to import the corresponding python file, where these component is defined or define it yourself. For examples, please have a look at " + os.path.realpath(
-                    os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "default_materials.py")))
+                    os.path.join(os.path.dirname(os.path.realpath(__file__)), "default_materials.py")))
         if return_class:
             return MaterialProperties.library[state_of_matter]["pure"][name]
         else:
@@ -2107,6 +2208,69 @@ def get_surfactant(name:str | list[str],return_class:bool=False)->SurfactantProp
             if not isinstance(r,SurfactantProperties):
                 raise RuntimeError(str(r)+" is not a surfactant, but a normal pure liquid") #type:ignore
         return res #type:ignore
+
+def _registered_ions()->"dict[str,type[IonProperties]]":
+    """Everything in the pure-liquid table that is an ion, keyed by name."""
+    return {n:c for n,c in MaterialProperties.library["liquid"]["pure"].items()
+            if isinstance(c,type) and issubclass(c,IonProperties)}
+
+
+def _lookup_registered_ion(name:str)->"IonProperties | None":
+    """The registered ion of that name, or None if no material of that name is registered at all.
+
+    Separate from :py:func:`get_ion` because :py:meth:`BaseLiquidProperties.add_ion` has to tell
+    "not registered" (create it from the arguments) from "registered, but not an ion" (a mistake).
+    """
+    table=MaterialProperties.library["liquid"]["pure"]
+    if name not in table:
+        return None
+    cls=table[name]
+    if not (isinstance(cls,type) and issubclass(cls,IonProperties)):
+        raise RuntimeError("'"+name+"' is a pure liquid, not an ion")
+    return cls()
+
+
+@overload
+def get_ion(name:str,return_class:Literal[False]=...)->IonProperties: ...
+
+@overload
+def get_ion(name:str,return_class:Literal[True])->type[IonProperties]: ...
+
+@overload
+def get_ion(name:list[str],return_class:Literal[False]=...)->tuple[IonProperties,...]: ...
+
+@overload
+def get_ion(name:list[str],return_class:Literal[True])->tuple[type[IonProperties],...]: ...
+
+def get_ion(name:str | list[str],return_class:bool=False)->IonProperties | type[IonProperties] | tuple[IonProperties, ...] | tuple[type[IonProperties], ...]:
+    """
+    Returns the ionic species for the given name(s) from the material library, in the same way
+    :py:func:`get_pure_liquid` and :py:func:`get_surfactant` do. Ion classes must be decorated with
+    :py:meth:`MaterialProperties.register` before this works -- import
+    :py:mod:`pyoomph.materials.ions` for the standard library, or declare your own with
+    :py:func:`new_ion`.
+
+    Like all these getters, this hands out a **new instance** per call, so dissolving it in one
+    liquid does not affect another.
+
+    Args:
+        name: Name of the ion(s), e.g. ``"Na+"``.
+        return_class: Return the class instead of an instance of the class.
+
+    Returns:
+        The ion properties as object(s) or class(es).
+    """
+    if isinstance(name,(list,tuple)):
+        return tuple(cast("IonProperties",get_ion(n,return_class)) for n in name) #type:ignore
+    _lookup_registered_ion(name)  # raises the specific error if the name is a non-ion material
+    known=_registered_ions()
+    if name not in known:
+        raise RuntimeError("Cannot find any ion named '"+name+"'. Registered ions: "+
+                           str(sorted(known.keys()))+". The standard ions are registered by "+
+                           "importing pyoomph.materials.ions; a new one is declared with new_ion().")
+    cls=known[name]
+    return cls if return_class else cls()
+
 
 @overload
 def get_pure_gas(name:str,return_class:Literal[False]=...)->PureGasProperties: ...
@@ -2414,10 +2578,14 @@ def new_ion(name:str,charge_number:int,diffusivity:ExpressionNumOrNone=None,*,
             dynamic_viscosity:ExpressionOrNum=1*milli*pascal*second,
             override:bool=False)->IonProperties:
     r"""
-    Shortcut to create and register a new ionic species.
+    Shortcut to create and register a new ionic species, i.e. to put one into the same table that
+    :py:mod:`pyoomph.materials.ions` fills and :py:func:`get_ion` reads.
 
     Give either a ``diffusivity`` or a ``limiting_molar_conductivity``; the latter is converted by
-    Nernst-Einstein, :math:`D_i=\lambda_i^0RT/(z_i^2F^2)`.
+    Nernst-Einstein, :math:`D_i=\lambda_i^0RT/(z_i^2F^2)`, at
+    :py:meth:`IonProperties.get_diffusivity`'s temperature -- which is ``var("temperature")`` unless
+    told otherwise, so an isothermal problem has to define one, e.g. with
+    ``self.define_named_var(temperature=25*celsius)``.
 
     Args:
         name: Name of the ion, e.g. ``"Na+"``. Also the stem of its concentration field.

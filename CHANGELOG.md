@@ -12,6 +12,25 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Added
 
+- **A library of ionic species, `pyoomph.materials.ions`.** The 28 common ions (H+ through HPO4 2-)
+  are registered with the same `@MaterialProperties.register()` decorator every other material uses,
+  and `get_ion("Na+")` fetches one exactly as `get_pure_liquid` and `get_surfactant` do -- a fresh
+  instance per call, so dissolving it in one liquid cannot reach another. `add_ion` and `add_salt`
+  take a name and go through the same lookup, so an electrolyte is
+  `water.add_salt("Na+", "Cl-", 1*milli*mol/liter)`; a name that is not registered still needs an
+  explicit `charge_number` and `diffusivity`, which `new_ion` then puts into the same table. The
+  datum stored per ion is the limiting molar conductivity at 25 °C and the diffusivity follows from
+  it by Nernst-Einstein: one number per ion, so the conductivity closure and the transport model
+  cannot end up describing different ions. Both the temperature dependence and the solvent dependence
+  come from the fractional Walden rule `λ⁰μⁿ = const`, applied by the solvent
+  (`BaseLiquidProperties.get_ion_diffusivity`) since an ion does not know what it is dissolved in.
+  That puts D(Na+) at 0 °C within 0.03% of the measured value where a constant `λ⁰` is 47% out, makes
+  an electrolyte's conductivity rise at the ~2 %/K a conductivity meter compensates for instead of
+  being exactly temperature independent, and estimates Na+ in glycerol as 737x slower than in water
+  rather than identical to it. H+ carries a fitted exponent of 0.63 against everyone else's ~0.94,
+  which is Grotthuss proton transfer being far less sensitive to the solvent viscosity than Stokes
+  drag.
+
 - **Adaptivity across coupled domain interfaces.** Two domains that share an interface (tied by
   `ConnectFieldsAtInterface`, `ConnectMeshAtInterface` or any other opposite-interface connection) are
   adapted individually by oomph-lib, so a refinement criterion stated for one of them left the other with

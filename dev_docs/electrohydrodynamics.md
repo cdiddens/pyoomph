@@ -398,6 +398,76 @@ conductivity from the same table the resolved model uses is what keeps the two f
 disagreeing about the material. Measured against the textbook for 1 mM NaCl: λ_D = 9.61 nm,
 σ_c = 12.6 mS/m.
 
+**The ions are library materials, not constructor arguments.** `pyoomph/materials/ions.py` registers
+the 28 common ones with the same `@MaterialProperties.register()` decorator every other material
+uses, and `get_ion("Na+")` fetches one exactly as `get_pure_liquid`/`get_surfactant` do — a fresh
+instance per call, so dissolving it in one liquid cannot reach another. `add_ion`/`add_salt` accept
+a name and go through the same lookup, so `water.add_salt("Na+", "Cl-", 1*milli*mol/liter)` is the
+whole setup; a name that is not registered still needs an explicit `charge_number` and
+`diffusivity`, which `new_ion` then puts into the same table.
+
+The datum stored per ion is the **limiting molar conductivity** at 25 °C, and the diffusivity is
+derived from it by Nernst-Einstein. One number per ion is deliberate: keeping the tabulated `D_i^0`
+as a second, independent datum is what would let the transport model and the conductivity closure
+disagree about the same ion. The conversion is done at the temperature it is asked for, i.e. at
+`var("temperature")` unless `get_diffusivity`/`ions_from_material` is given one — the same
+convention as every other property in the library, and an isothermal problem answers it the way it
+already answers it for the viscosity or the permittivity:
+
+    self.define_named_var(temperature=25*celsius)
+
+A test pins all 28 against the CRC table at 25 °C, which is also what catches the one unit trap here:
+`S cm²/mol` is `siemens*(centi*meter)**2/mol`, and the dimensionally impeccable
+`siemens*centi*meter**2/mol` is a factor of 100 out.
+
+**The temperature dependence is the solvent's, not Nernst-Einstein's.** Holding `λ^0` fixed and
+letting Nernst-Einstein supply the temperature gives `D ∝ T`, i.e. +37% between 0 and 100 °C where
+the measured change is a factor of five, and — worse, because it looks like a result rather than an
+omission — it makes an electrolyte's conductivity *exactly* temperature independent, since the `T`
+in `D` cancels the `1/T` in `σ = F²/(RT) Σ z²Dc`. The library therefore carries `λ^0` to another
+temperature (and to another solvent) by the fractional Walden rule `λ^0 μ^n = const`, so that
+`D_i ∝ T/μ^n` — Stokes-Einstein for `n = 1`. Measured against the multi-temperature tables over
+0–45 °C:
+
+| | constant λ⁰ | linear 2 %/K | Walden n=1 | fitted n |
+|---|---|---|---|---|
+| Na⁺ | −47% @0 °C | ≤5% | ≤4% | **0.4%** (n=0.94) |
+| K⁺ | −45% | ≤10% | ≤8% | **3.1%** (0.90) |
+| Cl⁻ | −46% | ≤8% | ≤5% | **3.5%** (0.95) |
+| H⁺ | −36% | ≤1.4% | **−21%** | **2.3%** (0.63) |
+
+Two things fall out of that table. Arrhenius fits (`λ^0 = A exp(-Ea/RT)`, not shown) are 7–12% and
+were dropped — they are fitting the viscosity's non-Arrhenius shape with an Arrhenius form. And H⁺
+is not a badly-fitted ion, it is a different mechanism: Grotthuss proton transfer is far less
+sensitive to the solvent viscosity than dragging an ion through it, which is exactly what an
+exponent of 0.63 against everyone else's ~0.94 says. Only the five ions with unambiguous
+multi-temperature data carry a fitted exponent; the rest keep 1, which is a statement about missing
+data rather than about them being better Stokes spheres than sodium. Above ~60 °C all of it degrades
+and none of it should be believed.
+
+Three implementation points, each of which was a bug first:
+
+* **The correction belongs to the solvent, not to the ion.** An `IonProperties` does not know what
+  it is dissolved in, so `BaseLiquidProperties.get_ion_diffusivity` is where the rule is applied,
+  and `ions_from_material` and `electric_conductivity_from_ions` both go through it — otherwise the
+  transport and the conductivity end up using differently corrected numbers for the same ion. The
+  same rule then also transfers the aqueous `λ^0` to a non-aqueous solvent, which is crude but far
+  better than the alternative: Na⁺ in glycerol comes out 737× slower than in water instead of
+  identical to it.
+* **`temperature=None` means symbolic, and it is not the same as being handed `var("temperature")`.**
+  Substituting a temperature *field* into water's viscosity correlation fails outright — the field
+  lands inside the exponent of `10^(247.8/(T-140))` and the unit machinery cannot extract a unit
+  from that. So the `None` path uses the material's viscosity expression as it stands, which is fine
+  because by code-generation time the field has a scale. This is the convention
+  `get_absolute_permittivity` already used, and the reason it used it.
+* **The exponents are `rational_num`, never floats.** A float exponent on a quantity that still
+  carries units is the other place GiNaC's unit handling gives up. A test walks the registered ions
+  and rejects any float.
+
+The reference viscosity is water at 25 °C *as pyoomph's own correlation gives it* (0.890439 mPa·s),
+not the 0.890 the tables were measured at: the correction has to be exactly 1 for an aqueous
+solution at the table temperature, and a test pins the constant to the correlation.
+
 **Ion names are not field names.** A chemist writes `"Na+"` and `"Cl-"`, and `add_salt` should accept
 that, but a pyoomph field name may only contain letters, digits and underscores. `ion_fieldname_stem`
 maps `+` → `_p` and `-` → `_m` and anything else invalid to `_`, so `"Na+"` is solved for as

@@ -71,6 +71,7 @@ def ions_from_material(fluid_props:"AnyMaterialProperties",*,
 
     Lets the electrolyte equations be driven from a material rather than from literals::
 
+        import pyoomph.materials.ions   # registers the standard ions
         water = get_pure_liquid("water")
         water.add_salt("Na+", "Cl-", 1*milli*mol/liter)
         eqs = PoissonNernstPlanck(ions_from_material(water), fluid_props=water)
@@ -85,7 +86,16 @@ def ions_from_material(fluid_props:"AnyMaterialProperties",*,
     if not ions:
         raise ValueError("No ions are dissolved in '"+str(getattr(fluid_props,"name","<unnamed>"))+
                          "'. Use its add_ion()/add_salt() first, or pass the ions explicitly.")
-    return [IonSpec(n,i.charge_number,i.get_diffusivity(temperature),
+    # get_ion_diffusivity, not the ion's own get_diffusivity: the tabulated value is for water at
+    # 25 degC, and only the solvent knows the viscosity that carries it to this temperature and this
+    # liquid. A material that carries ions but predates that method still works.
+    diff=getattr(fluid_props,"get_ion_diffusivity",None)
+    # None is how the material spells "leave the temperature symbolic", which is not the same thing
+    # as being handed var("temperature") to substitute -- substituting a field into a viscosity
+    # correlation is what fails there.
+    Targ=None if is_zero(convert_to_expression(temperature-var("temperature"))) else temperature
+    return [IonSpec(n,i.charge_number,
+                    diff(n,Targ) if diff is not None else i.get_diffusivity(temperature),
                     bulk_concentration=fluid_props.get_bulk_concentration(n),
                     molar_mass=getattr(i,"molar_mass",None))
             for n,i in ions.items()]
