@@ -334,6 +334,30 @@ def test_salt_lowers_the_vapour_pressure_of_the_solvent():
     assert a[5.0] < a[1.0] < a[0.0]
 
 
+def test_the_pure_vapour_pressure_survives_the_activity_model():
+    # A relative humidity is measured against the saturation pressure of *pure* water. Setting the
+    # activity coefficients multiplies the material's own vapor_pressure by the coefficient, and
+    # pure=True has to keep answering with the salt-free one: taking the lowered brine value as the
+    # saturation reference silently rescales every far-field concentration built from an RH.
+    T = 298.15 * kelvin
+    plain = get_pure_liquid("water")
+    p_pure = float(plain.evaluate_at_condition(plain.vapor_pressure, {}, temperature=T) / pascal)
+
+    salted = Mixture(get_pure_liquid("water") + 1 * molar * get_salt("NaCl"))
+    salted.set_activity_coefficients_by_unifac("AIOMFAC", use_multi_return=False)
+    rho = salted.get_reference_mass_density(T)
+    c = 1.0 * (mol / kilogram) * rho
+    ic = {"temperature": T, "c_Na_p": c, "c_Cl_m": c}
+
+    got_pure = float(salted.evaluate_at_condition(
+        salted.get_vapor_pressure_for("water", pure=True), ic) / pascal)
+    got_brine = float(salted.evaluate_at_condition(
+        salted.get_vapor_pressure_for("water"), ic) / pascal)
+    assert got_pure == pytest.approx(p_pure, rel=1e-12)
+    # ... and the brine one is lowered by exactly the activity coefficient
+    assert got_brine / got_pure == pytest.approx(0.966822, rel=1e-4)
+
+
 def test_a_model_without_electrolyte_parameters_says_so():
     mix = Mixture(get_pure_liquid("water") + 20 * percent * get_pure_liquid("ethanol")
                   + 1 * milli * molar * get_salt("NaCl"))

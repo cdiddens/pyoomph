@@ -1738,6 +1738,9 @@ class PureLiquidProperties(BaseLiquidProperties):
         self.initial_condition["massfrac_"+self.name]=1.0
         #: Vapor pressure of the pure liquid
         self.vapor_pressure:ExpressionNumOrNone=None
+        #: The salt-free vapor pressure, kept aside when a dissolved salt multiplies
+        #: :py:attr:`vapor_pressure` by an activity coefficient. ``None`` while the two agree.
+        self._pure_vapor_pressure:ExpressionNumOrNone=None
         self.passive_field=self.name
         #: The components are used for mixtures. Here it is just the set with only the name of the liquid as only element.
         self.components = set({self.name})
@@ -1766,6 +1769,10 @@ class PureLiquidProperties(BaseLiquidProperties):
         self._set_activity_coefficients_with_ions(model,use_multi_return)
         if set_vapor_pressures and self.vapor_pressure is not None:
             # Raoult with a salt-free mole fraction of one: the whole effect is in the coefficient.
+            # The salt-free value is kept, since pure=True must stay answerable afterwards: a far
+            # field concentration from a relative humidity is built from it, and without this the
+            # brine's own lowered vapour pressure would be taken as the saturation reference.
+            self._pure_vapor_pressure=self.vapor_pressure
             self.vapor_pressure=self.activity_coefficients[self.name]*self.vapor_pressure
 
     def set_unifac_groups(self,grps:dict[str,int],only_for:set[str] | str | None=None):
@@ -1821,8 +1828,15 @@ class PureLiquidProperties(BaseLiquidProperties):
     def get_vapor_pressure_for(self,name:str,pure:bool=False) -> ExpressionNumOrNone:
         """
         Returns the vapor pressure of the pure liquid.
+
+        Args:
+            name: Name of the liquid, i.e. this one.
+            pure: Return the salt-free value. Only differs once a dissolved salt has lowered the
+                vapor pressure by an activity coefficient.
         """        
         if self.name==name:
+            if pure and self._pure_vapor_pressure is not None:
+                return self._pure_vapor_pressure
             return self.vapor_pressure
         else:
             return None
@@ -2481,7 +2495,7 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
         else:
             pc=self.pure_properties[name]
             assert isinstance(pc,PureLiquidProperties)
-            return pc.get_vapor_pressure_for(name)
+            return pc.get_vapor_pressure_for(name,pure=True)
 
 
     # use_multi_return uses multi-return expression instead of subexpressions
