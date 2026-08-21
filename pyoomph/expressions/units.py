@@ -88,6 +88,8 @@ hour = 60 * minute
 day = 24 * hour
 litre = _power_of_ten(-3) * meter ** 3
 liter = litre
+#: Molar concentration, i.e. mol/litre. "1 mM NaCl" is 1*milli*molar.
+molar = mol / litre
 
 hertz = 1 / second
 newton = kilogram * meter / second ** 2

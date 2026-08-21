@@ -28,6 +28,8 @@ from __future__ import annotations
  
 from .. import _pyoomph_core as _pyoomph
 import os
+import copy
+import math
 import itertools
 from pathlib import Path
 from collections import OrderedDict as OrderDict
@@ -361,6 +363,16 @@ class MaterialProperties:
         self.molar_mass:ExpressionOrNum#=None
 
 
+    def describe(self)->str:
+        """A name for error messages. A mixture has no ``name``, only ``components``, and reaching
+        for the missing attribute inside an error path turns a clear message into an
+        AttributeError."""
+        name=getattr(self,"name",None)
+        if name is not None:
+            return str(name)
+        comps=getattr(self,"components",None)
+        return "mixture of "+", ".join(sorted(comps)) if comps else "<unnamed material>"
+
     def __mul__(self,other:float | int | Expression)->"MixtureDefinitionComponent":
         return MixtureDefinitionComponent(self,other)
 
@@ -546,9 +558,11 @@ class LiquidMixtureDefinitionComponent(MixtureDefinitionComponent):
     def __init__(self, compo: MaterialProperties, quant: ExpressionNumOrNone):
         super().__init__(compo, quant)
 
-    def __radd__(self,other:"MixtureDefinitionComponent | MaterialProperties")->"LiquidMixtureDefinitionComponents | LiquidMixtureDefinitionComponent":
+    def __radd__(self,other:"MixtureDefinitionComponent | MaterialProperties | DissolvedSpeciesComponent")->"LiquidMixtureDefinitionComponents | LiquidMixtureDefinitionComponent":
         if other==0:
             return self # This allows to use e.g. sum(massfrac[c]*component[c] for c in ...)
+        elif isinstance(other,DissolvedSpeciesComponent):
+            return LiquidMixtureDefinitionComponents([self],dissolved=[other])
         elif isinstance(other,LiquidMixtureDefinitionComponent):
             return LiquidMixtureDefinitionComponents([self,other])
         elif isinstance(other,PureLiquidProperties):
@@ -556,7 +570,7 @@ class LiquidMixtureDefinitionComponent(MixtureDefinitionComponent):
         else:
             raise RuntimeError("Tried to mix a liquid with something else:"+str(self)+" and "+str(other))
 
-    def __add__(self,other:"MixtureDefinitionComponent | MaterialProperties")->"LiquidMixtureDefinitionComponents | LiquidMixtureDefinitionComponent":
+    def __add__(self,other:"MixtureDefinitionComponent | MaterialProperties | DissolvedSpeciesComponent")->"LiquidMixtureDefinitionComponents | LiquidMixtureDefinitionComponent":
         return self.__radd__(other)
 
     def get_compo(self)->"PureLiquidProperties":
@@ -583,19 +597,27 @@ class GasMixtureDefinitionComponent(MixtureDefinitionComponent):
         return self.compo
 
 class MixtureDefinitionComponents():
-    def __init__(self,lst:list[MixtureDefinitionComponent]):
+    def __init__(self,lst:list[MixtureDefinitionComponent],
+                 dissolved:"list[DissolvedSpeciesComponent] | None"=None):
         self.lst=lst
+        #: Salts and ions given by concentration. They ride alongside rather than inside ``lst``,
+        #: because ``lst`` holds fractions that must sum to unity and a concentration is not one of
+        #: those -- see :py:class:`DissolvedSpeciesComponent`.
+        self.dissolved:"list[DissolvedSpeciesComponent]"=dissolved if dissolved is not None else []
 
-    def __add__(self,other:"MixtureDefinitionComponents | MixtureDefinitionComponent | MaterialProperties")->"MixtureDefinitionComponents":
-        if isinstance(other,MixtureDefinitionComponents):
-            return MixtureDefinitionComponents(self.lst+other.lst)
+    def __add__(self,other:"MixtureDefinitionComponents | MixtureDefinitionComponent | MaterialProperties | DissolvedSpeciesComponent")->"MixtureDefinitionComponents":
+        if isinstance(other,DissolvedSpeciesComponent):
+            return type(self)(self.lst,dissolved=self.dissolved+[other])
+        elif isinstance(other,MixtureDefinitionComponents):
+            return MixtureDefinitionComponents(self.lst+other.lst,dissolved=self.dissolved+other.dissolved)
         elif isinstance(other,MixtureDefinitionComponent):
-            return MixtureDefinitionComponents(self.lst+[other])
+            return MixtureDefinitionComponents(self.lst+[other],dissolved=self.dissolved)
         elif isinstance(other,MaterialProperties): #type:ignore
             return self+MixtureDefinitionComponent(other,None)
 
     def __repr__(self) -> str:
-        return "%s(%r)" % (self.__class__, self.lst)
+        return "%s(%r%s)" % (self.__class__, self.lst,
+                             ", dissolved=%r" % self.dissolved if self.dissolved else "")
 
     def finalise(self,quantity:MixQuantityDefinition="mass_fraction",temperature:ExpressionNumOrNone=None,pressure:ExpressionNumOrNone=1*atm) -> tuple[set[MaterialProperties], dict[str, ExpressionOrNum]]:
         #if len(self.lst)==1:
@@ -703,25 +725,31 @@ class MixtureDefinitionComponents():
 
 
 class LiquidMixtureDefinitionComponents(MixtureDefinitionComponents):
-    def __init__(self, lst: list[MixtureDefinitionComponent]):
-        super().__init__(lst)
+    def __init__(self, lst: list[MixtureDefinitionComponent],
+                 dissolved:"list[DissolvedSpeciesComponent] | None"=None):
+        super().__init__(lst,dissolved=dissolved)
         for a in lst:
             if not isinstance(a,LiquidMixtureDefinitionComponent):
                 RuntimeError("You tried to mix a gas with something else: "+str(self)+" contains "+str(a))
 
-    def __add__(self,other:"MixtureDefinitionComponents | MixtureDefinitionComponent | MaterialProperties")->"LiquidMixtureDefinitionComponents":
-        if isinstance(other,LiquidMixtureDefinitionComponents):
-            return LiquidMixtureDefinitionComponents(self.lst+other.lst)
+    def __add__(self,other:"MixtureDefinitionComponents | MixtureDefinitionComponent | MaterialProperties | DissolvedSpeciesComponent")->"LiquidMixtureDefinitionComponents":
+        if isinstance(other,DissolvedSpeciesComponent):
+            return LiquidMixtureDefinitionComponents(self.lst,dissolved=self.dissolved+[other])
+        elif isinstance(other,LiquidMixtureDefinitionComponents):
+            return LiquidMixtureDefinitionComponents(self.lst+other.lst,dissolved=self.dissolved+other.dissolved)
         elif isinstance(other,LiquidMixtureDefinitionComponent):
-            return LiquidMixtureDefinitionComponents(self.lst+[other])
+            return LiquidMixtureDefinitionComponents(self.lst+[other],dissolved=self.dissolved)
         elif isinstance(other,PureLiquidProperties):
             return self+LiquidMixtureDefinitionComponent(other,None)
         else:
             raise RuntimeError("You tried to mix a liquid with something else: "+str(self)+" and "+str(other))
 
 class GasMixtureDefinitionComponents(MixtureDefinitionComponents):
-    def __init__(self, lst: list[MixtureDefinitionComponent]):
-        super().__init__(lst)        
+    def __init__(self, lst: list[MixtureDefinitionComponent],
+                 dissolved:"list[DissolvedSpeciesComponent] | None"=None):
+        super().__init__(lst)
+        if dissolved:
+            raise RuntimeError("A gas cannot carry dissolved ions: "+str(dissolved))
         for a in lst:
             if not isinstance(a,GasMixtureDefinitionComponent):
                 RuntimeError("You tried to mix a gas with something else: "+str(self)+" contains "+str(a))
@@ -774,8 +802,16 @@ class BaseLiquidProperties(MaterialProperties):
         use the permittivity at that temperature and not a symbolic field.
         """
         if not hasattr(self,"relative_permittivity"):
-            raise RuntimeError("The material '"+str(self.name)+"' does not define a "+
-                               "relative_permittivity")
+            extra=""
+            if getattr(self,"components",None):
+                # Deliberately not averaged automatically: linear mixing is a poor rule for the
+                # permittivity (Bruggeman and Looyenga exist for a reason), so a mixture gets one
+                # only when someone asks for it, or sets its own correlation.
+                extra=("\nFor a mixture, either set it, or ask for the mass-weighted average "+
+                       "explicitly with set_by_weighted_average('relative_permittivity') if every "+
+                       "component defines one.")
+            raise RuntimeError("The material '"+self.describe()+"' does not define a "+
+                               "relative_permittivity"+extra)
         eps=self.relative_permittivity*epsilon_0
         if temperature is None:
             return eps
@@ -867,7 +903,7 @@ class BaseLiquidProperties(MaterialProperties):
     def get_bulk_concentration(self,ion_name:str)->ExpressionOrNum:
         """The reservoir concentration of one dissolved ion."""
         if ion_name not in self._bulk_concentrations:
-            raise RuntimeError("No ion '"+ion_name+"' dissolved in '"+str(self.name)+"'")
+            raise RuntimeError("No ion '"+ion_name+"' dissolved in '"+self.describe()+"'")
         return self._bulk_concentrations[ion_name]
 
     def get_ion_diffusivity(self,ion_name:str,
@@ -884,14 +920,17 @@ class BaseLiquidProperties(MaterialProperties):
 
         ``temperature`` follows the same convention as :py:meth:`get_absolute_permittivity`: ``None``
         leaves it as ``var("temperature")`` and uses the material's viscosity expression as it
-        stands, a given temperature evaluates both at it and at the material's initial composition.
+        stands -- for a mixture that expression depends on the composition too, so the ion's
+        diffusivity then follows the local mass fractions as well, which is what a solvent that
+        thickens as it evaporates should do. A given temperature evaluates both at it and at the
+        material's initial composition.
         That is not just symmetry -- substituting a temperature *field* into water's viscosity
         correlation fails outright, because the field sits inside the exponent of
         :math:`10^{247.8/(T-140)}` and the unit machinery cannot get a unit out of that. The raw
         expression is fine, since by the time it reaches the code generator the field has a scale.
         """
         if ion_name not in self._ion_table:
-            raise RuntimeError("No ion '"+ion_name+"' dissolved in '"+str(self.name)+"'")
+            raise RuntimeError("No ion '"+ion_name+"' dissolved in '"+self.describe()+"'")
         if temperature is None:
             return self._ion_table[ion_name].get_diffusivity_in_solvent(self.dynamic_viscosity)
         return self._ion_table[ion_name].get_diffusivity_in_solvent(
@@ -1537,6 +1576,25 @@ class IonProperties(PureLiquidProperties):
         r"""The molar mobility :math:`m_i=D_i/(RT)` in water, i.e. the Einstein relation."""
         return self.get_diffusivity(temperature)/(gas_constant*temperature)
 
+    def _times(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent | LiquidMixtureDefinitionComponent":
+        """``c*ion`` means two different things and the units say which.
+
+        An ion is a pure liquid property, so a dimensionless factor keeps the mixture-component
+        meaning it inherits -- a mass fraction that has to sum to unity with the others. A
+        concentration cannot mean that, and means the ion is dissolved in whatever it is added to.
+        """
+        try:
+            float(other)
+        except Exception:
+            return DissolvedSpeciesComponent(self,other)   # validates the unit itself
+        return LiquidMixtureDefinitionComponent(self,other)
+
+    def __mul__(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent | LiquidMixtureDefinitionComponent":  #type:ignore[override]
+        return self._times(other)
+
+    def __rmul__(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent | LiquidMixtureDefinitionComponent":  #type:ignore[override]
+        return self._times(other)
+
 
 class PureGasProperties(BaseGasProperties):
     """
@@ -1604,6 +1662,135 @@ class PureSolidProperties(BaseSolidProperties):
             return self
         else:
             return None
+
+class SaltProperties(PureSolidProperties):
+    r"""
+    A salt, i.e. the pair of ions that "1 mM NaCl" means, together with the stoichiometry that makes
+    the solution electroneutral.
+
+    A salt is a solid, and a recipe: what it is *for* is to be dissolved, which is what multiplying
+    it by a concentration does::
+
+        mix = Mixture(water + 20*percent*glycerol + 1*milli*molar*get_salt("NaCl"))
+
+    Subclasses name their two ions and are registered with
+    :py:meth:`MaterialProperties.register`; :py:mod:`pyoomph.materials.ions` ships the common ones
+    and :py:func:`get_salt` fetches them. The ions themselves are pulled from the ion library when
+    the salt is constructed, so a salt cannot name an ion that does not exist.
+
+    The stoichiometry is *derived* from the two charge numbers rather than parsed out of the name:
+    :math:`\nu_+=|z_-|/g` and :math:`\nu_-=z_+/g` with :math:`g=\gcd(z_+,|z_-|)`, which is the only
+    ratio that is electroneutral. For every standard salt this reproduces the formula the name
+    already carries -- Na2SO4 comes out as 2:1 because sulfate is divalent, not because the name
+    contains a 2.
+    """
+    #: Name of the cation in the ion library, e.g. ``"Na+"``.
+    cation_name:str
+    #: Name of the anion in the ion library, e.g. ``"Cl-"``.
+    anion_name:str
+
+    def __init__(self):
+        super().__init__()
+        #: The cation, an :py:class:`IonProperties` from the library.
+        self.cation=get_ion(self.cation_name)
+        #: The anion.
+        self.anion=get_ion(self.anion_name)
+        if self.cation.charge_number<0 or self.anion.charge_number>0:
+            raise ValueError("Salt '"+self.name+"' names '"+self.cation_name+"' as its cation and '"+
+                             self.anion_name+"' as its anion, but their charge numbers are "+
+                             str(self.cation.charge_number)+" and "+str(self.anion.charge_number))
+        g=math.gcd(self.cation.charge_number,-self.anion.charge_number)
+        #: Number of cations per formula unit, e.g. 2 for Na2SO4.
+        self.cation_stoichiometry=-self.anion.charge_number//g
+        #: Number of anions per formula unit, e.g. 2 for CaCl2.
+        self.anion_stoichiometry=self.cation.charge_number//g
+        self.molar_mass=self.cation_stoichiometry*self.cation.molar_mass \
+                        +self.anion_stoichiometry*self.anion.molar_mass
+
+    def dissolve_in(self,liquid:"BaseLiquidProperties",concentration:ExpressionOrNum)->None:
+        """
+        Dissolve this salt in a liquid at the given concentration *of the salt*, i.e. what
+        :py:meth:`BaseLiquidProperties.add_salt` means by it.
+
+        The ions are handed over as copies, so dissolving one salt object in two liquids does not
+        give the two liquids the same ion objects -- the same isolation ``get_ion`` gives by handing
+        out a fresh instance per call.
+        """
+        liquid.add_salt(copy.copy(self.cation),copy.copy(self.anion),concentration)
+
+    def __mul__(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent":
+        return DissolvedSpeciesComponent(self,other)
+
+    def __rmul__(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent":
+        return DissolvedSpeciesComponent(self,other)
+
+    def __repr__(self)->str:
+        return "Salt("+self.name+": "+str(self.cation_stoichiometry)+" "+self.cation.name+" + "+ \
+               str(self.anion_stoichiometry)+" "+self.anion.name+")"
+
+
+class DissolvedSpeciesComponent:
+    r"""
+    A salt or a single ion at a given concentration, waiting for a solvent.
+
+    This is what ``1*milli*molar*get_salt("NaCl")`` is, and it is deliberately *not* a
+    :py:class:`MixtureDefinitionComponent`: the solvent components of a mixture are fractions that
+    must sum to unity, while a dissolved species is a concentration and stays out of that
+    bookkeeping entirely. Physically that is the dilute-solute assumption -- 1 mM NaCl is 6e-5 by
+    mass, and pretending it displaces some of the water would be a bigger error than ignoring it.
+    :py:meth:`mass_fraction_in` is there to check that assumption when it matters.
+    """
+    def __init__(self,species:"SaltProperties | IonProperties",concentration:ExpressionOrNum):
+        # assert_dimensional_value lets a plain number through without ever looking at the required
+        # unit, so a dimensionless factor has to be caught here or "0.2*NaCl" would silently become
+        # a concentration of 0.2 mol/m^3.
+        if isinstance(concentration,(float,int)):
+            raise ValueError("Expected a dimensional quantity with unit "+str(mol/meter**3)+
+                             " for how much "+species.name+" is dissolved, but got the plain "+
+                             "number "+str(concentration)+". A salt is given by concentration, "+
+                             "e.g. 1*milli*molar*"+species.name+".")
+        _,_=assert_dimensional_value(concentration,required_unit=mol/meter**3)
+        self.species=species
+        self.concentration=concentration
+
+    def dissolve_in(self,liquid:"BaseLiquidProperties")->None:
+        """Put this species into the liquid's ion table."""
+        if isinstance(self.species,SaltProperties):
+            self.species.dissolve_in(liquid,self.concentration)
+        else:
+            liquid.add_ion(copy.copy(self.species),self.concentration)
+
+    def mass_fraction_in(self,liquid:"BaseLiquidProperties",
+                         temperature:ExpressionNumOrNone=None)->ExpressionOrNum:
+        r""":math:`c M/\rho`, i.e. how much of the solution's mass this species actually is -- the
+        quantity the dilute-solute assumption above says is negligible."""
+        return self.concentration*self.species.molar_mass \
+               /liquid.get_reference_mass_density(temperature)
+
+    def __radd__(self,other:"MixtureDefinitionComponent | MixtureDefinitionComponents | MaterialProperties | DissolvedSpeciesComponent | Literal[0]")->"LiquidMixtureDefinitionComponents":
+        if other==0:   # sum(...) starts at 0
+            return LiquidMixtureDefinitionComponents([],dissolved=[self])
+        if isinstance(other,DissolvedSpeciesComponent):
+            return LiquidMixtureDefinitionComponents([],dissolved=[other,self])
+        if isinstance(other,LiquidMixtureDefinitionComponents):
+            return LiquidMixtureDefinitionComponents(other.lst,dissolved=other.dissolved+[self])
+        if isinstance(other,LiquidMixtureDefinitionComponent):
+            return LiquidMixtureDefinitionComponents([other],dissolved=[self])
+        if isinstance(other,PureLiquidProperties):
+            return LiquidMixtureDefinitionComponents([LiquidMixtureDefinitionComponent(other,None)],
+                                                     dissolved=[self])
+        raise RuntimeError("Cannot dissolve "+str(self)+" in "+str(other)+
+                           ": only liquids and liquid mixtures can carry dissolved species")
+
+    def __add__(self,other:"MixtureDefinitionComponent | MixtureDefinitionComponents | MaterialProperties | DissolvedSpeciesComponent")->"LiquidMixtureDefinitionComponents":
+        res=self.__radd__(other)
+        # __radd__ appends self last, which is right when self is on the right of the +. Here it is
+        # on the left, and the order of the dissolved species is what get_ions() sorts anyway.
+        return res
+
+    def __repr__(self)->str:
+        return "DissolvedSpecies("+str(self.concentration)+" of "+self.species.name+")"
+
 
 class UNIFACPyoomphExpressionGenerator(UNIFACExpressionGeneratorBase):
     def get_molefrac_var(self,name:str) -> Expression:
@@ -2135,10 +2322,12 @@ def get_pure_material(state_of_matter:str,name:str | list[str],return_class:bool
             table=MaterialProperties.library[state_of_matter]["pure"]
             # The ions are pure liquids as well, but listing all of them here buries the handful of
             # solvents the user is actually looking for.
-            plain=sorted(n for n,c in table.items() if not (isinstance(c,type) and issubclass(c,IonProperties)))
+            plain=sorted(n for n,c in table.items()
+                         if not (isinstance(c,type) and issubclass(c,(IonProperties,SaltProperties))))
             print("Available pure " + state_of_matter + " components: " + str(plain))
             if len(plain)<len(table):
-                print("(plus " + str(len(table)-len(plain)) + " registered ions, see get_ion())")
+                print("(plus " + str(len(table)-len(plain)) + " registered ions/salts, see "
+                      + "get_ion() and get_salt())")
             raise RuntimeError(
                 "Cannot find any materials named '" + name + "' and in state '" + state_of_matter + "'. Make sure to import the corresponding python file, where these component is defined or define it yourself. For examples, please have a look at " + os.path.realpath(
                     os.path.join(os.path.dirname(os.path.realpath(__file__)), "default_materials.py")))
@@ -2268,6 +2457,54 @@ def get_ion(name:str | list[str],return_class:bool=False)->IonProperties | type[
         raise RuntimeError("Cannot find any ion named '"+name+"'. Registered ions: "+
                            str(sorted(known.keys()))+". The standard ions are registered by "+
                            "importing pyoomph.materials.ions; a new one is declared with new_ion().")
+    cls=known[name]
+    return cls if return_class else cls()
+
+
+def _registered_salts()->"dict[str,type[SaltProperties]]":
+    """Everything in the pure-solid table that is a salt, keyed by name."""
+    return {n:c for n,c in MaterialProperties.library["solid"]["pure"].items()
+            if isinstance(c,type) and issubclass(c,SaltProperties)}
+
+
+@overload
+def get_salt(name:str,return_class:Literal[False]=...)->SaltProperties: ...
+
+@overload
+def get_salt(name:str,return_class:Literal[True])->type[SaltProperties]: ...
+
+@overload
+def get_salt(name:list[str],return_class:Literal[False]=...)->tuple[SaltProperties,...]: ...
+
+@overload
+def get_salt(name:list[str],return_class:Literal[True])->tuple[type[SaltProperties],...]: ...
+
+def get_salt(name:str | list[str],return_class:bool=False)->SaltProperties | type[SaltProperties] | tuple[SaltProperties, ...] | tuple[type[SaltProperties], ...]:
+    """
+    Returns the salt of the given name(s) from the material library, in the same way
+    :py:func:`get_pure_liquid` and :py:func:`get_ion` do. Import :py:mod:`pyoomph.materials.ions`
+    for the standard library, or register your own :py:class:`SaltProperties` subclass.
+
+    Constructing a salt pulls its two ions out of the ion library, so what you get back already
+    knows their valences, diffusivities and molar masses. Multiply it by a concentration to dissolve
+    it::
+
+        mix = Mixture(water + 20*percent*glycerol + 1*milli*molar*get_salt("NaCl"))
+
+    Args:
+        name: Name of the salt(s), e.g. ``"NaCl"``.
+        return_class: Return the class instead of an instance of the class.
+
+    Returns:
+        The salt properties as object(s) or class(es).
+    """
+    if isinstance(name,(list,tuple)):
+        return tuple(cast("SaltProperties",get_salt(n,return_class)) for n in name) #type:ignore
+    known=_registered_salts()
+    if name not in known:
+        raise RuntimeError("Cannot find any salt named '"+name+"'. Registered salts: "+
+                           str(sorted(known.keys()))+". The standard salts are registered by "+
+                           "importing pyoomph.materials.ions.")
     cls=known[name]
     return cls if return_class else cls()
 
@@ -2499,6 +2736,9 @@ def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyM
 
     Args:
         mdef: Either a pure substance or a mixture like ``get_pure_liquid("water")+0.5*get_pure_liquid("ethanol")``.
+            Salts and ions may be added by *concentration* -- ``+ 1*milli*molar*get_salt("NaCl")`` --
+            in which case they are dissolved in the finished mixture rather than counted among the
+            fractions, see :py:class:`DissolvedSpeciesComponent`.
         temperature: The temperature of the mixture. Used for potential initial conditions and required if you want to use e.g. volume fractions or relative humidity as mixture quantity.
         quantity: Specifies the quantity definition of the mixture. Can be either ``"mass_fraction"``, ``"volume_fraction"``, ``"molar_fraction"``, or ``"relative_humidity"``.
         pressure: Absolute pressure. Necessary for particular conversions.
@@ -2507,13 +2747,30 @@ def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyM
         The properties of the mixture from the material library.
     """
     if isinstance(mdef,MixtureDefinitionComponents):
+        if not mdef.lst:
+            raise RuntimeError("A dissolved species needs a solvent: "+str(mdef.dissolved))
         res,init=mdef.finalise(quantity,temperature=temperature,pressure=pressure)
         props=get_mixture_properties(*tuple(res))
         for e,k in init.items():
             props.initial_condition["massfrac_"+e]=k
         if temperature is not None:
             props.initial_condition["temperature"]=temperature
+        # Salts and ions last: they are concentrations, so they take no part in the fractions above
+        # and only need the solvent to exist.
+        if mdef.dissolved:
+            if any(props is c for c in res):
+                # A one-component "mixture" is the very object that was passed in, so dissolving
+                # here would put the ions into the caller's own `water` -- and the next Mixture
+                # built from that same object would inherit them. Seen as a KCl solution reporting
+                # the Ca2+ of an unrelated mixture built one line earlier.
+                props=_with_its_own_ion_table(props)
+            for d in mdef.dissolved:
+                d.dissolve_in(cast(BaseLiquidProperties,props))
         return props
+    elif isinstance(mdef,DissolvedSpeciesComponent):
+        raise RuntimeError("A dissolved species needs a solvent: "+str(mdef)+
+                           ". Write e.g. Mixture(water+"+str(mdef.concentration)+"*"+
+                           mdef.species.name+") instead.")
     elif isinstance(mdef,LiquidMixtureDefinitionComponent): 
         return Mixture(LiquidMixtureDefinitionComponents([mdef]),temperature=temperature,quantity=quantity,pressure=pressure)
     elif isinstance(mdef,GasMixtureDefinitionComponent): 
@@ -2529,6 +2786,19 @@ def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyM
     else:
         raise RuntimeError("Handle this case"+str(mdef))
 
+
+
+def _with_its_own_ion_table(props:"AnyMaterialProperties")->"AnyMaterialProperties":
+    """A copy of a material that does not share the containers a dissolved species writes into.
+
+    Shallow otherwise: everything else about the material is read-only as far as dissolving is
+    concerned, and a deep copy of a material full of GiNaC expressions is neither cheap nor needed.
+    """
+    res=copy.copy(props)
+    for attr in ("_ion_table","_bulk_concentrations","initial_condition"):
+        if hasattr(res,attr):
+            setattr(res,attr,copy.copy(getattr(res,attr)))
+    return res
 
 
 def new_pure_liquid(name:str,mass_density:ExpressionOrNum=1000*kilogram/meter**3,dynamic_viscosity:ExpressionOrNum=1*milli*pascal*second,surface_tension:ExpressionOrNum=70*milli*newton/meter,molar_mass:ExpressionOrNum=50*gram/mol,override:bool=False,thermal_conductivity:ExpressionNumOrNone=None,specific_heat_capacity:ExpressionNumOrNone=None,latent_heat:ExpressionNumOrNone=None,vapor_pressure:ExpressionNumOrNone=None) -> PureLiquidProperties:

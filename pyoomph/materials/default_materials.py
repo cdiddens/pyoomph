@@ -112,6 +112,11 @@ class PureLiquidGlycerol(PureLiquidProperties):
         # https://en.wikipedia.org/wiki/Glycerol
         self.molar_mass = 92.094 * gram / mol
 
+        # Malmberg & Maryott, J. Res. Natl. Bur. Stand. 56 (1956) 1: 42.5 at 25 C. Not set as a
+        # correlation because the temperature dependence is not needed here; a mixture does not
+        # average this automatically, see get_absolute_permittivity.
+        self.relative_permittivity = 42.5
+
         self.dynamic_viscosity = 1 * pascal * second  ##TODO Correct ones here
 
         # https://en.wikipedia.org/wiki/Glycerol

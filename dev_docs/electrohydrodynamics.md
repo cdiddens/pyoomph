@@ -468,6 +468,42 @@ The reference viscosity is water at 25 °C *as pyoomph's own correlation gives i
 not the 0.890 the tables were measured at: the correction has to be exactly 1 for an aqueous
 solution at the table temperature, and a test pins the constant to the correlation.
 
+**Salts are recipes, and a mixture can carry them.** `pyoomph/materials/ions.py` also registers the
+common salts and strong acids as `SaltProperties`, which is a `PureSolidProperties` (a salt *is* a
+solid) naming two ions. `get_salt("NaCl")` pulls those ions out of the ion library when the salt is
+constructed, so a salt cannot name an ion that does not exist, and the stoichiometry is **derived
+from the two charge numbers** rather than parsed out of the name: `nu+ = |z-|/g`, `nu- = z+/g`. For
+every registered salt that reproduces the formula the name already carries — Na2SO4 comes out 2:1
+because sulfate is divalent — and a test checks the derived molar masses against the textbook ones.
+
+Multiplying a salt by a concentration gives a `DissolvedSpeciesComponent`, which `Mixture` accepts
+alongside the solvent fractions:
+
+    mix = Mixture(water + 20*percent*glycerol + 1*milli*molar*get_salt("NaCl"))
+
+The dissolved species deliberately do **not** live in the fraction list. Solvent fractions must sum
+to unity; a concentration is not one of those, and at 1 mM a salt is 6e-5 of the solution by mass, so
+pretending it displaces some of the water would be a larger error than ignoring it.
+`DissolvedSpeciesComponent.mass_fraction_in` is there for when that assumption needs checking. The
+same applies to a bare ion: `c*ion` dissolves it, while `fraction*ion` keeps the mixture-component
+meaning an ion inherits from `PureLiquidProperties` — the units are what tell the two apart, and a
+salt accepts only the former.
+
+Two traps this hit, both now tested:
+
+* **A one-component "mixture" is the object you passed in.** `get_mixture_properties(water)` returns
+  that same `water`, so dissolving into it put the ions into the caller's material, and the next
+  `Mixture` built from the same object inherited them — seen as a KCl solution reporting the Ca2+ of
+  an unrelated mixture built one line earlier. `Mixture` now gives the material its own ion table
+  before dissolving. `SaltProperties.dissolve_in` likewise hands over copies of its ions.
+* **A mixture has no `name`, only `components`.** Three error paths interpolated `self.name` and so
+  raised `AttributeError` instead of their message, exactly when a mixture was involved.
+  `MaterialProperties.describe()` is what they use now.
+
+A mixture's permittivity is still not averaged automatically — linear mixing is a poor rule for it —
+but glycerol now carries one (42.5), so `set_by_weighted_average("relative_permittivity")` is an
+available answer, and the error message says so.
+
 **Ion names are not field names.** A chemist writes `"Na+"` and `"Cl-"`, and `add_salt` should accept
 that, but a pyoomph field name may only contain letters, digits and underscores. `ion_fieldname_stem`
 maps `+` → `_p` and `-` → `_m` and anything else invalid to `_`, so `"Na+"` is solved for as

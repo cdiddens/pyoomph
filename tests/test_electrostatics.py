@@ -1119,13 +1119,15 @@ def test_unset_electric_properties_stay_unset():
     # a material that never sets these must not appear to have them. Assigning None in __init__
     # would silently break both.
     import pyoomph.materials.default_materials  # noqa: F401
-    from pyoomph.materials.generic import get_pure_liquid
-    glycerol = get_pure_liquid("glycerol")
-    assert "relative_permittivity" in glycerol.possible_properties
-    assert not hasattr(glycerol, "relative_permittivity")
-    assert not hasattr(glycerol, "electric_conductivity")
+    from pyoomph.materials.generic import new_pure_liquid
+    # A throwaway rather than a library material: this used to use glycerol, until glycerol was
+    # given a permittivity, at which point the test was pinning the data instead of the mechanism.
+    plain = new_pure_liquid("_liquid_without_electric_properties", override=True)
+    assert "relative_permittivity" in plain.possible_properties
+    assert not hasattr(plain, "relative_permittivity")
+    assert not hasattr(plain, "electric_conductivity")
     with pytest.raises(RuntimeError, match="does not define a relative_permittivity"):
-        glycerol.get_absolute_permittivity()
+        plain.get_absolute_permittivity()
 
 
 def test_add_salt_is_electroneutral_for_asymmetric_valences():
@@ -1327,6 +1329,146 @@ def test_add_salt_takes_per_ion_overrides_and_insists_on_the_order():
                  / (1e-9 * meter ** 2 / second)) == pytest.approx(1.0)
     with pytest.raises(ValueError, match="cation first"):
         get_pure_liquid("water").add_salt("Cl-", "Na+", 1 * milli * mol / liter)
+
+
+# ---------------------------------------------------------------------------------------------
+# Salts, and dissolving them into a mixture
+# ---------------------------------------------------------------------------------------------
+
+def _lib():
+    import pyoomph.materials.default_materials  # noqa: F401
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import get_pure_liquid, get_salt, get_ion, Mixture
+    return get_pure_liquid, get_salt, get_ion, Mixture
+
+
+@pytest.mark.parametrize("name,cation,anion,nu,molar_mass", [
+    ("NaCl", "Na+", "Cl-", (1, 1), 58.44),
+    ("CaCl2", "Ca2+", "Cl-", (1, 2), 110.98),
+    ("Na2SO4", "Na+", "SO4 2-", (2, 1), 142.04),
+    ("AlCl3", "Al3+", "Cl-", (1, 3), 133.34),
+    ("H2SO4", "H+", "SO4 2-", (2, 1), 98.08),
+    ("KH2PO4", "K+", "H2PO4-", (1, 1), 136.09),
+])
+def test_salt_stoichiometry_comes_from_the_charge_numbers(name, cation, anion, nu, molar_mass):
+    # The formula in the name is a label; the stoichiometry is derived from electroneutrality. That
+    # the two agree for every registered salt is the check -- Na2SO4 is 2:1 because sulfate is
+    # divalent, not because the name contains a 2.
+    _, get_salt, _, _ = _lib()
+    salt = get_salt(name)
+    assert salt.cation.name == cation and salt.anion.name == anion
+    assert (salt.cation_stoichiometry, salt.anion_stoichiometry) == nu
+    assert float(salt.molar_mass / (gram / mol)) == pytest.approx(molar_mass, rel=1e-3)
+
+
+def test_every_registered_salt_is_electroneutral():
+    import pyoomph.materials.ions  # noqa: F401
+    from pyoomph.materials.generic import _registered_salts, get_salt, get_pure_liquid
+    names = sorted(_registered_salts())
+    assert len(names) > 20
+    for n in names:
+        salt = get_salt(n)
+        w = get_pure_liquid("water")
+        salt.dissolve_in(w, 1 * milli * mol / liter)
+        assert float(w.get_net_charge_number() / (mol / meter ** 3)) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_get_salt_rejects_unknown_names():
+    _, get_salt, _, _ = _lib()
+    with pytest.raises(RuntimeError, match="Cannot find any salt named"):
+        get_salt("NaClxx")
+
+
+def test_mixture_with_a_salt():
+    # The whole point of the exercise: solvent fractions and a salt concentration in one expression.
+    get_pure_liquid, get_salt, _, Mixture = _lib()
+    water, glycerol = get_pure_liquid("water"), get_pure_liquid("glycerol")
+    mix = Mixture(water + 20 * percent * glycerol + 1 * milli * molar * get_salt("NaCl"),
+                  quantity="mass_fraction")
+    assert float(mix.initial_condition["massfrac_glycerol"]) == pytest.approx(0.2)
+    assert float(mix.initial_condition["massfrac_water"]) == pytest.approx(0.8)
+    # The salt takes no part in the fractions: it is a concentration, and at 1 mM it is 6e-5 by mass.
+    assert sorted(mix.get_ions()) == ["Cl-", "Na+"]
+    for n in ("Na+", "Cl-"):
+        assert float(mix.get_bulk_concentration(n) / (mol / meter ** 3)) == pytest.approx(1.0)
+    assert float(mix.get_net_charge_number() / (mol / meter ** 3)) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_dissolving_does_not_touch_the_material_it_was_built_from():
+    # A one-component "mixture" is the very object that was passed in, so without an explicit copy
+    # the ions land in the caller's water and the next mixture inherits them.
+    get_pure_liquid, get_salt, _, Mixture = _lib()
+    water = get_pure_liquid("water")
+    a = Mixture(water + 1 * milli * molar * get_salt("CaCl2"))
+    b = Mixture(water + 2 * milli * molar * get_salt("KCl"))
+    assert sorted(a.get_ions()) == ["Ca2+", "Cl-"]
+    assert sorted(b.get_ions()) == ["Cl-", "K+"]
+    assert list(water.get_ions()) == []
+    assert float(b.get_bulk_concentration("Cl-") / (mol / meter ** 3)) == pytest.approx(2.0)
+
+
+def test_the_salt_ions_are_not_shared_between_two_solutions():
+    _, get_salt, _, Mixture = _lib()
+    from pyoomph.materials.generic import get_pure_liquid
+    salt = get_salt("NaCl")
+    a = Mixture(get_pure_liquid("water") + 1 * milli * molar * salt)
+    b = Mixture(get_pure_liquid("water") + 1 * milli * molar * salt)
+    a.get_ions()["Na+"].diffusivity = 1 * meter ** 2 / second
+    assert float(b.get_ion_diffusivity("Na+", 298.15 * kelvin)
+                 / (1e-9 * meter ** 2 / second)) == pytest.approx(1.334, rel=5e-3)
+
+
+def test_a_dissolved_species_needs_a_concentration_and_a_solvent():
+    get_pure_liquid, get_salt, _, Mixture = _lib()
+    with pytest.raises(ValueError, match="Expected a dimensional quantity"):
+        0.2 * get_salt("NaCl")                       # a mass fraction is not how a salt is given
+    with pytest.raises(RuntimeError, match="needs a solvent"):
+        Mixture(1 * milli * molar * get_salt("NaCl"))
+    from pyoomph.materials.generic import get_pure_gas
+    with pytest.raises(RuntimeError, match="Cannot dissolve"):
+        get_pure_gas("air") + 1 * milli * molar * get_salt("NaCl")
+
+
+def test_an_ion_can_be_dissolved_by_concentration_too():
+    # c*ion means "dissolved" and fraction*ion keeps the mixture-component meaning an ion inherits
+    # from PureLiquidProperties; the units are what tell the two apart.
+    get_pure_liquid, _, get_ion, Mixture = _lib()
+    from pyoomph.materials.generic import DissolvedSpeciesComponent, LiquidMixtureDefinitionComponent
+    assert isinstance(1 * milli * molar * get_ion("Na+"), DissolvedSpeciesComponent)
+    assert isinstance(0.001 * get_ion("Na+"), LiquidMixtureDefinitionComponent)
+    mix = Mixture(get_pure_liquid("water") + 2 * milli * molar * get_ion("K+")
+                  + 2 * milli * molar * get_ion("Cl-"))
+    assert sorted(mix.get_ions()) == ["Cl-", "K+"]
+    assert float(mix.get_net_charge_number() / (mol / meter ** 3)) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_the_solvent_of_a_mixture_slows_the_ions_down():
+    # The Walden correction reads the *mixture's* viscosity, so 20 wt% glycerol has to show up as a
+    # slower ion and a lower conductivity than pure water. mu goes 0.890 -> 1.53 mPa*s.
+    get_pure_liquid, get_salt, _, Mixture = _lib()
+    T = 298.15 * kelvin
+    water = get_pure_liquid("water")
+    mix = Mixture(water + 20 * percent * get_pure_liquid("glycerol")
+                  + 1 * milli * molar * get_salt("NaCl"))
+    plain = Mixture(get_pure_liquid("water") + 1 * milli * molar * get_salt("NaCl"))
+    ratio = float(mix.get_reference_dynamic_viscosity(T) / water.get_reference_dynamic_viscosity(T))
+    assert ratio == pytest.approx(1.71, rel=0.05)
+    assert float(plain.get_ion_diffusivity("Na+", T) / mix.get_ion_diffusivity("Na+", T)) \
+        == pytest.approx(ratio ** 0.94, rel=1e-6)   # the Na+ Walden exponent
+
+
+def test_a_mixture_says_what_to_do_about_its_permittivity():
+    # A mixture has no name, and reaching for one inside this error path used to turn the message
+    # into an AttributeError. Linear mixing is a poor rule for the permittivity, so it stays opt-in.
+    get_pure_liquid, get_salt, _, Mixture = _lib()
+    mix = Mixture(get_pure_liquid("water") + 20 * percent * get_pure_liquid("glycerol")
+                  + 1 * milli * molar * get_salt("NaCl"))
+    with pytest.raises(RuntimeError, match="mixture of glycerol, water"):
+        mix.get_debye_length(298.15 * kelvin)
+    mix.set_by_weighted_average("relative_permittivity")
+    T = 298.15 * kelvin
+    assert float(mix.get_absolute_permittivity(T) / epsilon_0) == pytest.approx(71.1, rel=1e-2)
+    assert float(mix.get_debye_length(T) / (nano * meter)) == pytest.approx(9.16, rel=1e-2)
 
 
 class _MaterialDrivenPNP(Problem):

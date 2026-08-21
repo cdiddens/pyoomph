@@ -29,7 +29,7 @@ The standard library of ionic species, registered the same way every other mater
 Import this module to make the common ions available by name::
 
     import pyoomph.materials.ions   # registers them
-    from pyoomph.materials import get_pure_liquid, get_ion
+    from pyoomph.materials import get_pure_liquid, get_ion, get_salt, Mixture
 
     water = get_pure_liquid("water")
     water.add_salt("Na+", "Cl-", 1*milli*mol/liter)
@@ -37,6 +37,17 @@ Import this module to make the common ions available by name::
 :py:func:`~pyoomph.materials.generic.get_ion` gets one on its own, e.g. to override a property
 before dissolving it. Anything not listed here is declared with
 :py:func:`~pyoomph.materials.generic.new_ion`, which registers it in exactly the same table.
+
+**The salts are here too**, registered the same way and fetched with
+:py:func:`~pyoomph.materials.generic.get_salt`. A salt is a recipe -- two ions, pulled from the table
+above when it is constructed, plus the stoichiometry that electroneutrality forces -- so the way to
+use one is to multiply it by a concentration and hand it to :py:func:`Mixture`::
+
+    mix = Mixture(water + 20*percent*glycerol + 1*milli*molar*get_salt("NaCl"))
+
+The salt is dissolved in the finished mixture and takes no part in the mass fractions: it is a
+concentration, and at 1 mM it is 6e-5 of the solution by mass. A single ion works the same way, and
+then it is on you to keep the set electroneutral.
 
 **The datum per ion is the limiting molar conductivity** :math:`\\lambda_i^0` at 25 °C and infinite
 dilution (CRC Handbook, Vanysek, "Ionic conductivity and diffusion at infinite dilution"), and the
@@ -374,6 +385,362 @@ class IonHydrogenPhosphate(LibraryIon):
     z = -2
     limiting_molar_conductivity_25C = 114.0
     molar_mass_amu = 95.979
+
+
+# ---------------------------------------------------------------------------------------------
+# Salts
+#
+# Each one only names its two ions: the stoichiometry follows from their charge numbers (see
+# SaltProperties), and the molar mass follows from that, so nothing here can disagree with the ion
+# table above. All of these are strong electrolytes at the concentrations these models are run at,
+# i.e. taken as fully dissociated.
+# ---------------------------------------------------------------------------------------------
+
+@MaterialProperties.register()
+class SaltSodiumChloride(SaltProperties):
+    name = "NaCl"
+    cation_name = "Na+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltPotassiumChloride(SaltProperties):
+    name = "KCl"
+    cation_name = "K+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltLithiumChloride(SaltProperties):
+    name = "LiCl"
+    cation_name = "Li+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltCaesiumChloride(SaltProperties):
+    name = "CsCl"
+    cation_name = "Cs+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltAmmoniumChloride(SaltProperties):
+    name = "NH4Cl"
+    cation_name = "NH4+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltCalciumChloride(SaltProperties):
+    name = "CaCl2"
+    cation_name = "Ca2+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltMagnesiumChloride(SaltProperties):
+    name = "MgCl2"
+    cation_name = "Mg2+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltBariumChloride(SaltProperties):
+    name = "BaCl2"
+    cation_name = "Ba2+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltZincChloride(SaltProperties):
+    name = "ZnCl2"
+    cation_name = "Zn2+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltCopperChloride(SaltProperties):
+    name = "CuCl2"
+    cation_name = "Cu2+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltIronIIChloride(SaltProperties):
+    name = "FeCl2"
+    cation_name = "Fe2+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltIronIIIChloride(SaltProperties):
+    name = "FeCl3"
+    cation_name = "Fe3+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltAluminiumChloride(SaltProperties):
+    name = "AlCl3"
+    cation_name = "Al3+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class SaltSodiumBromide(SaltProperties):
+    name = "NaBr"
+    cation_name = "Na+"
+    anion_name = "Br-"
+
+
+@MaterialProperties.register()
+class SaltPotassiumBromide(SaltProperties):
+    name = "KBr"
+    cation_name = "K+"
+    anion_name = "Br-"
+
+
+@MaterialProperties.register()
+class SaltSodiumIodide(SaltProperties):
+    name = "NaI"
+    cation_name = "Na+"
+    anion_name = "I-"
+
+
+@MaterialProperties.register()
+class SaltPotassiumIodide(SaltProperties):
+    name = "KI"
+    cation_name = "K+"
+    anion_name = "I-"
+
+
+@MaterialProperties.register()
+class SaltSodiumFluoride(SaltProperties):
+    name = "NaF"
+    cation_name = "Na+"
+    anion_name = "F-"
+
+
+@MaterialProperties.register()
+class SaltSodiumSulfate(SaltProperties):
+    name = "Na2SO4"
+    cation_name = "Na+"
+    anion_name = "SO4 2-"
+
+
+@MaterialProperties.register()
+class SaltPotassiumSulfate(SaltProperties):
+    name = "K2SO4"
+    cation_name = "K+"
+    anion_name = "SO4 2-"
+
+
+@MaterialProperties.register()
+class SaltLithiumSulfate(SaltProperties):
+    name = "Li2SO4"
+    cation_name = "Li+"
+    anion_name = "SO4 2-"
+
+
+@MaterialProperties.register()
+class SaltMagnesiumSulfate(SaltProperties):
+    name = "MgSO4"
+    cation_name = "Mg2+"
+    anion_name = "SO4 2-"
+
+
+@MaterialProperties.register()
+class SaltCopperSulfate(SaltProperties):
+    name = "CuSO4"
+    cation_name = "Cu2+"
+    anion_name = "SO4 2-"
+
+
+@MaterialProperties.register()
+class SaltZincSulfate(SaltProperties):
+    name = "ZnSO4"
+    cation_name = "Zn2+"
+    anion_name = "SO4 2-"
+
+
+@MaterialProperties.register()
+class SaltIronIISulfate(SaltProperties):
+    name = "FeSO4"
+    cation_name = "Fe2+"
+    anion_name = "SO4 2-"
+
+
+@MaterialProperties.register()
+class SaltSodiumNitrate(SaltProperties):
+    name = "NaNO3"
+    cation_name = "Na+"
+    anion_name = "NO3-"
+
+
+@MaterialProperties.register()
+class SaltPotassiumNitrate(SaltProperties):
+    name = "KNO3"
+    cation_name = "K+"
+    anion_name = "NO3-"
+
+
+@MaterialProperties.register()
+class SaltAmmoniumNitrate(SaltProperties):
+    name = "NH4NO3"
+    cation_name = "NH4+"
+    anion_name = "NO3-"
+
+
+@MaterialProperties.register()
+class SaltSilverNitrate(SaltProperties):
+    name = "AgNO3"
+    cation_name = "Ag+"
+    anion_name = "NO3-"
+
+
+@MaterialProperties.register()
+class SaltCalciumNitrate(SaltProperties):
+    name = "Ca(NO3)2"
+    cation_name = "Ca2+"
+    anion_name = "NO3-"
+
+
+@MaterialProperties.register()
+class SaltMagnesiumNitrate(SaltProperties):
+    name = "Mg(NO3)2"
+    cation_name = "Mg2+"
+    anion_name = "NO3-"
+
+
+@MaterialProperties.register()
+class SaltSodiumPerchlorate(SaltProperties):
+    name = "NaClO4"
+    cation_name = "Na+"
+    anion_name = "ClO4-"
+
+
+@MaterialProperties.register()
+class SaltLithiumPerchlorate(SaltProperties):
+    name = "LiClO4"
+    cation_name = "Li+"
+    anion_name = "ClO4-"
+
+
+@MaterialProperties.register()
+class SaltSodiumBicarbonate(SaltProperties):
+    name = "NaHCO3"
+    cation_name = "Na+"
+    anion_name = "HCO3-"
+
+
+@MaterialProperties.register()
+class SaltSodiumCarbonate(SaltProperties):
+    name = "Na2CO3"
+    cation_name = "Na+"
+    anion_name = "CO3 2-"
+
+
+@MaterialProperties.register()
+class SaltPotassiumCarbonate(SaltProperties):
+    name = "K2CO3"
+    cation_name = "K+"
+    anion_name = "CO3 2-"
+
+
+@MaterialProperties.register()
+class SaltSodiumAcetate(SaltProperties):
+    name = "CH3COONa"
+    cation_name = "Na+"
+    anion_name = "CH3COO-"
+
+
+@MaterialProperties.register()
+class SaltSodiumDihydrogenPhosphate(SaltProperties):
+    name = "NaH2PO4"
+    cation_name = "Na+"
+    anion_name = "H2PO4-"
+
+
+@MaterialProperties.register()
+class SaltPotassiumDihydrogenPhosphate(SaltProperties):
+    name = "KH2PO4"
+    cation_name = "K+"
+    anion_name = "H2PO4-"
+
+
+@MaterialProperties.register()
+class SaltDisodiumHydrogenPhosphate(SaltProperties):
+    name = "Na2HPO4"
+    cation_name = "Na+"
+    anion_name = "HPO4 2-"
+
+
+@MaterialProperties.register()
+class SaltDipotassiumHydrogenPhosphate(SaltProperties):
+    name = "K2HPO4"
+    cation_name = "K+"
+    anion_name = "HPO4 2-"
+
+
+@MaterialProperties.register()
+class SaltSodiumHydroxide(SaltProperties):
+    name = "NaOH"
+    cation_name = "Na+"
+    anion_name = "OH-"
+
+
+@MaterialProperties.register()
+class SaltPotassiumHydroxide(SaltProperties):
+    name = "KOH"
+    cation_name = "K+"
+    anion_name = "OH-"
+
+
+@MaterialProperties.register()
+class SaltLithiumHydroxide(SaltProperties):
+    name = "LiOH"
+    cation_name = "Li+"
+    anion_name = "OH-"
+
+
+# The strong acids and bases dissociate the same way and are the same object here. H2SO4 is the one
+# idealization worth naming: only its first proton is strong, and treating it as 2 H+ + SO4(2-) is
+# right at the dilute end and increasingly wrong towards molar, where HSO4- is a real species.
+
+@MaterialProperties.register()
+class AcidHydrochloric(SaltProperties):
+    name = "HCl"
+    cation_name = "H+"
+    anion_name = "Cl-"
+
+
+@MaterialProperties.register()
+class AcidHydrobromic(SaltProperties):
+    name = "HBr"
+    cation_name = "H+"
+    anion_name = "Br-"
+
+
+@MaterialProperties.register()
+class AcidNitric(SaltProperties):
+    name = "HNO3"
+    cation_name = "H+"
+    anion_name = "NO3-"
+
+
+@MaterialProperties.register()
+class AcidSulfuric(SaltProperties):
+    name = "H2SO4"
+    cation_name = "H+"
+    anion_name = "SO4 2-"
+
+
+@MaterialProperties.register()
+class AcidPerchloric(SaltProperties):
+    name = "HClO4"
+    cation_name = "H+"
+    anion_name = "ClO4-"
 
 
 from ..typings import _set_public_api

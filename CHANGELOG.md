@@ -12,6 +12,29 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Added
 
+- **Salts, and mixtures that carry them.** `pyoomph.materials.ions` also registers the common salts
+  and strong acids, and `get_salt("NaCl")` fetches one the way `get_ion` and `get_pure_liquid` fetch
+  theirs. A salt names two ions and pulls them out of the ion library when it is constructed, so it
+  cannot name an ion that does not exist; the stoichiometry is *derived* from the two charge numbers
+  rather than parsed out of the name, which is why Na2SO4 comes out 2:1 -- sulfate is divalent, not
+  because the name contains a 2. Multiplying a salt by a concentration dissolves it, and `Mixture`
+  now takes that alongside the solvent fractions:
+
+      mix = Mixture(water + 20*percent*glycerol + 1*milli*molar*get_salt("NaCl"))
+
+  The dissolved species stay out of the fraction bookkeeping: fractions must sum to unity and a
+  concentration is not one of them, and at 1 mM a salt is 6e-5 of the solution by mass, so pretending
+  it displaces some of the water would be a bigger error than ignoring it
+  (`DissolvedSpeciesComponent.mass_fraction_in` is there when that needs checking). A single ion
+  works the same way -- `c*ion` dissolves it while `fraction*ion` keeps the mixture-component meaning
+  an ion inherits from `PureLiquidProperties`, with the units telling the two apart. `molar`
+  (mol/litre) joined the units. Because the Walden correction reads the *mixture's* viscosity, 20 wt%
+  glycerol slows Na+ from 1.33e-9 to 8.0e-10 m^2/s and drops the conductivity of 1 mM NaCl from 12.6
+  to 7.6 mS/m without any of that being wired up separately. Glycerol also gained its measured
+  relative permittivity (42.5); a mixture still does not average that automatically, since linear
+  mixing is a poor rule for it, but the error now names
+  `set_by_weighted_average('relative_permittivity')` as the way to ask.
+
 - **A library of ionic species, `pyoomph.materials.ions`.** The 28 common ions (H+ through HPO4 2-)
   are registered with the same `@MaterialProperties.register()` decorator every other material uses,
   and `get_ion("Na+")` fetches one exactly as `get_pure_liquid` and `get_surfactant` do -- a fresh
