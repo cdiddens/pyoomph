@@ -24,6 +24,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "pointlocator.hpp"
 #include "meshtemplate.hpp"
 #include "exception.hpp"
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <functional>
@@ -4872,6 +4873,10 @@ namespace pyoomph
     }
   }
 
+  // Defined further down, next to the ElementModeFit/sample_local_coordinates it reuses.
+  static void set_DL_initial_condition(BulkElementBase *el, DynamicJITCode *ci, const JITFuncSpec_Table_FiniteElement_t *ft,
+                                       double *normal, unsigned icindex);
+
   // Evaluate and assign the named initial-condition set ic_name to every dof of every element in this
   // mesh, at every stored time-history level. If this mesh has a well-defined normal (codim-1, i.e.
   // nodal_dim == element_dim+1), first precomputes an averaged unit nodal normal at every node
@@ -5094,49 +5099,12 @@ namespace pyoomph
       for (unsigned int i = 0; i < xlagr.size(); i++)
         x_lagr[i] = xlagr[i];
 
-      for (unsigned int fieldindex = 0; fieldindex < el->get_jit_code()->get_func_table()->info_DL.numfields; fieldindex++)
-      {
-        oomph::Vector<double> np(el->nodal_dimension(), 0.0);
-        oomph::Vector<double> np_lagr(el->nodal_dimension(), 0.0);
-        oomph::Vector<double> s(el->dim(), 0.5 * (el->s_min() + el->s_max()));
-        for (unsigned int j = 0; j < s.size(); j++)
-        {
-          double old = s[j];
-          s[j] = el->s_min();
-          el->interpolated_x(s, np);
-          el->interpolated_xi(s, np_lagr);
-          for (unsigned int i = 0; i < xcenter.size(); i++)
-            x_buffer[i] = np[i];
-          for (unsigned int i = 0; i < xlagr.size(); i++)
-            x_lagr[i] = np_lagr[i];
-          Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
-
-          auto *ts = this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new)->time_stepper_pt();
-          oomph::Vector<double> vmin(ts->ntstorage());
-          for (unsigned t = 0; t < vmin.size(); t++)
-            vmin[t] = this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new)->value(t, 0);
-
-          s[j] = el->s_max();
-          el->interpolated_x(s, np);
-          el->interpolated_xi(s, np_lagr);
-          for (unsigned int i = 0; i < xcenter.size(); i++)
-            x_buffer[i] = np[i];
-          for (unsigned int i = 0; i < xlagr.size(); i++)
-            x_lagr[i] = np_lagr[i];
-          Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
-          oomph::Vector<double> vmax(ts->ntstorage());
-          for (unsigned t = 0; t < vmax.size(); t++)
-            vmax[t] = this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new)->value(t, 0);
-
-          double denom = el->s_max() - el->s_min();
-          for (unsigned t = 0; t < vmax.size(); t++)
-            this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new)->set_value(t, j + 1, (vmax[t] - vmin[t]) / denom);
-
-          s[j] = old;
-        }
-
-        Generic_SetInitialCondition(el, this->element_pt(ei)->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new), el->get_jit_code(), fieldindex + ft->info_DL.buffer_offset_basebulk, 0, x_buffer, x_lagr, normal, false, false, ic_index);
-      }
+      // DL is fitted, not sampled at one point: its 1+dim coefficients live in the shape_at_s_DL
+      // basis, so a value at the midpoint plus a finite difference along each LOCAL coordinate - which
+      // is what this used to do - is not the same thing, and did not reproduce even a linear field.
+      // Sampling the IC on a lattice and least-squares fitting it onto that basis does, and reuses the
+      // fitter the adaptation/remeshing transfer already uses.
+      set_DL_initial_condition(el, el->get_jit_code(), ft, normal, ic_index);
 
       for (unsigned int i = 0; i < xcenter.size(); i++)
         x_buffer[i] = xcenter[i];
@@ -6632,6 +6600,86 @@ namespace pyoomph
       }
     }
   };
+
+  // Fills the DL coefficients of one element from an initial condition, by evaluating the IC on a
+  // lattice of local sample points and least-squares fitting it onto the DL basis.
+  //
+  // This replaced a midpoint value plus a finite difference along each local coordinate, which was
+  // wrong twice over. The DL coefficients are amplitudes in the shape_at_s_DL basis, not a value and
+  // d/ds slopes, so even a linear field - which DL represents exactly - came out with the wrong
+  // gradient. And the Lagrangian sample buffer was filled under `i < xlagr.size()`, the size of
+  // get_Lagrangian_midpoint_from_local_coordinate(), i.e. the ELEMENT's nlagrangian(): that is zero
+  // whenever the equations do not use Lagrangian coordinates, while the nodes still carry xi, so an IC
+  // written in terms of lagrangian_x silently evaluated at the origin for every element and produced a
+  // uniform field. Both are gone here: the fit is in the real basis, and the samples come from
+  // interpolated_xi, bounded by what the nodes actually have.
+  static void set_DL_initial_condition(BulkElementBase *el, DynamicJITCode *ci, const JITFuncSpec_Table_FiniteElement_t *ft,
+                                       double *normal, unsigned icindex)
+  {
+    const unsigned nDL = ft->info_DL.numfields;
+    if (!nDL || !el->nnode())
+      return;
+
+    std::vector<oomph::Vector<double>> lattice;
+    sample_local_coordinates(el, lattice, 2); // DL is two modes per direction
+    std::vector<std::vector<double>> slocs(lattice.size());
+    for (unsigned p = 0; p < lattice.size(); p++)
+      slocs[p].assign(lattice[p].begin(), lattice[p].end());
+
+    ElementModeFit dlfit;
+    dlfit.build(el, slocs, -1, true);
+    if (!dlfit.nmode)
+      return;
+
+    // The physical and Lagrangian position of every sample point. nlagrangian is taken from the node,
+    // not from the element - see above.
+    const unsigned ndim = el->nodal_dimension();
+    const unsigned nlagr = static_cast<pyoomph::Node *>(el->node_pt(0))->nlagrangian();
+    std::vector<std::array<double, 3>> xs(slocs.size(), {0.0, 0.0, 0.0}), xis(slocs.size(), {0.0, 0.0, 0.0});
+    for (unsigned p = 0; p < slocs.size(); p++)
+    {
+      oomph::Vector<double> sv(lattice[p]);
+      oomph::Vector<double> np(ndim, 0.0);
+      el->interpolated_x(sv, np);
+      for (unsigned i = 0; i < ndim && i < 3; i++)
+        xs[p][i] = np[i];
+      // Interpolated from the NODES, not with interpolated_xi: that one loops over the element's
+      // nlagrangian(), which is what was zero here in the first place.
+      if (nlagr)
+      {
+        oomph::Shape psi(el->nnode());
+        el->shape(sv, psi);
+        for (unsigned n = 0; n < el->nnode(); n++)
+        {
+          auto *nod = static_cast<pyoomph::Node *>(el->node_pt(n));
+          for (unsigned i = 0; i < nlagr && i < 3; i++)
+            xis[p][i] += psi[n] * nod->xi(i);
+        }
+      }
+    }
+
+    std::vector<double> vals(slocs.size()), coeffs;
+    for (unsigned fieldindex = 0; fieldindex < nDL; fieldindex++)
+    {
+      oomph::Data *d = el->internal_data_pt(fieldindex + ft->info_DL.internal_offset_new);
+      auto *ts = d->time_stepper_pt();
+      auto *Time_pt = ts->time_pt();
+      for (unsigned t = 0; t < Time_pt->ndt(); t++)
+      {
+        const double time_local = Time_pt->time(t);
+        for (unsigned p = 0; p < slocs.size(); p++)
+        {
+          double xb[3] = {xs[p][0], xs[p][1], xs[p][2]};
+          double xl[3] = {xis[p][0], xis[p][1], xis[p][2]};
+          vals[p] = ft->InitialConditionFunc[icindex](el->get_eleminfo(), fieldindex + ft->info_DL.buffer_offset_basebulk,
+                                                      xb, xl, normal, time_local, 0, 0.0);
+        }
+        dlfit.fit(vals, coeffs);
+        for (unsigned l = 0; l < dlfit.nmode; l++)
+          d->set_value(t, l, coeffs[l]);
+      }
+    }
+  }
 
   // Local expressions can only be evaluated once the element's (and, for anything reading bulk or
   // opposite-side fields, the neighbouring elements') eleminfo buffers exist. Freshly built facet
