@@ -40,7 +40,13 @@ from ..typings import *
 
 if TYPE_CHECKING:
     from ..generic import Problem
+    from ..generic.codegen import FiniteElementCodeGenerator
     from ..materials.generic import AnyMaterialProperties, BaseInterfaceProperties
+    # AnyMaterialProperties is a string-valued TypeAlias (see materials/generic.py) whose members
+    # (MaterialProperties, PureLiquidProperties, ...) are only resolvable via a wildcard import -
+    # needed so tools that resolve forward references in type annotations (e.g. sphinx_autodoc_typehints)
+    # can look them up in this module's namespace too, same as materials/generic.py itself does.
+    from ..materials.generic import *
     from .navier_stokes import StokesEquations
 
 
@@ -790,6 +796,8 @@ class OhmicConductionEquations(ElectricPotentialEquations):
     charge, prefer the Gauss-driven pairing described in :py:class:`SurfaceChargeConservation`; use
     this class when the steady current distribution is the thing being solved for.
 
+    Other arguments are as in :py:class:`ElectricPotentialEquations`.
+
     Args:
         conductivity: The Ohmic conductivity :math:`\sigma_\mathrm{c}`.
         permittivity / relative_permittivity / fluid_props: The permittivity, needed for the stress.
@@ -797,7 +805,6 @@ class OhmicConductionEquations(ElectricPotentialEquations):
             ``permittivity_scale`` it must be the **same** in all coupled domains. Defaults to
             ``"electric_conductivity"``, i.e. a named problem-level scale.
         charge_relaxation: Not implemented, see below.
-        Other arguments as in :py:class:`ElectricPotentialEquations`.
 
     .. note::
         ``charge_relaxation=True`` raises. The bulk charge relaxation time

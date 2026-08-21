@@ -37,6 +37,7 @@ from ..typings import *
 
 if TYPE_CHECKING:
     from ..generic import Problem
+    from ..generic.codegen import FiniteElementCodeGenerator
     from ..materials.generic import BaseInterfaceProperties
 
 
@@ -294,10 +295,11 @@ class ElectricBodyForceEquations(_ElectricFlowCoupling):
     :py:class:`~pyoomph.equations.electrostatics.ElectricPotentialEquations`, whose default is to
     apply the stress route; having both is refused rather than silently doubling the force.
 
+    Other arguments are as in :py:class:`MaxwellStressEquations`.
+
     Args:
         charge_density: Overrides the charge density of the co-located potential equations.
         coulomb / dielectrophoresis: Switch the individual terms off, e.g. to isolate one effect.
-        Other arguments as in :py:class:`MaxwellStressEquations`.
     """
 
     def __init__(self,*,permittivity:ExpressionNumOrNone=None,charge_density:ExpressionNumOrNone=None,
