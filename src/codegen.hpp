@@ -262,6 +262,7 @@ namespace pyoomph
    bool operator<(const TestFunction &lhs, const TestFunction &rhs);
 
    class FiniteElementCodeSubExpression;
+   class SubExpressionsToStructs; // defined in codegen.cpp; FiniteElementCode owns one per Hessian pass
    // Lightweight GiNaC-wrapped handle to a common-subexpression-eliminated (CSE) expression: just
    // pairs the owning code with the underlying GiNaC expression. The actual bookkeeping (substitution
    // symbol, required fields, etc.) lives in FiniteElementCodeSubExpression, looked up via resolve_subexpression().
@@ -1135,6 +1136,36 @@ namespace pyoomph
       std::vector<std::vector<bool>> local_parameter_has_deriv; // Per residual, per local parameter: whether a derivative w.r.t. that parameter is required
       std::vector<GiNaC::ex> local_parameter_symbols;
       std::set<unsigned> params_declared_in_current_function; // Local parameter indices hoisted into const double locals of the generated function currently being written (managed by GlobalParameterFunctionScope, read by GiNaCGlobalParameterWrapper::print)
+      // What the Hessian pass currently being written has encountered so far: the shape expansions and
+      // test functions its body dereferences, and the fields that need a Hessian index. Cleared at the
+      // start of the pass and consumed at its end (see write_generic_Hessian), so their lifetime was
+      // always per pass - only their scope was the whole process. Every reader has the code in hand.
+      //
+      // The "_for_shapeflags" twin is the same set WITHOUT the "derived" filter, and exists for one
+      // purpose: deciding which shape families the Hessian body needs at runtime. A derived shape
+      // expansion is the bare basis function phi_i of a Jacobian/Hessian COLUMN; it must not enter the
+      // set above, because that one drives the emission of interpolated_* variables and a derived
+      // expansion carries the same variable name as its undifferentiated twin, so two entries produce
+      // two identical `double intrp_..._u=0.0;` declarations, i.e. C that does not compile. But the
+      // emitted Hessian entry DOES dereference phi_i / dphi_i/dx, so the flags have to include them.
+      std::set<ShapeExpansion> all_Hessian_shapeexps;
+      std::set<ShapeExpansion> all_Hessian_shapeexps_for_shapeflags;
+      std::set<TestFunction> all_Hessian_testfuncs;
+      std::set<FiniteElementField *, FiniteElementFieldPtrLess> all_Hessian_indices_required;
+
+      // The subexpression->struct mapper of the Hessian pass currently being written, owned here and
+      // replaced at the start of each pass by write_generic_Hessian. It used to be a file-scope
+      // pointer that was new'ed per pass, deleted only by the NEXT pass and never at teardown, and
+      // read from GiNaCSubExpression::derivative - which has the code in hand anyway, so there was
+      // never a reason for it to be ambient.
+      SubExpressionsToStructs *se_to_struct_hessian = NULL;
+
+      // Names the hoisted Jacobian/Hessian coefficient locals of this code's generated C, _hc<N> and
+      // _jc<N>. Per code and reset by write_code(): as a process-wide counter it carried over from
+      // every code generated earlier in the process, so the SAME element definition produced
+      // different C text depending on how many domains happened to be compiled before it - different
+      // text is a different JIT cache key, so the cache missed on nothing but a reordering.
+      unsigned hoist_coeff_counter = 0;
 
       // --- Buffer aliases ------------------------------------------------------------------------
       // Loop-invariant shapeinfo->/eleminfo-> accesses bound to a local pointer at the top of the
@@ -1361,6 +1392,6 @@ namespace pyoomph
 
    };
 
-   extern FiniteElementCode *__current_code; // The FiniteElementCode currently being defined/assembled (set while running Python-side _define_fields()/_define_element() callbacks); used as an implicit context by free functions that need "the current code"
+   extern thread_local FiniteElementCode *__current_code; // The FiniteElementCode currently being defined/assembled (set while running Python-side _define_fields()/_define_element() callbacks); used as an implicit context by free functions that need "the current code"
 
 }
