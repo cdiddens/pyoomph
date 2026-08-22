@@ -139,7 +139,11 @@ reaches double digits.
 
 ### 4.2 Mesh section
 
-`_dump_version` goes 0.0.1 → 0.1.0 (structural mesh section) → 0.1.1 (sharding field in the header).
+`_dump_version` goes 0.0.1 → 0.1.0 (structural mesh section) → 0.1.1 (sharding field in the header)
+→ 0.1.2 (the adaptive time stepper's suggested next dt) → 0.1.3 (the tracers' position history)
+→ 0.1.4 (interface/skeleton element data) → 0.1.5 (the endtime of the run statement that wrote
+the file, so `--runmode continue` can tell a state written mid-statement from one written by an
+earlier statement that has since finished).
 The reader branches on it and keeps reading old files; the writer only writes the new format, for
 serial runs too. That is the point — a serial and a distributed run must produce interchangeable
 files, which also means the format is exercised by every serial test.

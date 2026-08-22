@@ -732,6 +732,15 @@ class Problem(_pyoomph.Problem):
         # one step and loses one adaptation, so a continued run drifted away from the uninterrupted
         # one it is supposed to reproduce. None until the first transient solve of the session.
         self._suggested_next_dt:float | None=None
+        # Nondimensional endtime of the run statement currently executing, written into every state
+        # file it produces. On loading it goes to _loaded_run_statement_endtime, which is how a
+        # --runmode continue tells a state written in the MIDDLE of a run statement (resume it, dt and
+        # all) from one written by an earlier statement that has since finished (start the next
+        # statement normally). None until the first run statement of the session, and for state files
+        # older than 0.1.5. It is deliberately NOT cleared when a run statement returns: a state saved
+        # right after one still belongs to it.
+        self._run_statement_endtime:float | None=None
+        self._loaded_run_statement_endtime:float | None=None
         self._where_expression="True"
 
         self._dump_header = "pyoomph_dump"
@@ -739,8 +748,11 @@ class Problem(_pyoomph.Problem):
         # element/node numbering, which is what makes states of distributed problems possible at all
         # and lets serial and distributed runs read each other's files. 0.1.1 adds the sharding field
         # to the header. 0.1.2 adds the adaptive time stepper's suggested next dt. 0.1.3 adds the
-        # tracers' rolling position history, which the trail plots are drawn from. Older files still load.
-        self._dump_version = "0.1.4"
+        # tracers' rolling position history, which the trail plots are drawn from. 0.1.4 adds the
+        # interface/skeleton element data. 0.1.5 adds the endtime of the run statement that wrote the
+        # file, so a --runmode continue can tell a state written in the middle of a run statement from
+        # one written by an earlier statement that has since finished. Older files still load.
+        self._dump_version = "0.1.5"
         self._last_bc_setting="init"
 
         self._output_step:int=0
@@ -7745,6 +7757,10 @@ class Problem(_pyoomph.Problem):
 
         starttime = self.get_current_time()
         keep_state_dt=False
+        # Stamps every state file this run statement writes with which statement wrote it, so a
+        # --runmode continue can tell whether it is resuming INTO this statement or merely starting it
+        # for the first time. See _loaded_run_statement_endtime below.
+        self._run_statement_endtime=float(endtime/self.get_scaling("temporal"))
         _tfactor,_tunit=assert_dimensional_value(starttime-endtime)
         if _tfactor>=0.0:
             # Deliberately returns without clearing _continue_dt_pending: a run statement the state
@@ -7759,12 +7775,24 @@ class Problem(_pyoomph.Problem):
                 et=float(endtime/self.get_scaling("temporal"))
                 progress=(ct-self._nondim_time_after_last_run_statement)/(et-self._nondim_time_after_last_run_statement)
                 numouts=int(numouts*(1-progress))
-            timestep = self.timestepper.time_pt().dt(0) * self.get_scaling("temporal")
-            self._first_step=False # TODO This would be better stored in the state file so that a solve from state_000000 will still have it true
+            # Whether this run has already left the first (BDF1-degraded) step behind is the step
+            # counter's business, and that one comes out of the state file. Forcing it False here was
+            # wrong for a state written before any unsteady step - state_000000 of a run resumed
+            # immediately - which then skipped the degraded start the uninterrupted run took.
+            self._first_step=self.timestepper.get_num_unsteady_steps_done()==0
             # This is the run statement being resumed: the dt the run had worked its way up to is the
             # one to carry on with. Without this, startstep below would throw it away and a continued
             # adaptive run would restart from the tiny initial step after every interruption.
-            keep_state_dt=self.use_state_dt_when_continue and self._continue_dt_pending
+            # Is the state we loaded one that THIS run statement wrote, i.e. are we resuming in the
+            # middle of it? If it was written by a different statement - a script's
+            # run(0.4,timestep=A) followed by run(1.0,timestep=B), stopped after the first of them
+            # wrote its last output - then this one was never entered, and nothing about it should
+            # come from that state: it starts with its own initial step, exactly as it would in an
+            # uninterrupted run. (Without this, B silently inherited A.) Old state files carry no
+            # such stamp, so they keep the previous behaviour.
+            resuming_into_this_statement=(self._loaded_run_statement_endtime is None
+                                          or self._loaded_run_statement_endtime==self._run_statement_endtime)
+            keep_state_dt=self.use_state_dt_when_continue and self._continue_dt_pending and resuming_into_this_statement
             self._continue_dt_pending=False
             if keep_state_dt and self._suggested_next_dt is not None:
                 # Not dt(0): that is the step already taken, and resuming with it would take one extra
@@ -7772,6 +7800,15 @@ class Problem(_pyoomph.Problem):
                 # would no longer step where the uninterrupted one did. The suggestion is the step the
                 # interrupted run was about to take, so picking it up here reproduces it exactly.
                 timestep = self._suggested_next_dt * self.get_scaling("temporal")
+            elif resuming_into_this_statement and (timestep is None or temporal_error is not None):
+                # Fall back on the step the state was written at only when this run statement has no
+                # fixed step of its own to insist on. A run(timestep=dt) without temporal adaptivity
+                # does have one, and dt(0) is NOT it: the loop below shortens steps to land exactly on
+                # the output times, so the last step before a state file is routinely a clamped one.
+                # Taking that as the new nominal dt made every resumed fixed-step run continue with a
+                # shorter step than the uninterrupted one - a different time discretisation, not just
+                # a different round-off (0.037 -> 0.026 in the test case).
+                timestep = self.timestepper.time_pt().dt(0) * self.get_scaling("temporal")
 
         #TODO Further checking for the end time
         single_step_desired=False
@@ -7846,6 +7883,22 @@ class Problem(_pyoomph.Problem):
                 currentdt=1.00001*remaining*TS
 
         nextdt_was_clamped_for_output:ExpressionNumOrNone=None # When clamping a time step to hit the next output dt, enlarge it afterwards
+
+        # Undo such a clamp BEFORE writing anything, not after. output() is also where the state file
+        # is written, and the _suggested_next_dt it stores is read back by a --runmode continue as
+        # "the step the interrupted run was about to take". The step just taken was shortened to land
+        # exactly on this output time, so restoring the full step afterwards left the file holding the
+        # clamped one: every resumed run then carried on with the short step (0.037 -> 0.026 in a plain
+        # run(timestep=0.037,outstep=0.1)), which is a different time discretisation from the
+        # uninterrupted run, not a round-off away from it.
+        def _restore_clamped_nextdt(ndt:ExpressionOrNum)->ExpressionOrNum:
+            nonlocal nextdt_was_clamped_for_output
+            if nextdt_was_clamped_for_output is not None:
+                ndt=max(1.0,float(nextdt_was_clamped_for_output/ndt))*ndt
+                nextdt_was_clamped_for_output=None
+            self._suggested_next_dt=float(ndt/TS)
+            return ndt
+
         first_step=True
         while self.get_current_time(as_float=True, dimensional=False) < float(endtime / TS):
             if self._abort_current_run:
@@ -7854,7 +7907,12 @@ class Problem(_pyoomph.Problem):
             tnd = self.get_current_time(as_float=True, dimensional=False)
             if ndouttimes is not None:
                 # Check if the current timestep would exceed the next output
-                currind:int = numpy.nonzero(ndouttimes <= tnd)[0] #type:ignore
+                # The tolerance is what keeps a rounding sliver from becoming a time step, exactly as
+                # at the end of the loop. A run resumed by --runmode continue rebuilds this grid from
+                # its own start time, and the instant it is resuming AT then lands an ulp above tnd
+                # instead of on it: the clamp below asked for a dt of ~5e-17, which the Newton solver
+                # cannot converge, and a continued run(numouts=...) died on its first step.
+                currind:int = numpy.nonzero(ndouttimes <= tnd + 1e-8*float(currentdt/TS))[0] #type:ignore
                 currind = -1 if len(currind) == 0 else currind[-1] #type:ignore
                 nextndout = ndouttimes[currind + 1] #type:ignore
                 if tnd + float(currentdt / TS) * 1.01 > nextndout:
@@ -7879,19 +7937,15 @@ class Problem(_pyoomph.Problem):
                     nextdt=currentdt
 
             if isinstance(outstep,bool) and outstep == True:
+                nextdt=_restore_clamped_nextdt(nextdt)
                 self.output()
-                if nextdt_was_clamped_for_output is not None:
-                        nextdt=max(1.0,float(nextdt_was_clamped_for_output/nextdt))*nextdt
-                        nextdt_was_clamped_for_output=None
             elif outstep != False:
                 tndnew = self.get_current_time(as_float=True, dimensional=False)
                 nextindA = numpy.nonzero(ndouttimes <= tndnew)[0] #type:ignore
                 nextind:int = -1 if len(nextindA) == 0 else nextindA[-1] #type:ignore
                 if nextind > currind: #type:ignore
+                    nextdt=_restore_clamped_nextdt(nextdt)
                     self.output()
-                    if nextdt_was_clamped_for_output is not None:
-                        nextdt=max(1.0,float(nextdt_was_clamped_for_output/nextdt))*nextdt
-                        nextdt_was_clamped_for_output=None
                 else:
                     # Not an output time, so the outputs marked output_every_step still get their line
                     # here. Guarded by the else branch rather than done unconditionally: on an output
@@ -8651,6 +8705,16 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             # An older file has no suggestion in it, and whatever this session is holding belongs to a
             # different point in time. Clear it, so run() falls back to the dt that was last taken.
             self._suggested_next_dt=None
+
+        # Which run statement was executing when this was written (NaN when none was, e.g. an explicit
+        # save_state between run calls). Only a state written by the very statement we are resuming
+        # into may hand it its time step; see the continue branch of run().
+        if state.version_at_least(0,1,5):
+            _run_endtime=state.float_data(lambda: float("nan") if self._run_statement_endtime is None else self._run_statement_endtime, lambda v: v)
+            if not state.save:
+                self._loaded_run_statement_endtime=None if math.isnan(_run_endtime) else _run_endtime
+        elif not state.save:
+            self._loaded_run_statement_endtime=None
 
         # Mesh list
         nummeshes = len(self._meshdict)

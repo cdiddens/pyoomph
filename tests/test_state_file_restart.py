@@ -42,6 +42,9 @@
 # which have to be bit-identical right after loading; then the same quantities after continuing, where
 # each side has done its own Newton solves and round-off is allowed.
 
+import os
+import sys
+
 import numpy
 import pytest
 
@@ -306,3 +309,66 @@ def test_restart_reproduces_the_state_and_the_continuation(tmp_path, kind, solve
         # The continuation: each side ran its own Newton solves, so round-off is allowed - but nothing
         # more. An O(dt^2) deviation here means the restarted run is integrating differently.
         _assert_same(uninterrupted, _snapshot(reader), "continuation after loading " + kind, tol=continuation_tol)
+
+
+# --------------------------------------------------------------------------------------------------
+# The same claim for --runmode continue, which is how a state file is actually used: a killed run is
+# restarted and has to carry on where it stopped. Three ways in which it did not, all of them in the
+# bookkeeping of run() rather than in the state itself:
+#
+#  * The run loop shortens a step so it lands exactly on an output time and gives the shortening back
+#    afterwards - but the state file is written by that very output(), i.e. BEFORE the restoration, so
+#    it recorded the clamped step as "the step I was about to take". A resumed run(timestep=0.037,
+#    outstep=0.1) then continued with 0.026 forever: a different time discretisation, off by O(dt^2).
+#  * A run statement that had never been entered inherited the previous statement's time step, because
+#    the state file did not say which statement wrote it (dump version 0.1.5 does).
+#  * The output grid of a run(numouts=...) is rebuilt from the resume time, so the instant being
+#    resumed AT landed an ulp in the future and the first step asked for was ~5e-17 - which the Newton
+#    solver cannot converge, and the continued run died on the spot.
+#
+# Each variant is run three times: uninterrupted, interrupted, and resumed. Only the ODE's value at
+# the end is compared, but that is enough - it is a nonlinear driven equation, so any deviation in the
+# step sequence shows up there.
+
+def _run_worker(tmp_path, variant, outdir, abort_at=None, continue_mode=False):
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    env = dict(os.environ, PYOOMPH_VARIANT=variant)
+    env["PYOOMPH_ABORT_AT"] = "-1" if abort_at is None else str(abort_at)
+    cmd = [sys.executable, os.path.join(here, "continue_run_worker.py"), "--outdir", str(tmp_path / outdir)]
+    if continue_mode:
+        cmd += ["--runmode", "continue"]
+    proc = subprocess.run(cmd, cwd=here, env=env, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if abort_at is not None:
+        assert proc.returncode == 7, "the worker was supposed to stop mid-run:\n" + out[-3000:]
+        return None
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    final = [line for line in out.splitlines() if line.startswith("FINAL ")]
+    assert len(final) == 1, "no final line:\n" + out[-3000:]
+    return dict(part.split("=", 1) for part in final[0].split()[1:])
+
+
+# numouts is the one variant that is not bit-for-bit: its output grid is rebuilt from the resume time
+# with a different number of remaining outputs, so the instants land a couple of ulps beside the
+# original ones and the steps clamped onto them differ in the last bit. Everything else has to match
+# exactly - a restarted run that integrates the same equation with the same steps has no reason not to.
+@pytest.mark.parametrize("variant,abort_at,tol", [("fixed", 0.45, 0.0),
+                                                  ("tempadapt", 0.45, 0.0),
+                                                  ("numouts", 0.45, 1e-14),
+                                                  ("tworuns", 0.45, 0.0),
+                                                  ("tworuns", 0.75, 0.0)])
+def test_runmode_continue_reproduces_the_uninterrupted_run(tmp_path, variant, abort_at, tol):
+    tag = "%s_%s" % (variant, abort_at)
+    reference = _run_worker(tmp_path, variant, "ref_" + tag)
+    _run_worker(tmp_path, variant, "brk_" + tag, abort_at=abort_at)
+    resumed = _run_worker(tmp_path, variant, "brk_" + tag, continue_mode=True)
+
+    assert float(resumed["t"]) == float(reference["t"]), "%s: ended at a different time" % tag
+    assert resumed["steps"] == reference["steps"], (
+        "%s: the resumed run took %s steps, the uninterrupted one %s -- it is not stepping where the "
+        "original did" % (tag, resumed["steps"], reference["steps"]))
+    deviation = abs(float(resumed["u"]) - float(reference["u"]))
+    assert deviation <= tol, "%s: u differs by %.3e (tolerance %.0e)" % (tag, deviation, tol)
+    if tol == 0.0:
+        assert resumed["dts"] == reference["dts"], "%s: dt history %s vs %s" % (tag, resumed["dts"], reference["dts"])
