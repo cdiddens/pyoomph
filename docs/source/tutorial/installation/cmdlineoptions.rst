@@ -71,7 +71,7 @@ And the C compiler backend used to build the just-in-time generated code is like
 ``--fast-math``
       Activate fast-math compiler flags. Only usable together with ``--distutils`` (or the default compiler), not with ``--tcc``.
 
-      It rarely pays off. The default flags are already ``-O3 -march=native``, so for weak forms built from polynomial terms the difference is within measurement noise. The one case where it matters is a weak form containing expensive calls such as ``exp``, ``log`` or non-integer powers, which the code generator would otherwise emit once per occurrence. Wrapping those terms in :py:func:`~pyoomph.expressions.generic.subexpression` addresses that far better: the term is then evaluated once into a temporary and its derivatives are cached as well, which beats ``--fast-math`` outright and, unlike ``--fast-math``, does not change the arithmetic at all. With ``subexpression`` in place, ``--fast-math`` adds less than a percent.
+      It rarely pays off. The default flags are already quite optimized. Wrapping expensive terms in :py:func:`~pyoomph.expressions.generic.subexpression` addresses that far better: the term is then evaluated once into a temporary and its derivatives are cached as well, which beats ``--fast-math`` outright. With ``subexpression`` in place, ``--fast-math`` usually adds less than a percent.
 
 Output and code generation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -89,50 +89,22 @@ Output and code generation
       Do not use the JIT code cache (see :numref:`installenvvars`) -- always regenerate and recompile the FEM code from scratch, ignoring the ``PYOOMPH_JIT_CACHE*`` environment variables for this run.
 
 ``--distribute``
-      Distribute the mesh in parallel (MPI).
+      Distribute the mesh in parallel (MPI), see :numref:`secmpimodes` for more details.
+      
+      Some features are not available with this flag, but pyoomph will let you know.
 
-      Eigenvalue problems are solved in parallel whenever ``mpirun`` is used with more than one
-      process, whether or not ``--distribute`` is given: without it the assembled matrices are
-      replicated on every process, but the eigensolver still splits them by rows and solves once,
-      together. What ``--distribute`` adds for an eigenproblem is distributed *matrix* storage; the
-      parallel shift-and-invert factorisation, which is where the time and most of the memory go, you
-      get either way.
-
-      This requires the SLEPc eigensolver (``slepc`` or ``slepc_mumps``) and a PETSc providing a
-      parallel direct solver (MUMPS or SuperLU_DIST) for the shift-and-invert transform; if either is
-      missing, the run stops with an explanation rather than silently solving the same problem once
-      per process. The ``scipy`` eigensolver sees one process' share of the matrices only, so under
-      ``--distribute`` they are gathered onto rank 0 and the eigenproblem is solved there -- correct,
-      but not parallel, so SLEPc remains the right choice. Eigenvectors are returned at full length on
-      every process, exactly as in a serial run, so plotting and output of eigenmodes need no changes.
-
-      Bifurcation tracking, eigenbranch continuation, periodic orbit tracking / Floquet analysis,
-      Lyapunov exponents, the periodic driving response and adapting the mesh to an eigenfunction
-      (:py:meth:`~pyoomph.generic.problem.Problem.refine_eigenfunction`) are **not** available under
-      ``--distribute`` and stop with an explanatory error. Run those without ``--distribute`` (plain
-      eigenvalue solving is unaffected).
 
 Threading
 ~~~~~~~~~
 
 ``--omp N``
       Use ``N`` threads for the element assembly and for the linear solver. Without it, pyoomph
-      assembles on one thread, which is the default and is what every timing and every reference value
-      in this tutorial refers to.
+      assembles on one thread, but might solve with OpenMP threads, which depends on the selected solver.
+      
+      Some features, like a finite-difference Jacobian (which perturbs data shared with the neighbouring elements) won't work with that. Pyoomph will let you know.
+      Also, it is required to build with OpenMP.
 
-      The threaded element loop is *bit-identical* to the serial one: it is built as a gather over
-      target slots in element order rather than as a scattered write, precisely so that switching it
-      on changes the run time and nothing else. It declines by itself -- saying why, once -- wherever
-      it cannot apply: a domain with a finite-difference Jacobian (which perturbs data shared with the
-      neighbouring elements), an assembly-time diagnostic environment variable, an assembly with no
-      frozen sparsity pattern, or a build whose CMake configuration found no OpenMP.
-
-      Note the asymmetry with the *solver*: a threaded direct solver is not bit-reproducible, so a
-      converged state can differ in its last digits between ``--omp 1`` and ``--omp 8``. That is a
-      property of the solver, not of the assembly, and it is what
-      :py:meth:`~pyoomph.generic.problem.Problem.set_num_threads` has always done.
-
-      Combines with ``mpirun``: threads run inside each rank. Keep ``ranks x N`` at or below the
+      It combines with ``mpirun``: threads run inside each rank. Keep ``ranks x N`` at or below the
       number of physical cores.
 
       .. warning::
@@ -141,9 +113,8 @@ Threading
          threads are created and the results stay correct, but they take turns on that one core
          instead of running side by side. Launch with ``mpirun --bind-to none`` (or a binding that
          gives each rank as many cores as it has threads). pyoomph prints a one-off note when it
-         notices. Measured on a 32k-dof cavity, ``mpirun -n 1 ... --omp 4`` was 0.99x of a single
-         thread with the default binding and 1.69x with ``--bind-to none``.
-
+         notices.
+         
          With the binding fixed, ranks and threads are roughly interchangeable for the Jacobian, and
          ranks are clearly better for the residual. Reach for ``--omp`` under ``mpirun`` mainly for
          what more ranks cannot give you: memory headroom, or a core count beyond what the mesh
