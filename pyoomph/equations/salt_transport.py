@@ -337,7 +337,13 @@ class SaltTransportEquations(ScalarTransportEquations):
         c=var(fieldname)
         R=self.dt_factor*partial_t(c,ALE="auto")
         if self._advective():
-            R=R+dot(self.wind,grad(c))
+            # The advective term as it is actually assembled, not as the non-conservative form
+            # writes it: with advection_by_parts (which GCL implies) the Galerkin part is
+            # -weak(c*wind,grad(v)), whose strong counterpart is div(wind*c).
+            conservative=self.stab_cfg.conservative_residual
+            if conservative=="auto":
+                conservative=bool(self.advection_by_parts)
+            R=R+(div(self.wind*c) if conservative else dot(self.wind,grad(c)))
         if self.stab_cfg.include_diffusion_in_residual:
             R=R-div(self.get_diffusivity(s.name)*grad(c))
         return R

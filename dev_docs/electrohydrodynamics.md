@@ -239,6 +239,8 @@ pairing is silent.
   `conductivity` attached, i.e. it still solves Gauss's law; its natural BC is therefore a jump in
   the **displacement**, which is exactly the surface charge. `SurfaceChargeConservation` supplies
   that charge as a dynamic unknown, driven by the Ohmic current jump it builds from the conductivity.
+  On a moving mesh it does so conservatively; see section 11. The Ohmic jump can be switched off with
+  `bulk_currents=0` when the charge is driven by adsorption or the motion is prescribed instead.
 
 * *Current-driven* (steady DC conduction). Bulk = `OhmicConductionEquations`, solving
   `div(sigma_c grad phi) = 0`; its natural BC is a jump in the **current**, so
@@ -549,7 +551,9 @@ rather than the completion of this one.
   ms-to-s flow times: 6 to 9 orders of stiffness. The flag exists and raises `NotImplementedError`
   with that explanation rather than silently producing something that will not converge.
   `SurfaceChargeConservation` keeps its `d_t q`, which is the physically meaningful transient — the
-  interfacial RC time, not the bulk one. Tested: the flag raises with that explanation.
+  interfacial RC time, not the bulk one. Tested: the flag raises with that explanation. Since
+  section 11 that `d_t q` is by default the derivative of the whole surface integral rather than a
+  pointwise `partial_t`, which does not change the statement above but does change what it discretises.
 * **`formulation="log"`** for Nernst-Planck. Not implemented and, contrary to what this document
   said until the materials work, **not reserved in the constructor signature either** — that claim
   was wrong when it was written. See §11 for what it would take.
@@ -625,7 +629,7 @@ so "untested" here means *no test names it at all*, not "lightly tested".
 | `ElectroosmoticSlip` | tested, `test_ehd.py`. The Helmholtz-Smoluchowski plug flow in a straight channel with open ends is exact (1e-11 on both a quadrilateral and a triangle mesh), and is checked for the sign of `zeta*E`, for using only the tangential field under an oblique one, for the permittivity lookup, for `wall_velocity`, for `impose_no_penetration=False`, for the default Maxwell-stress coupling not disturbing it, and dimensionally in SI units against 0.347 mm/s for silica-water. Both a quadrilateral and a triangle mesh are run: writing this test is what turned up [the Gauss knot typo](#a-quadrature-typo-that-used-to-cap-2d-quadrilateral-c2-accuracy-at-1e-9-fixed), and keeping the pair guards against it returning. Still untested: curved walls, a non-uniform zeta, and any regime where the Dukhin number matters. |
 | `lippmann_surface_tension`, `surface_charge_surface_tension`, `debye_huckel_surface_tension` | untested. They are one-line expressions, but the *sign* of the Lippmann relation (charging always lowers the tension) is exactly the kind of thing that should not be trusted to inspection. |
 | `ElectricFieldProjection` | untested. Verified once by hand — the output columns are correct and do not duplicate the local-expression ones — but that check is not in the suite. |
-| `IonFluxBC` | untested. Its default (blocking) is the natural boundary condition, so the class only matters for a nonzero flux or for the stabilization footprint, neither of which is exercised. |
+| `IonFluxBC` | still untested *as a class*, but its sign convention is now pinned indirectly: the ad-/desorption bulk coupling of `SurfaceChargeConservation` uses the identical boundary term, and `tests/test_surface_charge_transport.py` asserts that what the surface gains the bulk loses. Writing that test is what turned up [the backwards sign in this class's docstring](#114-two-records-corrected-while-in-there). The stabilization footprint is still not exercised. |
 | `with_fixed_amounts` | untested. It removes a genuinely singular nullspace, so a wrong sign there shows up as a solver failure rather than a wrong answer, but it is untested all the same. |
 | `electric_body_force`, `ions_from_material` | untested directly; each is used through a class that is tested. (`helmholtz_smoluchowski_velocity` is now covered through `ElectroosmoticSlip`.) |
 | `SternLayer` | constructor only. `ThinDielectricLayer`, its base, has the series-capacitance test. |
@@ -692,9 +696,12 @@ three of them the quadrilateral ones.
   custom assembly and no node matching — but `ElectricPotentialConnection` relies on the
   opposite-side interface pairing, which is exactly the machinery that has needed attention before
   (see `distributed_remeshing.md`, `mpi_augmented_systems.md`).
-* **Transients** are barely covered: one ion-conservation check over a few steps. `SurfaceChargeConservation`'s
-  `d_t q`, which is the physically interesting transient of the leaky-dielectric model, is only ever
-  solved in steady state, where it degenerates to current continuity.
+* **Transients** were barely covered — one ion-conservation check over a few steps, and
+  `SurfaceChargeConservation`'s `d_t q` only ever solved in steady state, where it degenerates to
+  current continuity. `tests/test_surface_charge_transport.py` closes most of that: 27 tests over a
+  prescribed moving interface and a shrinking film, transient throughout. What is still steady-only is
+  the *coupled* transient, i.e. `d_t q` driven by an actual Ohmic current jump rather than by
+  prescribed motion or adsorption.
 
 ### 10.4 Not implemented, but named in the design
 
@@ -702,10 +709,12 @@ three of them the quadrilateral ones.
   charge. The construction is settled (a `GlobalLagrangeMultiplier` plus an interface multiplier, the
   `with_pressure_integral_constraint` pattern) but no code exists.
 * **Charge regulation** — a surface charge that responds to the local pH through site dissociation,
-  `sigma_s(phi) = -e*Gamma/(1 + (K/cH)*exp(-e*phi/(kB*T)))`. `SurfaceChargeBC` takes a fixed charge
-  or an expression, so a user can write this by hand today; what is missing is the named class and,
-  more usefully, the Grahame conversion between a zeta potential and a surface charge, which the
-  design specified as a `zeta_model` argument and which does not exist.
+  `sigma_s(phi) = -e*Gamma/(1 + (K/cH)*exp(-e*phi/(kB*T)))`. That expression is the *equilibrium limit*
+  of an adsorption/desorption rate pair, so section 11.3 supplies the dynamic version of it:
+  `SurfaceChargeConservation(adsorption=...)` takes a rate, per ion or as a lumped charge flux, and a
+  Langmuir pair relaxes to exactly this isotherm. What is still missing is the named class for the
+  equilibrium form and, more usefully, the Grahame conversion between a zeta potential and a surface
+  charge, which the design specified as a `zeta_model` argument and which does not exist.
 
 ### 10.5 Meshing
 
@@ -722,7 +731,150 @@ are written to pin behaviour rather than to teach, and the API documentation is 
 docstrings. A chapter covering a capacitor, a charged wall in both PB and DH, the gas/liquid pairing
 and an EHD drop is the missing piece for anyone who did not write these modules.
 
-## 11. Pitfalls a user will hit
+## 11. Conservative transport on a moving mesh
+
+Added after the question "how does the surface charge behave under evaporation?", whose honest answer
+at the time was: *it is conserved in the model and not in the code*. Everything below was measured,
+in `tests/test_surface_charge_transport.py`.
+
+### 11.1 The surface charge
+
+`SurfaceChargeConservation._advection()` always built the physically right velocity —
+`u_s = (u - (u.n)n) + (w.n)n`, i.e. the charge follows the *interface* normally and the *liquid*
+tangentially, which is exactly what evaporation needs. The assembly around it was not. It was
+
+    weak(partial_t(q, ALE="auto"), q_test) + weak(div(q*u_s), q_test)
+
+which is the form `surfactant_transport.md` had already measured and rejected. `form="conservative"`
+is now the default:
+
+    time_derivative_of_integral(weak(q, q_test), scheme) - weak(q*(u - dt_factor*w), grad(q_test))
+
+Relative drift of the total charge at t=1, 20 steps unless stated, nref=2:
+
+| case | legacy | conservative |
+|---|---|---|
+| uniform dilatation | 1.1e-03 | -7e-15 |
+| **evaporation (normal slip)** | 6.8e-04 | -7e-15 |
+| tangential mesh slide only | -6.8e-04 | -5e-15 |
+| everything at once | -6.0e-04 | 3e-13 |
+
+**The evaporation row is worse than it looks, and this is the sharpest reason for the change.** Under
+a normal slip the legacy error does *not* converge in the time step at all:
+
+| nref | 20 steps | 40 | 80 | 160 |
+|---|---|---|---|---|
+| 1 | -7.5e-04 | -1.6e-03 | -1.8e-03 | -1.9e-03 |
+| 2 | +6.8e-04 | -1.7e-04 | -3.8e-04 | -4.4e-04 |
+| 3 | +1.0e-03 | +1.7e-04 | -4.4e-05 | -9.8e-05 |
+
+It converges to a nonzero limit, and that limit is second order in **h**. The cause is that
+`div(q*u_s)` differentiates the element normal, which the conservative form never touches — the same
+mechanism `surfactant_transport.md` section 3 records for a smoothed normal, and the reason the
+surfactant module's `"strong"` form scores worse than its `"legacy"` one. Note the sign change
+between 20 and 40 steps: a two-point convergence study lands on a ratio of 4 there by coincidence and
+reports "second order". The test asserts the tail, not two points.
+
+**Three deliberate omissions**, all inherited with their reasons from `surfactant_transport.md`: no
+tangential projector on `u-w` (`grad` on an interface is already the surface gradient), no smoothed
+normal (ten times worse under mass transfer), and no contour term at the ends — that omission *is*
+the zero-end-flux condition, and `SurfaceChargeEndFlux` exists for when it is not wanted.
+
+**`dt_factor` multiplies the mesh velocity too.** The GCL transient strongly supplies
+`dt_factor*(d_t q|_E + div_s(q w))`, while the equation wants `dt_factor*d_t q|_E + div_s(q u)`, so
+the flux term carries `u - dt_factor*w`. They coincide at `dt_factor=1`; at `dt_factor=0`
+(`quasi_static`) this collapses to the correct steady `div_s(q u)`, where a bare `(u-w)` would have
+solved `div_s(q(u-w))=0` instead. Conservation is unaffected either way, since the flux term vanishes
+for the constant test function — it is *which equation* that differs.
+
+### 11.2 The ions, and the other transport equations
+
+`NernstPlanckEquations` had no conservative branch. `GCL="auto"` is now the default, meaning **on
+whenever the mesh moves** and off on a static mesh. It is not a flat `True` because integrating the
+advection by parts also changes the natural boundary condition, and on a static mesh with through-flow
+that is a change for nothing; on a moving mesh it is the entire point.
+
+A 1d film thinning to `exp(-0.5)` of its height with the liquid at rest, so nothing can leave:
+
+| | 20 steps | 40 | 80 | 160 |
+|---|---|---|---|---|
+| `GCL=False` | -3.9324e-01 | -3.9341e-01 | -3.9346e-01 | -3.9347e-01 |
+| `GCL=True` | -4e-14 | | -6e-14 | |
+
+The non-conservative number is not a discretization error that a smaller step would reduce: it is
+exactly `1 - L/L0`. The concentration never changes at all and the receding boundary carries the ions
+away, precisely as `salt_transport.md` section 3 describes for the salt. That table applies verbatim
+here, and it is now quoted in the `GCL` docstring, because **an `IonFluxBC` written for the old form
+becomes a double count under GCL** — the one way to be silently wrong with this change.
+
+`AdvectionDiffusionEquations` and `TemperatureConductionEquation` /
+`TemperatureAdvectionConductionEquation` got the same `GCL` flag, opt-in (`False`) since flipping them
+would move published tutorial numbers for no requested gain. Both conserve to 1e-14 with it and lose
+the shrink ratio without it.
+
+Two things specific to the temperature:
+
+- **The conserved quantity is `rho*cp*T`**, so `rho` and `cp` sit *inside* the integral. If either
+  depends on `T`, the GCL form differentiates the enthalpy density where the standard form multiplies
+  `rho*cp` onto `d_t T` — a different model, not a different discretization. Identical for constant
+  properties. Said in the docstring rather than left to be discovered.
+- **The test overrides the conductivity as well**, for an unrelated reason worth recording: conserving
+  the enthalpy of a domain shrinking to 0.61 of its size means `T` rises to 495 K, which is outside
+  water's conductivity correlation, and Newton diverges at step 5. That is the material data leaving
+  its range, not the scheme.
+
+### 11.3 Ad- and desorption
+
+`SurfaceChargeConservation(adsorption=...)` takes either an expression — a net charge flux in
+C/(m^2 s), positive towards the interface — or a `{ion_name: molar_rate}` mapping, which contributes
+`sum(z_i F R_i)` to the charge and takes exactly `R_i` out of a co-located `NernstPlanckEquations`.
+Materials can carry either, as `surface_charge_adsorption_rate` and `ion_adsorption_rate` on
+`BaseInterfaceProperties`, and `SurfaceChargeConservation` now takes `interface_props=` like
+`SurfaceChargeBC`, `SternLayer` and `ElectroosmoticSlip` already did. It also finally reads
+`surface_conductance`, which had been sitting on the material unread since it was added.
+
+The per-ion test pins the whole sign chain in one assertion, at three valences: the surface gains
+`z*F*R`, the bulk loses exactly `R` moles, and bulk-plus-surface charge does not move. Getting the
+bulk sign backwards passes the first and fails the other two — which is precisely what the wrong
+`IonFluxBC` docstring (section 11.4) would have produced.
+
+`interface_props.surface_charge_density` is *also* what `SurfaceChargeBC` imposes as a fixed charge,
+so using both classes on one interface counts it twice. Documented; not detectable cheaply.
+
+### 11.4 Two records corrected while in there
+
+- **`IonFluxBC`'s sign was documented backwards.** It adds `+weak(flux, c_test)` while the docstring
+  claimed a positive value is an *influx*. The bulk assembles `int(d_t c v) - int(J.grad v)`, so the
+  omitted boundary term is `-oint(n.J)v` and `+weak(g, c_test)` imposes `n.J = g`, an **outflux**.
+  `NeumannBC`, which the docstring appealed to, uses the same convention once its value is read as a
+  flux rather than as a gradient. Nothing caught it because, as section 10.2 already recorded, no test
+  imposes a nonzero ion flux. The docstring now also says *which* flux `g` is, since that depends on
+  `advection_by_parts`.
+- **`NernstPlanckEquations` claimed its natural boundary condition is the zero *total* normal flux.**
+  With the default `advection_by_parts=False` only the terms written against `grad(c_test)` leave a
+  boundary term, so it is the zero diffusive-plus-migration flux and the advective part is
+  unconstrained. True as stated only under `advection_by_parts` / `GCL`.
+- **`NernstPlanckEquations.strong_residual` always wrote `dot(wind, grad(c))`**, i.e. under
+  `advection_by_parts=True` the stabilization was built on a different equation than the one being
+  assembled. It now consults `stab_cfg.conservative_residual` like the composition equations do.
+  `SaltTransportEquations` had the identical hole and got the identical fix.
+
+### 11.5 Still open
+
+- `time_derivative_of_integral` breaks the telescoping at an adaptation or a remesh, unavoidably: the
+  history integral is over the pre-adaptation mesh, so the conservation error at that step is the
+  projection error. Inherent to the formulation, not to this change. The tests do not adapt.
+- Its mass matrix comes solely from the `GiNaC_mass_matrix_marker` term, because a finite difference
+  of integrals is invisible to the `__partial_t_mass_matrix` probe. Whether that survives the
+  azimuthal expansion is pinned by no test — here or for the surfactants.
+- MPI is untouched by the change and untested for it, as for everything else in section 10.3.
+- `CompositionAdvectionDiffusionEquations`' GCL branch passes plain `"BDF2"` to
+  `time_derivative_of_integral`, because it shares one `scheme` argument with its `time_scheme`
+  wrapper and `time_scheme()` rejects the `_degr` names. So it runs first order in the first step.
+  Left alone deliberately: fixing it means splitting that argument, which moves published numbers.
+  The new flags all carry a separate `gcl_scheme`/`scheme` defaulting to `"BDF2_degr"`.
+
+## 12. Pitfalls a user will hit
 
 1. **`grad()` on an interface is the surface gradient.** Every accessor in both modules takes
    `domain=`, and every interface class passes `".."` or `"|.."`. The one deliberate exception is

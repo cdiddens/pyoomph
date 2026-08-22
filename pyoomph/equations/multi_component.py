@@ -1142,14 +1142,18 @@ class TemperatureConductionEquation(ScalarTransportEquations):
         cp_override(ExpressionNumOrNone): The specific heat capacity. Default is None.
         lambda_override(ExpressionNumOrNone): The thermal conductivity. Default is None.
         dt_factor(ExpressionOrNum): The factor for the time derivative. Default is 1.
+        GCL(bool): Write the transient term as the derivative of the whole integral of ``rho*cp*T``, and (in the advective subclass) advect with the velocity *relative to the mesh*: the conservative ALE form. On a mesh that follows a moving or evaporating boundary the enthalpy is then conserved to machine precision instead of to the order of the time stepping. **If rho or cp depend on the temperature this is a different model**, not merely a different discretization: the GCL form differentiates the product ``rho*cp*T`` in time, where the standard form multiplies ``rho*cp`` onto ``partial_t(T)``. Identical for constant properties. Default is False.
+        gcl_scheme: Time stepping scheme of the ``GCL`` transient, from the set a derivative of an integral understands. The default ``"BDF2_degr"`` degrades to first order in the first step, where an initial condition has no history.
         stabilization: Optional residual-based stabilization (SUPG etc.), see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all. Without a wind there is nothing to stabilize on a static mesh, but on a moving (ALE) mesh the transport by the mesh motion is stabilized.
     """
-    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
+    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,GCL:bool=False,gcl_scheme:"IntegralTimeSteppingScheme"="BDF2_degr",stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
         super(TemperatureConductionEquation, self).__init__()
         self.material=material
         self.space:FiniteElementSpaceEnum=space
         self.rho_override,self.cp_override,self.lambda_override=rho_override,cp_override,lambda_override
         self.dt_factor=dt_factor
+        self.GCL=GCL
+        self.gcl_scheme:"IntegralTimeSteppingScheme"=gcl_scheme
         self._init_stabilization(stabilization)
 
     def define_fields(self):
@@ -1189,7 +1193,14 @@ class TemperatureConductionEquation(ScalarTransportEquations):
     def strong_residual(self, fieldname:str) -> Expression:
         T=var("temperature")
         rho,cp,k=self.get_rho_cp_k()
-        R:Expression=self.dt_factor*rho*cp*partial_t(T)
+        if self.GCL:
+            # The GCL transient is strongly d_t(rho cp T)|_E + div(rho cp T w), and the mesh part of
+            # the flux term contributes exactly -div(rho cp T w), so the two cancel and what remains
+            # is the Eulerian derivative of the *enthalpy density* -- not rho*cp times the derivative
+            # of T, which is the same thing only for constant properties.
+            R:Expression=self.dt_factor*partial_t(rho*cp*T)
+        else:
+            R=self.dt_factor*rho*cp*partial_t(T)
         if self.stab_cfg.include_diffusion_in_residual:
             R=R-div(convert_to_expression(k)*grad(T))
         return R
@@ -1199,7 +1210,20 @@ class TemperatureConductionEquation(ScalarTransportEquations):
         stabilization stays the last thing added and is added exactly once."""
         T,T_test=var_and_test("temperature")
         rho,cp,k=self.get_rho_cp_k()
-        self.add_residual(weak(self.dt_factor*rho*cp*partial_t(T),T_test))
+        if self.GCL:
+            # The derivative of the whole integral of the enthalpy density, so that the change of the
+            # element volume is taken by the same finite difference that advances the field. rho and
+            # cp sit INSIDE the integral: if either is a field, the conserved quantity is rho*cp*T
+            # and not T. dt_factor multiplies from outside, or the history terms would carry it at
+            # their own time levels.
+            self.add_residual(self.dt_factor*time_derivative_of_integral(weak(rho*cp*T,T_test),
+                                                                         scheme=self.gcl_scheme))
+            # The advective counterpart of the mesh motion. The subclass adds the fluid part.
+            w=mesh_velocity()
+            if not is_zero(w):
+                self.add_residual(weak(self.dt_factor*rho*cp*T*w,grad(T_test)))
+        else:
+            self.add_residual(weak(self.dt_factor*rho*cp*partial_t(T),T_test))
         self.add_residual(weak(k*grad(T),grad(T_test)))
 
     def define_residuals(self):
@@ -1255,8 +1279,8 @@ class TemperatureAdvectionConductionEquation(TemperatureConductionEquation):
         stabilization: Optional residual-based stabilization (SUPG etc.), see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all.
     """
 
-    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",wind:ExpressionOrNum=var("velocity"),rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,adv_factor:ExpressionOrNum=1,stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
-        super(TemperatureAdvectionConductionEquation, self).__init__(material,space,rho_override=rho_override,cp_override=cp_override,lambda_override=lambda_override,dt_factor=dt_factor,stabilization=stabilization)
+    def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",wind:ExpressionOrNum=var("velocity"),rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,adv_factor:ExpressionOrNum=1,GCL:bool=False,gcl_scheme:"IntegralTimeSteppingScheme"="BDF2_degr",stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
+        super(TemperatureAdvectionConductionEquation, self).__init__(material,space,rho_override=rho_override,cp_override=cp_override,lambda_override=lambda_override,dt_factor=dt_factor,GCL=GCL,gcl_scheme=gcl_scheme,stabilization=stabilization)
         self.wind=wind
         self.adv_factor=adv_factor
 
@@ -1265,14 +1289,25 @@ class TemperatureAdvectionConductionEquation(TemperatureConductionEquation):
 
     def strong_residual(self,fieldname:str) -> Expression:
         rho,cp,_=self.get_rho_cp_k()
-        return (super(TemperatureAdvectionConductionEquation,self).strong_residual(fieldname)
-                + self.adv_factor*rho*cp*dot(self.wind,grad(var("temperature"))))
+        T=var("temperature")
+        base=super(TemperatureAdvectionConductionEquation,self).strong_residual(fieldname)
+        if self.GCL:
+            # Mirror the flux form actually assembled, so that the sum with the base class's
+            # d_t(rho cp T) + div(rho cp T w) is d_t(rho cp T) + div(rho cp T u).
+            return base+self.adv_factor*div(rho*cp*T*self.wind)
+        return base+self.adv_factor*rho*cp*dot(self.wind,grad(T))
 
     def define_galerkin_residuals(self):
         super(TemperatureAdvectionConductionEquation, self).define_galerkin_residuals()
         T,T_test=var_and_test("temperature")
         rho,cp,_=self.get_rho_cp_k()
-        self.add_residual(weak(self.adv_factor*rho*cp*dot(self.wind,grad(T)),T_test))
+        if self.GCL:
+            # The fluid part of the flux. The base class already contributed the mesh part with the
+            # opposite sign, so the two together are -weak(rho cp T (adv_factor*u - dt_factor*w),
+            # grad(v)), i.e. advection with the velocity relative to the mesh.
+            self.add_residual(-weak(self.adv_factor*rho*cp*T*self.wind,grad(T_test)))
+        else:
+            self.add_residual(weak(self.adv_factor*rho*cp*dot(self.wind,grad(T)),T_test))
 
 
 class TemperatureInfinityEquations(InterfaceEquations):

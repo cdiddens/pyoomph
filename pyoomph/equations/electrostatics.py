@@ -32,6 +32,7 @@ from ..expressions import * #Import grad et al
 from ..expressions.phys_consts import * # epsilon_0, faraday_constant, gas_constant, ... (and the units)
 from .generic import ProjectExpression, DirichletBC, get_interface_field_connection_space
 from .generic import GlobalLagrangeMultiplier, WeakContribution, Scaling, TestScaling
+from .generic import interface_transport_velocities
 from ..generic.codegen import sorted_field_kwargs
 from .stabilization import ScalarTransportEquations, ScalarTransportStabilization
 from .poisson import farfield_monopole_residual
@@ -875,12 +876,42 @@ class SurfaceChargeConservation(InterfaceEquations):
     .. math:: \partial_t q + \nabla_\mathrm{s}\cdot(q\vec{u}_\mathrm{s})
               - \nabla_\mathrm{s}\cdot(K_\mathrm{s}\nabla_\mathrm{s}q)
               + \nabla_\mathrm{s}\cdot(\kappa_\mathrm{s}\vec{E}_\mathrm{t})
-              = \vec{n}\cdot(\vec{J}_\mathrm{in}-\vec{J}_\mathrm{out})\,,
+              = \vec{n}\cdot(\vec{J}_\mathrm{in}-\vec{J}_\mathrm{out}) + \dot{q}_\mathrm{ads}\,,
 
-    i.e. the surface charge accumulates whatever Ohmic current the two bulks deliver, and is carried
-    along the interface by the flow and by surface conduction. :math:`\vec{n}` is the outward normal
-    of the parent domain, so it points from "in" to "out" and the right-hand side is the net current
-    arriving at the interface.
+    i.e. the surface charge accumulates whatever Ohmic current the two bulks deliver, is carried
+    along the interface by the flow and by surface conduction, and gains whatever ad- or desorbs.
+    :math:`\vec{n}` is the outward normal of the parent domain, so it points from "in" to "out" and
+    the current term is the net current arriving at the interface.
+
+    **On a moving mesh this is assembled conservatively** (``form="conservative"``, the default), as
+    the derivative of the whole surface integral minus the flux relative to the mesh::
+
+        time_derivative_of_integral(weak(q, q_test)) - weak(q*(u - w), grad(q_test))
+
+    Testing that with :math:`v=1` telescopes exactly -- the second term dies, and the first is a
+    finite difference of the total charge -- so **the total charge on a closed interface is conserved
+    to the Newton tolerance rather than to the order of the time stepping**. That is what an
+    evaporating drop needs: evaporation removes solvent and not charge, so as the area shrinks
+    :math:`q` must rise and :math:`\int q\,\mathrm{d}A` must not move. ``form="legacy"`` restores the
+    older non-conservative assembly, which drifts at :math:`O(\Delta t^p)` under a normal slip (=
+    mass transfer) *and* under a purely tangential mesh slip, where the interface does not even
+    change shape. The measurements are in ``dev_docs/surfactant_transport.md``, whose surfactant
+    equation has exactly the same structure; they are not repeated here.
+
+    Two things the conservative form deliberately does *not* do, both measured there: it does not
+    project :math:`\vec{u}-\vec{w}` onto the tangent plane (``grad`` on an interface *is* the surface
+    gradient, so ``grad(q_test)`` is already orthogonal to the element normal and a normal component
+    cannot contribute), and it does not smooth the normal (under mass transfer that makes the error
+    ten times worse). It is also why the conservative form takes :math:`\vec{u}` and :math:`\vec{w}`
+    separately rather than one combined :math:`\vec{u}_\mathrm{s}`, and why passing the old combined
+    velocity to ``advection_velocity`` is nevertheless exact: the two differ only by a normal
+    component, which the surface gradient annihilates.
+
+    **A consequence at the ends of an open interface.** The conservative form integrates the
+    advection by parts, so its natural condition at a contact line, corner or edge is now *zero total
+    flux* -- nothing leaves. That is what makes the conservation exact; use
+    :py:class:`SurfaceChargeEndFlux` where a nonzero end flux is wanted. The legacy form has no such
+    term and does let charge advect out at an end.
 
     **Which bulk equation to pair this with -- getting it wrong is silent.** The leaky-dielectric
     model can be closed in two equivalent ways, and they need *different* bulk operators, because a
@@ -919,39 +950,106 @@ class SurfaceChargeConservation(InterfaceEquations):
         space: Its finite element space. Defaults to ``"C2"``.
         surface_diffusivity: :math:`K_\mathrm{s}`, diffusion of the adsorbed charge. Defaults to 0.
         surface_conductivity: :math:`\kappa_\mathrm{s}`, the excess surface conductance that the
-            Dukhin number measures. Defaults to 0.
-        advection_velocity: The velocity carrying the charge. ``"auto"`` builds the tangential fluid
-            velocity plus the normal mesh velocity from a co-located (Navier-)Stokes, and falls back
-            to no advection if there is no flow. Pass 0 to switch it off, or an expression to
-            override.
+            Dukhin number measures. ``None`` takes ``interface_props.surface_conductance``, else 0.
+        form: ``"conservative"`` (default) or ``"legacy"``, see above.
+        scheme: Time stepping scheme of the conservative transient term. The default ``"BDF2_degr"``
+            degrades to first order in the very first step, where an initial condition has no
+            history. Plain ``"BDF2"`` here makes the *whole run* first order, which is easy to miss.
+        dt_factor: Multiplicative factor on the time derivative. 0 is the steady charge balance.
+        fluid_velocity: The velocity of the liquid, which carries the charge tangentially. ``None``
+            takes ``var("velocity")`` if a co-located (Navier-)Stokes exists, else 0.
+        interface_velocity: The velocity of the interface itself, which the charge follows normally.
+            ``None`` takes the mesh velocity if the mesh moves, else 0.
+        advection_velocity: **Deprecated**, kept because it is the published name. ``"auto"``
+            resolves the two above; ``0`` means no fluid velocity (the interface still carries its
+            charge along, which is what conservation means); an expression is used as
+            ``fluid_velocity``. In ``form="legacy"`` it keeps its literal old meaning, the *total*
+            advection velocity.
+        adsorption: Ad-/desorption onto the interface, positive towards it. Either an expression, a
+            net **charge** flux in C/(m^2 s), or a ``{ion_name: molar_rate}`` mapping in mol/(m^2 s),
+            which contributes :math:`\sum_i z_i F R_i` to the charge and takes exactly :math:`R_i`
+            out of a co-located :py:class:`NernstPlanckEquations` bulk. ``None`` takes
+            ``interface_props.surface_charge_adsorption_rate`` / ``.ion_adsorption_rate``.
+        bulk_coupling: Whether the ``{ion: rate}`` form also removes the ions from the bulk.
+            ``"auto"`` couples every species the parent Nernst-Planck transports.
+        bulk_currents: The Ohmic current jump driving the charge. ``"auto"`` builds it from the
+            bulk conductivities as before; pass 0 for a problem that has none, e.g. a prescribed
+            interface motion or a charge fed purely by adsorption.
+        interface_props: Interface properties to take ``surface_conductivity`` and ``adsorption``
+            from. Note that ``interface_props.surface_charge_density`` is what
+            :py:class:`SurfaceChargeBC` imposes as a *fixed* charge: using both classes on one
+            interface counts the charge twice.
         initial_charge: Initial condition for the charge. Defaults to 0.
-        quasi_static: Drop the time derivative, i.e. solve the steady charge balance. Defaults to False.
+        quasi_static: Sugar for ``dt_factor=0``. Defaults to False.
     """
     required_parent_type = ElectricPotentialEquations
 
     def __init__(self,*,name:str="surface_charge_density",space:"FiniteElementSpaceEnum"="C2",
-                 surface_diffusivity:ExpressionOrNum=0,surface_conductivity:ExpressionOrNum=0,
+                 surface_diffusivity:ExpressionOrNum=0,
+                 surface_conductivity:"ExpressionNumOrNone"=None,
+                 form:Literal["conservative","legacy"]="conservative",
+                 scheme:"IntegralTimeSteppingScheme"="BDF2_degr",
+                 dt_factor:ExpressionOrNum=1,
+                 fluid_velocity:"ExpressionNumOrNone"=None,
+                 interface_velocity:"ExpressionNumOrNone"=None,
                  advection_velocity:"ExpressionOrNum | Literal['auto']"="auto",
+                 adsorption:"ExpressionOrNum | dict[str,ExpressionOrNum] | None"=None,
+                 bulk_coupling:"Literal['auto'] | bool"="auto",
+                 bulk_currents:"Literal['auto'] | ExpressionOrNum"="auto",
+                 interface_props:"BaseInterfaceProperties | None"=None,
                  initial_charge:ExpressionOrNum=0,quasi_static:bool=False,
                  charge_scale:"ExpressionOrNum | str"="surface_charge_density"):
         super().__init__()
+        if form not in ("conservative","legacy"):
+            raise ValueError("SurfaceChargeConservation form must be 'conservative' or 'legacy', "+
+                             "not '"+str(form)+"'")
+        if advection_velocity!="auto" and fluid_velocity is not None:
+            raise ValueError("Pass either fluid_velocity or the deprecated advection_velocity to "+
+                             "SurfaceChargeConservation, not both.")
         self.name=name
         self.space:"FiniteElementSpaceEnum"=space
         self.surface_diffusivity=surface_diffusivity
-        self.surface_conductivity=surface_conductivity
+        self.form:Literal["conservative","legacy"]=form
+        self.scheme:"IntegralTimeSteppingScheme"=scheme
+        self.dt_factor:ExpressionOrNum=0 if quasi_static else dt_factor
+        self.fluid_velocity=fluid_velocity
+        self.interface_velocity=interface_velocity
         self.advection_velocity=advection_velocity
+        self.bulk_coupling:"Literal['auto'] | bool"=bulk_coupling
+        self.bulk_currents:"Literal['auto'] | ExpressionOrNum"=bulk_currents
+        self.interface_props=interface_props
         self.initial_charge=initial_charge
         self.quasi_static=quasi_static
         self.charge_scale:"ExpressionOrNum | str"=charge_scale
+        props=interface_props
+        if surface_conductivity is None:
+            surface_conductivity=getattr(props,"surface_conductance",None) if props is not None else None
+            if surface_conductivity is None:
+                surface_conductivity=0
+        self.surface_conductivity:ExpressionOrNum=surface_conductivity
+        if adsorption is None and props is not None:
+            # A per-ion table and a lumped charge rate are both allowed on a material; a material
+            # that sets neither leaves this None and nothing is assembled.
+            ions=getattr(props,"ion_adsorption_rate",None)
+            if ions:
+                adsorption=dict(ions)
+            else:
+                adsorption=getattr(props,"surface_charge_adsorption_rate",None)
+        self.adsorption:"ExpressionOrNum | dict[str,ExpressionOrNum] | None"=adsorption
 
-    def _bulk_currents(self)->Expression:
+    def _bulk_currents(self)->"Expression | None":
+        if self.bulk_currents!="auto":
+            e=convert_to_expression(self.bulk_currents)
+            return None if is_zero(e) else e
         inside=self.get_parent_equations(ElectricPotentialEquations)
         assert isinstance(inside,ElectricPotentialEquations)
         J_in=inside.get_conduction_current("..")
         if J_in is None:
             raise RuntimeError("SurfaceChargeConservation needs a conducting bulk, i.e. "+
                                "OhmicConductionEquations (or another class providing "+
-                               "get_conduction_current), on the parent domain.")
+                               "get_conduction_current), on the parent domain. Pass "+
+                               "bulk_currents=0 if the charge is not driven by an Ohmic current at "+
+                               "all, e.g. when it is fed by adsorption or the motion is prescribed.")
         n=self.get_normal()
         res=dot(n,J_in)
         outside=self.get_opposite_parent_equations(ElectricPotentialEquations)
@@ -961,42 +1059,119 @@ class SurfaceChargeConservation(InterfaceEquations):
                 res=res-dot(n,J_out)
         return res
 
-    def _advection(self)->"Expression | None":
-        if self.advection_velocity=="auto":
+    def _velocities(self)->tuple[Expression,Expression]:
+        """The fluid velocity and the interface velocity of the conservative form."""
+        u=self.fluid_velocity
+        if u is None and self.advection_velocity!="auto":
+            u=self.advection_velocity
+        return interface_transport_velocities(self,u,self.interface_velocity)
+
+    def _legacy_advection(self)->"Expression | None":
+        """The single combined advection velocity of the pre-conservative assembly.
+
+        ``advection_velocity=<expression>`` is still taken raw, exactly as it was, so that a script
+        written against the old class reproduces bit for bit. The newer ``fluid_velocity`` /
+        ``interface_velocity`` pair is combined into the same ``u_s`` the automatic path builds --
+        those names promise a fluid velocity and an interface velocity in *both* forms, and handing
+        the raw fluid velocity to a legacy assembly would advect the charge with the liquid across an
+        evaporating interface instead of with the interface.
+        """
+        if self.advection_velocity!="auto":
+            given=convert_to_expression(self.advection_velocity)
+            return None if is_zero(given) else given
+        if self.fluid_velocity is None:
             from .navier_stokes import StokesEquations
             flow=self.get_parent_domain().get_equations().get_equation_of_type(StokesEquations)
             if isinstance(flow,list):
                 flow=flow[0] if len(flow)==1 else None
             if not isinstance(flow,StokesEquations):
+                u=None
+            else:
+                u=var(flow.velocity_name)
+            if u is None:
                 return None
-            n=self.get_normal()
-            u=var(flow.velocity_name)
-            # Tangential fluid velocity plus the normal motion of the interface itself. On a static
-            # mesh the second term is zero and this is just the tangential slip.
-            res=u-dot(u,n)*n
-            if self.get_current_code_generator()._coordinates_as_dofs:
-                res=res+dot(mesh_velocity(),n)*n
-            return res
-        if is_zero(convert_to_expression(self.advection_velocity)):
-            return None
-        return convert_to_expression(self.advection_velocity)
+        else:
+            u=convert_to_expression(self.fluid_velocity)
+        n=self.get_normal()
+        # Tangential fluid velocity plus the normal motion of the interface itself. On a static mesh
+        # the second term is zero and this is just the tangential slip.
+        res=u-dot(u,n)*n
+        if self.interface_velocity is not None:
+            res=res+dot(convert_to_expression(self.interface_velocity),n)*n
+        elif self.get_current_code_generator()._coordinates_as_dofs:
+            res=res+dot(mesh_velocity(),n)*n
+        return res
+
+    def _adsorption_terms(self)->"tuple[Expression | None, list[tuple[str,ExpressionOrNum]]]":
+        """The charge gained per area and time, and the molar rates to take out of the bulk."""
+        if self.adsorption is None:
+            return None,[]
+        if not isinstance(self.adsorption,dict):
+            e=convert_to_expression(self.adsorption)
+            return (None if is_zero(e) else subexpression(e)),[]
+        parent=self.get_parent_equations(NernstPlanckEquations)
+        if isinstance(parent,list):
+            parent=parent[0] if len(parent)==1 else None
+        valences:dict[str,int]={}
+        if isinstance(parent,NernstPlanckEquations):
+            valences={i.name:i.valence for i in parent.ions}
+        charge:ExpressionOrNum=0
+        bulk:list[tuple[str,ExpressionOrNum]]=[]
+        # sorted: this fixes the order the terms are added in, hence the generated code, so it must
+        # not depend on how the dict was written.
+        for ion_name,rate in sorted(self.adsorption.items()):
+            if ion_name not in valences:
+                if valences:
+                    raise ValueError("SurfaceChargeConservation got an adsorption rate for '"+
+                                     ion_name+"', which the parent domain does not transport. It "+
+                                     "has: "+str(sorted(valences)))
+                raise ValueError("SurfaceChargeConservation got a per-ion adsorption rate for '"+
+                                 ion_name+"', but the parent domain carries no NernstPlanckEquations "+
+                                 "to take the valence from. Pass a net charge flux in C/(m^2 s) "+
+                                 "instead, or add the ion transport.")
+            rate=subexpression(convert_to_expression(rate))
+            charge=charge+valences[ion_name]*faraday_constant*rate
+            couple=self.bulk_coupling if self.bulk_coupling!="auto" else True
+            if couple:
+                bulk.append((cast(NernstPlanckEquations,parent).fieldname_of(ion_name),rate))
+        e=convert_to_expression(charge)
+        return (None if is_zero(e) else e),bulk
 
     def define_fields(self):
         # A field defined ON the interface gets no inherited test scale, so this has to make the
         # residual dimensionless by itself: d_t(q)*testscale must be 1, hence T/Q. (A *bulk* field's
         # test function used on an interface is different -- it inherits the parent scale with an
         # extra 1/spatial per level, which is what already makes e.g. weak(sigma, div(u_test))
-        # dimensionless in NavierStokesFreeSurface.)
+        # dimensionless in NavierStokesFreeSurface.) time_derivative_of_integral divides by the
+        # temporal scale itself, exactly as partial_t does, so the conservative form needs no other
+        # scaling than the non-conservative one did.
         self.define_scalar_field(self.name,self.space,scale=_resolve_scale(self.charge_scale),
                                  testscale=scale_factor("temporal")/_resolve_scale(self.charge_scale))
 
     def define_residuals(self):
         q,q_test=var_and_test(self.name)
-        if not self.quasi_static:
-            self.add_residual(weak(partial_t(q,ALE="auto"),q_test))
-        u_s=self._advection()
-        if u_s is not None:
-            self.add_residual(weak(div(q*u_s),q_test))
+        if self.form=="conservative":
+            if not is_zero(convert_to_expression(self.dt_factor)):
+                # dt_factor multiplies the derivative of the whole integral from OUTSIDE: inside, the
+                # history terms would carry it at their own time levels.
+                self.add_residual(self.dt_factor*time_derivative_of_integral(weak(q,q_test),
+                                                                             scheme=self.scheme))
+            u,w=self._velocities()
+            # The GCL transient strongly supplies dt_factor*(d_t q|_E + div_s(q w)), while the
+            # equation wants dt_factor*d_t q|_E + div_s(q u). So the flux term has to carry
+            # u - dt_factor*w, not u - w. They coincide at dt_factor=1; at dt_factor=0 this collapses
+            # to the correct steady transport div_s(q u), where a bare (u-w) would have solved
+            # div_s(q(u-w))=0 instead. Conservation is unaffected either way, since the whole term
+            # vanishes for the constant test function.
+            adv=u-self.dt_factor*w
+            if not is_zero(adv):
+                self.add_residual(-weak(q*adv,grad(q_test)))
+        else:
+            if not is_zero(convert_to_expression(self.dt_factor)):
+                self.add_residual(weak(self.dt_factor*partial_t(q,ALE="auto"),q_test))
+            u_s=self._legacy_advection()
+            if u_s is not None:
+                self.add_residual(weak(div(q*u_s),q_test))
         if not is_zero(convert_to_expression(self.surface_diffusivity)):
             self.add_residual(weak(self.surface_diffusivity*grad(q),grad(q_test)))
         if not is_zero(convert_to_expression(self.surface_conductivity)):
@@ -1005,8 +1180,61 @@ class SurfaceChargeConservation(InterfaceEquations):
             # Surface current i_s = -kappa_s*grad_s(phi); div_s(i_s) integrated by parts is
             # -weak(i_s, grad(v)), hence the plus.
             self.add_residual(weak(self.surface_conductivity*grad(var(parent.name)),grad(q_test)))
-        self.add_residual(-weak(self._bulk_currents(),q_test))
+        currents=self._bulk_currents()
+        if currents is not None:
+            self.add_residual(-weak(currents,q_test))
+        charge_rate,bulk_rates=self._adsorption_terms()
+        if charge_rate is not None:
+            self.add_residual(-weak(charge_rate,q_test))
+        for fieldname,rate in bulk_rates:
+            # An ion adsorbing leaves the bulk, i.e. it is an OUTFLUX n.J = rate, and the bulk
+            # assembles int(d_t c v) - int(J.grad v), so the boundary term to add is +weak(rate,v).
+            # Same convention (and the same helper) as IonFluxBC, whose docstring used to claim the
+            # opposite sign.
+            self.add_residual(weak(rate,testfunction(fieldname)))
         self.set_initial_condition(self.name,self.initial_charge,degraded_start="auto")
+
+
+class SurfaceChargeEndFlux(InterfaceEquations):
+    r"""
+    An imposed surface-charge flux at an end point of an interface -- a contact line, a corner, or an
+    edge where the interface stops.
+
+    The conservative form of :py:class:`SurfaceChargeConservation` integrates the advection by parts,
+    so its natural end condition is *zero total flux*: nothing leaves the interface, which is what
+    makes the total charge exactly conserved. Add this class where that is not what is wanted, e.g.
+    where charge drains into a grounded substrate at the contact line.
+
+    A positive flux means charge *leaving* the interface through this end point.
+
+    **Units: a flux per unit length of the end point**, i.e. A/m, in every coordinate system --
+    including a two-dimensional Cartesian one, where the end point is a point and its integration
+    measure is the dimensionless 1. That is not an accident of this class: a test scale in pyoomph
+    gains a factor 1/spatial per domain level, so the charge's test function, which belongs to the
+    interface, already carries the length the point measure does not. The two cancel, and the result
+    is independent of ``Problem.set_scaling(spatial=...)``.
+
+    Note that in an axisymmetric problem the measure of a point domain carries :math:`2\pi r`, so a
+    flux imposed at an end point sitting on the symmetry axis contributes nothing at all -- correctly
+    so, since the ring it lives on has zero circumference. Pass ``coordinate_system=cartesian`` if a
+    plain point value is wanted there instead.
+
+    Args:
+        flux: The outward flux per unit end-point length.
+        coordinate_system: Override the coordinate system of the point integral.
+    """
+    required_parent_type = SurfaceChargeConservation
+
+    def __init__(self,flux:ExpressionOrNum,*,coordinate_system:"OptionalCoordinateSystem"=None):
+        super().__init__()
+        self.flux=flux
+        self.coordinate_system=coordinate_system
+
+    def define_residuals(self):
+        parent=self.get_parent_equations(SurfaceChargeConservation)
+        assert isinstance(parent,SurfaceChargeConservation)
+        self.add_residual(weak(self.flux,testfunction(parent.name),
+                               coordinate_system=self.coordinate_system))
 
 
 class NernstPlanckEquations(ScalarTransportEquations):
@@ -1023,10 +1251,13 @@ class NernstPlanckEquations(ScalarTransportEquations):
     ``charge_density=<these equations>.get_charge_density()``, or use the
     :py:func:`PoissonNernstPlanck` factory, which does exactly that.
 
-    The natural boundary condition of the weak form is zero *total* normal flux, i.e. precisely a
-    blocking (ion-impermeable) wall or free surface. So an insulating boundary needs no interface
-    equation at all -- :py:class:`IonFluxBC` is only needed to prescribe a nonzero flux, or to
-    subtract the footprint the stabilization leaves behind.
+    **The natural boundary condition depends on how the advection was assembled**, and it is *not*
+    the zero total flux this docstring used to claim. Only the terms written against
+    ``grad(c_test)`` leave a boundary term behind, so with the default ``advection_by_parts=False``
+    the natural condition is zero *diffusive plus migration* flux and the advective part is
+    unconstrained, while ``advection_by_parts=True`` makes it the zero *total* flux. Either way an
+    insulating wall needs no interface equation at all; :py:class:`IonFluxBC` is only needed to
+    prescribe a nonzero flux, or to subtract the footprint the stabilization leaves behind.
 
     .. note::
         Stabilization is per-species: both the wind
@@ -1053,7 +1284,27 @@ class NernstPlanckEquations(ScalarTransportEquations):
         reactions: Volumetric source terms, as a ``{ion_name: rate}`` mapping.
         dt_factor: Multiplicative factor on the time derivative. Defaults to 1.
         time_scheme: Time stepping scheme. Defaults to None, i.e. the problem's default.
-        advection_by_parts: Integrate the advective term by parts. Defaults to False.
+        advection_by_parts: Integrate the advective term by parts. ``"auto"`` follows ``GCL``, which
+            requires it.
+        GCL: Write the transient term as the derivative of the whole integral and advect with the
+            velocity *relative to the mesh*, i.e. the conservative ALE form, exactly as
+            :py:class:`~pyoomph.equations.salt_transport.SaltTransportEquations` and
+            :py:class:`~pyoomph.equations.multi_component.CompositionAdvectionDiffusionEquations` do.
+            ``"auto"`` (the default) switches it on whenever the mesh moves, and leaves a static mesh
+            untouched. Implies ``advection_by_parts``. **It changes what a boundary with no interface
+            equation means**, which is the one way to be silently wrong here: what a non-volatile ion
+            needs at an evaporating interface depends on how the bulk was assembled. With the
+            advection not by parts the natural condition is zero *diffusive* flux and the interface
+            needs ``-c*j_total/rho``; by parts without ``GCL`` it is zero flux in the lab frame and
+            the interface needs ``+c*u_mesh.n``; under ``GCL`` it is zero flux *through the moving
+            boundary* and the interface needs **nothing at all**. So an :py:class:`IonFluxBC` written
+            for one of the other two becomes a double count here. ``dev_docs/salt_transport.md``
+            section 3 has the measurements.
+        gcl_scheme: Time stepping scheme of the ``GCL`` transient. A different set of schemes from
+            ``time_scheme``: only these five understand a derivative of an integral, and conversely
+            ``time_scheme`` rejects the ``_degr`` names. The default ``"BDF2_degr"`` degrades to
+            first order in the very first step, where an initial condition has no history; plain
+            ``"BDF2"`` here makes the *whole run* first order, which is easy to miss.
         concentration_scale: Named scale shared by all species. Defaults to ``"ion_concentration"``.
         set_bulk_initial_conditions: Initialise each species at its ``bulk_concentration``.
         stabilization: Optional residual-based stabilization, see the note above.
@@ -1064,7 +1315,10 @@ class NernstPlanckEquations(ScalarTransportEquations):
                  temperature:ExpressionOrNum=var("temperature"),field_prefix:str="c_",
                  fluid_props:"AnyMaterialProperties | None"=None,
                  reactions:"dict[str,ExpressionOrNum] | None"=None,dt_factor:ExpressionOrNum=1,
-                 time_scheme:"TimeSteppingScheme | None"=None,advection_by_parts:bool=False,
+                 time_scheme:"TimeSteppingScheme | None"=None,
+                 advection_by_parts:"bool | Literal['auto']"="auto",
+                 GCL:"bool | Literal['auto']"="auto",
+                 gcl_scheme:"IntegralTimeSteppingScheme"="BDF2_degr",
                  concentration_scale:str="ion_concentration",velocity_name_for_scaling:str="velocity",
                  set_bulk_initial_conditions:bool=True,consider_scaling:bool=True,
                  stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
@@ -1093,7 +1347,16 @@ class NernstPlanckEquations(ScalarTransportEquations):
                 raise ValueError("reactions has an entry for '"+n+"', which is not one of the ions")
         self.dt_factor=dt_factor
         self.time_scheme:"TimeSteppingScheme | None"=time_scheme
-        self.advection_by_parts=advection_by_parts
+        if GCL is False and advection_by_parts=="auto":
+            advection_by_parts=False
+        if GCL is True and advection_by_parts is False:
+            raise ValueError("NernstPlanckEquations cannot combine GCL=True with "+
+                             "advection_by_parts=False: the conservative ALE form *is* the by-parts "+
+                             "form, since d/dt of the whole integral needs the advection written "+
+                             "against grad(c_test) or the two do not describe the same equation.")
+        self.advection_by_parts:"bool | Literal['auto']"=advection_by_parts
+        self.GCL:"bool | Literal['auto']"=GCL
+        self.gcl_scheme:"IntegralTimeSteppingScheme"=gcl_scheme
         self.concentration_scale=concentration_scale
         self.velocity_name_for_scaling=velocity_name_for_scaling
         self.set_bulk_initial_conditions=set_bulk_initial_conditions
@@ -1184,7 +1447,36 @@ class NernstPlanckEquations(ScalarTransportEquations):
                                           also_on_interface=True)
 
     def _advective(self)->bool:
+        """Whether an advective term is present, for the *test scaling*.
+
+        Deliberately blind to the mesh velocity, even under GCL where a quiescent electrolyte on a
+        moving mesh does assemble a flux term. Flipping this on a moving mesh would swap the
+        diffusive test scale spatial^2/(D*c) for spatial/velocity/c in every such problem and would
+        reference scale_factor("velocity"), which the class docstring promises wind=0 removes from
+        the problem. Whether the flux *term* is emitted is a separate question, see _mesh_moves.
+        """
         return not is_zero(convert_to_expression(self.wind))
+
+    def _mesh_moves(self)->bool:
+        """Whether the parent domain has its coordinates as unknowns.
+
+        Only valid from define_residuals: activate_coordinates_as_dofs runs from another equation's
+        define_fields and the order within a domain is not guaranteed.
+        """
+        return bool(self.get_current_code_generator()._coordinates_as_dofs)
+
+    def _use_gcl(self)->bool:
+        """Resolve ``GCL="auto"``: on iff the mesh moves.
+
+        On a static mesh the conservative branch is the same equation, but integrating the advection
+        by parts changes the natural boundary condition from "zero diffusive plus migration flux" to
+        "zero total flux", which differs wherever there is through-flow. "auto" therefore turns the
+        conservative form on exactly where it is the point - a moving mesh, where the alternative
+        does not conserve the dissolved amount at all - and leaves a static problem untouched.
+        """
+        if self.GCL!="auto":
+            return bool(self.GCL)
+        return self._mesh_moves()
 
     def define_residuals(self):
         if self.time_scheme is None:
@@ -1192,15 +1484,36 @@ class NernstPlanckEquations(ScalarTransportEquations):
         else:
             ts=lambda x:time_scheme(cast("TimeSteppingScheme",self.time_scheme),x)
         gphi=grad(var(self.potential_name))
+        gcl=self._use_gcl()
+        by_parts=gcl if self.advection_by_parts=="auto" else bool(self.advection_by_parts)
+        adv:ExpressionOrNum=0
+        if gcl:
+            w=mesh_velocity() if self._mesh_moves() else Expression(0)
+            adv=convert_to_expression(self.wind)-self.dt_factor*w
         for i in self.ions:
             fn=self.fieldname_of(i.name)
             c,c_test=var_and_test(fn)
-            self.add_residual(weak(ts(self.dt_factor*partial_t(c,ALE="auto")),c_test))
-            if self._advective():
-                if self.advection_by_parts:
-                    self.add_residual(-weak(ts(c*self.wind),grad(c_test)))
-                else:
-                    self.add_residual(weak(ts(dot(self.wind,grad(c))),c_test))
+            if gcl:
+                # The conservative ALE form, term for term as SaltTransportEquations and the
+                # composition equations write it: the derivative of the whole integral, so that the
+                # change of the element volume is taken by the same finite difference that advances
+                # the field, and advection with the velocity relative to the mesh. dt_factor
+                # multiplies from OUTSIDE - inside, the history terms would carry it at their own
+                # time levels.
+                self.add_residual(self.dt_factor*time_derivative_of_integral(weak(c,c_test),
+                                                                             scheme=self.gcl_scheme))
+                # dt_factor multiplies w as well: the GCL transient strongly supplies
+                # dt_factor*(d_t c|_E + div(c w)), while the equation wants dt_factor*d_t c|_E +
+                # div(c u), so the flux has to carry u - dt_factor*w. They coincide at dt_factor=1.
+                if not is_zero(adv):
+                    self.add_residual(-weak(ts(c*adv),grad(c_test)))
+            else:
+                self.add_residual(weak(ts(self.dt_factor*partial_t(c,ALE="auto")),c_test))
+                if self._advective():
+                    if by_parts:
+                        self.add_residual(-weak(ts(c*self.wind),grad(c_test)))
+                    else:
+                        self.add_residual(weak(ts(dot(self.wind,grad(c))),c_test))
             self.add_residual(weak(ts(self.get_diffusivity(i.name)*grad(c)),grad(c_test)))
             # Migration. J_mig = -z m F c grad(phi); the by-parts weak form of div(J) is
             # -int J.grad(v), so the sign here is PLUS. Written with E instead of grad(phi) this
@@ -1279,7 +1592,16 @@ class NernstPlanckEquations(ScalarTransportEquations):
         c=var(fieldname)
         R=self.dt_factor*partial_t(c,ALE="auto")
         if self._advective():
-            R=R+dot(self.wind,grad(c))
+            # Mirror the advective term the Galerkin part actually assembles. This used to be
+            # dot(wind,grad(c)) unconditionally, i.e. the stabilization of an advection_by_parts
+            # problem was built on a different equation than the one being solved.
+            conservative=self.stab_cfg.conservative_residual
+            if conservative=="auto":
+                # The GCL branch produces the same expression as the plain by-parts one, and that is
+                # right: its transient is strongly d_t c|_E + div(c w) and its flux term adds
+                # div(c(u-w)), which sum to d_t c|_E + div(c u).
+                conservative=self._use_gcl() or (self.advection_by_parts is True)
+            R=R+(div(self.wind*c) if conservative else dot(self.wind,grad(c)))
         R=R-div(self.get_migration_mobility(ion.name)*c*grad(var(self.potential_name)))
         if ion.name in self.reactions:
             R=R-convert_to_expression(self.reactions[ion.name])
@@ -1325,14 +1647,24 @@ class IonFluxBC(InterfaceEquations):
     r"""
     A prescribed molar flux :math:`\vec{n}\cdot\vec{J}_i` of one or more ionic species.
 
-    The *natural* condition of :py:class:`NernstPlanckEquations` is already zero total flux, i.e. a
-    blocking wall, so this class is only needed to impose a nonzero flux -- or, with
-    ``subtract_stabilization_flux``, to make the imposed flux the physical one when the bulk is
-    stabilized. It is an :py:class:`~pyoomph.generic.codegen.InterfaceEquations` rather than a plain
-    ``Equations`` precisely so that it can reach the bulk for that correction.
+    The *natural* condition of :py:class:`NernstPlanckEquations` is already a blocking wall, so this
+    class is only needed to impose a nonzero flux -- or, with ``subtract_stabilization_flux``, to
+    make the imposed flux the physical one when the bulk is stabilized. It is an
+    :py:class:`~pyoomph.generic.codegen.InterfaceEquations` rather than a plain ``Equations``
+    precisely so that it can reach the bulk for that correction.
 
-    Sign: as for :py:class:`~pyoomph.equations.generic.NeumannBC`, a positive value is an *influx*
-    against the outward normal.
+    **Sign: a positive value is an OUTFLUX**, i.e. species leaving the domain along the outward
+    normal. This docstring used to claim the opposite, and nothing caught it because no test imposes
+    a nonzero flux. The bulk assembles :math:`\int\partial_t c\,v-\int\vec{J}\cdot\nabla v`,
+    so the boundary term it omits is :math:`-\oint(\vec{n}\cdot\vec{J})v` and adding
+    ``weak(g,c_test)`` here imposes :math:`\vec{n}\cdot\vec{J}=g`.
+    :py:class:`~pyoomph.equations.generic.NeumannBC` uses the same convention once its value is read
+    as a flux rather than as a gradient.
+
+    **Which flux** :math:`g` **is depends on the parent's** ``advection_by_parts``: with the default
+    ``False`` only the terms written against ``grad(c_test)`` leave a boundary term, so :math:`g` is
+    the diffusive plus migration flux; with it on, the advective part joins in and :math:`g` is the
+    total :math:`\vec{n}\cdot\vec{J}`.
 
     Args:
         subtract_stabilization_flux: Subtract the footprint the bulk stabilization leaves on this

@@ -98,6 +98,7 @@ from __future__ import annotations
 
 from ..generic import Equations, InterfaceEquations
 from ..expressions import *
+from .generic import interface_transport_velocities
 from .stabilization import ScalarTransportStabilization, element_h, regularized_magnitude
 from ..typings import *
 
@@ -107,11 +108,10 @@ from ..typings import *
 from ..materials.generic import BaseInterfaceProperties, SurfactantProperties, \
     MixtureLiquidProperties
 
-#: Schemes accepted for the transient term. These are the ones
-#: :py:func:`~pyoomph.expressions.time_derivative_of_integral` understands, which is a different set
-#: from :py:data:`~pyoomph.typings.TimeSteppingScheme`: the ``_degr`` variants exist only here, and
-#: the non-multistep ones (TPZ, midpoint, ...) are silently downgraded to BDF1 by that function.
-TransientSchemeEnum = Literal["BDF1", "BDF2", "Newmark2", "BDF2_degr", "Newmark2_degr"]
+#: Schemes accepted for the transient term. Kept as an alias because it is the published name; the
+#: definition now lives beside :py:data:`~pyoomph.expressions.generic.TimeSteppingScheme`, since the
+#: electrostatics module needs the same set and importing it from here would be backwards.
+TransientSchemeEnum = IntegralTimeSteppingScheme
 
 #: The transport forms :py:class:`SurfactantTransportEquations` can assemble.
 SURFACTANT_TRANSPORT_FORMS = {"conservative", "legacy", "strong", "dg_upwind"}
@@ -410,25 +410,11 @@ class SurfactantTransportEquations(InterfaceEquations):
         return "C2"
 
     def _velocities(self, host: Equations) -> tuple[Expression, Expression]:
-        """The fluid velocity that carries the surfactant tangentially, and the velocity of the
-        interface itself, which is what it follows normally.
-
-        Both default to nothing at all when there is nothing to take them from: a surfactant sitting
-        on a prescribed, immobile interface is a legitimate configuration, and asking for
-        ``var("velocity")`` there fails at code generation with a message about an undefined field
-        rather than about the equations being incomplete.
-        """
-        if self.fluid_velocity is not None:
-            u = convert_to_expression(self.fluid_velocity)
-        else:
-            from .navier_stokes import StokesEquations
-            u = var("velocity") if host.get_parent_equations(of_type=StokesEquations) is not None else Expression(0)  # type:ignore[attr-defined]
-        if self.interface_velocity is not None:
-            w = convert_to_expression(self.interface_velocity)
-        else:
-            pdom = host.get_current_code_generator().get_parent_domain()
-            w = mesh_velocity() if (pdom is not None and pdom._coordinates_as_dofs) else Expression(0)
-        return u, w
+        """The fluid velocity and the velocity of the interface itself, see
+        :py:func:`~pyoomph.equations.generic.interface_transport_velocities`. Shared with the surface
+        charge equations, which assemble the same conservative surface transport."""
+        return interface_transport_velocities(cast(InterfaceEquations, host),
+                                              self.fluid_velocity, self.interface_velocity)
 
     def uses_projected_advection_velocity(self, host: Equations) -> bool:
         """Whether ``_uinterf_proj`` exists, i.e. whether the legacy form is in use."""

@@ -2313,5 +2313,35 @@ class StaticCondensation(Equations):
         problem._auto_enable_static_condensation() #type:ignore
 
 
+def interface_transport_velocities(host:InterfaceEquations,
+                                   fluid_velocity:"ExpressionOrNum | None"=None,
+                                   interface_velocity:"ExpressionOrNum | None"=None)->tuple[Expression,Expression]:
+    """The two velocities a quantity transported along an interface needs: the fluid velocity that
+    carries it tangentially, and the velocity of the interface itself, which it follows normally.
+
+    Both default to nothing at all when there is nothing to take them from: a surfactant or a surface
+    charge sitting on a prescribed, immobile interface is a legitimate configuration, and asking for
+    ``var("velocity")`` there fails at code generation with a message about an undefined field rather
+    than about the equations being incomplete.
+
+    Shared by :py:class:`~pyoomph.equations.surfactants.SurfactantTransportEquations` and
+    :py:class:`~pyoomph.equations.electrostatics.SurfaceChargeConservation`, which assemble the same
+    conservative surface transport and would otherwise carry two copies of this - and of the reason
+    the conservative form takes ``u`` and ``w`` separately rather than one combined velocity.
+    """
+    from ..expressions import mesh_velocity, convert_to_expression
+    if fluid_velocity is not None:
+        u=convert_to_expression(fluid_velocity)
+    else:
+        from .navier_stokes import StokesEquations
+        u=var("velocity") if host.get_parent_equations(of_type=StokesEquations) is not None else Expression(0)
+    if interface_velocity is not None:
+        w=convert_to_expression(interface_velocity)
+    else:
+        pdom=host.get_current_code_generator().get_parent_domain()
+        w=mesh_velocity() if (pdom is not None and pdom._coordinates_as_dofs) else Expression(0)  #type:ignore[attr-defined]
+    return u,w
+
+
 from ..typings import _set_public_api
 _set_public_api(globals())  # keep the typing helpers (Callable, List, ...) out of "from ... import *"

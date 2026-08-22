@@ -68,13 +68,26 @@ class AdvectionDiffusionEquations(ScalarTransportEquations):
          dt_factor(ExpressionOrNum): Multiplicative time step factor. Default is 1.
          time_scheme(Optional[TimeSteppingScheme]): The time stepping scheme. Default is None.
          source(Union[ExpressionOrNum,Dict[str,ExpressionOrNum]]): The source term. Default is {}.
-         advection_by_parts(Union[bool,Literal["skew"]]): Whether to integrate by partsthe weak form of the advective term. Default is False.
+         advection_by_parts(Union[bool,Literal["skew"]]): Whether to integrate by parts the weak form of the advective term. Default is False.
+         GCL(bool): Write the transient term as the derivative of the whole integral and advect with the velocity *relative to the mesh*, i.e. the conservative ALE form. On a mesh that follows an evaporating or otherwise moving boundary this conserves the total amount to machine precision instead of to the order of the time stepping, and its natural boundary condition becomes zero flux *through the moving boundary* rather than zero diffusive flux. Implies ``advection_by_parts`` and is incompatible with ``"skew"``. Default is False.
+         gcl_scheme: Time stepping scheme of the ``GCL`` transient, from the set a derivative of an integral understands - a different set from ``time_scheme``, which rejects the ``_degr`` names. The default ``"BDF2_degr"`` degrades to first order in the first step, where an initial condition has no history; plain ``"BDF2"`` makes the whole run first order.
          velocity_name_for_scaling(str): The name of the velocity for scaling. Default is "velocity".
          stabilization: Optional residual-based stabilization (SUPG etc.), see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all.
    """
 
-   def __init__(self,fieldnames:str | list[str]="advdiffu",*,diffusivity:ExpressionOrNum=1,space:"FiniteElementSpaceEnum"="C2",consider_scaling:bool=True,fluid_props:MixtureLiquidProperties | MixtureGasProperties | None=None,wind:ExpressionOrNum=var("velocity"),dt_factor:ExpressionOrNum=1,time_scheme:TimeSteppingScheme | None=None,source:ExpressionOrNum | dict[str, ExpressionOrNum]={},advection_by_parts:bool | Literal["skew"]=False,velocity_name_for_scaling="velocity",stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
+   def __init__(self,fieldnames:str | list[str]="advdiffu",*,diffusivity:ExpressionOrNum=1,space:"FiniteElementSpaceEnum"="C2",consider_scaling:bool=True,fluid_props:MixtureLiquidProperties | MixtureGasProperties | None=None,wind:ExpressionOrNum=var("velocity"),dt_factor:ExpressionOrNum=1,time_scheme:TimeSteppingScheme | None=None,source:ExpressionOrNum | dict[str, ExpressionOrNum]={},advection_by_parts:bool | Literal["skew"]=False,GCL:bool=False,gcl_scheme:"IntegralTimeSteppingScheme"="BDF2_degr",velocity_name_for_scaling="velocity",stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
       super().__init__()
+      if GCL:
+         if advection_by_parts=="skew":
+            raise ValueError("AdvectionDiffusionEquations cannot combine GCL=True with "+
+                             "advection_by_parts='skew': the conservative ALE form needs the whole "+
+                             "advective term written against grad(v), and a half-and-half skew form "+
+                             "leaves the other half unaccounted for.")
+         # The conservative form *is* the by-parts form: d/dt of the whole integral needs the
+         # advection written against grad(v), or the two do not describe the same equation.
+         advection_by_parts=True
+      self.GCL=GCL
+      self.gcl_scheme:"IntegralTimeSteppingScheme"=gcl_scheme
       self.dt_factor=dt_factor
       self.diffusivity=diffusivity      
       self.space:"FiniteElementSpaceEnum"=space
@@ -165,17 +178,14 @@ class AdvectionDiffusionEquations(ScalarTransportEquations):
       # by (dt_factor-1)*u_mesh.grad(f): the strong residual mirrors the assembly, not the physics.
       R:Expression=self.dt_factor*partial_t(f)
       conservative=self.stab_cfg.conservative_residual
-      if conservative=="auto":
-         if self.advection_by_parts=="skew":
-            R=R+(dot(self.wind,grad(f))+div(self.wind*f))/2
-         elif self.advection_by_parts:
-            R=R+div(self.wind*f)
-         else:
-            R=R+dot(self.wind,grad(f))
-      elif conservative:
-         R=R+div(self.wind*f)
+      if conservative=="auto" and self.advection_by_parts=="skew":
+         R=R+(dot(self.wind,grad(f))+div(self.wind*f))/2
       else:
-         R=R+dot(self.wind,grad(f))
+         if conservative=="auto":
+            # GCL included: its transient is strongly d_t f|_E + div(w f) and its flux term adds
+            # div((u-w) f), which sum to the same conservative expression as the plain by-parts one.
+            conservative=bool(self.advection_by_parts) or self.GCL
+         R=R+(div(self.wind*f) if conservative else dot(self.wind,grad(f)))
       R=R-convert_to_expression(self.source.get(fieldname,0))
       if self.stab_cfg.include_diffusion_in_residual:
          if self.fluid_props is not None:
@@ -187,6 +197,31 @@ class AdvectionDiffusionEquations(ScalarTransportEquations):
             R=R-div(self.diffusivity*grad(f))
       return R
 
+   def _transient_and_advection(self,fn:str,ts:"Callable[[Expression],Expression]")->None:
+      """The transient term and the advective term, which the GCL form replaces as a pair."""
+      f, f_test = var_and_test(fn)
+      if self.GCL:
+         # d/dt of the whole integral, so that the change of the element volume is taken by the same
+         # finite difference that advances the field; testing with v=1 then telescopes exactly.
+         # dt_factor multiplies from OUTSIDE - inside, the history terms would carry it at their own
+         # time levels. It multiplies the mesh velocity as well, since the GCL transient strongly
+         # supplies dt_factor*(d_t f|_E + div(w f)) while the equation wants dt_factor*d_t f|_E +
+         # div(u f). They coincide at dt_factor=1.
+         self.add_residual(self.dt_factor*time_derivative_of_integral(weak(f,f_test),
+                                                                      scheme=self.gcl_scheme))
+         adv=convert_to_expression(self.wind)-self.dt_factor*mesh_velocity()
+         if not is_zero(adv):
+            self.add_residual(-weak(ts(f*adv),grad(f_test)))
+         return
+      self.add_residual(weak(ts(self.dt_factor*partial_t(f)),f_test))
+      if self.advection_by_parts=="skew":
+         self.add_residual(-weak(ts(self.wind*f),grad(f_test))/2)
+         self.add_residual(weak(ts(dot(self.wind,grad(f))),f_test)/2)
+      elif self.advection_by_parts:
+         self.add_residual(-weak(ts(self.wind*f),grad(f_test)))
+      else:
+         self.add_residual(weak(ts(dot(self.wind,grad(f))),f_test))
+
    def define_residuals(self):
       if self.time_scheme is None:
          ts:Callable[[Expression],Expression]=lambda x :x
@@ -195,14 +230,8 @@ class AdvectionDiffusionEquations(ScalarTransportEquations):
       if self.fluid_props is not None:
          for fn in self.fieldnames:
             f, f_test = var_and_test(fn)
-            self.add_residual(weak(ts(self.dt_factor*partial_t(f)-self.source.get(fn,0)),f_test))
-            if self.advection_by_parts=="skew":
-               self.add_residual(-weak( ts(self.wind* f),grad(f_test))/2)
-               self.add_residual(weak(ts(dot(self.wind, grad(f))), f_test)/2)
-            elif self.advection_by_parts:
-               self.add_residual(-weak( ts(self.wind* f),grad(f_test)))
-            else:
-               self.add_residual(weak(ts(dot(self.wind, grad(f))), f_test))
+            self._transient_and_advection(fn,ts)
+            self.add_residual(-weak(ts(convert_to_expression(self.source.get(fn,0))),f_test))
             for fn2 in self.fieldnames:
                f2,_=var_and_test(fn2)
                diffuD=self.get_diffusion_coefficient(self.component_names[fn],self.component_names[fn2])
@@ -211,14 +240,8 @@ class AdvectionDiffusionEquations(ScalarTransportEquations):
       else:
          for fn in self.fieldnames:
             f, f_test = var_and_test(fn)
-            self.add_residual(weak(ts(self.dt_factor * partial_t(f)),f_test)-weak(ts(Expression(self.source.get(fn, 0))),f_test))
-            if self.advection_by_parts=="skew":
-               self.add_residual(-weak( ts(self.wind* f),grad(f_test))/2)
-               self.add_residual(weak(ts(dot(self.wind, grad(f))), f_test)/2)
-            elif self.advection_by_parts:
-               self.add_residual(-weak(ts(self.wind*f), grad(f_test)))
-            else:
-               self.add_residual(weak(ts(dot(self.wind,grad(f))),f_test))
+            self._transient_and_advection(fn,ts)
+            self.add_residual(-weak(ts(Expression(self.source.get(fn, 0))),f_test))
             diffuD=self.diffusivity
             self.add_residual(weak(ts(diffuD*grad(f)),grad(f_test)))
       self.add_stabilization_residuals(ts)

@@ -55,6 +55,12 @@ SingleOrMultipleExpressions:TypeAlias=Expression|tuple[Expression,...]
 OptionalCoordinateSystem:TypeAlias=_pyoomph.CustomCoordinateSystem|None
 TimeSteppingScheme:TypeAlias=Literal["BDF1","BDF2","Newmark2","TPZ","MPT","Simpson","Boole","trapezoidal","Kepler","Milne","midpoint"]
 OptionalTimeSteppingScheme:TypeAlias=TimeSteppingScheme|None
+#: The schemes :py:func:`~pyoomph.expressions.time_derivative_of_integral` actually honours. A
+#: different set from :py:data:`TimeSteppingScheme`: the ``_degr`` variants exist only here, and the
+#: quadrature-style names of that alias are silently downgraded to ``"BDF1"`` by that function, since
+#: they are not linear multistep methods. Conversely ``time_scheme()`` rejects the ``_degr`` names, so
+#: an equation offering both needs two separate arguments.
+IntegralTimeSteppingScheme:TypeAlias=Literal["BDF1","BDF2","Newmark2","BDF2_degr","Newmark2_degr"]
 
 FiniteElementSpaceEnum:TypeAlias=Literal["C1","C1TB","C2","C2TB","D1","D1TB","D2","D2TB","DL","D0"]
 def assert_valid_finite_element_space(inp:str)->FiniteElementSpaceEnum:

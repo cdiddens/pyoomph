@@ -118,6 +118,15 @@ class BaseInterfaceProperties:
         self.double_layer_capacitance:ExpressionNumOrNone=None
         #: Excess surface conductance, i.e. the numerator of the Dukhin number.
         self.surface_conductance:ExpressionNumOrNone=None
+        #: Net charge flux onto this interface from ad-/desorption or a surface reaction, in
+        #: C/(m^2 s) and positive towards the interface. Read by
+        #: :py:class:`~pyoomph.equations.electrostatics.SurfaceChargeConservation`.
+        self.surface_charge_adsorption_rate:ExpressionNumOrNone=None
+        #: Per-ion net molar ad-/desorption rate onto this interface, in mol/(m^2 s) and positive
+        #: towards it. Read by the same class, which converts it to a charge with the ion valences
+        #: and takes the same amount out of the adjacent Nernst-Planck bulk. Takes precedence over
+        #: :py:attr:`surface_charge_adsorption_rate` when both are set.
+        self.ion_adsorption_rate:dict[str,ExpressionOrNum]={}
 
     def set_latent_heat_of(self,name:str,lat_heat:ExpressionOrNum):
         self._latent_heats[name]=lat_heat
