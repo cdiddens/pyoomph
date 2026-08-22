@@ -372,6 +372,10 @@ namespace pyoomph
     DynamicJITCode *jitcode;
 
     JITElementInfo_t eleminfo;
+    // The half-open range of eleminfo.nodal_coords[i] slots this element new'ed and must delete,
+    // RECORDED by fill_element_info() rather than re-derived at destruction time. See
+    // owned_nodal_coord_range().
+    unsigned owned_coord_begin = 0, owned_coord_end = 0;
     // The shape buffer this element assembles into. Not owned per element and not a member: the
     // buffer chain runs to hundreds of megabytes for a 3D C2 element with analytic Hessians on a
     // moving mesh, so ShapeBufferPool (elements.cpp) hands out one chain per concurrently

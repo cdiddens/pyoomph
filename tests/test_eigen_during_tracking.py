@@ -85,11 +85,21 @@ def _skip_reason():
 _SKIP = _skip_reason()
 pytestmark = pytest.mark.skipif(_SKIP is not None, reason=str(_SKIP))
 
-# The two spectra come from the same matrices, so they agree far better than this; the tolerance is
-# only here to absorb the shift-invert Krylov-Schur stopping criterion, which is not deterministic
-# down to the last bit across two EPS.solve() calls. A base-vs-augmented layout mix-up does not move
-# eigenvalues by 1e-8, it produces a different problem.
-_EIG_ATOL = 1e-8
+# The two spectra are NOT taken at the same state, which the tolerance has to allow for.
+#
+# _reaction_case re-converges the augmented system between them ("Re-converging has to land back on
+# the same critical parameter"), and that second solve moves the critical parameter a little: 1.73e-8
+# on the pitchfork at N=8. An eigenvalue that is zero at the bifurcation is linear in the distance to
+# it, so the tracked zero mode comes out at exactly that shift - measured, -1.7299e-08 against a
+# parameter step of +1.7298e-08, a ratio of 1.0000. The other three eigenvalues, being O(30), are
+# unmoved at seven digits and are governed by the relative tolerance instead.
+#
+# So the floor here is the tracker's own convergence, not the eigensolver's. It used to sit just under
+# 1e-8 (1.4e-9) and passed by a factor of seven, until the Gauss<2,3> knot fix (4ed8580) changed where
+# the first solve lands and pushed it to 1.7e-8. What the test is actually for is unaffected: a
+# base-vs-augmented layout mix-up does not move eigenvalues by 1e-8, it produces a different problem,
+# and _assert_base_layout() checks the layout directly anyway.
+_EIG_ATOL = 1e-6
 _EIG_RTOL = 1e-8
 
 

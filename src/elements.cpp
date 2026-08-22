@@ -1194,23 +1194,28 @@ namespace pyoomph
 	}
 
 	// The owned slots of eleminfo.nodal_coords[i], i.e. the ones this element new'ed and must delete:
-	// the local-coordinate buffers, and for a face element the zeta buffers after them. Derived from
-	// the element itself rather than read back out of jitcode->get_func_table(), because a destructor
-	// may not depend on another object's lifetime -- DynamicJITCode is a nanobind-owned Python object
-	// and at interpreter shutdown it is released before the mesh whose elements point at it, which
-	// segfaulted for every interface carrying an interior-facet skeleton (that mesh is destroyed from
-	// inside its code generator's dealloc). fill_element_info() checks the result against
-	// info_Pos.numfields, so a change to the generated Pos layout is caught there rather than here.
+	// the local-coordinate buffers, and for a face element the zeta buffers after them. The range is
+	// RECORDED by fill_element_info(), which is the only place that knows it, rather than read back
+	// out of jitcode->get_func_table() here: a destructor may not depend on another object's lifetime
+	// -- DynamicJITCode is a nanobind-owned Python object and at interpreter shutdown it is released
+	// before the mesh whose elements point at it, which segfaulted for every interface carrying an
+	// interior-facet skeleton (that mesh is destroyed from inside its code generator's dealloc).
 	//
-	// as_interface_element() is virtual, so this is only correct while the object still *is* one:
-	// by the time ~BulkElementBase runs, the InterfaceElementBase sub-object is gone and it reports
-	// NULL. Hence ~InterfaceElementBase calls free_element_info() itself, and the later call from
-	// ~BulkElementBase finds eleminfo.alloced already false and returns.
+	// It used to be DERIVED here instead, as nodal_dim + lagr_dim + dim (+ dim again for a face
+	// element's zeta). That assumed every face element carries a zeta block, and one does not: a 1D
+	// edge nested in a 2D face of a 3D bulk gets no boundary coordinate, so the generated Pos layout
+	// has 7 fields where the derivation predicted 8 (tests/test_segment_ordering.py, the line-in-3D
+	// case). fill_element_info()'s consistency check caught it before the wrong slots were freed,
+	// which is what that check was for; recording the range removes the assumption altogether.
+	//
+	// Recording also settles a second hazard the derivation had: as_interface_element() is virtual, so
+	// the old form was only correct while the object still *was* one. By the time ~BulkElementBase
+	// runs the InterfaceElementBase sub-object is gone and it reports NULL - which is why
+	// ~InterfaceElementBase calls free_element_info() itself and the later call from ~BulkElementBase
+	// finds eleminfo.alloced already false. A plain recorded pair needs no such ordering.
 	std::pair<unsigned, unsigned> BulkElementBase::owned_nodal_coord_range() const
 	{
-		const unsigned begin = eleminfo.nodal_dim + this->nlagrangian();
-		const unsigned n_zeta = this->as_interface_element() ? this->dim() : 0;
-		return std::make_pair(begin, begin + this->dim() + n_zeta);
+		return std::make_pair(owned_coord_begin, owned_coord_end);
 	}
 
 	// Frees all buffers set up by fill_element_info() (nodal coordinate/data/local-eqn arrays).
@@ -1357,18 +1362,12 @@ namespace pyoomph
 		// the node, and asking per node made fill_element_info one of the costliest cast sites here.
 		InterfaceElementBase *const this_as_face = this->as_interface_element();
 		const unsigned zeta_offset = eleminfo.nodal_dim + functable->lagr_dim + this->dim();
-		// free_element_info() derives this range without the function table (see there). If the
-		// generated Pos layout ever stops being
-		// [Eulerian, Lagrangian, local coordinates, zeta], the derivation would free the wrong slots,
-		// so it is checked here, once, where the table is still guaranteed to be alive.
-		const unsigned derived_pos_numfields = this->owned_nodal_coord_range().second;
-		if (derived_pos_numfields != functable->info_Pos.numfields)
-		{
-			throw_runtime_error("The generated Pos field layout is not the one free_element_info() assumes: "
-													"info_Pos.numfields is " + std::to_string(functable->info_Pos.numfields) +
-													" but nodal_dim+lagr_dim+dim(+zeta) is " + std::to_string(derived_pos_numfields) +
-													". Update BulkElementBase::owned_nodal_coord_range().");
-		}
+		// Recorded here, where the function table is still guaranteed to be alive, for
+		// free_element_info() to use later without touching it (see owned_nodal_coord_range).
+		// The slots below zeta_offset that are NOT owned are the Eulerian and Lagrangian ones, which
+		// point into the node; everything from the local-coordinate block to the end is new'ed below.
+		owned_coord_begin = eleminfo.nodal_dim + functable->lagr_dim;
+		owned_coord_end = functable->info_Pos.numfields;
 		bool face_zeta_defined = false;
 		if (this_as_face && functable->info_Pos.numfields > zeta_offset)
 		{

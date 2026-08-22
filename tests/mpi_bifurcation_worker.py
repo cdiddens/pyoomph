@@ -149,6 +149,31 @@ def _eigenvector_norms(p, index=0):
             "evect_absmax": float(numpy.amax(numpy.absolute(ev)))}
 
 
+def _converged_max_residual(p):
+    """max|R| of the augmented system, measured the way the tracking solve converged it.
+
+    Problem.solve() is a STATIONARY solve: it makes every timestepper steady, converges, and restores
+    them to unsteady before returning. So a get_residuals() call afterwards assembles the UNSTEADY
+    Jacobian - including the BDF d/dt term - while the tracker converged the steady one, and the
+    eigenvector rows J*Y come out at the size of that d/dt term rather than at the Newton tolerance.
+    On the pitchfork case that is 8.3e-4 against Newton's own 3.5e-11: same dofs to the last bit, same
+    parameter, only 225 of 452 rows differ and they are exactly the J*Y ones.
+
+    Making the timesteppers steady for the measurement is what makes this number mean what the
+    caller's comment says it means.
+    """
+    n = p.ntime_stepper()
+    was_steady = [p.time_stepper_pt(i).is_steady() for i in range(n)]
+    for i in range(n):
+        p.time_stepper_pt(i).make_steady()
+    try:
+        return float(numpy.amax(numpy.absolute(p.get_residuals())))
+    finally:
+        for i in range(n):
+            if not was_steady[i]:
+                p.time_stepper_pt(i).undo_make_steady()
+
+
 def _sorted_spectrum(evals):
     """Eigenvalues in a comparable order. Numbering-independent, so it survives distribute()."""
     ev = numpy.array(sorted(evals, key=lambda z: (round(numpy.real(z), 9), round(numpy.imag(z), 9))))
@@ -243,7 +268,7 @@ def fold_case(N=8, lam0=4.0, outdir=None, eigenvector_scaling="unit", with_guess
             "param": float(p.lam.value),
             # The residual of the CONVERGED augmented system: a tracking solve that "converged" onto
             # a system assembled inconsistently across ranks shows up here and nowhere else.
-            "max_residual": float(numpy.amax(numpy.absolute(p.get_residuals()))),
+            "max_residual": _converged_max_residual(p),
         }
         res.update(_eigenvector_norms(p))
         if with_eigen:
@@ -287,7 +312,7 @@ def hopf_case(N=20, B0=2.5, outdir=None, with_eigen=False):
             # The Hopf frequency lives on rank 0's dof vector alone when distributed, so this also
             # certifies that synchronise() broadcast it back to the other ranks.
             "omega": float(p._get_bifurcation_omega()),
-            "max_residual": float(numpy.amax(numpy.absolute(p.get_residuals()))),
+            "max_residual": _converged_max_residual(p),
         }
         res.update(_eigenvector_norms(p))
         if with_eigen:
@@ -394,7 +419,7 @@ def _reaction_case(prob, bifurcation_type, lam_start, lam_step, azimuthal_m, out
             "distributed": bool(p.is_distributed()),
             "param": float(p.lam.value),
             "omega": float(p._get_bifurcation_omega()),
-            "max_residual": float(numpy.amax(numpy.absolute(p.get_residuals()))),
+            "max_residual": _converged_max_residual(p),
         }
         res.update(_eigenvector_norms(p))
         if with_eigen:

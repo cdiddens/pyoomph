@@ -150,11 +150,21 @@ def test_consistency_on_a_representable_solution(space, advection_by_parts, stab
     assert numpy.max(numpy.abs(got - ref)) < tol * scale, \
         "%s on %s (advection_by_parts=%s) moved a solution it must reproduce" % (
             stabilization, space, advection_by_parts)
-    # ... and it must not have made the solution worse either. "err" is the *squared* L2 error, so
-    # the floor is the square of the bound above; like R2 it is an expanded square at roundoff and
-    # comes out signed, hence the abs() on the reference. (There used to be a .real here as well,
-    # which never did anything: float() has already raised by the time a complex could reach it.)
-    assert float(o["err"]) <= max(4 * abs(float(oref["err"])), (tol * scale) ** 2)
+    # ... and it must not have made the solution worse either. "err" is the *squared* L2 error; like
+    # R2 it is an expanded square at roundoff and comes out signed, hence the abs() on the reference.
+    # (There used to be a .real here as well, which never did anything: float() has already raised by
+    # the time a complex could reach it.)
+    #
+    # The floor used to be (tol*scale)**2, which is the square of a bound on the SOLUTION and is
+    # therefore ~1e-22 here - so far below the roundoff these numbers actually live at that it never
+    # participated, leaving "4 * the reference" as the whole test. Both sides are pure roundoff, so
+    # that made the bound a hostage to how small the reference happened to come out: it failed at
+    # 1.12e-15 against 4*2.50e-16 = 9.99e-16, a factor of 1.12, and only in some orderings of the
+    # suite. An expanded square of a difference that cancels sits at about eps*scale**2, so that is
+    # the floor: still twelve orders below the ~1e-2 that an inconsistent stabilization produces,
+    # which is the only thing this line is meant to catch.
+    roundoff_floor = 4 * numpy.finfo(float).eps * scale ** 2
+    assert float(o["err"]) <= max(4 * abs(float(oref["err"])), roundoff_floor)
 
 
 @pytest.mark.parametrize("terms", ["SUPG", "GLS", "ASGS", "SUPG+DC"])

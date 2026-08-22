@@ -3632,6 +3632,9 @@ class Problem(_pyoomph.Problem):
                     raise RuntimeError("No mesh template with a domain named '"+meshname+'" was added, but there are equations defined on this domain. Available domains are '+str(avdoms))
 
         self._equation_system._create_dummy_domains_for_DG(self) 
+        # after_fill_dummy_equations() above may have grafted whole domains onto the tree (see
+        # _adopt_nodes_added_after_fill); they were never walked by _fill_dummy_equations.
+        self._equation_system._adopt_nodes_added_after_fill(self)
         self._equation_system._finalize_equations(self,second_loop=True) 
         if not self.is_quiet():
             print("SOLVING THE FOLLOWING SYSTEM:\n"+str(self._equation_system))
@@ -5590,13 +5593,30 @@ class Problem(_pyoomph.Problem):
         if kind is not None:
             self.set_arc_length_parameter(scale_arc_length=False)
 
-    def _arclength_weighted_square_norm(self,v:"NPFloatArray")->float:
-        """``||v||_W^2`` for the configured inner product, or NaN if it cannot be formed."""
+    def _arclength_weighted_square_norm(self,v:"NPFloatArray")->"tuple[float,int]":
+        """``||v||_W^2`` for the configured inner product, and how many leading entries it covered.
+
+        Returns ``(w, m)``; ``w`` is NaN if the norm cannot be formed. ``m`` is ``len(v)`` except while
+        a bifurcation tracker is installed. There the dof vector is the AUGMENTED one -
+        ``[du/ds, dY/ds, dparameter/ds]`` for a fold - while the mass matrix is assembled on the BASE
+        rows alone, which is precisely what makes an eigenproblem solvable during tracking at all
+        (Problem::BaseDofDistributionScope). Multiplying the two used to raise "dimension mismatch"
+        from scipy: a 1x1 M against a length-3 tangent on the ODE fold of test_bifurcation_gui.
+
+        The metric is therefore taken over the base block, which is also the only part that HAS a mass
+        matrix - the eigenvector rows carry no integration weights and no continuum meaning - and the
+        caller divides by the matching block of v, so theta^2 comes out as the ratio it is defined to
+        be and equals what the same base tangent would give with no tracker installed.
+
+        The existing _get_n_unaugmented_dofs() guard in the caller does not cover this: that sentinel
+        is only non-zero for a CUSTOM augmented system (add_augmented_dofs / CustomBifurcationTracker),
+        and stays 0 under the built-in fold/pitchfork/Hopf handlers.
+        """
         kind=self._arclength_inner_product
         if callable(kind):
-            return float(kind(v))
+            return float(kind(v)),len(v)
         if kind=="ndof":
-            return float(numpy.dot(v,v))/len(v)
+            return float(numpy.dot(v,v))/len(v),len(v)
         # "l2"/"mass": the mass matrix carries the integration weights, so v^T M v is the integral of
         # the squared field. Dividing by the volume (1^T M 1, which telescopes to the domain measure for
         # a partition-of-unity basis) turns it into a mean square, i.e. a number of the size of the
@@ -5605,11 +5625,14 @@ class Problem(_pyoomph.Problem):
         n, _M_nzz, _M_nr, M_val, M_ci, M_rs, *_rest = self.assemble_eigenproblem_matrices(0.0) #type:ignore
         M=csr_matrix((M_val,M_ci,M_rs),shape=(n,n))
         if M.nnz==0:
-            return float("nan")   # no time derivatives anywhere: there is no mass matrix to weight with
+            return float("nan"),len(v)   # no time derivatives anywhere: there is no mass matrix to weight with
         volume=float(M.sum())
         if not (volume>0):
-            return float("nan")
-        return float(v.dot(M.dot(v)))/volume
+            return float("nan"),len(v)
+        if len(v)<n:
+            return float("nan"),len(v)   # fewer dofs than mass-matrix rows: nothing sensible to form
+        vb=v[:n] if len(v)>n else v
+        return float(vb.dot(M.dot(vb)))/volume,n
 
     def _retune_arclength_theta(self)->float:
         """Re-derive theta^2 from the configured inner product. Returns the factor to rescale ds by.
@@ -5654,10 +5677,15 @@ class Problem(_pyoomph.Problem):
             # No tangent yet (the first step), or sitting at a fold where dp/ds vanishes and z cannot be
             # formed. Either way there is nothing to renormalise; leave the metric as it is.
             return 1.0
-        w=self._arclength_weighted_square_norm(v)
+        w,m=self._arclength_weighted_square_norm(v)
         if not numpy.isfinite(w) or w<=0.0:
             return 1.0
-        theta_new=w/vv
+        # Divided by the SAME block the norm covered: under a bifurcation tracker that is the base one,
+        # and using the full augmented vv there would dilute theta^2 by the eigenvector rows.
+        vv_metric=vv if m==len(v) else float(numpy.dot(v[:m],v[:m]))
+        if vv_metric<=0.0 or not numpy.isfinite(vv_metric):
+            return 1.0
+        theta_new=w/vv_metric
         theta_old=self.get_arc_length_theta_sqr()
         if not numpy.isfinite(theta_new) or theta_new<=0.0 or theta_new==theta_old:
             return 1.0

@@ -3163,6 +3163,25 @@ class EquationTree(Equations):
         else:
             return chld.get_by_path("/".join(pth[1:]))
 
+    def _adopt_nodes_added_after_fill(self,problem:"Problem"):
+        """Give ``_problem`` to every node that still lacks one.
+
+        _fill_dummy_equations() hands the Problem to each node it walks, but some equations GRAFT a
+        whole new domain on afterwards: _AverageOrIntegralConstraintBase.after_fill_dummy_equations
+        does ``problem._equation_system += add_eqs @ odestorage`` to park its Lagrange multiplier in an
+        ODE storage domain, and by then the walk is long past. The grafted node then reached
+        _define_element() with ``_problem`` still None and tripped its assertion - AverageConstraint on
+        a moving mesh, i.e. the free-stream GCL case of tests/test_tensor_index_conventions.py.
+
+        Done as a sweep rather than in the constraint itself so that any other equation grafting a
+        domain from after_fill_dummy_equations() is covered too; the node is the master of its domain
+        and get_coordinate_system()/the timestepping defaults all read the Problem off it.
+        """
+        if self._problem is None:
+            self._problem=problem
+        for child in self._children.values():
+            child._adopt_nodes_added_after_fill(problem)
+
     def _create_dummy_equations_at_path(self,path:str,root:"EquationTree",problem:"Problem"):
         if (not self._equations) and (self!=root):
             self._equations=[DummyEquations()]
