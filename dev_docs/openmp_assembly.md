@@ -231,10 +231,19 @@ machine happened to have. `pyoomph._pyoomph_core.has_openmp` says which it was; 
 * **macOS.** AppleClang has no OpenMP at all and Homebrew's `libomp` cannot be used: its bottle
   requires the runner's macOS release, and delocate refuses to bundle that into a 10.13 wheel.
   `citools/build_static_libomp.sh` builds LLVM's runtime from source at the wheel's own deployment
-  target and links it statically, so nothing lands in `.dylibs`. What static linking does NOT avoid
-  is libomp's per-process registration: a second copy (PyTorch ships one) aborts with `OMP: Error
-  #15` once ours initialises, which is why `pyoomph/__init__.py` sets `KMP_DUPLICATE_LIB_OK` on
-  Darwin. `.github/workflows/test_mac_openmp_wheel.yml` builds one wheel and checks all of it.
+  target and links it statically, so nothing lands in `.dylibs`.
+  `.github/workflows/test_mac_openmp_wheel.yml` builds one wheel and checks all of it: nothing
+  bundled, `kmpc_fork_call` present in the extension, `minos` still 11.0, `has_openmp` true, and the
+  bit-identity suite green.
+
+  Static linking does not, in principle, avoid libomp's per-process registration - a second copy in
+  the process is what produces `OMP: Error #15` - so a `KMP_DUPLICATE_LIB_OK` default was tried and
+  then removed. Measured on a macos-14 runner against scikit-learn (which does bring its own
+  runtime): the threaded assembly survives in both import orders, and scikit-learn sets
+  `KMP_DUPLICATE_LIB_OK` itself before pyoomph is imported. One earlier run with PyTorch 2.13 DID
+  abort in the first threaded assembly, with no `OMP:` diagnostic of any kind - unexplained, not
+  reproduced with scikit-learn, and no reason on its own to set a process-global variable that every
+  other OpenMP library in the process would see.
 
 Rejected: replacing OpenMP with a `std::thread` pool, which would remove the packaging problem on
 all three platforms. The OpenMP surface here is small enough to port (one parallel region, one

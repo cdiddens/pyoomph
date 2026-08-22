@@ -13,11 +13,11 @@ set -euo pipefail
 #     opt-in threading flag. Built here, libomp gets the SAME deployment target as the wheel.
 #
 #   * Static (LIBOMP_ENABLE_SHARED=OFF), so nothing lands in the wheel's .dylibs at all and there is
-#     no second libomp.dylib for dyld to reason about. Note what this does NOT solve: libomp
-#     registers itself per process through an environment variable, so a statically linked copy is
-#     still a "duplicate runtime" if the user also imports something that ships its own libomp
-#     (PyTorch does). That is the OMP: Error #15 abort, and pyoomph/__init__.py defuses it on Darwin.
-#     It is only reachable at all once --omp N>1 actually starts our runtime.
+#     no second libomp.dylib for dyld to reason about. In principle this does NOT settle libomp's
+#     per-process registration - a statically linked copy still counts as a "duplicate runtime" next
+#     to something that ships its own, which is the OMP: Error #15 abort - but it was measured
+#     against scikit-learn on a macos-14 runner and survives in both import orders. See
+#     dev_docs/openmp_assembly.md; nothing is set in the environment to arrange that.
 #
 # Linux and Windows do not need any of this: libgomp comes with GCC on both, and auditwheel/
 # delvewheel bundle it without complaint.

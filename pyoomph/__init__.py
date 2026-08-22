@@ -66,16 +66,7 @@ os.environ.setdefault('MKL_NUM_THREADS', os.environ.get('PYOOMPH_MKL_NUM_THREADS
 # second pool of threads next to ours and oversubscribe the machine.
 os.environ.setdefault('OMP_NUM_THREADS', os.environ.get('PYOOMPH_OMP_NUM_THREADS', str(_omp_threads) if _omp_threads else '1'))
 # To Deactivate OpenMP parallelization, set PYOOMPH_OPENBLAS_NUM_THREADS=1 and PYOOMPH_MKL_NUM_THREADS=1
-if sys.platform == 'darwin':
-    # The macOS wheels link LLVM's OpenMP runtime statically (citools/build_static_libomp.sh). That
-    # keeps it out of the wheel's .dylibs, but libomp also registers itself per process through an
-    # environment variable and ABORTS - "OMP: Error #15 ... multiple copies of the OpenMP runtime" -
-    # when it finds another copy already registered. A statically linked one counts, so importing
-    # pyoomph alongside anything that ships its own libomp (PyTorch does) would kill the process the
-    # moment --omp N>1 starts our runtime. The documented answer is this variable; the cost of it is
-    # oversubscription, which OMP_NUM_THREADS above already rules out. Set
-    # PYOOMPH_KMP_DUPLICATE_LIB_OK=FALSE to get the abort back.
-    os.environ.setdefault('KMP_DUPLICATE_LIB_OK', os.environ.get('PYOOMPH_KMP_DUPLICATE_LIB_OK', 'TRUE'))
+
 
 
 
