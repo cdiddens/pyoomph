@@ -1797,8 +1797,18 @@ class Problem(_pyoomph.Problem):
 
     def set_num_threads(self,nthread:int | None):
         """
-        Set how many threads the linear solver may use. Most direct solvers are internally threaded, so
-        this is what decides whether a serial run keeps one core or several busy.
+        Set how many threads the element assembly and the linear solver may use. Most direct solvers
+        are internally threaded, and pyoomph's own element loop is threaded with OpenMP, so this is
+        what decides whether a serial run keeps one core or several busy.
+
+        The threaded element loop is bit-identical to the serial one - it changes the time and nothing
+        else - and it declines by itself, saying why once, wherever it cannot apply (a finite-difference
+        Jacobian, an assembly-time diagnostic switched on, a build without OpenMP).
+
+        A threaded direct SOLVER, on the other hand, is not bit-reproducible, so a converged state can
+        differ in its last digits between one thread and several. That is unchanged by, and unrelated
+        to, the threaded assembly; if you want the two effects apart, set the assembly count on its own
+        with ``problem._set_num_assembly_threads(n)``.
 
         The count is remembered on the problem, not just handed to the current solver: it is applied
         again to any backend selected later with :py:meth:`set_linear_solver`. Passing ``None`` leaves
@@ -1813,6 +1823,9 @@ class Problem(_pyoomph.Problem):
             nthread (Optional[int]): Number of threads, or ``None`` for the backend's own default.
         """
         self._num_threads=nthread
+        # None means "the backend's own default" for the solver, but the element loop has no such
+        # notion: it is either serial or told a number, and serial is the default.
+        self._set_num_assembly_threads(1 if nthread is None else max(1,nthread))
         if self._lasolver is not None:
             if isinstance(self._lasolver,str):
                 self.set_linear_solver(self._lasolver)
@@ -3014,6 +3027,7 @@ class Problem(_pyoomph.Problem):
         self.cmdlineparser.add_argument("--largest_residuals",help="Debug the largest residuals",type=int,default=self._debug_largest_residual)
         self.cmdlineparser.add_argument("--generate_precice_cfg",help="Generate some parts of a preCICE configuration file from the coupling equations",action="store_true")
         self.cmdlineparser.add_argument("--quick-test",help="Stops after the first successful Newton method. Useful for quick testing",action="store_true")
+        self.cmdlineparser.add_argument("--omp",help="Use N threads for the element assembly and for the linear solver (default: 1, i.e. the serial element loop)",type=int,default=None,metavar="N")
 
     def parse_cmd_line(self):
         from ..materials.generic import MaterialProperties
@@ -3033,6 +3047,11 @@ class Problem(_pyoomph.Problem):
             self.set_linear_solver("petsc_mumps")
         elif self.cmdlineargs.accelerate:
             self.set_linear_solver("accelerate")
+
+        # After the solver choice above, not before: set_linear_solver re-applies the stored thread
+        # count anyway, but doing it in this order means one call settles both halves.
+        if self.cmdlineargs.omp is not None:
+            self.set_num_threads(max(1,self.cmdlineargs.omp))
 
         if self.cmdlineargs.tcc:
             self.set_c_compiler("tcc")

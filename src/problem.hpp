@@ -26,6 +26,8 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #include <vector>
 #include <map>
+#include <set>
+#include <string>
 #include <unordered_set>
 #include <unordered_map>
 #include <memory>
@@ -295,6 +297,94 @@ namespace pyoomph
       row_start.shrink_to_fit(); column_index.shrink_to_fit(); element_offset.shrink_to_fit();
       scatter_source.shrink_to_fit(); scatter_slot.shrink_to_fit();
     }
+  };
+
+  // ------------------------------------------------------------------------------------------
+  // OpenMP element loop. See dev_docs/openmp_assembly.md.
+  //
+  // What one assembly hands to the engine. The scatter maps are passed as raw pointers rather than
+  // as a FrozenSparsity, because the serial and the distributed pattern (FrozenSparsity and
+  // DistributedFrozenSparsity::Mat) carry the same three arrays under the same names and the engine
+  // has no reason to know which of the two it is looking at.
+  class FrozenAssemblyRequest
+  {
+  public:
+    unsigned long el_lo = 0, el_hi_plus_one = 0; // Element range, ABSOLUTE indices into mesh_pt()
+    unsigned n_vector = 0, n_matrix = 0;
+    // One entry per matrix; several matrices may share a map (they routinely do - the Jacobian, its
+    // parameter derivative and a Hessian-vector product are all described by one pattern), so
+    // map_of_matrix[m] indexes the deduplicated list and the gather index is built once per map.
+    std::vector<const int *> element_offset, scatter_slot, scatter_source;
+    std::vector<unsigned> map_of_matrix;
+    unsigned n_map = 0;
+    std::vector<double *> value;     // n_matrix target value arrays, already zeroed
+    std::vector<double *> residual;  // n_vector target residual arrays, already zeroed
+    // Where a global equation number goes in the residual arrays. NULL means "nowhere else": the
+    // equation number IS the index, which is the non-distributed case. Otherwise a sorted list of
+    // the equations this rank holds, and an equation not in it contributes nothing.
+    const unsigned *res_row_map = NULL;
+    unsigned res_row_map_n = 0;
+    bool verify = false;             // Run the per-element out-of-pattern check (verify_frozen_sparsity)
+    // Where a sparsity-verification failure goes. NULL means "throw", which is right for a serial
+    // assembly. The distributed assembly passes a string instead: it is followed by a collective
+    // exchange, so a rank throwing on its own would hang the job rather than fail it, and the
+    // objection has to be voted on after the loop exactly as the serial distributed loop does.
+    std::string *violation_out = NULL;
+  };
+
+  // The precomputed index that makes the scatter a race-free gather. Cached on the Problem and
+  // rebuilt only when the key below changes, i.e. essentially once per equation numbering.
+  class ParallelAssemblyPlan
+  {
+  public:
+    // --- key: what this plan was built for. Anything here changing invalidates it.
+    unsigned long generation = 0;
+    unsigned long el_lo = 0, el_hi_plus_one = 0;
+    const void *handler = NULL;
+    unsigned n_vector = 0, n_matrix = 0, n_map = 0, res_row_map_n = 0;
+    const void *res_row_map = NULL;
+    std::vector<const int *> map_ptr; // Identity of each scatter map; a rebuilt pattern moves these
+
+    // --- the element slice, halo- and zero-dof-filtered once instead of per assembly
+    std::vector<int> elements;  // absolute element indices, ascending
+    std::vector<int> nvar;      // per entry of `elements`
+    std::vector<long> block_base; // per entry: offset of its nvar*nvar block inside its chunk's buffer
+    std::vector<long> res_base;   // per entry: offset of its nvar residual entries inside the chunk's buffer
+
+    // --- chunking. Chunks run SEQUENTIALLY, which is what keeps the summation order per slot equal
+    // to the serial one: within a chunk the gather sums in element order, and the chunks themselves
+    // are in element order.
+    std::vector<long> chunk_start;      // nchunk+1, indices into `elements`
+    std::vector<long> chunk_block_size; // per chunk, doubles needed per matrix
+    std::vector<long> chunk_res_size;   // per chunk, doubles needed per vector
+    long max_block_size = 0, max_res_size = 0;
+
+    // --- the gather itself: (target slot, source offset in the chunk buffer), stably sorted by
+    // slot within each chunk. `chunk_gather_start` gives the range belonging to each chunk.
+    class Gather
+    {
+    public:
+      std::vector<int> slot, src;
+      std::vector<long> chunk_gather_start; // nchunk+1
+    };
+    std::vector<Gather> mat_gather; // one per DEDUPLICATED scatter map
+    Gather res_gather;              // slot = residual row, src = offset in the chunk residual buffer
+
+    bool valid = false;
+    // Whether any element of the slice would actually write anything in interpolate_hang_values().
+    // False on a mesh with neither hanging nodes nor dummy values, and the serial pre-pass - the one
+    // part of a threaded assembly that does not scale - is then skipped entirely.
+    bool needs_hang_prepass = false;
+    unsigned long last_used = 0; // LRU stamp, for choosing which plan to evict
+    void clear()
+    {
+      valid = false; needs_hang_prepass = false; generation = 0; handler = NULL; map_ptr.clear();
+      elements.clear(); nvar.clear(); block_base.clear(); res_base.clear();
+      chunk_start.clear(); chunk_block_size.clear(); chunk_res_size.clear();
+      mat_gather.clear(); res_gather = Gather();
+      max_block_size = max_res_size = 0;
+    }
+    unsigned nchunk() const { return chunk_start.empty() ? 0u : (unsigned)(chunk_start.size() - 1); }
   };
 
 #ifdef OOMPH_HAS_MPI
@@ -830,6 +920,60 @@ namespace pyoomph
     // The fast assembly path: fills the output arrays directly from the frozen pattern. Returns false
     // without touching them if the pattern route does not apply, so the caller falls back to oomph-lib.
     bool assemble_with_frozen_sparsity(oomph::Vector<int*>& column_or_row_index, oomph::Vector<int*>& row_or_column_start, oomph::Vector<double*>& value, oomph::Vector<unsigned>& nnz, oomph::Vector<double*>& residuals, bool compressed_row_flag);
+
+    // --- OpenMP element loop (dev_docs/openmp_assembly.md) ---
+    // How many threads the element loop may use. 1 (the default) means the serial loops below run
+    // exactly as they always did; nothing about the parallel path is reachable in that case, which is
+    // what the "no cost when it is off" requirement amounts to.
+    unsigned num_threads = 1;
+    // How many element loops actually ran threaded. A fast path that silently falls back looks
+    // exactly like a working one from the outside (both give the right answer), so the tests check
+    // this rather than trusting the timings.
+    unsigned long parallel_assemblies_done = 0;
+    // A small cache, not one plan: a Newton step alternates residual-only and Jacobian assemblies,
+    // whose requests differ in n_matrix, and with a single slot each would evict the other's gather
+    // index and pay for a rebuild (a sort over every scatter entry) on every single call.
+    std::vector<ParallelAssemblyPlan> parallel_assembly_plans;
+    // Phase-1 scratch, kept across assemblies: it is a megabyte or so per matrix, and reallocating
+    // (and zero-filling) it on every Newton step would be a malloc and a memset that buy nothing.
+    std::vector<std::vector<double>> parallel_assembly_blocks, parallel_assembly_resbuf;
+    unsigned long parallel_assembly_plan_clock = 0;
+    static const unsigned max_parallel_assembly_plans = 4;
+    // Reasons already reported. The refusals are permanent for a given configuration, so saying them
+    // once is informative and saying them per Newton step is noise.
+    std::set<std::string> reported_parallel_refusals;
+    void report_parallel_refusal(const std::string &reason);
+    // The same channel for something that is not a refusal - the loop does run threaded, it just will
+    // not be any faster (a CPU affinity mask narrower than the thread count, which is what mpirun's
+    // default per-rank pinning produces).
+    void report_parallel_note(const std::string &msg);
+    // Whether a threaded element loop may run at all right now: threads asked for, OpenMP in the
+    // build, no finite-difference Jacobian anywhere, no assembly-time diagnostic switched on.
+    // Reports the reason (once) and returns false otherwise.
+    bool parallel_assembly_possible();
+    // Runs the element loop of `req` on num_threads threads. Returns false, having touched nothing,
+    // when the plan cannot be built; the caller then runs its own serial loop. Any exception thrown
+    // by an element is caught inside the region and rethrown from here.
+    bool parallel_assemble_frozen(const FrozenAssemblyRequest &req);
+    // Convenience wrapper for the two non-distributed frozen loops: builds the request from the
+    // frozen_sparsity_cache slots they already hold and runs it. False means "not done, run your own
+    // serial loop"; true means the value/residual arrays are filled.
+    bool try_parallel_frozen_assembly(const std::vector<int> &slots, const oomph::Vector<double *> &value,
+                                      const oomph::Vector<double *> &residuals, unsigned long el_lo,
+                                      unsigned long el_hi_plus_one);
+#ifdef OOMPH_HAS_MPI
+    // The same, for the distributed loops: their scatter maps live in DistributedFrozenSparsity::Mat
+    // and their targets are this rank's local buffers rather than the global arrays.
+    bool try_parallel_distributed_assembly(const DistributedFrozenSparsity &sp, unsigned n_matrix,
+                                           unsigned n_vector, std::vector<std::vector<double>> &local_values,
+                                           std::vector<std::vector<double>> &local_res, std::string &violation);
+#endif
+    // Builds, or finds, the plan for `req`. Returns the cache slot, or -1 if not planable.
+    int acquire_parallel_assembly_plan(const FrozenAssemblyRequest &req);
+    // One serial sweep of interpolate_hang_values() over the elements of the plan, stamping them with
+    // a fresh pass id which the workers then adopt. Returns that id. Without it the workers would
+    // write the same hanging node from several threads (elements_hanging.cpp).
+    unsigned long prepare_hanging_values_for_parallel_assembly(const ParallelAssemblyPlan &plan);
 #ifdef OOMPH_HAS_MPI
     // Phase 2b. Substitutes the frozen distributed assembly for oomph-lib's whenever the pattern is
     // known, and calls oomph-lib's otherwise -- so this is always revertible at runtime, and any
@@ -980,6 +1124,12 @@ namespace pyoomph
     // pattern; falls back to oomph-lib's assembly automatically whenever it cannot apply (distributed
     // runs, augmented systems, compressed-column output, any element without a symbolic mask).
     void set_use_frozen_sparsity(bool yesno);
+    // How many threads the element loop may use (dev_docs/openmp_assembly.md). 1 is the default and
+    // means the serial loops, unchanged. Set from Python by Problem.set_num_threads(), which also
+    // passes the same count on to the linear solver.
+    void set_num_assembly_threads(unsigned n);
+    unsigned get_num_assembly_threads() const { return num_threads; }
+    unsigned long get_parallel_assemblies_done() const { return parallel_assemblies_done; }
     bool get_use_frozen_sparsity() const { return use_frozen_sparsity; }
     void set_use_frozen_sparsity_for_bifurcation_tracking(bool yesno) { use_frozen_sparsity_for_bifurcation_tracking = yesno; invalidate_jacobian_structure(); }
     bool get_use_frozen_sparsity_for_bifurcation_tracking() const { return use_frozen_sparsity_for_bifurcation_tracking; }
@@ -1406,10 +1556,9 @@ namespace pyoomph
     {
         oomph::Problem::get_jacobian(residuals,jacobian);
     }
-    virtual void get_residuals_by_elemental_assembly(oomph::DoubleVector &residuals)
-    {
-     oomph::Problem::get_residuals(residuals);
-    }
+    // Threads the serial element loop when --omp asked for it, and is otherwise exactly the
+    // oomph::Problem::get_residuals() call it always was (see parallel_assembly.cpp).
+    virtual void get_residuals_by_elemental_assembly(oomph::DoubleVector &residuals);
     virtual void get_derivative_wrt_global_parameter_elemental_assembly(double* const& parameter_pt,oomph::DoubleVector &result)
     {
      oomph::Problem::get_derivative_wrt_global_parameter(parameter_pt,result);

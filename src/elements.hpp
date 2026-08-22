@@ -25,6 +25,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include <atomic>
 #include "exception.hpp"
 #include "jitbridge.h"
+#include "thread_state.hpp"
 
 #include "oomph_lib.hpp"
 
@@ -345,6 +346,11 @@ namespace pyoomph
 
   extern IntegrationSchemeStorage integration_scheme_storage;
 
+  // Hands this thread's shape-buffer chain back to the pool (definition in elements.cpp). Called at
+  // the end of each worker of a parallel element loop; the main thread of a serial run never calls
+  // it and simply keeps its one chain, as the single global buffer used to.
+  void release_thread_shape_buffer();
+
   class MeshTemplate;
   class MeshTemplateElement;
   class DynamicJITCode;
@@ -657,6 +663,14 @@ namespace pyoomph
     // The interface-only halves of the scan, so the base version composes exactly as the fills do.
     virtual bool scan_hang_interface_fields() const { return false; }
     virtual bool scan_interface_has_something_to_interpolate() const { return false; }
+
+  public:
+    // Whether interpolate_hang_values() would write anything for this element. Public because the
+    // parallel element loop has to decide, once per plan, whether its serial hanging pre-pass is
+    // needed at all (parallel_assembly.cpp); the classification itself stays protected.
+    bool would_interpolate_hang_values() { return !(get_hang_state() & HANGSTATE_NOTHING_TO_INTERPOLATE); }
+
+  protected:
 
   public:
     // What fill_hang_info_with_equations(required, ..., NULL) WOULD return, without doing the fill.

@@ -1141,7 +1141,7 @@ namespace pyoomph
           Eig_local[i] = Phi.global_value(global_eqn);
           Eig_local[raw_ndof + i] = Psi.global_value(global_eqn);
         }
-        multi_assm.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_jit_code()->get_func_table()->current_res_jac, &residuals, &jacobian, &M));
+        multi_assm.push_back(SinglePassMultiAssembleInfo(get_current_res_jac(pyoomph_elem_pt->get_jit_code()->get_func_table()), &residuals, &jacobian, &M));
 
         multi_assm.back().add_hessian(Eig_local, &dJdU_Eig, &dMdU_Eig);
         if (!lambda_tracking) multi_assm.back().add_param_deriv(Parameter_pt, &dRdParam, &dJdParam, &dMdParam);
@@ -2042,13 +2042,13 @@ namespace pyoomph
         
         if (!lambda_continuation)
         {
-          assemble_info.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_jit_code()->get_func_table()->current_res_jac, &residuals, &jacobian));
+          assemble_info.push_back(SinglePassMultiAssembleInfo(get_current_res_jac(pyoomph_elem_pt->get_jit_code()->get_func_table()), &residuals, &jacobian));
           assemble_info.back().add_param_deriv(Parameter_pt, &dres_dparam, &djac_dparam);
           assemble_info.back().add_hessian(Y_local, &dJduPhiH);
         }
         else
         {
-          assemble_info.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_jit_code()->get_func_table()->current_res_jac, &residuals, &jacobian,&M));
+          assemble_info.push_back(SinglePassMultiAssembleInfo(get_current_res_jac(pyoomph_elem_pt->get_jit_code()->get_func_table()), &residuals, &jacobian,&M));
           assemble_info.back().add_hessian(Y_local, &dJduPhiH,&dMduPhiH);
         }
         
@@ -2701,7 +2701,7 @@ namespace pyoomph
     {
       pyoomph::BulkElementBase *pyoomph_elem_pt = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
       std::vector<SinglePassMultiAssembleInfo> assemble_info;
-      assemble_info.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_jit_code()->get_func_table()->current_res_jac, &residuals, &jacobian));
+      assemble_info.push_back(SinglePassMultiAssembleInfo(get_current_res_jac(pyoomph_elem_pt->get_jit_code()->get_func_table()), &residuals, &jacobian));
       assemble_info.push_back(SinglePassMultiAssembleInfo(resolve_assembled_residual(elem_pt, 1), &symmetryR, &symmetryA));
       pyoomph_elem_pt->get_multi_assembly(assemble_info);
     }
@@ -2782,7 +2782,7 @@ namespace pyoomph
 
       pyoomph::BulkElementBase *pyoomph_elem_pt = dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
       std::vector<SinglePassMultiAssembleInfo> assemble_info;
-      assemble_info.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_jit_code()->get_func_table()->current_res_jac, &residuals, &jacobian));
+      assemble_info.push_back(SinglePassMultiAssembleInfo(get_current_res_jac(pyoomph_elem_pt->get_jit_code()->get_func_table()), &residuals, &jacobian));
       assemble_info.back().add_param_deriv(Parameter_pt, &dres_dparam, &djac_dparam);
       assemble_info.back().add_hessian(Y_local, &dJduPhiH);
       if (Problem_pt->improved_pitchfork_tracking_on_unstructured_meshes)
@@ -3017,13 +3017,13 @@ namespace pyoomph
     auto codes = prob->get_jit_codes();
     for (unsigned int i = 0; i < codes.size(); i++)
     {
-      int orig_residual = codes[i]->get_func_table()->current_res_jac; // Store the initial residual (base state)
+      int orig_residual = get_current_res_jac(codes[i]->get_func_table()); // Store the initial residual (base state)
       int mass_matrix_residual = -1;
       if (codes[i]->_set_solved_residual("_simple_mass_matrix_of_defined_fields"))
       {
-        mass_matrix_residual = codes[i]->get_func_table()->current_res_jac;
+        mass_matrix_residual = get_current_res_jac(codes[i]->get_func_table());
       }
-      codes[i]->get_func_table()->current_res_jac = orig_residual; // Reset it
+      set_current_res_jac(codes[i]->get_func_table(), orig_residual); // Reset it
       residual_contribution_indices[codes[i]] = PitchForkResidualContributionList(codes[i], orig_residual, mass_matrix_residual);
     }
   }
@@ -3043,7 +3043,10 @@ namespace pyoomph
     {
       throw_runtime_error("You have not set up your residual contribution mapping in beforehand");
     }
-    auto &entry = residual_contribution_indices[const_code];
+    // .at() rather than operator[]: this runs per element, and operator[] is a non-const call on a
+    // map shared by every thread of a parallel element loop. The count() check above already
+    // guarantees the key is present.
+    const auto &entry = residual_contribution_indices.at(const_code);
     return entry.residual_indices[residual_mode];
   }
 
@@ -3062,9 +3065,12 @@ namespace pyoomph
     {
       throw_runtime_error("You have not set up your residual contribution mapping in beforehand");
     }
-    auto &entry = residual_contribution_indices[const_code];
+    // .at() rather than operator[]: this runs per element, and operator[] is a non-const call on a
+    // map shared by every thread of a parallel element loop. The count() check above already
+    // guarantees the key is present.
+    const auto &entry = residual_contribution_indices.at(const_code);
     // Setup the solved residual by the index (-1 means no contribution)
-    entry.code->get_func_table()->current_res_jac = entry.residual_indices[residual_mode];
+    set_current_res_jac(entry.code->get_func_table(), entry.residual_indices[residual_mode]);
     return entry.residual_indices[residual_mode] >= 0;
   }
 
@@ -4114,18 +4120,18 @@ namespace pyoomph
     auto codes = prob->get_jit_codes();
     for (unsigned int i = 0; i < codes.size(); i++)
     {
-      int orig_residual = codes[i]->get_func_table()->current_res_jac; // Store the initial residual (base state)
+      int orig_residual = get_current_res_jac(codes[i]->get_func_table()); // Store the initial residual (base state)
       int real_azimuthal = -1;                                         // By default, no azimuthal residual present
       int imag_azimuthal = -1;
       if (codes[i]->_set_solved_residual(real_angular_J_and_M))
       {
-        real_azimuthal = codes[i]->get_func_table()->current_res_jac; // Get the real residual index
+        real_azimuthal = get_current_res_jac(codes[i]->get_func_table()); // Get the real residual index
       }
       if (codes[i]->_set_solved_residual(imag_angular_J_and_M))
       {
-        imag_azimuthal = codes[i]->get_func_table()->current_res_jac; // Get he imaginary residual index
+        imag_azimuthal = get_current_res_jac(codes[i]->get_func_table()); // Get he imaginary residual index
       }
-      codes[i]->get_func_table()->current_res_jac = orig_residual; // Reset it
+      set_current_res_jac(codes[i]->get_func_table(), orig_residual); // Reset it
 
       // And store it in the mapping
       //std::cout << "MAPPING " << codes[i]->get_file_name() << " " << orig_residual << " " << real_azimuthal << " " << imag_azimuthal << std::endl;
@@ -4150,7 +4156,10 @@ namespace pyoomph
     {
       throw_runtime_error("You have not set up your residual contribution mapping in beforehand");
     }
-    auto &entry = residual_contribution_indices[const_code];
+    // .at() rather than operator[]: this runs per element, and operator[] is a non-const call on a
+    // map shared by every thread of a parallel element loop. The count() check above already
+    // guarantees the key is present.
+    const auto &entry = residual_contribution_indices.at(const_code);
     return entry.residual_indices[residual_mode];
   }
 
@@ -4169,9 +4178,12 @@ namespace pyoomph
     {
       throw_runtime_error("You have not set up your residual contribution mapping in beforehand");
     }
-    auto &entry = residual_contribution_indices[const_code];
+    // .at() rather than operator[]: this runs per element, and operator[] is a non-const call on a
+    // map shared by every thread of a parallel element loop. The count() check above already
+    // guarantees the key is present.
+    const auto &entry = residual_contribution_indices.at(const_code);
     // Setup the solved residual by the index (-1 means no contribution)
-    entry.code->get_func_table()->current_res_jac = entry.residual_indices[residual_mode];
+    set_current_res_jac(entry.code->get_func_table(), entry.residual_indices[residual_mode]);
     return entry.residual_indices[residual_mode] >= 0;
   }
 
@@ -4508,7 +4520,7 @@ namespace pyoomph
     if (!ft) return false;
     // The orbit assembles J and M together from this residual in a single multi-assemble pass; if the
     // element does not have it, we cannot say what its pattern is.
-    const int resind = (int)ft->current_res_jac;
+    const int resind = (int)get_current_res_jac(ft);
     if (resind < 0) return false;
 
     const unsigned nT = this->n_tsteps();
@@ -5084,9 +5096,9 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       pyoomph::BulkElementBase * pyoomph_elem_pt=dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
       auto *ft=pyoomph_elem_pt->get_jit_code()->get_func_table();
       bool has_constant_mass_matrix=false;
-      if (ft->current_res_jac>=0) 
+      if (get_current_res_jac(ft)>=0) 
       { 
-        has_constant_mass_matrix=ft->has_constant_mass_matrix_for_sure[ft->current_res_jac];   
+        has_constant_mass_matrix=ft->has_constant_mass_matrix_for_sure[get_current_res_jac(ft)];   
       }
       
       unsigned raw_ndof = elem_pt->ndof();
@@ -5099,7 +5111,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       Vector<double> U(raw_ndof,0.0),dUds(raw_ndof,0.0);          
 
       std::vector<SinglePassMultiAssembleInfo> multi_assm;
-      multi_assm.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_jit_code()->get_func_table()->current_res_jac, &current_res, &J, &M));
+      multi_assm.push_back(SinglePassMultiAssembleInfo(get_current_res_jac(pyoomph_elem_pt->get_jit_code()->get_func_table()), &current_res, &J, &M));
       oomph::DenseMatrix<double> dMdU_dUdsterm(raw_ndof,raw_ndof,0.0);
       oomph::DenseMatrix<double> dummy_dJdU_dUdsterm(raw_ndof,raw_ndof,0.0);            
       multi_assm.back().add_hessian(dUds, &dummy_dJdU_dUdsterm, &dMdU_dUdsterm);
@@ -5498,9 +5510,9 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     pyoomph::BulkElementBase * pyoomph_elem_pt=dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
     auto *ft=pyoomph_elem_pt->get_jit_code()->get_func_table();
     bool has_constant_mass_matrix=false;
-    if (ft->current_res_jac>=0) 
+    if (get_current_res_jac(ft)>=0) 
     { 
-      has_constant_mass_matrix=ft->has_constant_mass_matrix_for_sure[ft->current_res_jac];   
+      has_constant_mass_matrix=ft->has_constant_mass_matrix_for_sure[get_current_res_jac(ft)];   
     }      
 
     residuals.initialise(0.0);
@@ -5514,7 +5526,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     
     std::vector<SinglePassMultiAssembleInfo> multi_assm;
     DenseMatrix<double> J(raw_ndof), M(raw_ndof);            
-    multi_assm.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_jit_code()->get_func_table()->current_res_jac, &current_res, &J, &M));
+    multi_assm.push_back(SinglePassMultiAssembleInfo(get_current_res_jac(pyoomph_elem_pt->get_jit_code()->get_func_table()), &current_res, &J, &M));
     oomph::DenseMatrix<double> dMdU_dUdsterm(raw_ndof,raw_ndof,0.0);
     oomph::DenseMatrix<double> dummy_dJdU_dUdsterm(raw_ndof,raw_ndof,0.0);            
     multi_assm.back().add_hessian(dUds, &dummy_dJdU_dUdsterm, &dMdU_dUdsterm);
@@ -5731,13 +5743,13 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       pyoomph::BulkElementBase * pyoomph_elem_pt=dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
       auto *ft=pyoomph_elem_pt->get_jit_code()->get_func_table();
       bool has_constant_mass_matrix=false;
-      if (ft->current_res_jac>=0) 
+      if (get_current_res_jac(ft)>=0) 
       { 
-        has_constant_mass_matrix=ft->has_constant_mass_matrix_for_sure[ft->current_res_jac];   
+        has_constant_mass_matrix=ft->has_constant_mass_matrix_for_sure[get_current_res_jac(ft)];   
       }      
 
       std::vector<SinglePassMultiAssembleInfo> multi_assm;
-      multi_assm.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_jit_code()->get_func_table()->current_res_jac, &current_res, &J, &M));
+      multi_assm.push_back(SinglePassMultiAssembleInfo(get_current_res_jac(pyoomph_elem_pt->get_jit_code()->get_func_table()), &current_res, &J, &M));
       oomph::DenseMatrix<double> dMdU_dUdsterm(raw_ndof,raw_ndof,0.0);
       oomph::DenseMatrix<double> dummy_dJdU_dUdsterm(raw_ndof,raw_ndof,0.0);            
       multi_assm.back().add_hessian(dUds, &dummy_dJdU_dUdsterm, &dMdU_dUdsterm);
@@ -5914,9 +5926,9 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       pyoomph::BulkElementBase * pyoomph_elem_pt=dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
       auto *ft=pyoomph_elem_pt->get_jit_code()->get_func_table();
       bool has_constant_mass_matrix=false;
-      if (ft->current_res_jac>=0) 
+      if (get_current_res_jac(ft)>=0) 
       { 
-        has_constant_mass_matrix=ft->has_constant_mass_matrix_for_sure[ft->current_res_jac];   
+        has_constant_mass_matrix=ft->has_constant_mass_matrix_for_sure[get_current_res_jac(ft)];   
       }      
       /*if (!has_constant_mass_matrix)
       {
@@ -5936,7 +5948,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       oomph::Vector<double> dUdsLocal(raw_ndof,0.0);
 
       std::vector<SinglePassMultiAssembleInfo> multi_assm;
-      multi_assm.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_jit_code()->get_func_table()->current_res_jac, &current_res, &J, &M));
+      multi_assm.push_back(SinglePassMultiAssembleInfo(get_current_res_jac(pyoomph_elem_pt->get_jit_code()->get_func_table()), &current_res, &J, &M));
       oomph::DenseMatrix<double> dMdU_dUdsterm(raw_ndof,raw_ndof,0.0);
       oomph::DenseMatrix<double> dummy_dJdU_dUdsterm(raw_ndof,raw_ndof,0.0);            
       multi_assm.back().add_hessian(dUdsLocal, &dummy_dJdU_dUdsterm, &dMdU_dUdsterm);
@@ -6208,9 +6220,9 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       pyoomph::BulkElementBase * pyoomph_elem_pt=dynamic_cast<pyoomph::BulkElementBase *>(elem_pt);
       auto *ft=pyoomph_elem_pt->get_jit_code()->get_func_table();
       bool has_constant_mass_matrix=false;
-      if (ft->current_res_jac>=0) 
+      if (get_current_res_jac(ft)>=0) 
       { 
-        has_constant_mass_matrix=ft->has_constant_mass_matrix_for_sure[ft->current_res_jac];   
+        has_constant_mass_matrix=ft->has_constant_mass_matrix_for_sure[get_current_res_jac(ft)];   
       }      
       /*if (!has_constant_mass_matrix)
       {
@@ -6226,7 +6238,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       Vector<double> ddof_ds(raw_ndof,0.0);          
 
       std::vector<SinglePassMultiAssembleInfo> multi_assm;
-      multi_assm.push_back(SinglePassMultiAssembleInfo(pyoomph_elem_pt->get_jit_code()->get_func_table()->current_res_jac, &current_res, &J, &M));
+      multi_assm.push_back(SinglePassMultiAssembleInfo(get_current_res_jac(pyoomph_elem_pt->get_jit_code()->get_func_table()), &current_res, &J, &M));
       oomph::DenseMatrix<double> dMdU_dUdsterm(raw_ndof,raw_ndof,0.0);
       oomph::DenseMatrix<double> dummy_dJdU_dUdsterm(raw_ndof,raw_ndof,0.0);            
       multi_assm.back().add_hessian(ddof_ds, &dummy_dJdU_dUdsterm, &dMdU_dUdsterm);
@@ -6887,16 +6899,16 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     auto codes = prob->get_jit_codes();
     for (unsigned int i = 0; i < codes.size(); i++)
     {
-      int orig_residual = codes[i]->get_func_table()->current_res_jac; // Store the initial residual (base state)
+      int orig_residual = get_current_res_jac(codes[i]->get_func_table()); // Store the initial residual (base state)
       std::vector<int> indices(unique_contributions.size(),-1);      
       for (unsigned int ui=0;ui<unique_contributions.size();ui++)
       {
         if (codes[i]->_set_solved_residual(unique_contributions[ui]))
         {
-          indices[ui] = codes[i]->get_func_table()->current_res_jac;
+          indices[ui] = get_current_res_jac(codes[i]->get_func_table());
         }
       }      
-      codes[i]->get_func_table()->current_res_jac = orig_residual; // Reset it
+      set_current_res_jac(codes[i]->get_func_table(), orig_residual); // Reset it
       residual_contribution_indices[codes[i]] = CustomMultiAssembleHandlerContributionList(codes[i], indices);
     }
     // Check whether we have an entirely empty contribution
@@ -6927,7 +6939,10 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     {
       throw_runtime_error("You have not set up your residual contribution mapping in beforehand");
     }
-    auto &entry = residual_contribution_indices[const_code];
+    // .at() rather than operator[]: this runs per element, and operator[] is a non-const call on a
+    // map shared by every thread of a parallel element loop. The count() check above already
+    // guarantees the key is present.
+    const auto &entry = residual_contribution_indices.at(const_code);
     return entry.residual_indices[residual_index];
   }
 

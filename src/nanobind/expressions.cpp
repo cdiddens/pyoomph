@@ -94,6 +94,12 @@ namespace pyoomph
 
 		double _call(double *args, unsigned int nargs) override
 		{
+			// Generated code reaches this from inside a threaded element loop, where the calling thread
+			// holds no GIL (see thread_state.hpp: the assembly hands it back before the parallel
+			// region). Taking it here is also what makes the shared argbuffer below safe, since it
+			// serialises the callbacks. On the main thread of a serial run this is a TLS lookup that
+			// finds the GIL already held.
+			nb::gil_scoped_acquire gil;
 			if (argbuffer.size() != nargs)
 				argbuffer.resize(nargs);
 			for (unsigned int i = 0; i < nargs; i++)
@@ -235,6 +241,12 @@ namespace pyoomph
 
 		void _call(int flag, double *args, unsigned int nargs, double *res, unsigned int nres, double *derivs) override
 		{
+			// Generated code reaches this from inside a threaded element loop, where the calling thread
+			// holds no GIL (see thread_state.hpp: the assembly hands it back before the parallel
+			// region). Taking it here is also what makes the shared argbuffer below safe, since it
+			// serialises the callbacks. On the main thread of a serial run this is a TLS lookup that
+			// finds the GIL already held.
+			nb::gil_scoped_acquire gil;
 			if (flag & 128)
 			{
 				flag &= ~(128);

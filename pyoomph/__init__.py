@@ -34,8 +34,37 @@ import os
 import platform
 import sys
 import weakref
-os.environ.setdefault('OPENBLAS_NUM_THREADS', os.environ.get('PYOOMPH_OPENBLAS_NUM_THREADS', '4'))
-os.environ.setdefault('MKL_NUM_THREADS', os.environ.get('PYOOMPH_MKL_NUM_THREADS', '4'))
+def _num_threads_from_command_line():
+    """Value of a ``--omp N`` on the command line, or None.
+
+    Read here, before anything else is imported, because MKL and PETSc latch their thread counts from
+    the environment at *their* import time - which is long before Problem.parse_cmd_line() would see
+    the switch. The real handling of --omp is in Problem.setup_cmd_line()/parse_cmd_line(); this is
+    only the part that has to happen early.
+    """
+    for i, a in enumerate(sys.argv):
+        if a == "--omp":
+            try:
+                return max(1, int(sys.argv[i + 1]))
+            except (IndexError, ValueError):
+                return None
+        if a.startswith("--omp="):
+            try:
+                return max(1, int(a.split("=", 1)[1]))
+            except ValueError:
+                return None
+    return None
+
+
+_omp_threads = _num_threads_from_command_line()
+_default_blas_threads = str(_omp_threads) if _omp_threads else '4'
+os.environ.setdefault('OPENBLAS_NUM_THREADS', os.environ.get('PYOOMPH_OPENBLAS_NUM_THREADS', _default_blas_threads))
+os.environ.setdefault('MKL_NUM_THREADS', os.environ.get('PYOOMPH_MKL_NUM_THREADS', _default_blas_threads))
+# pyoomph's own element loop takes its thread count from Problem.set_num_threads and passes it on the
+# OpenMP pragma itself, so OMP_NUM_THREADS does not steer it. It is pinned anyway, at 1 unless --omp
+# says otherwise, so that a third-party OpenMP runtime inside the linear solver cannot quietly open a
+# second pool of threads next to ours and oversubscribe the machine.
+os.environ.setdefault('OMP_NUM_THREADS', os.environ.get('PYOOMPH_OMP_NUM_THREADS', str(_omp_threads) if _omp_threads else '1'))
 # To Deactivate OpenMP parallelization, set PYOOMPH_OPENBLAS_NUM_THREADS=1 and PYOOMPH_MKL_NUM_THREADS=1
 
 

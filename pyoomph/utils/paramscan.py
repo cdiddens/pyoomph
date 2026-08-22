@@ -175,6 +175,9 @@ class ParallelParameterScan:
         output_dir (Optional[str]): The output directory for the parameter simulations. If not provided, a default directory will be created based on the script's name.
         max_procs (Optional[int]): The maximum number of processes to use for parallel execution. Defaults to the number of CPUs in the system.
         single_threaded_childs (bool): Whether to run each child process in single-threaded mode. Defaults to True.
+            This pins the linear solver's internal threading through the environment and pyoomph's own
+            element loop through ``--omp 1``, so that ``max_procs`` simulations do not each open their
+            own pool of threads on top of each other.
         interpreter (str): The path to the Python interpreter to use. Defaults to the system's default interpreter.
     
     """
@@ -267,6 +270,12 @@ class ParallelParameterScan:
         with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_procs) as executor:
             for s in self._sims:
                 args = [self._interpreter] + s._INTERNAL_assemble_args()  # type: ignore
+                if self._single_threaded_childs and "--omp" not in args:
+                    # The scan is already running max_procs simulations at once, so a child that also
+                    # threads its element loop oversubscribes the machine by max_procs x N. The env
+                    # vars above pin the solver's internal threading; this pins pyoomph's own, which
+                    # takes its count from --omp / set_num_threads rather than from the environment.
+                    args += ["--omp", "1"]
                 s._args = args  # type: ignore
                 if skip_done:
                     if self.already_done(args):

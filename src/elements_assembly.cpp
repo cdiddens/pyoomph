@@ -457,11 +457,12 @@ namespace pyoomph
 		JITShapeInfo_t *const shape_info = this->get_shape_info();
 
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
-		if (functable->current_res_jac < 0)
+		const int __crj = get_current_res_jac(functable); // hoisted: read once per element, see thread_state.hpp
+		if (__crj < 0)
 			return;
 		if (!functable->ParameterDerivative)
 			return;
-		if (!functable->ParameterDerivative[functable->current_res_jac])
+		if (!functable->ParameterDerivative[__crj])
 			return;
 		unsigned global_param_index = jitcode->get_problem()->resolve_parameter_value_ptr(parameter_pt);
 		int paramindex = -1;
@@ -475,32 +476,32 @@ namespace pyoomph
 		}
 		if (paramindex < 0)
 			return; // Nothing to do -> Element does not depend on this parameter
-		if (!functable->ParameterDerivative[functable->current_res_jac][paramindex])
+		if (!functable->ParameterDerivative[__crj][paramindex])
 			return;
 		// Unconditional, unlike the two residual/Jacobian paths: ParameterDerivative has no _NoHang
 		// twin in the function table, so the body that runs here always loads the hang buffers.
-		this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], shape_info, NULL);
+		this->fill_hang_info_with_equations(functable->shapes_required_ResJac[__crj], shape_info, NULL);
 		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
-		prepare_shape_buffer_for_integration(functable->shapes_required_ResJac[functable->current_res_jac], flag);
+		prepare_shape_buffer_for_integration(functable->shapes_required_ResJac[__crj], flag);
 		shape_info->jacobian_size = djac_dparam.nrow();
 		shape_info->mass_matrix_size = dmass_matrix_dparam.nrow();
 
-		if (!functable->ParameterDerivative[functable->current_res_jac][paramindex])
+		if (!functable->ParameterDerivative[__crj][paramindex])
 			return;
 		if (flag)
 		{
 			if (flag >= 2) // residuals, Jacobian, Mass matrix
 			{
-				functable->ParameterDerivative[functable->current_res_jac][paramindex](&eleminfo, shape_info, &(dres_dparam[0]), &(djac_dparam.entry(0, 0)), &(dmass_matrix_dparam.entry(0, 0)), flag);
+				functable->ParameterDerivative[__crj][paramindex](&eleminfo, shape_info, &(dres_dparam[0]), &(djac_dparam.entry(0, 0)), &(dmass_matrix_dparam.entry(0, 0)), flag);
 			}
 			else // residuals, Jacobian
 			{
-				functable->ParameterDerivative[functable->current_res_jac][paramindex](&eleminfo, shape_info, &(dres_dparam[0]), &(djac_dparam.entry(0, 0)), NULL, flag);
+				functable->ParameterDerivative[__crj][paramindex](&eleminfo, shape_info, &(dres_dparam[0]), &(djac_dparam.entry(0, 0)), NULL, flag);
 			}
 		}
 		else // Only residuals
 		{
-			functable->ParameterDerivative[functable->current_res_jac][paramindex](&eleminfo, shape_info, &(dres_dparam[0]), NULL, NULL, flag);
+			functable->ParameterDerivative[__crj][paramindex](&eleminfo, shape_info, &(dres_dparam[0]), NULL, NULL, flag);
 		}
 	}
 
@@ -534,45 +535,46 @@ namespace pyoomph
 		}
 
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
-		if (functable->current_res_jac < 0)
+		const int __crj = get_current_res_jac(functable); // hoisted: read once per element, see thread_state.hpp
+		if (__crj < 0)
 			return;
 		if (!this->ndof())
 			return;
 
-		if (!functable->ResidualAndJacobian[functable->current_res_jac])
+		if (!functable->ResidualAndJacobian[__crj])
 			return;
 		this->__sample_ext_data_stats();
-		prepare_shape_buffer_for_integration(functable->shapes_required_ResJac[functable->current_res_jac], flag);
+		prepare_shape_buffer_for_integration(functable->shapes_required_ResJac[__crj], flag);
 		shape_info->jacobian_size = jacobian.nrow();
 		shape_info->mass_matrix_size = mass_matrix.nrow();
 		// The predicate is the real answer ("some dof of this element hangs, a dof constraint reduced
 		// it, or an attached element's equations are remapped through the same buffers"); it used to be
 		// the fill's return value, but Stage 3a needs the answer BEFORE the fill in order to skip it.
-		const bool has_hang = this->hang_fill_would_report_hang(functable->shapes_required_ResJac[functable->current_res_jac]);
+		const bool has_hang = this->hang_fill_would_report_hang(functable->shapes_required_ResJac[__crj]);
 		const bool use_nohang = __use_nohang_entry(has_hang);
 
 		JITFuncSpec_ResidualAndJacobian_FiniteElement func;
 		const oomph::TimeStepper *tstepper = (this->nnode() ? this->node_pt(0)->time_stepper_pt() : this->internal_data_pt(0)->time_stepper_pt());
 		if (tstepper->is_steady())
 		{
-			func = (use_nohang ? functable->ResidualAndJacobianSteady_NoHang[functable->current_res_jac]
-							   : functable->ResidualAndJacobianSteady[functable->current_res_jac]);
+			func = (use_nohang ? functable->ResidualAndJacobianSteady_NoHang[__crj]
+							   : functable->ResidualAndJacobianSteady[__crj]);
 		}
 		else
 		{
-			func = (use_nohang ? functable->ResidualAndJacobian_NoHang[functable->current_res_jac]
-							   : functable->ResidualAndJacobian[functable->current_res_jac]);
+			func = (use_nohang ? functable->ResidualAndJacobian_NoHang[__crj]
+							   : functable->ResidualAndJacobian[__crj]);
 		}
 		// Stage 3a: derived from the very pointer selected just above, so the skip and the dispatch
 		// cannot diverge. A separately compiled _NoHang body has pyoomph_hang_on folded to 0 and
 		// therefore never loads a hang buffer (jitbridge.h, "Hanging macros"); where codegen emitted no
 		// such twin the two table slots alias and the fill stays.
 		if (use_nohang && !__disable_hang_fill_cache &&
-			__has_separate_nohang(functable, functable->current_res_jac, tstepper->is_steady()))
+			__has_separate_nohang(functable, __crj, tstepper->is_steady()))
 		{
 			if (__paranoid_hang_fill_cache)
 			{
-				const bool real = this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], shape_info, NULL);
+				const bool real = this->fill_hang_info_with_equations(functable->shapes_required_ResJac[__crj], shape_info, NULL);
 				if (real)
 					throw_runtime_error("PYOOMPH_PARANOID_HANG_FILL_CACHE: the hang predicate said 'nothing hangs' but fill_hang_info_with_equations reported a hang");
 				this->poison_hang_info(shape_info);
@@ -582,7 +584,7 @@ namespace pyoomph
 		}
 		else
 		{
-			this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], shape_info, NULL);
+			this->fill_hang_info_with_equations(functable->shapes_required_ResJac[__crj], shape_info, NULL);
 			if (__report_hang_fill_cache)
 				__hang_fill_cache_count(HANGCACHE_FILL_RUN);
 		}
@@ -777,25 +779,26 @@ namespace pyoomph
    {
 		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
-		if (functable->current_res_jac < 0)
+		const int __crj = get_current_res_jac(functable); // hoisted: read once per element, see thread_state.hpp
+		if (__crj < 0)
 			return;
 		if (!this->ndof())
 			return;
 		if (!functable->hessian_generated)
 			throw_runtime_error("Tried to calculate an analytical Hessian, but the corresponding C code was not generated. Please call setup_for_stability_analysis(analytic_hessian=True) of the Problem instance before initialization of the Problem.");
-		if (!functable->HessianVectorProduct[functable->current_res_jac])
+		if (!functable->HessianVectorProduct[__crj])
 			return;
 
       hbuffer.resize(this->ndof(),this->ndof(),this->ndof());
       hbuffer.initialise(0.0);
       mbuffer.resize(this->ndof(),this->ndof(),this->ndof());
       mbuffer.initialise(0.0);      
-		prepare_shape_buffer_for_integration(functable->shapes_required_Hessian[functable->current_res_jac], 3);
+		prepare_shape_buffer_for_integration(functable->shapes_required_Hessian[__crj], 3);
 		shape_info->jacobian_size = this->ndof();
 		// Unconditional: HessianVectorProduct has no _NoHang twin either.
-		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[functable->current_res_jac], shape_info, NULL);
+		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[__crj], shape_info, NULL);
 		this->interpolate_hang_values(); // This should be done elsewhere
-		JITFuncSpec_HessianVectorProduct_FiniteElement func = functable->HessianVectorProduct[functable->current_res_jac];
+		JITFuncSpec_HessianVectorProduct_FiniteElement func = functable->HessianVectorProduct[__crj];
 
 		func(&eleminfo, shape_info, NULL, &(mbuffer(0, 0,0)), &(hbuffer(0, 0,0)), 1, 3);		   
    }
@@ -1002,13 +1005,14 @@ namespace pyoomph
 	{
 		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
-		if (functable->current_res_jac < 0)
+		const int __crj = get_current_res_jac(functable); // hoisted: read once per element, see thread_state.hpp
+		if (__crj < 0)
 			return;
 		if (!this->ndof())
 			return;
 		if (!functable->hessian_generated)
 			throw_runtime_error("Tried to calculate an analytical Hessian, but the corresponding C code was not generated. Please call setup_for_stability_analysis(analytic_hessian=True) of the Problem instance before initialization of the Problem.");
-		if (!functable->HessianVectorProduct[functable->current_res_jac])
+		if (!functable->HessianVectorProduct[__crj])
 			return;
 
 		unsigned n_vec = C.nrow();
@@ -1016,14 +1020,14 @@ namespace pyoomph
 		if (flag == 3)
 			n_var = product.nrow();
 
-		prepare_shape_buffer_for_integration(functable->shapes_required_Hessian[functable->current_res_jac], 3);
+		prepare_shape_buffer_for_integration(functable->shapes_required_Hessian[__crj], 3);
 		shape_info->jacobian_size = n_var; // Storing the number of dofs now
 										   //& shape_info->mass_matrix_size=n_vec; // Won't be used, but storing the numbers of vects
 		// Unconditional: HessianVectorProduct has no _NoHang twin, so this body always reads the hang
 		// buffers and Stage 3a's skip does not apply here.
-		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[functable->current_res_jac], shape_info, NULL);
+		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[__crj], shape_info, NULL);
 		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
-		JITFuncSpec_HessianVectorProduct_FiniteElement func = functable->HessianVectorProduct[functable->current_res_jac];
+		JITFuncSpec_HessianVectorProduct_FiniteElement func = functable->HessianVectorProduct[__crj];
 
 		// const double * Cs=&(const_cast<oomph::DenseMatrix<double>*>(&C)->entry(0,0)); // XXX: Dirty hack, but otherwise not possibility to call this
 		func(&eleminfo, shape_info, &(Y[0]), &(C.entry(0, 0)), &(product.entry(0, 0)), n_vec, flag);
@@ -1131,9 +1135,9 @@ namespace pyoomph
 //		std::cout << "DB NDOF " << this->ndof() << std::endl  << std::flush;
 //		std::cout << "   J" << jacobian.nrow() << " x " << jacobian.ncol() << std::endl << std::flush;
 		oomph::DenseMatrix<double> fd_jacobian(jacobian.nrow(), jacobian.ncol(), 0.0);
-		if (jitcode->get_func_table()->missing_residual_assembly[jitcode->get_func_table()->current_res_jac])
+		if (jitcode->get_func_table()->missing_residual_assembly[get_current_res_jac(jitcode->get_func_table())])
 		{
-		    throw_runtime_error("The Jacobian of the residual "+std::string(jitcode->get_func_table()->res_jac_names[jitcode->get_func_table()->current_res_jac])+" cannot be calculated by finite differences, since the residual is not calculated at all.");
+		    throw_runtime_error("The Jacobian of the residual "+std::string(jitcode->get_func_table()->res_jac_names[get_current_res_jac(jitcode->get_func_table())])+" cannot be calculated by finite differences, since the residual is not calculated at all.");
 		}
 		this->RefineableSolidElement::fill_in_contribution_to_jacobian(fd_residuals, fd_jacobian);
 		//	this->fill_in_jacobian_from_lagragian_by_fd(fd_residuals,fd_jacobian);
@@ -1238,7 +1242,7 @@ namespace pyoomph
 				}
 			}
 
-			if (functable->shapes_required_ResJac[functable->current_res_jac].bulk_shapes && this->as_interface_element())
+			if (functable->shapes_required_ResJac[get_current_res_jac(functable)].bulk_shapes && this->as_interface_element())
 			{
 				BulkElementBase *bel = dynamic_cast<BulkElementBase *>(this->as_interface_element()->bulk_element_pt());
 				std::cout << "BULK HANG INFO POS" << std::endl;
@@ -1440,10 +1444,11 @@ namespace pyoomph
 	{
 		JITShapeInfo_t *const shape_info = this->get_shape_info();
 	 const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
-	 if (functable->moving_nodes && (functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian_cartesian || functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian))
+		const int __crj = get_current_res_jac(functable); // hoisted: read once per element, see thread_state.hpp
+	 if (functable->moving_nodes && (functable->shapes_required_ResJac[__crj].elemsize_Eulerian_cartesian || functable->shapes_required_ResJac[__crj].elemsize_Eulerian))
 	 {
 //	  std::cout << "UPDATE CALL" << std::endl;
-	  this->fill_shape_info_element_sizes(functable->shapes_required_ResJac[functable->current_res_jac],shape_info,0);
+	  this->fill_shape_info_element_sizes(functable->shapes_required_ResJac[__crj],shape_info,0);
 	 }
 	}
 
@@ -1457,6 +1462,7 @@ namespace pyoomph
 	void BulkElementBase::fill_in_contribution_to_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian)
 	{
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
+		const int __crj = get_current_res_jac(functable); // hoisted: read once per element, see thread_state.hpp
 		if (!functable->fd_jacobian)
 		{
 			fill_in_generic_residual_contribution_jit(residuals, jacobian, oomph::GeneralisedElement::Dummy_matrix, 1);
@@ -1465,15 +1471,15 @@ namespace pyoomph
 				this->fill_in_jacobian_from_lagragian_by_fd(residuals, jacobian);
 			}
 
-			if (functable->debug_jacobian_epsilon != 0.0 && functable->current_res_jac>=0)
+			if (functable->debug_jacobian_epsilon != 0.0 && __crj>=0)
 				debug_analytical_jacobian(residuals, jacobian, functable->debug_jacobian_epsilon);
 		}
 		else
 		{
-		   if (functable->current_res_jac<0) return;
-		   if (functable->missing_residual_assembly[functable->current_res_jac])
+		   if (__crj<0) return;
+		   if (functable->missing_residual_assembly[__crj])
 		   {
-		    throw_runtime_error("The Jacobian of the residual "+std::string(functable->res_jac_names[functable->current_res_jac])+" cannot be calculated by finite differences, since the residual is not calculated at all.");
+		    throw_runtime_error("The Jacobian of the residual "+std::string(functable->res_jac_names[__crj])+" cannot be calculated by finite differences, since the residual is not calculated at all.");
 		   }
 			// oomph-lib's own FD Jacobian: same reason as in fill_in_jacobian_from_nodal_by_fd.
 			HangInterpPassSuspension __no_pass;

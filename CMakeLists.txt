@@ -222,6 +222,32 @@ if(PYOOMPH_USE_MPI)
 endif()
 
 # ----------------------------------------------------------------------------
+# OpenMP: OPTIONAL, and only for pyoomph's own element loop (see
+# dev_docs/openmp_assembly.md). Deliberately not REQUIRED - the parallel
+# assembly is opt-in at runtime (--omp N / problem.set_num_threads), so a
+# toolchain without OpenMP (AppleClang without libomp being the usual one)
+# must still produce a working build; everything threaded is behind
+# PYOOMPH_HAS_OPENMP and set_num_threads(N>1) then says so once.
+#
+# PUBLIC on pyoomph_core so that the flag reaches the nanobind translation
+# units too: they include problem.hpp, which has inline members guarded by
+# PYOOMPH_HAS_OPENMP, and a definition mismatch across TUs would be an ODR
+# violation that only shows up as a corrupted object at runtime.
+#
+# The JIT compiler flags (pyoomph/generic/ccompiler.py) are NOT given -fopenmp:
+# generated code is called from INSIDE the parallel region and only has to be
+# reentrant, which it is since commit 25b24ea retired its file-scope globals.
+# ----------------------------------------------------------------------------
+find_package(OpenMP COMPONENTS CXX)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(pyoomph_core PUBLIC OpenMP::OpenMP_CXX)
+  target_compile_definitions(pyoomph_core PUBLIC PYOOMPH_HAS_OPENMP)
+  message(STATUS "OpenMP found - parallel element assembly (--omp N) is available")
+else()
+  message(STATUS "OpenMP NOT found - building without parallel element assembly")
+endif()
+
+# ----------------------------------------------------------------------------
 # The actual Python extension module: ONLY src/nanobind/*.cpp. This is the
 # only target that pulls in nanobind/Python compile flags and include
 # directories, and hence the only target that needs rebuilding when

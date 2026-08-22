@@ -112,6 +112,47 @@ Output and code generation
       ``--distribute`` and stop with an explanatory error. Run those without ``--distribute`` (plain
       eigenvalue solving is unaffected).
 
+Threading
+~~~~~~~~~
+
+``--omp N``
+      Use ``N`` threads for the element assembly and for the linear solver. Without it, pyoomph
+      assembles on one thread, which is the default and is what every timing and every reference value
+      in this tutorial refers to.
+
+      The threaded element loop is *bit-identical* to the serial one: it is built as a gather over
+      target slots in element order rather than as a scattered write, precisely so that switching it
+      on changes the run time and nothing else. It declines by itself -- saying why, once -- wherever
+      it cannot apply: a domain with a finite-difference Jacobian (which perturbs data shared with the
+      neighbouring elements), an assembly-time diagnostic environment variable, an assembly with no
+      frozen sparsity pattern, or a build whose CMake configuration found no OpenMP.
+
+      Note the asymmetry with the *solver*: a threaded direct solver is not bit-reproducible, so a
+      converged state can differ in its last digits between ``--omp 1`` and ``--omp 8``. That is a
+      property of the solver, not of the assembly, and it is what
+      :py:meth:`~pyoomph.generic.problem.Problem.set_num_threads` has always done.
+
+      Combines with ``mpirun``: threads run inside each rank. Keep ``ranks x N`` at or below the
+      number of physical cores.
+
+      .. warning::
+
+         ``mpirun`` pins each rank to a single core by default, which makes ``--omp N`` a no-op: the
+         threads are created and the results stay correct, but they take turns on that one core
+         instead of running side by side. Launch with ``mpirun --bind-to none`` (or a binding that
+         gives each rank as many cores as it has threads). pyoomph prints a one-off note when it
+         notices. Measured on a 32k-dof cavity, ``mpirun -n 1 ... --omp 4`` was 0.99x of a single
+         thread with the default binding and 1.69x with ``--bind-to none``.
+
+         With the binding fixed, ranks and threads are roughly interchangeable for the Jacobian, and
+         ranks are clearly better for the residual. Reach for ``--omp`` under ``mpirun`` mainly for
+         what more ranks cannot give you: memory headroom, or a core count beyond what the mesh
+         partitioner divides sensibly.
+
+      :py:meth:`~pyoomph.generic.problem.Problem.set_num_threads` does the same from the driver
+      script. :py:class:`~pyoomph.utils.paramscan.ParallelParameterScan` runs its children
+      single-threaded by default, since it is already running one simulation per core.
+
 Run control
 ~~~~~~~~~~~
 

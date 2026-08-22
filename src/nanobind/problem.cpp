@@ -197,8 +197,24 @@ void PyDecl_Problem(nb::module_ &m)
 	// py_decl_DofAugmentations=new nb::class_<pyoomph::DofAugmentations>(m,"DofAugmentations");
 }
 
+namespace
+{
+	// The two halves of the GIL hook that pyoomph_core declares but cannot implement: it links neither
+	// Python nor nanobind (see thread_state.hpp). Installed once at import time below, so that the
+	// threaded element loop can hand the GIL over to its workers' Python callbacks.
+	void *pyoomph_gil_release()
+	{
+		return (void *)new nb::gil_scoped_release();
+	}
+	void pyoomph_gil_acquire(void *token)
+	{
+		delete (nb::gil_scoped_release *)token;
+	}
+}
+
 void PyReg_Problem(nb::module_ &m)
 {
+	pyoomph::install_gil_hooks(&pyoomph_gil_release, &pyoomph_gil_acquire);
 
 	m.def(
 		"InitMPI", [](std::vector<std::string> &argv)
@@ -851,6 +867,16 @@ void PyReg_Problem(nb::module_ &m)
 			 "Make the distributed assembly report its local-stage time and the load imbalance across ranks. Diagnostics for the MPI assembly work. "
 			 "Only present in an MPI-enabled build.")
 #endif
+		.def("_set_num_assembly_threads", &pyoomph::Problem::set_num_assembly_threads, nb::arg("n"),
+			  "Number of OpenMP threads the element loop may use. 1 (the default) runs the serial loop unchanged. "
+			  "Set through Problem.set_num_threads(), which also passes the count to the linear solver; the command "
+			  "line switch --omp N does the same.")
+		.def("_get_num_assembly_threads", &pyoomph::Problem::get_num_assembly_threads,
+			  "Number of OpenMP threads currently allowed for the element loop.")
+		.def("_get_parallel_assemblies_done", &pyoomph::Problem::get_parallel_assemblies_done,
+			  "How many element loops have actually run threaded so far. Zero while --omp was not given, and "
+			  "still zero if the threaded path declined - which it reports once, but which otherwise looks "
+			  "exactly like a working one, since both give the right answer.")
 		.def_prop_rw("use_frozen_sparsity", &pyoomph::Problem::get_use_frozen_sparsity, &pyoomph::Problem::set_use_frozen_sparsity,
 					  "Whether assembly writes straight into a preallocated CSR through a precomputed scatter map, instead of accumulating into a searchable "
 					  "container and compressing it afterwards. Requires a value-independent pattern (``keep_structural_zeros``), and falls back to oomph-lib's "

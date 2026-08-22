@@ -323,7 +323,7 @@ namespace pyoomph
 	}
 
 	// Looks up the residual/Jacobian contribution named "name" in this code and, if found and non-NULL,
-	// makes it the active one (functable->current_res_jac) for subsequent assembly calls into this code.
+	// makes it the active one (get_current_res_jac(functable)) for subsequent assembly calls into this code.
 	// Returns 1 on success, 0 if no matching (non-NULL) contribution exists.
 	unsigned DynamicJITCode::_set_solved_residual(std::string name)
 	{
@@ -338,7 +338,7 @@ namespace pyoomph
 				break;
 			}
 		}
-		functable->current_res_jac = res_jac_index;
+		set_current_res_jac(functable, res_jac_index);
 		if (res_jac_index >= 0)
 			return 1;
 		else
@@ -2291,7 +2291,7 @@ namespace pyoomph
 		BulkElementBase *be = dynamic_cast<BulkElementBase *>(elem_pt);
 		if (!be) return false;
 		const JITFuncSpec_Table_FiniteElement_t *ft = be->get_jit_code()->get_func_table();
-		const int resind = (residual_override >= 0 ? residual_override : ft->current_res_jac);
+		const int resind = (residual_override >= 0 ? residual_override : get_current_res_jac(ft));
 		if (resind >= 0 && (unsigned)resind >= ft->num_res_jacs) return false; // Not a residual this code has
 		if (resind < 0)
 		{
@@ -3532,13 +3532,17 @@ namespace pyoomph
 		{
 			// Assembled straight into the preallocated pattern; nothing else to do.
 		}
-		else if (dynamic_cast<PeriodicOrbitHandler*>(this->assembly_handler_pt()))
-		{
-			sparse_assemble_row_or_column_compressed_for_periodic_orbit(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
-		}
 		else
 		{
-			oomph::Problem::sparse_assemble_row_or_column_compressed(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
+			// Only the frozen route is threaded, so say so once rather than leaving --omp looking as if
+			// it had simply bought nothing.
+			if (num_threads > 1)
+				report_parallel_refusal("this assembly has no frozen sparsity pattern (the periodic-orbit "
+										"and map-based routes are not threaded)");
+			if (dynamic_cast<PeriodicOrbitHandler*>(this->assembly_handler_pt()))
+				sparse_assemble_row_or_column_compressed_for_periodic_orbit(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
+			else
+				oomph::Problem::sparse_assemble_row_or_column_compressed(column_or_row_index,row_or_column_start,value,nnz,residual,compressed_row_flag);
 		}
 
 	}
@@ -6210,66 +6214,77 @@ namespace pyoomph
 
 		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
 		const unsigned long n_element = mesh_pt()->nelement();
-		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
-		oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
-		for (unsigned long e = 0; e < n_element; e++)
+		// Threaded element loop, if one was asked for and nothing rules it out. It fills exactly the
+		// same arrays with exactly the same bits (dev_docs/openmp_assembly.md); the serial loop below is
+		// left untouched and is what runs whenever --omp was not given, which is the default.
+		if (this->try_parallel_frozen_assembly(slots, value, residuals, 0, n_element))
 		{
-			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
-			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
-			if (!nvar) continue;
-			for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
-			for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
-			assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
+			// The frozen-fill statistics below still want the finished value arrays, so fall through to
+			// them rather than returning here.
+		}
+		else
+		{
+			oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
+			oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
+			for (unsigned long e = 0; e < n_element; e++)
+			{
+				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+				if (!nvar) continue;
+				for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
+				for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
+				assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
 
-			for (unsigned i = 0; i < nvar; i++)
-			{
-				const unsigned eqn_number = assembly_handler_pt->eqn_number(elem_pt, i);
-				for (unsigned v = 0; v < n_vector; v++) residuals[v][eqn_number] += el_residuals[v][i];
-			}
-			for (unsigned m = 0; m < n_matrix; m++)
-			{
-				const FrozenSparsity &sp = frozen_sparsity_cache[slots[m]];
-				const int lo = sp.element_offset[e], hi = sp.element_offset[e + 1];
-				const int *slot = &sp.scatter_slot[0];
-				const int *src = &sp.scatter_source[0];
-				double *val = value[m];
-				const double *flat = &el_jacobian[m](0, 0); // Row-major nvar*nvar block
-				for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
-				if (verify_frozen_sparsity)
+				for (unsigned i = 0; i < nvar; i++)
 				{
-					// The compact scatter never looks at the positions the pattern omits, so nothing would
-					// notice if the symbolic mask under-reported and a real entry landed there -- a
-					// silently truncated Jacobian. Count the nonzeros of the whole block and of the part
-					// actually scattered: equal iff everything omitted was exactly zero. Counting rather
-					// than summing on purpose -- a sum over the block and a sum over the slot-sorted
-					// subset differ in rounding, so a magnitude comparison reports spurious mismatches.
-					// O(nvar^2) reads of a block already in L1, against O(nvar^2) cache-missing writes for
-					// the scatter itself.
-					unsigned all = 0, taken = 0;
-					const size_t nblock = (size_t)nvar * nvar;
-					for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
-					for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
-					if (all > taken)
+					const unsigned eqn_number = assembly_handler_pt->eqn_number(elem_pt, i);
+					for (unsigned v = 0; v < n_vector; v++) residuals[v][eqn_number] += el_residuals[v][i];
+				}
+				for (unsigned m = 0; m < n_matrix; m++)
+				{
+					const FrozenSparsity &sp = frozen_sparsity_cache[slots[m]];
+					const int lo = sp.element_offset[e], hi = sp.element_offset[e + 1];
+					const int *slot = &sp.scatter_slot[0];
+					const int *src = &sp.scatter_source[0];
+					double *val = value[m];
+					const double *flat = &el_jacobian[m](0, 0); // Row-major nvar*nvar block
+					for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
+					if (verify_frozen_sparsity)
 					{
-						// Name the offending positions: which part of the block escaped decides what is
-						// wrong. On an AUGMENTED (bifurcation-tracking) block the row and column say which
-						// sub-block of the handler's spec is at fault, which "element 898" alone does not.
-						std::string where;
-						unsigned shown = 0;
-						std::vector<bool> covered(nblock, false);
-						for (int k = lo; k < hi; k++) covered[src[k]] = true;
-						for (size_t q = 0; q < nblock && shown < 6; q++)
+						// The compact scatter never looks at the positions the pattern omits, so nothing would
+						// notice if the symbolic mask under-reported and a real entry landed there -- a
+						// silently truncated Jacobian. Count the nonzeros of the whole block and of the part
+						// actually scattered: equal iff everything omitted was exactly zero. Counting rather
+						// than summing on purpose -- a sum over the block and a sum over the slot-sorted
+						// subset differ in rounding, so a magnitude comparison reports spurious mismatches.
+						// O(nvar^2) reads of a block already in L1, against O(nvar^2) cache-missing writes for
+						// the scatter itself.
+						unsigned all = 0, taken = 0;
+						const size_t nblock = (size_t)nvar * nvar;
+						for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
+						for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
+						if (all > taken)
 						{
-							if (flat[q] == 0.0 || covered[q]) continue;
-							where += (shown ? ", " : "") + std::string("(") + std::to_string(q / nvar) + "," +
-									 std::to_string(q % nvar) + ")=" + std::to_string(flat[q]);
-							shown++;
+							// Name the offending positions: which part of the block escaped decides what is
+							// wrong. On an AUGMENTED (bifurcation-tracking) block the row and column say which
+							// sub-block of the handler's spec is at fault, which "element 898" alone does not.
+							std::string where;
+							unsigned shown = 0;
+							std::vector<bool> covered(nblock, false);
+							for (int k = lo; k < hi; k++) covered[src[k]] = true;
+							for (size_t q = 0; q < nblock && shown < 6; q++)
+							{
+								if (flat[q] == 0.0 || covered[q]) continue;
+								where += (shown ? ", " : "") + std::string("(") + std::to_string(q / nvar) + "," +
+										 std::to_string(q % nvar) + ")=" + std::to_string(flat[q]);
+								shown++;
+							}
+							throw_runtime_error("A Jacobian entry appeared outside the symbolic sparsity pattern (matrix " +
+												std::to_string(m) + ", element " + std::to_string(e) + ", nvar " +
+												std::to_string(nvar) + "). Positions missing from the pattern: " + where +
+												". Silently dropping them would truncate the Jacobian, so assembly is "
+												"refused. Workaround: set problem.use_frozen_sparsity=False.");
 						}
-						throw_runtime_error("A Jacobian entry appeared outside the symbolic sparsity pattern (matrix " +
-											std::to_string(m) + ", element " + std::to_string(e) + ", nvar " +
-											std::to_string(nvar) + "). Positions missing from the pattern: " + where +
-											". Silently dropping them would truncate the Jacobian, so assembly is "
-											"refused. Workaround: set problem.use_frozen_sparsity=False.");
 					}
 				}
 			}
@@ -6905,53 +6920,59 @@ namespace pyoomph
 		// the matrix entries do not, they go through the scatter map.
 		const unsigned *eq0 = sp.my_eqns.data();
 
-		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
-		oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
 		std::string violation; // empty = this rank has no objection, see the vote after the loop
-		for (unsigned long e = el_lo; e < el_hi_plus_one; e++)
+		// Threaded local stage (dev_docs/openmp_assembly.md): hybrid MPI+OpenMP, i.e. threads INSIDE
+		// each rank. Only this loop is threaded; the exchange below stays on the calling thread, so
+		// MPI_THREAD_FUNNELED is all that is required of the MPI build.
+		if (!this->try_parallel_distributed_assembly(sp, n_matrix, n_vector, local_values, local_res, violation))
 		{
-			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
-			if (elem_pt->is_halo()) continue;
-			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
-			if (!nvar) continue;
-			for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
-			for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
-			assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
+			oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
+			oomph::Vector<oomph::DenseMatrix<double>> el_jacobian(n_matrix);
+			for (unsigned long e = el_lo; e < el_hi_plus_one; e++)
+			{
+				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+				if (elem_pt->is_halo()) continue;
+				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+				if (!nvar) continue;
+				for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
+				for (unsigned m = 0; m < n_matrix; m++) el_jacobian[m].resize(nvar);
+				assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, el_jacobian);
 
-			for (unsigned i = 0; i < nvar; i++)
-			{
-				const unsigned g = assembly_handler_pt->eqn_number(elem_pt, i);
-				const unsigned *found = std::lower_bound(eq0, eq0 + my_n_eqn, g);
-				if (found == eq0 + my_n_eqn || *found != g) continue;
-				const size_t row = found - eq0;
-				for (unsigned v = 0; v < n_vector; v++) local_res[v][row] += el_residuals[v][i];
-			}
-			for (unsigned m = 0; m < n_matrix; m++)
-			{
-				const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
-				const int lo = mt.element_offset[e], hi = mt.element_offset[e + 1];
-				const int *slot = mt.scatter_slot.data();
-				const int *src = mt.scatter_source.data();
-				double *val = local_values[m].data();
-				const double *flat = &el_jacobian[m](0, 0);
-				for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
-				if (verify_frozen_sparsity && violation.empty())
+				for (unsigned i = 0; i < nvar; i++)
 				{
-					// Same guard as the serial path: the compact scatter cannot notice an entry that fell
-					// outside the pattern, so count instead of trusting.
-					unsigned all = 0, taken = 0;
-					const size_t nblock = (size_t)nvar * nvar;
-					for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
-					for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
-					if (all > taken)
+					const unsigned g = assembly_handler_pt->eqn_number(elem_pt, i);
+					const unsigned *found = std::lower_bound(eq0, eq0 + my_n_eqn, g);
+					if (found == eq0 + my_n_eqn || *found != g) continue;
+					const size_t row = found - eq0;
+					for (unsigned v = 0; v < n_vector; v++) local_res[v][row] += el_residuals[v][i];
+				}
+				for (unsigned m = 0; m < n_matrix; m++)
+				{
+					const DistributedFrozenSparsity::Mat &mt = sp.mats[m];
+					const int lo = mt.element_offset[e], hi = mt.element_offset[e + 1];
+					const int *slot = mt.scatter_slot.data();
+					const int *src = mt.scatter_source.data();
+					double *val = local_values[m].data();
+					const double *flat = &el_jacobian[m](0, 0);
+					for (int k = lo; k < hi; k++) val[slot[k]] += flat[src[k]];
+					if (verify_frozen_sparsity && violation.empty())
 					{
-						// RECORDED, not thrown: the value exchange below is collective, so a rank throwing
-						// here on its own would leave every other rank waiting for a message it will never
-						// send - a hung job instead of a failed one. The offending element is this rank's
-						// own, so only it can see the violation.
-						violation = "A Jacobian entry appeared outside the symbolic sparsity pattern during "
-									"distributed assembly (matrix " + std::to_string(m) + ", element " +
-									std::to_string(e) + "). Workaround: set problem.use_frozen_sparsity=False.";
+						// Same guard as the serial path: the compact scatter cannot notice an entry that fell
+						// outside the pattern, so count instead of trusting.
+						unsigned all = 0, taken = 0;
+						const size_t nblock = (size_t)nvar * nvar;
+						for (size_t q = 0; q < nblock; q++) all += (flat[q] != 0.0);
+						for (int k = lo; k < hi; k++) taken += (flat[src[k]] != 0.0);
+						if (all > taken)
+						{
+							// RECORDED, not thrown: the value exchange below is collective, so a rank throwing
+							// here on its own would leave every other rank waiting for a message it will never
+							// send - a hung job instead of a failed one. The offending element is this rank's
+							// own, so only it can see the violation.
+							violation = "A Jacobian entry appeared outside the symbolic sparsity pattern during "
+										"distributed assembly (matrix " + std::to_string(m) + ", element " +
+										std::to_string(e) + "). Workaround: set problem.use_frozen_sparsity=False.";
+						}
 					}
 				}
 			}
@@ -7117,21 +7138,42 @@ namespace pyoomph
 		// ---- local stage ----
 		std::vector<std::vector<double>> local_res(n_vector);
 		for (unsigned v = 0; v < n_vector; v++) local_res[v].assign(my_n_eqn, 0.0);
-		oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
-		oomph::Vector<oomph::DenseMatrix<double>> no_matrices;
-		for (unsigned long e = rp.el_lo; e < rp.el_hi_plus_one; e++)
+		// Threaded local stage: hybrid MPI+OpenMP (dev_docs/openmp_assembly.md). The engine derives the
+		// same rows from rp.my_eqns that rp.res_slot holds, so the two agree by construction; the plan
+		// is built once and only when a pattern id exists to invalidate it against, which is why this
+		// declines - and falls through to the loop below - with keep_structural_zeros off.
+		bool threaded = false;
+		if (this->parallel_assembly_possible())
 		{
-			oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
-			if (elem_pt->is_halo()) continue;
-			const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
-			if (!nvar) continue;
-			for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
-			assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, no_matrices);
-			const int *slot = rp.res_slot.data() + rp.res_element_offset[e];
-			for (unsigned i = 0; i < nvar; i++)
+			FrozenAssemblyRequest req;
+			req.el_lo = rp.el_lo;
+			req.el_hi_plus_one = rp.el_hi_plus_one;
+			req.n_matrix = 0;
+			req.n_vector = n_vector;
+			req.n_map = 0;
+			for (unsigned v = 0; v < n_vector; v++) req.residual.push_back(local_res[v].data());
+			req.res_row_map = rp.my_eqns.data();
+			req.res_row_map_n = (unsigned)rp.my_eqns.size();
+			threaded = this->parallel_assemble_frozen(req);
+		}
+		if (!threaded)
+		{
+			oomph::Vector<oomph::Vector<double>> el_residuals(n_vector);
+			oomph::Vector<oomph::DenseMatrix<double>> no_matrices;
+			for (unsigned long e = rp.el_lo; e < rp.el_hi_plus_one; e++)
 			{
-				if (slot[i] < 0) continue;
-				for (unsigned v = 0; v < n_vector; v++) local_res[v][slot[i]] += el_residuals[v][i];
+				oomph::GeneralisedElement *elem_pt = mesh_pt()->element_pt(e);
+				if (elem_pt->is_halo()) continue;
+				const unsigned nvar = assembly_handler_pt->ndof(elem_pt);
+				if (!nvar) continue;
+				for (unsigned v = 0; v < n_vector; v++) el_residuals[v].resize(nvar);
+				assembly_handler_pt->get_all_vectors_and_matrices(elem_pt, el_residuals, no_matrices);
+				const int *slot = rp.res_slot.data() + rp.res_element_offset[e];
+				for (unsigned i = 0; i < nvar; i++)
+				{
+					if (slot[i] < 0) continue;
+					for (unsigned v = 0; v < n_vector; v++) local_res[v][slot[i]] += el_residuals[v][i];
+				}
 			}
 		}
 
@@ -7316,6 +7358,12 @@ namespace pyoomph
 					residuals[v] = new double[ndof ? ndof : 1];
 					std::fill(residuals[v], residuals[v] + ndof, 0.0);
 				}
+				// Threaded element loop (dev_docs/openmp_assembly.md). This is the assembly that a
+				// bifurcation-tracking or multi-assembly step goes through, i.e. the one that gains the
+				// most from it. One slot serves every matrix here, so the gather index is built once.
+				if (this->try_parallel_frozen_assembly(std::vector<int>(n_matrix, slot), value, residuals,
+													   el_lo, el_hi + 1))
+					return;
 				oomph::Vector<oomph::Vector<double>> el_res(n_vector);
 				oomph::Vector<oomph::DenseMatrix<double>> el_jac(n_matrix);
 				for (unsigned long e = el_lo; e <= el_hi; e++)
