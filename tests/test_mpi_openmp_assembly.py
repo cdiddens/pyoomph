@@ -49,7 +49,9 @@ def _skip_reason():
             return "pyoomph was built without MPI"
     except Exception as e:
         return "MPI unavailable: " + str(e)
-    from pyoomph import _pyoomph_core  # noqa: F401
+    from pyoomph import _pyoomph_core
+    if not _pyoomph_core.has_openmp:
+        return "this build has no OpenMP"
     return None
 
 

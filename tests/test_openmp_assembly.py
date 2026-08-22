@@ -46,8 +46,16 @@ from pyoomph.equations.poisson import *
 from pyoomph.equations.navier_stokes import *
 from pyoomph.equations.additional import EquationCompilationFlags
 from pyoomph.meshes.simplemeshes import RectangularQuadMesh, LineMesh
+from pyoomph import _pyoomph_core
 
 NTHREADS = 4
+
+# A build configured without OpenMP (PYOOMPH_USE_OPENMP=OFF, or AUTO on a toolchain that has none)
+# still accepts _set_num_assembly_threads and still gives the right answer - it just never runs the
+# threaded loop, so every bit-identity test below would fail on an assertion about a path that does
+# not exist. The tests that check the loop DECLINES are left running: they pass either way.
+requires_openmp = pytest.mark.skipif(not _pyoomph_core.has_openmp,
+                                     reason="this build has no OpenMP; there is no threaded element loop to compare against")
 
 
 def _snapshot(problem):
@@ -161,6 +169,7 @@ class _Pitchfork(Problem):
         self += eqs @ "domain"
 
 
+@requires_openmp
 def test_plain_problem_is_bit_identical(tmp_path):
     with _Poisson() as p:
         p.set_output_directory(str(tmp_path))
@@ -168,6 +177,7 @@ def test_plain_problem_is_bit_identical(tmp_path):
         _assert_threaded_matches_serial(p)
 
 
+@requires_openmp
 def test_two_space_element_is_bit_identical(tmp_path):
     with _Cavity() as p:
         p.set_output_directory(str(tmp_path))
@@ -176,6 +186,7 @@ def test_two_space_element_is_bit_identical(tmp_path):
         _assert_threaded_matches_serial(p)
 
 
+@requires_openmp
 def test_hanging_nodes_and_python_callback_are_bit_identical(tmp_path):
     with _AdaptivePoisson() as p:
         p.set_output_directory(str(tmp_path))
@@ -190,6 +201,7 @@ def test_hanging_nodes_and_python_callback_are_bit_identical(tmp_path):
         _assert_threaded_matches_serial(p)
 
 
+@requires_openmp
 def test_eigenproblem_matrices_are_bit_identical(tmp_path):
     with _Bratu() as p:
         p.set_output_directory(str(tmp_path))
@@ -209,6 +221,7 @@ def test_eigenproblem_matrices_are_bit_identical(tmp_path):
             assert numpy.array_equal(a, b), "eigenproblem array %d differs" % i
 
 
+@requires_openmp
 def test_arclength_continuation_path_is_bit_identical(tmp_path):
     """Arclength goes through the augmented (base-problem) assembly and its multi-assembly, which is
     a different element loop from the plain Jacobian one."""
@@ -232,6 +245,7 @@ def test_arclength_continuation_path_is_bit_identical(tmp_path):
     assert numpy.array_equal(serial, threaded)
 
 
+@requires_openmp
 def test_fold_tracking_is_bit_identical(tmp_path):
     def run(threads):
         with _Bratu() as p:
@@ -251,6 +265,7 @@ def test_fold_tracking_is_bit_identical(tmp_path):
     assert numpy.array_equal(dofs_s, dofs_t)
 
 
+@requires_openmp
 def test_pitchfork_tracking_is_bit_identical(tmp_path):
     """The pitchfork handler writes functable->current_res_jac per element; without the per-thread
     channel in thread_state.hpp two workers would overwrite each other's residual form."""

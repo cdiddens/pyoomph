@@ -135,6 +135,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libglu1-mesa-dev libxcursor-dev libopengl0
 
+      - name: Build a static libomp (macOS)
+        # OpenMP is not part of AppleClang, so without this the macOS wheels would silently be the
+        # only ones without --omp (PYOOMPH_USE_OPENMP=ON below then makes that a build failure
+        # rather than a surprise). Homebrew's libomp cannot be used: its bottle requires the
+        # runner's macOS release, which delocate refuses to bundle into a 10.13 wheel. See
+        # citools/build_static_libomp.sh for the rest of the reasoning. ~3 minutes.
+        #
+        # Deliberately built here rather than in the prebuild workflow next to CLN/GiNaC: it has to
+        # match MACOSX_DEPLOYMENT_TARGET, which is set in THIS file, and an old prebuild artifact
+        # reused via prebuild_run_id would then be missing it.
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "10.13"
+        run: |
+          chmod +x ./citools/build_static_libomp.sh
+          ./citools/build_static_libomp.sh "$PWD/libomp_static/install"
+
       # Split into two cibuildwheel invocations (both appending into the same
       # wheelhouse/ dir) rather than one combined CIBW_BUILD selector: cibuildwheel
       # env vars *always* win over pyproject.toml, including its
@@ -169,12 +187,14 @@ jobs:
             PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
             PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
             MACOSX_DEPLOYMENT_TARGET=10.13
+            OpenMP_ROOT=$PWD/libomp_static/install
           CIBW_CONFIG_SETTINGS: >
             cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
             cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
             cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
+            cmake.define.PYOOMPH_USE_OPENMP=ON
         uses: pypa/cibuildwheel@v4.1.0
         with:
           output-dir: wheelhouse
@@ -204,6 +224,7 @@ jobs:
             PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
             PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
             MACOSX_DEPLOYMENT_TARGET=10.13
+            OpenMP_ROOT=$PWD/libomp_static/install
           # wheel.py-api=cp312 tags the wheel cp312-abi3 instead of cp312-cp312,
           # matching CMakeLists.txt's nanobind_add_module(... STABLE_ABI ...)
           # (which compiles this build against Py_LIMITED_API=0x030C0000). Must
@@ -217,6 +238,7 @@ jobs:
             cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
             cmake.define.PYOOMPH_USE_MPI=OFF
             cmake.define.PYOOMPH_PARANOID=OFF
+            cmake.define.PYOOMPH_USE_OPENMP=ON
             wheel.py-api=cp312
         uses: pypa/cibuildwheel@v4.1.0
         with:
@@ -268,11 +290,11 @@ jobs:
             LEGACY_SELECTOR="${LEGACY_SELECTOR:+$LEGACY_SELECTOR }cp${v//./}-win_amd64"
           done
           export CIBW_BUILD="${LEGACY_SELECTOR}"
-          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON"
           python -m cibuildwheel --output-dir wheelhouse
 
           export CIBW_BUILD="cp${PYTHON_STABLE_ABI_BASE//./}-win_amd64"
-          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF wheel.py-api=cp312"
+          export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON wheel.py-api=cp312"
           python -m cibuildwheel --output-dir wheelhouse
 
       - name: Verify NO_MPI marker in wheel

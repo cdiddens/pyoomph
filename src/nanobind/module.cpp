@@ -78,6 +78,17 @@ NB_MODULE(PYOOMPH_MODULE_NAME, m)
     PyReg_Solvers(m);
     PyReg_Vector(m);
 
+    // Whether the threaded element loop (--omp N) is compiled in at all. Same purpose as
+    // has_tqmesh below, but it answers a question that is otherwise unanswerable from Python: a
+    // build without OpenMP accepts --omp N, prints one note and assembles serially, so a wheel that
+    // lost OpenMP at configure time is indistinguishable from a working one until someone measures.
+    // tests/test_openmp_assembly.py skips on it, and the wheel CI asserts it is true.
+#ifdef PYOOMPH_HAS_OPENMP
+    m.attr("has_openmp") = true;
+#else
+    m.attr("has_openmp") = false;
+#endif
+
     // Lets python find out whether this build can mesh with TQMesh, without having to probe for
     // the classes registered by PyReg_TQMesh().
 #ifdef PYOOMPH_HAS_TQMESH

@@ -211,3 +211,34 @@ third-party OpenMP runtime cannot open a second pool of threads next to ours.
 `ParallelParameterScan` runs `max_procs` simulations at once, so its children stay single-threaded:
 `single_threaded_childs` (the default) pins the solver's threading through the environment and
 pyoomph's own through an appended `--omp 1`.
+
+## Packaging: which wheels actually have it
+
+The build option is `PYOOMPH_USE_OPENMP` (`AUTO`/`ON`/`OFF`, default `AUTO`, see
+`docs/source/tutorial/installation/cmakeoptions.rst`). `AUTO` links OpenMP if the toolchain has it -
+which is why the capability of a wheel would otherwise be decided, silently, by whatever the build
+machine happened to have. `pyoomph._pyoomph_core.has_openmp` says which it was; the wheel jobs pass
+`ON` so that a runner which loses OpenMP fails the build instead of shipping a serial wheel, and
+`tests/test_openmp_assembly.py` skips on it rather than failing everywhere it is absent.
+
+* **Linux.** GCC always brings `libgomp`, and auditwheel vendors it into the wheel. A second
+  `libgomp` next to numpy's or torch's is merely wasteful, not fatal.
+* **Windows (MinGW/UCRT64).** `-fopenmp` pulls in `libgomp-1.dll`, which needs `libwinpthread-1.dll`
+  and `libgcc_s_seh-1.dll` of its own - `-static-libgcc -static-libstdc++` covers the extension, not
+  libgomp. delvewheel bundles all three, so the wheel stays self-contained. Exceptions must keep
+  being caught before they leave the parallel region (they are): the extension's static libgcc and
+  libgomp's dynamic one are two unwinders in one process.
+* **macOS.** AppleClang has no OpenMP at all and Homebrew's `libomp` cannot be used: its bottle
+  requires the runner's macOS release, and delocate refuses to bundle that into a 10.13 wheel.
+  `citools/build_static_libomp.sh` builds LLVM's runtime from source at the wheel's own deployment
+  target and links it statically, so nothing lands in `.dylibs`. What static linking does NOT avoid
+  is libomp's per-process registration: a second copy (PyTorch ships one) aborts with `OMP: Error
+  #15` once ours initialises, which is why `pyoomph/__init__.py` sets `KMP_DUPLICATE_LIB_OK` on
+  Darwin. `.github/workflows/test_mac_openmp_wheel.yml` builds one wheel and checks all of it.
+
+Rejected: replacing OpenMP with a `std::thread` pool, which would remove the packaging problem on
+all three platforms. The OpenMP surface here is small enough to port (one parallel region, one
+dynamic `for`, two barriers), but the barrier is not incidental - the chunk sweep above shows a 28 %
+loss once the two barriers per chunk stop being amortised, measured against libgomp's tuned
+spin-then-sleep. Hand-rolling that, plus a pool whose lifetime survives fork/MPI/several `Problem`s,
+buys one platform that `build_static_libomp.sh` already buys without touching the hot path.
