@@ -263,10 +263,24 @@ def _check_duplicates_agree(keys: NPAnyIntArray, lengths: NPAnyIntArray, data: N
         for m in members[1:]:
             other = data[offsets[m]:offsets[m + 1]]
             if len(other) != len(ref) or not numpy.array_equal(other, ref):
+                # How far apart, not just "different". A handful of entries off by round-off is a halo
+                # that drifted; a value that is simply unrelated means the two records are not the same
+                # entity at all and the KEY is wrong - which is what it turned out to be when
+                # Problem::distribute() re-rooted the refinement tree and 240 of 256 addresses
+                # collided. The message used to name the halo as the cause and sent the reader the
+                # wrong way, so it now reports what was measured and leaves the diagnosis open.
+                if len(other) == len(ref):
+                    diff = numpy.abs(numpy.asarray(other) - numpy.asarray(ref))
+                    worst = int(numpy.argmax(diff))
+                    detail = (": %d of %d entries differ, worst |a-b|=%.3e at index %d (%r vs %r)" %
+                              (int((diff > 0).sum()), len(diff), float(diff[worst]), worst,
+                               ref[worst], other[worst]))
+                else:
+                    detail = ": one reports %d entries, the other %d" % (len(ref), len(other))
                 raise StateFileInconsistency(
                     "Two processes report different values for the same " + what + " " + str(keys[members[0]]) +
-                    " while writing the state file. They are the same " + what + ", so their halo copies were out "
-                    "of sync at this point")
+                    " while writing the state file" + detail + ". Either their halo copies were out of sync, or "
+                    "the two records are different " + what + "s that were given the same key")
 
 
 def _sorted_records(local: dict[str, NPAnyArray], distributed: bool, check: bool) -> dict[str, NPAnyArray] | None:
