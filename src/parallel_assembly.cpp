@@ -44,6 +44,7 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "thread_state.hpp"
 
 #include "assembly_handler.h" // AssemblyHandler::ndof/eqn_number/get_all_vectors_and_matrices, called per element here
+#include "bifurcation.hpp" // CustomMultiAssembleHandler, refused below
 
 #include <algorithm>
 #include <atomic>
@@ -148,6 +149,20 @@ namespace pyoomph
 										"between elements");
 				return false;
 			}
+		}
+		// A handler that has no per-element route at all. The threaded loop below assembles by calling
+		// handler->get_residuals()/get_all_vectors_and_matrices() once per element, and
+		// CustomMultiAssembleHandler answers both with throw_runtime_error("Residual called"): it is
+		// driven from _assemble_multiassembly(), which sweeps the elements itself and asks each one for
+		// several named contributions at once. Refusing here puts such a solve back on that route
+		// instead of failing it -- deflated_solve.py died with "during threaded element assembly:
+		// Residual called" the moment the tutorials were run with --omp 2, and the same handler is why
+		// the tutorial harness already skips the deflation scripts under --mpirun.
+		if (dynamic_cast<CustomMultiAssembleHandler *>(this->assembly_handler_pt()))
+		{
+			report_parallel_refusal("the active assembly handler assembles several contributions per "
+									"element at once and has no per-element residual/Jacobian to call");
+			return false;
 		}
 		// Not a refusal: the assembly is still right, it just will not get faster. Reported through the
 		// same once-only channel because the cause and the fix are both invisible from the timings.

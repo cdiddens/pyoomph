@@ -9,6 +9,7 @@ parser.add_argument("--no-petsc", help="Do not select a PETSc build at all: skip
 parser.add_argument("--keep-logs", help="Keep log files also of successful tests", action="store_true")
 parser.add_argument("--keep-outdirs", help="Do not delete each script's output directory after it runs. Useful for comparing generated code across repeated runs (e.g. for determinism testing)", action="store_true")
 parser.add_argument("--mpirun", type=int, default=0, metavar="N", help="Run each script under 'mpirun -n N' instead of directly. Default 0, i.e. no mpirun")
+parser.add_argument("--omp", type=int, default=0, metavar="N", help="Pass '--omp N' to each script, i.e. assemble the elements on N threads. Default 0, i.e. leave each script on the serial element loop. Composes with --mpirun, which is threads per rank then")
 parser.add_argument("--distribute", help="Pass --distribute to each script, i.e. distribute the mesh over the ranks. Only meaningful together with --mpirun", action="store_true")
 # Folders to skip used to be read from sys.argv directly, which stopped working when argparse was
 # added - argparse rejects any positional argument it does not know about.
@@ -306,6 +307,8 @@ for d in glob.glob("./*/"):
       cmd.append("--tcc")
     if args.distribute:
       cmd.append("--distribute")
+    if args.omp>0:
+      cmd+=["--omp",str(args.omp)]
     started_at=time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     #proc = subprocess.Popen([sys.executable, '-u', f], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
