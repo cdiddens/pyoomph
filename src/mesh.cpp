@@ -154,30 +154,16 @@ namespace pyoomph
     return dynamic_cast<BulkElementBase *>(root->object_pt());
   }
 
-  // The packed path of e from its tree root, computed live. See get_element_structural_keys() for the
-  // packing; 1 means "this element is the root".
-  static long live_path_of(oomph::GeneralisedElement *e)
+  static std::vector<int> refinement_path_of(oomph::GeneralisedElement *e); // defined below
+
+  // The packed path of e from its tree root, in the encoding get_element_structural_keys() documents:
+  // one step per level, 3 bits each, +1 so son 0 is not a no-op, with a leading 1 so that "root" and
+  // "first son of the root" differ. 1 means the element IS the root.
+  static long packed_path_of(oomph::GeneralisedElement *e)
   {
     long path = 1;
-    oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(e);
-    if (re && re->tree_pt())
-    {
-      std::vector<long> steps;
-      for (oomph::Tree *t = re->tree_pt(); t->father_pt(); t = t->father_pt())
-      {
-        oomph::Tree *f = t->father_pt();
-        long which = -1;
-        for (unsigned s = 0; s < f->nsons(); s++)
-        {
-          if (f->son_pt(s) == t) { which = (long)s; break; }
-        }
-        if (which < 0)
-          throw_runtime_error("Refinement tree is inconsistent: an element is not among its father's sons");
-        steps.push_back(which);
-      }
-      for (auto it = steps.rbegin(); it != steps.rend(); ++it)
-        path = path * 8 + (*it + 1);
-    }
+    for (int step : refinement_path_of(e))
+      path = path * 8 + (step + 1);
     return path;
   }
 
@@ -217,7 +203,7 @@ namespace pyoomph
       if (!be) continue;
       BulkElementBase *root = root_element_of(this->element_pt(i));
       be->global_root_index = (root ? root->global_base_index : -1);
-      be->global_root_path = live_path_of(this->element_pt(i));
+      be->global_root_path = packed_path_of(this->element_pt(i));
     }
   }
 
@@ -230,22 +216,13 @@ namespace pyoomph
     std::vector<long> res(2 * this->nelement(), -1);
     for (unsigned ie = 0; ie < this->nelement(); ie++)
     {
-      BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
-      // The stamp first: it is the only source that survives distribution, where the root element
-      // itself may live on another rank. The live lookup stays as the fallback for a mesh that was
-      // never numbered (a serial run that never calls assign_global_base_element_indices()).
-      if (be && be->global_root_index >= 0)
-        res[2 * ie] = be->global_root_index;
-      else
+      long root = -1, path = 1;
+      if (!element_structural_key(this->element_pt(ie), root, path))
       {
-        BulkElementBase *root = root_element_of(this->element_pt(ie));
-        res[2 * ie] = (root ? root->global_base_index : -1);
+        root = -1;
+        path = packed_path_of(this->element_pt(ie));
       }
-      // Both halves come from the stamp or neither does: they describe one address, and mixing a
-      // stamped root with a freshly walked path is what produced 240 colliding keys out of 256.
-      long path = (be && be->global_root_index >= 0 && be->global_root_path >= 0)
-                      ? be->global_root_path
-                      : live_path_of(this->element_pt(ie));
+      res[2 * ie] = root;
       res[2 * ie + 1] = path;
     }
     return res;
@@ -281,16 +258,24 @@ namespace pyoomph
     return steps;
   }
 
+  // The one place an element's partition-independent address is formed. Interface meshes reach it
+  // through their bulk element (InterfaceMesh::get_interface_element_structural_keys) and the bulk
+  // list through get_element_structural_keys(), so both see the stamp and neither has to know that
+  // Problem::distribute() has re-rooted the tree underneath them.
   bool Mesh::element_structural_key(oomph::GeneralisedElement *e, long &root_index, long &path)
   {
+    BulkElementBase *be = dynamic_cast<BulkElementBase *>(e);
+    if (be && be->global_root_index >= 0 && be->global_root_path >= 0)
+    {
+      root_index = be->global_root_index;
+      path = be->global_root_path;
+      return true;
+    }
     BulkElementBase *r = root_element_of(e);
     if (!r || r->global_base_index < 0)
       return false;
     root_index = r->global_base_index;
-    path = 1;
-    std::vector<int> steps = refinement_path_of(e);
-    for (size_t i = 0; i < steps.size(); i++)
-      path = path * 8 + (steps[i] + 1);
+    path = packed_path_of(e);
     return true;
   }
 
