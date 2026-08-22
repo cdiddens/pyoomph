@@ -96,6 +96,36 @@ separate them are worth knowing:
   C2-only nodes, so it does not qualify. This is the largest remaining serial fraction of a threaded
   assembly and the obvious next thing to attack.
 
+### Load balancing across unequal elements
+
+Nothing about phase 1 is split by element COUNT. The elements of a chunk are handed out by
+`schedule(dynamic, gran)`, i.e. by work-stealing, so a mesh whose elements cost wildly different
+amounts - two domains with different physics, a cheap scalar field next to a 3D Navier-Stokes block,
+bulk elements next to interface elements - balances itself without anyone having to estimate a cost
+per element. Chunk boundaries do not respect domain boundaries either, and do not need to.
+
+What *was* fixed by count, and did break, is the dispatch **granularity**. It used to be a constant
+8. The chunk length comes from a budget on `nvar*nvar`, so a domain with large elements gets a SHORT
+chunk - 3D Q2/Q1 Navier-Stokes has `nvar = 3*27 + 8 = 89`, which admits a few dozen elements per
+chunk - and a grain of 8 then handed the whole chunk to one or two threads while the rest idled. The
+grain is now derived per chunk, aiming for about eight dispatches per thread:
+
+    gran = clamp(chunk_length / (8 * nthreads), 1, 8)
+
+Measured, 3D Q2/Q1 cavity, 8x8x8, 10 845 dofs, `assemble_jacobian` at 4 threads: **90 ms with the
+fixed grain of 8, 65 ms with the derived one**. The homogeneous 2D case is unaffected (its chunks are
+long enough that the formula returns 8 anyway) and still runs at 2.0x.
+
+With that in place the measured imbalance - busiest thread against the mean of their phase-1 BUSY
+times, which `PYOOMPH_REPORT_OMP_ASSEMBLY` prints - is 1.01-1.05 on all three shapes tested: the
+homogeneous 2D cavity, the large-element 3D block, and two domains sharing a problem where one is a
+scalar Poisson and the other Navier-Stokes. Note that the imbalance figure excludes the wait at the
+barrier on purpose; without that, a thread that finished early and a thread that never got work look
+identical.
+
+The one thing still split by count is phase 2, and there it is the right measure: every gather entry
+is one multiply-free add, so equal counts really are equal work.
+
 ### The chunk length
 
 Phase 2 is 4-7 ms, i.e. ~6 %, and it is the one part that cares where the chunk sits relative to the

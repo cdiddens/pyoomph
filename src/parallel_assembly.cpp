@@ -612,6 +612,10 @@ namespace pyoomph
 		// memory-bound rather than the loop being badly parallelised.
 		static const bool report_phases = getenv("PYOOMPH_REPORT_OMP_ASSEMBLY") != NULL;
 		double t_pre = 0.0, t_p1 = 0.0, t_p2 = 0.0, t0 = 0.0;
+		// Per-thread BUSY time in phase 1, i.e. excluding the wait at the barrier. max/mean over the
+		// threads is the load imbalance, and it is the only way to tell "the element kernel does not
+		// scale" from "one thread did most of the work" - the two look identical in the phase totals.
+		std::vector<double> busy(nt, 0.0);
 		if (report_phases) t0 = omp_get_wtime();
 
 		// Hanging values are pushed into the nodes ONCE, here, and the workers adopt the stamp.
@@ -660,10 +664,21 @@ namespace pyoomph
 
 				for (unsigned c = 0; c < nchunk; c++)
 				{
+					const long chunk_len = plan.chunk_start[c + 1] - plan.chunk_start[c];
+					// The dispatch granularity is derived from the chunk rather than fixed, and that
+					// matters as soon as the elements are large: the chunk length comes from a budget on
+					// nvar*nvar, so a domain with big elements gets a SHORT chunk, and a fixed grain of 8
+					// would hand the whole of it to one or two threads while the rest idled. Aim for about
+					// eight dispatches per thread - enough to even out elements of unequal cost without
+					// paying for a shared counter per element.
+					const int gran = (int)std::max(1L, std::min(8L, chunk_len / (8L * (long)nt_actual)));
 					double tc = 0.0;
 					if (report_phases && tid == 0) tc = omp_get_wtime();
+					const double t_busy0 = (report_phases ? omp_get_wtime() : 0.0);
 					// ---- phase 1: every element's block, in parallel, into its own slice
-#pragma omp for schedule(dynamic, 8)
+					// nowait plus the explicit barrier below rather than the implicit one: identical
+					// semantics, but it leaves a place to read each thread's busy time before it waits.
+#pragma omp for schedule(dynamic, gran) nowait
 					for (long i = plan.chunk_start[c]; i < plan.chunk_start[c + 1]; i++)
 					{
 						if (failed.load(std::memory_order_relaxed)) continue; // cannot break out of an omp for
@@ -732,7 +747,9 @@ namespace pyoomph
 						catch (const std::exception &err) { record_error(err.what()); }
 						catch (...) { record_error("unknown exception during threaded element assembly"); }
 					}
-					// implicit barrier at the end of the omp for: every block of this chunk is now written
+					if (report_phases) busy[tid] += omp_get_wtime() - t_busy0;
+#pragma omp barrier
+					// every block of this chunk is now written
 					if (report_phases && tid == 0) { t_p1 += omp_get_wtime() - tc; tc = omp_get_wtime(); }
 
 					// ---- phase 2: each thread owns a range of TARGET SLOTS, so nothing is shared
@@ -787,9 +804,17 @@ namespace pyoomph
 			}
 		}
 		if (report_phases)
+		{
+			double bmax = 0.0, bsum = 0.0;
+			for (int t = 0; t < nt; t++) { bmax = std::max(bmax, busy[t]); bsum += busy[t]; }
+			const double bmean = (nt ? bsum / nt : 0.0);
 			oomph::oomph_info << "pyoomph OMP assembly: " << nchunk << " chunks, " << nt << " threads, total "
 							  << (omp_get_wtime() - t0) * 1000 << " ms = hang pre-pass " << t_pre * 1000
-							  << " + phase 1 " << t_p1 * 1000 << " + phase 2 " << t_p2 * 1000 << " ms" << std::endl;
+							  << " + phase 1 " << t_p1 * 1000 << " + phase 2 " << t_p2 * 1000
+							  << " ms; phase-1 imbalance max/mean " << (bmean > 0 ? bmax / bmean : 1.0)
+							  << " (busiest " << bmax * 1000 << " ms, mean " << bmean * 1000 << " ms)"
+							  << std::endl;
+		}
 
 		// Rethrown here rather than from the worker: an exception must not leave an OpenMP region. The
 		// prefix is what tells the reader that the element it names was assembled off the main thread,
