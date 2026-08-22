@@ -31,6 +31,10 @@ on:
         description: "Run id of a 'Test macOS OpenMP wheel' run to take the wheel from (default: its latest success)"
         required: false
         default: ""
+      pip_install:
+        description: "Extra packages to pip install first (e.g. pytest-repeat, for --count=N)"
+        required: false
+        default: ""
       runner:
         description: "Which macOS image to run on - must match the wheel's architecture"
         required: false
@@ -83,9 +87,12 @@ jobs:
           ls -l wheelhouse
 
       - name: Install it
+        env:
+          PIP_EXTRA: ${{ inputs.pip_install }}
         run: |
           set -eux
           python -m pip install --upgrade pip pytest
+          if [[ -n "${PIP_EXTRA}" ]]; then python -m pip install ${PIP_EXTRA}; fi
           python -m pip install wheelhouse/*.whl
           cd ..
           python -c "
