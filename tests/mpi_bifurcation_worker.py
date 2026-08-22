@@ -353,7 +353,23 @@ class ReactionDiffusionEquations(Equations):
 
 
 class PitchforkProblem(Problem):
-    """Reaction-diffusion on a unit square with u=0 all around: pitchfork at lam = 2*pi^2."""
+    """Reaction-diffusion on a rectangle with u=0 all around: pitchfork at the first Dirichlet mode.
+
+    A 1 x 1.05 rectangle rather than the unit square, and the aspect ratio is load-bearing. On the
+    SQUARE the (1,2) and (2,1) Dirichlet modes are degenerate by symmetry -- here at lam-59.26 and
+    lam-29.63 twice -- and _eigen_during_tracking asks for exactly 4 eigenvalues, so the truncation
+    falls INSIDE that degenerate pair. Which of the two a Krylov solver returns in the fourth slot is
+    then its own business: under --distribute the tracked half came back with both copies of -29.63
+    and the untracked half with one copy plus the next mode at -79.18, and the A/B assertion compared
+    two spectra that were both correct. Verified at n=6, where both halves agree entry for entry, and
+    by 1 x 1.05, which splits the pair to -29.63/-26.87 and makes n=4 unambiguous again.
+
+    Not a solver defect and not worth a tolerance: an nev cut inside a degenerate cluster has no
+    well-defined answer, so the fix is to not put one there. The bifurcation is unaffected -- it is
+    still the symmetry breaking of u=0 in the first mode, only at lam = pi^2*(1 + 1/1.05^2).
+    """
+
+    ASPECT = 1.05
 
     def __init__(self, N=8):
         super().__init__()
@@ -361,7 +377,7 @@ class PitchforkProblem(Problem):
         self.lam = self.define_global_parameter(lam=1)
 
     def define_problem(self):
-        self += RectangularQuadMesh(N=self.N)
+        self += RectangularQuadMesh(N=self.N, size=[1.0, self.ASPECT])
         eqs = ReactionDiffusionEquations(self.lam)
         for b in ["left", "right", "top", "bottom"]:
             eqs += DirichletBC(u=0) @ b
