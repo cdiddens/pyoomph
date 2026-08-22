@@ -104,6 +104,12 @@ jobs:
           CIBW_BUILD: "cp312-macosx_*"
           CIBW_ARCHS: native
           CIBW_BUILD_FRONTEND: build
+          # Narrowed from pyproject.toml's whole-suite test-command to the threaded-assembly tests.
+          # This workflow is about how the wheel was LINKED; letting it run the full suite means 26
+          # minutes and, at the moment, five unrelated macOS/arm64 failures (a pardiso-only test, and
+          # four floating-point comparisons) that abort cibuildwheel before the checks below get to
+          # run at all. The full suite is the wheels workflow's business, not this one's.
+          CIBW_TEST_COMMAND: pytest {package}/tests/test_openmp_assembly.py -v
           CIBW_ENVIRONMENT: >
             PYOOMPH_GINAC_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
             PYOOMPH_GINAC_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
