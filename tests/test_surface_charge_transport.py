@@ -616,3 +616,53 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
     # sanity: the three settings really do differ from each other, so the check above is not vacuous
     assert len(set(expected.values())) == 3
     assert glob.glob(os.path.join(d, "_ccode", "*.c"))
+
+
+def test_the_default_field_name_and_scale_do_not_collide():
+    """`charge_scale` may not default to the field's own name.
+
+    `define_scalar_field(name, scale=scale_factor(name))` is self-referential and dies at code
+    generation with "Cannot expand the expression any further" -- and only once something has
+    actually registered that scale, which `set_electrostatic_scaling` does. So the class used to be
+    unusable with both of its own defaults, and every test and example dodged it by renaming the
+    field. The scale is now called "surface_charge" and the field "surface_charge_density".
+    """
+    from pyoomph.equations.electrostatics import (set_electrostatic_scaling,
+                                                  ElectricPotentialConnection, ElectrodeBC)
+
+    class _P(Problem):
+        def __init__(self, name, charge_scale=None):
+            super().__init__()
+            self.name_, self.charge_scale = name, charge_scale
+
+        def define_problem(self):
+            L = 1 * milli * meter
+            self.set_scaling(spatial=L, temporal=1 * second)
+            set_electrostatic_scaling(self, potential=1 * volt,
+                                      surface_charge_density=1e-9 * coulomb / meter ** 2)
+            self += LineMesh(N=8, size=L, name=lambda x: "A" if x < 0.5 else "B")
+            a = ElectricPotentialEquations(relative_permittivity=80)
+            kw = {} if self.charge_scale is None else {"charge_scale": self.charge_scale}
+            ifc = SurfaceChargeConservation(name=self.name_, bulk_currents=0,
+                                            advection_velocity=0, **kw)
+            ifc += ElectricPotentialConnection(surface_charge_density=self.name_)
+            a += ifc @ "A_B"
+            b = ElectricPotentialEquations(relative_permittivity=1)
+            b += ElectrodeBC(0) @ "right"
+            self += a @ "A"
+            self += b @ "B"
+
+    # the default name, with the default scale: the case that used to fail
+    for name in ("surface_charge_density", "qs"):
+        p = _P(name)
+        p.set_output_directory(tempfile.mkdtemp(prefix="scname_"))
+        p.quiet()
+        p.initialise()
+        p.solve(timestep=0.1 * second)
+    # set_electrostatic_scaling registers both names, so either can be asked for explicitly
+    for scale in ("surface_charge", "surface_charge_density"):
+        p = _P("qs", charge_scale=scale)
+        p.set_output_directory(tempfile.mkdtemp(prefix="scname_"))
+        p.quiet()
+        p.initialise()
+        p.solve(timestep=0.1 * second)

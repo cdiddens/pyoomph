@@ -947,6 +947,12 @@ class SurfaceChargeConservation(InterfaceEquations):
 
     Args:
         name: Name of the surface charge field. Defaults to ``"surface_charge_density"``.
+        charge_scale: The scale of the charge field, as a named scale or an expression. Defaults to
+            the named scale ``"surface_charge"``, which
+            :py:func:`set_electrostatic_scaling` registers. It deliberately does *not* share the name
+            of the field: a field whose scale is looked up under its own name is self-referential and
+            fails at code generation with "Cannot expand the expression any further", which is what
+            the default pair used to do to anyone who did not also rename the field.
         space: Its finite element space. Defaults to ``"C2"``.
         surface_diffusivity: :math:`K_\mathrm{s}`, diffusion of the adsorbed charge. Defaults to 0.
         surface_conductivity: :math:`\kappa_\mathrm{s}`, the excess surface conductance that the
@@ -998,7 +1004,7 @@ class SurfaceChargeConservation(InterfaceEquations):
                  bulk_currents:"Literal['auto'] | ExpressionOrNum"="auto",
                  interface_props:"BaseInterfaceProperties | None"=None,
                  initial_charge:ExpressionOrNum=0,quasi_static:bool=False,
-                 charge_scale:"ExpressionOrNum | str"="surface_charge_density"):
+                 charge_scale:"ExpressionOrNum | str"="surface_charge"):
         super().__init__()
         if form not in ("conservative","legacy"):
             raise ValueError("SurfaceChargeConservation form must be 'conservative' or 'legacy', "+
@@ -1990,7 +1996,9 @@ def set_electrostatic_scaling(problem:"Problem",*,potential:"ExpressionNumOrNone
             given, otherwise :math:`\varepsilon\Phi/L^2`.
         ion_concentration: Concentration scale shared by all ionic species.
         electric_field: Field scale. Defaults to :math:`\Phi/L`.
-        surface_charge_density: Surface charge scale. Defaults to :math:`\varepsilon\Phi/L`.
+        surface_charge_density: Surface charge scale, registered under both ``"surface_charge"``
+            (which :py:class:`SurfaceChargeConservation` uses) and ``"surface_charge_density"``.
+            Defaults to :math:`\varepsilon\Phi/L`.
         permittivity: Permittivity used to derive the above. Defaults to :py:data:`epsilon_0`.
         length: Length scale used to derive the above. Defaults to the problem's spatial scale.
     """
@@ -2008,8 +2016,12 @@ def set_electrostatic_scaling(problem:"Problem",*,potential:"ExpressionNumOrNone
     else:
         scals["charge_density"]=permittivity*Phi/X**2
     scals["electric_field"]=electric_field if electric_field is not None else Phi/X
-    scals["surface_charge_density"]=surface_charge_density if surface_charge_density is not None \
-                                     else permittivity*Phi/X
+    # Registered under both names: "surface_charge" is what SurfaceChargeConservation looks up (it
+    # cannot be "surface_charge_density", which is that class's default *field* name), while
+    # "surface_charge_density" stays for anything written against the older name.
+    sigma_scale=surface_charge_density if surface_charge_density is not None else permittivity*Phi/X
+    scals["surface_charge"]=sigma_scale
+    scals["surface_charge_density"]=sigma_scale
     scals["permittivity"]=permittivity
     problem.set_scaling(**scals)
 
