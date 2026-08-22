@@ -468,6 +468,16 @@ class MeshDataCacheEntry:
 
         # Merge connected lines
         elms = [tuple([i for i in e]) for e in self.elem_indices]
+        if not elms:
+            # No elements of this interface on this process, which under --distribute is the normal
+            # state of every rank the interface does not reach. There are no segments and no
+            # intermediate node count to derive, and the walk below cannot start: ninter stayed None
+            # and the assertion after the loop killed the whole job (droplet_spread_* under
+            # --mpirun 2 --distribute). Callers unpack (segments, ninter) and iterate the segments,
+            # so an empty list is the answer they already handle.
+            self.interface_lines_segs=lines
+            self.interface_lines_segs_ninter=0
+            return lines,0
         elms_at_points:dict[int,list[int]] = {}
         inbetween_pts:dict[tuple[int,int],list[int]] = {}
         ninter=None
