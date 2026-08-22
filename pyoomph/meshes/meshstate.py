@@ -194,10 +194,18 @@ def _local_contribution(mesh: "AnySpatialMesh") -> dict[str, NPAnyArray]:
     flat, stride = mesh.get_element_node_indices()
     elem_nodes = numpy.asarray(flat, dtype=numpy.int64).reshape(nelem, int(stride)) if nelem else numpy.zeros((0, 1), dtype=numpy.int64)
     if numpy.any(elem_keys[:, 0] < 0):
+        # Naming the mesh and the count: which mesh it is decides where the missing call belongs, and
+        # "all of them" versus "a handful" separates a mesh that was never numbered from one whose
+        # elements lost their tree root.
+        bad = int(numpy.count_nonzero(elem_keys[:, 0] < 0))
+        try:
+            where = mesh.get_full_name()
+        except Exception:
+            where = repr(mesh)
         raise StateFileInconsistency(
-            "The mesh has elements without a global base index. assign_global_base_element_indices() must run "
-            "before the problem is distributed - a state file written from rank-local element numbers could only "
-            "be read back by the very run that wrote it")
+            "The mesh '" + where + "' has " + str(bad) + " of " + str(nelem) + " elements without a global base "
+            "index. assign_global_base_element_indices() must run before the problem is distributed - a state "
+            "file written from rank-local element numbers could only be read back by the very run that wrote it")
 
     node_keys = _reconcile_node_keys(mesh, _node_keys(mesh, elem_keys, elem_nodes))
     owned = _owned_elements(mesh)
