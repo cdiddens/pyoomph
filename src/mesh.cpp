@@ -1233,24 +1233,31 @@ namespace pyoomph
 
   // List the names of the named integral expressions defined in this mesh's JIT-compiled element code
   // (looked up via the first element, since all elements of a mesh share the same code).
+  // Taken from the mesh's own jitcode, NOT from element 0. The list must be the same on every rank:
+  // each name costs one MPI_Allreduce in evaluate_integral_function, and the output loop drives that
+  // reduction once per name. Reading it off element 0 meant a rank whose local part of an interface
+  // mesh is empty answered with an empty list and performed none of those reductions, while the ranks
+  // that did hold elements performed all of them -- so the two fell out of step inside Problem.output()
+  // and deadlocked, one rank still reducing observables and the other already in save_state's alltoall
+  // (nacl_capillary_evaporation.py under --distribute, found by the tutorial harness). The guard in
+  // evaluate_integral_function ("Can't skip out here, since it might run into an MPI call later") was
+  // defeated one level up: the loop it protects never ran at all.
   std::vector<std::string> Mesh::list_integral_functions()
   {
-    unsigned nelement = this->nelement();
-    if (!nelement)
+    if (!this->jitcode)
       return std::vector<std::string>();
-    auto *cg = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_code_gen();
-    return cg->get_integral_expressions();
+    return this->jitcode->get_code_gen()->get_integral_expressions();
   }
 
   // List the names of the local (per-point, non-integrated) expressions defined in this mesh's
   // JIT-compiled element code.
   std::vector<std::string> Mesh::list_local_expressions()
   {
-    unsigned nelement = this->nelement();
-    if (!nelement)
+    // Same source as list_integral_functions above, and for the same reason: what a mesh DECLARES
+    // does not depend on how many of its elements this rank happens to hold.
+    if (!this->jitcode)
       return std::vector<std::string>();
-    auto *cg = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_code_gen();
-    return cg->get_local_expressions();
+    return this->jitcode->get_code_gen()->get_local_expressions();
   }
 
   // Refine a local-coordinate guess s for the extremum of the local expression `index` within element
@@ -1421,9 +1428,16 @@ namespace pyoomph
   GiNaC::ex Mesh::evaluate_integral_function(std::string name)
   {
     unsigned nelement = this->nelement();
-    int index;
-    if (!nelement) index=0; //Can't skip out here, since it might run into an MPI call later
-     index= dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code()->get_integral_function_index(name);
+    // The index comes from the mesh's own code, not from element 0: this function must run on EVERY
+    // rank, including one whose local part of the mesh is empty, because of the MPI_Allreduce below.
+    // The line this replaces read
+    //     if (!nelement) index=0; //Can't skip out here, since it might run into an MPI call later
+    //      index= dynamic_cast<BulkElementBase *>(this->element_pt(0))->...
+    // with no braces and no else, so the element_pt(0) dereference happened even when nelement==0 and
+    // an empty rank segfaulted instead of taking the branch that was written for it. Unreachable until
+    // list_integral_functions() stopped answering with an empty list on such a rank, which is what let
+    // it live.
+    int index = this->jitcode ? this->jitcode->get_integral_function_index(name) : -1;
     if (index < 0)
       throw_runtime_error("Integral function " + name + " not defined on this mesh");
     double res = 0.0;
