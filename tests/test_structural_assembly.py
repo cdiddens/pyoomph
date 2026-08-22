@@ -440,7 +440,13 @@ def test_diagonal_requirement_comes_from_the_linear_solver():
     unambiguous here, and checks the override machinery rather than the PETSc option parsing."""
     with _CavityProblem(N=6) as p:
         p.quiet()
-        p.set_linear_solver("pardiso")
+        try:
+            p.set_linear_solver("pardiso")
+        except RuntimeError as e:
+            # MKL has no arm64 build, so the macOS wheels for Apple silicon have no Pardiso at all -
+            # there is nothing to fall back to that would still exercise the point of the test, which
+            # is a solver answering requires_explicit_diagonal() with False.
+            pytest.skip("the pardiso solver is not available here: %s" % e)
         p.initialise()
         assert p.get_la_solver().requires_explicit_diagonal() is False
         p.solve()
