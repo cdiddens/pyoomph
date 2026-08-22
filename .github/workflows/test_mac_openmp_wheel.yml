@@ -189,23 +189,68 @@ jobs:
           # has no OpenMP, which is why the assert above comes first.
           python -m pytest "$GITHUB_WORKSPACE/tests/test_openmp_assembly.py" -v
 
-      - name: Check it survives a second OpenMP runtime in the process
-        # PyTorch ships its own libomp.dylib. Without pyoomph/__init__.py's KMP_DUPLICATE_LIB_OK
-        # default, libomp's per-process registration turns that into "OMP: Error #15" and an abort
-        # as soon as our runtime starts. Non-fatal: torch is a large download and this is an
-        # interaction with a third party, not part of the wheel's contract.
+      - name: Diagnose a second OpenMP runtime in the process
+        # TEMPORARY, and to be deleted with its dependency once it has answered its question.
+        # scikit-learn's macOS wheels ship their own libomp.dylib, which makes them the cheapest
+        # realistic way to put a second LLVM OpenMP runtime in one process - the condition that
+        # pyoomph/__init__.py's KMP_DUPLICATE_LIB_OK default was added for, on the assumption that it
+        # would otherwise abort with "OMP: Error #15". A run with PyTorch aborted anyway, with no such
+        # message, so the assumption needs checking before that default is allowed to stay.
+        #
+        # Four subcases, each its own process, each non-fatal and reporting its own exit code: the
+        # variable as pyoomph sets it, the variable forced off (which is what would print #15), the
+        # reverse import order, and a baseline with no second runtime at all.
         continue-on-error: true
         run: |
-          set -eux
-          python -m pip install torch || exit 0
+          set -x
+          python -m pip install scikit-learn
+          python - <<'PROBE'
+          import os, sklearn, pathlib
+          d = pathlib.Path(sklearn.__file__).parent.parent / ".dylibs"
+          print("sklearn", sklearn.__version__)
+          print("dylibs next to sklearn:", sorted(p.name for p in d.glob("*omp*")) if d.exists() else "none")
+          PROBE
           cd ..
-          # torch first, so ITS libomp registers before ours does, then the same bit-identity tests
-          # in the same process.
-          python -c "
-          import sys, torch, pytest
-          print('torch', torch.__version__)
-          sys.exit(pytest.main(['-v', '$GITHUB_WORKSPACE/tests/test_openmp_assembly.py']))
-          "
+          cat > /tmp/omp_probe.py <<'PROBE'
+          import os, sys
+          order = sys.argv[1]
+          if order == "other-first":
+              import sklearn.linear_model  # noqa: F401
+          import pyoomph
+          from pyoomph import *
+          from pyoomph.equations.poisson import PoissonEquation
+          from pyoomph.meshes.simplemeshes import RectangularQuadMesh
+          if order == "pyoomph-first":
+              import sklearn.linear_model  # noqa: F401
+          print("KMP_DUPLICATE_LIB_OK =", os.environ.get("KMP_DUPLICATE_LIB_OK"))
+          print("OMP_NUM_THREADS =", os.environ.get("OMP_NUM_THREADS"))
+
+          class P(Problem):
+              def define_problem(self):
+                  self += RectangularQuadMesh(N=12)
+                  eqs = PoissonEquation(name="u", source=1)
+                  eqs += DirichletBC(u=0) @ "left" + DirichletBC(u=0) @ "right"
+                  self += eqs @ "domain"
+
+          with P() as p:
+              p.set_output_directory("omp_probe_out_" + order)
+              p.initialise()
+              p._set_num_assembly_threads(4)
+              p.assemble_jacobian(with_residual=True)
+              assert p._get_parallel_assemblies_done() > 0, "the threaded loop declined"
+          print("OK: threaded assembly survived (" + order + ")")
+          PROBE
+          run() {
+            label="$1"; order="$2"; shift 2
+            echo "===== ${label}"
+            env "$@" python -X faulthandler /tmp/omp_probe.py "${order}" 2>&1 || echo "----- exit=$?"
+          }
+          run "sklearn first, KMP_DUPLICATE_LIB_OK as pyoomph sets it" other-first
+          run "sklearn first, KMP_DUPLICATE_LIB_OK forced off" other-first PYOOMPH_KMP_DUPLICATE_LIB_OK=FALSE
+          run "pyoomph first, then sklearn" pyoomph-first
+          run "baseline, no second runtime" none
+          echo "===== which OpenMP runtime does ours report"
+          OMP_DISPLAY_ENV=TRUE python -X faulthandler /tmp/omp_probe.py none 2>&1 | head -40 || true
 
       - name: Upload the wheel
         if: always()
