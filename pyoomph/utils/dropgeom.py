@@ -234,6 +234,43 @@ class DropletGeometry:
     # Relaxes the shape by gravity
     # returns an array of r and z positions and a scale factor to multiply the results with to get the right scaling
     def sample_gravity_shape(self,surface_tension:ExpressionOrNum,delta_rho_times_g:ExpressionOrNum,output_dir:str,fixations:YoungLaplaceFixationsType | None=None,update_params:bool=True,N:int=200,output_text:bool=True,compiler:Any=None,ignore_command_line:bool=False,globally_convergent_newton:bool=False)->tuple[NPFloatArray,ExpressionOrNum]:
+        """Solve the Young-Laplace shape under gravity and return it as sampled interface points.
+
+        Returns ``(points, spatial_scale)`` with ``points`` an (N+1, 2) array of nondimensional
+        (r, z), and also stores it for :py:meth:`get_sampled_gravity_shape`. With ``update_params``
+        the geometry's own volume/contact angle/apex height/base radius are replaced by the relaxed
+        ones.
+
+        ``output_text`` writes the relaxed shape as a text file into ``output_dir``. It used to be
+        accepted and then ignored - ``relax_by_gravity`` was called with a hardcoded ``True`` - so
+        the output could not be switched off at all.
+
+        This builds and solves a SECOND Problem (:py:class:`YoungLaplaceDropletShape`) while the
+        caller's own Problem usually exists already: the typical use is from a
+        ``GmshTemplate.define_geometry()``, i.e. from inside the outer problem's ``initialise()``.
+        Two things follow.
+
+        Give it an ``output_dir`` of its own, as every in-tree caller does (a ``_initial_shape``
+        subdirectory of the outer problem's). Both problems generate a code called ``domain``, so a
+        shared directory means one ``.so`` path for both; that is now caught and worked around, but
+        it is a collision worth not having.
+
+        Under mpirun EVERY rank builds and solves this, and that is deliberate rather than an
+        oversight. An oomph Problem is collective on its communicator whether or not it is
+        distributed - oomph's ``Problem::get_residuals`` broadcasts the assembled residual across the
+        communicator in its NON-distributed branch, i.e. on every Newton step - and a sub-problem
+        always inherits
+        ``MPI_COMM_WORLD``, with no way to give it one of its own. Solving it on rank 0 alone
+        therefore deadlocks the other ranks in the first collective inside the Newton solve, which is
+        exactly what happens if you try. The duplicated work is small (about 0.4 s at ``N=200``, 1.2 s
+        at ``N=800``) and concurrent, so it costs no wall-clock time, and the output is not
+        duplicated: the writers on ranks > 0 drop out on their own for a non-distributed problem.
+
+        The compiler is the process default (``system``), NOT the calling problem's choice - a fresh
+        Problem always starts from ``get_default_c_compiler()``. Pass ``compiler="tcc"`` if the
+        codegen of these four small element codes costs more than their execution saves, which for a
+        one-shot shape it usually does.
+        """
         if self.rivulet_instead:
             raise RuntimeError("Not yet implemented")
         if isinstance((0+surface_tension),(Expression)):
@@ -246,7 +283,7 @@ class DropletGeometry:
             problem.ignore_command_line=ignore_command_line
             if compiler is not None:
                 problem.set_c_compiler(compiler)
-            problem.relax_by_gravity(output_text=True,globally_convergent_newton=globally_convergent_newton)
+            problem.relax_by_gravity(output_text=output_text,globally_convergent_newton=globally_convergent_newton)
             dom=problem.get_mesh("domain")
             rs:list[float]=[]
             zs:list[float]=[]
