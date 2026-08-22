@@ -8571,7 +8571,7 @@ namespace pyoomph
     {
       pyoomph::BulkElementBase *el = dynamic_cast<pyoomph::BulkElementBase *>(this->element_pt(ie));
       if (!el) continue;
-      if (!el->is_halo())
+      if (!element_is_halo(el))
       {
         for (unsigned int in = 0; in < el->nnode(); in++) decidable.insert(el->node_pt(in));
       }

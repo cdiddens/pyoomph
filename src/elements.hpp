@@ -49,6 +49,20 @@ extern "C"
 namespace pyoomph
 {
 
+  // oomph-lib declares GeneralisedElement::is_halo() inside its own OOMPH_HAS_MPI guard, so every
+  // plain el->is_halo() is a call that does not compile in a build without MPI - which is what every
+  // released wheel is. Asking through here instead keeps the call sites readable: with no MPI there
+  // are no halo elements, so the answer is a compile-time false.
+  inline bool element_is_halo(const oomph::GeneralisedElement *el)
+  {
+#ifdef OOMPH_HAS_MPI
+    return el->is_halo();
+#else
+    (void)el;
+    return false;
+#endif
+  }
+
   // --- Assembly-overhead campaign, stage 0 diagnostics ---
   //
   // Three measurement-only levers around the per-element hang bookkeeping, which runs in full for

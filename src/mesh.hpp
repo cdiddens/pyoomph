@@ -575,8 +575,12 @@ namespace pyoomph
 		// Problem::copy_haloed_eqn_numbers_helper, i.e. a segfault far from here.
 		void clear_halo_element_scheme()
 		{
+			// The lists themselves only exist in an MPI build (oomph::Mesh declares them inside its own
+			// OOMPH_HAS_MPI guard), and without MPI there is nothing to go stale.
+#ifdef OOMPH_HAS_MPI
 			Root_halo_element_pt.clear();
 			Root_haloed_element_pt.clear();
+#endif
 		}
 		std::string get_full_domain_path() override;
 		unsigned count_nnode(bool discontinuous = false) override; // Interface meshes don't have their own nodes...

@@ -480,6 +480,10 @@ brace of "if (this->nelement()>0)" and before classify_halo_and_haloed_nodes(): 
 block is skipped on a rank holding no elements of a submesh, so a collective in there deadlocks, and
 the halo/haloed NODE lists are not rebuilt until afterwards, so only the ELEMENT lists can drive it.
 Only the h-adaptive adapt_mesh is hooked; p_adapt_mesh is not, as pyoomph has no p-refinable elements.
+The two declarations sit just ABOVE mesh.h's "#ifdef OOMPH_HAS_MPI" block (corrected on 22nd August
+2026; they were inside it at first). Only the second one communicates, but both call sites in
+refineable_mesh.cc are unconditional, so an MPI-less configuration -- which is what every wheel is --
+did not compile at all.
 See dev_docs/boundary_node_membership.md.
 Upstream equivalent: none, this is a pyoomph fix.
 

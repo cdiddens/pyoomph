@@ -1137,7 +1137,7 @@ namespace pyoomph
 					 // around silently.
 					 if (!adj)
 					 {
-					   if (!be->is_halo()) throw_runtime_error("Interior facet of a non-halo element has no neighbouring element: the halo layer is incomplete");
+					   if (!element_is_halo(be)) throw_runtime_error("Interior facet of a non-halo element has no neighbouring element: the halo layer is incomplete");
 					   continue;
 					 }
 

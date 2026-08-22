@@ -177,7 +177,7 @@ namespace pyoomph
       BulkElementBase *e = dynamic_cast<BulkElementBase *>(source->element_pt(ie));
       if (!e)
         continue;
-      if (setup.skip_halo_elements && e->is_halo())
+      if (setup.skip_halo_elements && element_is_halo(e))
         continue;
       element_index[e] = elements_by_index.size();
       elements_by_index.push_back(e);
