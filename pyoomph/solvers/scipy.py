@@ -226,11 +226,7 @@ class ScipyEigenSolver(GenericEigenSolver):
 		_n,nrow_local,first_row,_distributed=self.get_eigen_row_layout()
 
 		def _gather(mat:DefaultMatrixType):
-			import sys as _s
-			from ..generic.mpi import get_mpi_nproc as _gnp
 			layout=mpi_row_layout(n,first_row,nrow_local,mat.nnz)
-			print("DIAG rank=%r nproc=%r n=%r first_row=%r nrow_local=%r nnz=%r distributed=%r layout=%r"%(
-				get_mpi_rank(),_gnp(),n,first_row,nrow_local,mat.nnz,_distributed,layout is not None),file=_s.stderr,flush=True)
 			assert layout is not None
 			got=mpi_gather_csr_rows(layout,mat.data,mat.indices,mat.indptr,
 									context="gathering the eigenproblem onto rank 0")
