@@ -1,0 +1,210 @@
+# Builds one macOS wheel the way .github/workflows/wheels.yml does and checks that the threaded
+# element assembly (--omp N) is actually in it.
+#
+# Why this is worth its own workflow:
+#   * OpenMP is not part of AppleClang, so macOS is the one platform where the wheels could quietly
+#     lose the threaded loop: a build without it accepts --omp N, prints one note and assembles
+#     serially, which looks exactly like a working wheel until someone measures.
+#   * The fix (citools/build_static_libomp.sh) is macOS-specific packaging - a static LLVM OpenMP
+#     runtime built at the wheel's own deployment target - and none of it is exercised by the
+#     Linux/Windows jobs.
+#
+# One Python version (3.12, the Stable ABI tier) is enough: nothing here depends on the interpreter,
+# only on how the extension was linked.
+#
+# NOTE: GitHub only offers workflow_dispatch for workflows present on the DEFAULT branch. This file
+# has to be on main before the "Run workflow" button appears, even to run it against another branch.
+
+name: Test macOS OpenMP wheel
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or SHA to test"
+        required: false
+        default: ""
+      runner:
+        description: "Which macOS image to build on"
+        required: false
+        default: "macos-14"
+        type: choice
+        options:
+          - macos-14
+          - macos-15-intel
+      prebuild_run_id:
+        description: "Optional 'Prebuild static CLN/GiNaC' run id to take the static GiNaC/CLN from"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  mac-openmp-wheel:
+    runs-on: ${{ inputs.runner || 'macos-14' }}
+    # Dominated by compiling pyoomph_core; libomp itself is ~3 minutes and GiNaC/CLN come prebuilt.
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve the prebuild run to take GiNaC/CLN from
+        id: prebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          RUN_ID="${{ inputs.prebuild_run_id }}"
+          if [[ -z "${RUN_ID}" ]]; then
+            RUN_ID="$(gh run list \
+              --workflow "Prebuild static CLN/GiNaC" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+          test -n "${RUN_ID}" && test "${RUN_ID}" != "null"
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download the static GiNaC/CLN artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          if [[ "$(uname -m)" == "arm64" ]]; then
+            NAME="static-ginac-cln-macos-arm64"
+          else
+            NAME="static-ginac-cln-macos-intel-x86_64"
+          fi
+          rm -rf prebuilt && mkdir -p prebuilt
+          gh run download "${{ steps.prebuild.outputs.run_id }}" \
+            --repo "${GITHUB_REPOSITORY}" --name "${NAME}" --dir prebuilt
+          test -f prebuilt/GiNaC_static/install/lib/libginac.a
+
+      - name: Build a static libomp
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "10.13"
+        run: |
+          set -eux
+          chmod +x ./citools/build_static_libomp.sh
+          ./citools/build_static_libomp.sh "$PWD/libomp_static/install"
+          ls -l libomp_static/install/lib
+
+      - name: Build the wheel with cibuildwheel
+        env:
+          CIBW_BUILD: "cp312-macosx_*"
+          CIBW_ARCHS: native
+          CIBW_BUILD_FRONTEND: build
+          CIBW_ENVIRONMENT: >
+            PYOOMPH_GINAC_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
+            PYOOMPH_GINAC_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            PYOOMPH_CLN_INCLUDE_DIR=$PWD/prebuilt/GiNaC_static/install/include
+            PYOOMPH_CLN_LIB_DIR=$PWD/prebuilt/GiNaC_static/install/lib
+            MACOSX_DEPLOYMENT_TARGET=10.13
+            OpenMP_ROOT=$PWD/libomp_static/install
+          # PYOOMPH_USE_OPENMP=ON is the point of the exercise: with it, a libomp that CMake fails to
+          # find is a configure error here instead of a silently serial wheel.
+          CIBW_CONFIG_SETTINGS: >
+            cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF
+            cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF
+            cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON
+            cmake.define.PYOOMPH_USE_MPI=OFF
+            cmake.define.PYOOMPH_PARANOID=OFF
+            cmake.define.PYOOMPH_USE_OPENMP=ON
+            wheel.py-api=cp312
+        uses: pypa/cibuildwheel@v4.1.0
+        with:
+          output-dir: wheelhouse
+
+      - name: Inspect how the wheel was linked
+        run: |
+          set -eux
+          WHEEL="$(ls wheelhouse/*.whl)"
+          rm -rf unpacked && mkdir unpacked
+          unzip -q "${WHEEL}" -d unpacked
+          SO="$(ls unpacked/pyoomph/_pyoomph_core*.so)"
+
+          # 1. Nothing was bundled: a static libomp leaves no dylib for delocate to copy. A
+          #    libomp.dylib in here would mean CMake found a shared one (Homebrew's, say) instead.
+          ls -la unpacked/pyoomph/.dylibs/ 2>/dev/null || echo "(no .dylibs directory at all)"
+          if ls unpacked/pyoomph/.dylibs/ 2>/dev/null | grep -i "omp"; then
+            echo "a libomp dylib was bundled into the wheel; the static build did not take" >&2
+            exit 1
+          fi
+          # NB: grep for libomp, not omp - "pyoomph" itself contains that substring, and otool
+          # prints the file's own path as the first line.
+          otool -L "${SO}" | tee /tmp/otool.txt
+          if grep -iE "lib(i|g)?omp" /tmp/otool.txt; then
+            echo "the extension links an OpenMP dylib; expected the static libomp.a" >&2
+            exit 1
+          fi
+
+          # 2. ... but the runtime IS in there. Absence of both this and a dylib would be a wheel
+          #    that quietly lost the threaded loop, which is the whole failure mode under test.
+          nm "${SO}" | grep -q "kmpc_fork_call"
+
+          # 3. The deployment target survived. Homebrew's libomp would have forced this up to the
+          #    runner's macOS release (14 or 15), which is why it cannot be used. Checked against
+          #    what was ASKED for rather than against the wheel's own tag: delocate retags the
+          #    wheel to match what it bundled, so tag and binary would agree even if both were
+          #    bumped.
+          if [[ "$(uname -m)" == "arm64" ]]; then EXPECTED="11.0"; else EXPECTED="10.13"; fi
+          MINOS="$(otool -l "${SO}" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
+          if [[ -z "${MINOS}" ]]; then
+            MINOS="$(otool -l "${SO}" | awk '/LC_VERSION_MIN_MACOSX/{f=1} f&&/version/{print $2; exit}')"
+          fi
+          echo "wheel ${WHEEL}: asked for macOS ${EXPECTED}, binary says ${MINOS}"
+          test "${EXPECTED}" = "${MINOS}"
+
+      - name: Install the wheel and confirm the threaded loop is present and correct
+        run: |
+          set -eux
+          python -m pip install --upgrade pip pytest
+          python -m pip install wheelhouse/*.whl
+          # From outside the checkout: no compiled extension is tracked in git, so with the repo as
+          # the working directory "import pyoomph" would find the source tree instead of the wheel.
+          cd ..
+          python -c "
+          from pyoomph import _pyoomph_core as core
+          assert core.has_openmp, 'the wheel was built without OpenMP'
+          print('has_openmp =', core.has_openmp)
+          "
+          # These assert that the threaded loop actually RAN (_get_parallel_assemblies_done > 0) and
+          # that it reproduced the serial assembly bit for bit. They skip themselves when the build
+          # has no OpenMP, which is why the assert above comes first.
+          python -m pytest "$GITHUB_WORKSPACE/tests/test_openmp_assembly.py" -v
+
+      - name: Check it survives a second OpenMP runtime in the process
+        # PyTorch ships its own libomp.dylib. Without pyoomph/__init__.py's KMP_DUPLICATE_LIB_OK
+        # default, libomp's per-process registration turns that into "OMP: Error #15" and an abort
+        # as soon as our runtime starts. Non-fatal: torch is a large download and this is an
+        # interaction with a third party, not part of the wheel's contract.
+        continue-on-error: true
+        run: |
+          set -eux
+          python -m pip install torch || exit 0
+          cd ..
+          # torch first, so ITS libomp registers before ours does, then the same bit-identity tests
+          # in the same process.
+          python -c "
+          import sys, torch, pytest
+          print('torch', torch.__version__)
+          sys.exit(pytest.main(['-v', '$GITHUB_WORKSPACE/tests/test_openmp_assembly.py']))
+          "
+
+      - name: Upload the wheel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-openmp-wheel-${{ inputs.runner || 'macos-14' }}
+          path: wheelhouse/*.whl
+          if-no-files-found: warn
