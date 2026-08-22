@@ -1,0 +1,115 @@
+# Run anything you like against an ALREADY BUILT macOS wheel.
+#
+# The point is the turnaround. Building the wheel takes ~4 minutes and running the whole suite takes
+# ~26, so chasing one macOS-only test failure through "Test macOS OpenMP wheel" costs half an hour a
+# guess. That workflow already uploads its wheel as an artifact, so this one downloads it, installs
+# it, and runs whatever pytest arguments you hand it - about two minutes per iteration, and you can
+# iterate on the TEST sources (which come from the checkout, not the wheel) without rebuilding
+# anything at all.
+#
+# The wheel and the checkout are therefore two independent versions: fine for editing a test or a
+# tolerance, wrong for anything that changes src/ or the pyoomph package itself. Rebuild through
+# "Test macOS OpenMP wheel" when you have touched those, and point this at the new run.
+#
+# NOTE: GitHub only offers workflow_dispatch for workflows present on the DEFAULT branch. This file
+# has to be on main before the "Run workflow" button appears, even to run it against another branch.
+
+name: Diagnose macOS wheel
+
+on:
+  workflow_dispatch:
+    inputs:
+      pytest_args:
+        description: "Arguments for pytest, relative to the repo root (paths are rewritten for you)"
+        required: false
+        default: "tests/test_structural_assembly.py tests/test_vectorial_conditions.py tests/test_adaptivity.py"
+      ref:
+        description: "Branch, tag or SHA to take the TESTS from"
+        required: false
+        default: ""
+      wheel_run_id:
+        description: "Run id of a 'Test macOS OpenMP wheel' run to take the wheel from (default: its latest success)"
+        required: false
+        default: ""
+      runner:
+        description: "Which macOS image to run on - must match the wheel's architecture"
+        required: false
+        default: "macos-14"
+        type: choice
+        options:
+          - macos-14
+          - macos-15-intel
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnose:
+    runs-on: ${{ inputs.runner || 'macos-14' }}
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch the wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          RUN_ID="${{ inputs.wheel_run_id }}"
+          if [[ -z "${RUN_ID}" ]]; then
+            RUN_ID="$(gh run list \
+              --workflow "Test macOS OpenMP wheel" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+          test -n "${RUN_ID}" && test "${RUN_ID}" != "null"
+          echo "Taking the wheel from run ${RUN_ID}"
+          rm -rf wheelhouse && mkdir -p wheelhouse
+          # The artifact is named after the runner it was built on, so an arm64 wheel cannot be
+          # installed on the intel image and vice versa - hence the runner input above.
+          gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+            --name "mac-openmp-wheel-${{ inputs.runner || 'macos-14' }}" --dir wheelhouse
+          ls -l wheelhouse
+
+      - name: Install it
+        run: |
+          set -eux
+          python -m pip install --upgrade pip pytest
+          python -m pip install wheelhouse/*.whl
+          cd ..
+          python -c "
+          import pyoomph
+          from pyoomph import _pyoomph_core as core
+          print('pyoomph', pyoomph.__version__ if hasattr(pyoomph, '__version__') else '?', pyoomph.__file__)
+          print('has_openmp', core.has_openmp)
+          "
+
+      - name: Run what was asked for
+        # From OUTSIDE the checkout, so that "import pyoomph" finds the installed wheel rather than
+        # the source tree, which carries no compiled extension. The paths in pytest_args are given
+        # relative to the repo root and rewritten here, so they can be copied straight out of a
+        # failing run's summary.
+        env:
+          PYTEST_ARGS: ${{ inputs.pytest_args }}
+        run: |
+          set -x
+          cd ..
+          ARGS=""
+          for a in ${PYTEST_ARGS}; do
+            case "${a}" in
+              tests/*) ARGS="${ARGS} ${GITHUB_WORKSPACE}/${a}" ;;
+              *) ARGS="${ARGS} ${a}" ;;
+            esac
+          done
+          python -m pytest -v -rA ${ARGS}
