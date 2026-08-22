@@ -574,9 +574,12 @@ namespace pyoomph
 
 	// A moving (ALE) mesh solves for the nodal positions, so snapping them onto the template geometry
 	// would fight the solve. There the macro element keeps doing only what it does today: shape the
-	// initial configuration, through Problem.map_nodes_on_macro_elements(). Stage S5 gives moving
-	// meshes the treatment they should have -- the macro element driving the Lagrangian coordinate via
-	// the undeformed macro element.
+	// initial configuration, through Problem.map_nodes_on_macro_elements(). Note that this guard is on
+	// moving_nodes, i.e. on whether the coordinates are dofs -- NOT on whether they are pinned; a
+	// boundary that is held still gets the FE placement. The alternative -- the macro element driving
+	// the Lagrangian coordinate instead of the position, via the undeformed macro element -- was
+	// prototyped and works, but is deliberately not built; dev_docs/macro_elements.md 7.1 records what
+	// it takes and 7.2 why it has to be an explicit per-boundary declaration rather than a default.
 	bool BulkElementBase::macro_element_may_set_positions() const
 	{
 		if (!this->jitcode) return true;

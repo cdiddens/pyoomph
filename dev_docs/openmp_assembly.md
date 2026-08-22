@@ -239,8 +239,10 @@ machine happened to have. `pyoomph._pyoomph_core.has_openmp` says which it was; 
   Static linking does not, in principle, avoid libomp's per-process registration - a second copy in
   the process is what produces `OMP: Error #15` - so a `KMP_DUPLICATE_LIB_OK` default was tried and
   then removed. Measured on a macos-14 runner against scikit-learn (which does bring its own
-  runtime): the threaded assembly survives in both import orders, and scikit-learn sets
-  `KMP_DUPLICATE_LIB_OK` itself before pyoomph is imported. One earlier run with PyTorch 2.13 DID
+  runtime): the threaded assembly survives in both import orders, and the variable is already set to
+  `True` before pyoomph is imported - `threadpoolctl`, which scikit-learn depends on, sets it at
+  import time for exactly this reason. The package that brings the second runtime brings the setting
+  with it. One earlier run with PyTorch 2.13 DID
   abort in the first threaded assembly, with no `OMP:` diagnostic of any kind - unexplained, not
   reproduced with scikit-learn, and no reason on its own to set a process-global variable that every
   other OpenMP library in the process would see.

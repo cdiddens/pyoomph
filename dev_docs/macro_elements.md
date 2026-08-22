@@ -525,21 +525,81 @@ Today `reapply_macro_element_positions` is a no-op when `moving_nodes` is set, a
 free. The measurable gap is a drift to **7.13e-4** after two runtime refinements where a static mesh is
 exact. Four options were weighed — leave as today; snap only where the mesh position is pinned; always
 snap; an explicit per-boundary declaration. **Decision: leave as today.** The drift is second-order and
-only affects a case (a pinned curved boundary on an adaptively refined ALE mesh) that no shipped example
-exercises, whereas every candidate fix changes ALE results for meshes that are currently correct.
+only affects a case (a curved boundary that has not moved, on an adaptively refined ALE mesh) that no
+shipped example exercises, whereas every candidate fix changes ALE results for meshes that are currently
+correct.
 
-### 7.1 The route the plan proposed does not exist
+Two things about the scope of this, because both are easy to read the wrong way round:
+
+* **The trigger is `moving_nodes`, not pinning.** Both guards key on "are the coordinates dofs", never on
+  whether a node's position is pinned, and the drift measures the same with and without a position
+  Dirichlet condition on the boundary (5.4e-4 either way after one uniform refinement of the §6.1 quarter
+  disc). Whether the boundary is held is what decides if the drift is *unwanted*, not whether it happens.
+* **Initial refinement is not affected.** It runs inside `initialise()`, before the strip and before the
+  closing `map_nodes_on_macro_elements()`, so a curved boundary refined at startup is exact with or
+  without an ALE equation attached — `RefineToLevel(3)` on the quarter disc puts all 33 rim nodes on the
+  circle to 3e-16 — and is then free to move. Only refinement *during* the run is at issue.
+
+### 7.1 The route the plan proposed does exist, and two wires are missing
+
+*Corrected 2026-08-22. This section previously reported that `interpolated_xi` returns zeros at every
+node, and concluded that ξ is not the quantity pyoomph's ALE reads and that the route was therefore a
+dead end. That measurement no longer holds — it predates the fix that gave refined simplex nodes their
+interpolated ξ — and the conclusion drawn from it was wrong. Re-measured below.*
 
 The plan was that on a moving mesh the macro element should drive the **Lagrangian** coordinate ξ, via
 oomph's `Undeformed_macro_elem_pt` and `enable_use_of_undeformed_macro_element_for_new_lagrangian_coords`.
-The mechanism exists and is plumbed for the Q family. **It is not the mechanism pyoomph uses.**
-`pyoomph::Node` *is* an `oomph::SolidNode` and ξ storage is allocated — yet in a Poisson +
-`PseudoElasticMesh` problem `interpolated_xi` returns zeros at every node, including a boundary node whose
-Eulerian position is `(0, 1)`. The element's `nlagrangian()` comes from the generated code's `lagr_dim`,
-and pyoomph's `var("lagrangian")` — which `PseudoElasticMesh` really does use — reaches the reference
-configuration by its own route, not through oomph's `xi`. So wiring `Undeformed_macro_elem_pt` would have
-driven a quantity nothing reads. **Anyone reviving this must first establish where pyoomph's ALE reference
-configuration actually lives.**
+That *is* the mechanism pyoomph uses. `PseudoElasticMesh` builds its residual from `X = var("lagrangian")`
+(`pyoomph/equations/ALE.py`), `var("lagrangian")` expands to the `lagrangian_x/y/z` fields, and the shape
+buffer fills those from `raw_lagrangian_position_gen` (`src/elements_shapeinfo.cpp`) — i.e. from
+`oomph::SolidNode::xi`. On the quarter disc of §6.1 with a `PseudoElasticMesh` attached, ξ is populated
+and equal to x at initialisation (`max|ξ| = 1.000000`, `max|x − ξ| = 0`). Wiring
+`Undeformed_macro_elem_pt` therefore drives exactly the quantity the ALE residual reads.
+
+What is missing is two wires, both on the pyoomph side:
+
+1. **`Undeformed_macro_elem_pt` is never set.** `SolidFiniteElement::set_macro_elem_pt` exists precisely
+   to default it to the same macro element, but `QSolidElementBase::set_macro_elem_pt` overrides it and
+   chains to `FiniteElement::set_macro_elem_pt`, which sets `Macro_elem_pt` alone.
+2. **The flag never reaches a son.** `RefineableSolidElement::further_build()` exists precisely to pass
+   `Use_undeformed_macro_element_for_new_lagrangian_coords` down from the father, but
+   `BulkElementBase::further_build()` overrides it without chaining, so every son starts `false`.
+
+So a new node takes ξ from `xi_fe`, the FE interpolation of the father's ξ — which leaves ξ exactly as far
+off the curve as x. That is why `DirichletBC(mesh=var("lagrangian"))` on the rim reproduces the drift
+rather than curing it: both sides of the condition are chord-bound.
+
+Prototyped on the quarter disc (§6.1 geometry, `PseudoElasticMesh`, one runtime uniform refinement) by
+setting the undeformed macro element to the same macro element, propagating the flag in `further_build`,
+and retaining the macro elements past `initialise()`:
+
+```
+                                                      rim |x|-R    rim |xi|-R
+today                                                  5.4e-4        5.4e-4
+xi-from-macro, rim pinned rigidly                      5.4e-4        2.2e-16
+xi-from-macro + DirichletBC(mesh=var("lagrangian"))    2.2e-16       2.2e-16
+```
+
+The middle row is the informative one: the two halves are independent. The ξ route fixes the *reference*
+geometry; `DirichletBC(mesh=var("lagrangian"))` is what carries it into x, and it survives the solve
+(`max|x − ξ|` back to 1.6e-16 in the interior afterwards).
+
+**§7's decision still stands, for §7.2's reason rather than this one.** Three things would have to be
+settled before this becomes a feature:
+
+* **Q family only.** `get_x_and_xi` is `QSolidElementBase`'s and uses its `s_macro_ll/ur` box. The
+  simplex, wedge and pyramid families have no equivalent; they would need their own ξ assignment where
+  `inherit_macro_element_from_father` already runs.
+* **The macro element has to survive `initialise()`,** which `remove_macro_elements_after_initial_adaption
+  = "auto"` strips on an ALE mesh. Retaining it re-exposes what §7.3 describes. The clean version keeps it
+  for ξ only and never lets it touch x — which is how `macro_element_may_set_positions()` is already
+  structured.
+* **§7.2's parametrisation objection survives in full.** Pinning x to ξ fixes a node's position *along*
+  the arc, not just its distance from the centre, so a contact line sliding on a curved wall is dragged
+  back. As a boundary the mesh author explicitly declares, that is the intent; as a default it is the bug
+  §7.2 describes. Which is §7.2's own conclusion — an explicit per-boundary declaration — except that the
+  mechanism turns out to be reachable today and `DirichletBC(mesh=var("lagrangian"))` is already the
+  declaration.
 
 ### 7.2 "Snap only where pinned" is the wrong criterion
 
