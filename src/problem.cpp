@@ -6358,20 +6358,9 @@ namespace pyoomph
 		return true;
 	}
 
-#ifdef OOMPH_HAS_MPI
-
-	// Phase 2b. See the comment on DistributedFrozenSparsity for what this replaces and why.
-	//
-	// Builds the entire distributed plan. Everything up to "exchange the pattern" is local and mirrors
-	// build_frozen_sparsity(), only with my_eqns as the row set instead of 0..ndof-1; after that one
-	// round of communication tells each rank which (row, column) pairs will arrive from where, which is
-	// all it needs to lay out the final CSR and precompute the merge.
-	// The row/equation half of a distributed assembly plan, shared by the matrix and residual-only
-	// paths. COLLECTIVE, and it returns the same verdict on every rank.
-	//
-	// Nothing here depends on a matrix, on the symbolic mask or on keep_structural_zeros -- only on the
-	// equation numbering and the mesh partition. That is what lets get_residuals() use it even when the
-	// pattern machinery does not apply at all.
+	// Defined OUTSIDE the OOMPH_HAS_MPI block below: problem.hpp declares it unconditionally and the
+	// nanobind binding exposes it either way, so leaving it in there left _pyoomph_core.so with an
+	// undefined symbol in every MPI-less build. The body's own guard is what makes it MPI-aware.
 	// The elements this rank assembles, exactly as oomph::Problem::parallel_sparse_assemble() computes
 	// them. Distributed: all of them, with the halo flag doing the selection. Replicated: the slice
 	// oomph-lib handed this rank, which it may re-tune from measured elemental timings -- which is why
@@ -6393,6 +6382,20 @@ namespace pyoomph
 #endif
 	}
 
+#ifdef OOMPH_HAS_MPI
+
+	// Phase 2b. See the comment on DistributedFrozenSparsity for what this replaces and why.
+	//
+	// Builds the entire distributed plan. Everything up to "exchange the pattern" is local and mirrors
+	// build_frozen_sparsity(), only with my_eqns as the row set instead of 0..ndof-1; after that one
+	// round of communication tells each rank which (row, column) pairs will arrive from where, which is
+	// all it needs to lay out the final CSR and precompute the merge.
+	// The row/equation half of a distributed assembly plan, shared by the matrix and residual-only
+	// paths. COLLECTIVE, and it returns the same verdict on every rank.
+	//
+	// Nothing here depends on a matrix, on the symbolic mask or on keep_structural_zeros -- only on the
+	// equation numbering and the mesh partition. That is what lets get_residuals() use it even when the
+	// pattern machinery does not apply at all.
 	bool Problem::build_distributed_residual_plan(const oomph::LinearAlgebraDistribution* const& dist_pt, unsigned n_vector, DistributedResidualPlan &rp)
 	{
 		rp.clear();
