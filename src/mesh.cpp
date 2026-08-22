@@ -154,6 +154,33 @@ namespace pyoomph
     return dynamic_cast<BulkElementBase *>(root->object_pt());
   }
 
+  // The packed path of e from its tree root, computed live. See get_element_structural_keys() for the
+  // packing; 1 means "this element is the root".
+  static long live_path_of(oomph::GeneralisedElement *e)
+  {
+    long path = 1;
+    oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(e);
+    if (re && re->tree_pt())
+    {
+      std::vector<long> steps;
+      for (oomph::Tree *t = re->tree_pt(); t->father_pt(); t = t->father_pt())
+      {
+        oomph::Tree *f = t->father_pt();
+        long which = -1;
+        for (unsigned s = 0; s < f->nsons(); s++)
+        {
+          if (f->son_pt(s) == t) { which = (long)s; break; }
+        }
+        if (which < 0)
+          throw_runtime_error("Refinement tree is inconsistent: an element is not among its father's sons");
+        steps.push_back(which);
+      }
+      for (auto it = steps.rbegin(); it != steps.rend(); ++it)
+        path = path * 8 + (*it + 1);
+    }
+    return path;
+  }
+
   // Number the root elements in their current order. Must run BEFORE the problem is distributed,
   // while the mesh still holds all of them - afterwards each rank only sees its own share and would
   // number them 0..n_local, which is exactly the rank-local numbering this is meant to avoid.
@@ -190,6 +217,7 @@ namespace pyoomph
       if (!be) continue;
       BulkElementBase *root = root_element_of(this->element_pt(i));
       be->global_root_index = (root ? root->global_base_index : -1);
+      be->global_root_path = live_path_of(this->element_pt(i));
     }
   }
 
@@ -213,31 +241,11 @@ namespace pyoomph
         BulkElementBase *root = root_element_of(this->element_pt(ie));
         res[2 * ie] = (root ? root->global_base_index : -1);
       }
-      long path = 1;
-      oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
-      if (re && re->tree_pt())
-      {
-        std::vector<long> steps;
-        for (oomph::Tree *t = re->tree_pt(); t->father_pt(); t = t->father_pt())
-        {
-          oomph::Tree *f = t->father_pt();
-          long which = -1;
-          for (unsigned s = 0; s < f->nsons(); s++)
-          {
-            if (f->son_pt(s) == t)
-            {
-              which = (long)s;
-              break;
-            }
-          }
-          if (which < 0)
-            throw_runtime_error("Refinement tree is inconsistent: an element is not among its father's sons");
-          steps.push_back(which);
-        }
-        // steps runs leaf -> root, the path has to read root -> leaf
-        for (auto it = steps.rbegin(); it != steps.rend(); ++it)
-          path = path * 8 + (*it + 1);
-      }
+      // Both halves come from the stamp or neither does: they describe one address, and mixing a
+      // stamped root with a freshly walked path is what produced 240 colliding keys out of 256.
+      long path = (be && be->global_root_index >= 0 && be->global_root_path >= 0)
+                      ? be->global_root_path
+                      : live_path_of(this->element_pt(ie));
       res[2 * ie + 1] = path;
     }
     return res;

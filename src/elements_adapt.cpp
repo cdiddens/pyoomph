@@ -157,6 +157,21 @@ namespace pyoomph
 		// Without this a mesh refined AFTER being distributed would hand out fresh elements with -1
 		// and become unwritable again - the stamp is only laid down while the mesh is still whole.
 		this->global_root_index = father->global_root_index;
+		// The son's address is the father's path with one more step appended, packed the way
+		// Mesh::get_element_structural_keys() packs it (3 bits per level, +1 so that son 0 is not a
+		// no-op). Recomputing it from the tree is not an option once the mesh has been distributed:
+		// the tree no longer reaches back past the distribution.
+		if (father->global_root_path >= 0)
+		{
+			long which = -1;
+			oomph::Tree *f = this->tree_pt() ? this->tree_pt()->father_pt() : NULL;
+			if (f)
+			{
+				for (unsigned sn = 0; sn < f->nsons(); sn++)
+					if (f->son_pt(sn) == this->tree_pt()) { which = (long)sn; break; }
+			}
+			if (which >= 0) this->global_root_path = father->global_root_path * 8 + (which + 1);
+		}
 
 		oomph::QuadTree *quadtree_pt = dynamic_cast<oomph::QuadTree *>(Tree_pt);
 		oomph::BinaryTree *binarytree_pt = dynamic_cast<oomph::BinaryTree *>(Tree_pt);

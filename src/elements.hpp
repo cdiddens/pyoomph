@@ -727,6 +727,13 @@ namespace pyoomph
     // returns -1), which made every element of a distributed mesh unaddressable and the state file
     // refuse to be written. Inherited from the father by refinement, so it survives adaptivity too.
     long global_root_index = -1;
+    // ... and the packed path from that root down to this element, stamped at the same moment and for
+    // the same reason. Problem::distribute() re-roots the forest at whatever the leaves are when it is
+    // called -- oomph says so itself, next to Base_mesh_element_number_plus_one: "these elements become
+    // roots on each of the processors involved in the distribution". The refinement history is gone
+    // from the tree afterwards, so a live walk answers "root, no steps" for every element and 240 of
+    // 256 addresses collide. Only a stamp taken beforehand can still say where an element sits.
+    long global_root_path = -1;
     // Transient (per tesselated-numpy pass, cleared by Mesh::to_numpy / get_num_numpy_elemental_indices):
     // for each finer-neighbour hanging node registered on THIS element, its LOCAL coordinate in this element,
     // computed TOPOLOGICALLY by the finer neighbour from the tree neighbour finder (no physical geometry, no
