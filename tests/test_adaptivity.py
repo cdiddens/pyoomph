@@ -147,15 +147,21 @@ def _elemental_errors(normalize_relative=_UNSET, amplitude=1.0):
 
 def test_normalize_relative_defaults_to_one():
 	"""Not passing it must leave the historical, fully relative behaviour untouched."""
-	# Not exactly equal: the threaded direct solver is not bit-reproducible run to run, and two runs
-	# with identical arguments differ by the same ~1e-16 as these two do. Compared by hand rather
+	# Not exactly equal, and the tolerance is set by the SOLVER, not by the estimator: these are two
+	# separate solves, and a threaded direct solver is not bit-reproducible run to run. ~1e-16 apart
+	# with Pardiso on x86_64, but 1.0e-12 to 1.3e-11 with Accelerate on arm64 macOS - measured over 20
+	# repeats, 16 of which failed the 1e-12 this used to ask for. 1e-8 keeps three orders over that
+	# and is still seven orders below any real difference, since a default that was not 1.0 would
+	# change the errors by a factor, not in the twelfth digit. (Comparing both variants against ONE
+	# solve would remove the solver from the question entirely; that is a bigger change to
+	# _elemental_errors than this is worth.) Compared by hand rather
 	# than with allclose so that a failure says HOW far apart they were - the number is the whole
 	# question when the tolerance is this tight and the solver underneath differs per platform.
 	default, explicit = _elemental_errors(), _elemental_errors(1.0)
 	nonzero = numpy.abs(explicit) > 0.0
 	assert numpy.array_equal(default[~nonzero], explicit[~nonzero])
 	relative = numpy.max(numpy.abs(default[nonzero] - explicit[nonzero]) / numpy.abs(explicit[nonzero]))
-	assert relative < 1e-12, "the default and an explicit 1.0 differ by %.3g relative" % relative
+	assert relative < 1e-8, "the default and an explicit 1.0 differ by %.3g relative" % relative
 
 
 def test_relative_error_is_blind_to_the_solution_scale():
