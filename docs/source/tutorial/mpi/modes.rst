@@ -6,33 +6,29 @@ Requirements and the parallel modes
 Requirements
 ~~~~~~~~~~~~
 
-MPI support is a **compile-time** option. The CMake switch ``PYOOMPH_USE_MPI`` defaults to ``OFF``
+MPI support is a compile-time option. The CMake switch ``PYOOMPH_USE_MPI`` defaults to ``OFF``
 (cf. :numref:`installcmakeoptions`), and the precompiled wheels on PyPI are built with that default, so
-a ``pip install pyoomph`` cannot be run in parallel no matter how it is launched. To use MPI you have to
-build pyoomph from source (cf. :numref:`installcompile`) with the switch turned on, e.g.
+a ``pip install pyoomph`` cannot be run in parallel. To use MPI you have to
+build pyoomph from source with the switch turned on (cf. :numref:`installcompile`), e.g.
 
 .. code:: bash
 
    python -m pip install --no-build-isolation -e . --config-settings=cmake.define.PYOOMPH_USE_MPI=ON
 
-On the Python side, ``mpi4py`` must be importable. Whether the pyoomph you are actually running has MPI
-is best asked directly rather than inferred from how it was installed:
+On the Python side, ``mpi4py`` must be importable. You can test whether your pyoomph installation is ready for MPI with
 
 .. code:: bash
 
    python -m pyoomph check mpi
 
-which reports how pyoomph was compiled and, for an MPI build, verifies the requirements below. From
-within a script, the same question is answered by
+From within a script, the same question is answered by
 
 .. code:: python
 
    from pyoomph.generic.mpi import has_mpi
    print(has_mpi())
 
-A build without MPI is not broken, it is simply serial: it reports ``has_mpi() == False``, and the
-process count it reports is ``0`` rather than ``1``, which is how pyoomph tells "built without MPI" from
-"built with MPI but started as a single process".
+
 
 Distributing the mesh (the third mode below) additionally requires `PyMetis <https://pypi.org/project/PyMetis/>`__
 for the graph partitioning:
@@ -50,7 +46,7 @@ system provide) as any other MPI program:
    mpirun -n 4 python3 my_simulation.py # run with 4 processes, non-distributed meshes
    mpirun -n 4 python3 my_simulation.py --distribute # run with 4 processes, distributed meshes
 
-The number of processes is not something the script chooses; it comes from the launcher.
+As usual in MPI running, the actual run script cannot select or change the number of MPI processes, it has to be specified by the mpirun/mpiexec launcher.
 
 The three modes
 ~~~~~~~~~~~~~~~
@@ -69,11 +65,11 @@ They are shown, together with a serial run for reference, in :numref:`figmpimode
 	(centre) ``mpirun`` without ``--distribute``: every process still holds the entire mesh, but the
 	element loop of the assembly is split between them - the colors show which process integrates
 	which elements. (right) ``mpirun --distribute``: the mesh itself is partitioned, and each process
-	only ever holds its own part (plus a thin halo of neighbouring elements, not drawn).
+	only holds its own part (plus a thin halo of neighbouring elements, not drawn).
 
 **Serial, without** ``mpirun``. One process holds the mesh, assembles the residual and Jacobian and
-solves the linear system. This is not necessarily single-threaded: some direct solvers are internally
-threaded, so a serial pyoomph run can still keep several cores busy inside the factorization, but not during the assembly. 
+solves the linear system. Solving is not necessarily single-threaded: some direct solvers are internally
+OpenMP threaded, so a serial pyoomph run can still keep several cores busy inside the factorization, but not during the assembly. 
 For small to medium problems, in particular for simple ODEs or 1d problems, this is very often the fastest/easiest option.
 
 **With** ``mpirun``, **without** ``--distribute``. Every process holds the whole mesh(es) and the whole
@@ -86,6 +82,7 @@ It does not reduce the memory per process at all: every process stores the whole
 **With** ``mpirun --distribute``. The mesh is partitioned with METIS and each process keeps only its own
 part (together with *halos* of neighbouring elements). Assembly, storage and the linear solve are all distributed,
 which leads to still more total memory requirement than a serial run, but considerably less than without ``--distribute``.
+Note that the initial mesh is still constructed on all processes, then METIS splits it on rank 0 and afterwards, it is pruned on each rank to only hold the assigned subset of elements.
 This mode is intended for large problems or HPC clusters.
 
 
@@ -103,7 +100,7 @@ When running with MPI with more than one process, the linear solver will default
 PETSc is the only supported backend that is genuinely parallel, and it is the one that scales to large problems.
 
 The serial backends - ``pardiso``, ``superlu``, ``umfpack`` and Apple's ``accelerate`` - are not simply
-refused under ``mpirun``. Pyoomph gathers the assembled system onto process 0, solves it there, and
+refused under ``mpirun``. Pyoomph gathers the assembled system onto process 0, solves it there (potentially with OpenMP threads), and
 scatters the result back, while the other processes wait. You will receive a warning message if this fallback is used.
 It is a real speed-up for an assembly-dominated problem, but process 0 needs the entire matrix in memory.
 
