@@ -85,6 +85,10 @@ if __name__ == "__main__":
 
     # For soluble surfactants, we also must have it in the bulk (potentially at zero concentration)
     liquid = Mixture(get_pure_liquid("water")+0.001*get_pure_liquid("my_soluble_surfactant"))
+    # The amount may also be given as a concentration, which is what the isotherms are written in.
+    # It is then still an ordinary component, i.e. it counts towards the mass fractions:
+    #   liquid = Mixture(get_pure_liquid("water")+1*milli*molar*get_pure_liquid("my_soluble_surfactant"),
+    #                    temperature=20*celsius)
     gas = get_pure_gas("air")
     # Dict stating the initial surface concentration
     surfactants = {"my_soluble_surfactant": 1 * micro * mol / meter ** 2}

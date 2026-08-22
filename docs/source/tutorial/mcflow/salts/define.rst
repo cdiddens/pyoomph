@@ -25,6 +25,8 @@ A salt is dissolved by multiplying it by a concentration and adding it to a mixt
 
 By default, salts do not sum to the mass fractions of the solvents: in the example, glycerol and water will sum up to unity, and the salt is described by its concentration instead. At 1 mM a salt is about :math:`6\cdot 10^{-5}` of the solution by mass, so this is a good description up to a few tenths molar.
 
+The same ``<concentration>*<material>`` syntax also works for any *other* pure liquid -- a soluble surfactant, say -- but means something different there: such a component is always a genuine component of the mixture and never a dilute rider, so it has no ``salt_treatment`` analogue. Combining the two under ``salt_treatment="component"`` is consistent, but not without consequence: the salt then takes up a share of the volume, which dilutes anything given by a concentration alongside it by the factor :math:`1-c_\text{s}V_{\phi,\text{s}}`.
+
 The ions in the material can be read back with :py:meth:`~pyoomph.materials.generic.BaseLiquidProperties.get_ions` and :py:meth:`~pyoomph.materials.generic.BaseLiquidProperties.get_bulk_concentration`.
 
 Defining additional ions or salts works as follows:

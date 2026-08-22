@@ -12,6 +12,29 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Added
 
+- **Any liquid can be given by concentration.**
+  `Mixture(water + 1*milli*molar*get_pure_liquid("my_surfactant"), temperature=20*celsius)` -- and
+  `5*gram/litre*...` for a mass concentration -- instead of a mass fraction worked out by hand. The
+  literature values for a soluble surfactant, and every isotherm in
+  `pyoomph.materials.surfactant_isotherms`, are written against `molarconc_`, so a mass fraction was
+  the one form nobody has. Unlike a dissolved salt, such a species is *always* a real component: it
+  counts towards the mass fractions, gets a mole fraction and a share of the density, and needs the
+  registered `MixtureLiquidProperties` for the full set of names. The remaining fractions describe the
+  base mixture and are scaled by `1-sum w` to make room, so `water + 20*percent*glycerol + 1*mM*surf`
+  keeps a 20 % glycerol *base*.
+  - **Two conventions, because there are two volumes**, selected by `concentration_basis`.
+    `"base_mixture"` (the default) is how a solution is made -- mix the base, measure *its* volume, add
+    the solute by that volume -- so it is a mass balance and claims nothing about the volume the solute
+    occupies; it is `_set_salt_initial_conditions` with the apparent molar volume set to zero.
+    `"solution"` is moles per volume of the finished solution, i.e. what the solver reports: it solves
+    `w = c*M/rho(w)` against the mixture's own density by fixed-point iteration, so `molarconc_<name>`
+    at t=0 is exactly the value that was typed. The two differ by the solute's own mass fraction, i.e.
+    not at all in the dilute limit.
+  - A `temperature=` is required, since essentially every density correlation has one.
+  - A dimensionless factor still means a fraction. A factor carrying any other unit is now refused at
+    the multiplication with a message naming the three accepted forms, rather than surviving as a
+    "fraction" of 1 mol/m^3 until `float(total)` inside `Mixture` failed on it.
+
 - **Salt as a real composition field.** `CompositionFlowEquations(..., salt_treatment="component")`
   promotes every dissolved salt from a dilute solute to an ordinary component: a mass fraction that
   sums to unity with the solvents, a mole fraction, and a share of the volume. The composition

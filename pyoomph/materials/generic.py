@@ -545,6 +545,11 @@ class MixtureDefinitionComponent:
             raise RuntimeError("This should not happen")
         self.quant*=other
 
+    def __repr__(self)->str:
+        # The bare object repr used to be what the "total fractions exceed unity" and the
+        # unit-on-a-gas messages showed the user, which named neither the amount nor the substance.
+        return (self.compo.name if self.quant is None else str(self.quant)+"*"+self.compo.name)
+
 #    def __radd__(self,other:Union["MixtureDefinitionComponent",MaterialProperties])->"MixtureDefinitionComponents":
 #        if isinstance(other,MixtureDefinitionComponent):
 #            return MixtureDefinitionComponents([self,other])
@@ -576,6 +581,72 @@ class LiquidMixtureDefinitionComponent(MixtureDefinitionComponent):
     def get_compo(self)->"PureLiquidProperties":
         assert isinstance(self.compo,PureLiquidProperties)
         return self.compo
+
+def _split_concentration(value:ExpressionOrNum,name:str)->tuple[bool,float]:
+    """``(is_it_a_mass_concentration, its value in SI)``, or a message naming the accepted forms.
+
+    Both mol/m^3 and kg/m^3 are accepted because both are how a solution gets written down, and the two
+    are dimensionally distinct here, so nothing has to be guessed.
+    """
+    for by_mass,unit in ((False,mol/meter**3),(True,kilogram/meter**3)):
+        try:
+            return by_mass,float(value/unit)
+        except Exception:
+            continue
+    raise ValueError("The factor in front of the liquid '"+name+"' must be either a plain number (a "+
+                     "mass fraction, e.g. 0.001*"+name+"), a molar concentration (e.g. 1*milli*molar*"+
+                     name+") or a mass concentration (e.g. 5*gram/litre*"+name+"), but got "+
+                     str(value)+".")
+
+
+class ConcentrationMixtureDefinitionComponent(LiquidMixtureDefinitionComponent):
+    r"""
+    A liquid component given by a *concentration* rather than by a fraction.
+
+    ``1*milli*molar*get_pure_liquid("my_surfactant")`` is this, and unlike
+    :py:class:`DissolvedSpeciesComponent` it is a real component of the resulting mixture: it gets a
+    mass fraction that sums to unity with the solvents, so the registered
+    :py:class:`MixtureLiquidProperties` for the *whole* set of names is required. There is deliberately
+    no dilute variant -- a surfactant is not an ion, its molar mass is large and it is not screened, so
+    the only thing a rider would buy is a composition that does not add up.
+
+    A subclass of :py:class:`LiquidMixtureDefinitionComponent` rather than a bucket of its own precisely
+    because it *is* a component: it has to reach ``get_mixture_properties`` through
+    :py:attr:`MixtureDefinitionComponents.lst`, and only
+    :py:meth:`MixtureDefinitionComponents.finalise` has to tell the two kinds apart.
+
+    The concentration has to be a number times a unit: the mass fraction it becomes is an initial
+    condition, and a symbolic factor (a :py:class:`~pyoomph.generic.problem.GlobalParameter`, say)
+    cannot be turned into one. Which volume the concentration refers to is chosen by
+    :py:func:`Mixture`'s ``concentration_basis``.
+    """
+    def __init__(self, compo: "PureLiquidProperties", concentration:ExpressionOrNum):
+        # assert_dimensional_value lets a plain number through without ever looking at the required
+        # unit, so a dimensionless factor has to be caught before we get here -- reading 0.2 as
+        # 0.2 mol/m^3 would be far worse than the error. Same guard as DissolvedSpeciesComponent.
+        if isinstance(concentration,(float,int)):
+            raise ValueError("Expected a dimensional concentration for how much "+compo.name+
+                             " is in the mixture, but got the plain number "+str(concentration)+
+                             ". A plain number is a mass fraction and is not routed here.")
+        #: ``True`` for a mass concentration (kg/m^3), ``False`` for a molar one (mol/m^3).
+        self.by_mass,self.value=_split_concentration(concentration,compo.name)
+        #: The concentration exactly as it was written, for the repr and the error messages.
+        self.concentration=concentration
+        # quant stays None: this is not one of the fractions that must sum to unity, and finalise()
+        # filters these components out before it looks at quant at all.
+        super().__init__(compo, None)
+
+    def __mul__(self,other:ExpressionOrNum)->"ConcentrationMixtureDefinitionComponent": #type:ignore[override]
+        # The inherited MixtureDefinitionComponent.__mul__ does "self.quant*=other" and returns None,
+        # which would make 2*(1*molar*surfactant) silently None.
+        return ConcentrationMixtureDefinitionComponent(self.get_compo(),self.concentration*other)
+
+    def __rmul__(self,other:ExpressionOrNum)->"ConcentrationMixtureDefinitionComponent": #type:ignore[override]
+        return self.__mul__(other)
+
+    def __repr__(self)->str:
+        return "Concentration("+str(self.concentration)+" of "+self.compo.name+")"
+
 
 class GasMixtureDefinitionComponent(MixtureDefinitionComponent):
     def __init__(self, compo: MaterialProperties, quant: ExpressionNumOrNone):
@@ -619,7 +690,7 @@ class MixtureDefinitionComponents():
         return "%s(%r%s)" % (self.__class__, self.lst,
                              ", dissolved=%r" % self.dissolved if self.dissolved else "")
 
-    def finalise(self,quantity:MixQuantityDefinition="mass_fraction",temperature:ExpressionNumOrNone=None,pressure:ExpressionNumOrNone=1*atm) -> tuple[set[MaterialProperties], dict[str, ExpressionOrNum]]:
+    def finalise(self,quantity:MixQuantityDefinition="mass_fraction",temperature:ExpressionNumOrNone=None,pressure:ExpressionNumOrNone=1*atm,concentration_basis:"ConcentrationBasis"="base_mixture") -> tuple[set[MaterialProperties], dict[str, ExpressionOrNum]]:
         #if len(self.lst)==1:
         #    return {self.lst[0].compo},1
         if quantity=="RH":
@@ -628,12 +699,32 @@ class MixtureDefinitionComponents():
             quantity="mass_fraction"
         comps = set([e.compo for e in self.lst])
 
+        # A component given by a concentration stays in comps -- unlike a DissolvedSpeciesComponent it
+        # is a real component and has to reach get_mixture_properties -- but it takes no part in the
+        # "sums to unity" bookkeeping below, and every conversion (relative humidity, mole and volume
+        # fractions) describes the base mixture rather than the finished solution.
+        concs=[e for e in self.lst if isinstance(e,ConcentrationMixtureDefinitionComponent)]
+        fracs=[e for e in self.lst if not isinstance(e,ConcentrationMixtureDefinitionComponent)]
+        frac_comps={e.compo for e in fracs}
+        if concs:
+            if not fracs:
+                raise RuntimeError("A component given by concentration needs a base mixture to be in: "+
+                                   str(concs)+". Write e.g. Mixture(get_pure_liquid(\"water\")+"+
+                                   str(concs[0].concentration)+"*"+concs[0].compo.name+") instead.")
+            # Both at once would just overwrite one of the two silently. By name, not by identity:
+            # get_pure_liquid hands out a fresh instance per call, so the two are never the same
+            # object, and it is the name that get_mixture_properties keys on anyway.
+            both={e.compo.name for e in fracs} & {e.compo.name for e in concs}
+            if both:
+                raise ValueError("'"+sorted(both)[0]+"' is given both as a fraction and as a "+
+                                 "concentration; one of the two would silently win.")
+
         if (temperature is not None) and not (isinstance(temperature,(float,int))):
             _,_=assert_dimensional_value(temperature,required_unit=kelvin)
 
         total:ExpressionOrNum=0
         hasNone=None
-        for e in self.lst:
+        for e in fracs:
             if e.quant is None:
                 if hasNone is not None:
                     raise ValueError("Found at least 2 contributions to the mixture which do not have a factor. You may add several <factor>*<component>, but only in one term, the factor may be omitted. This factor is then determined by 1 minus the others")
@@ -645,7 +736,7 @@ class MixtureDefinitionComponents():
             gasprops=get_mixture_properties(*comps)
             if gasprops.state_of_matter!="gas":
                 raise RuntimeError("relative_humidity works only for gases")
-            for e in self.lst:
+            for e in fracs:
                 if e==hasNone:
                     continue
                 else:
@@ -666,7 +757,7 @@ class MixtureDefinitionComponents():
                     e.quant*=Pvap_rel
             quantity="mole_fraction"
             total = 0
-            for e in self.lst:
+            for e in fracs:
                 if e==hasNone:
                     continue
                 else:
@@ -678,7 +769,13 @@ class MixtureDefinitionComponents():
         must_sum_to_unity=(quantity=="mass_fraction" or quantity=="mole_fraction" or quantity=="volume_fraction")
 
 
-        totalf=float(total)
+        try:
+            totalf=float(total)
+        except Exception as err:
+            # The only way to get here is a factor with a unit on something that does not dispatch on
+            # one, i.e. a gas: PureLiquidProperties._times turns such a factor into a concentration.
+            raise ValueError("A factor with a unit means a concentration, which is only supported for "+
+                             "liquid components: "+str(self.lst)+"\n"+str(err)) from err
         if must_sum_to_unity and totalf>1+eps:
             raise ValueError("The total fractions of the mixture exceed unity: "+quantity+"  "+str(self.lst))
         if hasNone is not None:
@@ -688,38 +785,48 @@ class MixtureDefinitionComponents():
             raise ValueError("The total fractions of the mixture are less than unity")
 
         init:dict[str,ExpressionOrNum]
+        # The components given by concentration start at zero here and are filled in at the very end,
+        # once the base mixture is a complete composition of its own.
         if quantity=="mass_fraction":
             init = {c.name: 0.0 for c in comps}
-            for e in self.lst:
+            for e in fracs:
                 assert e.quant is not None
                 init[e.compo.name] += e.quant
         elif quantity=="mole_fraction":
             init = {c.name: 0.0 for c in comps}
-            for e in self.lst:
+            for e in fracs:
                 assert e.quant is not None
                 init[e.compo.name] += e.quant
-            props = get_mixture_properties(*comps)
-            assert isinstance(props,(MixtureGasProperties,MixtureLiquidProperties))
-            molar_denom=sum([props.pure_properties[c].molar_mass*init[c] for c in sorted(props.components)])
-            for c in sorted(props.components):
-                init[c]*=props.pure_properties[c].molar_mass/molar_denom
-                init[c]=float(init[c])
+            # A single component is already a complete composition, and get_mixture_properties would
+            # hand back the pure material, which has no pure_properties to convert with.
+            if len(frac_comps)>1:
+                props = get_mixture_properties(*frac_comps)
+                assert isinstance(props,(MixtureGasProperties,MixtureLiquidProperties))
+                molar_denom=sum([props.pure_properties[c].molar_mass*init[c] for c in sorted(props.components)])
+                for c in sorted(props.components):
+                    init[c]*=props.pure_properties[c].molar_mass/molar_denom
+                    init[c]=float(init[c])
         elif quantity=="volume_fraction":
             init = {c.name: 0.0 for c in comps}
-            for e in self.lst:
+            for e in fracs:
                 assert e.quant is not None
                 init[e.compo.name] += e.quant
-            props = get_mixture_properties(*comps)
-            assert isinstance(props,(MixtureGasProperties,MixtureLiquidProperties))
-            rhos = {c: props.pure_properties[c].evaluate_at_condition(props.pure_properties[c].mass_density,temperature=temperature) for c in sorted(props.components)}
-            for _, rho in rhos.items():
-                assert_dimensional_value(rho)
-            denom = sum([rhos[c] * init[c] for c in sorted(props.components)])
-            for c in sorted(props.components):
-                init[c]*=rhos[c]/denom
-                init[c]=float(init[c])
+            if len(frac_comps)>1:
+                props = get_mixture_properties(*frac_comps)
+                assert isinstance(props,(MixtureGasProperties,MixtureLiquidProperties))
+                rhos = {c: props.pure_properties[c].evaluate_at_condition(props.pure_properties[c].mass_density,temperature=temperature) for c in sorted(props.components)}
+                for _, rho in rhos.items():
+                    assert_dimensional_value(rho)
+                denom = sum([rhos[c] * init[c] for c in sorted(props.components)])
+                for c in sorted(props.components):
+                    init[c]*=rhos[c]/denom
+                    init[c]=float(init[c])
         else:
             raise ValueError("quantity=... may only take 'mass_fraction'/'wt', 'mole_fraction', 'volume_fraction' and 'relative_humidity'/'RH'.")
+
+        if concs:
+            init=_apply_concentration_components(init,get_mixture_properties(*frac_comps),fracs,concs,
+                                                 comps,concentration_basis,temperature,pressure)
 
         return comps,init
 
@@ -751,6 +858,8 @@ class GasMixtureDefinitionComponents(MixtureDefinitionComponents):
         if dissolved:
             raise RuntimeError("A gas cannot carry dissolved ions: "+str(dissolved))
         for a in lst:
+            if isinstance(a,ConcentrationMixtureDefinitionComponent):
+                raise RuntimeError("A gas cannot take a component given by concentration: "+str(a))
             if not isinstance(a,GasMixtureDefinitionComponent):
                 RuntimeError("You tried to mix a gas with something else: "+str(self)+" contains "+str(a))
 
@@ -1850,11 +1959,25 @@ class PureLiquidProperties(BaseLiquidProperties):
         else:
             return None
 
-    def __mul__(self,other:float | int | Expression)->"LiquidMixtureDefinitionComponent":
+    def _times(self,other:ExpressionOrNum)->"LiquidMixtureDefinitionComponent":
+        """``x*liquid`` is a fraction when x is a plain number and a concentration when it has a unit.
+
+        The same rule as :py:meth:`IonProperties._times`, which this generalises one level up. Before
+        it, ``1*milli*molar*surfactant`` built a "fraction" of 1 mol/m^3 that survived all the way into
+        ``float(total)`` in :py:meth:`MixtureDefinitionComponents.finalise` and died there as "Cannot
+        convert mol*meter^(-3) to double".
+        """
+        try:
+            float(other)
+        except Exception:
+            return ConcentrationMixtureDefinitionComponent(self,other) # validates the unit itself
         return LiquidMixtureDefinitionComponent(self,other)
 
+    def __mul__(self,other:float | int | Expression)->"LiquidMixtureDefinitionComponent":
+        return self._times(other)
+
     def __rmul__(self,other:float | int | Expression)->"LiquidMixtureDefinitionComponent":
-        return LiquidMixtureDefinitionComponent(self,other)
+        return self._times(other)
 
 
 #A surfactant is by definition just a pure liquid property, can therefore be mixed with other liquids
@@ -2079,6 +2202,121 @@ def ambipolar_diffusivity(cation_charge:int,anion_charge:int,cation_diffusivity:
     """
     return (cation_charge-anion_charge)*cation_diffusivity*anion_diffusivity \
            /(cation_charge*cation_diffusivity-anion_charge*anion_diffusivity)
+
+
+ConcentrationBasis:TypeAlias=Literal["base_mixture","solution"]
+
+
+def _mass_density_as_number(props:"MaterialProperties",cond:dict[str,ExpressionOrNum],
+                            temperature:ExpressionNumOrNone)->float:
+    """The mass density in kg/m^3 as a plain number, or a message about the temperature.
+
+    Both the evaluation and the ``float`` are guarded, because without a temperature the failure is not
+    a ``float`` of something still symbolic: it is a RuntimeError out of the unit collector, which
+    cannot get a unit out of a subexpression holding ``var("temperature")`` -- the trap
+    :py:meth:`BaseLiquidProperties.treat_salts_as_components` already documents.
+    """
+    try:
+        return float(props.evaluate_at_condition(props.mass_density,cond)/(kilogram/meter**3))
+    except Exception as e:
+        if temperature is None:
+            raise RuntimeError("A component given by concentration needs the mass density of "+
+                               props.describe()+" as a number, and essentially every density "+
+                               "correlation depends on the temperature. Pass one: "+
+                               "Mixture(..., temperature=20*celsius).") from e
+        raise RuntimeError("Could not evaluate the mass density of "+props.describe()+" at "+
+                           str(temperature)+" as a number. It may depend on nothing but temperature, "+
+                           "pressure and composition:\n"+str(e)) from e
+
+
+def _solve_concentration_mass_fractions(solvent:dict[str,float],target:dict[str,float],
+                                        comps:set["MaterialProperties"],cond:dict[str,ExpressionOrNum],
+                                        temperature:ExpressionNumOrNone)->dict[str,float]:
+    r"""``concentration_basis="solution"``: solve :math:`w_i=c_iM_i/\rho(w)`.
+
+    Implicit, because :math:`\rho` is the finished mixture's own density at the very composition being
+    solved for. That is what makes ``molarconc_<n>`` -- defined as ``massfrac_<n>*mass_density/M_n`` in
+    :py:meth:`~pyoomph.equations.multi_component.CompositionAdvectionDiffusionEquations.define_fields`,
+    and the variable every surfactant isotherm is written against -- come out at t=0 as exactly the
+    concentration that was asked for.
+
+    Plain fixed-point iteration on floats: one round moves :math:`\rho` by at most the solute's own mass
+    fraction, so it contracts hard wherever the solute is not the bulk of the solution. Floats rather
+    than expressions, because this is an initial condition and takes no part in any residual.
+    """
+    props=get_mixture_properties(*comps)   # the full mixture: its density is the one being inverted
+    w={n:0.0 for n in target}
+    for _ in range(100):
+        rest=1-sum(w.values())
+        if rest<=0:
+            raise ValueError("The requested concentrations amount to at least the whole solution. "+
+                             "Check the units and the molar masses.")
+        c=dict(cond)
+        c.update({"massfrac_"+n:f*rest for n,f in solvent.items()})
+        c.update({"massfrac_"+n:v for n,v in w.items()})
+        rho=_mass_density_as_number(props,c,temperature)
+        new={n:t/rho for n,t in target.items()}
+        err=max(abs(new[n]-w[n]) for n in w)
+        w=new
+        if err<=1e-14:
+            break
+    else:
+        raise RuntimeError("The mass fractions for the given concentrations in "+props.describe()+
+                           " did not converge. That needs a density which does not react violently to "+
+                           "the composition; concentration_basis='base_mixture' does not iterate.")
+    return w
+
+
+def _apply_concentration_components(init:dict[str,ExpressionOrNum],
+                                    solvent_props:"MaterialProperties",
+                                    fracs:list["MixtureDefinitionComponent"],
+                                    concs:list["ConcentrationMixtureDefinitionComponent"],
+                                    comps:set["MaterialProperties"],basis:ConcentrationBasis,
+                                    temperature:ExpressionNumOrNone,
+                                    pressure:ExpressionNumOrNone)->dict[str,ExpressionOrNum]:
+    r"""Mass fractions for the components given by concentration, with the rest squeezed into what is
+    left.
+
+    The fractions specify the *base mixture*: "20 % glycerol" means 20 % of the base, and what is given
+    by concentration is added on top. Same convention as
+    :py:meth:`BaseLiquidProperties._set_salt_initial_conditions`, and the reason both bases end in a
+    rescale by :math:`1-\sum w`.
+    """
+    if basis not in ("base_mixture","solution"):
+        raise ValueError("concentration_basis must be 'base_mixture' or 'solution', not "+str(basis))
+    solvent={c.name:float(init[c.name]) for c in {e.compo for e in fracs}}   # sums to unity
+    # kg of species per m^3 of whichever volume the basis names: a mass concentration directly, a molar
+    # one through the molar mass.
+    target={e.compo.name:(e.value if e.by_mass
+                          else e.value*float(e.compo.molar_mass/(kilogram/mol))) for e in concs}
+    cond:dict[str,ExpressionOrNum]={}
+    if pressure is not None:
+        cond["absolute_pressure"]=pressure
+    if temperature is not None:
+        cond["temperature"]=temperature
+
+    if basis=="base_mixture":
+        # A molarity mixed the way it is measured: mix the base, measure its volume, add by that
+        # volume. One m^3 of the finished base weighs rho_base and what went into it weighs sum(c*M),
+        # so no claim is made about the volume the solute itself takes up -- which is the point, since
+        # that volume is exactly what a base-mixture molarity was never told. This is
+        # _set_salt_initial_conditions with the apparent molar volume set to zero.
+        c=dict(cond)
+        c.update({"massfrac_"+n:f for n,f in solvent.items()})
+        rho=_mass_density_as_number(solvent_props,c,temperature)
+        total=rho+sum(target.values())
+        w={n:t/total for n,t in target.items()}
+    else:
+        w=_solve_concentration_mass_fractions(solvent,target,comps,cond,temperature)
+
+    rest=1-sum(w.values())
+    if rest<=0:
+        raise ValueError("The concentrations "+str([str(e.concentration) for e in concs])+
+                         " amount to at least the whole solution. Check the units and the molar "+
+                         "masses.")
+    res:dict[str,ExpressionOrNum]={n:f*rest for n,f in solvent.items()}
+    res.update(w)
+    return res
 
 
 def pure_liquid_as_mixture(pure:"PureLiquidProperties")->"MixtureLiquidProperties":
@@ -3351,16 +3589,16 @@ def get_interface_properties(phaseA:MaterialProperties | MixtureDefinitionCompon
             raise RuntimeError("Cannot find an interface of type "+typus+" for "+n1+" | "+n2+" and the surfactants "+str({s.name for s in surfactantsN}))
 
 @overload
-def Mixture(mdef:LiquidMixtureDefinitionComponents | LiquidMixtureDefinitionComponent | PureLiquidProperties,temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...)->AnyLiquidProperties: ...
+def Mixture(mdef:LiquidMixtureDefinitionComponents | LiquidMixtureDefinitionComponent | PureLiquidProperties,temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...,salt_treatment:Literal["dilute","component"]=...,concentration_basis:"ConcentrationBasis"=...)->AnyLiquidProperties: ...
 
 @overload
-def Mixture(mdef:GasMixtureDefinitionComponents | GasMixtureDefinitionComponent | PureGasProperties,temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...)->AnyGasProperties: ...
+def Mixture(mdef:GasMixtureDefinitionComponents | GasMixtureDefinitionComponent | PureGasProperties,temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...,salt_treatment:Literal["dilute","component"]=...,concentration_basis:"ConcentrationBasis"=...)->AnyGasProperties: ...
 
 @overload
-def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyMaterialProperties,temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...)->MaterialProperties: ...
+def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyMaterialProperties,temperature:ExpressionNumOrNone=...,quantity:MixQuantityDefinition=...,pressure:ExpressionOrNum=...,salt_treatment:Literal["dilute","component"]=...,concentration_basis:"ConcentrationBasis"=...)->MaterialProperties: ...
 
-def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyMaterialProperties,temperature:ExpressionNumOrNone=None,quantity:MixQuantityDefinition="mass_fraction",pressure:ExpressionOrNum=1*atm,salt_treatment:Literal["dilute","component"]="dilute")->AnyMaterialProperties:
-    """
+def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyMaterialProperties,temperature:ExpressionNumOrNone=None,quantity:MixQuantityDefinition="mass_fraction",pressure:ExpressionOrNum=1*atm,salt_treatment:Literal["dilute","component"]="dilute",concentration_basis:"ConcentrationBasis"="base_mixture")->AnyMaterialProperties:
+    r"""
     Returns a gas or liquid mixture from the given mixture definition components or a single material properties object.
 
     Args:
@@ -3368,6 +3606,21 @@ def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyM
             Salts and ions may be added by *concentration* -- ``+ 1*milli*molar*get_salt("NaCl")`` --
             in which case they are dissolved in the finished mixture rather than counted among the
             fractions, see :py:class:`DissolvedSpeciesComponent`.
+            Any *other* pure liquid may be given by concentration as well -- a soluble surfactant in
+            particular, ``+ 1*milli*molar*get_pure_liquid("my_surfactant")`` or
+            ``+ 5*gram/litre*...`` -- and is then a real component: it counts towards the mass
+            fractions and needs the registered :py:class:`MixtureLiquidProperties` for the whole set
+            of names, see :py:class:`ConcentrationMixtureDefinitionComponent`. There is no dilute
+            variant for it. The fractions of the remaining components describe the base mixture and
+            are scaled by :math:`1-\sum w` to make room, so ``water + 20*percent*glycerol +
+            1*milli*molar*surfactant`` keeps a 20 % glycerol *base*.
+        concentration_basis: Which volume such a concentration refers to. ``"base_mixture"`` (the
+            default) is how a solution is made: mix the base, measure *its* volume, then add the
+            solute by that volume. ``"solution"`` means moles per volume of the finished solution,
+            which is what the solver reports -- ``molarconc_<name>``, the variable the surfactant
+            isotherms are written against, is then at t=0 exactly the value given here. The two
+            differ by the solute's own mass fraction, i.e. not at all in the dilute limit. Both need
+            a ``temperature``, since essentially every density correlation has one.
         salt_treatment: ``"dilute"`` (the default) leaves a dissolved salt out of the mass fractions,
             which is right to a few percent up to about half molar. ``"component"`` makes it a
             component of its own, see
@@ -3383,7 +3636,8 @@ def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyM
     if isinstance(mdef,MixtureDefinitionComponents):
         if not mdef.lst:
             raise RuntimeError("A dissolved species needs a solvent: "+str(mdef.dissolved))
-        res,init=mdef.finalise(quantity,temperature=temperature,pressure=pressure)
+        res,init=mdef.finalise(quantity,temperature=temperature,pressure=pressure,
+                               concentration_basis=concentration_basis)
         props=get_mixture_properties(*tuple(res))
         for e,k in init.items():
             props.initial_condition["massfrac_"+e]=k
@@ -3413,17 +3667,14 @@ def Mixture(mdef:MixtureDefinitionComponents | MixtureDefinitionComponent | AnyM
                            ". Write e.g. Mixture(water+"+str(mdef.concentration)+"*"+
                            mdef.species.name+") instead.")
     elif isinstance(mdef,LiquidMixtureDefinitionComponent): 
-        return Mixture(LiquidMixtureDefinitionComponents([mdef]),temperature=temperature,quantity=quantity,pressure=pressure)
+        return Mixture(LiquidMixtureDefinitionComponents([mdef]),temperature=temperature,quantity=quantity,pressure=pressure,salt_treatment=salt_treatment,concentration_basis=concentration_basis)
     elif isinstance(mdef,GasMixtureDefinitionComponent): 
-        return Mixture(GasMixtureDefinitionComponents([mdef]),temperature=temperature,quantity=quantity,pressure=pressure)
-    elif isinstance(mdef,LiquidMixtureDefinitionComponent):
-        return Mixture(mdef.get_compo(),temperature=temperature,quantity=quantity,pressure=pressure)
-    elif isinstance(mdef,GasMixtureDefinitionComponent):
-        return Mixture(mdef.get_compo(),temperature=temperature,quantity=quantity,pressure=pressure)
+        return Mixture(GasMixtureDefinitionComponents([mdef]),temperature=temperature,quantity=quantity,pressure=pressure,salt_treatment=salt_treatment,concentration_basis=concentration_basis)
     elif isinstance(mdef,PureLiquidProperties):
-        return Mixture(mdef*1,temperature=temperature,pressure=pressure)
+        # quantity= is irrelevant for a single component: it is the whole of the mixture either way.
+        return Mixture(mdef*1,temperature=temperature,pressure=pressure,salt_treatment=salt_treatment,concentration_basis=concentration_basis)
     elif isinstance(mdef,PureGasProperties):
-        return Mixture(mdef*1,temperature=temperature,pressure=pressure)    
+        return Mixture(mdef*1,temperature=temperature,pressure=pressure,salt_treatment=salt_treatment,concentration_basis=concentration_basis)
     else:
         raise RuntimeError("Handle this case"+str(mdef))
 
