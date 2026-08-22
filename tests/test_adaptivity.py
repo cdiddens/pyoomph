@@ -148,8 +148,14 @@ def _elemental_errors(normalize_relative=_UNSET, amplitude=1.0):
 def test_normalize_relative_defaults_to_one():
 	"""Not passing it must leave the historical, fully relative behaviour untouched."""
 	# Not exactly equal: the threaded direct solver is not bit-reproducible run to run, and two runs
-	# with identical arguments differ by the same ~1e-16 as these two do.
-	assert numpy.allclose(_elemental_errors(), _elemental_errors(1.0), rtol=1e-12, atol=0.0)
+	# with identical arguments differ by the same ~1e-16 as these two do. Compared by hand rather
+	# than with allclose so that a failure says HOW far apart they were - the number is the whole
+	# question when the tolerance is this tight and the solver underneath differs per platform.
+	default, explicit = _elemental_errors(), _elemental_errors(1.0)
+	nonzero = numpy.abs(explicit) > 0.0
+	assert numpy.array_equal(default[~nonzero], explicit[~nonzero])
+	relative = numpy.max(numpy.abs(default[nonzero] - explicit[nonzero]) / numpy.abs(explicit[nonzero]))
+	assert relative < 1e-12, "the default and an explicit 1.0 differ by %.3g relative" % relative
 
 
 def test_relative_error_is_blind_to_the_solution_scale():
