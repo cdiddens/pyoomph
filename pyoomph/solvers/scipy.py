@@ -239,6 +239,10 @@ class ScipyEigenSolver(GenericEigenSolver):
 		evals:Any=None
 		evects:Any=None
 		error:BaseException | None=None
+		# Everything inside this block runs on rank 0 ALONE, with the other ranks already waiting at
+		# mpi_share_root_failure below. Nothing called from here may be collective: the two sides then
+		# block in different collectives and the job hangs rather than failing, which is how the
+		# distributed scipy eigen tests turned into 900 s timeouts (see the PSD screen's `collective`).
 		if get_mpi_rank()==0:
 			assert Jg is not None and Mg is not None
 			try:
@@ -303,7 +307,9 @@ class ScipyEigenSolver(GenericEigenSolver):
 				 and which=="LM" and OPpart is None
 				 and J.dtype.kind!="c" and M.dtype.kind!="c"
 				 and (v0 is None or not numpy.iscomplexobj(v0)))
-		if use_sym and not self._mass_matrix_can_be_positive_semidefinite(M):
+		# collective only when every rank is here. On the gathered path rank 0 re-enters this method
+		# alone, holding the whole assembled system, while the others wait in mpi_share_root_failure.
+		if use_sym and not self._mass_matrix_can_be_positive_semidefinite(M,collective=custom_J_and_M is None):
 			use_sym=False
 			self.last_symmetry_decision_reason="mass matrix is symmetric but not positive semi-definite"
 		self.last_symmetry_decision=use_sym

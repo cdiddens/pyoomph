@@ -781,7 +781,7 @@ class GenericEigenSolver:
 		self.last_symmetry_decision_reason="J and M proven symmetric" if decision else "J or M not proven symmetric (or augmented/custom assembly)"
 		return decision
 
-	def _mass_matrix_can_be_positive_semidefinite(self,M:Any,first_row:int=0)->bool:
+	def _mass_matrix_can_be_positive_semidefinite(self,M:Any,first_row:int=0,collective:bool=True)->bool:
 		"""Cheap necessary condition for a symmetric M to be positive semi-definite.
 
 		_use_symmetric_eigensolver_now only establishes that M is SYMMETRIC, but the symmetric drivers
@@ -797,7 +797,13 @@ class GenericEigenSolver:
 		cross-coupled mass matrices are.
 
 		``first_row`` is this rank's global row offset when M holds only a local row block (columns are
-		global either way); the verdict is reduced across ranks, so all of them engage or none do.
+		global either way); the verdict is then reduced across ranks, so all of them engage or none do.
+
+		``collective=False`` skips that reduction, and is required whenever M is already a whole global
+		matrix that only ONE rank holds -- the gathered path in ScipyEigenSolver, where rank 0 re-enters
+		solve() with the assembled system while every other rank waits in mpi_share_root_failure. The
+		reduction has no partner there, and the two ranks deadlock in different collectives (rank 0 in
+		this allreduce, the rest in that broadcast) until the test harness times out at 900 s.
 		"""
 		Mc=M.tocsr() if not hasattr(M,"indptr") else M
 		ok=True
@@ -812,6 +818,8 @@ class GenericEigenSolver:
 				# shift-invert handles. A zero DIAGONAL with a non-zero row is not.
 				if bool((diag<-tol).any()) or bool(((diag<=tol)&(rowsum>tol)).any()):
 					ok=False
+		if not collective:
+			return ok
 		return not _mpi_any_rank(not ok)
 
 	@property
