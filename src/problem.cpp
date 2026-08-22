@@ -234,7 +234,6 @@ namespace pyoomph
 		functable->handle = so_handle;
 
 		// Export the functions to call
-		functable->get_element_size = _pyoomph_get_element_size;
 		functable->invoke_callback = _pyoomph_invoke_callback;
 		functable->invoke_multi_ret = _pyoomph_invoke_multi_ret;
 		functable->fill_shape_buffer_for_point = _pyoomph_fill_shape_buffer_for_point;
@@ -247,6 +246,25 @@ namespace pyoomph
 		// Sized here rather than in the member initialiser list: the ED0 field count only
 		// becomes known once initfunc() above has filled the function table.
 		linked_external_data = ExternalDataLinkVector(functable->info_ED0.numfields);
+	}
+
+	// Every shared library currently loaded by ANY Problem in this process, mapped to the code that
+	// loaded it. dlopen dedupes by inode and only bumps a refcount, so a second Problem that resolves
+	// an element code to a path already loaded gets the FIRST Problem's compiled image handed back -
+	// silently, and after its own compiler has already overwritten that file underneath the live
+	// mapping. The observed symptom was a second Problem quietly computing the first one's equations;
+	// on codes whose layout differs enough, the rewritten mapping instead takes the process down
+	// inside dlsym. Neither is detectable from the return value of dlopen, so the collision is caught
+	// here instead. Entries are removed by ~DynamicJITCode, so loading the same path again after the
+	// first Problem has been destroyed is fine - which is what redefine_problem() relies on.
+	static std::map<std::string, DynamicJITCode *> __loaded_jit_libraries;
+
+	// Whether some Problem in this process currently has this shared library loaded. The Python side
+	// asks before it compiles, so that a second Problem can be given its own code directory rather
+	// than run into the error in load_jit_code below.
+	bool jit_library_is_loaded(const std::string &fname)
+	{
+		return __loaded_jit_libraries.count(fname) > 0;
 	}
 
 	// Cleans up the function table (invoking the code's own clean_up callback first, if any) and closes
@@ -284,6 +302,10 @@ namespace pyoomph
 		}
 		so_handle = NULL;
 		functable = NULL;
+
+		auto it = __loaded_jit_libraries.find(filename);
+		if (it != __loaded_jit_libraries.end() && it->second == this)
+			__loaded_jit_libraries.erase(it);
 	}
 
 	int DynamicJITCode::get_integral_function_index(std::string n)
@@ -821,16 +843,23 @@ namespace pyoomph
 		// replaced, and it now also carries the first compilation's bulk mesh. Every domain and
 		// interface compiles to its own uniquely named trunk, so a collision here means two of them
 		// were written to the same path - report it instead of corrupting one of them.
-		for (unsigned int i = 0; i < jit_codes.size(); i++)
+		//
+		// Checked against every library loaded in the PROCESS, not just this Problem's own jit_codes:
+		// the damage dlopen's inode dedupe does (see __loaded_jit_libraries) is worst precisely when
+		// the two codes belong to different Problems, because nothing else in either of them would
+		// ever notice.
+		auto already = __loaded_jit_libraries.find(dynamic_lib);
+		if (already != __loaded_jit_libraries.end())
 		{
-			if (jit_codes[i]->get_file_name() == dynamic_lib)
-			{
-				throw_runtime_error("Two element codes resolved to the same shared library '" + dynamic_lib +
-									"'. If this happened during redefine_problem(), pass a code_dir that differs from the current one.");
-			}
+			const bool other_problem = already->second->get_problem() != this;
+			throw_runtime_error("Two element codes resolved to the same shared library '" + dynamic_lib + "'." +
+								(other_problem
+									 ? std::string(" They belong to two different Problems that are alive at the same time. Give each Problem its own output directory (set_output_directory) or its own code directory, so that their generated code does not share a file name.")
+									 : std::string(" If this happened during redefine_problem(), pass a code_dir that differs from the current one.")));
 		}
 		CCompiler *ccompiler = this->get_ccompiler();
 		jit_codes.push_back(new DynamicJITCode(this, ccompiler, dynamic_lib, code_gen, bulkmesh));
+		__loaded_jit_libraries[dynamic_lib] = jit_codes.back();
 		code_gen->fill_callback_info(jit_codes.back()->functable);
 		auto *ft = jit_codes.back()->functable;
 		for (unsigned int i = 0; i < ft->numglobal_params; i++)
@@ -1797,20 +1826,24 @@ namespace pyoomph
 			throw_runtime_error("Unknown param to set " + nam);
 	}
 
-	// Toggles the internal __replace_RJM_by_param_deriv pointer, which, when non-NULL, makes subsequent
+	// Toggles this Problem's replace_RJM_by_param_deriv pointer, which, when non-NULL, makes subsequent
 	// residual/Jacobian/mass-matrix assembly calls return the derivative w.r.t. the named global
 	// parameter instead of the normal residual/Jacobian/mass matrix (used internally e.g. for parameter
 	// derivative computations that must reuse the same elemental assembly loop machinery).
+	//
+	// This is a latch with no scope guard, and it is reachable from Python: an exception raised between
+	// the "on" and the "off" call leaves the Problem assembling parameter derivatives. It used to be a
+	// process-wide global, so that also left every OTHER Problem doing so.
 	void Problem::_replace_RJM_by_param_deriv(std::string name, bool active)
 	{
 		if (!active)
-			__replace_RJM_by_param_deriv = NULL;
+			replace_RJM_by_param_deriv = NULL;
 		else
 		{
 			if (!global_params_by_name.count(name))
 				throw_runtime_error("Cannot replace residuals/jacobian/mass matrix by parameter derivatives for global parameter " + name + ", since it is not present in the problem");
 			auto *p = global_params_by_name[name];
-			__replace_RJM_by_param_deriv = &(p->value());
+			replace_RJM_by_param_deriv = &(p->value());
 		}
 	}
 
@@ -8279,7 +8312,7 @@ namespace pyoomph
 		oomph::AssemblyHandler *ah = this->assembly_handler_pt();
 		if (!ah || typeid(*ah) != typeid(oomph::AssemblyHandler)) return std::make_tuple(false, false);
 		if (use_custom_residual_jacobian) return std::make_tuple(false, false);
-		if (__replace_RJM_by_param_deriv) return std::make_tuple(false, false);
+		if (replace_RJM_by_param_deriv) return std::make_tuple(false, false);
 		int ri = -1;
 		for (unsigned i = 0; i < residual_names.size(); i++)
 			if (residual_names[i] == residual_name) { ri = i; break; }

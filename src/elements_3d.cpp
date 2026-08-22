@@ -40,10 +40,9 @@ namespace pyoomph
 	// Tet son of a pyramid: a BulkElementTetra3dC1 bound to the same physics (jitcode) as this pyramid.
 	BulkElementBase *BulkElementPyramid3dC1::create_tet_son_instance() const
 	{
-		BulkElementBase::__CurrentJITCode = jitcode;
+		BulkElementBase::JITCodeScope __jit_scope1(jitcode);
 		auto res = new BulkElementTetra3dC1();
 		res->set_jit_code(jitcode); // res is a tet, not a pyramid -> use the public setter
-		BulkElementBase::__CurrentJITCode = NULL;
 		return res;
 	}
 
@@ -55,10 +54,9 @@ namespace pyoomph
 	// Tet son of a C2 pyramid: a BulkElementTetra3dC2 bound to the same physics (jitcode) as this pyramid.
 	BulkElementBase *BulkElementPyramid3dC2::create_tet_son_instance() const
 	{
-		BulkElementBase::__CurrentJITCode = jitcode;
+		BulkElementBase::JITCodeScope __jit_scope2(jitcode);
 		auto res = new BulkElementTetra3dC2();
 		res->set_jit_code(jitcode); // res is a tet, not a pyramid -> use the public setter
-		BulkElementBase::__CurrentJITCode = NULL;
 		return res;
 	}
 
@@ -136,7 +134,7 @@ namespace pyoomph
 	// BulkElementQuad2dC1. DL uses a 4-value (constant + 3 gradient components) representation.
 	BulkElementBrick3dC1::BulkElementBrick3dC1()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 8;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 8;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 8;
@@ -248,7 +246,7 @@ namespace pyoomph
 
 	BulkElementBrick3dC2::BulkElementBrick3dC2()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 27;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 8;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 8;		
@@ -525,7 +523,7 @@ namespace pyoomph
 
 	BulkElementTetra3dC1::BulkElementTetra3dC1()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 4;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 4;
 		eleminfo.nnode_DL = 4;
@@ -595,7 +593,7 @@ namespace pyoomph
 		unsigned n_node = this->nnode();
         this->set_n_node(n_node +1);      
         this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, 2,true));
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 5;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 4;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 5;
@@ -740,7 +738,7 @@ namespace pyoomph
 
 	BulkElementTetra3dC2::BulkElementTetra3dC2(bool has_bubble)
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = (has_bubble ? 15 : 10);
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 4;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = (has_bubble ? 15 : 10);
@@ -756,7 +754,7 @@ namespace pyoomph
    // in which case the son must keep the bubble-enriched node layout too.
    BulkElementBase *BulkElementTetra3dC2::create_son_instance() const
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope3(jitcode);
       // A C2TB (bubble-enriched) father must spawn a genuine BulkElementTetra3dC2TB son: the bubble
       // needs real 11th-15th (4 face-centroid + 1 volume-centroid) node slots and the 15-node nodal
       // space map. A plain BulkElementTetra3dC2(true) only bumps nnode_of_space[C2TB] to 15 while
@@ -765,7 +763,6 @@ namespace pyoomph
       if (dynamic_cast<const BulkElementTetra3dC2TB*>(this) != nullptr) res = new BulkElementTetra3dC2TB();
       else res = new BulkElementTetra3dC2(false);
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
 
@@ -994,7 +991,7 @@ namespace pyoomph
 
 	BulkElementTetra3dC2TB::BulkElementTetra3dC2TB() : BulkElementTetra3dC2(true)
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 15;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 4;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 5;		
@@ -1032,7 +1029,7 @@ namespace pyoomph
     // 6-node linear wedge/triangular-prism element (2 triangular + 3 quadrilateral faces).
     BulkElementWedge3dC1::BulkElementWedge3dC1()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 6;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 6;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 0;		
@@ -1102,7 +1099,7 @@ namespace pyoomph
 
 	BulkElementPyramid3dC1::BulkElementPyramid3dC1()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 5;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 5;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 0;		
@@ -1172,7 +1169,7 @@ namespace pyoomph
 
     BulkElementWedge3dC2::BulkElementWedge3dC2()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 18;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 6; 
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 0;		
@@ -1239,7 +1236,7 @@ namespace pyoomph
 
     BulkElementPyramid3dC2::BulkElementPyramid3dC2() 
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 14;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 5; 
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 0;		

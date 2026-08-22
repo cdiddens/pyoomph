@@ -576,6 +576,10 @@ namespace pyoomph
     }
   };
 
+  // Whether any Problem in this process currently has the named shared library loaded; see the
+  // registry in problem.cpp.
+  bool jit_library_is_loaded(const std::string &fname);
+
   class Problem : public oomph::Problem
   {
   protected:
@@ -590,6 +594,21 @@ namespace pyoomph
     std::map<std::string, GlobalParameterDescriptor *> global_params_by_name;
     std::vector<GlobalParameterDescriptor *> global_params_by_index; // Indexed by GlobalParameterDescriptor::get_global_index()
     //   const FieldDescriptor * assert_field(const std::string & name,const FieldSpace & space );
+
+    // Settings that used to be process-wide statics on BulkElementBase / InterfaceElementBase,
+    // reachable from Python as free functions. They are properties of one Problem: with two alive,
+    // switching a Problem into eigen-error-estimator mode, or suppressing interface-dof interpolation
+    // around its remesh (Problem.remesh_handler_during_multistep does exactly that), silently did the
+    // same to the other one. Mesh::report_interpolation_timing deliberately stayed a static; see the
+    // note there.
+    bool use_eigen_error_estimators = false;
+    bool interpolate_new_interface_dofs = true;
+
+    // When non-NULL, every subsequent elemental assembly returns the derivative of the
+    // residual/Jacobian/mass matrix w.r.t. this global parameter instead of the quantity itself; see
+    // _replace_RJM_by_param_deriv(). Per Problem rather than process-wide, so that a second Problem
+    // is not silently switched into parameter-derivative mode along with the first.
+    double *replace_RJM_by_param_deriv = NULL;
 
     oomph::CRDoubleMatrix *eigen_JacobianMatrixPt, *eigen_MassMatrixPt; // Cached Jacobian/mass matrices from the last assemble_eigenproblem_matrices() call
     double global_temporal_error_norm() override; // Combines the per-mesh temporal error norm contributions into a single global error estimate used for adaptive timestepping
@@ -1352,6 +1371,15 @@ namespace pyoomph
     virtual void quiet(bool _quiet); // Suppresses/re-enables oomph-lib's and pyoomph's own informational output
     virtual bool _set_solved_residual(std::string name, bool raise_error=true,bool remove_dofs_without_jacobian_row=true); // Switches which named residual (see residual_names) subsequent assembly/solves act on
     bool has_empty_jacobian_rows_marked() const; // Whether the last assemble_defined_field_list()/assign_eqn_numbers() found fields with empty Jacobian rows/cols that had to be pinned
+    bool get_use_eigen_error_estimators() const { return use_eigen_error_estimators; }
+    void set_use_eigen_error_estimators(bool on) { use_eigen_error_estimators = on; }
+    bool get_interpolate_new_interface_dofs() const { return interpolate_new_interface_dofs; }
+    void set_interpolate_new_interface_dofs(bool on) { interpolate_new_interface_dofs = on; }
+
+    // The parameter whose derivative elemental assembly currently returns instead of the
+    // residual/Jacobian/mass matrix, or NULL for normal assembly. Read once per element assembly
+    // by BulkElementBase::fill_in_generic_residual_contribution_jit.
+    double *get_replace_RJM_by_param_deriv() const { return replace_RJM_by_param_deriv; }
     virtual void _replace_RJM_by_param_deriv(std::string name,bool active); // Toggles replacing the residual/Jacobian/mass-matrix assembly by the derivative w.r.t. parameter name (used internally for parameter-derivative computations)
     virtual std::string _get_solved_residual() { return _solved_residual; }
     virtual bool is_quiet() const { return _is_quiet; }

@@ -102,7 +102,7 @@ namespace pyoomph
 	// representation, not tied to any actual node.
 	BulkElementQuad2dC1::BulkElementQuad2dC1()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 4;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 4;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 4;
@@ -384,7 +384,7 @@ namespace pyoomph
 	// pressure); DL is again a 3-value discontinuous linear representation.
 	BulkElementQuad2dC2::BulkElementQuad2dC2()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		// std::cout << "SETTING ELEM PTR " <<  eleminfo.elem_ptr << std::endl;
 		eleminfo.nnode = 9;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 4;
@@ -957,7 +957,7 @@ namespace pyoomph
 	// DL always use only the 3 corner nodes / a constant+linear representation.
 	BulkElementTri2dC1::BulkElementTri2dC1(bool has_bubble)
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = (has_bubble ? 4 : 3);
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = (has_bubble ? 4 : 3);
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 3;
@@ -1069,7 +1069,7 @@ namespace pyoomph
 	// corner/bubble nodes; DL is a constant+linear discontinuous representation.
 	BulkElementTri2dC2::BulkElementTri2dC2(bool with_bubble)
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 6;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = (with_bubble ? 7:6); // Must be done here! DG field allocation would otherwise alloc only 6 for D2TB!
 		eleminfo.nnode_of_space[SPACE_INDEX_C2] = 6;
@@ -1085,7 +1085,7 @@ namespace pyoomph
     // BulkElementTri2dC2) matching this element, for dynamic_split()/mesh refinement.
     BulkElementBase * BulkElementTri2dC2::create_son_instance() const
 	    {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope1(jitcode);
       // A C2TB (bubble-enriched) father must spawn a genuine BulkElementTri2dC2TB son: the bubble
       // needs a real 7th (centroid) node slot and the 7-node nodal-space map. A plain
       // BulkElementTri2dC2(true) only bumps nnode_of_space[C2TB] to 7 while keeping 6 oomph node
@@ -1094,7 +1094,6 @@ namespace pyoomph
       if (dynamic_cast<const BulkElementTri2dC2TB*>(this) != nullptr) res = new BulkElementTri2dC2TB();
       else res = new BulkElementTri2dC2(false);
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
 
@@ -1376,7 +1375,7 @@ namespace pyoomph
    // used e.g. for LBB-stable low-order Stokes discretizations.
    BulkElementTri2dC1TB::BulkElementTri2dC1TB()  : BulkElementTri2dC1(true)
    {
-		eleminfo.elem_ptr = this;   
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);   
       eleminfo.nnode=4;
       eleminfo.nnode_of_space[SPACE_INDEX_C1]=3;
       eleminfo.nnode_of_space[SPACE_INDEX_C1TB]=4;
@@ -1510,7 +1509,7 @@ namespace pyoomph
 	// BulkElementTri2dC1TB above, layered on top of the quadratic C2 geometry/fields.
 	BulkElementTri2dC2TB::BulkElementTri2dC2TB() : BulkElementTri2dC2(true)
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 7;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2TB] = 7;
 		eleminfo.nnode_of_space[SPACE_INDEX_C2] = 6;

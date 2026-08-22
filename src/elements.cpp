@@ -36,20 +36,10 @@ The main author may be contacted at c.diddens@utwente.nl
 #include "expressions.hpp"
 #include "timestepper.hpp"
 
-namespace pyoomph
-{
-	BulkElementBase *_currently_assembled_element = NULL;
-}
+#include <mutex>
 
 extern "C"
 {
-	double _pyoomph_get_element_size(void *elem_ptr)
-	{
-		throw_runtime_error("Element size will get problems with the casting");
-		pyoomph::BulkElementBase *elem = (pyoomph::BulkElementBase *)elem_ptr;
-		return elem->get_element_diam();
-	}
-
 	double _pyoomph_invoke_callback(void *functab, int jitindex, double *args, int numargs)
 	{
 		JITFuncSpec_Table_FiniteElement_t *ft = (JITFuncSpec_Table_FiniteElement_t *)functab;
@@ -64,16 +54,18 @@ extern "C"
 		expr->_call(flag,arg_list, numargs,result_list,numret,derivative_matrix);
 	}	
 
-	void _pyoomph_fill_shape_buffer_for_point(unsigned index, JITFuncSpec_RequiredShapes_FiniteElement_t *required, int flag)
+	// Called from generated code inside the integration-point loop. The element comes back out of
+	// the eleminfo the generated function was handed; it used to come from a process-wide
+	// _currently_assembled_element, which made the whole assembly path unparallelisable and left a
+	// dangling pointer behind after a remesh.
+	void _pyoomph_fill_shape_buffer_for_point(const JITElementInfo_t *eleminfo, unsigned index, JITFuncSpec_RequiredShapes_FiniteElement_t *required, int flag)
 	{
-		pyoomph::_currently_assembled_element->fill_shape_buffer_for_integration_point(index, *required, flag);
+		((pyoomph::BulkElementBase *)eleminfo->elem_ptr)->fill_shape_buffer_for_integration_point(index, *required, flag);
 	}
 }
 
 namespace pyoomph
 {
-	double *__replace_RJM_by_param_deriv = NULL;
-
 	size_t __shape_buffer_mem_usage = 0;
 	void *counted_calloc(size_t num, size_t size)
 	{
@@ -290,8 +282,6 @@ namespace pyoomph
 		return map[maxorder];
 	}
 
-	JITShapeInfo_t *Default_shape_info_buffer = NULL;
-	//JITShapeInfo_t *temp_shape_info_buffer = NULL;
 
 	// What the (process-wide, shared) shape buffer must be able to hold. The optional parts are kept
 	// out of the buffer unless some code actually asks for them, and the buffer is grown
@@ -336,8 +326,78 @@ namespace pyoomph
 		}
 	};
 
-	// Capabilities the currently allocated Default_shape_info_buffer was built with.
-	static ShapeBufferCaps Default_shape_info_buffer_caps;
+	// Defined below, next to the single-buffer allocator it recurses into.
+	void alloc_dealloc_all_shape_buffers(bool do_alloc, JITShapeInfo_t **buff, const ShapeBufferCaps &caps);
+
+	// Owner of the shape buffers. A "buffer" here is really the five-deep chain built by
+	// alloc_dealloc_all_shape_buffers (the element's own, its bulk, its bulk's bulk, its opposite and
+	// that one's bulk), which an interface element addresses through shape_info->bulk_shapeinfo rather
+	// than through the neighbour's own member - so one chain serves the whole assembly of one element.
+	//
+	// There is deliberately no buffer per element: the chain reaches hundreds of megabytes for a 3D C2
+	// element with analytic Hessians on a moving mesh (see the sizing note on ShapeBufferCaps above),
+	// and an element only needs it while it is actually being assembled. What used to be a single
+	// process-wide buffer is now a small pool, handed out one per concurrently assembling thread, so
+	// that the element loop can be parallelised without every element writing into the same arrays.
+	// In a serial run the pool holds exactly one chain, i.e. the memory footprint is unchanged and the
+	// buffer contents follow the same sequence they always did.
+	//
+	// require() may only be called while nothing is assembling. It grows every chain in the pool,
+	// which frees and reallocates their inner arrays; a thread mid-assembly would be left reading
+	// freed memory. Element construction is the only caller and never overlaps assembly.
+	class ShapeBufferPool
+	{
+		std::vector<JITShapeInfo_t *> all;   // every chain ever built, owned here
+		std::vector<JITShapeInfo_t *> idle;  // the subset nobody is currently assembling into
+		ShapeBufferCaps caps;                // what every chain in `all` was built with
+		std::mutex mtx;
+
+	public:
+		void require(const ShapeBufferCaps &needed)
+		{
+			std::lock_guard<std::mutex> lock(mtx);
+			if (caps.covers(needed))
+				return;
+			// Free with the caps each chain was allocated with (otherwise the recursive free walks the
+			// wrong depths), then rebuild at the widened capabilities.
+			for (auto *b : all)
+				alloc_dealloc_all_shape_buffers(false, &b, caps);
+			caps.absorb(needed);
+			for (auto *b : all)
+				alloc_dealloc_all_shape_buffers(true, &b, caps);
+		}
+
+		JITShapeInfo_t *acquire()
+		{
+			std::lock_guard<std::mutex> lock(mtx);
+			if (!idle.empty())
+			{
+				JITShapeInfo_t *b = idle.back();
+				idle.pop_back();
+				return b;
+			}
+			JITShapeInfo_t *b = NULL;
+			alloc_dealloc_all_shape_buffers(true, &b, caps);
+			all.push_back(b);
+			return b;
+		}
+
+		void release(JITShapeInfo_t *b)
+		{
+			if (!b)
+				return;
+			std::lock_guard<std::mutex> lock(mtx);
+			idle.push_back(b);
+		}
+	};
+
+	static ShapeBufferPool shape_buffer_pool;
+
+	// The chain the calling thread is assembling into, acquired on first use and held until
+	// release_thread_shape_buffer(). Holding it for the thread's lifetime rather than for one
+	// element's assembly keeps the buffer contents in exactly the order the single global buffer
+	// produced them, and costs one chain per worker thread rather than one per element.
+	static thread_local JITShapeInfo_t *__thread_shape_buffer = NULL;
 
 	// Whether any space anywhere in this required-shapes tree (including the bulk/opposite
 	// sub-structures) asks for second spatial derivatives.
@@ -349,10 +409,9 @@ namespace pyoomph
 			if (r->continuous_spaces[i].d2x_psi) return true;
 		return required_shapes_want_d2x(r->bulk_shapes) || required_shapes_want_d2x(r->opposite_shapes);
 	}
-	DynamicJITCode *BulkElementBase::__CurrentJITCode = NULL;
-	unsigned BulkElementBase::zeta_time_history = 0;
-	unsigned BulkElementBase::zeta_coordinate_type = 0; // 0 means Lagrangian, 1 Eulerian, on co-dimensional meshes it will be the boundary coordinate (if set)
-	bool BulkElementBase::use_eigen_error_estimators=false;
+	thread_local DynamicJITCode *BulkElementBase::__CurrentJITCode = NULL;
+	thread_local unsigned BulkElementBase::zeta_time_history = 0;
+	thread_local unsigned BulkElementBase::zeta_coordinate_type = 0; // 0 means Lagrangian, 1 Eulerian, on co-dimensional meshes it will be the boundary coordinate (if set)
 	bool BulkElementBase::detect_inverted_elements=false;
 
 	// Default (unimplemented) hook; concrete element types with higher-order interpolation on
@@ -809,9 +868,11 @@ namespace pyoomph
 		res->initial_cartesian_nondim_size = res->size();
 		res->initial_quality_factor = res->get_quality_factor();
 
-		if (BulkElementBase::__CurrentJITCode->get_func_table()->integration_order)
+		// The element's own code, not the ambient __CurrentJITCode: by this point `res` exists and
+		// carries it, so there is no reason to go back through the construction side channel.
+		if (res->get_jit_code()->get_func_table()->integration_order)
 		{
-			res->set_integration_order(BulkElementBase::__CurrentJITCode->get_func_table()->integration_order);
+			res->set_integration_order(res->get_jit_code()->get_func_table()->integration_order);
 		}
 		return res;
 	}
@@ -1029,6 +1090,9 @@ namespace pyoomph
 		{
 			(*buff)->bulk_shapeinfo = NULL;
 			(*buff)->opposite_shapeinfo = NULL;
+			// `new JITShapeInfo_t` leaves this indeterminate, and the ordinary residual/Jacobian path
+			// only ever reads it - the multi-assemble path is the sole writer, and restores false.
+			(*buff)->during_shared_multi_assembling = false;
 		}
 		else
 		{
@@ -1069,10 +1133,9 @@ namespace pyoomph
 		}
 	}
 
-	// Constructs the element and lazily allocates the process-wide Default_shape_info_buffer
-	// (shared by all elements of the same "shape", since only one element is assembled at a time).
-	// If a previously allocated buffer lacks the second-derivative (Hessian) storage but the
-	// current code requires it, the buffer is reallocated with that storage included.
+	// Constructs the element and widens the shape-buffer pool to whatever this code needs. The
+	// element does not own a buffer; it borrows one from the pool for the duration of an assembly
+	// (see ShapeBufferPool and get_shape_info below).
 	BulkElementBase::BulkElementBase()
 	{
 		memset(&eleminfo, 0, sizeof(eleminfo));
@@ -1084,6 +1147,9 @@ namespace pyoomph
 		}
 
 		const JITFuncSpec_Table_FiniteElement_t *ft = this->jitcode->get_func_table();
+		// Set once here (eleminfo was memset just above and is never zeroed again), so that generated
+		// code can reach this code's table without a file-scope global inside the .so.
+		eleminfo.functable = const_cast<JITFuncSpec_Table_FiniteElement_t *>(ft);
 
 		ShapeBufferCaps needed;
 		needed.hessian_moving_mesh = ft->hessian_generated && ft->moving_nodes;
@@ -1100,24 +1166,31 @@ namespace pyoomph
 			if (needed.second_derivs_hessian) needed.second_derivs_dcoord = true;
 		}
 
-		if (!Default_shape_info_buffer)
-		{
-			Default_shape_info_buffer_caps = needed;
-			alloc_dealloc_all_shape_buffers(true, &Default_shape_info_buffer, Default_shape_info_buffer_caps);
-		}
-		else if (!Default_shape_info_buffer_caps.covers(needed))
-		{
-			// A later code needs more than the buffer was built with. Free with the caps it
-			// was allocated with (otherwise the recursive free walks the wrong depths), then grow.
-			alloc_dealloc_all_shape_buffers(false, &Default_shape_info_buffer, Default_shape_info_buffer_caps);
-			Default_shape_info_buffer_caps.absorb(needed);
-			alloc_dealloc_all_shape_buffers(true, &Default_shape_info_buffer, Default_shape_info_buffer_caps);
-		}
-		shape_info = Default_shape_info_buffer;
+		shape_buffer_pool.require(needed);
 
 		this->set_nlagrangian_and_ndim(this->jitcode->get_func_table()->lagr_dim, this->jitcode->get_func_table()->nodal_dim);
 		this->ensure_external_data();
 		
+	}
+
+	// The shape buffer this thread assembles into. Acquired lazily so that no call path can reach the
+	// buffer without one being held - the alternative, an RAII scope at every entry point, is one
+	// missed entry point away from a null dereference at runtime.
+	JITShapeInfo_t *BulkElementBase::get_shape_info() const
+	{
+		if (!__thread_shape_buffer)
+			__thread_shape_buffer = shape_buffer_pool.acquire();
+		return __thread_shape_buffer;
+	}
+
+	// Hands this thread's buffer back to the pool. Nothing calls it yet: with a serial element loop
+	// the main thread simply keeps its one buffer for the life of the process, exactly as the old
+	// single global buffer did. A parallel element loop calls it at the end of each worker so the
+	// pool stays bounded by the number of threads actually in flight.
+	void release_thread_shape_buffer()
+	{
+		shape_buffer_pool.release(__thread_shape_buffer);
+		__thread_shape_buffer = NULL;
 	}
 
 	// The owned slots of eleminfo.nodal_coords[i], i.e. the ones this element new'ed and must delete:
@@ -1958,7 +2031,7 @@ namespace pyoomph
 	// primary solution to drive mesh refinement.
 	unsigned BulkElementBase::num_Z2_flux_terms()
 	{
-		if (BulkElementBase::use_eigen_error_estimators) return jitcode->get_func_table()->num_Z2_flux_terms_for_eigen;
+		if (jitcode->get_problem()->get_use_eigen_error_estimators()) return jitcode->get_func_table()->num_Z2_flux_terms_for_eigen;
 		else return jitcode->get_func_table()->num_Z2_flux_terms;
 	}
 
@@ -1968,14 +2041,14 @@ namespace pyoomph
 	unsigned BulkElementBase::ncompound_fluxes()
 	{
 		auto *ft = jitcode->get_func_table();
-		const unsigned n = (BulkElementBase::use_eigen_error_estimators ? ft->num_Z2_compound_fluxes_for_eigen : ft->num_Z2_compound_fluxes);
+		const unsigned n = (jitcode->get_problem()->get_use_eigen_error_estimators() ? ft->num_Z2_compound_fluxes_for_eigen : ft->num_Z2_compound_fluxes);
 		return (n ? n : 1);
 	}
 
 	void BulkElementBase::get_Z2_compound_flux_indices(oomph::Vector<unsigned> &flux_index)
 	{
 		auto *ft = jitcode->get_func_table();
-		const unsigned *idx = (BulkElementBase::use_eigen_error_estimators ? ft->Z2_flux_group_index_for_eigen : ft->Z2_flux_group_index);
+		const unsigned *idx = (jitcode->get_problem()->get_use_eigen_error_estimators() ? ft->Z2_flux_group_index_for_eigen : ft->Z2_flux_group_index);
 		if (!idx) return; // caller initialised the vector to all-zero, which is the single-group case
 		for (unsigned int i = 0; i < flux_index.size(); i++) flux_index[i] = idx[i];
 	}
@@ -1986,14 +2059,14 @@ namespace pyoomph
 	double BulkElementBase::Z2_compound_flux_normalize_relative(const unsigned &g)
 	{
 		auto *ft = jitcode->get_func_table();
-		const double *v = (BulkElementBase::use_eigen_error_estimators ? ft->Z2_group_normalize_relative_for_eigen : ft->Z2_group_normalize_relative);
+		const double *v = (jitcode->get_problem()->get_use_eigen_error_estimators() ? ft->Z2_group_normalize_relative_for_eigen : ft->Z2_group_normalize_relative);
 		return (v ? v[g] : 1.0);
 	}
 
 	double BulkElementBase::Z2_compound_flux_weight(const unsigned &g)
 	{
 		auto *ft = jitcode->get_func_table();
-		const double *v = (BulkElementBase::use_eigen_error_estimators ? ft->Z2_group_weight_for_eigen : ft->Z2_group_weight);
+		const double *v = (jitcode->get_problem()->get_use_eigen_error_estimators() ? ft->Z2_group_weight_for_eigen : ft->Z2_group_weight);
 		return (v ? v[g] : 1.0);
 	}
 
@@ -2002,7 +2075,8 @@ namespace pyoomph
 	// drive adaptive mesh refinement.
 	void BulkElementBase::get_Z2_flux(const oomph::Vector<double> &s, oomph::Vector<double> &flux)
 	{
-		bool has_fluxes=(BulkElementBase::use_eigen_error_estimators ? jitcode->get_func_table()->GetZ2FluxesForEigen : jitcode->get_func_table()->GetZ2Fluxes );
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
+		bool has_fluxes=(jitcode->get_problem()->get_use_eigen_error_estimators() ? jitcode->get_func_table()->GetZ2FluxesForEigen : jitcode->get_func_table()->GetZ2Fluxes );
 		if (has_fluxes)
 		{
 			this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
@@ -2010,7 +2084,7 @@ namespace pyoomph
 			double JLagr;
 			this->fill_shape_info_at_s(s, 0, jitcode->get_func_table()->shapes_required_Z2Fluxes, JLagr, 0);
 			this->set_remaining_shapes_appropriately(shape_info,jitcode->get_func_table()->shapes_required_Z2Fluxes);
-			if (BulkElementBase::use_eigen_error_estimators)
+			if (jitcode->get_problem()->get_use_eigen_error_estimators())
 			{
 				jitcode->get_func_table()->GetZ2FluxesForEigen(&eleminfo, shape_info, &(flux[0]));
 			}

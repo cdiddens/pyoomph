@@ -40,8 +40,8 @@ namespace pyoomph
   class PeriodicBSplineBasis
   {
   protected:
-    static std::vector<std::vector<double>> GL_x; // Gauss-Lengendre quadrature points, indexed by [order-1][point index]
-    static std::vector<std::vector<double>> GL_w; // Gauss-Lengendre quadrature weights, indexed by [order-1][point index]
+    static const std::vector<std::vector<double>> GL_x; // Gauss-Lengendre quadrature points, indexed by [order-1][point index]
+    static const std::vector<std::vector<double>> GL_w; // Gauss-Lengendre quadrature weights, indexed by [order-1][point index]
     std::vector<double> knots;                     // knots including the periodic knot at the end
     std::vector<double> augknots;                  // augmented knots (including the periodic knots at the beginning and the end and the shifted knots for even order)
     unsigned zero_offset;                          // index within augknots corresponding to the start of the "real" (non-augmented) knot range

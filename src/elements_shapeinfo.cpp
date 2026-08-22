@@ -73,6 +73,7 @@ namespace pyoomph
 	// nothing - the fill simply overwrites it, which is what a first attempt at this control did.
 	static const bool __poison_everything = __poison_unrequired && !strcmp(__poison_unrequired_mode, "all");
 	// Engagement counter, for the same reason: "0 entries poisoned" is not a clean bill of health.
+	// Diagnostic only (see the note in elements_hanging.cpp): process-wide and not thread-safe.
 	static unsigned long __poison_written = 0;
 	static struct __PoisonReport
 	{
@@ -179,7 +180,7 @@ namespace pyoomph
 	// shape_info-taking overload below for the actual work.
 	double BulkElementBase::fill_shape_info_at_s(const oomph::Vector<double> &s, const unsigned int &index, const JITFuncSpec_RequiredShapes_FiniteElement_t &required, double &JLagr, unsigned int flag, oomph::DenseMatrix<double> *dxds,unsigned history_index) const
 	{
-		return fill_shape_info_at_s(s, index, required, this->shape_info, JLagr, flag, dxds,history_index);
+		return fill_shape_info_at_s(s, index, required, this->get_shape_info(), JLagr, flag, dxds,history_index);
 	}
 
 	/**
@@ -2462,6 +2463,7 @@ namespace pyoomph
 	// the combined integration weights (weight * Jacobian) used by JIT code to form dx/dX/etc.
 	void BulkElementBase::fill_shape_buffer_for_integration_point(unsigned ipt, const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		oomph::Vector<double> s(this->dim());
 		for (unsigned int i = 0; i < this->dim(); i++)
 			s[i] = integral_pt()->knot(ipt, i);
@@ -2666,6 +2668,7 @@ namespace pyoomph
 	// called before fill_shape_buffer_for_integration_point() is used for the individual points.
 	void BulkElementBase::prepare_shape_buffer_for_integration(const JITFuncSpec_RequiredShapes_FiniteElement_t &required_shapes, unsigned int flag)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (__poison_unrequired)
 			this->poison_unrequired_shapes(required_shapes, shape_info, true);
@@ -2725,8 +2728,6 @@ namespace pyoomph
 
 		set_remaining_shapes_appropriately(shape_info, required_shapes);
 
-		_currently_assembled_element = this;
-		
       // Should be fine here!
       this->fill_shape_info_element_sizes(required_shapes,shape_info,flag);
 
@@ -2748,12 +2749,13 @@ namespace pyoomph
 	// EvalIntegralExpression, which reads the prepared shape_info buffer.
 	double BulkElementBase::eval_integral_expression(unsigned index)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numintegral_expressions)
 			throw_runtime_error("Cannot evaluate integral expression at too large index " + std::to_string(index));		
 		this->interpolate_hang_values();
 		prepare_shape_buffer_for_integration(functable->shapes_required_IntegralExprs, 0);
-		return functable->EvalIntegralExpression(&eleminfo, this->shape_info, index);
+		return functable->EvalIntegralExpression(&eleminfo, shape_info, index);
 	}
 
 	// Evaluates a user-defined "local expression" (a pointwise, non-integrated expression) at a
@@ -2768,6 +2770,7 @@ namespace pyoomph
 	// Evaluates a user-defined "local expression" at an arbitrary local coordinate s.
 	double BulkElementBase::eval_local_expression_at_s(unsigned index, const oomph::Vector<double> &s)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numlocal_expressions)
 			throw_runtime_error("Cannot evaluate local expression at too large index " + std::to_string(index));
@@ -2778,9 +2781,8 @@ namespace pyoomph
 		this->fill_shape_info_at_s(s, 0, jitcode->get_func_table()->shapes_required_LocalExprs, JLagr, 0);
 		this->prepare_shape_buffer_for_integration(jitcode->get_func_table()->shapes_required_LocalExprs, 0);
 //		set_remaining_shapes_appropriately(shape_info, jitcode->get_func_table()->shapes_required_LocalExprs);
-      _currently_assembled_element = this;
 	    //std::cout << "CALLING EVAL LOCAL EXPRESSION  " << this << " ELEMINFO " << &eleminfo << std::endl;
-		return functable->EvalLocalExpression(&eleminfo, this->shape_info, index);
+		return functable->EvalLocalExpression(&eleminfo, shape_info, index);
 	}
 
 	// Evaluates a user-defined "extremum expression" (used e.g. to track min/max of some field)
@@ -2795,6 +2797,7 @@ namespace pyoomph
 	// Evaluates a user-defined "extremum expression" at an arbitrary local coordinate s.
 	double BulkElementBase::eval_extremum_expression_at_s(unsigned index, const oomph::Vector<double> &s)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numextremum_expressions)
 			throw_runtime_error("Cannot evaluate extremum expression at too large index " + std::to_string(index));
@@ -2804,8 +2807,7 @@ namespace pyoomph
 		double JLagr;
 		this->fill_shape_info_at_s(s, 0, jitcode->get_func_table()->shapes_required_ExtremumExprs, JLagr, 0);
 		this->prepare_shape_buffer_for_integration(jitcode->get_func_table()->shapes_required_ExtremumExprs, 0);
-      _currently_assembled_element = this;	    
-		return functable->EvalExtremumExpression(&eleminfo, this->shape_info, index);
+		return functable->EvalExtremumExpression(&eleminfo, shape_info, index);
 	}	
 
 	// Deliberately NOT built on fill_shape_info_at_s: this is called several times per Runge-Kutta
@@ -2882,6 +2884,7 @@ namespace pyoomph
 	// drop them silently.
 	void BulkElementBase::eval_tracer_advection_at_s(unsigned index, const oomph::Vector<double> &s, oomph::Vector<double> &xvelo)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (index >= functable->numtracer_advections)
 			throw_runtime_error("Cannot evaluate tracer advection at too large index " + std::to_string(index));
@@ -2900,7 +2903,6 @@ namespace pyoomph
 		set_remaining_shapes_appropriately(shape_info, required);
 
 		xvelo.assign(3, 0.0);
-		_currently_assembled_element = this;
-		functable->EvalTracerAdvection(&eleminfo, this->shape_info, index, &(xvelo[0]));
+		functable->EvalTracerAdvection(&eleminfo, shape_info, index, &(xvelo[0]));
 	}
 }

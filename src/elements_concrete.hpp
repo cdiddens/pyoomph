@@ -85,13 +85,12 @@ namespace pyoomph
     BulkElementODE0d(DynamicJITCode *jit_code, oomph::TimeStepper *tstepper);
     ~BulkElementODE0d() override;
 
-    // Factory that sets the __CurrentJITCode "side channel" (see BulkElementBase) around
-    // construction so the new element picks up the right JIT code, then clears it again.
+    // Factory that opens the __CurrentJITCode "side channel" (see BulkElementBase::JITCodeScope)
+    // around construction so the new element picks up the right JIT code.
     static BulkElementODE0d *construct_new(DynamicJITCode *jit_code, oomph::TimeStepper *tstepper)
     {
-      BulkElementBase::__CurrentJITCode = jit_code;
+      BulkElementBase::JITCodeScope __jit_scope1(jit_code);
       BulkElementODE0d *res = new BulkElementODE0d(jit_code, tstepper);
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     double get_quality_factor() override { return 1.0; }
@@ -206,10 +205,9 @@ namespace pyoomph
     std::vector<double> get_outline(bool lagrangian) override;
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope2(jitcode);
       auto res = new BulkElementLine1dC1();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
 
@@ -282,10 +280,9 @@ namespace pyoomph
     void further_setup_hanging_nodes() override {};
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope3(jitcode);
       auto res = new BulkElementLine1dC2();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 1, order)); }
@@ -340,10 +337,9 @@ namespace pyoomph
     std::vector<double> get_outline(bool lagrangian) override;
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope4(jitcode);
       auto res = new BulkTElementLine1dC1();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
 
@@ -417,10 +413,9 @@ namespace pyoomph
     void further_setup_hanging_nodes() override {};
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope5(jitcode);
       auto res = new BulkTElementLine1dC2();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 1, order)); }
@@ -488,10 +483,9 @@ namespace pyoomph
     }
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope6(jitcode);
       auto res = new BulkElementQuad2dC1();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
@@ -574,10 +568,9 @@ namespace pyoomph
     void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override;
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope7(jitcode);
       auto res = new BulkElementQuad2dC2();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
@@ -639,10 +632,9 @@ namespace pyoomph
     void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope8(jitcode);
       auto res = new BulkElementTri2dC1();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 2, order)); }
@@ -697,10 +689,9 @@ namespace pyoomph
     // Same failure mode as the C2TB case, see BulkElementTri2dC2::create_son_instance.
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope9(jitcode);
       auto res = new BulkElementTri2dC1TB();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
 
@@ -884,10 +875,9 @@ namespace pyoomph
     void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope10(jitcode);
       auto res = new BulkElementBrick3dC1();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 3, order)); }
@@ -966,10 +956,9 @@ namespace pyoomph
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope11(jitcode);
       auto res = new BulkElementBrick3dC2();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 3, order)); }
@@ -1044,10 +1033,9 @@ namespace pyoomph
     void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope12(jitcode);
       auto res = new BulkElementTetra3dC1();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order)); }
@@ -1096,10 +1084,9 @@ namespace pyoomph
     }
     BulkElementBase *create_son_instance() const override
     {
-      BulkElementBase::__CurrentJITCode = jitcode;
+      BulkElementBase::JITCodeScope __jit_scope13(jitcode);
       auto res = new BulkElementTetra3dC1TB();
       res->jitcode = jitcode;
-      BulkElementBase::__CurrentJITCode = NULL;
       return res;
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(true, 3, order,true)); }
@@ -1320,10 +1307,9 @@ namespace pyoomph
       void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
       BulkElementBase *create_son_instance() const override
       {
-          BulkElementBase::__CurrentJITCode = jitcode;
+          BulkElementBase::JITCodeScope __jit_scope14(jitcode);
           auto res = new BulkElementWedge3dC1();
           res->jitcode = jitcode;
-          BulkElementBase::__CurrentJITCode = NULL;
           return res;
       }
       void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
@@ -1387,10 +1373,9 @@ namespace pyoomph
       void further_setup_hanging_nodes() override { BulkElementBase::further_setup_hanging_nodes(); } // There can't be any problem here, since it is all isoparametric
       BulkElementBase *create_son_instance() const override
       {
-          BulkElementBase::__CurrentJITCode = jitcode;
+          BulkElementBase::JITCodeScope __jit_scope15(jitcode);
           auto res = new BulkElementPyramid3dC1();
           res->jitcode = jitcode;
-          BulkElementBase::__CurrentJITCode = NULL;
           return res;
       }
       // Factory for a TETRAHEDRAL son of the same physics (same jitcode) -- used by
@@ -1465,10 +1450,9 @@ namespace pyoomph
       oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override { return this->generic_get_interpolating_node_at_local_coordinate(s, value_id); }
       BulkElementBase *create_son_instance() const override
       {
-          BulkElementBase::__CurrentJITCode = jitcode;
+          BulkElementBase::JITCodeScope __jit_scope16(jitcode);
           auto res = new BulkElementWedge3dC2();
           res->jitcode = jitcode;
-          BulkElementBase::__CurrentJITCode = NULL;
           return res;
       }
       void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 4, order)); }
@@ -1596,10 +1580,9 @@ namespace pyoomph
       oomph::Node *get_interpolating_node_at_local_coordinate(const oomph::Vector<double> &s, const int &value_id) override { return this->generic_get_interpolating_node_at_local_coordinate(s, value_id); }
       BulkElementBase *create_son_instance() const override
       {
-          BulkElementBase::__CurrentJITCode = jitcode;
+          BulkElementBase::JITCodeScope __jit_scope17(jitcode);
           auto res = new BulkElementPyramid3dC2();
           res->jitcode = jitcode;
-          BulkElementBase::__CurrentJITCode = NULL;
           return res;
       }
       // Mixed red-split of a C2 pyramid: 6 sub-pyramids (create_son_instance) + 4 tets. The tet son is a

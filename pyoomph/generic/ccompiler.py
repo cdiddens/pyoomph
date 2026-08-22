@@ -375,7 +375,22 @@ int main (int argc, char **argv) {
             src=self.get_code_filename()
         #print("Compiling "+src+" to shared library "+self.get_lib_filename()+" with compiler "+str(self.comp.compiler_type)+" i.e. "+self.comp.compiler_so[0]) #type:ignore
         obj=self.comp.compile([src],extra_preargs=preargs,extra_postargs=preargs,debug=os.environ.get('PYOOMPH_DEBUG') == "1")
-        self.comp.link(self.comp.SHARED_LIBRARY, obj,self.get_lib_filename(),extra_postargs=link_extra_postargs) #type:ignore
+        # Link to a sibling temp name and rename it into place, rather than letting the linker write
+        # the final name directly. A direct write truncates and rewrites the same inode, which may be
+        # mmapped right now by a library another Problem in this process still has loaded; os.replace
+        # is atomic and installs a new inode, so an existing mapping keeps the bytes it was opened
+        # with. Same reasoning as JITCache.try_restore in jit_cache.py.
+        final=self.get_lib_filename()
+        tmp=final+".tmp"+str(os.getpid())
+        self.comp.link(self.comp.SHARED_LIBRARY, obj,tmp,extra_postargs=link_extra_postargs) #type:ignore
+        try:
+            os.replace(tmp,final)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
         return True
 
 

@@ -548,8 +548,6 @@ class Problem(_pyoomph.Problem):
         #self._outdir=os.path.join(os.path.dirname(scriptfile),os.path.basename(scriptfile))
         self._outdir:str = os.path.basename(scriptfile)
 
-        self._bulk_element_code_counter:int=0
-
         self._first_step:bool=True
         self._suppress_code_writing:bool=False
         self._suppress_compilation:bool=False
@@ -558,6 +556,7 @@ class Problem(_pyoomph.Problem):
         self.ignore_command_line:bool=False
 
         self._ccode_dir:str="_ccode"
+        self._ccode_dir_is_unique:bool=False # set once _claim_unique_ccode_dir has moved us out of another Problem's way
         self._dof_selector:_DofSelector | None=None # The desired selected dofs
         self._dof_selector_used:_DofSelector | None | Literal["INVALID"]=None
 
@@ -2243,7 +2242,7 @@ class Problem(_pyoomph.Problem):
                 b._elemental_error_max_override=mesh_errs[i]
                 
         if self._adapt_eigenindex is not None and self._last_eigenvectors is not None and len(self._last_eigenvectors)>self._adapt_eigenindex:
-            _pyoomph.set_use_eigen_Z2_error_estimators(True)
+            self.set_use_eigen_Z2_error_estimators(True)
             evect=self._last_eigenvectors[self._adapt_eigenindex]
             has_imag=numpy.amax(numpy.absolute(numpy.imag(evect)))>0.00001*numpy.amax(numpy.absolute(numpy.real(evect)))
             #print("EIG AS DOF")
@@ -2286,7 +2285,7 @@ class Problem(_pyoomph.Problem):
             for _name,mesh in self._meshdict.items():
                 if isinstance(mesh,ODEStorageMesh): continue
                 repair_hanging(mesh)
-            _pyoomph.set_use_eigen_Z2_error_estimators(False)
+            self.set_use_eigen_Z2_error_estimators(False)
             #print("RESET")
 
         # The desired_ndof controller runs HERE, on the raw estimator errors and before any override
@@ -3663,6 +3662,7 @@ class Problem(_pyoomph.Problem):
         if interpolator is None:
             interpolator=self.mesh_interpolator
         self._ccode_dir = code_dir
+        self._ccode_dir_is_unique = True # explicitly chosen by the caller; never second-guess it
 
         if not self.is_initialised():
             self.initialise()
@@ -4967,7 +4967,31 @@ class Problem(_pyoomph.Problem):
             
 
 
+    def _claim_unique_ccode_dir(self,subname:str)->None:
+        """Move this Problem's generated code out of the way of another live Problem's.
+
+        Two Problems default to the same output directory and the same "_ccode" below it, so two
+        same-named domains compile to the same .so path. dlopen dedupes by inode and only bumps a
+        refcount, so the second Problem would silently be handed the first one's compiled equations
+        while its own compiler overwrote that file underneath the live mapping. Checked at the point
+        of collision rather than in __init__, so the ordinary single-Problem layout is untouched and
+        a loop that reuses one variable for many Problems does not accumulate directories.
+        """
+        if self._outdir is None or self._ccode_dir_is_unique:
+            return
+        ext=self.get_ccompiler().get_shared_lib_extension()
+        if not _pyoomph.jit_library_is_loaded(os.path.join(self._outdir,self._ccode_dir,subname)+ext):
+            return
+        base=self._ccode_dir
+        n=1
+        while _pyoomph.jit_library_is_loaded(os.path.join(self._outdir,base+"_"+str(n),subname)+ext):
+            n+=1
+        self._ccode_dir=base+"_"+str(n)
+        self._ccode_dir_is_unique=True
+        print("Another Problem in this process already uses "+base+"; this one compiles its equations into "+self._ccode_dir+" instead")
+
     def compile_bulk_element_code(self,elementtype:FiniteElementCodeGenerator,bulkmesh:AnyMesh,subname:str) -> _pyoomph.DynamicJITCode:
+        self._claim_unique_ccode_dir(subname)
         if self._outdir is not None:
             destpath=os.path.join(self._outdir,self._ccode_dir)
             Path(destpath).mkdir(parents=True, exist_ok=True)
@@ -5023,7 +5047,6 @@ class Problem(_pyoomph.Problem):
 
         mpi_barrier()
         #print("REt MPI")
-        self._bulk_element_code_counter=self._bulk_element_code_counter+1
         return res
 
 
@@ -8841,7 +8864,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             assert isinstance(fname,str), "relative_to_output makes no sense when reading from a stream"
             fname=os.path.join(self.get_output_directory(),fname)
 
-        _pyoomph.set_interpolate_new_interface_dofs(False) # We may not interpolate the additional dofs on newly constructed interface nodes
+        self.set_interpolate_new_interface_dofs(False) # We may not interpolate the additional dofs on newly constructed interface nodes
         self.invalidate_cached_mesh_data()
         dump = DumpFile(fname, False)
         good=dump.check_footer("EOF_pyoomph")
@@ -8897,7 +8920,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             self.actions_before_transient_solve()
         elif self._last_bc_setting=="stationary":
             self.actions_before_stationary_solve()
-        _pyoomph.set_interpolate_new_interface_dofs(True) # Activate the interpolation again, good for spatial adaptivity
+        self.set_interpolate_new_interface_dofs(True) # Activate the interpolation again, good for spatial adaptivity
         return True
 
     ############################################################################################

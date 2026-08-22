@@ -1924,12 +1924,14 @@ void PyReg_Mesh(nb::module_ &m)
 		//  .def(nb::init<pyoomph::Problem*>());
 		.def(nb::init<>());
 
+	m.def("jit_library_is_loaded", &pyoomph::jit_library_is_loaded, nb::arg("filename"),
+		  "Whether some Problem in this process currently has the named JIT-compiled shared library loaded. dlopen dedupes by inode, so a second Problem that resolves an element code to an already-loaded path silently gets the first Problem's compiled equations; ask this before compiling and choose a different path instead.");
 	m.def("set_tolerance_for_singular_jacobian", [](double tol)
 		  { oomph::FiniteElement::Tolerance_for_singular_jacobian = tol; }, nb::arg("tolerance"), "Sets the tolerance below which the local coordinate-to-Eulerian Jacobian of an element is considered singular (raising an error)");
-	m.def("set_interpolate_new_interface_dofs", [](bool on)
-		  { pyoomph::InterfaceElementBase::interpolate_new_interface_dofs = on; }, nb::arg("on"), "Globally controls whether newly created interface degrees of freedom (e.g. after refinement) are interpolated from the neighbouring nodes or initialized to zero");
-	m.def("set_use_eigen_Z2_error_estimators", [](bool on)
-		  { pyoomph::BulkElementBase::use_eigen_error_estimators = on; }, nb::arg("on"), "Globally controls whether the Eigen-based implementation is used for the Zienkiewicz-Zhu (Z2) spatial error estimator");
+	// set_interpolate_new_interface_dofs and set_use_eigen_Z2_error_estimators used to write a
+	// process-wide static and are now Problem methods (see Problem.set_* in nanobind/problem.cpp):
+	// Problem.remesh_handler_during_multistep switches interface-dof interpolation off and on again
+	// around its remesh, which with two Problems alive also switched it for the other one.
 	m.def("set_detect_inverted_elements", [](bool on)
 		  { pyoomph::BulkElementBase::detect_inverted_elements = on; }, nb::arg("on"), "Globally controls whether an element that has turned inside out raises an error while its shape buffer is filled, i.e. whether the signed determinant of the Eulerian mapping dx/ds is required to be strictly positive at every integration point. Only applies where that mapping is square (element dimension equal to nodal dimension); interface elements have no orientation and are skipped. Off by default. When on, adaptive time stepping and arclength continuation catch the error and retry with a smaller step instead of continuing on a folded mesh; the check costs roughly 2% of the assembly time while enabled and nothing while disabled");
 	m.def("get_detect_inverted_elements", []()

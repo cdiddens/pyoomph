@@ -1199,7 +1199,7 @@ namespace pyoomph
 					this->add_additional_values(additional_data_values, value_index);
 				   for (unsigned l = 0; l < eleminfo.nnode; ++l)
 				   {
-					  if (additional_data_values[l] && !already_allocated[l] && interpolate_new_interface_dofs) this->interpolate_newly_constructed_additional_dof(l,value_index,space_info->space_name);
+					  if (additional_data_values[l] && !already_allocated[l] && jitcode->get_problem()->get_interpolate_new_interface_dofs()) this->interpolate_newly_constructed_additional_dof(l,value_index,space_info->space_name);
 					}				
 				}
 			}
@@ -2866,5 +2866,4 @@ namespace pyoomph
 		oomph::FaceElement::assign_additional_local_eqn_numbers();
 	}
 
-	bool InterfaceElementBase::interpolate_new_interface_dofs=true;
 }

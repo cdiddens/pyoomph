@@ -5282,7 +5282,7 @@ namespace pyoomph
 	{
 		if (this->use_shared_shape_buffer_during_multi_assemble)
 		{
-			os << indent << "unsigned n_int_pt=(my_func_table->during_shared_multi_assembling ? 1 : shapeinfo->n_int_pt);" << std::endl;
+			os << indent << "unsigned n_int_pt=(shapeinfo->during_shared_multi_assembling ? 1 : shapeinfo->n_int_pt);" << std::endl;
 			os << indent << "for(unsigned ipt=0;ipt<n_int_pt;ipt++)" << std::endl;
 		}
 		else
@@ -5292,10 +5292,10 @@ namespace pyoomph
 		os << indent << "{" << std::endl;
 		if (this->use_shared_shape_buffer_during_multi_assemble)
 		{
-			os << indent << "   if (!my_func_table->during_shared_multi_assembling)" << std::endl;
+			os << indent << "   if (!shapeinfo->during_shared_multi_assembling)" << std::endl;
 			os << indent << "   {" << std::endl;
 		}
-		os << indent << "  my_func_table->fill_shape_buffer_for_point(ipt, " << required_table_and_flag << ");" << std::endl;
+		os << indent << "  my_func_table->fill_shape_buffer_for_point(eleminfo, ipt, " << required_table_and_flag << ");" << std::endl;
 		if (this->use_shared_shape_buffer_during_multi_assemble)
 		{
 			os << indent << "   }" << std::endl;
@@ -6563,7 +6563,15 @@ namespace pyoomph
 		}
 		os << "#include \"jitbridge.h\"" << std::endl
 		   << std::endl;
-		os << "static JITFuncSpec_Table_FiniteElement_t * my_func_table;" << std::endl
+		// my_func_table used to be a file-scope `static JITFuncSpec_Table_FiniteElement_t *` here,
+		// assigned by JIT_ELEMENT_init. One .so serving two Problems then shared one pointer: dlopen
+		// dedupes by inode, so the second Problem's init silently repointed it and the first
+		// Problem's elements started reading the second's global_parameters (and dangled once that
+		// Problem was destroyed). It is now the code's own table reached through the element info
+		// that every generated entry point already receives. Kept as a macro rather than rewritten
+		// at ~15 emission sites so that the compiler flags any body that has no `eleminfo` in scope
+		// instead of that being found at runtime.
+		os << "#define my_func_table (eleminfo->functable)" << std::endl
 		   << std::endl;
 	}
 
@@ -6637,7 +6645,7 @@ namespace pyoomph
 			os << "  double res=0.0;" << std::endl;
 			os << "  for(unsigned ipt=0;ipt<shapeinfo->n_int_pt;ipt++)" << std::endl;
 			os << "  {" << std::endl;
-			os << "    my_func_table->fill_shape_buffer_for_point(ipt, &(my_func_table->shapes_required_IntegralExprs), 0);" << std::endl;
+			os << "    my_func_table->fill_shape_buffer_for_point(eleminfo, ipt, &(my_func_table->shapes_required_IntegralExprs), 0);" << std::endl;
 		}
 		else
 		{
@@ -8664,9 +8672,8 @@ namespace pyoomph
 	}
 
 	// Resets the residual accumulator(s) and invokes the user's _define_element() (weak-form
-	// definition) hook, with expressions::el_dim temporarily set to this element's dimension so that
-	// dimension-dependent symbolic constructs (e.g. spatial vectors of the right size) resolve
-	// correctly during that call.
+	// definition) hook, with __current_code pointing at this code so that the GiNaC structures
+	// built during that call can reach their coordinate system and dimensions.
 	void FiniteElementCode::finalise()
 	{
 		// residual[0]=0;
@@ -8675,11 +8682,9 @@ namespace pyoomph
 		residual_names.clear();
 		residual.push_back(0);
 		residual_names.push_back("");
-		expressions::el_dim = this->element_dim;
 		__current_code = this;
 		_define_element();
 		__current_code = NULL;
-		expressions::el_dim = -1;
 	}
 
 	void FiniteElementCode::set_problem(Problem * p) {problem=p;}
@@ -10841,7 +10846,6 @@ namespace pyoomph
 		// init function) and freed there too - see the comment there for why that keeps
 		// alloc/free symmetric regardless of the compiler backend's C runtime.
 		init << " functable->clean_up=&clean_up;" << std::endl;
-		init << " my_func_table=functable;" << std::endl;
 		init << "}" << std::endl;
 		
 		init << std::endl << std::endl;

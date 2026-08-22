@@ -128,6 +128,13 @@ namespace pyoomph
 		// Print how long the point-location phase of nodal_interpolate_from took, and how the
 		// candidate sets were arrived at. Off by default; interpolation is called often enough that
 		// unconditional timing output would be noise.
+		//
+		// Deliberately still process-wide, unlike interpolate_new_interface_dofs and
+		// use_eigen_error_estimators, which moved onto Problem because switching them for one Problem
+		// silently switched them for every other one. This one only prints: the worst a second
+		// Problem suffers is diagnostics it did not ask for. It is also switched on BEFORE the
+		// Problem that will report exists (see tests/test_mesh_point_locator.py), which a per-Problem
+		// setting could not express.
 		static bool report_interpolation_timing;
 		virtual void set_time_level_for_projection(unsigned time_level);
 		// Turn the zeta-projection residual on or off for every element of this mesh. It has to stay

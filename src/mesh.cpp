@@ -46,10 +46,10 @@ using namespace oomph;
 
 namespace pyoomph
 {
+  bool Mesh::report_interpolation_timing = false;
 
   typedef double (*InitialConditionFctPt)(const double &t);
 
-  bool Mesh::report_interpolation_timing = false;
 
   // Determine how many "elemental index" entries to_numpy will need to write per element (nelem is
   // set to the total number of sub-elements across the mesh, e.g. after triangle tessellation of
@@ -1488,7 +1488,7 @@ namespace pyoomph
       nbe = this->nboundary_element(bind);
     }
 
-    BulkElementBase::__CurrentJITCode = interface_jitcode;
+    BulkElementBase::JITCodeScope __jit_scope1(interface_jitcode);
     dynamic_cast<InterfaceMesh *>(imesh)->set_rebuild_information(this, intername, interface_jitcode);
 
     unsigned n_element = imesh->nelement();
@@ -1632,7 +1632,6 @@ namespace pyoomph
     }
     dynamic_cast<InterfaceMesh *>(imesh)->set_rebuild_information(this, intername, interface_jitcode);
     dynamic_cast<InterfaceMesh *>(imesh)->setup_boundary_information(this);
-    BulkElementBase::__CurrentJITCode = NULL;
   }
 
   // Build a map from field name to its finite-element space (e.g. "C2", "C1", "DL", "D0"), by
@@ -5759,14 +5758,12 @@ namespace pyoomph
 		}
 
   // Creates a new "0d" pseudo-element wrapping a single ODE, using the code
-  // instance's generated residual/Jacobian routines. __CurrentJITCode is a
-  // thread-local-like hook that BulkElementODE0d's constructor reads to know which
-  // generated code table it belongs to.
+  // instance's generated residual/Jacobian routines. __CurrentJITCode is the per-thread hook that
+  // BulkElementODE0d's constructor reads to know which generated code table it belongs to.
   oomph::GeneralisedElement *ODEStorageMesh::_create_ode_element(oomph::TimeStepper *ts)
   {
-    BulkElementBase::__CurrentJITCode = this->jitcode;
+    BulkElementBase::JITCodeScope __jit_scope2(this->jitcode);
     oomph::GeneralisedElement *ode = new BulkElementODE0d(this->jitcode, ts);
-    BulkElementBase::__CurrentJITCode = NULL;
     this->add_element_pt(ode);
     return ode;
   }
@@ -7839,9 +7836,11 @@ namespace pyoomph
     new_el->initial_cartesian_nondim_size = new_el->size();
     new_el->initial_quality_factor = new_el->get_quality_factor();
 
-    if (BulkElementBase::__CurrentJITCode->get_func_table()->integration_order)
+    // See the same change in BulkElementBase::create_from_template: read the code off the element
+    // that was just built rather than off the ambient construction side channel.
+    if (new_el->get_jit_code()->get_func_table()->integration_order)
     {
-      new_el->set_integration_order(BulkElementBase::__CurrentJITCode->get_func_table()->integration_order);
+      new_el->set_integration_order(new_el->get_jit_code()->get_func_table()->integration_order);
     }
     return res;
   }

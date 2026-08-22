@@ -41,6 +41,9 @@ namespace pyoomph
 	// Definitions of the stage-0 hang-fill diagnostics declared in elements.hpp.
 	const bool __measure_skip_hang_fills = getenv("PYOOMPH_MEASURE_SKIP_HANG_FILLS") != NULL;
 	const bool __report_hang_fill_time = getenv("PYOOMPH_REPORT_HANG_FILL_TIME") != NULL;
+	// The accumulators below (here and for the cache counters) are plain process-wide statics on
+	// purpose: they exist only under their env flags, are read once at exit, and a diagnostic that
+	// undercounts under concurrency is not worth a per-thread reduction.
 	unsigned __hang_fill_time_depth = 0;
 	static double __hang_fill_time[HANGFILL_NUM_SLOTS] = {0.0, 0.0, 0.0};
 	static unsigned long __hang_fill_calls[HANGFILL_NUM_SLOTS] = {0, 0, 0};
@@ -88,9 +91,10 @@ namespace pyoomph
 		}
 	} __hang_fill_cache_report;
 
-	unsigned long __hang_interp_pass = 0;
-	unsigned long __hang_interp_pass_counter = 0;
-	static unsigned __hang_interp_depth = 0;
+	thread_local unsigned long __hang_interp_pass = 0;
+	std::atomic<unsigned long> __hang_interp_pass_counter{0};
+	// Nesting depth of interpolate_hang_values() on this thread, so only the outermost call may skip.
+	static thread_local unsigned __hang_interp_depth = 0;
 
 	HangInterpGate::HangInterpGate(BulkElementBase *e) : el(e), outer(__hang_interp_depth++ == 0) {}
 	HangInterpGate::~HangInterpGate() { __hang_interp_depth--; }

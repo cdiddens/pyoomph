@@ -51,7 +51,7 @@ namespace pyoomph
 	{
 		//std::cout << "CONSTRUCT BULK ODE 0D " << this << std::endl;
 		this->jitcode = jit_code;
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 1; // One dummy node... Necessary to create the buffers
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 0;
 		eleminfo.nnode_DL = 0;
@@ -92,7 +92,7 @@ namespace pyoomph
 	// (C1/C1TB/C2/C2TB/DL) degenerate to a single shape function that is identically 1.
 	PointElement0d::PointElement0d()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 1;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 1;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 1;
@@ -177,7 +177,7 @@ namespace pyoomph
 	// nodal (Q1) space, and DL uses the same linear shape functions on its own discontinuous copy.
 	BulkElementLine1dC1::BulkElementLine1dC1()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
@@ -278,7 +278,7 @@ namespace pyoomph
 	// discontinuous linear copy living on its own 2 "nodes".
 	BulkElementLine1dC2::BulkElementLine1dC2()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 3;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;
@@ -391,7 +391,7 @@ namespace pyoomph
 	// tetrahedral elements. Otherwise the same linear (2-node) element as BulkElementLine1dC1.
 	BulkTElementLine1dC1::BulkTElementLine1dC1()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
@@ -448,7 +448,7 @@ namespace pyoomph
 	// [0,1]) convention -- the 1-d edge element of quadratic triangular/tetrahedral meshes.
 	BulkTElementLine1dC2::BulkTElementLine1dC2()
 	{
-		eleminfo.elem_ptr = this;
+		eleminfo.elem_ptr = static_cast<BulkElementBase *>(this);
 		eleminfo.nnode = 3;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1] = 2;
 		eleminfo.nnode_of_space[SPACE_INDEX_C1TB] = 2;		

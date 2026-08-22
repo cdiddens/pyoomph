@@ -1368,6 +1368,15 @@ void PyReg_Problem(nb::module_ &m)
 			"adapt", [](pyoomph::Problem &self)
 			{ unsigned nref, nunref; self.adapt(nref, nunref); return std::make_tuple(nref, nunref); },
 			"Perform spatial mesh adaptation (refinement/unrefinement) on all refineable submeshes. Returns (n_refined, n_unrefined).")
+		.def("set_interpolate_new_interface_dofs", &pyoomph::Problem::set_interpolate_new_interface_dofs, nb::arg("on"),
+			 "Controls whether newly created interface degrees of freedom (e.g. after refinement) are interpolated from the neighbouring nodes or initialized to zero. "
+			 "Was a process-wide switch; it is per Problem, because remeshing turns it off and on again around itself.")
+		.def("get_interpolate_new_interface_dofs", &pyoomph::Problem::get_interpolate_new_interface_dofs,
+			 "Whether newly created interface degrees of freedom are interpolated from their neighbours (see set_interpolate_new_interface_dofs).")
+		.def("set_use_eigen_Z2_error_estimators", &pyoomph::Problem::set_use_eigen_error_estimators, nb::arg("on"),
+			 "Controls whether the Zienkiewicz-Zhu (Z2) spatial error estimator uses the eigenvector flux set instead of the base-state one. Was a process-wide switch.")
+		.def("get_use_eigen_Z2_error_estimators", &pyoomph::Problem::get_use_eigen_error_estimators,
+			 "Whether the Z2 error estimator uses the eigenvector flux set (see set_use_eigen_Z2_error_estimators).")
 		.def("_replace_RJM_by_param_deriv", &pyoomph::Problem::_replace_RJM_by_param_deriv, nb::arg("parameter_name"), nb::arg("active"),
 			 "If ``active`` is True, replace the assembled residuals/Jacobian/mass-matrix by their derivative with respect to the global parameter "
 			 "``parameter_name`` in all subsequent assembly calls; if False, restore the plain residuals/Jacobian/mass-matrix.")

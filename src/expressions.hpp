@@ -460,8 +460,6 @@ namespace pyoomph
     extern GiNaC::potential_real_symbol dt;
     extern GiNaC::idx l_shape; // Symbolic loop index over shape functions/nodes (corresponds to the "l_shape" loop variable in generated C code)
     extern GiNaC::idx l_test;  // Symbolic loop index over test functions (corresponds to the "l_test" loop variable in generated C code)
-    extern GiNaC::potential_real_symbol *proj_on_test_function; // If set, restricts weak-form assembly to a single, given test function (projection) instead of looping over all of them
-    extern int el_dim; // Currently active element (local) dimension during code generation
 
     GiNaC::ex diff(const GiNaC::ex &what, const GiNaC::ex &wrto); // Symbolic differentiation that additionally understands pyoomph's placeholder functions (fields, test functions, ...), unlike plain GiNaC::diff
     bool collect_base_units(GiNaC::ex arg, GiNaC::ex &factor, GiNaC::ex &units, GiNaC::ex &rest); // Splits arg into a numeric factor, a product of base units, and a dimensionless remainder; returns false if arg is not unit-consistent

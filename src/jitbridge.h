@@ -133,6 +133,8 @@ float __mzerosf=-0.0;
 #define MAX_N2DERIV (PYOOMPH_MAX_NODAL_DIM * PYOOMPH_MAX_NODAL_DIM)
 #define PYOOMPH_D2_SLOT(i, j) (PYOOMPH_MAX_NODAL_DIM * (i) + (j))
 
+struct JITFuncSpec_Table_FiniteElement; /* fwd decl: JITElementInfo carries a pointer to it (see below) */
+
 typedef struct JITElementInfo
 {
 
@@ -164,7 +166,18 @@ typedef struct JITElementInfo
   unsigned int ndof; // Number of local dofs
 
   bool alloced;
-  void *elem_ptr; // Pointer to the element //TODO: This is problematic, as the this pointer cannot be restored for multiple inheritance
+  /* The element itself, always stored as a properly upcast pyoomph::BulkElementBase* so that the
+     round trip through void* survives multiple inheritance (a raw `this` from a derived class does
+     not). Handed back to fill_shape_buffer_for_point below, which used to find its element through
+     a process-wide _currently_assembled_element pointer instead - unusable under parallel assembly
+     and stale for the whole time between two assemblies. */
+  void *elem_ptr;
+  /* This code's own function table. Generated code reaches global parameters, required-shape
+     tables and the exported callbacks through here. It used to be a file-scope `static` in every
+     generated .so, assigned by JIT_ELEMENT_init; that broke as soon as one .so served two Problems,
+     since dlopen dedupes by inode and the second init silently repointed it - after which the first
+     Problem's elements read the second Problem's global_parameters. */
+  struct JITFuncSpec_Table_FiniteElement *functable;
 
   struct JITElementInfo * PYOOMPH_RESTRICT bulk_eleminfo;
   // struct JITElementInfo * otherbulk_eleminfo;
@@ -333,6 +346,13 @@ typedef struct JITShapeInfo
    
   
 
+
+  /* Set while assemble_multi_residual_jacobian drives several contributions through one shared fill
+     of this buffer, so the generated bodies loop over the integration point the caller already
+     filled instead of refilling all of them. Lives here rather than in the function table because
+     the table is shared by every element of the code while this is a property of one element's
+     assembly; on the table it could not survive a parallel element loop. */
+  bool during_shared_multi_assembling;
 
   struct JITShapeInfo * PYOOMPH_RESTRICT bulk_shapeinfo;
   // struct JITShapeInfo * otherbulk_shapeinfo; //Bulk element on the other side
@@ -552,7 +572,7 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
   int integration_order;
   bool moving_nodes;
-  bool use_shared_shape_buffer_during_multi_assemble,during_shared_multi_assembling;
+  bool use_shared_shape_buffer_during_multi_assemble; /* the pass flag itself lives in JITShapeInfo_t */
 
   void *handle; // Handle to the SO
   JITFuncSpec_ResidualAndJacobian_FiniteElement *ResidualAndJacobian;
@@ -659,8 +679,7 @@ typedef struct JITFuncSpec_Table_FiniteElement
 
   // Exported functions
   void (*check_compiler_size)(unsigned long long,unsigned long long,char *);  
-  double (*get_element_size)(void *);
-  void (*fill_shape_buffer_for_point)(unsigned,JITFuncSpec_RequiredShapes_FiniteElement_t *,int);
+  void (*fill_shape_buffer_for_point)(const JITElementInfo_t *,unsigned,JITFuncSpec_RequiredShapes_FiniteElement_t *,int);
   void (*clean_up)(struct JITFuncSpec_Table_FiniteElement *functable);
 } JITFuncSpec_Table_FiniteElement_t;
 

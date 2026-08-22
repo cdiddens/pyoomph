@@ -2166,7 +2166,7 @@ Index : Local coordinates (s0,s1,s2)
 	{
 		// Generate all nodes if not present
 		const JITFuncSpec_Table_FiniteElement_t *functable = coll->jitcode->get_func_table();
-		BulkElementBase::__CurrentJITCode = coll->jitcode;		
+		BulkElementBase::JITCodeScope __jit_scope1(coll->jitcode);
 		unsigned ntot = 0;
 		for (unsigned int si=0;si<functable->num_present_continuous_spaces;si++)
 		{
@@ -2423,7 +2423,6 @@ Index : Local coordinates (s0,s1,s2)
 			}
 		}
 
-		BulkElementBase::__CurrentJITCode = NULL;
 		return res;
 	}
 

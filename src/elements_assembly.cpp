@@ -53,6 +53,7 @@ namespace pyoomph
 	// identical numbers and looks like a perfect result, so the engagement has to be counted rather
 	// than inferred.
 	static const bool __report_nohang_dispatch = getenv("PYOOMPH_REPORT_NOHANG_DISPATCH") != NULL;
+	// Diagnostic only (see the note in elements_hanging.cpp): process-wide and not thread-safe.
 	static unsigned long __nohang_dispatch_count = 0, __hang_dispatch_count = 0;
 	static struct __NoHangDispatchReport
 	{
@@ -166,6 +167,7 @@ namespace pyoomph
 	// function, and/or Hessian-vector-product function.
 	void BulkElementBase::get_multi_assembly(std::vector<SinglePassMultiAssembleInfo> &info)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		JITFuncSpec_RequiredShapes_FiniteElement_t *required_shapes = (JITFuncSpec_RequiredShapes_FiniteElement_t *)std::calloc(1, sizeof(JITFuncSpec_RequiredShapes_FiniteElement_t));
 		int shapeflag = -1;
@@ -285,25 +287,25 @@ namespace pyoomph
 		{
 			if (__paranoid_hang_fill_cache)
 			{
-				const bool real = this->fill_hang_info_with_equations(*required_shapes, this->shape_info, NULL);
+				const bool real = this->fill_hang_info_with_equations(*required_shapes, shape_info, NULL);
 				if (real)
 					throw_runtime_error("PYOOMPH_PARANOID_HANG_FILL_CACHE: the hang predicate said 'nothing hangs' but fill_hang_info_with_equations reported a hang (multi-assembly)");
-				this->poison_hang_info(this->shape_info);
+				this->poison_hang_info(shape_info);
 			}
 			if (__report_hang_fill_cache)
 				__hang_fill_cache_count(HANGCACHE_FILL_SKIPPED);
 		}
 		else
 		{
-			this->fill_hang_info_with_equations(*required_shapes, this->shape_info, NULL);
+			this->fill_hang_info_with_equations(*required_shapes, shape_info, NULL);
 			if (__report_hang_fill_cache)
 				__hang_fill_cache_count(HANGCACHE_FILL_RUN);
 		}
 		this->interpolate_hang_values();
 		prepare_shape_buffer_for_integration(*required_shapes, shapeflag);
       bool shared_multi_assemble=functable->use_shared_shape_buffer_during_multi_assemble;
-      functable->during_shared_multi_assembling=shared_multi_assemble;
-      unsigned n_int_pt=(shared_multi_assemble ? this->shape_info->n_int_pt : 1);
+      shape_info->during_shared_multi_assembling=shared_multi_assemble;
+      unsigned n_int_pt=(shared_multi_assemble ? shape_info->n_int_pt : 1);
       for (unsigned int i_int_pt=0;i_int_pt<n_int_pt;i_int_pt++)
       {
 
@@ -442,7 +444,7 @@ namespace pyoomph
 				}
 			}
 		}
-      functable->during_shared_multi_assembling=false;
+      shape_info->during_shared_multi_assembling=false;
 		RequiredShapes_free(required_shapes);
 	}
 
@@ -452,6 +454,7 @@ namespace pyoomph
 	/// Flag=2: Fill in mass matrix too.
 	void BulkElementBase::fill_in_generic_dresidual_contribution_jit(double *const &parameter_pt, oomph::Vector<double> &dres_dparam, oomph::DenseMatrix<double> &djac_dparam, oomph::DenseMatrix<double> &dmass_matrix_dparam, unsigned flag)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (functable->current_res_jac < 0)
@@ -476,7 +479,7 @@ namespace pyoomph
 			return;
 		// Unconditional, unlike the two residual/Jacobian paths: ParameterDerivative has no _NoHang
 		// twin in the function table, so the body that runs here always loads the hang buffers.
-		this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
+		this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], shape_info, NULL);
 		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
 		prepare_shape_buffer_for_integration(functable->shapes_required_ResJac[functable->current_res_jac], flag);
 		shape_info->jacobian_size = djac_dparam.nrow();
@@ -504,7 +507,7 @@ namespace pyoomph
 	// The main JIT-driven residual/Jacobian/mass-matrix assembly entry point, called from
 	// oomph-lib's fill_in_contribution_to_* machinery (flag: 0=residuals only, 1=+Jacobian,
 	// >=2=+mass matrix). Two special redirections take priority over normal assembly: if
-	// __replace_RJM_by_param_deriv is set (used while computing derivatives w.r.t. a parameter
+	// the Problem's replace_RJM_by_param_deriv is set (used while computing derivatives w.r.t. a parameter
 	// via finite differences elsewhere), delegates to fill_in_generic_dresidual_contribution_jit
 	// instead; if enable_zeta_projection is set, assembles the (unrelated) zeta-projection
 	// residuals instead of the physical equations. Otherwise prepares the shape buffer, resolves
@@ -513,9 +516,10 @@ namespace pyoomph
 	// choice is a real one since 9.4.14 - it used to be hard-wired to "hanging" for every element.
 	void BulkElementBase::fill_in_generic_residual_contribution_jit(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, oomph::DenseMatrix<double> &mass_matrix, unsigned flag)
 	{
-		if (__replace_RJM_by_param_deriv)
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
+		if (double *param_deriv = jitcode->get_problem()->get_replace_RJM_by_param_deriv())
 		{
-			fill_in_generic_dresidual_contribution_jit(__replace_RJM_by_param_deriv, residuals, jacobian, mass_matrix, flag);
+			fill_in_generic_dresidual_contribution_jit(param_deriv, residuals, jacobian, mass_matrix, flag);
 			return;
 		}
 
@@ -568,17 +572,17 @@ namespace pyoomph
 		{
 			if (__paranoid_hang_fill_cache)
 			{
-				const bool real = this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
+				const bool real = this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], shape_info, NULL);
 				if (real)
 					throw_runtime_error("PYOOMPH_PARANOID_HANG_FILL_CACHE: the hang predicate said 'nothing hangs' but fill_hang_info_with_equations reported a hang");
-				this->poison_hang_info(this->shape_info);
+				this->poison_hang_info(shape_info);
 			}
 			if (__report_hang_fill_cache)
 				__hang_fill_cache_count(HANGCACHE_FILL_SKIPPED);
 		}
 		else
 		{
-			this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], this->shape_info, NULL);
+			this->fill_hang_info_with_equations(functable->shapes_required_ResJac[functable->current_res_jac], shape_info, NULL);
 			if (__report_hang_fill_cache)
 				__hang_fill_cache_count(HANGCACHE_FILL_RUN);
 		}
@@ -771,6 +775,7 @@ namespace pyoomph
 	// the code to have been JIT-compiled with analytic Hessians enabled.
    void BulkElementBase::assemble_hessian_and_mass_hessian(oomph::RankThreeTensor<double> & hbuffer,oomph::RankThreeTensor<double> & mbuffer)
    {
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (functable->current_res_jac < 0)
 			return;
@@ -788,7 +793,7 @@ namespace pyoomph
 		prepare_shape_buffer_for_integration(functable->shapes_required_Hessian[functable->current_res_jac], 3);
 		shape_info->jacobian_size = this->ndof();
 		// Unconditional: HessianVectorProduct has no _NoHang twin either.
-		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[functable->current_res_jac], this->shape_info, NULL);
+		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[functable->current_res_jac], shape_info, NULL);
 		this->interpolate_hang_values(); // This should be done elsewhere
 		JITFuncSpec_HessianVectorProduct_FiniteElement func = functable->HessianVectorProduct[functable->current_res_jac];
 
@@ -995,6 +1000,7 @@ namespace pyoomph
 	// see the JITFuncSpec_HessianVectorProduct_FiniteElement calling convention).
 	void BulkElementBase::fill_in_generic_hessian(oomph::Vector<double> const &Y, oomph::DenseMatrix<double> &C, oomph::DenseMatrix<double> &product, unsigned flag)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 		if (functable->current_res_jac < 0)
 			return;
@@ -1015,7 +1021,7 @@ namespace pyoomph
 										   //& shape_info->mass_matrix_size=n_vec; // Won't be used, but storing the numbers of vects
 		// Unconditional: HessianVectorProduct has no _NoHang twin, so this body always reads the hang
 		// buffers and Stage 3a's skip does not apply here.
-		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[functable->current_res_jac], this->shape_info, NULL);
+		this->fill_hang_info_with_equations(functable->shapes_required_Hessian[functable->current_res_jac], shape_info, NULL);
 		this->interpolate_hang_values(); // XXX This should be moved to somewhere else, after each update of any values
 		JITFuncSpec_HessianVectorProduct_FiniteElement func = functable->HessianVectorProduct[functable->current_res_jac];
 
@@ -1117,6 +1123,7 @@ namespace pyoomph
 	// detailed dump of the element's dof/equation-number bookkeeping.
 	void BulkElementBase::debug_analytical_jacobian(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian, double diff_eps)
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 		// oomph-lib's generic FD path below perturbs dofs and re-enters get_residuals, exactly like our own
 		// FD loops do.
 		HangInterpPassSuspension __no_pass;
@@ -1431,6 +1438,7 @@ namespace pyoomph
 	
 	void BulkElementBase::update_in_solid_position_fd(const unsigned &) // For FD with element_sizes, we have to update the element size buffer
 	{
+		JITShapeInfo_t *const shape_info = this->get_shape_info();
 	 const JITFuncSpec_Table_FiniteElement_t *functable = jitcode->get_func_table();
 	 if (functable->moving_nodes && (functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian_cartesian || functable->shapes_required_ResJac[functable->current_res_jac].elemsize_Eulerian))
 	 {

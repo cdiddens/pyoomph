@@ -22,6 +22,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #pragma once
 #include <chrono>
+#include <atomic>
 #include "exception.hpp"
 #include "jitbridge.h"
 
@@ -39,10 +40,9 @@ The main author may be contacted at c.diddens@utwente.nl
 
 extern "C"
 {
-  double _pyoomph_get_element_size(void *);
   double _pyoomph_invoke_callback(void *, int, double *, int);
   void _pyoomph_invoke_multi_ret(void *, int, int, double *, double *, double *, int, int); // Index, flag,args,returns,derivative matrix, nargs,nret
-  void _pyoomph_fill_shape_buffer_for_point(unsigned, JITFuncSpec_RequiredShapes_FiniteElement_t *, int);
+  void _pyoomph_fill_shape_buffer_for_point(const JITElementInfo_t *, unsigned, JITFuncSpec_RequiredShapes_FiniteElement_t *, int);
 }
 
 namespace pyoomph
@@ -131,13 +131,22 @@ namespace pyoomph
   };
   void __hang_fill_cache_count(int which);
 
-  // Id of the global assembly sweep currently running, or 0 for "none". interpolate_hang_values()
-  // re-derives values that are constant for the whole sweep, so within one pass the second and
-  // further calls for the same element (an interface re-interpolating its bulk neighbour, then that
-  // bulk element assembling itself, then the interface on its other side) are redundant. 0 is the
-  // safe default: every caller that is NOT inside a sweep interpolates unconditionally.
-  extern unsigned long __hang_interp_pass;
-  extern unsigned long __hang_interp_pass_counter;
+  // Id of the assembly sweep this thread is currently running, or 0 for "none".
+  // interpolate_hang_values() re-derives values that are constant for the whole sweep, so within one
+  // pass the second and further calls for the same element (an interface re-interpolating its bulk
+  // neighbour, then that bulk element assembling itself, then the interface on its other side) are
+  // redundant. 0 is the safe default: every caller that is NOT inside a sweep interpolates
+  // unconditionally.
+  //
+  // Per thread rather than global, because HangInterpPassSuspension closes and reopens the pass
+  // around every finite-difference loop, i.e. inside one element's assembly. A worker thread of a
+  // parallel element loop that never opens a pass of its own simply sees 0 and interpolates every
+  // time - slower than it needs to be, but never wrong, which is the right way round for a
+  // correctness-critical cache. Opening a pass per worker would recover the saving.
+  extern thread_local unsigned long __hang_interp_pass;
+  // The id generator, shared by all threads: an id must not be handed out twice, or a stamp left on
+  // an element by one pass would be matched by an unrelated later one and its interpolation skipped.
+  extern std::atomic<unsigned long> __hang_interp_pass_counter;
 
   // Opens a new pass for its lifetime. Nesting is fine (the previous id is restored).
   class HangInterpPassScope
@@ -363,7 +372,12 @@ namespace pyoomph
     DynamicJITCode *jitcode;
 
     JITElementInfo_t eleminfo;
-    JITShapeInfo_t *shape_info;
+    // The shape buffer this element assembles into. Not owned per element and not a member: the
+    // buffer chain runs to hundreds of megabytes for a 3D C2 element with analytic Hessians on a
+    // moving mesh, so ShapeBufferPool (elements.cpp) hands out one chain per concurrently
+    // assembling thread instead of one per element. Functions that touch it more than once take it
+    // into a local first, so the lookup happens once per call rather than per integration point.
+    JITShapeInfo_t *get_shape_info() const;
 
     // [first, last) slots of eleminfo.nodal_coords[i] that this element owns and must delete.
     // Derived, not stored - see the definition in elements.cpp for why it may not consult the JIT code.
@@ -507,10 +521,15 @@ namespace pyoomph
     // square (element dimension == nodal dimension); interface elements have no orientation to lose
     // and are skipped. The adaptive time stepper and the arclength continuation in oomph-lib catch the
     // exception and retry with a smaller step, which is the whole point: on a moving mesh an inverted
-    // element is normally a symptom of too large a step, not of an ill-posed problem. Global rather
-    // than per-Problem, following use_eigen_error_estimators and interpolate_new_interface_dofs; off
-    // by default, since without a catching solver an inversion would turn a survivable garbage step
-    // into an abort.
+    // element is normally a symptom of too large a step, not of an ill-posed problem. Off by default,
+    // since without a catching solver an inversion would turn a survivable garbage step into an abort.
+    //
+    // Deliberately still process-wide, unlike the other switches that moved onto Problem: this one is
+    // read once per integration point, on the hottest path there is, and the measurement quoted in
+    // fill_shape_buffer_for_integration_point ("indistinguishable from a build with the block deleted"
+    // while off) rests on that read being a plain static load rather than two dependent pointer
+    // chases through jitcode->get_problem(). The cross-Problem leak it leaves is benign: a second
+    // Problem gets a diagnostic it did not ask for, never a different answer.
     static bool detect_inverted_elements;
 
     // Hang node X (one of THIS fine element's edge interpolating nodes for value_id) on the strictly
@@ -940,16 +959,36 @@ namespace pyoomph
     // jitcode directly. Same-type factories set jitcode inline.
     void set_jit_code(DynamicJITCode *c) { jitcode = c; }
 
-    // Global "current code" used to pass the DynamicJITCode through
-    // oomph-lib's mesh/element construction machinery (e.g. Mesh::build, refinement son-element
-    // creation), which offers no direct way to pass extra constructor arguments. Set immediately
-    // before creating a new element instance of a given code, and read (then typically cleared) by
-    // that element's constructor/create_son_instance.
-    static DynamicJITCode *__CurrentJITCode; // Really annoying, but no other way to pass it through the entire mesh stur
+    // "Current code" side channel used to pass the DynamicJITCode through oomph-lib's mesh/element
+    // construction machinery (e.g. Mesh::build, refinement son-element creation), which offers no way
+    // to pass extra constructor arguments. Set immediately before creating a new element instance of
+    // a given code and read by that element's constructor.
+    //
+    // Per thread, so that two threads building meshes do not hand each other's code to their
+    // elements. Always set through JITCodeScope below rather than assigned directly.
+    static thread_local DynamicJITCode *__CurrentJITCode;
 
-    static unsigned zeta_time_history;    // Index in time for zeta. Only Eulerian
-    static unsigned zeta_coordinate_type; // 0: Lagrangian, 1: Eulerian -- On interfaces usually boundary coordinate
-    static bool use_eigen_error_estimators;
+    // RAII form of the side channel. It restores the previous value instead of clearing to NULL,
+    // which the hand-written set/clear pairs it replaced did not: a factory that transitively built
+    // an element of another code left its caller's scope at NULL, and the several construction paths
+    // that can throw in between (a non-boundary node on an interface, an unimplemented macro element)
+    // left the channel pointing at a code that was no longer being built.
+    class JITCodeScope
+    {
+      DynamicJITCode *prev;
+
+    public:
+      explicit JITCodeScope(DynamicJITCode *c) : prev(BulkElementBase::__CurrentJITCode) { BulkElementBase::__CurrentJITCode = c; }
+      ~JITCodeScope() { BulkElementBase::__CurrentJITCode = prev; }
+      JITCodeScope(const JITCodeScope &) = delete;
+      JITCodeScope &operator=(const JITCodeScope &) = delete;
+    };
+
+    // Which nodal coordinate zeta_nodal() reports, set and restored around a single locate_zeta /
+    // mesh-to-mesh interpolation. Per thread: the save/restore already makes them safe between two
+    // Problems in one thread, but two threads locating at once would trample each other's setting.
+    static thread_local unsigned zeta_time_history;    // Index in time for zeta. Only Eulerian
+    static thread_local unsigned zeta_coordinate_type; // 0: Lagrangian, 1: Eulerian -- On interfaces usually boundary coordinate
 
     // The "boundary coordinate" zeta used e.g. for mesh-to-mesh projection, taken to be either the
     // Lagrangian (reference/undeformed) or Eulerian (current) nodal position depending on the
@@ -1603,7 +1642,6 @@ namespace pyoomph
 
     virtual int local_interface_hang_eqn(unsigned int interface_dof_index, oomph::Node * master_node) const;  
     void fill_in_jacobian_from_nodal_by_fd(oomph::Vector<double> &residuals, oomph::DenseMatrix<double> &jacobian) override;
-    static bool interpolate_new_interface_dofs;
     // Public entry point to refresh all the eqn_map bookkeeping (bulk_eqn_map,
     // opp_interf_eqn_map, opp_bulk_eqn_map, bulk_bulk_eqn_map) after equation numbers have changed
     // (e.g. following mesh refinement or re-numbering), by calling
@@ -1834,10 +1872,4 @@ namespace pyoomph
 
 
 
-  extern double *__replace_RJM_by_param_deriv;
-
-  // Set by the element that is currently having its shape buffer filled, read back by the extern "C"
-  // trampoline the generated code calls to refill that buffer at an integration point. Declared here
-  // because setter (elements_shapeinfo.cpp) and reader (elements.cpp) are no longer the same TU.
-  extern BulkElementBase *_currently_assembled_element;
 }

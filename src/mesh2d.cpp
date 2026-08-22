@@ -344,9 +344,8 @@ namespace pyoomph
   // Used for local subdivision of triangular meshes (which cannot be tree-refined, see refinement_possible()).
   unsigned TemplatedMeshBase2d::add_tri_C1(Node* & n1, Node* & n2, Node* & n3)
   {
-    BulkElementBase::__CurrentJITCode = jitcode;
+    BulkElementBase::JITCodeScope __jit_scope1(jitcode);
     unsigned res=this->add_new_element(new BulkElementTri2dC1(),{n1,n2,n3});
-    BulkElementBase::__CurrentJITCode = NULL;
     return res;
   }
 
@@ -357,7 +356,7 @@ namespace pyoomph
   // sub-triangles sharing this new node.
   unsigned TemplatedMeshBase2d::add_tri_C1TB(Node* & n1, Node* & n2, Node* & n3, Node* & n4)
   {
-    BulkElementBase::__CurrentJITCode = jitcode;
+    BulkElementBase::JITCodeScope __jit_scope2(jitcode);
     if (!n4)
     {
       auto * functable=jitcode->get_func_table();
@@ -377,7 +376,6 @@ namespace pyoomph
       this->add_node_pt(n4);
     }
     unsigned res=this->add_new_element(new BulkElementTri2dC1TB(),{n1,n2,n3,n4});
-    BulkElementBase::__CurrentJITCode = NULL;
     return res;
   }
 
