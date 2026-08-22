@@ -720,6 +720,13 @@ namespace pyoomph
     // tree path this addresses an element independently of the partition, which is what lets state
     // files be written and read back on any number of processes. See dev_docs/distributed_state_files.md
     long global_base_index = -1;
+    // The index of THIS element's root in the undistributed base mesh, stamped on every element by
+    // Mesh::assign_global_base_element_indices() while the mesh is still whole. Read back by
+    // get_element_structural_keys(): after Problem::distribute() the root element a leaf belongs to
+    // need not be present on this rank any more (its object_pt() is then NULL and the live lookup
+    // returns -1), which made every element of a distributed mesh unaddressable and the state file
+    // refuse to be written. Inherited from the father by refinement, so it survives adaptivity too.
+    long global_root_index = -1;
     // Transient (per tesselated-numpy pass, cleared by Mesh::to_numpy / get_num_numpy_elemental_indices):
     // for each finer-neighbour hanging node registered on THIS element, its LOCAL coordinate in this element,
     // computed TOPOLOGICALLY by the finer neighbour from the tree neighbour finder (no physical geometry, no

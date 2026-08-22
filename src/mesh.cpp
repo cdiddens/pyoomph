@@ -179,6 +179,18 @@ namespace pyoomph
           be->global_base_index = (long)i;
       }
     }
+    // Stamp every element with the number of ITS root, not only the roots with their own. The pair
+    // that addresses an element is (root index, path), and the root half used to be looked up through
+    // the tree at write time - which stops working the moment the mesh is distributed, since a leaf
+    // this rank keeps may belong to a root it does not. Doing it here, while the mesh is whole, is the
+    // only place the answer is available for every element.
+    for (unsigned i = 0; i < this->nelement(); i++)
+    {
+      BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(i));
+      if (!be) continue;
+      BulkElementBase *root = root_element_of(this->element_pt(i));
+      be->global_root_index = (root ? root->global_base_index : -1);
+    }
   }
 
   // (root index, packed tree path) for every element, in local element order. The path packs the
@@ -190,8 +202,17 @@ namespace pyoomph
     std::vector<long> res(2 * this->nelement(), -1);
     for (unsigned ie = 0; ie < this->nelement(); ie++)
     {
-      BulkElementBase *root = root_element_of(this->element_pt(ie));
-      res[2 * ie] = (root ? root->global_base_index : -1);
+      BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+      // The stamp first: it is the only source that survives distribution, where the root element
+      // itself may live on another rank. The live lookup stays as the fallback for a mesh that was
+      // never numbered (a serial run that never calls assign_global_base_element_indices()).
+      if (be && be->global_root_index >= 0)
+        res[2 * ie] = be->global_root_index;
+      else
+      {
+        BulkElementBase *root = root_element_of(this->element_pt(ie));
+        res[2 * ie] = (root ? root->global_base_index : -1);
+      }
       long path = 1;
       oomph::RefineableElement *re = dynamic_cast<oomph::RefineableElement *>(this->element_pt(ie));
       if (re && re->tree_pt())

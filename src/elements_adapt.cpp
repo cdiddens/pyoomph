@@ -153,6 +153,10 @@ namespace pyoomph
 		BulkElementBase *father = dynamic_cast<BulkElementBase *>(this->tree_pt()->father_pt()->object_pt());
 		if (!father)
 			throw_runtime_error("Try to split an element, but found not father...");
+		// A son sits under the same root as its father, so it carries the same stamped root index.
+		// Without this a mesh refined AFTER being distributed would hand out fresh elements with -1
+		// and become unwritable again - the stamp is only laid down while the mesh is still whole.
+		this->global_root_index = father->global_root_index;
 
 		oomph::QuadTree *quadtree_pt = dynamic_cast<oomph::QuadTree *>(Tree_pt);
 		oomph::BinaryTree *binarytree_pt = dynamic_cast<oomph::BinaryTree *>(Tree_pt);
