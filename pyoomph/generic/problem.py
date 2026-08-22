@@ -53,7 +53,7 @@ from .codegen import EquationTree,BaseEquations, FiniteElementCodeGenerator,Dumm
 from ..equations.additional import EquationCompilationFlags
 from ..solvers.generic import DefaultMatrixType, EigenSolverWhich, GenericLinearSystemSolver,GenericEigenSolver
 from ..expressions.units import *
-from ..expressions import get_global_symbol,cartesian,axisymmetric,axisymmetric_flipped,radialsymmetric,BaseCoordinateSystem,nondim,testfunction,weak,OptionalCoordinateSystem
+from ..expressions import cartesian,axisymmetric,axisymmetric_flipped,radialsymmetric,BaseCoordinateSystem,nondim,testfunction,weak,OptionalCoordinateSystem
 from ..solvers.generic import get_default_linear_solver,get_default_eigen_solver
 from ..meshes.interpolator import _DefaultInterpolatorClass,ODEInterpolator 
 from ..output.states import DumpFile
@@ -756,6 +756,9 @@ class Problem(_pyoomph.Problem):
         self._last_bc_setting="init"
 
         self._output_step:int=0
+        # Leftover of the removed can_continue_section(): never incremented any more, but the state
+        # file writes it in its fixed prefix (see define_state_file), so dropping it would make every
+        # existing dump unreadable.
         self._continue_section_step:int=0
         self._continue_section_step_loaded:int=0
         self._nondim_time_after_last_run_statement=0 # Required for continue
@@ -852,7 +855,7 @@ class Problem(_pyoomph.Problem):
         self.project_initial_conditions=False
 
     # Use weak(u,psi) instead of vectorial U*Psi for the symmetry-breaking constraint
-    def improve_pitchfork_tracking_on_unstructured_meshes(self,coord_sys:"OptionalCoordinateSystem"=None,pos_coord_sys:"OptionalCoordinateSystem"=None):
+    def _improve_pitchfork_tracking_on_unstructured_meshes(self,coord_sys:"OptionalCoordinateSystem"=None,pos_coord_sys:"OptionalCoordinateSystem"=None):
         self._improved_pitchfork_tracking_on_unstructured_meshes=True
         self._improved_pitchfork_tracking_coordinate_system=coord_sys
         self._improved_pitchfork_tracking_position_coordinate_system=pos_coord_sys
@@ -863,32 +866,6 @@ class Problem(_pyoomph.Problem):
         """
         self._abort_current_run=True
 
-    def can_continue_section(self, id:str | None=None) -> bool:
-        if id is not None:
-            raise RuntimeError("TODO: id for continue sections")
-        if not self._initialised:
-            self.initialise()
-
-#		if self.write_states:
-#			raise RuntimeError("Section grouping by can_continue_section works only with write_states=False")
-
-        if self._runmode != "continue":
-
-            statedir:str = os.path.join(self.get_output_directory(), "_states")
-            Path(statedir).mkdir(parents=True, exist_ok=True)
-            statefname:str = os.path.join(statedir, "state_{:06d}.dump".format(self._continue_section_step))
-            self.save_state(statefname)
-            self._continue_section_step += 1
-            return False
-
-
-        if self._continue_section_step_loaded>self._continue_section_step:
-            self._continue_section_step += 1
-            print("SKIPPING CONTINUE SECTION")
-            return True
-        else:
-            return False
-        
     # Shortcut to add a (GlobalLagrangeMultiplier(name=equation_contribution)+Scaling(name=scaling)+TestScaling(name=testscaling))@domain and return var(name,domain=domain),testfunction(name,domain=domain)
     def add_global_dof(self,name:str,equation_contribution:ExpressionOrNum=0,*,scaling:ExpressionNumOrNone=None,testscaling:ExpressionNumOrNone=None,domain:str="globals",only_for_stationary_solve:bool=False,initial_condition:ExpressionNumOrNone=None,set_zero_on_normal_mode_eigensolve:bool=True):
         """
@@ -959,7 +936,7 @@ class Problem(_pyoomph.Problem):
         """
         self._mesh_data_cache.clear(only_eigens)
 
-    def set_tolerance_for_singular_jacobian(self,tol:float):
+    def _set_tolerance_for_singular_jacobian(self,tol:float):
         _pyoomph.set_tolerance_for_singular_jacobian(tol)  
         
     def get_current_normal_mode_k(self,dimensional:bool=True):  
@@ -1296,8 +1273,8 @@ class Problem(_pyoomph.Problem):
         if self._custom_assembler is not None:
             self._custom_assembler.problem=None #type:ignore
             self._custom_assembler=None
-        # define_problem_for_additional_cartesian_stability_investigation()/
-        # define_problem_for_axial_symmetry_breaking_investigation() (normal-mode/azimuthal
+        # _define_problem_for_additional_cartesian_stability_investigation()/
+        # _define_problem_for_axial_symmetry_breaking_investigation() (normal-mode/azimuthal
         # stability setup) install a lambda here that closes over "self" - a plain Python
         # self-referential cycle (self -> _residual_mapping_functions -> lambda -> self).
         # Break it explicitly instead of relying on cyclic gc, same rationale as above.
@@ -1595,7 +1572,7 @@ class Problem(_pyoomph.Problem):
         self._declare_static_condensation_rules(("condense_element_private_dofs",self._static_condensation_source_counter),
                                                 domain,[("",(),"element_private")])
 
-    def get_all_values_at_current_time(self,with_pos:bool)->tuple[NPFloatArray,NPBoolArray,NPFloatArray]:
+    def _get_all_values_at_current_time(self,with_pos:bool)->tuple[NPFloatArray,NPBoolArray,NPFloatArray]:
         dofs,positional_dof=self.get_current_dofs()
         pinned=self.get_current_pinned_values(with_pos)
         return numpy.array(dofs),positional_dof,numpy.array(pinned) #type:ignore
@@ -1618,7 +1595,7 @@ class Problem(_pyoomph.Problem):
         if n>=len(self._last_eigenvectors):
             raise RuntimeError("Cannot set eigenfunction "+str(n)+" as dofs, since we have calculated only "+str(len(self._last_eigenvectors))+" eigenfunctions")
         with_pos=not additive_mesh_positions
-        actual_dofs,positional_dofs,pinned_values=self.get_all_values_at_current_time(with_pos)
+        actual_dofs,positional_dofs,pinned_values=self._get_all_values_at_current_time(with_pos)
         if eigenvector_position_scale is None:
             eigenvector_position_scale=self.eigenvector_position_scale
         newpinned=self.setup_pinned_values_of_eigenfunction(numpy.array(pinned_values),n,mode) #type:ignore
@@ -2173,7 +2150,7 @@ class Problem(_pyoomph.Problem):
         self._equation_system._do_output(self._output_step, stage, only_every_step=True)
 
 
-    def init_output(self,redefined:bool=False):
+    def _init_output(self,redefined:bool=False):
         cinfo:dict[str,Any] | None=None
         if redefined:
             cinfo={"redefined":True}
@@ -2191,9 +2168,6 @@ class Problem(_pyoomph.Problem):
         pass
         #raise NotImplementedError("Please override the function define_problem to create the mesh(es) and so on")
 
-
-    def flush_mesh_templates(self):
-        self._meshtemplate_list=[]
 
     def add_mesh(self,mesh:_TypeVarMeshTemplate)->_TypeVarMeshTemplate:
         """
@@ -2404,7 +2378,7 @@ class Problem(_pyoomph.Problem):
             dof_deriv=self.get_arclength_dof_derivative_vector()
             if len(dof_deriv)>0:
                 has_arclength_data=True
-                _actual_dofs,_positional_dofs,pinned_values=self.get_all_values_at_current_time(True)            
+                _actual_dofs,_positional_dofs,pinned_values=self._get_all_values_at_current_time(True)            
                 dof_current=self.get_arclength_dof_current_vector()
                 self.set_current_pinned_values(0*pinned_values,True,5)
                 self.set_current_pinned_values(0*pinned_values,True,6)
@@ -2417,7 +2391,7 @@ class Problem(_pyoomph.Problem):
                 messed_around_in_history=True
             
         if self._adapt_eigenindex is not None:
-            _actual_dofs,_positional_dofs,pinned_values=self.get_all_values_at_current_time(True)
+            _actual_dofs,_positional_dofs,pinned_values=self._get_all_values_at_current_time(True)
             self.set_current_pinned_values(0*pinned_values,True,3)
             self.set_current_pinned_values(0*pinned_values,True,4)
             self.set_history_dofs(3,numpy.real(self._last_eigenvectors[self._adapt_eigenindex]))
@@ -2761,7 +2735,7 @@ class Problem(_pyoomph.Problem):
         nref,nunref=self._adapt_with_interfacial_errors()
         return nref,nunref
 
-    def compile_meshes(self):
+    def _compile_meshes(self):
         for _,mesh in self._meshdict.items():
             if isinstance(mesh,ODEStorageMesh):
                 mesh._compile_bulk_equations() 
@@ -3717,7 +3691,7 @@ class Problem(_pyoomph.Problem):
         if len(self._meshdict) == 0:
             raise RuntimeError("No mesh or ODE added to the problem, do it in the define_problem() method")
 
-        self.compile_meshes()
+        self._compile_meshes()
 
         self.rebuild_global_mesh_from_list(rebuild=True)
         
@@ -3740,7 +3714,7 @@ class Problem(_pyoomph.Problem):
             raise NotImplementedError("Not implemented yet: Redefining the problem with distribution...")
             self.distribute()
 
-        self.init_output(redefined=True)
+        self._init_output(redefined=True)
         self.rebuild_global_mesh_from_list(rebuild=True)
         self.reapply_boundary_conditions()
 
@@ -3950,9 +3924,9 @@ class Problem(_pyoomph.Problem):
         if self._setup_azimuthal_stability_code:
             if  self._setup_additional_cartesian_stability_code:
                 raise RuntimeError("Cannot set up both azimuthal and additional cartesian coordinate stability simultaneously yet")
-            self.define_problem_for_axial_symmetry_breaking_investigation()
+            self._define_problem_for_axial_symmetry_breaking_investigation()
         elif self._setup_additional_cartesian_stability_code:
-            self.define_problem_for_additional_cartesian_stability_investigation()
+            self._define_problem_for_additional_cartesian_stability_investigation()
         if self.additional_equations != 0:
             self.add_equations(self.additional_equations)
 
@@ -3962,7 +3936,7 @@ class Problem(_pyoomph.Problem):
         if len(self._meshdict)==0:
             raise RuntimeError("No mesh or ODE added to the problem, do it in the define_problem() method")
 
-        self.compile_meshes()
+        self._compile_meshes()
         #print("MESH COMPILE DONE")
 
         if get_mpi_rank()==0:
@@ -4112,7 +4086,7 @@ class Problem(_pyoomph.Problem):
 
         self._initialised = True
         self._during_initialization=False
-        self.init_output()
+        self._init_output()
         self.rebuild_global_mesh_from_list(rebuild=True)
         self.reapply_boundary_conditions()
 
@@ -4300,12 +4274,6 @@ class Problem(_pyoomph.Problem):
         if self._custom_assembler:
             self._custom_assembler.actions_after_setting_initial_condition()
 
-
-
-    def get_time_symbol(self,with_scaling:bool=True) -> Expression:
-        return get_global_symbol("t")*(self.get_scaling("temporal") if with_scaling else 1)
-
-
     def actions_before_adapt(self):
         for m in self._interfacemeshes:
             m.clear_before_adapt()
@@ -4427,7 +4395,7 @@ class Problem(_pyoomph.Problem):
                     e=e.get_father_element()
                     e.set_macro_element(None, False)
 
-    def describe_equation(self,dofindex:int) -> str:
+    def _describe_equation(self,dofindex:int) -> str:
         res = "unknown(" + str(dofindex) + ")"
         for mesh_name, mesh in self._meshdict.items():
             if isinstance(mesh,ODEStorageMesh):
@@ -4625,7 +4593,7 @@ class Problem(_pyoomph.Problem):
         return analyse_jacobian_singularity(self,k=k,ntop=ntop,quiet=quiet,**kwargs)
 
 
-    def search_dof_in_mesh(self,mesh:AnyMesh,dofindex:int):
+    def _search_dof_in_mesh(self,mesh:AnyMesh,dofindex:int):
         location = None
         typ = None
         if not isinstance(mesh,ODEStorageMesh):
@@ -4712,7 +4680,7 @@ class Problem(_pyoomph.Problem):
                             dofindex-=ndof_base
                         elif splt[-1].endswith("__(ImEigen)"):
                             dofindex-=2*ndof_base
-                    location,typ=self.search_dof_in_mesh(mesh,dofindex)
+                    location,typ=self._search_dof_in_mesh(mesh,dofindex)
                     if location is None or typ is None:
                         print("   ... cannot find any node or element containing this dof...")
                     else:
@@ -4724,12 +4692,12 @@ class Problem(_pyoomph.Problem):
                 for ism in range(self.nsub_mesh()):
                     submesh=self.mesh_pt(ism)
                     assert isinstance(submesh,(MeshFromTemplate1d,MeshFromTemplate2d,MeshFromTemplate3d,InterfaceMesh,ODEStorageMesh))
-                    location, typ = self.search_dof_in_mesh(submesh, dofindex)
+                    location, typ = self._search_dof_in_mesh(submesh, dofindex)
                     if location is not None and typ is not None:
                         print("     but found in mesh "+submesh.get_full_name()+" at " + str(location) + ". Type: " + typ)
                     else:
                         print(" 		not found in mesh "+submesh.get_full_name())
-                    #print("DESCRIBE",self.describe_equation(dofindex))
+                    #print("DESCRIBE",self._describe_equation(dofindex))
                     for e in submesh.elements():
                         for d in range(e.ndof()):
                             if e.eqn_number(d)==dofindex:
@@ -5024,7 +4992,7 @@ class Problem(_pyoomph.Problem):
         self._ccode_dir_is_unique=True
         print("Another Problem in this process already uses "+base+"; this one compiles its equations into "+self._ccode_dir+" instead")
 
-    def compile_bulk_element_code(self,elementtype:FiniteElementCodeGenerator,bulkmesh:AnyMesh,subname:str) -> _pyoomph.DynamicJITCode:
+    def _compile_bulk_element_code(self,elementtype:FiniteElementCodeGenerator,bulkmesh:AnyMesh,subname:str) -> _pyoomph.DynamicJITCode:
         self._claim_unique_ccode_dir(subname)
         if self._outdir is not None:
             destpath=os.path.join(self._outdir,self._ccode_dir)
@@ -5192,7 +5160,7 @@ class Problem(_pyoomph.Problem):
         #if azimuthal_stability:
         #    self.set_analytic_hessian_products(False) # We may not use it here!
         if improve_pitchfork_on_unstructured_mesh:
-            self.improve_pitchfork_tracking_on_unstructured_meshes(coord_sys=improve_pitchfork_coordsys,pos_coord_sys=improve_pitchfork_position_coordsys)
+            self._improve_pitchfork_tracking_on_unstructured_meshes(coord_sys=improve_pitchfork_coordsys,pos_coord_sys=improve_pitchfork_position_coordsys)
         if shared_shapes_for_multi_assemble is not None:
             self._shared_shapes_for_multi_assemble=shared_shapes_for_multi_assemble
         if azimuthal_stability:
@@ -5541,7 +5509,7 @@ class Problem(_pyoomph.Problem):
             self._set_globally_convergent_newton_method(globally_convergent_newton)
         return old
     
-    def is_global_parameter_used(self,param:str | _pyoomph.GiNaC_GlobalParam)->bool:
+    def _is_global_parameter_used(self,param:str | _pyoomph.GiNaC_GlobalParam)->bool:
         if isinstance(param,str):
             if param not in self.get_global_parameter_names():
                 return False
@@ -5785,7 +5753,7 @@ class Problem(_pyoomph.Problem):
         if parameter not in self.get_global_parameter_names():
             raise RuntimeError("Cannot perform arclength continuation in parameter '" + parameter + "' since it is not part of the problem")
         
-        if self.warn_about_unused_global_parameters and not self.is_global_parameter_used(parameter):
+        if self.warn_about_unused_global_parameters and not self._is_global_parameter_used(parameter):
             if self.warn_about_unused_global_parameters=="error":
                 raise RuntimeError("Arclength continuation in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Have you defined it with define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'? Have you defined it via define_global_parameter? Or have you overridden it by e.g. '" + parameter + "=<value>' instead of '" + parameter + ".value=<value>'?  Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
             else:
@@ -6697,7 +6665,7 @@ class Problem(_pyoomph.Problem):
             if not parameter in self.get_global_parameter_names():
                 raise RuntimeError("Cannot perform bifurcation tracking in parameter '"+parameter+"' since it is not part of the problem")
             
-            if self.warn_about_unused_global_parameters and not self.is_global_parameter_used(parameter):
+            if self.warn_about_unused_global_parameters and not self._is_global_parameter_used(parameter):
                 if self.warn_about_unused_global_parameters=="error":
                     raise RuntimeError("Bifurcation tracking in the global parameter '" + parameter + "', which is used in the problem. This may lead to unexpected behaviour. Set <Problem>.warn_about_unused_global_parameters to False to suppress this error.")
                 else:
@@ -7249,7 +7217,7 @@ class Problem(_pyoomph.Problem):
         return numpy.array(neweigen)
 
     
-    def define_problem_for_axial_symmetry_breaking_investigation(self):
+    def _define_problem_for_axial_symmetry_breaking_investigation(self):
         from ..expressions.coordsys import AxisymmetryBreakingCoordinateSystem
         self._azimuthal_mode_param_m = self.get_global_parameter(self._azimuthal_stability.azimuthal_param_m_name)
         coordsys = AxisymmetryBreakingCoordinateSystem(self._azimuthal_mode_param_m.get_symbol())
@@ -7268,7 +7236,7 @@ class Problem(_pyoomph.Problem):
 
 
 
-    def define_problem_for_additional_cartesian_stability_investigation(self):
+    def _define_problem_for_additional_cartesian_stability_investigation(self):
         from ..expressions.coordsys import CartesianCoordinateSystemWithAdditionalNormalMode
         self._normal_mode_param_k = self.get_global_parameter(self._cartesian_normal_mode_stability.normal_mode_param_k_name)
         coordsys = CartesianCoordinateSystemWithAdditionalNormalMode(self._normal_mode_param_k.get_symbol())
@@ -8408,7 +8376,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             if len(dof_deriv)>0:
                 dof_current=self.get_arclength_dof_current_vector()
                 # Store the arclength in the history
-                _actual_dofs,_positional_dofs,pinned_values=self.get_all_values_at_current_time(True)            
+                _actual_dofs,_positional_dofs,pinned_values=self._get_all_values_at_current_time(True)            
                 self.set_current_pinned_values(0*pinned_values,True,5)
                 self.set_current_pinned_values(0*pinned_values,True,6)
                 self.set_history_dofs(5,dof_deriv)
@@ -8591,7 +8559,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         state.float_data(lambda: self.get_current_time(dimensional=True, as_float=True),lambda t: self.set_current_time(t, dimensional=True, as_float=True))
         self._output_step = state.int_data(lambda: self._output_step, lambda s: s)
 
-        # Continue section step
+        # Continue section step - always 0 since can_continue_section() was removed, but the slot has
+        # to stay where it is, or old state files no longer line up.
         self._continue_section_step_loaded=state.int_data(lambda: self._continue_section_step,lambda v:v)
 
         # From here on, you can in principle modify. Of course, old state files are incompatible once you add/remove anything here

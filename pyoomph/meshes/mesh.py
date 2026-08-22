@@ -1417,7 +1417,7 @@ class MeshFromTemplateBase(BaseMesh):
         eqs.before_finalization(self._codegen)
         self._codegen._finalise()
         eqs.before_compilation(self._codegen)
-        self._codegen._code = problem.compile_bulk_element_code(
+        self._codegen._code = problem._compile_bulk_element_code(
             self._codegen, assert_spatial_mesh(self), self._name)
         self._templatemesh.get_domain(
             self._name).set_element_code(self._codegen.get_code())
@@ -1994,7 +1994,7 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         eqs._set_current_codegen(self._codegen)
         eqs.before_compilation(self._codegen)
 
-        self._codegen._code = self._codegen.get_problem().compile_bulk_element_code(self._codegen, self, curri._name + "__" + name)  
+        self._codegen._code = self._codegen.get_problem()._compile_bulk_element_code(self._codegen, self, curri._name + "__" + name)  
 
         self._set_problem(self.get_problem(),
                           self._codegen._code)  # type:ignore
@@ -2152,7 +2152,7 @@ class ODEStorageMesh(_pyoomph.ODEStorageMesh):
         self._codegen.get_equations()._set_current_codegen(self._codegen)
 
         eqs.before_compilation(self._codegen)
-        self._codegen._code = problem.compile_bulk_element_code(self._codegen, self, self._name)
+        self._codegen._code = problem._compile_bulk_element_code(self._codegen, self, self._name)
         #self._element = _pyoomph.BulkElementODE0d.construct_new(self._codegen.get_code(), problem.timestepper)
         #self._element.set_must_be_kept_as_halo(True) # ODE Dofs are always halo dofs, so they can be accessed from everywhere
         self._set_problem(problem, self._codegen._code)

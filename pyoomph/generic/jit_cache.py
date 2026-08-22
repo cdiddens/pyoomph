@@ -122,7 +122,7 @@ def set_enabled(enabled: bool) -> None:
     process-wide command-line flag, so a process-wide switch is the correct
     scope for it, unlike the per-Problem suppress_code_writing/suppress_compilation
     checks, which are applied at the call site instead - see problem.py's
-    compile_bulk_element_code())."""
+    _compile_bulk_element_code())."""
     global _runtime_disabled
     _runtime_disabled = not enabled
 

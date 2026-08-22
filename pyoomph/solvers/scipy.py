@@ -141,7 +141,7 @@ class SuperLUSerial(GenericLinearSystemSolver):
 							if len(crop):
 								maxi=maxi[0:crop[0][0]] #type:ignore
 							nsplead=nspv[maxi] #type:ignore
-							descs=[self.problem.describe_equation(eq) for eq in maxi] #type:ignore
+							descs=[self.problem._describe_equation(eq) for eq in maxi] #type:ignore
 							print(k,nsplead,maxi,":\n\t\t"+"\n\t\t".join(descs)) #type:ignore
 					# Re-raised as a SolverError: a singular factorisation is exactly the state an
 					# adaptive time step or an arclength step should back away from, and scipy's plain
