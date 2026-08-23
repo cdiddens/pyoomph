@@ -246,7 +246,7 @@ class HDGPoisson(Problem):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                         "..", "docs", "source", "tutorial", "dg"))
         try:
-            from hdg_poisson import HDGPoissonEquations, HDGCoupling, HDGDirichletBC
+            from hdg_poisson import HDGPoissonEquations, HDGDirichletBC
         finally:
             sys.path.pop(0)
         x, y = var("coordinate_x"), var("coordinate_y")
@@ -256,8 +256,9 @@ class HDGPoisson(Problem):
         self.max_refinement_level = 0
         self.initial_adaption_steps = 0
         self += RectangularQuadMesh(N=self.N)
-        eqs = HDGPoissonEquations(source, self.space)
-        eqs += HDGCoupling(tau, self.facet_space) @ "_internal_facets_"
+        # The tutorial declares the trace and its facet residual inside HDGPoissonEquations itself
+        # (at_internal_facets=True / add_interior_facet_residual), so this is the whole formulation.
+        eqs = HDGPoissonEquations(source, tau, self.space, self.facet_space)
         eqs += HDGDirichletBC(exact, tau) @ ["left", "right", "top", "bottom"]
         eqs += IntegralObservables(err2=(var("u") - exact) ** 2, u1=var("u"), u2=var("u") ** 2,
                                    mx=x * var("u"), gu=dot(grad(var("u")), grad(var("u"))))
