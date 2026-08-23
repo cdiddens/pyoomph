@@ -201,9 +201,13 @@ class PyoomphEigenExtrusion(VTKPythonAlgorithmBase):
         self.Modified()
 
     @smproperty.intvector(name="Bulk", default_values=0)
-    @smdomain.intrange(min=0, max=1)
+    @smdomain.xml("""<EnumerationDomain name="enum">
+                       <Entry text="Surface (boundary only)" value="0"/>
+                       <Entry text="Bulk (solid)" value="1"/>
+                     </EnumerationDomain>""")
     def SetBulk(self, bulk):
-        self.bulk = bulk
+        """What gets swept: the boundary of the input, or every cell of it."""
+        self.bulk = int(bulk)
         self.Modified()
 
     @smproperty.intvector(name="Capping", default_values=1)
@@ -407,15 +411,21 @@ class PyoomphEigenExtrusion(VTKPythonAlgorithmBase):
         Q = self._frame(sweep)
         wRe, wIm = self._mode_factors(sweep)
 
-        # The out-of-plane vector component is written as a scalar array of its own, named "_phi"
-        # by the azimuthal coordinate system and "_normal" by the Cartesian one. Detected per array
-        # rather than assumed from the mode, so pointing the wrong mode at a dataset still transforms
-        # its vectors instead of dropping them.
+        # A vector arrives as a 3-component array holding (in-plane, in-plane, out-of-plane). The
+        # out-of-plane slot is filled in the array itself for a vector the mesh writes ("normal",
+        # the eigenperturbation of the position), but a FIELD's swirl component is a scalar array of
+        # its own - "_phi" in the azimuthal coordinate system, "_normal" in the Cartesian one, since
+        # the writer groups only _x/_y/_z. Detected per array rather than assumed from the mode, so
+        # pointing the wrong mode at a dataset still transforms its vectors instead of dropping them.
         def companion(name):
             for suffix in ("_phi", "_normal"):
                 if name + suffix in names:
                     return suffix
             return None
+
+        def out_of_plane(name, values):
+            suffix = companion(name)
+            return get(name + suffix) if suffix is not None else values[:, 2]
 
         def eigen_pair(name):
             return ("EigenRe_" + name in names) and ("EigenIm_" + name in names)
@@ -448,13 +458,15 @@ class PyoomphEigenExtrusion(VTKPythonAlgorithmBase):
                     consumed.update(("EigenRe_" + name, "EigenIm_" + name))
                 continue
 
-            # ---- vectors: (in-plane, axial, 0) in the grouped array plus a separate third component
-            third = companion(name) if ncomp[name] > 1 else None
-            if third is not None:
+            # ---- vectors
+            if ncomp[name] == 3:
                 arr = get(name)
-                consumed.update((name, name + third))
+                third = companion(name)
+                consumed.add(name)
+                if third is not None:
+                    consumed.add(name + third)
                 result[name] = numpy.einsum("nai,ni->na", Q,
-                                            numpy.stack([arr[:, 0], arr[:, 1], get(name + third)], axis=1))
+                                            numpy.stack([arr[:, 0], arr[:, 1], out_of_plane(name, arr)], axis=1))
             if not has_eigen:
                 continue
             re, im = get("EigenRe_" + name), get("EigenIm_" + name)
@@ -462,50 +474,45 @@ class PyoomphEigenExtrusion(VTKPythonAlgorithmBase):
                 values = wRe * re + wIm * im
             else:
                 eigen_third = companion("EigenRe_" + name)
-                if eigen_third is None or ("EigenIm_" + name + eigen_third) not in names:
+                if eigen_third is not None and ("EigenIm_" + name + eigen_third) not in names:
                     continue   # nothing consumed yet, so the two halves survive rather than vanish
                 cyl = numpy.stack([wRe * re[:, 0] + wIm * im[:, 0],
                                    wRe * re[:, 1] + wIm * im[:, 1],
-                                   wRe * get("EigenRe_" + name + eigen_third)
-                                   + wIm * get("EigenIm_" + name + eigen_third)], axis=1)
+                                   wRe * out_of_plane("EigenRe_" + name, re)
+                                   + wIm * out_of_plane("EigenIm_" + name, im)], axis=1)
                 values = numpy.einsum("nai,ni->na", Q, cyl)
-                consumed.update(("EigenRe_" + name + eigen_third, "EigenIm_" + name + eigen_third))
-                # The companion is part of this vector, not a scalar in its own right. It has to be
-                # withdrawn from both directions: the leftover pass below would otherwise resurrect
-                # it, and if the array order happened to reach it BEFORE the vector it belongs to,
-                # this loop has already emitted it as a scalar of its own.
-                handled.add(name + eigen_third)
-                result.pop("Eigen_" + name + eigen_third, None)
+                if eigen_third is not None:
+                    consumed.update(("EigenRe_" + name + eigen_third, "EigenIm_" + name + eigen_third))
+                    # The companion is part of this vector, not a scalar in its own right. It has to
+                    # be withdrawn from both directions: the leftover pass below would otherwise
+                    # resurrect it, and if the array order happened to reach it BEFORE the vector it
+                    # belongs to, this loop has already emitted it as a scalar of its own.
+                    handled.add(name + eigen_third)
+                    result.pop("Eigen_" + name + eigen_third, None)
             handled.add(name)
             consumed.update(("EigenRe_" + name, "EigenIm_" + name))
             result["Eigen_" + name] = values
 
         # ---- eigen pairs with no base array of their own. The mesh perturbation is the important
-        # one: coordinates are the points, not a point data array, so EigenRe_coordinate_x/_y are
-        # never reached above - and that pair is what deforms the shape, i.e. the whole point of
-        # plotting an interface eigenmode. Lagrange multipliers such as _kin_bc land here too.
+        # one: the coordinates ARE the points, so there is no base "coordinate" array for the loop
+        # above to have started from - and that pair is what deforms the shape, i.e. the whole point
+        # of plotting an interface eigenmode. Lagrange multipliers such as _kin_bc land here too.
         leftover = sorted({n[len("EigenRe_"):] for n in names if n.startswith("EigenRe_")}
                           & {n[len("EigenIm_"):] for n in names if n.startswith("EigenIm_")}
                           - handled)
-        if "coordinate_x" in leftover and "coordinate_y" in leftover:
-            # assembled as a cylindrical displacement and rotated, the way the mesh-position block
-            # of MeshDataRotationalExtrusion does it
-            def displacement(prefix):
-                out_of_plane = (get(prefix + "coordinate_phi") if prefix + "coordinate_phi" in names
-                                else numpy.zeros(len(sweep)))
-                return numpy.stack([get(prefix + "coordinate_x"), get(prefix + "coordinate_y"),
-                                    out_of_plane], axis=1)
-            result["Eigen_coordinate"] = numpy.einsum(
-                "nai,ni->na", Q, wRe[:, None] * displacement("EigenRe_")
-                                 + wIm[:, None] * displacement("EigenIm_"))
-            for axis in ("_x", "_y", "_phi"):
-                consumed.update(("EigenRe_coordinate" + axis, "EigenIm_coordinate" + axis))
-            leftover = [n for n in leftover if not n.startswith("coordinate_")]
         for name in leftover:
             re, im = get("EigenRe_" + name), get("EigenIm_" + name)
-            if re.ndim > 1:
-                continue    # a bare multi-component pair has no frame to be rotated in
-            result["Eigen_" + name] = wRe * re + wIm * im
+            if re.ndim > 1 and re.shape[1] == 3:
+                # a vector, so it turns with the frame like any other
+                cyl = (wRe[:, None] * numpy.stack([re[:, 0], re[:, 1],
+                                                   out_of_plane("EigenRe_" + name, re)], axis=1)
+                       + wIm[:, None] * numpy.stack([im[:, 0], im[:, 1],
+                                                     out_of_plane("EigenIm_" + name, im)], axis=1))
+                result["Eigen_" + name] = numpy.einsum("nai,ni->na", Q, cyl)
+            elif re.ndim > 1:
+                continue    # neither a scalar nor a vector: no frame to rotate it in
+            else:
+                result["Eigen_" + name] = wRe * re + wIm * im
             consumed.update(("EigenRe_" + name, "EigenIm_" + name))
 
         # ---- optionally fold the perturbation into the base state, geometry included

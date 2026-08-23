@@ -190,11 +190,28 @@ class MeshDataCacheEntry:
         self.vector_fields:dict[str,list[str]] = {k: v for a in vector_fields for k, v in a.items()}
         tensor_fields = msh.get_eqtree().get_equations().get_list_of_tensor_fields(self.mesh.get_eqtree().get_code_gen())
         self.tensor_fields:dict[str,list[list[str]]] = {k: v for a in tensor_fields for k, v in a.items()}
+        self._add_implicit_vector_fields()
 
         self._additional_eigendata:dict[int,tuple[str,str,str]]={} # Index to pair of Re,Im
         self.is_global=False # This entry holds this rank's part of a distributed mesh, see from_arrays
         if self.operator is not None:
             self.operator.apply(self)
+
+    #: Vectors the mesh writes itself instead of an equation declaring them, so they appear in no
+    #: _vectorfields and used to be written as loose scalars - "normal_x", "normal_y" rather than a
+    #: single "normal", and likewise the eigenperturbation of the position. Their components carry
+    #: the same x/y/z suffixes as any other vector field, so registering them here is enough for
+    #: everything downstream to treat them alike: the writer groups them, MeshDataCombineWith-
+    #: Eigenfunction prefixes them, and the extrusions rotate them with the frame.
+    IMPLICIT_VECTOR_FIELDS = ("coordinate", "lagrangian", "normal")
+
+    def _add_implicit_vector_fields(self)->None:
+        for stem in self.IMPLICIT_VECTOR_FIELDS:
+            if stem in self.vector_fields:
+                continue
+            components=[stem+"_"+c for c in ("x","y","z") if stem+"_"+c in self.nodal_field_inds]
+            if len(components)>1:
+                self.vector_fields[stem]=components
 
     @classmethod
     def from_arrays(cls,msh:AnySpatialMesh,key:MeshDataCacheKey,nodal_values:NPFloatArray,elem_indices:NPAnyIntArray,elem_types:NPAnyIntArray,nodal_field_inds:dict[str,int],D0_data:NPFloatArray,DL_data:NPFloatArray,elemental_field_inds:dict[str,int],merged_eigendata:dict[int,dict[str,Any]],nodal_local_exprs:dict[str,NPFloatArray],local_expr_indices:dict[str,int],vector_fields:dict[str,list[str]],tensor_fields:dict[str,list[list[str]]] | None=None) -> "MeshDataCacheEntry":
@@ -1509,6 +1526,16 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                             #    field_operators[vecname+"_z"]= [lambda ReVy,ImVy: numpy.outer(numpy.cos(m * phis), ReVy).flatten()+numpy.outer(numpy.sin(m * phis), ImVy).flatten(),prefixRe + veccompos[0][len(prefixRes):-len("_x")] + "_y",prefixIm + veccompos[0][len(prefixRes):-len("_x")] + "_y"] #type:ignore
                             vector_fields[vecname]=[vecname+component for component in ["_x","_y","_z"][0:len(composRes)]]
                             #print(new_nodal_field_inds,vector_fields)
+                        else:
+                            # No "_normal" component to fold in. This extrusion translates rather
+                            # than turning, so the scalar loop above already produced every component
+                            # of this vector correctly and the plain vector loop below must be kept
+                            # off it: that one composes its operator from a SOURCE field of the same
+                            # name, which for an eigen result does not exist. "normal" and
+                            # "coordinate" started arriving here once the mesh-written vectors were
+                            # registered as vector fields at all.
+                            completed_eigen_vector_fields.add(vecname) #type:ignore
+                            vector_fields[vecname]=_vector_components_present(vecname,new_nodal_field_inds)
                     # There used to be an else branch here setting field_operators[vecname+"_y"]
                     # from vecname+"_normal". It was dead: it fires only for the non-eigen vector
                     # fields, which the loop below overwrites in every case where the entry would
@@ -1766,21 +1793,31 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                             #print(vector_fields[ResVector])
                             #raise RuntimeError("HEREH")
                             #field_operators[fnRes] = [lambda RealPart, ImagPart: numpy.outer(numpy.cos(m * phis),RealPart).flatten() + numpy.outer(numpy.sin(m * phis), ImagPart).flatten(), fnRe, fnIm]
-                # Second iteration to patch the vectors
+                # Second iteration to patch the vectors.
+                #
+                # These are FUSED operators, reading the real and imaginary halves and doing both
+                # the mode reconstruction and the frame rotation at once: the dispatcher can only
+                # read base fields, so an operator cannot chain onto the reconstruction the scalar
+                # loop above produced. A swirl-free vector needs this as much as a swirling one -
+                # its components are still radial and axial rather than Cartesian. "normal" and
+                # "coordinate", which the mesh writes itself rather than an equation declaring them,
+                # are exactly that, and letting them fall through to the plain vector loop below
+                # asked it for a source field named after the RESULT.
                 for vecname,veccompos in vector_fields.items():
                     if vecname.startswith(prefixRes):
                         composRes = [fn for fn in veccompos]
                         composIm = [prefixIm + fn[len(prefixRes):] for fn in veccompos]
                         composRe = [prefixRe + fn[len(prefixRes):] for fn in veccompos]
-                        r_index=None
-                        phi_index=None
+                        r_index=phi_index=axial_index=None
                         for cindex,componame in enumerate(composRes):
                             if componame.endswith("_x"):
                                 r_index=cindex
                             elif componame.endswith("_phi"):
-                                phi_index=cindex                                
+                                phi_index=cindex
+                            elif componame.endswith("_y"):
+                                axial_index=cindex
 
-                        if r_index is not None and phi_index is not None:
+                        if r_index is not None:
                             # V = Re[(Vr*r_hat + Vphi*phi_hat)*exp(I*m*phi)] with the RIGHT-handed
                             # phi_hat = (-sin phi, cos phi, 0) -- the same one the base vector loop
                             # further down uses. Both signs were wrong here and they composed into a
@@ -1788,21 +1825,34 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                             # perturbation swirl were drawn with opposite handedness in one picture.
                             def _mode(Re,Im,m=m,phis=phis): #type:ignore
                                 return numpy.cos(m*phis)[:,None]*Re[None,:]-numpy.sin(m*phis)[:,None]*Im[None,:] #type:ignore
-                            def get_x_component(ReR,ImR,ReP,ImP,phis=phis): #type:ignore
-                                return (numpy.cos(phis)[:,None]*_mode(ReR,ImR)-numpy.sin(phis)[:,None]*_mode(ReP,ImP)).flatten() #type:ignore
-                            def get_y_component(ReR,ImR,ReP,ImP,phis=phis): #type:ignore
-                                return (numpy.sin(phis)[:,None]*_mode(ReR,ImR)+numpy.cos(phis)[:,None]*_mode(ReP,ImP)).flatten() #type:ignore
-                            field_operators[composRes[r_index]]=[get_x_component,composRe[r_index],composIm[r_index],composRe[phi_index],composIm[phi_index]] 
-                            field_operators[composRes[phi_index]] = [get_y_component, composRe[r_index],composIm[r_index], composRe[phi_index],composIm[phi_index]]
-                            yname=vecname+"_y"
-                            field_operators[yname]=field_operators.pop(composRes[phi_index]) #type:ignore
-                            new_nodal_field_inds[yname]=new_nodal_field_inds.pop(composRes[phi_index])
+                            if phi_index is not None:
+                                def get_x_component(ReR,ImR,ReP,ImP,phis=phis): #type:ignore
+                                    return (numpy.cos(phis)[:,None]*_mode(ReR,ImR)-numpy.sin(phis)[:,None]*_mode(ReP,ImP)).flatten() #type:ignore
+                                def get_y_component(ReR,ImR,ReP,ImP,phis=phis): #type:ignore
+                                    return (numpy.sin(phis)[:,None]*_mode(ReR,ImR)+numpy.cos(phis)[:,None]*_mode(ReP,ImP)).flatten() #type:ignore
+                                mode_args=[composRe[r_index],composIm[r_index],composRe[phi_index],composIm[phi_index]]
+                            else:
+                                def get_x_component(ReR,ImR,phis=phis): #type:ignore
+                                    return (numpy.cos(phis)[:,None]*_mode(ReR,ImR)).flatten() #type:ignore
+                                def get_y_component(ReR,ImR,phis=phis): #type:ignore
+                                    return (numpy.sin(phis)[:,None]*_mode(ReR,ImR)).flatten() #type:ignore
+                                mode_args=[composRe[r_index],composIm[r_index]]
+                            # the source-named components go away; the Cartesian ones take over
+                            for stale in composRes:
+                                field_operators.pop(stale,None)
+                                new_nodal_field_inds.pop(stale,None)
+                            for suffix,op in (("_x",get_x_component),("_y",get_y_component)):
+                                field_operators[vecname+suffix]=[op]+mode_args
+                                if vecname+suffix not in new_nodal_field_inds:
+                                    new_nodal_field_inds[vecname+suffix]=max(new_nodal_field_inds.values())+1
+                            if axial_index is not None:
+                                # the axial component only picks up the mode factor, not the rotation
+                                field_operators[vecname+"_z"]=[lambda ReVy,ImVy,m=m,phis=phis: numpy.outer(numpy.cos(m*phis),ReVy).flatten()-numpy.outer(numpy.sin(m*phis),ImVy).flatten(),
+                                                               composRe[axial_index],composIm[axial_index]] #type:ignore
+                                if vecname+"_z" not in new_nodal_field_inds:
+                                    new_nodal_field_inds[vecname+"_z"]=max(new_nodal_field_inds.values())+1
                             completed_eigen_vector_fields.add(vecname) #type:ignore
-                            if len(composRes)>2:
-                                new_nodal_field_inds[vecname + "_z"] = max(new_nodal_field_inds.values()) + 1
-                                field_operators[vecname+"_z"]= [lambda ReVy,ImVy,m=m,phis=phis: numpy.outer(numpy.cos(m * phis), ReVy).flatten()-numpy.outer(numpy.sin(m * phis), ImVy).flatten(),prefixRe + veccompos[0][len(prefixRes):-len("_x")] + "_y",prefixIm + veccompos[0][len(prefixRes):-len("_x")] + "_y"] #type:ignore
-                            vector_fields[vecname]=[vecname+component for component in ["_x","_y","_z"][0:len(composRes)]]
-                            #print(new_nodal_field_inds,vector_fields)
+                            vector_fields[vecname]=_vector_components_present(vecname,new_nodal_field_inds)
 
                 
             # Also assemble the eigenperturbation of the position. The field names are hardcoded, so
