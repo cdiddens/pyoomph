@@ -243,6 +243,14 @@ namespace pyoomph
 		virtual void fill_dof_types(int *typarr);
 		// Make sure the halo layer (MPI-distributed meshes) is wide enough to represent periodic boundary partners.
 		virtual void ensure_halos_for_periodic_boundaries();
+		// True if any node of this mesh is a periodic ("copy") node, i.e. the mesh carries a PeriodicBC or
+		// was built from a template with add_periodic_node_pair(). Scans the node list; not cached, since
+		// refinement and remeshing both mint and destroy copy nodes.
+		virtual bool has_periodic_nodes() const;
+		// True if this mesh has periodic ("copy") nodes whose POSITIONS are still unknowns, i.e. a moving
+		// (ALE) mesh. Only meaningful once equation numbers have been assigned. See the note at the
+		// implementation for why that combination is refused under MPI.
+		virtual bool has_periodic_position_dofs() const;
 		// Evaluate a named user-defined integral (as set up in the JIT code) over this mesh.
 		virtual GiNaC::ex evaluate_integral_function(std::string name);
 		// Find the extremum (sign>0: max, sign<0: min) of a named local expression over the mesh; returns the

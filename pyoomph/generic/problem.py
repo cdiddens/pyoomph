@@ -1850,6 +1850,43 @@ class Problem(_pyoomph.Problem):
         if self.is_distributed():
             raise RuntimeError(what+" is not supported on a distributed (--distribute) problem yet. Run it without --distribute (plain eigenvalue solving via SLEPc does work distributed).")
 
+    def _require_no_distributed_periodic_refinement(self,what:str,nchanged:int|None=None)->None:
+        """Stop with a clear message when a distributed mesh with periodic nodes has been refined.
+
+        Mesh::distribute() ends with setup_tree_forest(), which rebuilds the tree neighbours by
+        matching shared nodes. A periodic master and its copy are two distinct Node pointers, so the
+        TreeRoot::Neighbour_periodic links that BulkElementBase::connect_periodic_tree installed do
+        not survive. Refining afterwards therefore mints ordinary, non-periodic nodes along the seam
+        and the solution quietly stops being periodic. Refinement BEFORE distribution is unaffected,
+        which is where the initial uniform refinement happens.
+
+        Checked AFTER the fact, with ``nchanged`` the number of elements the adaption actually
+        touched: initialise() runs its initial adaption loop on every problem, adaptive or not, so a
+        check beforehand would refuse every distributed periodic run over an adapt that was going to
+        be a no-op anyway. Pass ``nchanged=None`` for a caller that unconditionally refines.
+
+        Both branches below are collective on every rank, whatever this rank happens to hold: the
+        periodic nodes may all sit on one partition, and a RuntimeError raised on that rank alone
+        would leave the others waiting in the next collective.
+        """
+        if not self.is_distributed():
+            return
+        local_periodic = 0
+        for name,mesh in self._meshdict.items():
+            if isinstance(mesh,ODEStorageMesh):
+                continue
+            if mesh.has_periodic_nodes():
+                local_periodic = 1
+                break
+        if get_mpi_nproc()>1:
+            has_periodic = get_mpi_sum(local_periodic)>0
+            changed = True if nchanged is None else get_mpi_sum(int(nchanged))>0
+        else:
+            has_periodic = local_periodic>0
+            changed = True if nchanged is None else int(nchanged)>0
+        if has_periodic and changed:
+            raise RuntimeError(what+" of a distributed (--distribute) problem whose mesh has periodic boundaries is not supported: the periodic tree connections do not survive Mesh::distribute(), so the refined seam would silently stop being periodic. The run is stopped rather than continuing on a mesh that would no longer be periodic. Either drop --distribute, or do all refinement before distribution (a finer base mesh plus initial_adaption_steps=0). See dev_docs/distributed_periodic_bc.md.")
+
     def _require_no_bifurcation_tracking(self,what:str)->None:
         """Stop with a clear message if ``what`` is being attempted while a tracker is installed.
 
@@ -2733,6 +2770,7 @@ class Problem(_pyoomph.Problem):
 
     def _adapt(self) -> tuple[int, int]:
         nref,nunref=self._adapt_with_interfacial_errors()
+        self._require_no_distributed_periodic_refinement("Mesh adaptation",nref+nunref)
         return nref,nunref
 
     def _compile_meshes(self):
@@ -4348,6 +4386,38 @@ class Problem(_pyoomph.Problem):
             # The snapshot/refit carries every discontinuous space now (see
             # dev_docs/internal_facet_fields.md), so there is nothing left to refuse.
         super().distribute()
+        self._require_no_distributed_periodic_position_dofs()
+
+
+    def _require_no_distributed_periodic_position_dofs(self)->None:
+        """Stop if periodic boundaries are combined with a moving mesh on a distributed problem.
+
+        make_periodic() aliases only a node's VALUES, never its positions -- oomph-lib says so itself
+        in the warning in BoundaryNode<SolidNode>::make_periodic -- so a periodic copy's position dofs
+        are its own. Distribution keeps the copy out of the halo scheme entirely (it owns no values,
+        and the two sides of a seam are too far apart for any partition to pair them up), which is
+        exactly what independent position dofs would have needed: they would be numbered on every rank
+        that holds the copy rather than on one.
+
+        Checked after super().distribute(), because Problem::distribute() assigns the equation numbers
+        at its very end and there is nothing to read before that. Collective: the periodic nodes can
+        all sit on one partition, and on a rank where the copy is a halo its dofs read as pinned.
+        """
+        if not self.is_distributed():
+            # mpirun -n 1, or fewer elements than ranks: Problem::distribute() declined to do
+            # anything, so there is no halo scheme for the position dofs to fall out of.
+            return
+        local = 0
+        for _name,mesh in self._meshdict.items():
+            if isinstance(mesh,ODEStorageMesh):
+                continue
+            if mesh.has_periodic_position_dofs():
+                local = 1
+                break
+        if get_mpi_nproc()>1:
+            local = get_mpi_sum(local)
+        if local>0:
+            raise RuntimeError("Periodic boundaries on a moving (ALE) mesh are not supported with --distribute: only the nodal values are shared between a periodic node and its master, never the positions, so the copy's position degrees of freedom are its own and cannot be carried by the distributed halo scheme. Note that the two sides' coordinates do not coincide even in serial -- use Lagrange multipliers if you need that. See dev_docs/distributed_periodic_bc.md.")
 
 
     def actions_before_distribute(self):
@@ -4885,6 +4955,7 @@ class Problem(_pyoomph.Problem):
         """Apply what _defer_uneven_initial_refinement held back, once distribution is done."""
         if not deferred:
             return
+        self._require_no_distributed_periodic_refinement("Deferred initial uniform refinement")
         self.actions_before_adapt()
         for mesh,extra in deferred:
             for _ in range(extra):

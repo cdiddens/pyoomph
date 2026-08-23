@@ -44,7 +44,7 @@ import math
 import numpy
 import pytest
 
-from pyoomph import Problem, Equations, DirichletBC
+from pyoomph import Problem, Equations, DirichletBC, PeriodicBC
 from pyoomph.expressions import var, vector, matrix, matproduct
 from pyoomph.equations.navier_stokes import NavierStokesEquations
 from pyoomph.equations.viscoelastic import (ViscoelasticEquations, ViscoelasticInflowBC, OldroydB,
@@ -373,14 +373,14 @@ class _PoiseuilleProblem(Problem):
     def define_problem(self):
         # Periodic in the flow direction, so the fully developed profile is the exact solution of
         # the discrete problem too and no artificial inflow or outflow condition is needed.
-        self.add_mesh(RectangularQuadMesh(N=[2, self.elements_across], size=[0.25, 1.0],
-                                          periodic=[True, False]))
+        self.add_mesh(RectangularQuadMesh(N=[2, self.elements_across], size=[0.25, 1.0]))
         navier_stokes = NavierStokesEquations(dynamic_viscosity=_ETA_S, mass_density=1,
                                               bulkforce=vector(_FORCE, 0))
         eqs = navier_stokes
         eqs += ViscoelasticEquations(model=OldroydB(), relaxation_time=_LAMBDA,
                                      polymer_viscosity=_ETA_P, space="C2",
                                      stabilization=self.stabilization)
+        eqs += PeriodicBC("right", offset=[0.25, 0]) @ "left"
         eqs += DirichletBC(velocity_x=0, velocity_y=0) @ "top"
         eqs += DirichletBC(velocity_x=0, velocity_y=0) @ "bottom"
         eqs += navier_stokes.create_pressure_fixation(value=0) @ "bottom"

@@ -1191,35 +1191,34 @@ namespace pyoomph
   // a master node possibly owned by a different process. If an element on this process touches such a
   // copy node, the element(s) owning the corresponding master node must be kept as halo elements on
   // this process too (set_must_be_kept_as_halo), otherwise the master's data would not be available
-  // locally. This walks all boundary elements/nodes, finds copy nodes, locates the boundary element(s)
-  // that own the master node, and flags both sides as must-keep-halo. Nodal (as opposed to purely
-  // discontinuous/DG) degrees of freedom on copied nodes are not supported in this distributed
-  // periodic setup and trigger an error.
+  // locally: Data::~Data turns every surviving copy into a deep, no-longer-periodic node without so
+  // much as a warning, and the periodicity would simply vanish. This walks all boundary
+  // elements/nodes, finds copy nodes, locates a boundary element that owns the master node, and flags
+  // both sides as must-keep-halo. One element per side is enough - it only has to keep the node
+  // alive and reachable - which is why both searches below stop at the first hit.
+  // This is also what the other half of the fix relies on: in the vendored oomph-lib a copy node is
+  // kept out of the shared/halo/haloed schemes entirely (the two sides of a seam are at opposite ends
+  // of the domain, so no partitioning can pair them up), and the master is then the only node of the
+  // pair the halo exchange reaches - it has to exist wherever the copy does. Stubbing this function
+  // out fails 6 of the tests in tests/test_mpi_periodic.py, so the dependency is not theoretical.
+  // See dev_docs/distributed_periodic_bc.md.
   void Mesh::ensure_halos_for_periodic_boundaries()
   {
 #ifdef OOMPH_HAS_MPI
-    // if (!this->is_mesh_distributed()) return;
+    // No is_mesh_distributed() early-out: this runs from actions_before_distribute(), i.e. before
+    // the mesh has ever been distributed, so the flag is always false here.
     for (unsigned int ib = 0; ib < this->nboundary(); ib++)
     {
       unsigned nbe = this->nboundary_element(ib);
-      //	std::cout << "NBE IS " << nbe << std::endl;
       for (unsigned int ie = 0; ie < nbe; ie++)
       {
         auto *be = dynamic_cast<BulkElementBase *>(this->boundary_element_pt(ib, ie));
-        //		std::cout << "BE IS " << be << std::endl;
         for (unsigned int in = 0; in < be->nnode(); in++)
         {
           auto *n = be->node_pt(in);
-          //			std::cout << "N IS " << n << std::endl;
           if (n->is_on_boundary(ib) && n->is_a_copy())
           {
-            if (n->nvalue() > 0 || (static_cast<pyoomph::Node*>(n)->variable_position_pt()->nvalue() > 0 && static_cast<pyoomph::Node*>(n)->variable_position_pt()->is_a_copy()))
-            {
-              throw_runtime_error("Distributed parallel with copied nodes (i.e. PeriodicBC) does not work with nodal degrees of freedom. Either use pure DG or implement a periodic boundary condition by Lagrange multipliers");
-            }
-            std::cout << "FOUND ELEM NODE: " << ib << "  " << ie << "  " << in << "  iscpy " << n->is_a_copy() << std::endl;
             auto *master = n->copied_node_pt();
-            std::cout << "MASTER NODE " << master << std::endl;
             for (unsigned int ib2 = 0; ib2 < this->nboundary(); ib2++)
             {
               if (master->is_on_boundary(ib2))
@@ -1243,6 +1242,43 @@ namespace pyoomph
       }
     }
 #endif
+  }
+
+  // Periodic boundaries alias one node's value storage onto another's (see
+  // ensure_halos_for_periodic_boundaries above). Several code paths - notably adaptation of a
+  // distributed mesh - are not valid in the presence of such nodes and use this to refuse.
+  bool Mesh::has_periodic_nodes() const
+  {
+    unsigned nnod = this->nnode();
+    for (unsigned int i = 0; i < nnod; i++)
+    {
+      if (this->node_pt(i)->is_a_copy()) return true;
+    }
+    return false;
+  }
+
+  // make_periodic() aliases only a node's VALUES, never its positions - oomph-lib says so itself in
+  // the warning in BoundaryNode<SolidNode>::make_periodic - so a periodic copy's position dofs are
+  // its own. Under MPI the copy is deliberately kept out of the halo scheme (it owns no values, and
+  // the two sides of a seam are too far apart for any partition to pair them), which is exactly what
+  // independent position dofs would have needed. Reports whether any such dof exists, so the
+  // combination can be refused rather than silently numbered on several ranks at once.
+  // Reads equation numbers, so it only says anything after assign_eqn_numbers(); on a rank where the
+  // node is a halo the dofs read as pinned, hence the caller reduces over ranks.
+  bool Mesh::has_periodic_position_dofs() const
+  {
+    unsigned nnod = this->nnode();
+    for (unsigned int i = 0; i < nnod; i++)
+    {
+      oomph::Node *n = this->node_pt(i);
+      if (!n->is_a_copy()) continue;
+      oomph::Data *pos = static_cast<pyoomph::Node *>(n)->variable_position_pt();
+      for (unsigned int j = 0; j < pos->nvalue(); j++)
+      {
+        if (pos->eqn_number(j) >= 0) return true;
+      }
+    }
+    return false;
   }
 
   // List the names of the named integral expressions defined in this mesh's JIT-compiled element code

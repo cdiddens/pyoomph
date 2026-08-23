@@ -2785,6 +2785,17 @@ namespace oomph
             {
               Node* nod_pt = el_pt->node_pt(j);
 
+              //FOR PYOOMPH: a periodic ("copy") node owns no data at all - make_periodic() points
+              // its Value/Eqn_number arrays at its master's and its assign_eqn_numbers() is a no-op.
+              // Keeping it out of the shared/halo/haloed schemes entirely is therefore both safe and
+              // necessary: safe because whatever the master receives IS the copy's data, and
+              // necessary because master and copy sit at opposite ends of the domain, so no
+              // partitioning puts them in the same halo layer and the schemes cannot pair them up.
+              // is_a_copy() is a local property of the node and identical on every rank, so both
+              // sides of every scheme skip exactly the same nodes and the orderings still match.
+              // See dev_docs/distributed_periodic_bc.md.
+              if (nod_pt->is_a_copy()) continue;
+
               // Add it as a shared node from current domain
               if (!node_shared[nod_pt])
               {
@@ -2813,6 +2824,9 @@ namespace oomph
             for (unsigned j = 0; j < nnod; j++)
             {
               Node* nod_pt = el_pt->node_pt(j);
+
+              //FOR PYOOMPH: periodic copies stay out of the schemes; see above.
+              if (nod_pt->is_a_copy()) continue;
 
               // Add it as a shared node from current domain
               if (!node_shared[nod_pt])
@@ -2848,6 +2862,9 @@ namespace oomph
             {
               Node* nod_pt = el_pt->node_pt(j);
 
+              //FOR PYOOMPH: periodic copies stay out of the schemes; see above.
+              if (nod_pt->is_a_copy()) continue;
+
               // Add it as a shared node from current domain
               if (!node_shared[nod_pt])
               {
@@ -2874,6 +2891,9 @@ namespace oomph
             for (unsigned j = 0; j < nnod; j++)
             {
               Node* nod_pt = el_pt->node_pt(j);
+
+              //FOR PYOOMPH: periodic copies stay out of the schemes; see above.
+              if (nod_pt->is_a_copy()) continue;
 
               // Add it as a shared node from current domain
               if (!node_shared[nod_pt])
@@ -3356,6 +3376,11 @@ namespace oomph
           for (unsigned j = 0; j < nnod; j++)
           {
             Node* nod_pt = finite_el_pt->node_pt(j);
+
+            //FOR PYOOMPH: periodic copies own no data and stay out of the halo(ed) schemes; see
+            // the note in setup_shared_node_scheme().
+            if (nod_pt->is_a_copy()) continue;
+
             // Associate node with this domain
             processors_associated_with_data[nod_pt].insert(domain);
 
@@ -3389,6 +3414,10 @@ namespace oomph
         for (unsigned j = 0; j < nnod; j++)
         {
           Node* nod_pt = finite_el_pt->node_pt(j);
+
+          //FOR PYOOMPH: periodic copies own no data and stay out of the halo(ed) schemes; see
+          // the note in setup_shared_node_scheme().
+          if (nod_pt->is_a_copy()) continue;
 
           // Associate this node with current processor
           processors_associated_with_data[nod_pt].insert(my_rank);
@@ -3590,6 +3619,10 @@ namespace oomph
     {
       Node* nod_pt = this->node_pt(j);
 
+      //FOR PYOOMPH: a periodic copy is given its master's halo status at the end of this function
+      // instead of getting a verdict of its own; see the note in setup_shared_node_scheme().
+      if (nod_pt->is_a_copy()) continue;
+
       // Reset halo status of node to false
       nod_pt->set_nonhalo();
 
@@ -3661,6 +3694,10 @@ namespace oomph
           for (unsigned j = 0; j < nnod; j++)
           {
             Node* nod_pt = finite_el_pt->node_pt(j);
+
+            //FOR PYOOMPH: periodic copies own no data and stay out of the halo(ed) schemes; see
+            // the note in setup_shared_node_scheme().
+            if (nod_pt->is_a_copy()) continue;
 
             // Have we done this node already?
             if (!done[nod_pt])
@@ -3740,6 +3777,10 @@ namespace oomph
           for (unsigned j = 0; j < nnod; j++)
           {
             Node* nod_pt = finite_el_pt->node_pt(j);
+
+            //FOR PYOOMPH: periodic copies own no data and stay out of the halo(ed) schemes; see
+            // the note in setup_shared_node_scheme().
+            if (nod_pt->is_a_copy()) continue;
 
             // Have we done this node already?
             if (!node_done[nod_pt])
@@ -4413,6 +4454,28 @@ namespace oomph
       }
     }
 
+
+    //FOR PYOOMPH: the periodic copies were left out of the classification above, so give them
+    // their master's halo status now. Nothing in the halo exchange reads it -- the copy is in no
+    // halo(ed) list -- but plenty of code asks a node whether it is a halo, and a copy that claimed
+    // to be non-halo on every rank would look like a node several processors own.
+    {
+      unsigned nnod_all = this->nnode();
+      for (unsigned j = 0; j < nnod_all; j++)
+      {
+        Node* nod_pt = this->node_pt(j);
+        if (!nod_pt->is_a_copy()) continue;
+        Node* master_pt = nod_pt->copied_node_pt();
+        if (master_pt->is_halo())
+        {
+          nod_pt->set_halo(master_pt->non_halo_proc_ID());
+        }
+        else
+        {
+          nod_pt->set_nonhalo();
+        }
+      }
+    }
 
     // MemoryUsage::doc_memory_usage("before resize halo nodes");
 

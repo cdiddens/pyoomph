@@ -695,3 +695,46 @@ directly -- odd monomials over a symmetric domain, and a Poisson solution lying 
 lines, quadrilaterals, triangles and bricks; it was verified to fail on the pre-fix build, on
 exactly the three quadrilateral cases.
 Upstream equivalent: none; this is an upstream oomph-lib typo, present in the same table there.
+
+mesh.cc + problem.cc (Changed on 23rd August 2026, periodic boundary conditions under --distribute):
+Periodicity is pointer aliasing, not a constraint: BoundaryNodeBase::make_node_periodic points the
+copy node's Value/Eqn_number arrays at its master's, and BoundaryNode::assign_eqn_numbers is a no-op
+on a copy. Nothing in the distribution machinery knows that - mesh.cc, problem.cc, refineable_mesh.cc
+and partitioning.cc do not contain the word "periodic" - so master and copy were two independent
+Data* keys in every halo map while being one array, and pyoomph refused the combination outright.
+Two changes, both marked //FOR PYOOMPH.
+(a) Mesh::setup_shared_node_scheme and Mesh::classify_halo_and_haloed_nodes skip nodes with
+is_a_copy() when building Shared_node_pt, Halo_node_pt, Haloed_node_pt and the
+processors_associated_with_data / processor_in_charge maps; the copies are given their master's halo
+status at the end of classify_halo_and_haloed_nodes instead of getting a verdict of their own. Safe
+because a copy owns no data - whatever the master receives IS the copy's data - and necessary because
+the two members of a pair sit at opposite ends of the domain: no partitioning puts them in the same
+halo layer, so the schemes, which are built out of element adjacency, structurally cannot pair them
+up. is_a_copy() is a local property of the node and identical on every rank, so both sides of every
+scheme skip the same nodes and the ordering invariants still hold.
+Giving the pair one agreed owner instead - computable without communicating in Mesh::distribute,
+where the mesh is still replicated and element_domain has been broadcast - was tried first and does
+NOT work: the forced owner holds the OTHER member, so the node is not in the shared node scheme with
+it and the overlooked-halo reconciliation throws "Failed to find node that is shared node N ... in
+shared node lookup scheme with processor P which is in charge". Patching that reconciliation only
+moved the failure to three or more ranks, where the intermediate is a third rank that also lacks the
+node.
+(b) Problem::synchronise_eqn_numbers no longer bumps a copy's equation numbers. Data::eqn_number(i)
+returns a long& into the SHARED array and master and copy are both in Node_pt, so every periodic dof
+got my_eqn_num_base added twice - invisible on rank 0, silently out of range everywhere else. Needed
+independently of (a); the position bump is guarded by position_is_a_copy() for symmetry, though
+make_periodic never aliases positions.
+(b) was verified by ablation: restoring the stock loop while keeping (a) makes five of the twelve
+tests in tests/test_mpi_periodic.py fail, all with PETSc's "Column too large: col 1440 max 991".
+The pyoomph half of the fix is Mesh::ensure_halos_for_periodic_boundaries (src/mesh.cpp), which keeps
+a boundary element from each side of the seam on every rank so the master is always present - (a)
+depends on that, since the master then becomes the only node of the pair the halo exchange reaches,
+and stubbing it out fails 6 of the tests -
+plus two refusals in Problem: _require_no_distributed_periodic_refinement, because Mesh::distribute
+ends with setup_tree_forest(), which rebuilds tree neighbours by matching shared nodes, so the
+TreeRoot::Neighbour_periodic links do not survive it; and
+_require_no_distributed_periodic_position_dofs, because make_periodic aliases only the values, so on
+a moving mesh a copy carries position dofs of its own and (a) leaves nothing to carry them.
+See dev_docs/distributed_periodic_bc.md and tests/test_mpi_periodic.py.
+Upstream equivalent: none, this is a pyoomph fix (upstream oomph-lib does not support periodic
+boundary conditions on a distributed mesh either).

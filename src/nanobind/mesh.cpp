@@ -503,6 +503,10 @@ void PyReg_Mesh(nb::module_ &m)
 			for(unsigned int i=0;i<zeta.size();i++){zeta[i]=zeta_prime[i];};
 			return zeta;
 		}, nb::arg("boundary_index"), "Returns the intrinsic boundary coordinate(s) zeta of this node on the given mesh boundary")
+		.def("is_a_copy", [](pyoomph::Node *n)
+			 { return n->is_a_copy(); }, "Returns True if this node is a periodic copy of another node, i.e. if it shares that node's values and equation numbers instead of owning any")
+		.def("copied_node_pt", [](pyoomph::Node *n)
+			 { return dynamic_cast<pyoomph::Node*>(n->copied_node_pt()); }, nb::rv_policy::reference, "Returns the master node this node is a periodic copy of, or None if it is not a copy")
 		// Ties a slave node to a master node so they share the same degrees of freedom (used for periodic boundaries).
 		// Resolves any pre-existing copy-master relations first and raises an error if that leads to an inconsistency.
 		.def("_make_periodic", [](pyoomph::Node *slv, pyoomph::Node *mst, MeshHandleBase *mesh_h)
@@ -1357,6 +1361,10 @@ void PyReg_Mesh(nb::module_ &m)
 			 { m->ensure_external_data(); }), "Ensures that all external Data dependencies (dofs owned by other elements/meshes) required by this mesh's elements are properly registered")
 		.def("ensure_halos_for_periodic_boundaries",mesh_method([](pyoomph::Mesh *m)
 			 { m->ensure_halos_for_periodic_boundaries(); }), "In parallel (MPI) runs, ensures that the required halo elements/nodes are present so periodic boundary conditions also work across processor boundaries")
+		.def("has_periodic_nodes",mesh_method([](pyoomph::Mesh *m)
+			 { return m->has_periodic_nodes(); }), "Returns True if any node of this mesh is a periodic copy of another node, i.e. if a PeriodicBC or a periodic mesh template is in use")
+		.def("has_periodic_position_dofs",mesh_method([](pyoomph::Mesh *m)
+			 { return m->has_periodic_position_dofs(); }), "Returns True if a periodic copy node of this mesh has unknown (unpinned) positions, i.e. if periodic boundaries are combined with a moving mesh. Only meaningful after the equation numbers have been assigned")
 		.def("nroot_halo_element",mesh_method([](pyoomph::Mesh *m)
 			 {
 				#ifdef OOMPH_HAS_MPI

@@ -17140,25 +17140,36 @@ namespace oomph
     {
       Node* nod_pt = mesh_pt()->node_pt(j);
 
-      // loop over ALL eqn numbers - variable number of values
-      unsigned nval = nod_pt->nvalue();
-
-      for (unsigned ival = 0; ival < nval; ival++)
+      //FOR PYOOMPH: a periodic ("copy") node does not own its equation numbers - make_periodic()
+      // points its Eqn_number array at the master's, and eqn_number(i) hands out a reference into
+      // that shared array. Master and copy are both in Node_pt, so bumping both adds
+      // my_eqn_num_base twice to the same long. That is invisible on rank 0 (base 0) and silently
+      // renumbers every periodic dof out of range on every other rank.
+      if (!nod_pt->is_a_copy())
       {
-        int old_eqn_number = nod_pt->eqn_number(ival);
-        // Include all eqn numbers
-        if (old_eqn_number >= 0)
+        // loop over ALL eqn numbers - variable number of values
+        unsigned nval = nod_pt->nvalue();
+
+        for (unsigned ival = 0; ival < nval; ival++)
         {
-          // Bump up eqn number
-          int new_eqn_number = old_eqn_number + my_eqn_num_base;
-          nod_pt->eqn_number(ival) = new_eqn_number;
+          int old_eqn_number = nod_pt->eqn_number(ival);
+          // Include all eqn numbers
+          if (old_eqn_number >= 0)
+          {
+            // Bump up eqn number
+            int new_eqn_number = old_eqn_number + my_eqn_num_base;
+            nod_pt->eqn_number(ival) = new_eqn_number;
+          }
         }
       }
 
       // Is this a solid node? If so, need to bump up its equation number(s)
       SolidNode* solid_nod_pt = dynamic_cast<SolidNode*>(nod_pt);
 
-      if (solid_nod_pt != 0)
+      //FOR PYOOMPH: same reasoning for the position data. make_periodic() does not alias positions
+      // (see the warning in BoundaryNode<SolidNode>::make_periodic), so this is never true today,
+      // but hijacked or copied position data would hit exactly the same double bump.
+      if (solid_nod_pt != 0 && !solid_nod_pt->position_is_a_copy())
       {
         // Find equation numbers
         unsigned nval = solid_nod_pt->variable_position_pt()->nvalue();
