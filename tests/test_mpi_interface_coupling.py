@@ -127,3 +127,28 @@ def test_conformity_check_stays_clean_under_throw(tmp_path):
     cases = [(k, "connect1", (1, 2, "callback")) for k in _KINDS]
     cases += [("quad", "ale", (1, 2, "level")), ("mixed", "connect12", (0, 3, "level"))]
     _run(cases, 2, tmp_path, extra_env={"PYOOMPH_CHECK_HALO_CONSISTENCY": "2"})
+
+
+# --- Mixed element spaces (dev_docs/interface_refinement_coupling.md section 15) ----------------------
+
+
+@pytest.mark.parametrize("lo,up", [("C1", "C2"), ("C2", "C1"), ("C2", "C1TB"), ("C2TB", "C1")])
+def test_mixed_spaces_distributed(lo, up, tmp_path):
+    # The space matrix under distribution. Two things are being asked here that the serial arm cannot:
+    # that the cross-domain node identities agree BETWEEN RANKS -- they are never communicated, each rank
+    # derives them from the template stamp and its own refinements, halo elements included -- and that the
+    # C2/C1TB pair, which used to segfault on any refinement at all, survives a distributed adapt too.
+    _run([(k, "connect:%s/%s" % (lo, up), (1, 2, "estimator")) for k in _KINDS], 2, tmp_path)
+
+
+@pytest.mark.parametrize("lo,up", [("C2", "C1"), ("C1", "C2")])
+def test_mixed_order_on_a_moving_interface_distributed(lo, up, tmp_path):
+    # The case the topological identity exists for, distributed: on a curved interface the C2 side
+    # promotes its off-chord midside node to a vertex while the C1 side creates one on the chord, so the
+    # quantised Eulerian keys the machinery used to run on disagree. Under MPI the two sides are also
+    # partitioned independently, so a rank routinely holds one side of a facet pair and not the other --
+    # the identities have to match without anyone comparing them across ranks.
+    #
+    # tri_left only for C2TB/C2TB is excluded elsewhere; here the quad kind is enough to state the point
+    # and keeps the case small (CLAUDE.md: <= 4 ranks, small problems).
+    _run([("quad", "move:%s/%s" % (lo, up), (1, 2, "estimator"))], 2, tmp_path)
