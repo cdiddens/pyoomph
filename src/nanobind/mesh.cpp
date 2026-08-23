@@ -1608,7 +1608,7 @@ void PyReg_Mesh(nb::module_ &m)
 	 std::vector<int> types;
 	 std::vector<std::string> names;
 	 self->describe_global_dofs(types,names);
-	 return std::make_tuple(vector_to_ndarray(types),names); }), "Returns, for every global degree of freedom associated with this mesh, its dof type and a human-readable name")
+	 return std::make_tuple(vector_to_ndarray(types),names); }), "Returns a classification of the problem's degrees of freedom by this mesh: one entry per global equation number giving the index of its dof type on this mesh (-1 for the dofs this mesh does not carry), plus the human-readable type names those indices refer to. Under MPI only the dofs this rank's own elements reach are classified, but the type names come from the mesh's own code and are therefore the same on every rank, including one that holds no element of this mesh at all")
 		.def("set_output_scale",mesh_method(&pyoomph::Mesh::set_output_scale), nb::arg("name"), nb::arg("scale"), nb::arg("jitcode"), "Sets an output (dimensional rescaling) factor for the field of the given name, used e.g. when exporting to numpy/VTK")
 		.def("get_output_scale",mesh_method(&pyoomph::Mesh::get_output_scale), nb::arg("name"), "Returns the output (dimensional rescaling) factor previously set for the field of the given name")
 		.def("get_element_dimension",mesh_method(&pyoomph::Mesh::get_element_dimension), "Returns the spatial dimension of the elements of this mesh")

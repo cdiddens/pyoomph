@@ -74,6 +74,9 @@ if no_mpi_file.exists():
 	def get_mpi_any_list(flags, comm=None): #type:ignore
 		return [bool(f) for f in flags] #type:ignore
 
+	def get_mpi_elementwise_max(arr, comm=None): #type:ignore
+		return arr #type:ignore
+
 	def get_mpi_bcast(value, root:int=0, comm=None): #type:ignore
 		return value #type:ignore
 
@@ -129,6 +132,15 @@ else:
 		# rank-independent order.
 		gathered=comm.allgather([bool(f) for f in flags]) #type:ignore
 		return [any(votes) for votes in zip(*gathered)] #type:ignore
+
+	def get_mpi_elementwise_max(arr, comm=MPI.COMM_WORLD): #type:ignore
+		# Elementwise MAX over a numpy array of the same length and meaning on every rank - indexed
+		# by something rank-independent, a global equation number say. Reduced in place (and the
+		# array returned), so the caller must not hand in a view it still needs unreduced.
+		import numpy
+		out=numpy.ascontiguousarray(arr) #type:ignore
+		comm.Allreduce(MPI.IN_PLACE, out, op=MPI.MAX) #type:ignore
+		return out #type:ignore
 
 	def get_mpi_bcast(value, root:int=0, comm=MPI.COMM_WORLD): #type:ignore
 		# For data that MUST be identical on every rank but is not by construction - anything drawn

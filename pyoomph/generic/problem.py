@@ -4488,6 +4488,31 @@ class Problem(_pyoomph.Problem):
         if self._custom_assembler:
             self._custom_assembler.actions_after_equation_numbering()
 
+    def _merge_dof_description_over_ranks(self,doflist:NPIntArray,dofnames:list[str])->NPIntArray:
+        """Complete the per-rank dof description of :py:meth:`get_dof_description` into the global one.
+
+        A rank can only classify the dofs its own elements reach, so on a distributed problem each of
+        them comes out of the mesh walk with holes where somebody else's part of the mesh is. The type
+        indices are comparable across ranks because the mesh tree, and with it the name list, comes
+        from the same equation tree everywhere - which is checked rather than assumed, since names that
+        disagree would relabel dofs instead of failing.
+
+        Elementwise MAX is the merge: unassigned is -1, and where two ranks both classified a dof they
+        each took whichever mesh came later in the walk, so the larger index is also the one a serial
+        run would have arrived at (an interface is walked after its bulk).
+        """
+        if not self.is_distributed():
+            return doflist
+        from .mpi import get_mpi_nproc,get_mpi_world_comm,get_mpi_elementwise_max
+        comm=get_mpi_world_comm()
+        if get_mpi_nproc()<=1 or comm is None:
+            return doflist
+        if any(other!=dofnames for other in comm.allgather(dofnames)): #type:ignore
+            if not self.is_quiet():
+                print("Cannot merge the dof description across the ranks: they do not agree on the dof type names. Describing this rank's part of the mesh only.")
+            return doflist
+        return get_mpi_elementwise_max(doflist)
+
     def get_dof_description(self):
         """
         Returns two arrays containing the description of the degrees of freedom.
@@ -4496,11 +4521,19 @@ class Problem(_pyoomph.Problem):
         
         For a simple Poisson equation for a field ``u`` on a line domain name ``"domain"``, the first returned array will contain numbers between 0 and 2 (dof-type indices), and the second array will contain the type names ``["domain/u", "domain/left/u", "domain/right/u"]``.
         Note how the boundaries get their own dof-type indices.
-                        
+
+        On a distributed (``--distribute``) problem this is collective: each rank can only describe the
+        dofs its own elements reach, so the per-rank answers are merged and every rank returns the same
+        full-length description - which is what the callers need, since the residual vector they index
+        it with is gathered as well.
+
         Returns:
             A pair of arrays containing the dof-type indices and the type names to classify the degrees of freedom.
         """
-        doflist:NPIntArray=numpy.array([],dtype=numpy.int32) #type:ignore
+        # Full length and all-unassigned from the start. Deriving the length from the first mesh that
+        # answers instead used to leave it at zero on a rank whose first mesh is empty, and every later
+        # mesh then silently described nothing.
+        doflist:NPIntArray=numpy.full(self.ndof(),-1,dtype=numpy.int32) #type:ignore
         dofnames:list[str] = []
 
         def process(m:AnyMesh):
@@ -4510,23 +4543,26 @@ class Problem(_pyoomph.Problem):
             #if numpy.all(types<0):
             #	print("MESH "+m.get_full_name()+" does not identify any dofs...")
             #print(m.get_full_name(),types,names)
-            if len(doflist)==0:
-                doflist = numpy.array(types,dtype=numpy.int32) #type:ignore
             offset = len(dofnames)
             trunk = m.get_full_name()
             for n in names:
                 dofnames.append(trunk + "/" + n)
-            for k in range(len(doflist)):
-                if k>=len(types):
-                    raise RuntimeError("Strange. Should not happen: "+m.get_full_name()+" NAMES: "+str(names)+" TYPES: "+str(types),"DOFLIST: "+str(doflist))
-                if types[k] >= 0:
-                    doflist[k] = offset + types[k]
+            # A mesh without a compiled code (and only such a mesh) describes nothing at all. It still
+            # has to be walked, so that its interfaces contribute their names in the same order here as
+            # on every other rank.
+            if len(types):
+                if len(types)!=len(doflist):
+                    raise RuntimeError("Mesh "+m.get_full_name()+" described "+str(len(types))+" dofs, but the problem has "+str(len(doflist)))
+                assigned=types>=0
+                doflist[assigned]=offset+types[assigned]
             if not isinstance(m,ODEStorageMesh):
                 for im in m._interfacemeshes.values(): 
                     process(im)
 
         for _, bm in self._meshdict.items():
             process(bm)
+
+        doflist=self._merge_dof_description_over_ranks(doflist,dofnames)
 
         if numpy.any(doflist<0): #type:ignore
             if self.get_bifurcation_tracking_mode()=="azimuthal":

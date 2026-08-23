@@ -4613,14 +4613,27 @@ namespace pyoomph
   // data, and nodal position dofs, mapping each dof's global equation number (eqn_number) to the field
   // index it corresponds to in the generated code's field ordering (buffer_offset_basebulk/interf).
   // Used for introspection/debugging of the assembled Jacobian's dof structure.
+  //
+  // Answers for the WHOLE problem (doftype is indexed by the global equation number), but only about
+  // the dofs this rank's own elements reach: on a distributed problem the caller has to merge the
+  // per-rank answers, see Problem.get_dof_description().
   void Mesh::describe_global_dofs(std::vector<int> &doftype, std::vector<std::string> &typnames)
   {
     typnames.clear();
-    if (!this->nelement())
+    doftype.clear();
+    // The code comes from the mesh itself when the mesh is empty, not from element 0: a distributed
+    // mesh has ranks with no elements of it at all - an interface that lies entirely on somebody
+    // else - and returning "no dofs and no type names" for those made every LATER mesh's type
+    // indices differ from the other ranks', which is exactly what the merge cannot survive. Same
+    // reasoning as evaluate_integral_function above.
+    DynamicJITCode *ci = NULL;
+    if (this->nelement())
+      ci = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code();
+    else
+      ci = this->jitcode;
+    if (!ci || !problem)
       return;
     doftype.resize(problem->ndof(), -1);
-    BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(0));
-    DynamicJITCode *ci = be->get_jit_code();
 
     auto *ft = ci->get_func_table();
 
