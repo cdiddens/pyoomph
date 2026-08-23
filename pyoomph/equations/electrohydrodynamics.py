@@ -260,11 +260,12 @@ class MaxwellStressEquations(_ElectricFlowCoupling):
     def define_additional_functions(self):
         if not self.output_stress:
             return
-        s=self.get_maxwell_stress()
-        comps="xyz"
-        for i in range(self.get_nodal_dimension()):
-            for j in range(self.get_nodal_dimension()):
-                self.add_local_function("maxwell_stress_"+comps[i]+comps[j],s[i,j])
+        # Registered as one tensor, not component by component: only then does the stress land in
+        # _tensorfields and get written as a single tensor array (rather than loose scalars) to the
+        # vtu. The whole 3x3 goes out, not the in-plane block the component loop used to cover:
+        # sigma_zz=-eps|E|^2/2 is nonzero in a planar problem too, and a grouped tensor has to carry
+        # the real value in that slot rather than the zero a truncated one would imply.
+        self.add_local_function("maxwell_stress",self.get_maxwell_stress())
 
 
 class ElectricBodyForceEquations(_ElectricFlowCoupling):

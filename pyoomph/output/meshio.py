@@ -100,23 +100,59 @@ def _convert_mesh_to_meshio(problem:"Problem",cache,eigenvector:int | list[int] 
 				rev_vector_fields[a+c]=a
 	vector_fields_written:set[str]=set()
 
+	# Tensors are grouped the same way, but off a 3x3 grid of component names rather than a triple.
+	tensor_fields=getattr(cache,"tensor_fields",{})
+	rev_tensor_fields:dict[str,str]={}
+	for a,trows in tensor_fields.items():
+		for trow in trows:
+			for tc in trow:
+				if tc:
+					rev_tensor_fields[tc]=a
+	tensor_fields_written:set[str]=set()
+
 	for n in outfields:
 		if n!="coordinate_x" and n!="coordinate_y" and n!="coordinate_z":
 			if group_vector_fields and n in rev_vector_fields:
 				vector_name=rev_vector_fields[n]
 				if vector_name in vector_fields_written:
 					continue
-				data:list[NPFloatArray]=[]
+				# A component that is identically zero is never registered as a field at all (see
+				# FiniteElementCode::register_local_expression), so it is missing here rather than zero.
+				# Every missing slot therefore has to be filled in place: padding only once something had
+				# already been collected slid the rest down a slot, and vector(0,u) came out as (u,0).
+				data:list[NPFloatArray | None]=[]
 				for k in "_x","_y","_z":
-					if vector_name+k in outfields:
-						#print("GETTING DATA",vector_name,k,cache.get_data(vector_name+k))
-						data.append(cache.get_data(vector_name+k)) #type:ignore
-					else:
-						if len(data)>0:
-							data.append(numpy.zeros(len(data[0]))) #type:ignore
-				if len(data)>0:
-					field_data[vector_name]=numpy.transpose(numpy.array(data)) #type:ignore
+					data.append(cache.get_data(vector_name+k) if vector_name+k in outfields else None) #type:ignore
+				present=[d for d in data if d is not None]
+				if len(present)>0:
+					zero=numpy.zeros(len(present[0])) #type:ignore
+					field_data[vector_name]=numpy.transpose(numpy.array([zero if d is None else d for d in data])) #type:ignore
 					vector_fields_written.add(vector_name)
+				continue
+
+			if n in rev_tensor_fields:
+				# VTK takes a tensor as either 9 components (full, row-major) or 6 (symmetric, ordered
+				# xx,yy,zz,xy,yz,xz -- verified against vtkTensorGlyph); nothing else is accepted as a
+				# tensor attribute. register_local_expression leaves a symbolically zero component
+				# unregistered and repeats the upper-triangle name in the lower triangle when the tensor
+				# is symmetric, so the name grid carries both the layout and the symmetry.
+				tensor_name=rev_tensor_fields[n]
+				if tensor_name in tensor_fields_written:
+					continue
+				tnames=[["","",""],["","",""],["","",""]]
+				for ti,trow in enumerate(tensor_fields[tensor_name][:3]):
+					for tj,tnm in enumerate(trow[:3]):
+						tnames[ti][tj]=tnm if tnm else ""
+				tdata:list[list[NPFloatArray | None]]=[[(cache.get_data(tnames[ti][tj]) if tnames[ti][tj] in outfields else None) for tj in range(3)] for ti in range(3)] #type:ignore
+				tpresent=[d for trow2 in tdata for d in trow2 if d is not None]
+				if len(tpresent)>0:
+					tzero=numpy.zeros(len(tpresent[0])) #type:ignore
+					if all(tnames[ti][tj]==tnames[tj][ti] for ti in range(3) for tj in range(3)):
+						torder=[(0,0),(1,1),(2,2),(0,1),(1,2),(0,2)]
+					else:
+						torder=[(ti,tj) for ti in range(3) for tj in range(3)]
+					field_data[tensor_name]=numpy.transpose(numpy.array([(tdata[ti][tj] if tdata[ti][tj] is not None else tzero) for ti,tj in torder])) #type:ignore
+					tensor_fields_written.add(tensor_name)
 				continue
 
 			field_data[n]=cache.get_data(n)
@@ -395,23 +431,59 @@ class _MeshFileOutput(_BaseNumpyOutput):
 						rev_vector_fields[a+c]=a
 			vector_fields_written:set[str]=set()
 
+			# Tensors are grouped the same way, but off a 3x3 grid of component names rather than a triple.
+			tensor_fields=getattr(cache,"tensor_fields",{})
+			rev_tensor_fields:dict[str,str]={}
+			for a,trows in tensor_fields.items():
+				for trow in trows:
+					for tc in trow:
+						if tc:
+							rev_tensor_fields[tc]=a
+			tensor_fields_written:set[str]=set()
+
 			for n in outfields:
 				if n!="coordinate_x" and n!="coordinate_y" and n!="coordinate_z":
 					if group_vector_fields and n in rev_vector_fields:
 						vector_name=rev_vector_fields[n]
 						if vector_name in vector_fields_written:
 							continue
-						data:list[NPFloatArray]=[]
+						# A component that is identically zero is never registered as a field at all (see
+						# FiniteElementCode::register_local_expression), so it is missing here rather than zero.
+						# Every missing slot therefore has to be filled in place: padding only once something had
+						# already been collected slid the rest down a slot, and vector(0,u) came out as (u,0).
+						data:list[NPFloatArray | None]=[]
 						for k in "_x","_y","_z":
-							if vector_name+k in outfields:
-								#print("GETTING DATA",vector_name,k,cache.get_data(vector_name+k))
-								data.append(cache.get_data(vector_name+k)) #type:ignore
-							else:
-								if len(data)>0:
-									data.append(numpy.zeros(len(data[0]))) #type:ignore
-						if len(data)>0:
-							field_data[vector_name]=numpy.transpose(numpy.array(data)) #type:ignore
+							data.append(cache.get_data(vector_name+k) if vector_name+k in outfields else None) #type:ignore
+						present=[d for d in data if d is not None]
+						if len(present)>0:
+							zero=numpy.zeros(len(present[0])) #type:ignore
+							field_data[vector_name]=numpy.transpose(numpy.array([zero if d is None else d for d in data])) #type:ignore
 							vector_fields_written.add(vector_name)
+						continue
+
+					if n in rev_tensor_fields:
+						# VTK takes a tensor as either 9 components (full, row-major) or 6 (symmetric, ordered
+						# xx,yy,zz,xy,yz,xz -- verified against vtkTensorGlyph); nothing else is accepted as a
+						# tensor attribute. register_local_expression leaves a symbolically zero component
+						# unregistered and repeats the upper-triangle name in the lower triangle when the tensor
+						# is symmetric, so the name grid carries both the layout and the symmetry.
+						tensor_name=rev_tensor_fields[n]
+						if tensor_name in tensor_fields_written:
+							continue
+						tnames=[["","",""],["","",""],["","",""]]
+						for ti,trow in enumerate(tensor_fields[tensor_name][:3]):
+							for tj,tnm in enumerate(trow[:3]):
+								tnames[ti][tj]=tnm if tnm else ""
+						tdata:list[list[NPFloatArray | None]]=[[(cache.get_data(tnames[ti][tj]) if tnames[ti][tj] in outfields else None) for tj in range(3)] for ti in range(3)] #type:ignore
+						tpresent=[d for trow2 in tdata for d in trow2 if d is not None]
+						if len(tpresent)>0:
+							tzero=numpy.zeros(len(tpresent[0])) #type:ignore
+							if all(tnames[ti][tj]==tnames[tj][ti] for ti in range(3) for tj in range(3)):
+								torder=[(0,0),(1,1),(2,2),(0,1),(1,2),(0,2)]
+							else:
+								torder=[(ti,tj) for ti in range(3) for tj in range(3)]
+							field_data[tensor_name]=numpy.transpose(numpy.array([(tdata[ti][tj] if tdata[ti][tj] is not None else tzero) for ti,tj in torder])) #type:ignore
+							tensor_fields_written.add(tensor_name)
 						continue
 
 					ndata=cache.get_data(n)
@@ -440,7 +512,12 @@ class _MeshFileOutput(_BaseNumpyOutput):
 			cells = []
 			cell_data:dict[str,list[NPFloatArray]] = {}
 
-			if self.tesselate_tri and self.mesh.get_dimension()>1:
+			# eleminds.shape[1]==3, not just the mesh dimension: tesselation makes plain triangles,
+			# but an extrusion operator then sweeps them into wedges, and the mesh this asks is the
+			# UNextruded one, so the shortcut fired and handed meshio 6-node cells labelled
+			# "triangle" ("Unexpected cells array shape (N, 6) for triangle cells"). The element-type
+			# dispatch below already knows wedges, so extruded output just falls through to it.
+			if self.tesselate_tri and self.mesh.get_dimension()>1 and eleminds.shape[1]==3:
 				if self.mesh.get_dimension()==3:
 					raise RuntimeError("TODO")
 				cells = [("triangle", eleminds)]

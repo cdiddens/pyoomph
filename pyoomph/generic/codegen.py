@@ -507,6 +507,9 @@ class BaseEquations(_pyoomph.Equations):
     def get_list_of_vector_fields(self,codegen:"FiniteElementCodeGenerator")->list[dict[str,list[str]]]:
         return []
 
+    def get_list_of_tensor_fields(self,codegen:"FiniteElementCodeGenerator")->list[dict[str,list[list[str]]]]:
+        return []
+
     def expand_vectorial_entries(self,entries:dict[str,"ExpressionOrNum"],what:str)->dict[str,"ExpressionOrNum"]:
         """Split vector-valued entries into one entry per component of the corresponding vector field.
 
@@ -1783,6 +1786,20 @@ class Equations(BaseEquations):
                 vector_fields.append(peqs._vectorfields) 
             parent = parent._get_parent_domain()
         return vector_fields
+
+    def get_list_of_tensor_fields(self,codegen:"FiniteElementCodeGenerator")->list[dict[str,list[list[str]]]]:
+        tensor_fields:list[dict[str,list[list[str]]]]=[]
+        current=self
+        if hasattr(current, "_tensorfields"):
+            tensor_fields.append(current._tensorfields)
+        parent = codegen._get_parent_domain()
+        while parent is not None:
+            assert isinstance(parent,FiniteElementCodeGenerator)
+            peqs=parent.get_equations()
+            if isinstance(peqs,Equations):
+                tensor_fields.append(peqs._tensorfields)
+            parent = parent._get_parent_domain()
+        return tensor_fields
 
 
     def _is_ode(self)->bool | None:

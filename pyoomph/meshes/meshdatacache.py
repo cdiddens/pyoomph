@@ -188,6 +188,8 @@ class MeshDataCacheEntry:
 
         vector_fields = msh.get_eqtree().get_equations().get_list_of_vector_fields(self.mesh.get_eqtree().get_code_gen())
         self.vector_fields:dict[str,list[str]] = {k: v for a in vector_fields for k, v in a.items()}
+        tensor_fields = msh.get_eqtree().get_equations().get_list_of_tensor_fields(self.mesh.get_eqtree().get_code_gen())
+        self.tensor_fields:dict[str,list[list[str]]] = {k: v for a in tensor_fields for k, v in a.items()}
 
         self._additional_eigendata:dict[int,tuple[str,str,str]]={} # Index to pair of Re,Im
         self.is_global=False # This entry holds this rank's part of a distributed mesh, see from_arrays
@@ -195,7 +197,7 @@ class MeshDataCacheEntry:
             self.operator.apply(self)
 
     @classmethod
-    def from_arrays(cls,msh:AnySpatialMesh,key:MeshDataCacheKey,nodal_values:NPFloatArray,elem_indices:NPAnyIntArray,elem_types:NPAnyIntArray,nodal_field_inds:dict[str,int],D0_data:NPFloatArray,DL_data:NPFloatArray,elemental_field_inds:dict[str,int],merged_eigendata:dict[int,dict[str,Any]],nodal_local_exprs:dict[str,NPFloatArray],local_expr_indices:dict[str,int],vector_fields:dict[str,list[str]]) -> "MeshDataCacheEntry":
+    def from_arrays(cls,msh:AnySpatialMesh,key:MeshDataCacheKey,nodal_values:NPFloatArray,elem_indices:NPAnyIntArray,elem_types:NPAnyIntArray,nodal_field_inds:dict[str,int],D0_data:NPFloatArray,DL_data:NPFloatArray,elemental_field_inds:dict[str,int],merged_eigendata:dict[int,dict[str,Any]],nodal_local_exprs:dict[str,NPFloatArray],local_expr_indices:dict[str,int],vector_fields:dict[str,list[str]],tensor_fields:dict[str,list[list[str]]] | None=None) -> "MeshDataCacheEntry":
         """Builds an entry from ready-made arrays instead of extracting them from the mesh.
 
         Used for the globally merged data of a distributed mesh (see
@@ -229,6 +231,7 @@ class MeshDataCacheEntry:
         self.nodal_local_exprs=nodal_local_exprs
         self.local_expr_indices=local_expr_indices
         self.vector_fields=vector_fields
+        self.tensor_fields=tensor_fields if tensor_fields is not None else {}
         self.interface_lines_segs=None
         self.interface_lines_segs_ninter=None
         self._additional_eigendata={}
@@ -704,14 +707,29 @@ class _ExtrusionSubElement:
 @dataclass(frozen=True)
 class _ExtrusionTemplate:
     """How one kind of source element is extruded. ``step`` is the stride through the segment
-    offsets: ``None`` means "the operator's phi_increm", 0 means "produce one element for the whole
-    extrusion" (used for elements degenerating onto the rotation axis)."""
+    offsets: 0 means "produce one element for the whole extrusion" (used for elements degenerating
+    onto the rotation axis), and ``None`` means "derive it from the template", see :py:meth:`stride`.
+    """
     step:int | None
     subs:tuple[_ExtrusionSubElement,...]
 
     @property
     def nnode(self)->int:
         return len(self.subs[0].nodes)
+
+    @property
+    def stride(self)->int:
+        """How many segment offsets one element consumes.
+
+        Derived from the template rather than taken from the operator's phi_increm, because the two
+        disagree exactly when the cells are not the ones the coordinate space implies: tesselate_tri
+        splits a C2 mesh into LINEAR triangles, which span one layer, while phi_increm is still 2
+        because the space is C2. Striding 2 over a template that spans 1 left every second slab
+        unfilled - a solid with gaps through it.
+        """
+        if self.step is not None:
+            return self.step
+        return max(delta for sub in self.subs for _node,_factor,delta in sub.nodes)
 
 
 def _sub(elem_type:int,*nodes:tuple[int,int,int])->_ExtrusionSubElement:
@@ -739,6 +757,193 @@ def _vector_components_present(vfield:str,field_inds:dict[str,int])->list[str]:
     miss the added one, so entry.vector_fields disagreed with entry.nodal_field_inds.
     """
     return [vfield+c for c in ("_x","_y","_z") if vfield+c in field_inds]
+
+
+_TENSOR_DIRS=("x","y","z")
+
+
+def _tensor_component_names(tname:str)->list[list[str]]:
+    """The nine Cartesian component names of an extruded tensor, row-major."""
+    return [[tname+"_"+_TENSOR_DIRS[i]+_TENSOR_DIRS[j] for j in range(3)] for i in range(3)]
+
+
+def _padded_tensor_grid(grid:list[list[str]])->list[list[str]]:
+    """A component-name grid padded to 3x3, absent entries as "".
+
+    Grids arrive in three shapes: ndim x ndim from define_tensor_field in Cartesian coordinates,
+    a full 3x3 with the azimuthal entry on the diagonal in axisymmetry, and a full 3x3 with holes
+    from add_local_function, which leaves a symbolically zero component unregistered.
+    """
+    out=[["","",""],["","",""],["","",""]]
+    for i,row in enumerate(grid[:3]):
+        for j,name in enumerate(row[:3]):
+            out[i][j]=name if name else ""
+    return out
+
+
+def _grid_is_symmetric(grid:list[list[str]])->bool:
+    """Whether a padded name grid names the same field at (i,j) and (j,i).
+
+    That is how both producers record symmetry: define_tensor_field repeats the upper-triangle name
+    in the lower triangle, and register_local_expression does the same rather than registering a
+    duplicate expression.
+    """
+    return all(grid[i][j]==grid[j][i] for i in range(3) for j in range(3))
+
+
+def _outer_sum_operator(coefs:tuple[NPFloatArray,...]):
+    """sum_k outer(coefs[k], arg_k).flatten(), the shape every extruded component takes.
+
+    coefs is bound as a default: these closures are called long after the loop that built them has
+    finished, the same trap the wavenumbers in the eigen operators fell into.
+    """
+    def op(*args:NPFloatArray,coefs:tuple[NPFloatArray,...]=coefs)->NPFloatArray:
+        total=numpy.outer(coefs[0],args[0]).flatten()
+        for c,a in zip(coefs[1:],args[1:]):
+            total+=numpy.outer(c,a).flatten()
+        return total #type:ignore
+    return op
+
+
+def _emit_tensor_frame_operators(tname:str,sources:list[list[list[tuple[str,NPFloatArray]]]],
+                                 Q:NPFloatArray,nrows:int,nnodes:int,
+                                 new_field_inds:dict[str,int],field_operators:dict[str,Any],
+                                 symmetric:bool=False)->list[list[str]]:
+    """Writes the nine Cartesian components of one tensor into ``field_operators``.
+
+    ``sources[i][j]`` reconstructs the (i,j) component of the tensor **in its own frame** as a list
+    of (base field name, weight over the extrusion rows): one unit-weighted entry for a base-state
+    field, a cos/sin pair for an eigenmode. An empty list means the component is identically zero,
+    which is how a symbolically zero one arrives - it is never registered as a field at all, so it
+    cannot be named as an operator argument.
+
+    ``Q[r]`` is the basis matrix at extrusion row r, so what gets written is ``Q T Q^T``. Q is the
+    very matrix the vector operators of the same extrusion already apply, only once per index
+    instead of once - deriving it from them is what keeps vectors and tensors consistent.
+    """
+    outnames=_tensor_component_names(tname)
+    for a in range(3):
+        for b in range(3):
+            if symmetric and b<a:
+                # Q T Q^T preserves symmetry exactly, so the lower triangle is the upper one under
+                # a different name. Aliasing rather than recomputing keeps an extruded symmetric
+                # tensor at six components, the way it was written before the extrusion.
+                outnames[a][b]=outnames[b][a]
+                continue
+            contrib:dict[str,NPFloatArray]={}
+            for i in range(3):
+                for j in range(3):
+                    if not sources[i][j]:
+                        continue
+                    qq=Q[:,a,i]*Q[:,b,j]
+                    if not numpy.any(qq): # a structural zero of Q, exact rather than rounded
+                        continue
+                    for srcname,weight in sources[i][j]:
+                        coef=qq*weight
+                        if not numpy.any(coef):
+                            continue
+                        contrib[srcname]=contrib[srcname]+coef if srcname in contrib else coef
+            name=outnames[a][b]
+            if contrib:
+                args=list(contrib.keys())
+                field_operators[name]=[_outer_sum_operator(tuple(contrib[k] for k in args))]+args
+            else:
+                field_operators[name]=[lambda n=nrows*nnodes: numpy.zeros(n)] #type:ignore
+            if name not in new_field_inds:
+                new_field_inds[name]=max(new_field_inds.values())+1
+    return outnames
+
+
+def _extrude_tensor_fields(tensor_fields:dict[str,list[list[str]]],Q:NPFloatArray,nrows:int,nnodes:int,
+                           available:set[str],
+                           new_field_inds:dict[str,int],field_operators:dict[str,Any],
+                           eigen:"Sequence[tuple[str,str,str,NPFloatArray,NPFloatArray]]"=())->dict[str,list[list[str]]]:
+    """Rotates every tensor field of an extrusion into the Cartesian frame.
+
+    Without this a tensor's components fall through to the plain tile of the dispatcher below, i.e.
+    T_xx at phi=90 degrees still holds T_rr and the extruded tensor is wrong everywhere off the
+    starting angle - the same bug vectors had before their rotation was written.
+
+    ``eigen`` names the (real prefix, imaginary prefix, result prefix, real weights, imaginary
+    weights) of each eigenmode. A tensor under one of those prefixes is reconstructed from its real
+    and imaginary halves and rotated in one step, since both are weights on the same outer product.
+    The imaginary weight carries the minus of Re[u*exp(I*m*phi)] = cos*Re - sin*Im; the caller passes
+    it in already signed.
+
+    ``available`` is the set of field names that actually carry data. A grid can name components
+    that do not: MeshDataCombineWithEigenfunction prefixes a whole grid whether or not the
+    eigenfunction has every component, which for a local expression it never does. Such a name is
+    treated as absent, and a tensor left with nothing is dropped rather than written as zeros. The
+    vector path relies on the same filtering, only spelled as a guard at each use.
+    """
+    def clean(grid:list[list[str]])->list[list[str]]:
+        padded=_padded_tensor_grid(grid)
+        return [[(name if name in available else "") for name in row] for row in padded]
+
+    result:dict[str,list[list[str]]]={}
+    consumed:set[str]=set()
+    handled:set[str]=set()
+
+    for prefixRe,prefixIm,prefixRes,cosw,sinw in eigen:
+        for tname in list(tensor_fields.keys()):
+            if not tname.startswith(prefixRe):
+                continue
+            stem=tname[len(prefixRe):]
+            if prefixIm+stem not in tensor_fields:
+                continue
+            grid_re=clean(tensor_fields[tname])
+            grid_im=clean(tensor_fields[prefixIm+stem])
+            if not any(name for row in grid_re for name in row) and not any(name for row in grid_im for name in row):
+                handled.add(tname)
+                handled.add(prefixIm+stem)
+                continue
+            sources=[[[] for _j in range(3)] for _i in range(3)]
+            for i in range(3):
+                for j in range(3):
+                    entry=[]
+                    if grid_re[i][j]:
+                        entry.append((grid_re[i][j],cosw))
+                        consumed.add(grid_re[i][j])
+                        # The generic scalar loop of the caller reconstructs EVERY field under the
+                        # real prefix into one under the result prefix, component by component, so
+                        # the ones whose names this rotation does not reuse - the azimuthal "_xa",
+                        # "_ya", "_aa" of a tensor - are left over as stray scalars unless they are
+                        # dropped here too.
+                        consumed.add(prefixRes+grid_re[i][j][len(prefixRe):])
+                    if grid_im[i][j]:
+                        entry.append((grid_im[i][j],sinw))
+                        consumed.add(grid_im[i][j])
+                    sources[i][j]=entry
+            result[prefixRes+stem]=_emit_tensor_frame_operators(prefixRes+stem,sources,Q,nrows,nnodes,
+                                                                new_field_inds,field_operators,
+                                                                _grid_is_symmetric(grid_re) and _grid_is_symmetric(grid_im))
+            handled.add(tname)
+            handled.add(prefixIm+stem)
+
+    ones=numpy.ones(nrows)
+    for tname,grid in tensor_fields.items():
+        if tname in handled:
+            continue
+        padded=clean(grid)
+        if not any(name for row in padded for name in row):
+            continue
+        sources=[[([(padded[i][j],ones)] if padded[i][j] else []) for j in range(3)] for i in range(3)]
+        for row in padded:
+            for name in row:
+                if name:
+                    consumed.add(name)
+        result[tname]=_emit_tensor_frame_operators(tname,sources,Q,nrows,nnodes,
+                                                   new_field_inds,field_operators,
+                                                   _grid_is_symmetric(padded))
+
+    # A source component that is not also one of the written ones - the azimuthal "_aa" of an
+    # axisymmetric tensor, or either half of an eigenmode - would otherwise be tiled through as a
+    # stray scalar that no longer means anything.
+    written={name for grid in result.values() for row in grid for name in row}
+    for name in consumed-written:
+        new_field_inds.pop(name,None)
+        field_operators.pop(name,None)
+    return result
 
 
 # Keyed by a template name; the mapping from element type (plus, on the rotation axis, which of its
@@ -876,7 +1081,7 @@ def _extrude_element_connectivity(elem_types:NPAnyIntArray,elem_indices:NPAnyInt
     maxl=0
     for name,rows in groups:
         tmpl=_EXTRUSION_TEMPLATES[name]
-        step=phi_increm if tmpl.step is None else tmpl.step
+        step=tmpl.stride
         if step==0:
             offs=numpy.zeros((1,),dtype=int)
             row=numpy.array([phi_row(phi_increm)[0]])
@@ -926,7 +1131,33 @@ class MeshDataCacheOperatorBase:
 
     def apply(self,base:MeshDataCacheEntry)->None:
         raise RuntimeError("Specify")
-    
+
+    def _materialise_local_expressions(self,base:MeshDataCacheEntry)->None:
+        """Folds every local expression into the nodal field block.
+
+        An extrusion rewrites nodal_values and nodal_field_inds, but a local expression lives in
+        nodal_local_exprs and is evaluated against the ORIGINAL mesh, so it kept the original node
+        count and the writer died with "len(points) = 784, but len(point_data[...]) = 49". That hit
+        scalars, vectors and tensors alike, i.e. every extrusion of any output carrying a
+        LocalExpressions. Materialising them first turns them into ordinary columns that the
+        extrusion below transforms like any other field.
+        """
+        if not base.local_expr_indices:
+            return
+        columns:list[NPFloatArray]=[]
+        nextind=max(base.nodal_field_inds.values())+1 if base.nodal_field_inds else 0
+        for name in sorted(base.local_expr_indices.keys(),key=lambda n: base.local_expr_indices[n]):
+            data=base.get_data(name)
+            if data is None:
+                continue
+            base.nodal_field_inds[name]=nextind
+            nextind+=1
+            columns.append(numpy.asarray(data))
+        if columns:
+            base.nodal_values=numpy.column_stack([base.nodal_values]+columns) #type:ignore
+        base.local_expr_indices={}
+        base.nodal_local_exprs={}
+
     def depends_on_eigen(self)->bool:
         return False
 
@@ -1073,6 +1304,10 @@ class MeshDataCombineWithEigenfunction(MeshDataCacheOperatorBase):
 
                 for vector_name,compo_names in eigendata.vector_fields.items():
                     base.vector_fields[prefix+vector_name]=[prefix+compo_name for compo_name in compo_names]
+                for tensor_name,compo_rows in eigendata.tensor_fields.items():
+                    # An empty name marks a component that is identically zero and was never
+                    # registered, so it must stay empty rather than become a prefixed non-name.
+                    base.tensor_fields[prefix+tensor_name]=[[(prefix+c if c else "") for c in row] for row in compo_rows]
                 base.nodal_values = new_nodal_values
                 base.nodal_field_inds = new_nodal_field_inds
                 base.elemental_field_inds=new_elem_field_inds
@@ -1114,6 +1349,7 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
         self.numperiods=numperiods
         
     def apply(self,base:MeshDataCacheEntry):
+        self._materialise_local_expressions(base)
         n_segments=self.n_segments
         phi_increm=1
         if base.mesh._eqtree.get_code_gen()._coordinate_space not in {"C1","C1TB"}: 
@@ -1208,7 +1444,9 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                         # k/phis (m/phis) are bound as defaults: these closures are only called much later, after
                         # every loop has finished, so with more than one entry in _additional_eigendata
                         # they all used to be evaluated with the LAST eigenindex's wavenumber.
-                        field_operators[fnRes] = [lambda RealPart,ImagPart,k=k,phis=phis : numpy.outer(numpy.cos(k*phis), RealPart).flatten() + numpy.outer(numpy.sin(k*phis), ImagPart).flatten(), fnRe,fnIm] #type:ignore
+                        # Same convention as the rotational one, and as the vector operators below,
+                        # which already had the minus. Verified with d/dx_extra = I*k.
+                        field_operators[fnRes] = [lambda RealPart,ImagPart,k=k,phis=phis : numpy.outer(numpy.cos(k*phis), RealPart).flatten() - numpy.outer(numpy.sin(k*phis), ImagPart).flatten(), fnRe,fnIm] #type:ignore
 
                         if fnRe in rev_vector_fields:
                             ReVector=rev_vector_fields[fnRe] #type:ignore
@@ -1294,6 +1532,24 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
                     del new_nodal_field_inds[vfield+"_normal"]
                 vector_fields[vfield]=_vector_components_present(vfield,new_nodal_field_inds)
 
+        # Tensors. This extrusion translates along the new axis rather than turning about one, so
+        # the basis does not rotate and Q is the identity: a tensor's slot 2 already IS the extra
+        # direction (matrix() pads to 3x3 and no coordinate system names a tensor component
+        # "_normal", unlike a vector). The base state therefore needs nothing the plain tile of the
+        # dispatcher below would not do - what does need doing is the eigenmode reconstruction,
+        # which otherwise leaves the real and imaginary halves lying around unrecombined.
+        Q=numpy.broadcast_to(numpy.eye(3),(n_segments+1,3,3))
+        eigen_tensor_modes=[]
+        if self.apply_k_mode_expansion and base.mesh.get_problem().get_last_eigenmodes_k() is not None: #type:ignore
+            for eigenindex,prefixPair in base._additional_eigendata.items(): #type:ignore
+                k=base.mesh.get_problem().get_last_eigenmodes_k()[eigenindex] #type:ignore
+                kphis=numpy.linspace(0,2*numpy.pi*self.numperiods/k,n_segments+1,endpoint=True)+self.phase
+                eigen_tensor_modes.append((prefixPair[0],prefixPair[1],prefixPair[2],
+                                           numpy.cos(k*kphis),-numpy.sin(k*kphis)))
+        tensor_fields=_extrude_tensor_fields(getattr(base,"tensor_fields",{}),Q,n_segments+1,stride,
+                                             set(base.nodal_field_inds.keys()),
+                                             new_nodal_field_inds,field_operators,eigen_tensor_modes)
+
         _compact_field_indices(new_nodal_field_inds)
         for name,index in sorted(new_nodal_field_inds.items(),key=lambda item: item[1]): #type:ignore
             if name in field_operators.keys():
@@ -1317,7 +1573,7 @@ class MeshDataCartesianExtrusion(MeshDataCacheOperatorBase):
         # every later nodal_values[:,i] became a strided gather
         base.nodal_values=numpy.column_stack(new_nodal_values) #type:ignore
         base.vector_fields=vector_fields
-        
+        base.tensor_fields=tensor_fields
 
 
         #if base.tesselate_tri:
@@ -1429,6 +1685,7 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
         self.rotate_eigendata_with_mode_m=rotate_eigendata_with_mode_m
 
     def apply(self,base:MeshDataCacheEntry):
+        self._materialise_local_expressions(base)
         n_segments=self.n_segments
         phi_increm=1
         if base.mesh._eqtree.get_code_gen()._coordinate_space not in {"C1","C1TB"}: 
@@ -1487,7 +1744,13 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                         # k/phis (m/phis) are bound as defaults: these closures are only called much later, after
                         # every loop has finished, so with more than one entry in _additional_eigendata
                         # they all used to be evaluated with the LAST eigenindex's wavenumber.
-                        field_operators[fnRes] = [lambda RealPart,ImagPart,m=m,phis=phis : numpy.outer(numpy.cos(m*phis), RealPart).flatten() + numpy.outer(numpy.sin(m*phis), ImagPart).flatten(), fnRe,fnIm] #type:ignore
+                        # The stored pair is (Re,Im) of the complex amplitude of exp(I*m*phi), so the physical field
+                        # is Re[u*exp(I*m*phi)] = cos*Re - SIN*Im. Verified against the coordinate system itself rather
+                        # than against another reconstruction: d/dphi of a perturbation is a factor I*m, so projecting
+                        # w = r*grad(u)_phi must give Re_w = -m*Im_u and Im_w = +m*Re_u, which it does to 3e-9. This used
+                        # to read +sin, i.e. it rendered the conjugate mode - a mirror image, which still looks like a
+                        # plausible mode and is why it went unnoticed.
+                        field_operators[fnRes] = [lambda RealPart,ImagPart,m=m,phis=phis : numpy.outer(numpy.cos(m*phis), RealPart).flatten() - numpy.outer(numpy.sin(m*phis), ImagPart).flatten(), fnRe,fnIm] #type:ignore
 
                         if fnRe in rev_vector_fields:
                             ReVector=rev_vector_fields[fnRe] #type:ignore
@@ -1518,14 +1781,17 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                                 phi_index=cindex                                
 
                         if r_index is not None and phi_index is not None:
-                            def get_x_component(ReR,ImR,ReP,ImP,m=m,phis=phis): #type:ignore
-                                Vr_cos_phi=numpy.outer(numpy.cos(m * phis)*numpy.cos(phis),ReR).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.cos(phis),ImR).flatten() #type:ignore
-                                Vphi_sin_phi=numpy.outer(numpy.cos(m * phis)*numpy.sin(phis),ReP).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.sin(phis),ImP).flatten() #type:ignore
-                                return Vr_cos_phi+Vphi_sin_phi #type:ignore
-                            def get_y_component(ReR,ImR,ReP,ImP,m=m,phis=phis): #type:ignore
-                                Vr_sin_phi=numpy.outer(numpy.cos(m * phis)*numpy.sin(phis),ReR).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.sin(phis),ImR).flatten() #type:ignore
-                                Vphi_cos_phi=numpy.outer(numpy.cos(m * phis)*numpy.cos(phis),ReP).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.cos(phis),ImP).flatten() #type:ignore
-                                return Vr_sin_phi-Vphi_cos_phi #type:ignore
+                            # V = Re[(Vr*r_hat + Vphi*phi_hat)*exp(I*m*phi)] with the RIGHT-handed
+                            # phi_hat = (-sin phi, cos phi, 0) -- the same one the base vector loop
+                            # further down uses. Both signs were wrong here and they composed into a
+                            # clean mirror image of the true mode, so the base swirl and the
+                            # perturbation swirl were drawn with opposite handedness in one picture.
+                            def _mode(Re,Im,m=m,phis=phis): #type:ignore
+                                return numpy.cos(m*phis)[:,None]*Re[None,:]-numpy.sin(m*phis)[:,None]*Im[None,:] #type:ignore
+                            def get_x_component(ReR,ImR,ReP,ImP,phis=phis): #type:ignore
+                                return (numpy.cos(phis)[:,None]*_mode(ReR,ImR)-numpy.sin(phis)[:,None]*_mode(ReP,ImP)).flatten() #type:ignore
+                            def get_y_component(ReR,ImR,ReP,ImP,phis=phis): #type:ignore
+                                return (numpy.sin(phis)[:,None]*_mode(ReR,ImR)+numpy.cos(phis)[:,None]*_mode(ReP,ImP)).flatten() #type:ignore
                             field_operators[composRes[r_index]]=[get_x_component,composRe[r_index],composIm[r_index],composRe[phi_index],composIm[phi_index]] 
                             field_operators[composRes[phi_index]] = [get_y_component, composRe[r_index],composIm[r_index], composRe[phi_index],composIm[phi_index]]
                             yname=vecname+"_y"
@@ -1534,7 +1800,7 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                             completed_eigen_vector_fields.add(vecname) #type:ignore
                             if len(composRes)>2:
                                 new_nodal_field_inds[vecname + "_z"] = max(new_nodal_field_inds.values()) + 1
-                                field_operators[vecname+"_z"]= [lambda ReVy,ImVy,m=m,phis=phis: numpy.outer(numpy.cos(m * phis), ReVy).flatten()+numpy.outer(numpy.sin(m * phis), ImVy).flatten(),prefixRe + veccompos[0][len(prefixRes):-len("_x")] + "_y",prefixIm + veccompos[0][len(prefixRes):-len("_x")] + "_y"] #type:ignore
+                                field_operators[vecname+"_z"]= [lambda ReVy,ImVy,m=m,phis=phis: numpy.outer(numpy.cos(m * phis), ReVy).flatten()-numpy.outer(numpy.sin(m * phis), ImVy).flatten(),prefixRe + veccompos[0][len(prefixRes):-len("_x")] + "_y",prefixIm + veccompos[0][len(prefixRes):-len("_x")] + "_y"] #type:ignore
                             vector_fields[vecname]=[vecname+component for component in ["_x","_y","_z"][0:len(composRes)]]
                             #print(new_nodal_field_inds,vector_fields)
 
@@ -1545,18 +1811,19 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
             if "EigenRe_coordinate_x" in base.nodal_field_inds and "EigenRe_" in ms_by_prefix:
                 m=ms_by_prefix["EigenRe_"]
 
-                def get_x_component(ReR,ImR,m=m,phis=phis): #type:ignore
-                    Vr_cos_phi=numpy.outer(numpy.cos(m * phis)*numpy.cos(phis),ReR).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.cos(phis),ImR).flatten() #type:ignore
-                    #Vphi_sin_phi=numpy.outer(numpy.cos(m * phis)*numpy.sin(phis),ReP).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.sin(phis),ImP).flatten() #type:ignore
-                    return Vr_cos_phi#+Vphi_sin_phi #type:ignore
-                def get_y_component(ReR,ImR,m=m,phis=phis): #type:ignore
-                    Vr_sin_phi=numpy.outer(numpy.cos(m * phis)*numpy.sin(phis),ReR).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.sin(phis),ImR).flatten() #type:ignore
-                    #Vphi_cos_phi=numpy.outer(numpy.cos(m * phis)*numpy.cos(phis),ReP).flatten()+numpy.outer(numpy.sin(m * phis)*numpy.cos(phis),ImP).flatten() #type:ignore
-                    return Vr_sin_phi#-Vphi_cos_phi #type:ignore
+                # The mesh perturbation has no azimuthal component of its own (the commented-out
+                # Vphi terms), so only the mode factor applies -- with the same minus as everywhere
+                # else, since these are the (Re,Im) of an exp(I*m*phi) amplitude too.
+                def _mode_c(Re,Im,m=m,phis=phis): #type:ignore
+                    return numpy.cos(m*phis)[:,None]*Re[None,:]-numpy.sin(m*phis)[:,None]*Im[None,:] #type:ignore
+                def get_x_component(ReR,ImR,phis=phis): #type:ignore
+                    return (numpy.cos(phis)[:,None]*_mode_c(ReR,ImR)).flatten() #type:ignore
+                def get_y_component(ReR,ImR,phis=phis): #type:ignore
+                    return (numpy.sin(phis)[:,None]*_mode_c(ReR,ImR)).flatten() #type:ignore
                 field_operators["Eigen_coordinate_x"]= [get_x_component,"EigenRe_coordinate_x","EigenIm_coordinate_x"] #type:ignore
                 field_operators["Eigen_coordinate_y"]= [get_y_component,"EigenRe_coordinate_x","EigenIm_coordinate_x"] #type:ignore
                 if "EigenRe_coordinate_y" in base.nodal_field_inds:
-                    field_operators["Eigen_coordinate_z"]= [lambda ReVy,ImVy,m=m,phis=phis: numpy.outer(numpy.cos(m * phis), ReVy).flatten()+numpy.outer(numpy.sin(m * phis), ImVy).flatten(),"EigenRe_coordinate_y","EigenIm_coordinate_y"] #type:ignore
+                    field_operators["Eigen_coordinate_z"]= [lambda ReVy,ImVy,m=m,phis=phis: numpy.outer(numpy.cos(m * phis), ReVy).flatten()-numpy.outer(numpy.sin(m * phis), ImVy).flatten(),"EigenRe_coordinate_y","EigenIm_coordinate_y"] #type:ignore
                     new_nodal_field_inds["Eigen_coordinate_z"] = max(new_nodal_field_inds.values()) + 1
                     vector_fields["Eigen_coordinate"]=["Eigen_coordinate"+component for component in ["_x","_y","_z"]]
                 else:                
@@ -1584,6 +1851,41 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                     field_operators[vfield + "_x"] = [lambda vx: numpy.outer(numpy.cos(phis), vx).flatten(),vfield + "_x"] #type:ignore
                     field_operators[vfield + "_y"] = [lambda vx: numpy.outer(numpy.sin(phis), vx).flatten(),vfield + "_x"] #type:ignore
                 vector_fields[vfield]=_vector_components_present(vfield,new_nodal_field_inds)
+
+        # Tensors, one index at a time with the same rotation. A tensor's slots are positional,
+        # unlike a vector, whose azimuthal component is the separately named "_phi" - so Q's columns
+        # are the images of the slots in their own order, and that order depends on the mesh. On a
+        # bulk mesh the slots are (r, z, phi); on a RADIAL one there is no axial direction at all and
+        # they are (r, phi), which is the layout define_tensor_field hands out ("_aa" at [1][1], not
+        # [2][2]) and the one directional_tensor_derivative assumes with azi = 2 if ndim == 2 else 1.
+        # Using the bulk Q on a radial mesh sent the azimuthal slot to z, i.e. e_phi (x) e_phi came
+        # out as e_z (x) e_z, constant instead of turning with phi.
+        # Like the vector path this assumes the mesh x is the radius: neither consults
+        # use_x_as_symmetry_axis, which would swap the first two slots of the bulk layout. That flag
+        # is now refused outright by the azimuthal normal mode system, so only a plain axisymmetric
+        # output can still carry it - and such a mesh is already extruded about the wrong axis here,
+        # vectors included, since r_pos above reads coordinate_x.
+        cs,sn=numpy.cos(phis),numpy.sin(phis)
+        zeros_row=numpy.zeros_like(cs)
+        ones_row=numpy.ones_like(cs)
+        if "coordinate_y" in base.nodal_field_inds:
+            Q=numpy.stack([numpy.stack([ cs,zeros_row,-sn],axis=1),
+                           numpy.stack([ sn,zeros_row, cs],axis=1),
+                           numpy.stack([zeros_row,ones_row,zeros_row],axis=1)],axis=1)
+        else:
+            # (r, phi) and an unused third slot: a plain rotation about the axis
+            Q=numpy.stack([numpy.stack([ cs,-sn,zeros_row],axis=1),
+                           numpy.stack([ sn, cs,zeros_row],axis=1),
+                           numpy.stack([zeros_row,zeros_row,ones_row],axis=1)],axis=1)
+        eigen_tensor_modes=[]
+        if self.rotate_eigendata_with_mode_m and base.mesh.get_problem().get_last_eigenmodes_m() is not None: #type:ignore
+            for eigenindex,prefixPair in base._additional_eigendata.items(): #type:ignore
+                m=base.mesh.get_problem().get_last_eigenmodes_m()[eigenindex] #type:ignore
+                eigen_tensor_modes.append((prefixPair[0],prefixPair[1],prefixPair[2],
+                                           numpy.cos(m*phis),-numpy.sin(m*phis)))
+        tensor_fields=_extrude_tensor_fields(getattr(base,"tensor_fields",{}),Q,len(phis),stride,
+                                             set(base.nodal_field_inds.keys()),
+                                             new_nodal_field_inds,field_operators,eigen_tensor_modes)
 
         if "coordinate_y" in base.nodal_field_inds:
             new_nodal_field_inds["coordinate_z"]=max(new_nodal_field_inds.values())+1
@@ -1626,6 +1928,7 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
         # every later nodal_values[:,i] became a strided gather
         base.nodal_values=numpy.column_stack(new_nodal_values) #type:ignore
         base.vector_fields=vector_fields
+        base.tensor_fields=tensor_fields
 
 
         if base.tesselate_tri:

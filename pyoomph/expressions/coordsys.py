@@ -567,9 +567,11 @@ class AxisymmetricCoordinateSystem(BaseCoordinateSystem):
         instance, gives (b.grad)a = (e_r.grad)e_phi = 0 and div(e_r) = 1/r, hence (div T)_phi = 1/r, which is what
         the T_phir/r half of the last line produces.
 
-        The azimuthal row cannot be reached from any tensor this coordinate system can build: define_tensor_field
+        The azimuthal row cannot be reached from any tensor THIS class can build: define_tensor_field
         puts the azimuthal component on the diagonal only ("_aa" at [2][2]) and vector_gradient hard-zeros the
-        azimuthal off-diagonals, since there is no azimuthal velocity component in plain axisymmetry at all. It is
+        azimuthal off-diagonals, since there is no azimuthal velocity component in plain axisymmetry at all.
+        AxisymmetryBreakingCoordinateSystem overrides both, so a tensor unknown there does have T_rphi and
+        T_zphi - and its own tensor_divergence, not this one, is what acts on it. It is
         reachable from a hand-assembled tensor, e.g. dyadic(vector(h,0,0),vector(0,0,k)), which is how it is tested.
         Both the two-dimensional and the radial form of that row used to be wrong: the 2d one had
         (T_phir - T_rphi)/r, which is zero for the symmetric tensors that matter and has the wrong sign otherwise,
@@ -1192,6 +1194,24 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
         self.with_phi_component_in_mesh_coordinates=False # TODO: Implement that some day
         self.expand_with_modes_for_python_debugging=False # If you want to use expand_expression_for_debugging, set this
 
+    # use_x_as_symmetry_axis belongs to plain axisymmetry alone. It is inherited, and the constructor
+    # above never passes it on, so the only way to get it set here is an assignment afterwards - which
+    # used to be accepted and then ignored: every branch of this class spells out the (r,z,phi) layout
+    # directly, from the I*m/r factors of the derivative operators to the "_phi" component of
+    # define_vector_field, so the flag would have flipped the inherited geometric_jacobian and nothing
+    # else. A half-flipped system is worse than a refused one, hence the property.
+    @property
+    def use_x_as_symmetry_axis(self)->bool:
+        return False
+
+    @use_x_as_symmetry_axis.setter
+    def use_x_as_symmetry_axis(self,value:bool)->None:
+        if value:
+            raise RuntimeError("use_x_as_symmetry_axis is only supported in a plain "
+                               "AxisymmetricCoordinateSystem, not in the azimuthal normal mode system: "
+                               "this class assumes the (r,z,phi) slot layout throughout. Swap the mesh "
+                               "coordinates instead, so that x is the radius.")
+
         
 
     def get_mode_expansion_of_var_or_test(self,code:_pyoomph.FiniteElementCode,fieldname:str,is_field:bool,is_dim:bool,expr:Expression,where:str,expansion_mode:int)->Expression:
@@ -1443,6 +1463,46 @@ class AxisymmetryBreakingCoordinateSystem(AxisymmetricCoordinateSystem):
             return [vx / s, vt/s], [testfunction(name + "_x") / S,testfunction(name + "_phi") / S], [name + "_x",name + "_phi"]
         else:
             raise RuntimeError("Axisymmetric vector fields do not work for dimension " + str(ndim))
+
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", ndim:int, element:"Equations", symmetric:bool)->tuple[list[list[Expression]],list[list[Expression]],list[list[str]]]:
+        """A tensor unknown that carries its azimuthal off-diagonals.
+
+        The inherited axisymmetric version puts the azimuthal direction on the diagonal alone,
+        because plain axisymmetry is swirl-free and T_rphi/T_zphi vanish identically there. A
+        non-axisymmetric mode excites exactly those two, so here they are unknowns - the same reason
+        define_vector_field above adds a "_phi" component that the inherited one does not have.
+
+        The slot layout is the one tensor_divergence and directional_tensor_derivative below expect:
+        (r,z,phi) on a bulk mesh and (r,phi) on a radial one, i.e. the azimuthal direction sits at
+        slot 2 or slot 1 respectively. Its index letter stays "a", as in the inherited "_aa", so a
+        two-dimensional tensor spans _xx _xy _xa / _yx _yy _ya / _ax _ay _aa.
+
+        Written as a loop rather than unrolled like the implementations it mirrors: nine components
+        times three lists is not readable spelled out, and the symmetric case would double it again.
+        """
+        if ndim not in (1,2):
+            raise RuntimeError("define_tensor_field: ndim="+str(ndim)+" is not supported for AxisymmetryBreakingCoordinateSystem (only ndim=1 or ndim=2)")
+        s = scale_factor(name)
+        S = test_scale_factor(name)
+        letters = ["x","y","a"] if ndim==2 else ["x","a"]
+        n = len(letters)
+        # symmetric shares one unknown between each pair, as every other define_tensor_field does
+        namelist = [[name+"_"+(letters[min(i,j)]+letters[max(i,j)] if symmetric else letters[i]+letters[j])
+                     for j in range(n)] for i in range(n)]
+        for compo in sorted({c for row in namelist for c in row}):
+            element.define_scalar_field(compo, space)
+            element.set_scaling({compo: name})
+            element.set_test_scaling({compo: name})
+        zero = Expression(0)
+        vals:list[list[Expression]] = [[zero]*3 for _i in range(3)]
+        tests:list[list[Expression]] = [[zero]*3 for _i in range(3)]
+        names:list[list[str]] = [["" for _j in range(3)] for _i in range(3)]
+        for i in range(n):
+            for j in range(n):
+                vals[i][j] = var(namelist[i][j]) / s
+                tests[i][j] = testfunction(namelist[i][j]) / S
+                names[i][j] = namelist[i][j]
+        return vals, tests, names
 
 
     def expand_coordinate_or_mesh_vector(self,cg:"FiniteElementCodeGenerator", name:str,dimensional:bool,no_jacobian:bool,no_hessian:bool):        

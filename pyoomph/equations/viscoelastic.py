@@ -576,12 +576,30 @@ class ViscoelasticEquations(Equations):
         name = self.field_name
         testscale = scale_factor("spatial") / scale_factor(self.velocity_name)
         self.define_tensor_field(name, self.space, symmetric=True, scale=1, testscale=testscale)
-        if not self._is_axisymmetric() and self._out_of_plane_component() is not None:
+        oop = self._out_of_plane_component()
+        if not self._is_axisymmetric() and oop is not None:
             # define_tensor_field only covers the in-plane block in Cartesian coordinates, so the
             # out-of-plane component is added by hand, with the same scales.
-            self.define_scalar_field(name + "_zz", self.space)
-            self.set_scaling({name + "_zz": 1})
-            self.set_test_scaling({name + "_zz": testscale})
+            self.define_scalar_field(name + "_" + oop, self.space)
+            self.set_scaling({name + "_" + oop: 1})
+            self.set_test_scaling({name + "_" + oop: testscale})
+        # The tensor is written to the output as a single VTK tensor array, off the component grid
+        # define_tensor_field built. That grid stops at the in-plane block in Cartesian coordinates,
+        # so the out-of-plane slot has to be filled in or the output shows a zero there. A zero is
+        # right for the log-conformation tensor, whose absent component means Psi_zz=0, but not for
+        # the conformation tensor, where it means C_zz=1 -- a zero on that diagonal reads as a
+        # collapsed configuration. The axisymmetric grid already carries its azimuthal entry.
+        mst = self._master()
+        assert isinstance(mst, Equations)
+        grid = [list(row) + [""] * (3 - len(row)) for row in mst._tensorfields[name]]
+        grid += [["", "", ""] for _ in range(3 - len(grid))]
+        if not grid[2][2]:
+            if oop is not None:
+                grid[2][2] = name + "_" + oop
+            elif self.formulation == "conformation":
+                self.add_local_function(name + "_zz", 1)
+                grid[2][2] = name + "_zz"
+        mst._tensorfields[name] = grid
         if self.formulation == "conformation":
             for comp in set(self._component_map().values()):
                 # C=identity at rest. In the log-conformation formulation the corresponding
@@ -597,7 +615,6 @@ class ViscoelasticEquations(Equations):
     # ------------------------------------------------------------- residuals
 
     def define_residuals(self):
-        comps = self._component_map()
         name = self.field_name
         identity = identity_matrix(3)
 
@@ -668,13 +685,16 @@ class ViscoelasticEquations(Equations):
             self.add_residual(weak(stress, grad(u_test)))
 
         if self.output_conformation:
-            for (i, j), c in sorted(comps.items()):
-                if i <= j:
-                    # In the conformation formulation these are the unknowns themselves and are
-                    # output anyway; adding them again would clash with the field names.
-                    if self.formulation == "log-conf":
-                        self.add_local_function("conformation_" + c, C[i, j])
-                    self.add_local_function("polymer_stress_" + c, stress[i, j])
+            # Registered as whole tensors, not component by component: only then do they land in
+            # _tensorfields and get written as single tensor arrays (rather than loose scalars) to
+            # the vtu. The component names follow from the matrix, so in axisymmetry the azimuthal
+            # entry is now called "_zz" rather than "_aa" -- which is where it belongs in the output,
+            # the azimuthal direction being the Cartesian z of the r-z plane.
+            if self.formulation == "log-conf":
+                # In the conformation formulation these are the unknowns themselves and are output
+                # anyway; adding them again would clash with the field names.
+                self.add_local_function("conformation", C)
+            self.add_local_function("polymer_stress", stress)
             self.add_local_function("conformation_trace", trC)
             # The first normal stress difference, the quantity most rheological measurements report.
             self.add_local_function("polymer_N1", stress[0, 0] - stress[1, 1])

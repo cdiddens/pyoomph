@@ -1014,3 +1014,200 @@ def test_normal_mode_tensor_operations_are_refused_on_a_surface(tmp_path):
                        coordsys=AxisymmetricCoordinateSystem() if stability == "azimuthal" else None,
                        lower_left=[1, 0] if stability == "azimuthal" else None,
                        stability=stability, interface=True)
+
+
+# ----------------------------------------------------------------------------------------------
+# A tensor UNKNOWN in the azimuthally-broken system.
+#
+# AxisymmetryBreakingCoordinateSystem carried working tensor operations long before it could define a
+# tensor field to feed them: it inherited define_tensor_field from plain axisymmetry, which puts the
+# azimuthal direction on the diagonal alone and hard-zeros T_rphi/T_zphi -- exactly the components a
+# non-axisymmetric mode excites. Everything above drives those operators with tensors built inline
+# from coordinates; these two drive them through the component fields of an unknown, which is the
+# path an equation takes and the only one that can catch a mismatch between the slot layout
+# define_tensor_field hands out and the one the operators assume.
+# ----------------------------------------------------------------------------------------------
+
+class _TensorUnknown(Equations):
+    """A tensor unknown pinned to a prescribed value, plus scalars projected off its operators."""
+
+    def __init__(self, value, expressions_of):
+        super().__init__()
+        self.value = value
+        self.expressions_of = expressions_of
+
+    def define_fields(self):
+        self.define_tensor_field("sig", "C2", symmetric=False)
+        for name in self.expressions_of(identity_matrix()):
+            self.define_scalar_field(name, "C2")
+
+    def define_residuals(self):
+        # var("sig") rather than the components one by one: define_tensor_field registers the tensor
+        # as a substituted field, and that is the form an equation writes.
+        sig, sigtest = var_and_test("sig")
+        self.add_residual(weak(sig - self.value, sigtest))
+        for name, expression in self.expressions_of(sig).items():
+            unknown, test = var_and_test(name)
+            self.add_residual(weak(unknown - expression, test))
+
+
+class _TensorUnknownProblem(Problem):
+    def __init__(self, value, expressions_of):
+        super().__init__()
+        self.value = value
+        self.expressions_of = expressions_of
+
+    def define_problem(self):
+        self.set_coordinate_system(AxisymmetricCoordinateSystem())
+        # away from the axis, since the connection terms carry 1/r
+        self.add_mesh(RectangularQuadMesh(N=2, lower_left=[1, 0]))
+        self.add_equations(_TensorUnknown(self.value, self.expressions_of) @ "domain")
+
+
+def _tensor_unknown_values(tmp_path, value, expressions_of, stability):
+    with _TensorUnknownProblem(value, expressions_of) as problem:
+        problem.set_output_directory(str(tmp_path))
+        if stability:
+            problem.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False)
+        problem.initialise()
+        problem.solve()
+        mesh = problem.get_mesh("domain")
+        indices = mesh.get_nodal_field_indices()
+        names = list(expressions_of(identity_matrix()).keys())
+        return {name: max(abs(node.value(indices[name])) for node in mesh.nodes()) for name in names}
+
+
+def test_azimuthal_tensor_unknown_has_its_swirl_components(tmp_path):
+    """The nine components exist as unknowns, where plain axisymmetry offers five.
+
+    Counting dofs rather than inspecting names, so the test fails if a component is declared but not
+    actually allocated."""
+    value = dyadic(vector(1, 2, 3), vector(4, 5, 6))
+    expressions_of = lambda sig: {}
+
+    def ndof(stability):
+        with _TensorUnknownProblem(value, expressions_of) as problem:
+            problem.set_output_directory(str(tmp_path / ("azi" if stability else "plain")))
+            if stability:
+                problem.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False)
+            problem.initialise()
+            return problem.ndof(), problem.get_mesh("domain").nnode()
+
+    plain, nnode = ndof(False)
+    azimuthal, _ = ndof(True)
+    assert plain == 5 * nnode                 # xx, xy, yx, yy and the azimuthal diagonal aa
+    assert azimuthal == 9 * nnode             # ... plus xa, ya, ax, ay
+
+
+def test_azimuthal_tensor_unknown_satisfies_the_dyadic_identity(tmp_path):
+    """div(a (x) b) == div(b)*a + (b.grad)a, with the tensor carried by unknowns.
+
+    The same identity the inline tensors above are checked against, so the reference is independent
+    of the field definition being tested. Driving it through the component fields is what pins the
+    slot layout: define_tensor_field puts the azimuthal direction at slot 2, and tensor_divergence
+    and directional_tensor_derivative assume exactly that.
+    """
+    r, z = var(["coordinate_x", "coordinate_y"])
+    # Every entry of dyadic(a,b) is one of r*r, z*z or r*z, i.e. inside the C2 space of the element.
+    # That matters: the unknown has to equal the value EXACTLY for the residual below to be
+    # identically zero rather than the projection error. A quartic dyadic leaves an O(1) remainder
+    # on this mesh and says nothing about the operators.
+    a = vector(r, z, r)
+    b = vector(z, r, z)
+
+    def expressions_of(sig):
+        rhs = div(b) * a + directional_derivative(a, b)
+        out = {"magnitude": div(sig)[0]}
+        for i in range(3):
+            out["dyadic_%d" % i] = div(sig)[i] - rhs[i]
+        return out
+
+    values = _tensor_unknown_values(tmp_path / "azimuthal", dyadic(a, b), expressions_of,
+                                    stability=True)
+    # a real magnitude, or the residuals below are trivially small
+    assert values["magnitude"] > 0.5
+    for i in range(3):
+        assert values["dyadic_%d" % i] < 1e-8, i
+
+    # The same run under plain axisymmetry, whose tensor field has no azimuthal off-diagonals, so it
+    # cannot hold this dyadic at all. Without this the test above would pass on a field that simply
+    # dropped the swirl: the residual is 1.0 and 2.0 in two of the three components there, not small.
+    inherited = _tensor_unknown_values(tmp_path / "plain", dyadic(a, b), expressions_of,
+                                       stability=False)
+    assert max(inherited["dyadic_%d" % i] for i in range(3)) > 0.1
+
+
+def test_flipped_symmetry_axis_is_refused_under_azimuthal_stability(tmp_path):
+    """use_x_as_symmetry_axis belongs to plain axisymmetry alone.
+
+    The azimuthal normal mode system spells out the (r,z,phi) layout throughout -- the I*m/r factors
+    of its derivative operators, the "_phi" component of define_vector_field, the slot order of
+    define_tensor_field -- so a flipped axis is not something it can honour. Two ways in, both
+    refused: setting the flag on the class, and handing setup_for_stability_analysis a coordinate
+    system that already carries it. The latter used to build a fresh unflipped system and drop the
+    flag without a word, which changes what the base state means.
+    """
+    from pyoomph.expressions.coordsys import AxisymmetryBreakingCoordinateSystem
+
+    coordsys = AxisymmetryBreakingCoordinateSystem(Expression(1))
+    assert coordsys.use_x_as_symmetry_axis is False
+    coordsys.use_x_as_symmetry_axis = False          # what the inherited constructor does
+    with pytest.raises(RuntimeError, match="only supported in a plain"):
+        coordsys.use_x_as_symmetry_axis = True
+
+    # ... and plain axisymmetry still takes it, or the guard is too wide
+    assert AxisymmetricCoordinateSystem(use_x_as_symmetry_axis=True).use_x_as_symmetry_axis is True
+
+    class _Scalar(Equations):
+        def define_fields(self):
+            self.define_scalar_field("u", "C2")
+
+        def define_residuals(self):
+            u, v = var_and_test("u")
+            self.add_residual(weak(partial_t(u), v) + weak(grad(u), grad(v)))
+
+    class _FlippedProblem(Problem):
+        def define_problem(self):
+            self.set_coordinate_system(AxisymmetricCoordinateSystem(use_x_as_symmetry_axis=True))
+            self.add_mesh(RectangularQuadMesh(N=2, lower_left=[0, 1]))
+            self.add_equations(_Scalar() @ "domain")
+
+    with pytest.raises(RuntimeError, match="use_x_as_symmetry_axis"):
+        with _FlippedProblem() as problem:
+            problem.set_output_directory(str(tmp_path))
+            problem.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False)
+            problem.initialise()
+
+
+def test_cartesian_error_estimation_survives_the_switch_to_azimuthal_stability(tmp_path):
+    """setup_for_stability_analysis builds a fresh coordinate system, so settings have to be carried.
+
+    It used to test the OLD system for the breaking subclass before copying, i.e. it only carried the
+    setting over from a system it had installed itself. A problem written with a plain
+    AxisymmetricCoordinateSystem -- every real case -- silently lost it.
+    """
+    class _Scalar(Equations):
+        def define_fields(self):
+            self.define_scalar_field("u", "C2")
+
+        def define_residuals(self):
+            u, v = var_and_test("u")
+            self.add_residual(weak(partial_t(u), v) + weak(grad(u), grad(v)))
+
+    class _Prob(Problem):
+        def __init__(self, cartesian_error_estimation):
+            super().__init__()
+            self.cartesian_error_estimation = cartesian_error_estimation
+
+        def define_problem(self):
+            self.set_coordinate_system(AxisymmetricCoordinateSystem(
+                cartesian_error_estimation=self.cartesian_error_estimation))
+            self.add_mesh(RectangularQuadMesh(N=2, lower_left=[1, 0]))
+            self.add_equations(_Scalar() @ "domain")
+
+    for setting in (False, True):
+        with _Prob(setting) as problem:
+            problem.set_output_directory(str(tmp_path / str(setting)))
+            problem.setup_for_stability_analysis(azimuthal_stability=True, analytic_hessian=False)
+            problem.initialise()
+            assert problem.get_coordinate_system().cartesian_error_estimation is setting

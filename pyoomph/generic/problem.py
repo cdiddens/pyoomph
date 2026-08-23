@@ -7330,7 +7330,20 @@ class Problem(_pyoomph.Problem):
         coordsys = AxisymmetryBreakingCoordinateSystem(self._azimuthal_mode_param_m.get_symbol())
         oldcoordsys=self.get_coordinate_system()
         if oldcoordsys is not None:
-            if isinstance(oldcoordsys,AxisymmetryBreakingCoordinateSystem):
+            from ..expressions.coordsys import AxisymmetricCoordinateSystem
+            # The replacement system below is built fresh and carries the (r,z,phi) layout, so a
+            # flipped axis would be dropped here without a word and the base state would silently
+            # change meaning. Refuse instead.
+            if isinstance(oldcoordsys,AxisymmetricCoordinateSystem) and oldcoordsys.use_x_as_symmetry_axis:
+                raise RuntimeError("Azimuthal stability analysis does not support "
+                                   "use_x_as_symmetry_axis: the azimuthal normal mode coordinate "
+                                   "system assumes that x is the radius. Swap the mesh coordinates "
+                                   "so that the symmetry axis is y.")
+            # AxisymmetricCoordinateSystem, not the breaking subclass: the old system is the one the
+            # problem was written with, which is a plain axisymmetric one in every case except
+            # re-entry, so testing for the subclass meant the setting was only ever carried over
+            # from a system this method had already installed itself - i.e. never, in practice.
+            if isinstance(oldcoordsys,AxisymmetricCoordinateSystem):
                 coordsys.cartesian_error_estimation=oldcoordsys.cartesian_error_estimation
         self.set_coordinate_system(coordsys)
 

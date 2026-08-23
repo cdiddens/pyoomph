@@ -564,16 +564,23 @@ class ProjectExpression(Equations):
             refers to a registered scale by name. Defaults to 1.
         space: Finite element space to project onto. Defaults to "C2".
         destination: Residual destination for the projection. Defaults to None, i.e. the default residual.
-        field_type: Type of the projected field. Can be "scalar" or "vector". Defaults to "scalar".
+        field_type: Type of the projected field: "scalar" (default), "vector", "tensor" or
+            "symmetric_tensor". A symmetric tensor shares one test function between each pair of
+            off-diagonal entries, so it projects the symmetric part of the expression.
+        dim: Number of components (vector) or rows and columns (tensor) of the projected field.
+            Defaults to the nodal dimension. In Cartesian coordinates that leaves a planar tensor
+            without its out-of-plane entry, so pass ``dim=3`` to project a full three-dimensional
+            tensor on a two-dimensional mesh. Ignored for a scalar field.
         coordinate_system: Coordinate system for the projection. If None, the coordinate system of the domain/problem will be used. Defaults to None.
         **projs: Keyword arguments representing the expressions to project. The keys are the names of the projected fields, and the values are the expressions to project.
         
     """
-    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",destination:str | None=None,field_type:Literal["scalar","vector"]="scalar",coordinate_system:"BaseCoordinateSystem | None"=None, **projs:ExpressionOrNum):
+    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",destination:str | None=None,field_type:Literal["scalar","vector","tensor","symmetric_tensor"]="scalar",dim:int | None=None,coordinate_system:"BaseCoordinateSystem | None"=None, **projs:ExpressionOrNum):
         super(ProjectExpression, self).__init__()
         self.space:FiniteElementSpaceEnum=space
         self.scale:ExpressionOrNum=scale_factor(scale) if isinstance(scale,str) else scale
         self.field_type=field_type
+        self.dim=dim
         self.projs=projs.copy()
         self.coordinate_system=coordinate_system
         self.destination=destination
@@ -583,7 +590,13 @@ class ProjectExpression(Equations):
             if self.field_type=="scalar":
                 self.define_scalar_field(n,self.space,scale=self.scale,testscale=1/self.scale)
             elif self.field_type=="vector":
-                self.define_vector_field(n,self.space,scale=self.scale,testscale=1/self.scale)
+                self.define_vector_field(n,self.space,dim=self.dim,scale=self.scale,testscale=1/self.scale)
+            elif self.field_type in {"tensor","symmetric_tensor"}:
+                # The residuals below need no case of their own: weak() double-contracts matrices,
+                # and matrix() pads everything to 3x3, so a tensor expression and a tensor test
+                # function meet at the same size whatever the dimension of the field.
+                self.define_tensor_field(n,self.space,dim=self.dim,symmetric=self.field_type=="symmetric_tensor",
+                                         scale=self.scale,testscale=1/self.scale)
             else:
                 raise ValueError("Unsupported field type "+self.field_type)
 

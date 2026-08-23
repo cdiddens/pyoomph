@@ -433,8 +433,11 @@ class ElectricPotentialEquations(Equations):
         comps=[stem+"_"+c for c in ("x","y","z")][:self.get_nodal_dimension()]
         if all(mydom.get_space_of_field(c)=="" for c in comps):
             E=self.get_electric_field()
-            for i,c in enumerate(comps):
-                self.add_local_function(c,E[i])
+            # Registered as one vector, not component by component: only then does the field land in
+            # _vectorfields and get written as a single vector array (rather than loose scalars) to
+            # the vtu. Truncated to the nodal dimension, so that an out-of-plane component -- an
+            # azimuthal one, say -- is not silently mislabelled as "_z".
+            self.add_local_function(stem,vector([E[i] for i in range(len(comps))]))
         rho=self.get_charge_density()
         if rho is not None and not is_zero(rho):
             self.add_local_function("charge_density",rho)

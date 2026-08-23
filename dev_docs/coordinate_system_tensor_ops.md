@@ -156,6 +156,30 @@ If swirl in plain axisymmetry is ever wanted, the whole set above has to change 
 point `AxisymmetryBreakingCoordinateSystem` at `m=0` is probably the better starting point than
 extending this one.
 
+### 4.1 `AxisymmetryBreakingCoordinateSystem` can now build one (closed)
+
+That class overrode `define_vector_field` to add `_phi` but inherited `define_tensor_field` from the
+above, so a tensor **unknown** under azimuthal stability analysis had no `T_rphi`/`T_zphi` either --
+exactly the components a non-axisymmetric mode excites. Its tensor operations had been correct and
+tested for years by then; only the field definition was missing, so nothing could feed them.
+
+It now has its own `define_tensor_field`. The layout is the one `tensor_divergence` and
+`directional_tensor_derivative` assume -- `(r,z,phi)` on a bulk mesh, `(r,phi)` on a radial one, i.e.
+the azimuthal slot is 2 or 1 -- and the azimuthal index letter stays `a`, as in the inherited `_aa`:
+
+| | components |
+|---|---|
+| `ndim=2`, full | `_xx _xy _xa / _yx _yy _ya / _ax _ay _aa` |
+| `ndim=2`, symmetric | `_xx _xy _xa / _yy _ya / _aa` |
+| `ndim=1`, full | `_xx _xa / _ax _aa` |
+
+Note what a test of this **cannot** see. Forcing the unknown to a prescribed tensor pins slot
+*values*, and the operators read slot values, so any permutation of the component *names* is
+invisible -- a sabotage that swaps `_xa` and `_ya` throughout passes. What is load-bearing, and what
+`test_azimuthal_tensor_unknown_satisfies_the_dyadic_identity` does catch, is whether all nine slots
+are independently representable: the same run under plain axisymmetry leaves residuals of 1.0 and 2.0
+because its field simply cannot hold the swirl. The test asserts both halves for that reason.
+
 ---
 
 ## 5. `AxisymmetricCoordinateSystem.directional_tensor_derivative` had a wrong entry in every branch
