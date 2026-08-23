@@ -1390,7 +1390,13 @@ namespace pyoomph
 				this->local_coordinate_of_node(i,snode);
 			}
 						
-			pyoomph::Node *const nod_pt = static_cast<pyoomph::Node *>(node_pt(i));
+			// eleminfo.nnode counts BUFFER slots, which is not the same as the number of oomph nodes:
+			// the 0d ODE element (BulkElementODE0d) has one dummy slot, so that its D0 fields have
+			// somewhere to write below, and no node at all. node_pt(0) there reads one pointer past a
+			// zero-length array - harmless in practice only because that element also has nodal_dim
+			// and lagr_dim 0, so the pointer is never dereferenced, but it is still an out-of-bounds
+			// read and valgrind reports it on every run. A node-less slot gets no node.
+			pyoomph::Node *const nod_pt = (i < this->nnode() ? static_cast<pyoomph::Node *>(node_pt(i)) : NULL);
 			eleminfo.nodal_coords[i] = (double **)calloc(functable->info_Pos.numfields, sizeof(double *));
 			
 			for (unsigned int j = 0; j < eleminfo.nodal_dim; j++)
