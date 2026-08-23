@@ -15,6 +15,8 @@ That applies to the full `tests/` suite, the MPI suites, and the tutorial harnes
 passes for an A/B comparison take most of an afternoon. Batch changes up and run once, rather than
 after each fix. Targeted single scripts and small benchmarks are fine without asking.
 
+pytest output should be unbuffered and redirected, so that the user can always ask for the progress. It also helps in case of SEGFAULTS.
+
 The main branch should be always quite stable. Development happens on the branch "develop", which is merged into main regularly.
 Urgent direct fixes can be implemented directly in "main" and have to be included into "develop".
 
@@ -26,7 +28,7 @@ After **any** C++ change (`src/`), run
 
 not `ninja` on its own. It does an editable `pip install`, which is what makes Python import the new
 extension; building without installing leaves the stale module in place and you will debug a binary
-that does not contain your change.
+that does not contain your change. Don't forget to `cd` back into your Scratchpad directory afterwards.
 
 The `.pyi` stub (`pyoomph/_pyoomph_core.pyi`) is generated from the nanobind docstrings by
 `nanobind.stubgen` during the build and mirrored into the source tree. To fix what the stub says, fix
@@ -40,7 +42,7 @@ it and the results become a mixture of two builds.
 Run scratch scripts, benchmarks and diagnostics from the session scratchpad, **never** from the
 user's own folders under `pyoomph_runs/` - every run creates an output directory next to the script.
 
-You can work in the Scratchpad subfolder!
+Work in the Scratchpad subfolder of this repository, never in /tmp. Make a unique meaningful subdirectory in the Scratchpad.
 
 Fast tests of existing tutorials can be achieved by adding --quick-test to the command line. It will stop after the first Newton solve and provides a single output.
 
@@ -67,7 +69,7 @@ Include `$PETSC_DIR/$PETSC_ARCH_COMPLEX/lib` into `PYTHONPATH` to get complex PE
     PYTHONPATH=<candidate> python3 -c "from petsc4py import PETSc; import numpy; \
         assert PETSc.ScalarType is numpy.complex128; import slepc4py; print('complex PETSc ok')"
 
-Likewise for real PETSc.
+Likewise for real PETSc. If you find multiple, always take the PETSC_DIR with `pyoomph` in the directory name.
 
 
 The MPI and 3D-adaptivity suites are marked `slow` and are **skipped** without `--full`:
