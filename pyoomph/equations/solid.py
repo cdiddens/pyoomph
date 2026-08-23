@@ -222,7 +222,7 @@ class BaseDeformableSolidEquations(BaseMovingMeshEquations):
                 self.set_test_scaling(mesh=1/self.modulus_for_scaling*scale_factor("spatial"))    
                 
 
-    def before_mesh_to_mesh_interpolation(self, eqtree, interpolator):
+    def _before_mesh_to_mesh_interpolation(self, eqtree, interpolator):
         pass
 
 

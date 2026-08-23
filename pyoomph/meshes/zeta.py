@@ -232,7 +232,7 @@ class AssignZetaCoordinatesBase(InterfaceEquations):
         self.assign_zetas(self.get_mesh())
         return super().after_mapping_on_macro_elements()
 
-    def before_mesh_to_mesh_interpolation(self, eqtree: "EquationTree", interpolator: "BaseMeshToMeshInterpolator"):
+    def _before_mesh_to_mesh_interpolation(self, eqtree: "EquationTree", interpolator: "BaseMeshToMeshInterpolator"):
         new_mesh=eqtree.get_mesh() # self.get_mesh()
         # This is only ever attached to InterfaceEquations, so the eqtree/interpolator here
         # always belong to a spatial interface mesh, never an ODEStorageMesh.
@@ -243,7 +243,7 @@ class AssignZetaCoordinatesBase(InterfaceEquations):
         assert isinstance(old_mesh,InterfaceMesh)
         self.assign_zetas(old_mesh)
         self.assign_zetas(new_mesh)
-        return super().before_mesh_to_mesh_interpolation(eqtree,interpolator)
+        return super()._before_mesh_to_mesh_interpolation(eqtree,interpolator)
 
     def after_remeshing(self, eqtree: "EquationTree"):
         self.assign_zetas(self.get_mesh())
@@ -298,14 +298,14 @@ class AssignZetaCoordinatesByEulerianCoordinate(AssignZetaCoordinatesBase):
             minzeta,maxzeta=get_mpi_min(minzeta),get_mpi_max(maxzeta)
             nodes_set=get_mpi_sum(nodes_set)
         if maxzeta-minzeta<1e-10 and nodes_set>1:
-            raise self.add_exception_info(RuntimeError("The assigned zeta coordinates are not meaningful. Probably align along another axis"))
+            raise self._add_exception_info(RuntimeError("The assigned zeta coordinates are not meaningful. Probably align along another axis"))
         if self.validate_zetas:
             # An interface overhanging in the chosen direction produces a perfectly non-degenerate
             # zeta that is nonetheless not invertible, which the min/max check above cannot see.
             try:
                 _check_zeta_is_invertible(mesh,bind,"AssignZetaCoordinatesByEulerianCoordinate(direction="+str(self.direction)+")")
             except RuntimeError as e:
-                raise self.add_exception_info(e)
+                raise self._add_exception_info(e)
 
 
 class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
@@ -346,7 +346,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         loop=list(loop)
         n=len(loop)
         if n<3:
-            raise self.add_exception_info(RuntimeError("A closed interface loop needs at least three distinct nodes, got "+str(n)))
+            raise self._add_exception_info(RuntimeError("A closed interface loop needs at least three distinct nodes, got "+str(n)))
 
         # Orientation, so both meshes traverse the loop the same way.
         area=0.0
@@ -384,14 +384,14 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
             worst=max(range(n),key=lambda k:edge[k])
             if edge[worst]>5.0*median:
                 a,b=loop[worst],loop[(worst+1)%n]
-                raise self.add_exception_info(RuntimeError("The closed loop '"+mesh.get_name()+"' is not geometrically ordered: the step from node at ("+str(pts[0,a])+", "+str(pts[1,a])+") to ("+str(pts[0,b])+", "+str(pts[1,b])+") is "+str(edge[worst])+", more than five times the median step "+str(median)+". A node of this boundary is misplaced, so its arclength - and therefore its zeta - would be meaningless."))
+                raise self._add_exception_info(RuntimeError("The closed loop '"+mesh.get_name()+"' is not geometrically ordered: the step from node at ("+str(pts[0,a])+", "+str(pts[1,a])+") to ("+str(pts[0,b])+", "+str(pts[1,b])+") is "+str(edge[worst])+", more than five times the median step "+str(median)+". A node of this boundary is misplaced, so its arclength - and therefore its zeta - would be meaningless."))
 
         cum=[0.0]*n
         for k in range(1,n):
             cum[k]=cum[k-1]+edge[k-1]
         total=cum[-1]+edge[-1]
         if total<=0:
-            raise self.add_exception_info(RuntimeError("The closed interface loop '"+mesh.get_name()+"' has zero length"))
+            raise self._add_exception_info(RuntimeError("The closed interface loop '"+mesh.get_name()+"' has zero length"))
 
         s_anchor=cum[seam_k]+seam_u*edge[seam_k]
         period=1.0 if self.normalized else total
@@ -412,10 +412,10 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         closed=_find_closed_segments(cache,segs)
         if any(closed):
             if len(segs)!=1:
-                raise self.add_exception_info(RuntimeError("The interface '"+mesh.get_name()+"' has "+str(len(segs))+" segments of which "+str(sum(closed))+" are closed loops. A periodic zeta has one period for the whole boundary, so a closed loop has to be the only segment on it. Split the boundary, or parameterise it some other way."))
+                raise self._add_exception_info(RuntimeError("The interface '"+mesh.get_name()+"' has "+str(len(segs))+" segments of which "+str(sum(closed))+" are closed loops. A periodic zeta has one period for the whole boundary, so a closed loop has to be the only segment on it. Split the boundary, or parameterise it some other way."))
             loop=_walk_closed_loop(cache)
             if loop is None:
-                raise self.add_exception_info(RuntimeError("The interface '"+mesh.get_name()+"' looks like a closed loop but its elements do not form one single cycle, so it cannot be given a periodic zeta."))
+                raise self._add_exception_info(RuntimeError("The interface '"+mesh.get_name()+"' looks like a closed loop but its elements do not form one single cycle, so it cannot be given a periodic zeta."))
             return self._closed_loop_zetas(mesh,pts,loop)
 
         # Sort and reverse the segments based on the settings
@@ -494,7 +494,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         dist,idx=cKDTree(coords).query(numpy.array([[n.x(0),n.x(1)] for n in nodes]))
         extent=max(float(numpy.amax(numpy.abs(coords))),1.0)
         if float(numpy.amax(dist))>1e-8*extent:
-            raise self.add_exception_info(RuntimeError("Assigning zeta on '"+mesh.get_name()+"' from the merged interface: a node of this rank is "+str(float(numpy.amax(dist)))+" away from the nearest point of the merged boundary, which should be zero. The merged data does not describe the same interface."))
+            raise self._add_exception_info(RuntimeError("Assigning zeta on '"+mesh.get_name()+"' from the merged interface: a node of this rank is "+str(float(numpy.amax(dist)))+" away from the nearest point of the merged boundary, which should be zero. The merged data does not describe the same interface."))
         for n,i in zip(nodes,idx):
             n.set_coordinates_on_boundary(bind,[float(zetas[i])])
 
@@ -548,7 +548,7 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
             try:
                 _check_zeta_is_invertible(mesh,bind,"AssignZetaCoordinatesByArclength"+(" (closed loop)" if period>0 else ""),period)
             except RuntimeError as e:
-                raise self.add_exception_info(e)
+                raise self._add_exception_info(e)
 
 
 

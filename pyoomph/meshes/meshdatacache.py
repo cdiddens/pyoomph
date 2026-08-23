@@ -186,9 +186,9 @@ class MeshDataCacheEntry:
         self.nodal_local_exprs:dict[str,NPFloatArray]={}
         self.local_expr_indices:dict[str,int]={n:i for i,n in enumerate(self.mesh.list_local_expressions())}
 
-        vector_fields = msh.get_eqtree().get_equations().get_list_of_vector_fields(self.mesh.get_eqtree().get_code_gen())
+        vector_fields = msh.get_eqtree().get_equations()._get_list_of_vector_fields(self.mesh.get_eqtree().get_code_gen())
         self.vector_fields:dict[str,list[str]] = {k: v for a in vector_fields for k, v in a.items()}
-        tensor_fields = msh.get_eqtree().get_equations().get_list_of_tensor_fields(self.mesh.get_eqtree().get_code_gen())
+        tensor_fields = msh.get_eqtree().get_equations()._get_list_of_tensor_fields(self.mesh.get_eqtree().get_code_gen())
         self.tensor_fields:dict[str,list[list[str]]] = {k: v for a in tensor_fields for k, v in a.items()}
         self._add_implicit_vector_fields()
 

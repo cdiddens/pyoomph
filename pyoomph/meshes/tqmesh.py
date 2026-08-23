@@ -969,7 +969,7 @@ class TQMeshTemplate(MeshedMeshTemplate):
 
     def _transfer_mesh(self, surface: _TQMeshSurface, mesh: Any, color_names: dict[int, str]):
         if self.has_domain(surface.name):
-            collection = self.get_domain(surface.name)
+            collection = self._get_domain(surface.name)
         else:
             collection = self.new_domain(surface.name)
         # add_node_unique() identifies nodes by their position, which is what stitches the domains together: TQMesh

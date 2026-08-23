@@ -410,8 +410,8 @@ class StokesEquations(Equations):
         P = self.get_scaling(self.pressure_name)
         self.set_test_scaling({self.velocity_name:X / P})
         self.set_test_scaling(pressure=X / U*self.pressure_test_scaling_factor)
-        self.add_named_numerical_factor(p_in_momentum_eq=scale_factor(self.pressure_name)*test_scale_factor(self.velocity_name)/scale_factor("spatial")*self.pressure_test_scaling_factor)
-        self.add_named_numerical_factor(div_u__in_conti_eq=scale_factor(self.velocity_name) * test_scale_factor(self.pressure_name) / scale_factor("spatial"))
+        self._add_named_numerical_factor(p_in_momentum_eq=scale_factor(self.pressure_name)*test_scale_factor(self.velocity_name)/scale_factor("spatial")*self.pressure_test_scaling_factor)
+        self._add_named_numerical_factor(div_u__in_conti_eq=scale_factor(self.velocity_name) * test_scale_factor(self.pressure_name) / scale_factor("spatial"))
 
     def define_stress_tensor(self):
         u = var(self.velocity_name)
@@ -621,7 +621,7 @@ class NavierStokesEquations(StokesEquations):
 
     def define_scaling(self):
         super(NavierStokesEquations, self).define_scaling()
-        self.add_named_numerical_factor(inertia_in_momentum_eq=self.dt_factor*scale_factor("mass_density") * scale_factor(self.velocity_name)*test_scale_factor(self.velocity_name) / scale_factor("temporal"))
+        self._add_named_numerical_factor(inertia_in_momentum_eq=self.dt_factor*scale_factor("mass_density") * scale_factor(self.velocity_name)*test_scale_factor(self.velocity_name) / scale_factor("temporal"))
 
     def define_residuals(self):
         super().define_residuals()  # add the Stokes part

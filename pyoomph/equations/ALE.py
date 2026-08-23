@@ -445,7 +445,7 @@ class ConnectMeshAtInterface(InterfaceEquations):
     def define_fields(self):
         for f in self.get_required_fields():
             if self.get_opposite_side_of_interface(raise_error_if_none=False) is None:
-                raise self.add_exception_info(RuntimeError("Cannot connect any fields at the interface if no opposite side is present"))
+                raise self._add_exception_info(RuntimeError("Cannot connect any fields at the interface if no opposite side is present"))
             inside_space=self.get_parent_domain()._coordinate_space            
             if inside_space=="":
                 raise RuntimeError("Cannot connect field "+f+" at the interface, since it cannot find in the inner domain. You might have to raise the coordinate space of that domain with an ElementSpace")

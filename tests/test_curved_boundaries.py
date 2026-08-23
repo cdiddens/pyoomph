@@ -565,7 +565,7 @@ class _ArcSector(Problem):
 class _MovingGmshDiskTemplate(GmshTemplate):
     # A gmsh triangular disc, rim on circle arcs. Gmsh-based on purpose: only a template that
     # records a .msh file in the state can come back from load_state as a *different* template
-    # (MeshTemplate.define_state_file), which is what makes the meshes be rebuilt there.
+    # (MeshTemplate._define_state_file), which is what makes the meshes be rebuilt there.
     def define_geometry(self):
         self.default_resolution = 0.4
         self.mesh_mode = "tris"

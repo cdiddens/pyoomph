@@ -89,7 +89,7 @@ class RefineMaxElementSize(Equations):
         super(RefineMaxElementSize, self).__init__()
         self.max_nondim_size=max_nondim_cartesian_size
 
-    def register_refinement_directives(self,codegen):
+    def _register_refinement_directives(self,codegen):
         mesh=codegen._mesh
         assert mesh is not None
         # A C++ refinement directive, for the same reason as RefineToLevel: it is a pure function of the
@@ -97,7 +97,7 @@ class RefineMaxElementSize(Equations):
         mesh._add_refinement_directive_max_element_size(float(self.max_nondim_size))
 
     def after_compilation(self,codegen):
-        self.register_refinement_directives(codegen)
+        self._register_refinement_directives(codegen)
 
 
 
@@ -214,11 +214,11 @@ class EquationCompilationFlags(BaseEquations):
             if v is not None:
                 setattr(codegen,n,v)
 
-    def before_compilation(self,codegen:"FiniteElementCodeGenerator"):
+    def _before_compilation(self,codegen:"FiniteElementCodeGenerator"):
         self.apply_to_codegen(codegen)
 
     def define_fields(self):
-        # Also set in before_compilation, but the warning fires while the residuals are assembled,
+        # Also set in _before_compilation, but the warning fires while the residuals are assembled,
         # i.e. long before that.
         if self.warn_on_large_numerical_factor is not None:
             self.get_current_code_generator().warn_on_large_numerical_factor=self.warn_on_large_numerical_factor

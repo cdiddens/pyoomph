@@ -24,7 +24,7 @@ continue` and the dedicated plotting subprocess under `mpirun --distribute`, bec
 
 ## 1. What is in a state file, and how each part behaves
 
-`Problem.define_state_file` (`problem.py:6929`) writes one sequential stream. It splits into three
+`Problem._define_state_file` (`problem.py:6929`) writes one sequential stream. It splits into three
 kinds of data, and only one of them is actually hard:
 
 | kind | what | under `--distribute` |
@@ -148,7 +148,7 @@ The reader branches on it and keeps reading old files; the writer only writes th
 serial runs too. That is the point — a serial and a distributed run must produce interchangeable
 files, which also means the format is exercised by every serial test.
 
-Per bulk mesh (interface meshes are not saved; `define_state_file` asserts that), instead of
+Per bulk mesh (interface meshes are not saved; `_define_state_file` asserts that), instead of
 "refinement pattern + one flat nodal blob":
 
 ```
@@ -258,7 +258,7 @@ block table. Only worth revisiting if states ever reach GB scale.
   belongs either to a nodal value or to an element's internal data, both of which now have keys.
 * **tracers** — particles have no natural order; they need an id or a sort by position before they can
   be gathered. They raise on a distributed save for now.
-* **loading a state whose mesh template differs** (the remeshing path in `define_state_file`) is
+* **loading a state whose mesh template differs** (the remeshing path in `_define_state_file`) is
   untouched and remains serial-only.
 
 ## 9. C++ additions
@@ -396,7 +396,7 @@ What makes it more than a mechanical port:
   Python either way. So a port either reimplements the numpy block format in C++ - it is simple and
   stable, but it is a second implementation of the container - or keeps the writing in Python and moves
   only the computation, handing over one finished array per section. **The second is the sensible
-  first step**: it keeps `define_state_file` readable as the definition of the format, and the arrays
+  first step**: it keeps `_define_state_file` readable as the definition of the format, and the arrays
   handed over are exactly the ones §4 lists.
 * **The MPI would change hands.** The gather and the key reconciliation currently go through mpi4py;
   in C++ they would go through oomph-lib's communicator (`MPI_Gatherv`, `MPI_Alltoall`). That is not

@@ -188,13 +188,13 @@ class ConnectFieldsAtInterface(InterfaceEquations):
                     testscale_inside=self.expand_expression_for_debugging(test_scale_factor(finner))
                     testscale_outside=self.expand_expression_for_debugging(test_scale_factor(fouter,domain=self.get_opposite_side_of_interface()))
                     
-                    raise self.add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the test function scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the test function scaling is consistent.\n   test_scale("+str(finner)+")_inside = "+str(testscale_inside)+"\n   test_scale("+str(fouter)+")_outside = "+str(testscale_outside)))
+                    raise self._add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the test function scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the test function scaling is consistent.\n   test_scale("+str(finner)+")_inside = "+str(testscale_inside)+"\n   test_scale("+str(fouter)+")_outside = "+str(testscale_outside)))
                 testdiff=scale_factor(finner)-scale_factor(fouter,domain=self.get_opposite_side_of_interface())
                 testdiff=self.expand_expression_for_debugging(testdiff,raise_error=False,unit_error=False)
                 if not testdiff.is_zero():
                     scale_inside=self.expand_expression_for_debugging(scale_factor(finner))
                     scale_outside=self.expand_expression_for_debugging(scale_factor(fouter,domain=self.get_opposite_side_of_interface()))
-                    raise self.add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the scaling is consistent.\n   scale("+str(finner)+")_inside = "+str(scale_inside)+"\n   scale("+str(fouter)+")_outside = "+str(scale_outside)))
+                    raise self._add_exception_info(RuntimeError("When connecting fields "+str(finner)+" and "+str(fouter)+" at the interface, the scaling is inconsistent.\nPlease either set check_consistent_scaling=False or ensure that the scaling is consistent.\n   scale("+str(finner)+")_inside = "+str(scale_inside)+"\n   scale("+str(fouter)+")_outside = "+str(scale_outside)))
 
 
             l, l_test=var_and_test(self.lagr_mult_prefix+finner+"_"+fouter)
@@ -393,7 +393,7 @@ class RefineToLevel(Equations):
         super(RefineToLevel, self).__init__()
         self.level:Literal["max"] | int = level
 
-    def register_refinement_directives(self,codegen):
+    def _register_refinement_directives(self,codegen):
         mesh=codegen._mesh
         assert mesh is not None
         # Registered as a C++ refinement directive rather than evaluated by a Python loop over the
@@ -404,7 +404,7 @@ class RefineToLevel(Equations):
         mesh._add_refinement_directive_to_level(-1 if self.level=="max" else int(self.level))
 
     def after_compilation(self,codegen):
-        self.register_refinement_directives(codegen)
+        self._register_refinement_directives(codegen)
         mesh=codegen._mesh
         assert mesh is not None
         # Only MeshFromTemplate1d/2d/3d actually carry _initial_uniform_refinement_level.
@@ -653,7 +653,7 @@ class InitialCondition(BaseEquations):
     the field's components in their own order, so this is also correct in e.g. an axisymmetric
     coordinate system. This includes the position fields and values that are not written as an explicit
     ``vector(...)``, i.e. ``InitialCondition(mesh=var("lagrangian"))``. See
-    :py:meth:`~pyoomph.generic.codegen.BaseEquations.expand_vectorial_entries`.
+    :py:meth:`~pyoomph.generic.codegen.BaseEquations._expand_vectorial_entries`.
     """
 
     def __init__(self, *, degraded_start: bool | Literal["auto"] = "auto", IC_name: str = "", **kwargs: ExpressionOrNum):
@@ -669,7 +669,7 @@ class InitialCondition(BaseEquations):
         # Vector-valued entries split into their components. Not done in __init__: which components
         # "velocity" has is a property of the domain this condition ends up on, which is not known
         # until the equations are attached.
-        for n, val in self.expand_vectorial_entries(self._ics, "initial condition").items():
+        for n, val in self._expand_vectorial_entries(self._ics, "initial condition").items():
             assert isinstance(self._degraded_start, bool) or self._degraded_start == "auto"
             self.set_initial_condition(n, val, degraded_start=self._degraded_start, IC_name=self._ic_name)
             if self.get_problem().project_initial_conditions:
@@ -718,7 +718,7 @@ class LocalExpressions(Equations):
 
     def define_additional_functions(self):
         if self._master()._is_ode():
-            raise self.add_exception_info( RuntimeError("LocalExpressions cannot be used with ODE equations. Use IntegralObservables instead."))
+            raise self._add_exception_info( RuntimeError("LocalExpressions cannot be used with ODE equations. Use IntegralObservables instead."))
         for k,v in self.local_expressions.items():
             self.add_local_function(k, v )
             
@@ -952,16 +952,16 @@ class _AverageOrIntegralConstraintBase(Equations):
         self.set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve
         self.scaling_factor:ExpressionNumOrNone=scale_factor(scaling_factor) if isinstance(scaling_factor,str) else scaling_factor
 
-    def get_global_dof_storage_name(self, pathname: str | None = None):
+    def _get_global_dof_storage_name(self, pathname: str | None = None):
         if self.ode_storage_domain is None:
-            return super().get_global_dof_storage_name(pathname)
+            return super()._get_global_dof_storage_name(pathname)
         else:
             return self.ode_storage_domain
         
-    def after_fill_dummy_equations(self, problem: "Problem", eqtree: "EquationTree",pathname:str,elem_dim:int | None=None):
+    def _after_fill_dummy_equations(self, problem: "Problem", eqtree: "EquationTree",pathname:str,elem_dim:int | None=None):
         if len(self.constraints)==0:
-            return super().after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
-        odestorage=self.get_global_dof_storage_name(pathname=pathname)  
+            return super()._after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
+        odestorage=self._get_global_dof_storage_name(pathname=pathname)  
         add_eqs=None      
         for field,integral_value in self.constraints.items():
             scale_correction=problem.get_scaling(field) if self.scaling_factor is None else self.scaling_factor
@@ -984,10 +984,10 @@ class _AverageOrIntegralConstraintBase(Equations):
         # once and add_eqs was assigned.
         assert add_eqs is not None
         problem._equation_system+=add_eqs@odestorage
-        return super().after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
+        return super()._after_fill_dummy_equations(problem,eqtree,pathname,elem_dim)        
 
     def define_residuals(self):
-        odestorage=self.get_global_dof_storage_name()        
+        odestorage=self._get_global_dof_storage_name()        
         for field,integral_value in self.constraints.items():
             u,utest=var_and_test(field)
             l,ltest=var_and_test(field,domain=odestorage)
@@ -1302,7 +1302,7 @@ class EnforcedBC(InterfaceEquations):
                         if sp == "":
                             # Test if it is a vector field
                             # print(dir(self.get_parent_domain().get_equations()))
-                            # expanded = self.expand_additional_field(k, True, 0, self.get_current_code_generator(),False,False)
+                            # expanded = self._expand_additional_field(k, True, 0, self.get_current_code_generator(),False,False)
                             # peqs = self.get_parent_domain().get_equations()
                             raise RuntimeError("Cannot use EnforcedBC on an unknown field " + k)
                 if sp not in allowed_spaces:
@@ -1629,7 +1629,7 @@ class DirichletBC(BaseEquations):
     field's components in their own order, so this is also correct in e.g. an axisymmetric coordinate
     system. This includes the position fields and values that are not written as an explicit
     ``vector(...)``, i.e. ``DirichletBC(mesh=var("lagrangian"))`` to hold the mesh at its undeformed
-    position. See :py:meth:`~pyoomph.generic.codegen.BaseEquations.expand_vectorial_entries`.
+    position. See :py:meth:`~pyoomph.generic.codegen.BaseEquations._expand_vectorial_entries`.
     """
 
     def __init__(self, *, prefer_weak_for_DG: bool = True, **kwargs: ExpressionOrNum):
@@ -1641,7 +1641,7 @@ class DirichletBC(BaseEquations):
         # Vector-valued entries split into their components. Not done in __init__: which components
         # "velocity" has is a property of the domain this condition ends up on (and, for an interface
         # condition, of its parent), which is not known until the equations are attached.
-        return self.expand_vectorial_entries(self._dcs, "Dirichlet condition")
+        return self._expand_vectorial_entries(self._dcs, "Dirichlet condition")
 
     def define_residuals(self):
         pdom = self.get_parent_domain()

@@ -330,9 +330,9 @@ and 4 ranks, reproducing the serial answer.
 ## 8. State files
 
 A state file has to reproduce exactly the state it was written at. Until recently it did not, and not
-only for `Dx`: **no interface or skeleton element data was written at all.** `Problem.define_state_file`
+only for `Dx`: **no interface or skeleton element data was written at all.** `Problem._define_state_file`
 looped `self._meshdict` only (asserting `not isinstance(mesh, InterfaceMesh)`), and `InterfaceMesh` has
-no `define_state_file` of its own. What happened on load instead: `_load_state` snapshots the *pre-load*
+no `_define_state_file` of its own. What happened on load instead: `_load_state` snapshots the *pre-load*
 interface values (`clear_before_adapt`), loads the bulk mesh, and lets
 `actions_after_adapt → restore_discontinuous_data` refit that pre-load snapshot onto the loaded
 geometry. So the facet values after a load were whatever the in-memory problem happened to hold — for a
@@ -350,7 +350,7 @@ fresh reader, zeros — and not what the file recorded. `DL`/`D0` were no better
   makes the record partition-independent — a file written serially loads on any number of ranks.
 * **Two-phase load.** The interface elements do not exist in their final form until after
   `actions_after_adapt()`, which is well past the point where the bulk block is read. So the block is
-  read into `Problem._pending_interface_states` during `define_state_file` and applied by
+  read into `Problem._pending_interface_states` during `_define_state_file` and applied by
   `Problem._apply_interface_states()` immediately after `actions_after_adapt()` — deliberately *after*
   `restore_discontinuous_data` has run, so the file's values overwrite that refit rather than race it.
   An element whose key is not in the file keeps what the rebuild left it (the refit, or the recovery

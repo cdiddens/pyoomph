@@ -239,7 +239,7 @@ class MaxwellStressEquations(_ElectricFlowCoupling):
 
     def define_scaling(self):
         flow=self.get_flow()
-        self.add_named_numerical_factor(maxwell_stress_in_momentum_eq=
+        self._add_named_numerical_factor(maxwell_stress_in_momentum_eq=
             scale_factor("permittivity")*scale_factor("electric_field")**2
             *test_scale_factor(flow.velocity_name)/scale_factor("spatial"))
 

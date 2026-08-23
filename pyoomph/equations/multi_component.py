@@ -719,7 +719,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         scals:dict[str,str | ExpressionOrNum] = {}
         scals["mass_transfer_rate"] = scale_factor("velocity") * scale_factor("mass_density")*self.additional_masstransfer_scale
         self.set_scaling(scals)
-        self.add_named_numerical_factor(surface_tension_term=test_scale_factor("velocity")/scale_factor("spatial"))
+        self._add_named_numerical_factor(surface_tension_term=test_scale_factor("velocity")/scale_factor("spatial"))
 
         if self.masstransfer_model is not None:
             self.masstransfer_model._setup_for_code(self.get_current_code_generator(),self.interface_props) 

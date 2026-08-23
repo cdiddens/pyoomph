@@ -235,6 +235,59 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Changed / Improved
 
+- **Internal `BaseEquations`/`Equations`/`ODEEquations` methods are now underscore-prefixed.** A survey
+  of every call and override across the tutorials, the test suite and the example scripts found a
+  group of methods that only the framework itself ever touches. They now say so:
+  `change_output_directory`, `before_fill_dummy_equations`, `after_fill_dummy_equations`,
+  `get_list_of_vector_fields`, `get_list_of_tensor_fields`, `get_creation_info`, `add_exception_info`,
+  `interior_facet_terms_required`, `expand_vectorial_entries`, `expand_additional_field`,
+  `expand_additional_testfunction`, `get_default_timestepping_scheme`, `get_global_dof_storage_name`,
+  `register_refinement_directives`, `before_compilation`, `before_mesh_to_mesh_interpolation`,
+  `add_named_numerical_factor` and the three `*_precice_*` hooks all gained a leading underscore.
+  The similarly named methods on other classes are unaffected: the outputters keep their public
+  `change_output_directory`, and `FiniteElementCodeGenerator.expand_additional_field`,
+  `.expand_additional_testfunction` and `.get_default_timestepping_scheme` stay public because they are
+  the nanobind trampolines for the corresponding C++ virtuals. The hooks that scripts *do* override --
+  `after_compilation`, `before_finalization`, `calculate_error_overrides`,
+  `after_mapping_on_macro_elements`, `setup_remeshing_size`, `on_apply_boundary_conditions`, the
+  Newton/remeshing hooks -- keep their public names. `EquationTree._register_refinement_directives`,
+  the recursion over the tree, is now `_register_all_refinement_directives`, since the hook it
+  dispatches took that name.
+
+- **Removed two dead methods:** `BaseEquations.get_latex_info` had no caller anywhere (the LaTeX output
+  is fed by the C++ printer callbacks, not by this dict), and with it the write-only
+  `_residuals_for_tex` bookkeeping in `add_residual` is gone too. `BaseEquations.define_external_field`
+  was never called nor overridden by anything.
+
+- **Removed seven write-only `Problem` attributes**: `_already_set_ic`, `_use_first_order_timestepper`,
+  `_in_transient_newton_solve`, `_no_cache`, `_interface_vertex_balance_refinements` and the public
+  `further_cmdlineargs` were all assigned and never read. `--no-cache` is unaffected -- it acts through
+  the `jit_cache.set_enabled(False)` beside the flag -- and command lines with unknown arguments are
+  still tolerated, since `parse_known_args` stays; only the discarded half is no longer stored.
+  `_static_condensation_applied_meshes` looks equally dead and is not: it keeps the meshes behind the
+  `id()`s in `_static_condensation_applied` alive so a destroyed mesh cannot hand its id to its
+  replacement, and now says so where it is declared.
+
+- **The same pass over `MeshTemplate`, `MeshedMeshTemplate` and `GmshTemplate`.** Methods only the
+  framework calls are now underscored: `get_template`, `get_domain`, `available_domains` and, on
+  `GmshTemplate`, `post_process`, `process_cells_for_optional_mirroring`,
+  `process_points_for_optional_mirroring`, `write_curved_entities` and `read_curved_entities`.
+  `define_state_file` was renamed on `Problem`, `MeshTemplate`, `MeshFromTemplateBase` and
+  `ODEStorageMesh` together, so the save/restore protocol keeps one name across all four. The two
+  nanobind bindings nothing ever called from Python, `new_bulk_element_collection` and
+  `add_periodic_node_pair`, were renamed to match. The geometry surface scripts actually use --
+  `point`, `line`, `circle_arc`, `plane_surface`, `sphere`, `extrude`, `revolve`, the mesh-size fields,
+  `add_node`, `add_facet_to_boundary` and the rest -- is untouched, as is the plotters' own public
+  `post_process`, which is a different hook that scripts do override.
+
+- **Removed three dead methods and four dead attributes** from those classes.
+  `MeshTemplate.get_opposite_interface`, `MeshTemplate.add_nodes` and `GmshTemplate.points` had no
+  caller anywhere, and `GmshTemplate._entities0d`, `_entities2d`, `_curved_entities0d` and the
+  `_has_curved_entries` flag were only ever written. Two write-only members deliberately stay:
+  `MeshTemplate._macrobounds`, which keeps the C++ `MeshTemplateCurvedEntity` objects alive because the
+  template stores them as raw pointers, and `GmshTemplate.num_flipped_2d_elements`, which is read by
+  the orientation matrix in `dev_docs/examples/`.
+
 - **The generated element code binds its loop-invariant buffer reads to locals.** Every
   `shapeinfo->`/`eleminfo->` access whose leading indices do not depend on the test/trial node -- the
   shape buffers, the nodal data, the hanging-node rows, the local-equation table, the loop bounds, the

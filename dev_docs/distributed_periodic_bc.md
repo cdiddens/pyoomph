@@ -36,8 +36,9 @@ exist. `LineMesh` and `RectangularQuadMesh` used to expose it through a `periodi
 argument was removed, because the route cannot patch the corner mid-side nodes of a doubly periodic
 mesh (it fails in `MeshTemplateElementCollection::set_element_code` with "Cannot find the
 corresponding L2 node for periodicity", `src/meshtemplate.cpp:1577`) and it never populated
-`Mesh::copied_masters`. It is still available to hand-written mesh templates, and everything below
-applies to it too -- it ends in the same `oomph::Node::make_periodic`.
+`Mesh::copied_masters`. It is still reachable from hand-written mesh templates, but only through the underscored binding
+`_add_periodic_node_pair` (it was renamed to mark it internal, since nothing in the tutorials, the
+tests or the user scripts ever called it). Everything below applies to it too -- it ends in the same `oomph::Node::make_periodic`.
 
 ## 2. Why it did not work
 

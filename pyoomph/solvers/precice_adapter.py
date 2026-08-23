@@ -267,7 +267,7 @@ class PreciceProvideMesh(BaseEquations):
         self.name=precice_mesh_name
         self.use_lagrangian_coords=use_lagrangian_coords
 
-    def before_precice_initialise(self,eqtree:"EquationTree"):
+    def _before_precice_initialise(self,eqtree:"EquationTree"):
         mesh=eqtree.get_mesh()
         pr=mesh.get_problem()
         interface=pr._precice_interface
@@ -560,14 +560,14 @@ class PreciceWriteData(BaseEquations):
                     interface.write_data(provider.name, write_name, vertex_ids[inds], buffer)
 
    
-    def before_precice_initialise(self, eqtree: "EquationTree"):
+    def _before_precice_initialise(self, eqtree: "EquationTree"):
         interface=self.get_problem()._precice_interface
         assert interface is not None
         if interface.requires_initial_data():
             self._do_write_data(0)
         
 
-    def after_precice_solve(self, eqtree: "EquationTree",precice_dt:float):
+    def _after_precice_solve(self, eqtree: "EquationTree",precice_dt:float):
         self._do_write_data(precice_dt)
 
             
@@ -676,7 +676,7 @@ class PreciceReadData(BaseEquations):
                         for i,n in enumerate(mesh.nodes()):
                             n.set_value(index,buffer[_v2v(mesh)[n],vindex])
 
-    def before_precice_solve(self, eqtree: EquationTree, precice_dt: float):
+    def _before_precice_solve(self, eqtree: EquationTree, precice_dt: float):
         self._do_read_data(precice_dt)
              
 

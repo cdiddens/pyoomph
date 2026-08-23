@@ -551,7 +551,6 @@ class Problem(_pyoomph.Problem):
         self._first_step:bool=True
         self._suppress_code_writing:bool=False
         self._suppress_compilation:bool=False
-        self._no_cache:bool=False
         self._debug_largest_residual:int=0
         self.ignore_command_line:bool=False
 
@@ -561,13 +560,14 @@ class Problem(_pyoomph.Problem):
         self._dof_selector_used:_DofSelector | None | Literal["INVALID"]=None
 
 
-        self._use_first_order_timestepper:bool=False
         self._domains_to_remesh:set[MeshTemplate]=set()
 
         # Static condensation: the Python-side, mesh-independent form of the rules. See
         # _sync_static_condensation_rules() for why the rules are kept here at all.
         self._static_condensation_sources:dict[Any,tuple[str | None,tuple[tuple[str,tuple[int,...],str],...]]]={}
         self._static_condensation_applied:tuple[Any,...] | None=None
+        #: Never read: it exists to keep the meshes behind the id()s in _static_condensation_applied
+        #: referenced, so that a destroyed mesh cannot hand its id to its replacement.
         self._static_condensation_applied_meshes:list["AnyMesh"]=[]
         self._static_condensation_source_counter:int=0
 
@@ -617,12 +617,6 @@ class Problem(_pyoomph.Problem):
         #: there first. Reset it yourself to measure a particular stretch of a run.
         self._interface_conformity_repairs:int=0
         #: Cumulative number of elements refined by the vertex-connected balance closure of
-        #: enforce_interface_conformity(): elements that touch a coupled interface at a single vertex
-        #: and carry no facet on it, which the facet-based conformity machinery cannot see and which
-        #: would otherwise be left arbitrarily coarser than the interface next to them. Counted apart
-        #: from _interface_conformity_repairs because, unlike a repair, this loses no information -
-        #: these elements have never been refined, so their sons interpolate a current father.
-        self._interface_vertex_balance_refinements:int=0
         self.remove_macro_elements_after_initial_adaption:bool | Literal["auto"]="auto" # "auto" means: Only if the coordinates are free
         #: In distributed runs, we call load balance after each non-uniform adaptions
         self.call_load_balance_in_initial_adaption=False
@@ -757,7 +751,7 @@ class Problem(_pyoomph.Problem):
 
         self._output_step:int=0
         # Leftover of the removed can_continue_section(): never incremented any more, but the state
-        # file writes it in its fixed prefix (see define_state_file), so dropping it would make every
+        # file writes it in its fixed prefix (see _define_state_file), so dropping it would make every
         # existing dump unreadable.
         self._continue_section_step:int=0
         self._continue_section_step_loaded:int=0
@@ -786,9 +780,7 @@ class Problem(_pyoomph.Problem):
         self._last_arclength_parameter=None
         self._taken_already_an_unsteady_step=False
         self._last_step_was_stationary=None
-        self._already_set_ic = False
         self._resetting_first_step=False
-        self._in_transient_newton_solve=False
         
         self._hooks:list[GenericProblemHooks]=[]
         
@@ -955,7 +947,7 @@ class Problem(_pyoomph.Problem):
         """
         if not isinstance(eqs,EquationTree): #type: ignore
             err=ValueError("Cannot add "+str(eqs)+' to the system. Equations need to be restricted via <equation> @ "<name in equation tree>"')
-            eqs.add_exception_info(err)
+            eqs._add_exception_info(err)
         if not self._during_initialization:
             raise RuntimeError("You cannot use add_equations outside define_problem (or in functions called from there). Use additional_equations+=... instead, if you want to add something before initialization.")
         if not hasattr(self,"_equation_system") or self._equation_system is None:
@@ -3059,9 +3051,9 @@ class Problem(_pyoomph.Problem):
     def parse_cmd_line(self):
         from ..materials.generic import MaterialProperties
         if self.ignore_command_line:
-            self.cmdlineargs, self.further_cmdlineargs = self.cmdlineparser.parse_known_args(args="")
+            self.cmdlineargs,_ = self.cmdlineparser.parse_known_args(args="")
         else:
-            self.cmdlineargs, self.further_cmdlineargs = self.cmdlineparser.parse_known_args()
+            self.cmdlineargs,_ = self.cmdlineparser.parse_known_args()
         if self.cmdlineargs.superlu:
             self.set_linear_solver("superlu")
         elif self.cmdlineargs.petsc:
@@ -3116,7 +3108,6 @@ class Problem(_pyoomph.Problem):
             self._suppress_compilation=True
 
         if self.cmdlineargs.no_cache:
-            self._no_cache=True
             from .jit_cache import set_enabled
             set_enabled(False)
 
@@ -3588,7 +3579,7 @@ class Problem(_pyoomph.Problem):
         if depth==0:
             res:set[str]=set()
             for m in self._meshtemplate_list:
-                res.update(m.available_domains())
+                res.update(m._available_domains())
             return res,"Available domains"
         path=node.get_full_path().lstrip("/").split("/")
         templ=None
@@ -3601,7 +3592,7 @@ class Problem(_pyoomph.Problem):
         if depth==1:
             # Exactly the boundaries this domain touches with a whole facet, i.e. the same subset the
             # generated mesh will end up with.
-            return set(templ.get_domain(path[0]).get_adjacent_boundary_names()),"Boundaries of '"+path[0]+"'"
+            return set(templ._get_domain(path[0]).get_adjacent_boundary_names()),"Boundaries of '"+path[0]+"'"
         if depth==2:
             # _find_interface_intersections() inserts every permutation, so "domain/left/top" is present
             # iff "domain/top/left" is; filtering on the prefix therefore gives the codim-2 children.
@@ -3614,7 +3605,7 @@ class Problem(_pyoomph.Problem):
         domset:set[str]=set()
         for m in self._meshtemplate_list:
             m._do_define_geometry(self) 
-            mydoms=set(m.available_domains())
+            mydoms=set(m._available_domains())
             inters=domset.intersection(mydoms)
             if len(inters)>0:
                 raise RuntimeError("Following domains are added multiple times: "+str(inters))
@@ -3678,7 +3669,7 @@ class Problem(_pyoomph.Problem):
                     raise RuntimeError("No mesh template with a domain named '"+meshname+'" was added, but there are equations defined on this domain. Available domains are '+str(avdoms))
 
         self._equation_system._create_dummy_domains_for_DG(self) 
-        # after_fill_dummy_equations() above may have grafted whole domains onto the tree (see
+        # _after_fill_dummy_equations() above may have grafted whole domains onto the tree (see
         # _adopt_nodes_added_after_fill); they were never walked by _fill_dummy_equations.
         self._equation_system._adopt_nodes_added_after_fill(self)
         self._equation_system._finalize_equations(self,second_loop=True) 
@@ -5118,9 +5109,9 @@ class Problem(_pyoomph.Problem):
 
         The same fixed point also closes the VERTEX-connected balance: an element touching a coupled
         interface at a single vertex carries no facet, so none of the above can see it, and it would
-        otherwise be left arbitrarily coarser than the interface beside it. Those refinements are
-        accumulated into :py:attr:`_interface_vertex_balance_refinements` instead, since they are a
-        grading closure inside one mesh rather than a conformity repair.
+        otherwise be left arbitrarily coarser than the interface beside it. Those refinements are not
+        counted in the return value, since they are a grading closure inside one mesh rather than a
+        conformity repair.
 
         Collective under MPI: every process must call it. Returns the number of elements refined to
         repair facet conformity.
@@ -5132,8 +5123,7 @@ class Problem(_pyoomph.Problem):
         conns=self._collect_coupled_interfaces()
         if not conns:
             return 0
-        n,nvert=_pyoomph._enforce_interface_conformity(conns,40) #type:ignore
-        self._interface_vertex_balance_refinements+=nvert
+        n,_nvert=_pyoomph._enforce_interface_conformity(conns,40) #type:ignore
         # How much repairing this had to do. Zero is the good case and the interesting one: it means the
         # two sides agreed BEFORE they acted (the flag reconciliation in _adapt_with_interfacial_errors
         # got there first), rather than one of them being refined back afterwards. A repair is correct
@@ -7742,9 +7732,7 @@ class Problem(_pyoomph.Problem):
             lastres:ExpressionOrNum=0
             for t in timestep: #type:ignore
                 assert isinstance(t,(float,int,Expression)) or t is None
-                self._in_transient_newton_solve=True
                 lastres=self.solve(timestep=t,spatial_adapt=spatial_adapt,shift_values=shift_values,temporal_error=temporal_error,max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor,suppress_resolve_after_adapt=suppress_resolve_after_adapt,newton_solver_tolerance=newton_solver_tolerance,globally_convergent_newton=globally_convergent_newton)
-                self._in_transient_newton_solve=False
             return lastres
 
         timestep_normalized=False
@@ -8151,7 +8139,6 @@ class Problem(_pyoomph.Problem):
                 if tnd + float(currentdt / TS) * 1.01 > nextndout:
                     currentdt = (nextndout - tnd) * TS
 
-            self._in_transient_newton_solve=True
             nextdt = self.solve(timestep=currentdt, temporal_error=temporal_error,spatial_adapt=spatial_adapt,newton_solver_tolerance=newton_solver_tolerance,do_not_set_IC=do_not_set_IC,globally_convergent_newton=globally_convergent_newton,max_newton_iterations=max_newton_iterations,suppress_resolve_after_adapt=suppress_resolve_after_adapt)
             if first_step and float(nextdt/currentdt)>=1.0-1e-14:
                 if single_step_desired:
@@ -8162,7 +8149,6 @@ class Problem(_pyoomph.Problem):
                 single_step_desired=False
                 
             first_step=False
-            self._in_transient_newton_solve=False
             if max_newton_to_increase_time_step is not None and float(nextdt/TS)>float(currentdt/TS*1.00001):
                 last_res=self.get_last_residual_convergence()
                 if len(last_res)>max_newton_to_increase_time_step:
@@ -8552,10 +8538,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         Only the domains that were actually replaced: their meshes are new and carry no directives yet,
         while an untouched domain still holds its own and would collect a duplicate per remesh. Call
         only after ``rebuild_global_mesh_from_list()``, which is what points every code generator -
-        the interface ones included - at its new mesh; ``register_refinement_directives`` reads
+        the interface ones included - at its new mesh; ``_register_refinement_directives`` reads
         ``codegen._mesh``."""
         for _name,newmesh in new_meshes.items():
-            newmesh.get_eqtree()._register_refinement_directives()
+            newmesh.get_eqtree()._register_all_refinement_directives()
 
     def _redistribute_after_remeshing(self)->None:
         """Partition the rebuilt meshes again, since remeshing replaces them whole and replicated.
@@ -8805,7 +8791,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
     def _define_state_header(self,state:DumpFile)->str:
         """Read or write the header of a state file: what it is, which format version, and how it is sharded.
 
-        Shared by define_state_file and _get_time_of_state_file, which peeks at the first entries
+        Shared by _define_state_file and _get_time_of_state_file, which peeks at the first entries
         without reading the rest - so the order of these entries is part of the format and the two must
         not drift apart. Returns the version."""
         state.string_data(lambda: self._dump_header, lambda s: state.assert_equal(s, self._dump_header))
@@ -8831,7 +8817,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         return t,s
 
     # This function defines the state file, i.e. storing or reading all relevant information of the current status of the simulations
-    def define_state_file(self, state:DumpFile,ignore_loading_eigendata:bool=False,ignore_continuation_data=False,additional_info={}):
+    def _define_state_file(self, state:DumpFile,ignore_loading_eigendata:bool=False,ignore_continuation_data=False,additional_info={}):
         # The header comes first and in that order, because _get_time_of_state_file peeks at the entries
         # up to the output step without reading the rest. Both go through _define_state_header.
         self._define_state_header(state)
@@ -8858,8 +8844,8 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         new_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d] = {}
         old_meshes:dict[str,MeshFromTemplate1d | MeshFromTemplate2d | MeshFromTemplate3d]= {}
         for _i,templ in enumerate(self._meshtemplate_list):
-            old=templ.get_template()
-            new=templ.define_state_file(state,additional_info=additional_info)
+            old=templ._get_template()
+            new=templ._define_state_file(state,additional_info=additional_info)
             if not state.save:
 #                print("OLD VS NEW",old,new)
                 if old!=new:
@@ -8976,7 +8962,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             assert meshname in self._meshdict.keys()
             mesh = self._meshdict[meshname]
             assert not isinstance(mesh,InterfaceMesh)            
-            mesh.define_state_file(state,additional_info={})
+            mesh._define_state_file(state,additional_info={})
         # Interface and skeleton element data, i.e. everything a facet field owns: DL/D0 and the nodal
         # DG spaces alike live in the interface element's own internal Data, and no other block of the
         # file holds them. Without this the file could only reproduce the bulk state and would refit
@@ -9073,7 +9059,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             if not state.save and not ignore_continuation_data:
                 # PARKED, not applied here. The meshes have been read by this point but the equation
                 # numbering has not been rebuilt yet - rebuild_global_mesh_from_list, actions_after_adapt
-                # and reapply_boundary_conditions all run after define_state_file returns. So ndof is
+                # and reapply_boundary_conditions all run after _define_state_file returns. So ndof is
                 # still the OLD problem's, and applying a tangent belonging to the file's (adapted) mesh
                 # threw "Mismatching size in the dof direction vector" for any state saved on a refined
                 # mesh. Same reason the interface values are parked for _apply_interface_states().
@@ -9124,7 +9110,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             if relative_to_output:
                 assert isinstance(fname,str), "relative_to_output makes no sense when writing to a stream"
                 fname=os.path.join(self.get_output_directory(),fname)
-            # On a DISTRIBUTED problem all ranks walk through define_state_file - that is where they
+            # On a DISTRIBUTED problem all ranks walk through _define_state_file - that is where they
             # hand their part of the mesh over - but only rank 0 writes anything, the others send
             # their bytes to /dev/null, because the result is one merged, partition-independent
             # stream.
@@ -9137,7 +9123,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             writes_here = (get_mpi_rank()==0) or (not distributed)
             dump = DumpFile(fname if writes_here else os.devnull, True,compression_level=self.states_compression_level)
             try:
-                self.define_state_file(dump)
+                self._define_state_file(dump)
                 dump.write_footer("EOF_pyoomph")
                 dump.close()
             except BaseException as e:
@@ -9146,7 +9132,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         # otherwise leave the others waiting in the next collective - the run would hang instead of
         # reporting the failure - and for a FILE they also pin every rank here until it is written.
         if distributed:
-            # Every rank ran define_state_file, so any of them can be the one that failed.
+            # Every rank ran _define_state_file, so any of them can be the one that failed.
             mpi_share_any_failure(error,context="writing the state file")
         elif to_file:
             # Only rank 0 wrote; the others skipped the section entirely and learn about it here.
@@ -9175,7 +9161,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
     def _apply_parked_continuation_data(self):
         """Apply the continuation tangent read from a state file, once the equations are renumbered.
 
-        Parked during define_state_file because ndof is not final there yet; see the note at the parking
+        Parked during _define_state_file because ndof is not final there yet; see the note at the parking
         site. A length that still does not match is dropped with a message instead of raising: that
         happens for a file written while a bifurcation tracker was active (the vector has the augmented
         length and means nothing on the plain system) and for one whose mesh cannot be restored, and a
@@ -9201,7 +9187,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
     def _apply_interface_states(self):
         """Push the interface/skeleton element data read from a state file onto the rebuilt meshes.
 
-        Separate from reading because the elements are rebuilt in between; see define_state_file. An
+        Separate from reading because the elements are rebuilt in between; see _define_state_file. An
         interface named in the file but absent now, or an element whose key is not in the file, is left
         alone: that is a mesh which has changed since the file was written, and the rebuild's own
         transfer is a better answer there than nothing."""
@@ -9235,7 +9221,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         for m in self._interfacemeshes:
             m.clear_before_adapt()
         oldoutstep=self._output_step
-        self.define_state_file(dump,ignore_loading_eigendata=ignore_eigendata,ignore_continuation_data=ignore_continuation_data,additional_info=additional_info)
+        self._define_state_file(dump,ignore_loading_eigendata=ignore_eigendata,ignore_continuation_data=ignore_continuation_data,additional_info=additional_info)
         self.invalidate_cached_mesh_data()
         if ignore_outstep:
             self._output_step=oldoutstep

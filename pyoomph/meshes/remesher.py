@@ -627,7 +627,7 @@ class Remesher2d(RemesherBase):
             print("SETTING MESH SIZE CALLBACK",self._mesh_size_callback)
         self.gmsh._do_define_geometry(self.problem,fnformat.format(self._cnt)) 
         self.template._meshfile=self.gmsh._meshfile 
-        self.template.get_template()._meshfile=self.gmsh._meshfile 
+        self.template._get_template()._meshfile=self.gmsh._meshfile 
         self._cnt+=1
 
 
@@ -740,7 +740,7 @@ class ParametricGmshMeshRemesher2d(Remesher2d):
         self.gmsh._geom = None        
         self.gmsh._do_define_geometry(self.problem,fnformat.format(self._cnt)) 
         self.template._meshfile=self.gmsh._meshfile 
-        self.template.get_template()._meshfile=self.gmsh._meshfile 
+        self.template._get_template()._meshfile=self.gmsh._meshfile 
         self._cnt+=1
 
 

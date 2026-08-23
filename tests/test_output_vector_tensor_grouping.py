@@ -505,8 +505,24 @@ def test_rotational_extrusion_keeps_a_symmetric_tensor_at_six_components(tmp_pat
 
 
 # ----------------------------------------------------------------------------------------------
-# eigenmodes under the extrusions. These need a complex PETSc on PYTHONPATH, see CLAUDE.md.
+# eigenmodes under the extrusions. Some of these need a complex PETSc on PYTHONPATH, see CLAUDE.md.
 # ----------------------------------------------------------------------------------------------
+
+def _complex_petsc_skip_reason():
+    """Importing slepc4py is not enough: a REAL build imports fine and then raises out of the solve.
+
+    The tensor relaxation below stays real, so it only needs slepc4py at all; the mode-convention
+    tests carry an I*m*u term and hand the solver a genuinely complex pair, which a real
+    PETSc/SLEPc refuses with a RuntimeError rather than a skip."""
+    try:
+        import slepc4py  # type:ignore  # noqa: F401
+        from petsc4py import PETSc  # type:ignore
+    except Exception:
+        return "petsc4py/slepc4py not available (PYTHONPATH must carry a complex PETSc build)"
+    if PETSc.ScalarType is not numpy.complex128:
+        return "the PETSc on PYTHONPATH is a real build; a complex eigenproblem needs a complex one"
+    return None
+
 
 class _TensorRelaxation(Equations):
     """dt(sig) = -sig + source: a tensor unknown with a non-empty mass matrix, so it has eigenmodes."""
@@ -558,7 +574,7 @@ def test_rotational_extrusion_of_an_azimuthal_eigen_tensor(tmp_path, m):
     The mode reconstruction and the basis rotation are fused into one outer product, so this checks
     them together against the two halves as they come out unextruded. A tensor unknown rather than a
     local expression, since only a field has real and imaginary halves to recombine."""
-    pytest.importorskip("slepc4py", reason="azimuthal stability needs a complex PETSc build")
+    pytest.importorskip("slepc4py", reason="the azimuthal eigensolve needs slepc4py")
     combine = MeshDataCombineWithEigenfunction(0)
     flat = _eigen_tensor_output(tmp_path / "flat", combine, True, azimuthal_m=m)
     ext = _eigen_tensor_output(tmp_path / "ext",
@@ -589,7 +605,7 @@ def test_cartesian_extrusion_of_a_normal_mode_eigen_tensor(tmp_path, k):
     The base state therefore needs nothing a plain tile would not do -- asserted, so that a future
     rotation added by mistake shows up -- while the eigenmode still has to be recombined from its
     two halves."""
-    pytest.importorskip("slepc4py", reason="normal mode stability needs a complex PETSc build")
+    pytest.importorskip("slepc4py", reason="the normal-mode eigensolve needs slepc4py")
     combine = MeshDataCombineWithEigenfunction(0)
     flat = _eigen_tensor_output(tmp_path / "flat", combine, False, normal_mode_k=k)
     ext = _eigen_tensor_output(tmp_path / "ext",
@@ -782,7 +798,9 @@ def test_stored_eigen_pair_is_the_amplitude_of_a_positive_exponential(tmp_path, 
 
     This is what fixes the sign of every reconstruction below, so it is checked first and against
     the coordinate system rather than against any of them."""
-    pytest.importorskip("slepc4py", reason="stability analysis needs a complex PETSc build")
+    reason = _complex_petsc_skip_reason()
+    if reason is not None:
+        pytest.skip(reason)
     wavenumber = 2.0
     kwargs = {"azimuthal_m": int(wavenumber)} if azimuthal else {"normal_mode_k": wavenumber}
     data, _ = _mode_convention_output(tmp_path, azimuthal, MeshDataCombineWithEigenfunction(0), **kwargs)
@@ -797,7 +815,9 @@ def test_stored_eigen_pair_is_the_amplitude_of_a_positive_exponential(tmp_path, 
 @pytest.mark.parametrize("azimuthal", [True, False])
 def test_extruded_scalar_eigenmode_uses_minus_sin_times_the_imaginary_part(tmp_path, azimuthal):
     """The extruded field is Re[u_hat*exp(I*m*phi)], with phi right-handed about the axis."""
-    pytest.importorskip("slepc4py", reason="stability analysis needs a complex PETSc build")
+    reason = _complex_petsc_skip_reason()
+    if reason is not None:
+        pytest.skip(reason)
     wavenumber = 2.0
     kwargs = {"azimuthal_m": int(wavenumber)} if azimuthal else {"normal_mode_k": wavenumber}
     combine = MeshDataCombineWithEigenfunction(0)

@@ -476,7 +476,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
         
 
 
-    def before_mesh_to_mesh_interpolation(self, eqtree: "EquationTree", interpolator: "BaseMeshToMeshInterpolator"):
+    def _before_mesh_to_mesh_interpolation(self, eqtree: "EquationTree", interpolator: "BaseMeshToMeshInterpolator"):
         mesh=eqtree.get_mesh()
         assert isinstance(mesh,InterfaceMesh)
         self.ensure_nondimensional_distance_parameters(mesh.get_problem())
@@ -527,7 +527,7 @@ class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence)
             else:
                 self.assign_zetas(new_mesh)            
 
-        return super().before_mesh_to_mesh_interpolation(eqtree, interpolator)
+        return super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
 
     def assign_zetas(self,mesh:InterfaceMesh):
         bmesh=mesh.get_bulk_mesh()

@@ -29,7 +29,7 @@
 #     InitialCondition(velocity=vector(u,v))  instead of  InitialCondition(velocity_x=u, velocity_y=v)
 #
 # Both classes act on the SCALAR fields the code generator knows about, so the vector has to be split
-# into its components (BaseEquations.expand_vectorial_entries). The oracle throughout is that the two
+# into its components (BaseEquations._expand_vectorial_entries). The oracle throughout is that the two
 # spellings are bit-identical -- same ndof, same initial dof vector, same solution -- which is a
 # stronger statement than "it runs", and the only one that catches a component being written to the
 # wrong slot.
@@ -208,13 +208,13 @@ def test_a_deferred_symbol_is_resolved_before_it_is_split(tmp_path):
     class _Split(PseudoElasticMesh):
         def define_residuals(self):
             super().define_residuals()
-            got = self.expand_vectorial_entries({"mesh": 2 * var("lagrangian")}, "test")
+            got = self._expand_vectorial_entries({"mesh": 2 * var("lagrangian")}, "test")
             assert set(got.keys()) == {"mesh_x", "mesh_y"}, got
             assert "lagrangian_x" in str(got["mesh_x"]) and "lagrangian_y" not in str(got["mesh_x"])
             assert "lagrangian_y" in str(got["mesh_y"]) and "lagrangian_x" not in str(got["mesh_y"])
             # A plain scalar is not a vector, whatever the field is called: left untouched, so the code
             # generator reports it along with the fields it does have.
-            assert self.expand_vectorial_entries({"mesh": 0}, "test") == {"mesh": 0}
+            assert self._expand_vectorial_entries({"mesh": 0}, "test") == {"mesh": 0}
 
     class P(Problem):
         def define_problem(self):

@@ -1279,7 +1279,7 @@ def test_adaptivity_during_continuation(policy, tmp_path):
 def test_a_state_saved_on_an_adapted_mesh_restores_its_tangent(tmp_path):
     """Loading a state must apply its continuation tangent AFTER the equations are renumbered.
 
-    define_state_file reads the meshes but the numbering is rebuilt only after it returns -
+    _define_state_file reads the meshes but the numbering is rebuilt only after it returns -
     rebuild_global_mesh_from_list, actions_after_adapt and reapply_boundary_conditions all run later. So
     the tangent used to be checked against the OLD dof count, and any state saved on an adapted mesh
     threw "Mismatching size in the dof direction vector" and took the whole reload with it. It is now

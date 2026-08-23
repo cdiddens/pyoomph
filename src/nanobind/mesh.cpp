@@ -1785,7 +1785,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("_set_problem", &pyoomph::MeshTemplate::_set_problem, nb::arg("problem").none(), "Associates this mesh template with the given Problem (or None to clear it)")
 		.def("_get_problem", &pyoomph::MeshTemplate::get_problem, nb::rv_policy::reference, "Return the Problem this mesh template is associated with (or None if not yet set)")
 		.def("get_node_position", &pyoomph::MeshTemplate::get_node_position, nb::arg("node_index"), "Returns the position [x, y, z] of the node at the given index of this template")
-		.def("new_bulk_element_collection", &pyoomph::MeshTemplate::new_bulk_element_collection, nb::rv_policy::reference, nb::arg("name"), "Creates a new named bulk element domain (MeshTemplateElementCollection) within this template")
+		.def("_new_bulk_element_collection", &pyoomph::MeshTemplate::new_bulk_element_collection, nb::rv_policy::reference, nb::arg("name"), "Internal: creates a new named bulk element domain (MeshTemplateElementCollection). Use MeshTemplate.new_domain instead, which also registers the domain in the template")
 		// keep_alive<1,5>: the curved entity is stored as a bare borrowed pointer in MeshTemplateFacet
 		// (and later in the MacroElements built from it), so without this the Python object may be
 		// collected as soon as the caller's local goes out of scope -- which segfaults the macro map
@@ -1797,7 +1797,7 @@ void PyReg_Mesh(nb::module_ &m)
 		.def("add_facet_to_curve_entity",[](pyoomph::MeshTemplate & self, const std::vector<pyoomph::nodeindex_t> &ni, pyoomph::MeshTemplateCurvedEntity *curved=nullptr){ throw_runtime_error("add_facet_to_curve_entity is deprecated. Use add_facet_to_boundary instead"); }, nb::arg("node_indices"), nb::arg("curved_entity")=nullptr)
 		.def("_find_opposite_interface_connections", &pyoomph::MeshTemplate::_find_opposite_interface_connections, "Finds, for every pair of boundaries registered as mutually opposite interfaces, the corresponding node/facet connections between them (used for e.g. two-sided interfaces)")
 		.def("_find_interface_intersections", &pyoomph::MeshTemplate::_find_interface_intersections, "Finds the set of boundary names where two or more interfaces intersect (e.g. contact lines/triple points)")
-		.def("add_periodic_node_pair", &pyoomph::MeshTemplate::add_periodic_node_pair, "n_mst"_a, "n_slv"_a, "Registers the node at index n_slv as periodic copy of the node at index n_mst")
+		.def("_add_periodic_node_pair", &pyoomph::MeshTemplate::add_periodic_node_pair, "n_mst"_a, "n_slv"_a, "Internal low-level periodicity: registers the node at index n_slv as periodic copy of the node at index n_mst. Prefer the PeriodicBC equation; this route cannot patch the mid-side corner nodes of a doubly periodic mesh")
 		.def("add_node_unique", &pyoomph::MeshTemplate::add_node_unique, "x"_a, "y"_a = 0.0, "z"_a = 0.0,"Adds a node at the given position. If there is already a node at this position,no new node is created")
 		.def("add_node", &pyoomph::MeshTemplate::add_node, "x"_a, "y"_a = 0.0, "z"_a = 0.0,"Adds a node at the given position. Creates overlapping nodes, if there is already a node at this position.")
 		.def("_reset", &pyoomph::MeshTemplate::reset, "Clears all nodes, domains and boundary information of this mesh template, so it can be rebuilt from scratch")

@@ -368,7 +368,7 @@ class ElectricPotentialEquations(Equations):
         # can possibly resolve the double layer.
         rho=self.get_charge_density()
         if rho is not None:
-            self.add_named_numerical_factor(charge_density_in_poisson_eq=
+            self._add_named_numerical_factor(charge_density_in_poisson_eq=
                                             scale_factor("charge_density")*test_scale_factor(self.name))
 
     def _find_flow(self)->"StokesEquations | None":
@@ -862,7 +862,7 @@ class OhmicConductionEquations(ElectricPotentialEquations):
             return
         # The charge relaxation time over the flow time: the number that says whether treating the
         # bulk as quasi-static is defensible at all.
-        self.add_named_numerical_factor(electric_reynolds_number=
+        self._add_named_numerical_factor(electric_reynolds_number=
             _resolve_scale(self.permittivity_scale)/_resolve_scale(self.conductivity_scale)
             /scale_factor("temporal"))
 
@@ -1841,7 +1841,7 @@ class ElectricPotentialConnection(InterfaceEquations):
             diff=getter(inside.name)-getter(outside.name,domain=opp)
             diff=self.expand_expression_for_debugging(diff,raise_error=False,unit_error=False)
             if not diff.is_zero():
-                raise self.add_exception_info(RuntimeError(
+                raise self._add_exception_info(RuntimeError(
                     "The two sides of this ElectricPotentialConnection disagree on the "+what+" of the "+
                     "potential, which silently breaks the continuity of the normal displacement field.\n"+
                     "  inside  ("+inside.name+"): "+str(self.expand_expression_for_debugging(getter(inside.name)))+"\n"+
