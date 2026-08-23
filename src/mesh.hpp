@@ -71,6 +71,13 @@ namespace pyoomph
 	class Mesh : public virtual oomph::RefineableMeshBase, public virtual oomph::Mesh
 	{
 	protected:
+		// See has_complete_interface_topological_ids().
+		bool interface_topological_ids_complete = false;
+		// (nnode, nelement) at the last completed sweep. Nodes are only ever created by generation or by
+		// refinement, both of which change these, so an unchanged pair means there is nothing to do --
+		// which matters because pair_is_topological() asks once per pair per repair round.
+		unsigned long topo_ids_at_nnode = 0, topo_ids_at_nelement = 0;
+
 		Problem *problem; // Owning Problem (non-owning pointer)
 		std::string domainname; // Name of the domain this mesh represents, e.g. as used in the Python interface
 		std::vector<std::string> boundary_names; // Names of the boundaries, indexed like oomph-lib's boundary indices
@@ -278,6 +285,19 @@ namespace pyoomph
 		// Row indices, in to_numpy's node ordering, of the nodes shared with process p, index-matched to process p's
 		// own list for this rank (empty without MPI). Used to merge the per-rank meshes into one global mesh.
 		virtual std::vector<int> get_shared_node_numpy_indices(unsigned p);
+
+		// --- Cross-domain topological node identity (dev_docs/interface_refinement_coupling.md section 15) ---
+		// Fill in pyoomph::Node::interface_topological_id for every node that does not have one yet, by
+		// walking the refinement tree downwards: a son's node is the C1 interpolation of its father's
+		// vertex nodes at a dyadic local coordinate, so its id is the canonical set of
+		// (father vertex id, exact dyadic weight) pairs. Idempotent, purely local (no MPI: the ids of
+		// pre-distribution nodes travel with the nodes, and later ones are born of a refinement this rank
+		// performed, halo elements included). Sets interface_topological_ids_complete.
+		void assign_interface_topological_ids();
+		// Did the last assign_interface_topological_ids() reach every node of this mesh? False means
+		// something was created outside the two routes above, and the interface machinery must then fall
+		// back to matching by position rather than silently compare an unset id.
+		bool has_complete_interface_topological_ids() const { return interface_topological_ids_complete; }
 
 		// --- Partition-independent addressing, for state files (dev_docs/distributed_state_files.md) ---
 		void assign_global_base_element_indices();            // number the roots; must run before distribute()
@@ -602,6 +622,10 @@ namespace pyoomph
 		// Match this interface mesh's elements/nodes to those of another interface mesh (e.g. the opposite side of
 		// a periodic domain) by nearest-neighbor lookup via a KD-tree, populating opposite_interior_facets etc.
 		virtual void connect_interface_elements_by_kdtree(InterfaceMesh *other);
+		// The same pairing on the cross-domain topological node identity rather than on the positions.
+		// Used by connect_interface_elements_by_kdtree whenever both sides carry a complete set of ids and
+		// the connection is coincident; see pyoomph::Node::interface_topological_id.
+		virtual void connect_interface_elements_topologically(InterfaceMesh *other);
 		unsigned get_nodal_dimension() override;
 		int get_element_dimension() override;
 	};
@@ -991,6 +1015,9 @@ namespace pyoomph
 			// descent). Runs before equation numbering, so the hangs are picked up by
 			// assign_(hanging_)local_eqn_numbers. No-op for quad/hex meshes.
 			this->post_adapt_setup_hanging_nodes();
+			// The nodes the refinement just created have no cross-domain identity yet, and the coupled
+			// interface machinery is about to ask for it. Idempotent and cheap when nothing is new.
+			this->assign_interface_topological_ids();
 			const int halochk = this->halo_consistency_check_mode();
 			if (halochk) check_halo_element_consistency(this, "after 2:1 balancing", NULL, halochk > 1);
 		}

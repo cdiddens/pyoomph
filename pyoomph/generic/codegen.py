@@ -1920,12 +1920,19 @@ class Equations(BaseEquations):
             elif space=="C2" or space=="D2":
                 if pdom._coordinate_space not in {"C2TB","C2"}:
                     raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to a bulk domain with element space "+str(pdom._coordinate_space)+". This does not work"))
-            elif space=="C1TB" or space=="D1TB":    
-                if pdom._coordinate_space=="C1":
-                    raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to a bulk domain with element space "+str(pdom._coordinate_space)+". This does not work"))
-                elif pdom._coordinate_space=="C2" or pdom._coordinate_space=="C1TB":
-                    if pdom.dimension==3:
-                        raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to 3d bulk domain with element space "+str(pdom._coordinate_space)+". This does not work, since 3d tetrahedral elements of "+str(pdom._coordinate_space)+" do not provide the face bubble node for "+str(space)+" on 2d facets. Consider upgrading the 3d space to C2TB using an ElementSpace('C2TB') for the 3d domain or adjust the facet space to "+("C1" if space=="C1TB" else "D1")+"."))
+            elif space=="C1TB" or space=="D1TB":
+                # A bubble space needs a bubble NODE, and a C2 element does not have one: on the simplex
+                # families BulkElementTri2dC2 / BulkElementTetra3dC2 the C1TB row of
+                # Nodal_Space_Index_To_Element_Index_Map is literally empty (src/elements_2d.cpp). This
+                # check used to let a C2 parent through in 2d, and indexing that empty row SEGFAULTED in
+                # interpolate_newly_constructed_additional_dof rather than reporting anything -- see
+                # dev_docs/interface_refinement_coupling.md section 14.5. Kept as a backstop: the
+                # negotiation in get_interface_field_connection_space now caps the space with
+                # largest_facet_space() and should never reach here.
+                if pdom._coordinate_space not in {"C1TB","C2TB"}:
+                    raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to a bulk domain with element space "+str(pdom._coordinate_space)+". This does not work, since elements of "+str(pdom._coordinate_space)+" have no bubble node for "+str(space)+". Use "+("C1" if space=="C1TB" else "D1")+" for the facet field, or raise the bulk domain to C1TB/C2TB with an ElementSpace()."))
+                elif pdom._coordinate_space=="C1TB" and pdom.dimension==3:
+                    raise self.add_exception_info(RuntimeError("You tried to define a "+str(space)+" field '"+str(name)+"' at an interface attached to 3d bulk domain with element space "+str(pdom._coordinate_space)+". This does not work, since 3d tetrahedral elements of "+str(pdom._coordinate_space)+" do not provide the face bubble node for "+str(space)+" on 2d facets. Consider upgrading the 3d space to C2TB using an ElementSpace('C2TB') for the 3d domain or adjust the facet space to "+("C1" if space=="C1TB" else "D1")+"."))
             
             
         cg = master._assert_codegen()

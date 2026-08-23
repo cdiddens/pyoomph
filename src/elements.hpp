@@ -1661,6 +1661,13 @@ namespace pyoomph
     // Must be implemented per concrete Interface*Element* subclass (the matching logic - which
     // permutations of nodes to try - depends on the face's geometric shape).
     virtual void analyze_opposite_orientation(const std::vector<double> & ) { throw_runtime_error("Implement"); }
+    // How far a vertex node of this side is from a candidate vertex on the opposite side, as the
+    // squared distance the permutation search minimises. TOPOLOGICAL when both nodes carry a
+    // cross-domain identity and the connection is coincident: 0 for the same node, 1 for a different
+    // one. The geometric answer is no longer a reliable one at a mixed-order interface -- a C2 side's
+    // interface is a quadratic curve where a C1 side's is the chord, so the two sides' vertices are
+    // genuinely apart and the nearest miss is not a match. See pyoomph::Node::interface_topological_id.
+    static double vertex_match_distance2(oomph::Node *a, oomph::Node *b, const std::vector<double> &offset);
     // Adds the discontinuous-Galerkin (DG) field data of the attached bulk element as external data
     // of this interface element, so generated interface code can access DG fields of the bulk domain.
     virtual void add_DG_external_data();

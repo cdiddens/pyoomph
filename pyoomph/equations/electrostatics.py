@@ -1828,7 +1828,9 @@ class ElectricPotentialConnection(InterfaceEquations):
             raise RuntimeError("Cannot find the potential field on both sides of the interface")
         space=get_interface_field_connection_space(assert_valid_finite_element_space(inside_space),
                                                    assert_valid_finite_element_space(outside_space),
-                                                   use_highest_space=self.use_highest_space)
+                                                   use_highest_space=self.use_highest_space,
+                                                   parent_space=str(self.get_parent_domain()._coordinate_space),
+                                                   parent_dim=int(self.get_parent_domain().dimension))
         self.define_scalar_field(self.lagr_mult_name,assert_valid_finite_element_space(space),
                                  scale=1/test_scale_factor(inside.name))
 

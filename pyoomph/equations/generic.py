@@ -58,7 +58,7 @@ from __future__ import annotations
 from .. import _pyoomph_core as _pyoomph
 from ..expressions import var_and_test,var
 from ..generic.codegen import  InterfaceEquations,Equations,BaseEquations,ODEEquations,FiniteElementCodeGenerator,sorted_field_kwargs
-from ..expressions.generic import ExpressionOrNum,ExpressionNumOrNone,FiniteElementSpaceEnum, grad,nondim, scale_factor,test_scale_factor,Expression,assert_valid_finite_element_space, testfunction,find_dominant_element_space,weak
+from ..expressions.generic import ExpressionOrNum,ExpressionNumOrNone,FiniteElementSpaceEnum, grad,nondim, scale_factor,test_scale_factor,Expression,assert_valid_finite_element_space, testfunction,find_dominant_element_space,find_subordinate_element_space,largest_facet_space,weak
 
 #Connects one or multiple fields at both sides of the interfaces via Lagrange multipliers
 #i.e. it ensures the same Neumann flux on both sides, whereas the magnitude of this flux is given by the Lagrange multiplier
@@ -81,24 +81,55 @@ if TYPE_CHECKING:
 
 
 # TODO Check this
-def get_interface_field_connection_space(inside_space:FiniteElementSpaceEnum | Literal[""],outside_space:FiniteElementSpaceEnum | Literal[""],use_highest_space:bool=False)->FiniteElementSpaceEnum | Literal[""]:
+def _facet_space_cap(eqs)->"tuple[str,int]":
+    """(coordinate space, dimension) of the bulk domain an interface equation is attached to.
+
+    The Lagrange multiplier of an interface coupling is a nodal value on the INNER domain's bulk nodes,
+    so that domain is the one that has to be able to carry the negotiated space on a facet. Returns
+    ("",0) when the parent cannot be resolved, which leaves the negotiation uncapped exactly as before.
+    """
+    try:
+        pdom=eqs.get_parent_domain()
+        if pdom is None:
+            return ("",0)
+        return (str(pdom._coordinate_space),int(pdom.dimension))
+    except Exception:
+        return ("",0)
+
+
+def get_interface_field_connection_space(inside_space:FiniteElementSpaceEnum | Literal[""],outside_space:FiniteElementSpaceEnum | Literal[""],use_highest_space:bool=False,parent_space:str="",parent_dim:int=0)->FiniteElementSpaceEnum | Literal[""]:
+    """The space the Lagrange multiplier coupling the two sides of an interface lives in.
+
+    By default the MEET of the two -- the largest space both sides can represent -- capped by what the
+    inner domain can actually carry on a facet (the multiplier is a nodal value on the INNER domain's
+    bulk nodes, so only that side's facet has to hold it).
+
+    This used to walk a total order ["D2TB","C2TB","D2","C2","D1TB","C1TB","D1","C1"], which is wrong:
+    C1TB and C2 are incomparable, so "the one further down that list" is not the meet. A C2 domain
+    coupled to a C1TB one negotiated a C1TB multiplier -- a space a C2 triangle does not have -- and the
+    run segfaulted rather than complained. See dev_docs/interface_refinement_coupling.md section 14.5 and
+    find_subordinate_element_space, which is the lattice this now uses.
+    """
     if outside_space == "":
         return inside_space
     elif inside_space == "":
         return outside_space    
     if outside_space[0]!=inside_space[0]:
         raise RuntimeError("TODO: Think about what space is lower/higher ") #TODO: Is e.g. D2 lower or higher than C2TB? hard to tell
-    space_order:list[FiniteElementSpaceEnum]=["D2TB","C2TB","D2","C2","D1TB","C1TB","D1","C1"]
-    for sp in space_order:
-        if inside_space==sp:
-            if outside_space==sp or use_highest_space:
-                return sp
-            else:
-                return outside_space
-        elif outside_space==sp:
-            return inside_space
-
-    raise RuntimeError("Should not happen: Cannot get field connection space for "+inside_space+" and "+outside_space)
+    # The lattice works on the continuous names; both inputs are the same kind here (checked above), so
+    # whatever it returns is translated back to that kind.
+    discontinuous=(inside_space[0]=="D")
+    if use_highest_space:
+        res=find_dominant_element_space(inside_space,outside_space)
+    else:
+        res=find_subordinate_element_space(inside_space,outside_space)
+    if parent_space!="":
+        res=find_subordinate_element_space(res,largest_facet_space(parent_space,parent_dim))
+    if res=="":
+        raise RuntimeError("Should not happen: Cannot get field connection space for "+inside_space+" and "+outside_space)
+    if discontinuous:
+        res="D"+res[1:]
+    return cast("FiniteElementSpaceEnum",res)
 
 class ConnectFieldsAtInterface(InterfaceEquations):
     """
@@ -140,7 +171,8 @@ class ConnectFieldsAtInterface(InterfaceEquations):
                 raise RuntimeError("Cannot connect field "+fouter+" at the interface, since it cannot find in the outer domain")
             inside_space=assert_valid_finite_element_space(inside_space)
             outside_space=assert_valid_finite_element_space(outside_space)            
-            space=get_interface_field_connection_space(inside_space,outside_space,use_highest_space=self.use_highest_space) 
+            pspace,pdim=_facet_space_cap(self)
+            space=get_interface_field_connection_space(inside_space,outside_space,use_highest_space=self.use_highest_space,parent_space=pspace,parent_dim=pdim) 
             space=assert_valid_finite_element_space(space)
             self.define_scalar_field(self.lagr_mult_prefix+finner+"_"+fouter,space,scale=1/test_scale_factor(finner)) 
 

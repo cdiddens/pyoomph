@@ -110,8 +110,12 @@ namespace pyoomph
 
   // Gather one side. Silently yields an empty result if the mesh is null or carries no such boundary
   // (a side may legitimately be absent, e.g. when only dummy equations were created for it).
+  // `topological` selects the node identity: the cross-domain topological id (see
+  // pyoomph::Node::interface_topological_id) when both sides carry a complete set and the connection is
+  // coincident, the quantised Eulerian position otherwise. The two sides of one pair must always be
+  // collected with the same choice.
   void collect_interface_side(Mesh *m, const std::string &bname, const std::vector<double> &offset,
-                              InterfaceSideFacets &out);
+                              InterfaceSideFacets &out, bool topological);
 
   // Report how many of this rank's facets are non-conforming, globally summed so every rank agrees.
   // mode: 0 silent, 1 report to stdout, 2 throw. `when` labels the call site in the message.

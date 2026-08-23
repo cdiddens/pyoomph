@@ -963,6 +963,31 @@ namespace pyoomph
     // whole mesh, and the callers all have their indices on the stack already.
     nodeindex_t add_intermediate_node_generic(const nodeindex_t *key_corners, unsigned nkey, const nodeindex_t *parents, unsigned nparents, bool boundary_possible);
 
+    // --- Cross-domain topological node identity (dev_docs/interface_refinement_coupling.md section 15) ---
+    // Memo for topological_node_id(), rebuilt whenever the node list or the intermediate map has grown.
+    std::vector<std::array<unsigned long long, 2>> topo_node_id_cache;
+    std::vector<std::vector<std::pair<std::size_t, double>>> topo_node_expansion_cache;
+    std::unordered_map<nodeindex_t, std::vector<nodeindex_t>> topo_intermediate_corners;
+    std::size_t topo_cache_nodes = 0, topo_cache_intermediates = (std::size_t)-1;
+    void build_topological_id_cache();
+
+  public:
+    // The 128-bit identity of template node `ni`, as stamped onto every Node generated from it.
+    //
+    // A corner node is identified by its own index; an INTERMEDIATE node (edge mid-point, face or cell
+    // centre) by the C1 combination of the entity's corners -- exactly the form the refinement sweep
+    // produces. That is the whole point: a C2 domain's midside node is a template node, while the C1
+    // domain's node at the same place is created by a refinement, and the two must digest identically or
+    // the two sides of the interface stop recognising each other. intermediate_node_map already holds
+    // that entity description, keyed by the corner set precisely because "that set - not the node's
+    // position - is its identity".
+    std::array<unsigned long long, 2> topological_node_id(nodeindex_t ni);
+    // ... and the expansion it is the digest of, empty for an opaque node (see
+    // pyoomph::Node::interface_topological_expansion).
+    const std::vector<std::pair<std::size_t, double>> &topological_node_expansion(nodeindex_t ni);
+
+  protected:
+
   public:
     void note_predefined_higher_order_element() { has_predefined_higher_order_elements = true; }
 

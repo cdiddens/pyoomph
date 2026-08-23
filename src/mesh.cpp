@@ -167,6 +167,209 @@ namespace pyoomph
     return path;
   }
 
+  namespace
+  {
+    // splitmix64. Any decent 64-bit mixer would do; this one is short, has no table and is exactly
+    // reproducible across compilers, which is what matters -- two processes must digest the same input
+    // to the same 128 bits or the two sides of an interface stop recognising each other.
+    inline unsigned long long topo_mix64(unsigned long long x)
+    {
+      x += 0x9E3779B97F4A7C15ULL;
+      x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+      x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+      return x ^ (x >> 31);
+    }
+
+    inline void topo_absorb(std::array<unsigned long long, 2> &acc, unsigned long long v)
+    {
+      acc[0] = topo_mix64(acc[0] ^ v);
+      acc[1] = topo_mix64(acc[1] + v + 0x165667B19E3779F9ULL);
+    }
+
+    const double TOPO_WEIGHT_SCALE = 16777216.0; // 2^24
+  }
+
+  // See the declaration in nodes.hpp. Throws on a non-dyadic weight rather than rounding: a son's nodes
+  // sit at dyadic points of its father whatever the family, so anything else means the assumption this
+  // identity rests on is broken, and a silently rounded weight would make one side's key differ from the
+  // other's.
+  bool topo_weight_is_dyadic(double w)
+  {
+    const double scaled = w * TOPO_WEIGHT_SCALE;
+    return std::fabs(scaled - (double)std::llround(scaled)) <= 1e-6;
+  }
+
+  long long topo_weight_exact(double w)
+  {
+    const double scaled = w * TOPO_WEIGHT_SCALE;
+    const long long q = (long long)std::llround(scaled);
+    if (std::fabs(scaled - (double)q) > 1e-6)
+    {
+      throw_runtime_error("Cannot build a topological node identity: the C1 shape weight " + std::to_string(w) +
+                          " is not an exact dyadic. See dev_docs/interface_refinement_coupling.md section 15.");
+    }
+    return q;
+  }
+
+  std::array<unsigned long long, 2> topo_digest_of_template_index(std::size_t template_index)
+  {
+    // +1 so template node 0 does not digest to something that could collide with the "unset" state.
+    std::array<unsigned long long, 2> acc = {0x243F6A8885A308D3ULL, 0x13198A2E03707344ULL};
+    topo_absorb(acc, (unsigned long long)template_index + 1ULL);
+    if (!acc[0] && !acc[1]) acc[0] = 1ULL; // {0,0} is the sentinel; never hand it out
+    return acc;
+  }
+
+  std::array<unsigned long long, 2> topo_digest_of_expansion(std::vector<std::pair<std::size_t, double>> &expansion)
+  {
+    // Canonical form first: sorted by template index, weights of repeated indices summed, zeros dropped.
+    // Two domains reach the same point through different elements and in a different order, so nothing
+    // that depends on the order of assembly may survive into the digest.
+    std::sort(expansion.begin(), expansion.end());
+    std::vector<std::pair<std::size_t, double>> merged;
+    for (auto &e : expansion)
+    {
+      if (!merged.empty() && merged.back().first == e.first) merged.back().second += e.second;
+      else merged.push_back(e);
+    }
+    std::array<unsigned long long, 2> acc = {0xA4093822299F31D0ULL, 0x082EFA98EC4E6C89ULL};
+    for (auto &e : merged)
+    {
+      if (std::fabs(e.second) < 1e-13) continue;
+      topo_absorb(acc, (unsigned long long)e.first + 1ULL);
+      topo_absorb(acc, (unsigned long long)topo_weight_exact(e.second));
+    }
+    if (!acc[0] && !acc[1]) acc[0] = 1ULL;
+    expansion.swap(merged);
+    return acc;
+  }
+
+  // Deterministic identity for a point whose C1 description is not dyadic (a centroid bubble). Quantised
+  // the same way on both sides -- the shape function is evaluated at the same local coordinate, so the
+  // doubles are bit-identical -- but never compared against a refinement-created node, which is why an
+  // approximate quantisation is acceptable here and not above.
+  std::array<unsigned long long, 2> topo_digest_of_opaque_expansion(std::vector<std::pair<std::size_t, double>> expansion)
+  {
+    std::sort(expansion.begin(), expansion.end());
+    std::array<unsigned long long, 2> acc = {0x9216D5D98979FB1BULL, 0xD1310BA698DFB5ACULL};
+    for (auto &e : expansion)
+    {
+      if (std::fabs(e.second) < 1e-13) continue;
+      topo_absorb(acc, (unsigned long long)e.first + 1ULL);
+      topo_absorb(acc, (unsigned long long)std::llround(e.second * TOPO_WEIGHT_SCALE));
+    }
+    if (!acc[0] && !acc[1]) acc[0] = 1ULL;
+    return acc;
+  }
+
+  std::array<unsigned long long, 2> topo_digest_of_corner_set(const std::vector<std::size_t> &sorted_corners)
+  {
+    std::array<unsigned long long, 2> acc = {0x452821E638D01377ULL, 0xBE5466CF34E90C6CULL};
+    topo_absorb(acc, (unsigned long long)sorted_corners.size());
+    for (std::size_t c : sorted_corners) topo_absorb(acc, (unsigned long long)c + 1ULL);
+    if (!acc[0] && !acc[1]) acc[0] = 1ULL;
+    return acc;
+  }
+
+  // See the header. Walks the elements in order of increasing refinement level, so a father's nodes are
+  // always resolved before its sons' are needed.
+  void Mesh::assign_interface_topological_ids()
+  {
+    refresh_topological_interface_key_setting();
+    const unsigned nel = this->nelement();
+    if (!nel)
+    {
+      interface_topological_ids_complete = true;
+      return;
+    }
+    if (interface_topological_ids_complete && topo_ids_at_nnode == (unsigned long)this->nnode() &&
+        topo_ids_at_nelement == (unsigned long)nel)
+      return;
+    // Group by refinement level rather than sorting: the levels are small integers and the common case
+    // is that there is nothing left to do at all.
+    unsigned maxlevel = 0;
+    std::vector<BulkElementBase *> els;
+    els.reserve(nel);
+    for (unsigned e = 0; e < nel; e++)
+    {
+      BulkElementBase *be = dynamic_cast<BulkElementBase *>(this->element_pt(e));
+      if (!be) continue;
+      els.push_back(be);
+      maxlevel = std::max(maxlevel, be->refinement_level());
+    }
+
+    bool complete = true;
+    for (unsigned lvl = 0; lvl <= maxlevel; lvl++)
+    {
+      for (BulkElementBase *be : els)
+      {
+        if (be->refinement_level() != lvl) continue;
+        // Any node still unset here has to be resolved from the father; a level-0 element's nodes come
+        // from the mesh generator and are stamped there.
+        bool any_unset = false;
+        for (unsigned l = 0; l < be->nnode(); l++)
+          if (!static_cast<pyoomph::Node *>(be->node_pt(l))->has_interface_topological_id()) { any_unset = true; break; }
+        if (!any_unset) continue;
+
+        BulkElementBase *father = dynamic_cast<BulkElementBase *>(be->father_element_pt());
+        if (!father) { complete = false; continue; }
+        const std::vector<unsigned> &c1map = father->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1];
+        if (c1map.empty()) { complete = false; continue; }
+
+        oomph::Shape psi(c1map.size());
+        for (unsigned l = 0; l < be->nnode(); l++)
+        {
+          pyoomph::Node *n = static_cast<pyoomph::Node *>(be->node_pt(l));
+          if (n->has_interface_topological_id()) continue;
+          oomph::Vector<double> sfather;
+          be->get_nodal_s_in_father(l, sfather);
+          father->shape_at_s_C1(sfather, psi);
+          // Compose the father's C1 corners' TEMPLATE expansions, not their digests. The expansion is
+          // the canonical form and the only one that does not depend on the level at which this node
+          // happened to be created -- see pyoomph::Node::interface_topological_expansion for the
+          // quarter-edge point that reaches a C2 domain and a C1 domain by different routes.
+          std::vector<std::pair<std::size_t, double>> expansion;
+          bool resolvable = true;
+          for (unsigned m = 0; m < c1map.size(); m++)
+          {
+            if (std::fabs(psi[m]) < 1e-12) continue;
+            pyoomph::Node *fn = static_cast<pyoomph::Node *>(father->node_pt(c1map[m]));
+            const std::vector<std::pair<std::size_t, double>> &fe = fn->get_interface_topological_expansion();
+            if (fe.empty()) { resolvable = false; break; } // opaque, or not resolved yet
+            for (auto &t : fe) expansion.push_back(std::make_pair(t.first, t.second * psi[m]));
+          }
+          if (!resolvable || expansion.empty()) { complete = false; continue; }
+          // A bubble node sits at a centroid, so its C1 weights are thirds or sixths -- not dyadic, and
+          // not something any refinement ever produces. Those get an OPAQUE identity: deterministic, but
+          // deliberately outside the comparable set. That is safe because only C1 CORNERS ever enter an
+          // expansion or a facet key, and a bubble is never one of those.
+          bool dyadic = true;
+          for (auto &t : expansion)
+            if (!topo_weight_is_dyadic(t.second)) { dyadic = false; break; }
+          if (!dyadic)
+          {
+            n->set_interface_topological_expansion(std::vector<std::pair<std::size_t, double>>());
+            n->set_interface_topological_id(topo_digest_of_opaque_expansion(expansion));
+            continue;
+          }
+          const std::array<unsigned long long, 2> id = topo_digest_of_expansion(expansion);
+          n->set_interface_topological_expansion(expansion);
+          n->set_interface_topological_id(id);
+        }
+      }
+    }
+
+    // A node that is still unset after the sweep (e.g. rebuilt by the missing-master machinery rather
+    // than by a refinement this rank performed) makes the whole mesh fall back to position matching,
+    // rather than being compared as an unset id against a real one.
+    for (BulkElementBase *be : els)
+      for (unsigned l = 0; l < be->nnode(); l++)
+        if (!static_cast<pyoomph::Node *>(be->node_pt(l))->has_interface_topological_id()) { complete = false; break; }
+    interface_topological_ids_complete = complete;
+    topo_ids_at_nnode = (unsigned long)this->nnode();
+    topo_ids_at_nelement = (unsigned long)nel;
+  }
+
   // Number the root elements in their current order. Must run BEFORE the problem is distributed,
   // while the mesh still holds all of them - afterwards each rank only sees its own share and would
   // number them 0..n_local, which is exactly the rank-local numbering this is meant to avoid.
@@ -7767,6 +7970,77 @@ namespace pyoomph
     }*/
   }
 
+  // See the declaration in nodes.hpp. Cached rather than read per call because
+  // InterfaceElementBase::vertex_match_distance2 asks once per candidate vertex pair, and getenv is a
+  // linear scan of the environment. Refreshed by assign_interface_topological_ids(), i.e. once per mesh
+  // per adaptation -- without that the value would be frozen at whatever the first query saw, and a test
+  // that sets the variable in-process (monkeypatch) would silently measure the wrong build.
+  namespace
+  {
+    int topo_keys_disabled_cache = -1;
+  }
+
+  void refresh_topological_interface_key_setting()
+  {
+    const char *e = getenv("PYOOMPH_DISABLE_TOPOLOGICAL_INTERFACE_KEYS");
+    topo_keys_disabled_cache = (e && std::string(e) != "0") ? 1 : 0;
+  }
+
+  bool topological_interface_keys_disabled()
+  {
+    if (topo_keys_disabled_cache < 0) refresh_topological_interface_key_setting();
+    return topo_keys_disabled_cache == 1;
+  }
+
+  // The same element-for-element pairing as connect_interface_elements_by_kdtree, on the cross-domain
+  // topological node identity instead of the positions: exact equality of a 128-bit digest rather than a
+  // nearest-neighbour lookup with an epsilon, so it also stops being a question of how far the two sides'
+  // vertices have drifted apart under ALE. Only reached when both sides carry a complete set of ids.
+  void InterfaceMesh::connect_interface_elements_topologically(InterfaceMesh *other)
+  {
+    std::map<std::set<std::pair<unsigned long long, unsigned long long>>, BulkElementBase *> nodes_to_elemB;
+    for (unsigned int ieB = 0; ieB < other->nelement(); ieB++)
+    {
+      BulkElementBase *eB = dynamic_cast<BulkElementBase *>(other->element_pt(ieB));
+      std::set<std::pair<unsigned long long, unsigned long long>> ids;
+      for (unsigned int inB = 0; inB < eB->nvertex_node(); inB++)
+      {
+        const std::array<unsigned long long, 2> &id =
+            static_cast<pyoomph::Node *>(eB->vertex_node_pt(inB))->get_interface_topological_id();
+        ids.insert(std::make_pair(id[0], id[1]));
+      }
+      nodes_to_elemB[ids] = eB;
+    }
+    for (unsigned int ieA = 0; ieA < this->nelement(); ieA++)
+    {
+      BulkElementBase *eA = dynamic_cast<BulkElementBase *>(this->element_pt(ieA));
+      std::set<std::pair<unsigned long long, unsigned long long>> ids;
+      for (unsigned int inA = 0; inA < eA->nvertex_node(); inA++)
+      {
+        const std::array<unsigned long long, 2> &id =
+            static_cast<pyoomph::Node *>(eA->vertex_node_pt(inA))->get_interface_topological_id();
+        ids.insert(std::make_pair(id[0], id[1]));
+      }
+      auto found = nodes_to_elemB.find(ids);
+      if (found == nodes_to_elemB.end())
+      {
+        pyoomph::Node *n0 = static_cast<pyoomph::Node *>(eA->vertex_node_pt(0));
+        std::string posstring = "";
+        for (unsigned int d = 0; d < n0->ndim(); d++) posstring += std::to_string(n0->x(d)) + (d + 1 < n0->ndim() ? "," : "");
+        // Keep the "Cannot locate opposite" wording of the position-based matcher: it is the phrase that
+        // is in every log, test and note about this failure, and the cause is the same one.
+        throw_runtime_error("Cannot locate opposite interface element, matching topologically (one of its vertices "
+                            "is at x=(" + posstring + ")). The two sides of the interface do not carry the same "
+                            "facets, which Problem.check_interface_conformity() reports in detail.");
+      }
+      BulkElementBase *eB = found->second;
+      InterfaceElementBase *iA = eA->as_interface_element();
+      InterfaceElementBase *iB = eB->as_interface_element();
+      iA->set_opposite_interface_element(iB, this->opposite_offset_vector);
+      iB->set_opposite_interface_element(iA, this->reversed_opposite_offset_vector);
+    }
+  }
+
   // Pairs up each element of this interface mesh with the geometrically coincident
   // element of `other` (e.g. the same physical interface seen from the two adjacent
   // bulk domains), by matching sets of vertex-node positions via a KD-tree of
@@ -7776,6 +8050,39 @@ namespace pyoomph
   {
     if (!this->nelement() || !other->nelement())
       return;
+    // Prefer the cross-domain TOPOLOGICAL identity over the positions. The two sides' interface vertices
+    // coincide only when both domains can represent the same geometry: a C2 side's interface is a
+    // quadratic curve through three nodes, a C1 side's is the chord between two of them, and a refinement
+    // then promotes an off-chord midside node to a vertex on one side while creating a chord midpoint on
+    // the other -- at which point the KD-tree below reports "Cannot locate opposite node". See
+    // pyoomph::Node::interface_topological_id and dev_docs/interface_refinement_coupling.md section 14.3.
+    //
+    // The offset is what rules the topological path out for a periodic/translated pair: there the two
+    // sides are DIFFERENT template facets, related only by the translation, and no topological identity
+    // can bridge that. Those keep the KD-tree.
+    bool topological = !topological_interface_keys_disabled();
+    for (double o : this->opposite_offset_vector)
+      if (o != 0.0) topological = false;
+    if (topological)
+    {
+      for (unsigned int ie = 0; ie < this->nelement() && topological; ie++)
+      {
+        BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ie));
+        for (unsigned int in = 0; in < e->nvertex_node(); in++)
+          if (!static_cast<pyoomph::Node *>(e->vertex_node_pt(in))->has_interface_topological_id()) { topological = false; break; }
+      }
+      for (unsigned int ie = 0; ie < other->nelement() && topological; ie++)
+      {
+        BulkElementBase *e = dynamic_cast<BulkElementBase *>(other->element_pt(ie));
+        for (unsigned int in = 0; in < e->nvertex_node(); in++)
+          if (!static_cast<pyoomph::Node *>(e->vertex_node_pt(in))->has_interface_topological_id()) { topological = false; break; }
+      }
+    }
+    if (topological)
+    {
+      connect_interface_elements_topologically(other);
+      return;
+    }
     std::map<std::set<int>, BulkElementBase *> nodes_to_elemB;
 
     unsigned ndimB = dynamic_cast<BulkElementBase *>(other->element_pt(0))->nodal_dimension();

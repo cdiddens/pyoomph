@@ -907,7 +907,9 @@ class ConnectVelocityAtInterface(InterfaceEquations):
             if outside_space == "":
                 raise RuntimeError(
                     "Cannot connect field " + f + " at the interface, since it cannot find in the outer domain")
-            space=get_interface_field_connection_space(inside_space,outside_space,self.use_highest_space)
+            space=get_interface_field_connection_space(inside_space,outside_space,self.use_highest_space,
+                                                       parent_space=str(self.get_parent_domain()._coordinate_space),
+                                                       parent_dim=int(self.get_parent_domain().dimension))
             assert space!=""
             self.define_scalar_field(self.lagr_mult_prefix + f, space)
             

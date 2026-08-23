@@ -654,7 +654,9 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
                     oppns=oppblkeq.get_equation_of_type(NavierStokesEquations)
                     if oppns is not None and isinstance(oppns,NavierStokesEquations):
                         outside_space=oppns.get_velocity_space_from_mode(for_interface=True)
-                        conn_space=get_interface_field_connection_space(inside_space,outside_space,use_highest_space=self.use_highest_space_for_velo_connection)
+                        conn_space=get_interface_field_connection_space(inside_space,outside_space,use_highest_space=self.use_highest_space_for_velo_connection,
+                                                                       parent_space=str(self.get_parent_domain()._coordinate_space),
+                                                                       parent_dim=int(self.get_parent_domain().dimension))
                         assert conn_space!=""
                         fields = ["velocity_x", "velocity_y", "velocity_z"]
                         fields = fields[0:self.get_nodal_dimension()]

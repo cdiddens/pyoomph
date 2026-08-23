@@ -2774,6 +2774,9 @@ class Problem(_pyoomph.Problem):
         return nref,nunref
 
     def _compile_meshes(self):
+        # Only now does every domain's codegen know its coordinate space (it is set while the fields are
+        # defined), which is what the junction check compares.
+        self._check_coupled_interface_junctions()
         for _,mesh in self._meshdict.items():
             if isinstance(mesh,ODEStorageMesh):
                 mesh._compile_bulk_equations() 
@@ -4238,6 +4241,7 @@ class Problem(_pyoomph.Problem):
                 print("BUILDING GLOBAL MESH FROM LIST")
             self.build_global_mesh()
         for mt in self._meshtemplate_list:
+            self._assign_interface_topological_ids()
             mt._connect_opposite_elements(self._equation_system) 
 
 
@@ -4855,6 +4859,134 @@ class Problem(_pyoomph.Problem):
         for h in self._hooks:
             h.actions_after_newton_step()
 
+    def _check_coupled_interface_junctions(self):
+        """Refuse a junction where coupled interfaces share a multiplier slot but the domains meeting
+        there do not share an element space.
+
+        An interface field is a nodal value on the BULK node and Mesh::resolve_interface_dof_id() keys the
+        slot on the NAME alone, so a domain owning two coupled interfaces has ONE multiplier on the node
+        where they meet. Its residual then enforces the SUM of the two coupling conditions,
+        (u - u_first) + (u - u_second) = 0, rather than each of them.
+
+        That is deliberate, and it is load-bearing when every domain around the junction carries the same
+        space: the remaining multipliers still force the two conditions individually, and merging removes
+        a redundancy that would otherwise leave the Jacobian singular. Measured on a four-domain cross
+        point (dev_docs/interface_refinement_coupling.md section 14.4): all-C1 gives rank 13 of 13 with the
+        shared name against 13 of 14 with distinct ones.
+
+        As soon as ONE domain at the junction carries a different space that redundancy disappears --
+        distinct names go to rank 18 of 18 -- and the merged system is no longer equivalent. It stays FULL
+        RANK and Newton converges, so nothing downstream notices; it simply solves a different problem.
+        Measured max|u-y| 2.6e-2 against 1.1e-16, with the error sitting exactly on the cross point.
+
+        Note what the criterion has to be. The offending domain need not be a NEIGHBOUR of the one that
+        owns the shared slot: in the measured case A owns both slots and touches only B and C, all three
+        C1, and it is D -- which meets A at the cross point and nowhere else -- that breaks it. So the test
+        is over every domain at the junction, found by connecting the boundaries that meet pairwise.
+
+        There is no silent option here, so this refuses. A distinct lagr_mult_prefix per interface is
+        correct in every configuration measured, at the price of the singular Jacobian above should the
+        junction later become homogeneous; with_removed_overconstraining() is the other escape hatch.
+        Making that trade automatic needs the redundancy counted from the junction topology, which is its
+        own piece of work.
+        """
+        from ..equations.generic import ConnectFieldsAtInterface
+        from ..equations.ALE import ConnectMeshAtInterface
+
+        def coupled_multiplier_names(domtree,bname:str)->set[str]:
+            """The multiplier names a coupled interface on domtree/bname puts on domtree's own nodes."""
+            child=domtree.get_children().get(bname)
+            if child is None or child._equations is None or child._codegen is None:
+                return set()
+            if child._codegen._get_opposite_interface() is None:
+                return set()
+            # _equations is a plain list of Equations at this point in the setup, not yet the combined
+            # object that carries get_equation_of_type().
+            eqs=child._equations if isinstance(child._equations,(list,tuple)) else [child._equations]
+            names:set[str]=set()
+            for c in eqs:
+                if isinstance(c,ConnectFieldsAtInterface):
+                    for finner,fouter in c.fields.items():
+                        names.add(c.lagr_mult_prefix+finner+"_"+fouter)
+                elif isinstance(c,ConnectMeshAtInterface):
+                    assert domtree._codegen is not None
+                    for f in ["mesh_x","mesh_y","mesh_z"][0:domtree._codegen.get_nodal_dimension()]:
+                        names.add(c.lagr_mult_prefix+f)
+            return names
+
+        for m in self._meshtemplate_list:
+            # (a) Which boundaries meet each other at a node, as an undirected graph. Only boundaries
+            # that actually carry a coupled interface take part -- otherwise an outer corner such as
+            # "A/A_B/top" would merge the cross point with an unrelated wall.
+            pairs:list[tuple[str,str,str]]=[]  # (domain, boundary, boundary)
+            for inter in m._find_interface_intersections():
+                parts=inter.split("/")
+                if len(parts)<3:
+                    continue
+                dom=parts[0]
+                domtree=self._equation_system.get_children().get(dom)
+                if domtree is None or domtree._codegen is None:
+                    continue
+                coupled=[b for b in parts[1:] if coupled_multiplier_names(domtree,b) or
+                         (domtree.get_children().get(b) is not None and
+                          domtree.get_children()[b]._codegen is not None and
+                          domtree.get_children()[b]._codegen._get_opposite_interface() is not None)]
+                for k in range(len(coupled)):
+                    for l in range(k+1,len(coupled)):
+                        pairs.append((dom,coupled[k],coupled[l]))
+            if not pairs:
+                continue
+            # (b) Connected components of that graph are the junctions.
+            parent:dict[str,str]={}
+            def find(x:str)->str:
+                parent.setdefault(x,x)
+                while parent[x]!=x:
+                    parent[x]=parent[parent[x]]; x=parent[x]
+                return x
+            def union(a:str,b:str):
+                ra,rb=find(a),find(b)
+                if ra!=rb: parent[ra]=rb
+            for _dom,b1,b2 in pairs:
+                union(b1,b2)
+            junctions:dict[str,set[tuple[str,str]]]={}   # component -> {(domain, boundary)}
+            for dom,b1,b2 in pairs:
+                junctions.setdefault(find(b1),set()).update({(dom,b1),(dom,b2)})
+            # (c) Per junction: is any slot shared, and are all the domains there in one space?
+            for _root,members in junctions.items():
+                doms={d for d,_b in members}
+                spaces={str(self._equation_system.get_children()[d]._codegen._coordinate_space)
+                        for d in doms if self._equation_system.get_children().get(d) is not None
+                        and self._equation_system.get_children()[d]._codegen is not None}
+                spaces.discard("")
+                if len(spaces)<2:
+                    continue
+                for d in sorted(doms):
+                    domtree=self._equation_system.get_children().get(d)
+                    if domtree is None:
+                        continue
+                    bs=sorted(b for dd,b in members if dd==d)
+                    shared:dict[str,list[str]]={}
+                    for b in bs:
+                        for n in coupled_multiplier_names(domtree,b):
+                            shared.setdefault(n,[]).append(b)
+                    for name,bnds in sorted(shared.items()):
+                        if len(bnds)<2:
+                            continue
+                        raise RuntimeError(
+                            "The coupled interfaces "+", ".join(d+"/"+b for b in bnds)+" meet at a shared "
+                            "node and use the same Lagrange multiplier '"+name+"', so they share ONE "
+                            "multiplier slot there -- but the domains meeting at that junction ("
+                            +", ".join(sorted(doms))+") do not all carry the same element space ("
+                            +", ".join(sorted(spaces))+"). The shared multiplier then enforces the SUM of "
+                            "the coupling conditions instead of each of them, and the result is a "
+                            "converged but WRONG solution: measured max|u-u_exact| 2.6e-2 against 1.1e-16, "
+                            "full rank, Newton converging in one step. See "
+                            "dev_docs/interface_refinement_coupling.md section 14.4.\n"
+                            "Give the interfaces distinct multipliers with a different lagr_mult_prefix "
+                            "per interface -- correct in every configuration measured, at the price of a "
+                            "singular Jacobian should the junction later become homogeneous -- or remove "
+                            "the redundant constraint explicitly with with_removed_overconstraining().")
+
     def _collect_coupled_interfaces(self) -> list[tuple[AnySpatialMesh,str,AnySpatialMesh,str,list[float]]]:
         """Every declared opposite-interface connection, expressed on the BULK meshes.
 
@@ -4963,6 +5095,18 @@ class Problem(_pyoomph.Problem):
         self.relink_external_data()
         self.actions_after_adapt() # repairs the conformity this just broke
 
+    def _assign_interface_topological_ids(self):
+        """Give every node its cross-domain topological identity, before anything asks for one.
+
+        C++ does this at the end of every adaptation (TemplatedMeshBase::adapt_finalise), which covers the
+        adapt path but not mesh generation or the initial uniform refinement -- and the opposite-element
+        matcher runs after those too. Idempotent and cheap once every node already has one.
+        """
+        for m in self._meshdict.values():
+            if isinstance(m,ODEStorageMesh) or isinstance(m,InterfaceMesh):
+                continue
+            m._assign_interface_topological_ids()
+
     def enforce_interface_conformity(self) -> int:
         """Make both sides of every coupled interface carry identical boundary facets.
 
@@ -5044,6 +5188,7 @@ class Problem(_pyoomph.Problem):
             print("REBUILDING GLOBAL MESH")
         self.rebuild_global_mesh()
         for m in self._meshtemplate_list:
+            self._assign_interface_topological_ids()
             m._connect_opposite_elements(self._equation_system)
         # After the whole loop above, not inside it: this is COLLECTIVE, and rebuild_after_adapt() can
         # throw per-rank (a non-conforming 3d skeleton, say), which would leave the ranks that did not
@@ -8575,6 +8720,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 print("REBUILDING GLOBAL MESH")
             self.rebuild_global_mesh()
         for mt in self._meshtemplate_list:
+            self._assign_interface_topological_ids()
             mt._connect_opposite_elements(self._equation_system) 
 
         self.rebuild_global_mesh_from_list(rebuild=True)
@@ -8747,8 +8893,9 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     if not self.is_quiet():
                         print("REBUILDING GLOBAL MESH")
                     self.rebuild_global_mesh()
+                self._assign_interface_topological_ids()
                 for mt in self._meshtemplate_list:
-                    mt._connect_opposite_elements(self._equation_system) 
+                    mt._connect_opposite_elements(self._equation_system)
 
                 self.rebuild_global_mesh_from_list(rebuild=True)
                 self.reapply_boundary_conditions()

@@ -1001,6 +1001,30 @@ namespace pyoomph
     return res;
   }
 
+  // See the declaration in elements.hpp.
+  double InterfaceElementBase::vertex_match_distance2(oomph::Node *a, oomph::Node *b, const std::vector<double> &offset)
+  {
+    pyoomph::Node *pa = static_cast<pyoomph::Node *>(a);
+    pyoomph::Node *pb = static_cast<pyoomph::Node *>(b);
+    bool coincident = true;
+    for (double o : offset)
+      if (o != 0.0) { coincident = false; break; }
+    if (coincident && !topological_interface_keys_disabled() &&
+        pa->has_interface_topological_id() && pb->has_interface_topological_id())
+    {
+      return (pa->get_interface_topological_id() == pb->get_interface_topological_id()) ? 0.0 : 1.0;
+    }
+    double d2 = 0.0;
+    const unsigned nd = std::min(a->ndim(), b->ndim());
+    for (unsigned k = 0; k < nd; k++)
+    {
+      const double off = (k < offset.size() ? offset[k] : 0.0);
+      const double d = a->x(k) - b->x(k) + off;
+      d2 += d * d;
+    }
+    return d2;
+  }
+
   void Quad2dFaceOrientation::analyze(const oomph::FiniteElement *self, const oomph::FiniteElement *opposite, const std::vector<double> &offset, unsigned nnode_1d, int &orientation, std::vector<int> &node_index)
   {
     if (!opposite) throw_runtime_error("No opposite side set");
@@ -1031,7 +1055,34 @@ namespace pyoomph
       }
     }
     if (best_dist > 1e-14) throw_runtime_error("Vertex nodes are not matching here");
-    node_index = node_index_map(orientation, nnode_1d);
+    // Index the OPPOSITE element, which need not have the same number of nodes per direction: a C2 brick
+    // face has 9 nodes against a C1 one's 4. This used to build the map at THIS element's nnode_1d, so a
+    // C2-against-C1 pair was left holding indices up to 8 into a 4-node element -- latent (the case runs
+    // and converges) until something dereferenced one, at which point opposite_node_pt() returned a
+    // garbage pointer. The 1d line elements have always handled the same mismatch explicitly ("opposite
+    // is C1: no midside node" -> -1) and so do the triangular faces; this is the quad face doing it too.
+    // See dev_docs/interface_refinement_coupling.md section 14.6.
+    const unsigned onn = opposite->nnode_1d();
+    node_index.assign(nnode_1d * nnode_1d, -1);
+    const double h = 2.0 / (nnode_1d - 1.0);
+    const double ho = 2.0 / (onn - 1.0);
+    for (unsigned j = 0; j < nnode_1d; j++)
+    {
+      for (unsigned i = 0; i < nnode_1d; i++)
+      {
+        oomph::Vector<double> sv(2);
+        sv[0] = -1.0 + h * i;
+        sv[1] = -1.0 + h * j;
+        oomph::Vector<double> so = map_s(orientation, sv);
+        // The symmetries permute the tensor grid exactly, so a non-integer here means this side has a
+        // node the opposite one simply does not have (a midside against a C1 face), not a mismatch.
+        const double fi = (so[0] + 1.0) / ho, fj = (so[1] + 1.0) / ho;
+        const long li = std::lround(fi), lj = std::lround(fj);
+        if (std::fabs(fi - (double)li) > 1e-9 || std::fabs(fj - (double)lj) > 1e-9) continue;
+        if (li < 0 || lj < 0 || (unsigned)li >= onn || (unsigned)lj >= onn) continue;
+        node_index[i + nnode_1d * j] = (int)(li + (long)onn * lj);
+      }
+    }
   }
 
   // Finds the local coordinate s on this (surface) element whose interpolated position best matches the
@@ -1169,6 +1220,31 @@ namespace pyoomph
 				if (space_info->numfields > space_info->numfields_bulk)
 				{
 					throw_runtime_error("Continuous fields on the interior-facet skeleton '_internal_facets_' are not supported (field '" + std::string(space_info->fieldnames[space_info->numfields_bulk]) + "' on space " + std::string(space_info->space_name) + "). Use a discontinuous facet space instead, i.e. D0, DL, D1, D1TB, D2 or D2TB.");
+				}
+			}
+		}
+
+		// A space the BULK element does not have cannot hold an interface dof. BulkElementTri2dC2's C1TB
+		// row of Nodal_Space_Index_To_Element_Index_Map is empty -- a C2 triangle has no bubble node -- and
+		// interpolate_newly_constructed_additional_dof below indexes that row, so a C1TB interface field on
+		// such a parent SEGFAULTED rather than reporting anything (dev_docs/interface_refinement_coupling.md
+		// section 14.5). get_interface_field_connection_space now caps the negotiated space with
+		// largest_facet_space() and should never produce one; this is the backstop for a space a user
+		// declares explicitly, and it covers every site that indexes one of these rows.
+		{
+			BulkElementBase *blk = dynamic_cast<BulkElementBase *>(this->Bulk_element_pt);
+			for (unsigned int i = 0; i < ft->num_present_continuous_spaces; i++)
+			{
+				const JITFuncSpec_Table_FiniteElement_SpaceInfo_t *space_info = ft->present_continuous_spaces[i];
+				if (space_info->numfields <= space_info->numfields_bulk) continue; // no interface-only dof here
+				if (blk && blk->get_nodal_space_index_to_element_index_map()[space_info->space_index].empty())
+				{
+					throw_runtime_error("Cannot define the " + std::string(space_info->space_name) + " interface field '" +
+										std::string(space_info->fieldnames[space_info->numfields_bulk]) +
+										"' here: the bulk element of domain '" + std::string(blk->get_jit_code()->get_func_table()->domain_name) +
+										"' has no node in that space at all (its element space is " +
+										std::string(blk->get_jit_code()->get_func_table()->dominant_space) +
+										"). Use a lower facet space, or raise the bulk domain's space with an ElementSpace().");
 				}
 			}
 		}

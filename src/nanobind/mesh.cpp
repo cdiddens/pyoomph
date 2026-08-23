@@ -1664,6 +1664,14 @@ void PyReg_Mesh(nb::module_ &m)
 			 {
 	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);
 	   if (tm) tm->adapt_finalise(); }), "Restores 2:1 balancing and rebuilds the shape-specific hanging nodes after _adapt_execute")
+		.def("_assign_interface_topological_ids",mesh_method(&pyoomph::Mesh::assign_interface_topological_ids),
+			 "Fills in the cross-domain topological identity of every node that does not have one yet (see "
+			 "pyoomph::Node::interface_topological_id). Idempotent; called automatically after every adaptation, "
+			 "and from Python once the mesh has been generated and initially refined")
+		.def("_has_complete_interface_topological_ids",mesh_method([](pyoomph::Mesh *self)
+			 { return self->has_complete_interface_topological_ids(); }),
+			 "Whether every node of this mesh carries a topological identity. False makes the coupled-interface "
+			 "machinery fall back to matching by position")
 		.def("_adapt_pending_counts",mesh_method([](pyoomph::Mesh *self)
 			 {
 	   pyoomph::TemplatedMeshBase *tm=dynamic_cast<pyoomph::TemplatedMeshBase*>(self);

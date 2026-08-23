@@ -37,8 +37,45 @@ namespace pyoomph
 
   namespace
   {
-    InterfacePosKey node_key(oomph::Node *n, const std::vector<double> &offset)
+    // Can this pair be matched topologically? Both sides must carry a complete set of node identities,
+    // and the connection must be coincident: a periodic/translated pair relates two DIFFERENT template
+    // facets, which no topological identity can bridge, so those keep the position keys and their offset.
+    bool pair_is_topological(const CoupledInterfacePair &p)
     {
+      if (topological_interface_keys_disabled()) return false;
+      for (double o : p.offset)
+        if (o != 0.0) return false;
+      if (!p.meshA || !p.meshB) return false;
+      // Assign here rather than trusting a flag set at the last adaptation. Several paths create nodes
+      // without going through adapt_finalise() -- refine_uniformly(), and the repair loop's own
+      // refine_selected_elements() between rounds -- and a stale "complete" would then hand an unset id
+      // to node_key(). Idempotent, and a no-op once every node has one.
+      p.meshA->assign_interface_topological_ids();
+      p.meshB->assign_interface_topological_ids();
+      return p.meshA->has_complete_interface_topological_ids() &&
+             p.meshB->has_complete_interface_topological_ids();
+    }
+
+    // The identity of an interface node: topological where available, quantised position otherwise.
+    //
+    // The position was the only key here until the space matrix was swept. It rests on the two sides'
+    // interface VERTICES coinciding, and they do not: a C2 domain's interface is a quadratic curve
+    // through three nodes while a C1 domain's is the chord between two of them, so a refinement promotes
+    // an off-chord midside node to a vertex on one side and creates a chord midpoint on the other. The
+    // two sides then refine the SAME facet and disagree about where its midpoint is, which this file
+    // used to report as "the coarser side could not be refined any further".
+    // See dev_docs/interface_refinement_coupling.md section 14.3 and pyoomph::Node::interface_topological_id.
+    InterfacePosKey node_key(oomph::Node *n, const std::vector<double> &offset, bool topological)
+    {
+      if (topological)
+      {
+        pyoomph::Node *pn = static_cast<pyoomph::Node *>(n);
+        // Guaranteed by pair_is_topological (both meshes report a complete set), so an unset id here
+        // would mean a node reached the interface from outside those meshes.
+        if (!pn->has_interface_topological_id()) throw_runtime_error("Interface node without a topological identity");
+        const std::array<unsigned long long, 2> &id = pn->get_interface_topological_id();
+        return InterfacePosKey{(long long)id[0], (long long)id[1], 0};
+      }
       InterfacePosKey k = {0, 0, 0};
       const unsigned nd = n->ndim();
       for (unsigned d = 0; d < 3; d++)
@@ -201,9 +238,9 @@ namespace pyoomph
     // Halo and owner should already agree after synchronise_elemental_errors; these are the safe
     // directions if they somehow do not.
     void collect_side_with_flags(Mesh *m, const std::string &bname, const std::vector<double> &offset,
-                                 InterfaceSideFacets &out, oomph::OomphCommunicator *comm_pt)
+                                 InterfaceSideFacets &out, oomph::OomphCommunicator *comm_pt, bool topological)
     {
-      collect_interface_side(m, bname, offset, out);
+      collect_interface_side(m, bname, offset, out, topological);
       out.flags.clear();
       oomph::Mesh *om = dynamic_cast<oomph::Mesh *>(m);
       TemplatedMeshBase *tm = dynamic_cast<TemplatedMeshBase *>(m);
@@ -373,7 +410,8 @@ namespace pyoomph
     // Append to `out` the indices of this mesh's elements that touch boundary `bname` at a vertex only
     // and sit more than one level below the finest boundary facet at that vertex.
     void select_vertex_connected_too_coarse(TemplatedMeshBase *tm, const std::string &bname,
-                                            oomph::OomphCommunicator *comm_pt, std::vector<unsigned> &out)
+                                            oomph::OomphCommunicator *comm_pt, std::vector<unsigned> &out,
+                                            bool topological)
     {
       if (!tm || vertex_balance_disabled()) return;
       oomph::Mesh *om = dynamic_cast<oomph::Mesh *>(tm);
@@ -396,7 +434,7 @@ namespace pyoomph
         std::vector<pyoomph::Node *> verts = el->get_vertex_nodes_of_face(om->face_index_at_boundary(bind, i));
         for (unsigned v = 0; v < verts.size(); v++)
         {
-          const InterfacePosKey k = node_key(verts[v], no_offset);
+          const InterfacePosKey k = node_key(verts[v], no_offset, topological);
           auto it = finest.find(k);
           if (it == finest.end()) finest[k] = lvl;
           else it->second = std::max(it->second, lvl);
@@ -418,7 +456,7 @@ namespace pyoomph
         if (lvl >= (int)tm->max_refinement_level()) continue; // cannot go finer; the jump has to stand
         for (unsigned v = 0; v < el->nvertex_node(); v++)
         {
-          auto it = finest.find(node_key(el->vertex_node_pt(v), no_offset));
+          auto it = finest.find(node_key(el->vertex_node_pt(v), no_offset, topological));
           if (it != finest.end() && lvl < it->second - 1)
           {
             out.push_back(ie);
@@ -428,9 +466,17 @@ namespace pyoomph
       }
     }
 
-    std::string key_to_string(const InterfacePosKey &k)
+    // A topological key is a 128-bit digest, not a position, so it has to be printed as one -- rendering
+    // it through the coordinate scale would put plausible-looking but meaningless numbers in an error
+    // message that a reader is meant to act on.
+    std::string key_to_string(const InterfacePosKey &k, bool topological)
     {
       std::ostringstream oss;
+      if (topological)
+      {
+        oss << "#" << std::hex << (unsigned long long)k[0] << ":" << (unsigned long long)k[1] << std::dec;
+        return oss.str();
+      }
       oss << "(";
       for (int d = 0; d < 3; d++)
         oss << (double)k[d] / INTERFACE_COUPLING_KEY_SCALE << (d < 2 ? "," : "");
@@ -438,10 +484,10 @@ namespace pyoomph
       return oss.str();
     }
 
-    std::string facet_to_string(const std::vector<InterfacePosKey> &keys)
+    std::string facet_to_string(const std::vector<InterfacePosKey> &keys, bool topological)
     {
       std::ostringstream oss;
-      for (unsigned i = 0; i < keys.size(); i++) oss << (i ? " " : "") << key_to_string(keys[i]);
+      for (unsigned i = 0; i < keys.size(); i++) oss << (i ? " " : "") << key_to_string(keys[i], topological);
       return oss.str();
     }
 
@@ -459,8 +505,9 @@ namespace pyoomph
       for (const CoupledInterfacePair &p : pairs)
       {
         InterfaceSideFacets A, B;
-        collect_interface_side(p.meshA, p.bnameA, p.offset, A);
-        collect_interface_side(p.meshB, p.bnameB, std::vector<double>(), B);
+        const bool topo = pair_is_topological(p);
+        collect_interface_side(p.meshA, p.bnameA, p.offset, A, topo);
+        collect_interface_side(p.meshB, p.bnameB, std::vector<double>(), B, topo);
         allgather_side(A, comm_pt);
         allgather_side(B, comm_pt);
         if (A.facets.empty() && B.facets.empty()) continue;
@@ -475,7 +522,7 @@ namespace pyoomph
               if (reported < MAX_REPORTED)
               {
                 reported++;
-                oss << "  side " << labels[s] << " facet " << facet_to_string(kv)
+                oss << "  side " << labels[s] << " facet " << facet_to_string(kv, topo)
                     << (facet_is_too_coarse(kv, *others[s]) ? "  [too coarse -- could not be refined]"
                                                             : "  [too fine]")
                     << "\n";
@@ -496,7 +543,7 @@ namespace pyoomph
   }
 
   void collect_interface_side(Mesh *m, const std::string &bname, const std::vector<double> &offset,
-                              InterfaceSideFacets &out)
+                              InterfaceSideFacets &out, bool topological)
   {
     out.facets.clear();
     out.vertices.clear();
@@ -522,7 +569,7 @@ namespace pyoomph
       if (verts.size() < 2) continue; // 0d "point" faces carry no vertex set to match on
       std::vector<InterfacePosKey> keys;
       keys.reserve(verts.size());
-      for (unsigned v = 0; v < verts.size(); v++) keys.push_back(node_key(verts[v], offset));
+      for (unsigned v = 0; v < verts.size(); v++) keys.push_back(node_key(verts[v], offset, topological));
       std::sort(keys.begin(), keys.end());
       auto found = index_of.find(el);
       if (found == index_of.end()) continue; // not an active element of this mesh (should not happen)
@@ -547,8 +594,9 @@ namespace pyoomph
     {
       InterfaceSideFacets A, B, A_local, B_local;
       // Both sides are keyed in side-A coordinates: the offset moves A onto B, so A carries it.
-      collect_interface_side(p.meshA, p.bnameA, p.offset, A);
-      collect_interface_side(p.meshB, p.bnameB, std::vector<double>(), B);
+      const bool topo = pair_is_topological(p);
+      collect_interface_side(p.meshA, p.bnameA, p.offset, A, topo);
+      collect_interface_side(p.meshB, p.bnameB, std::vector<double>(), B, topo);
       A_local = A; // keep the rank-local facet sets before they are replaced by the global union
       B_local = B;
       allgather_side(A, comm_pt);
@@ -571,7 +619,7 @@ namespace pyoomph
           {
             reported++;
             msg << "  side " << labels[s] << " facet not present on the other side: "
-                << facet_to_string(kv) << (facet_is_too_coarse(kv, *others[s]) ? "  [too coarse]" : "  [too fine]")
+                << facet_to_string(kv, topo) << (facet_is_too_coarse(kv, *others[s]) ? "  [too coarse]" : "  [too fine]")
                 << "\n";
           }
         }
@@ -594,7 +642,7 @@ namespace pyoomph
           {
             reported_unreachable++;
             msg << "  side " << labels[s] << " facet held here but its partner is NOT on this process: "
-                << facet_to_string(f.second) << "\n";
+                << facet_to_string(f.second, topo) << "\n";
           }
         }
       }
@@ -653,8 +701,9 @@ namespace pyoomph
         for (const CoupledInterfacePair &p : pairs)
         {
           InterfaceSideFacets A, B;
-          collect_side_with_flags(p.meshA, p.bnameA, p.offset, A, comm_pt);
-          collect_side_with_flags(p.meshB, p.bnameB, std::vector<double>(), B, comm_pt);
+          const bool topo = pair_is_topological(p);
+          collect_side_with_flags(p.meshA, p.bnameA, p.offset, A, comm_pt, topo);
+          collect_side_with_flags(p.meshB, p.bnameB, std::vector<double>(), B, comm_pt, topo);
           if (A.facets.empty() || B.facets.empty()) continue;
 
           oomph::Mesh *ms[2] = {dynamic_cast<oomph::Mesh *>(p.meshA), dynamic_cast<oomph::Mesh *>(p.meshB)};
@@ -759,8 +808,9 @@ namespace pyoomph
       for (const CoupledInterfacePair &p : pairs)
       {
         InterfaceSideFacets A, B;
-        collect_interface_side(p.meshA, p.bnameA, p.offset, A);
-        collect_interface_side(p.meshB, p.bnameB, std::vector<double>(), B);
+        const bool topo = pair_is_topological(p);
+        collect_interface_side(p.meshA, p.bnameA, p.offset, A, topo);
+        collect_interface_side(p.meshB, p.bnameB, std::vector<double>(), B, topo);
         allgather_side(A, comm_pt);
         allgather_side(B, comm_pt);
         if (A.facets.empty() || B.facets.empty()) continue;
@@ -785,7 +835,8 @@ namespace pyoomph
           }
           // ...and, in the same round, the elements that touch this interface at a vertex only. They
           // carry no facet, so the loop above is structurally blind to them; see the closure itself.
-          select_vertex_connected_too_coarse(ms[s], (s == 0 ? p.bnameA : p.bnameB), comm_pt, to_balance[mi]);
+          select_vertex_connected_too_coarse(ms[s], (s == 0 ? p.bnameA : p.bnameB), comm_pt, to_balance[mi],
+                                             pair_is_topological(p));
         }
       }
 

@@ -1733,11 +1733,9 @@ namespace pyoomph
       {
         pyoomph::Node *nthis = static_cast<pyoomph::Node *>(this->vertex_node_pt(i));
         pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(i));
-        for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
-          dist0 += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
+          dist0 += InterfaceElementBase::vertex_match_distance2(nthis, nopp, offset);
         nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1 - i));
-        for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
-          dist1 += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
+          dist1 += InterfaceElementBase::vertex_match_distance2(nthis, nopp, offset);
       }
       opposite_orientation = (dist0 < dist1 ? 0 : 1);
       /*      if (dynamic_cast<BulkTElementLine1dC1*>(opposite_side))
@@ -1887,14 +1885,10 @@ namespace pyoomph
       pyoomph::Node *nopp1 = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1));
       pyoomph::Node *nthis0 = static_cast<pyoomph::Node *>(this->vertex_node_pt(0));
       pyoomph::Node *nthis1 = static_cast<pyoomph::Node *>(this->vertex_node_pt(1));            
-      for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
-        dist0 += (nthis0->x(k) - nopp0->x(k)+offset[k]) * (nthis0->x(k) - nopp0->x(k)+offset[k]);
-      for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
-        dist0 += (nthis1->x(k) - nopp1->x(k)+offset[k]) * (nthis1->x(k) - nopp1->x(k)+offset[k]);
-      for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
-        dist1 += (nthis1->x(k) - nopp0->x(k)+offset[k]) * (nthis1->x(k) - nopp0->x(k)+offset[k]);
-      for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
-        dist1 += (nthis0->x(k) - nopp1->x(k)+offset[k]) * (nthis0->x(k) - nopp1->x(k)+offset[k]);
+        dist0 += InterfaceElementBase::vertex_match_distance2(nthis0, nopp0, offset);
+        dist0 += InterfaceElementBase::vertex_match_distance2(nthis1, nopp1, offset);
+        dist1 += InterfaceElementBase::vertex_match_distance2(nthis1, nopp0, offset);
+        dist1 += InterfaceElementBase::vertex_match_distance2(nthis0, nopp1, offset);
       opposite_orientation = (dist0 < dist1 ? 0 : 1);
       if ((dist0 < dist1 ? dist0 : dist1) > 1e-14)
       {
@@ -2017,11 +2011,9 @@ namespace pyoomph
         /*        for (unsigned int j = 0; j < opposite_side->nvertex_node(); j++)
                 {*/
         pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(i));
-        for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
-          dist0 += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
+          dist0 += InterfaceElementBase::vertex_match_distance2(nthis, nopp, offset);
         nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1 - i));
-        for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
-          dist1 += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
+          dist1 += InterfaceElementBase::vertex_match_distance2(nthis, nopp, offset);
         //        }
       }
       if ((dist0 < dist1 ? dist0 : dist1) > 1e-14)
@@ -2151,14 +2143,10 @@ namespace pyoomph
       pyoomph::Node *nopp1 = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(1));
       pyoomph::Node *nthis0 = static_cast<pyoomph::Node *>(this->vertex_node_pt(0));
       pyoomph::Node *nthis1 = static_cast<pyoomph::Node *>(this->vertex_node_pt(1));
-      for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
-        dist0 += (nthis0->x(k) - nopp0->x(k)+offset[k]) * (nthis0->x(k) - nopp0->x(k)+offset[k]);
-      for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
-        dist0 += (nthis1->x(k) - nopp1->x(k)+offset[k]) * (nthis1->x(k) - nopp1->x(k)+offset[k]);
-      for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
-        dist1 += (nthis1->x(k) - nopp0->x(k)+offset[k]) * (nthis1->x(k) - nopp0->x(k)+offset[k]);
-      for (unsigned int k = 0; k < std::min(nthis0->ndim(), nopp0->ndim()); k++)
-        dist1 += (nthis0->x(k) - nopp1->x(k)+offset[k]) * (nthis0->x(k) - nopp1->x(k)+offset[k]);
+        dist0 += InterfaceElementBase::vertex_match_distance2(nthis0, nopp0, offset);
+        dist0 += InterfaceElementBase::vertex_match_distance2(nthis1, nopp1, offset);
+        dist1 += InterfaceElementBase::vertex_match_distance2(nthis1, nopp0, offset);
+        dist1 += InterfaceElementBase::vertex_match_distance2(nthis0, nopp1, offset);
       opposite_orientation = (dist0 < dist1 ? 0 : 1);
       if ((dist0 < dist1 ? dist0 : dist1) > 1e-14)
       {
@@ -2397,8 +2385,7 @@ namespace pyoomph
         for (unsigned int p = 0; p < perms.size(); p++)
         {
           pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(perms[p][i]));
-          for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
-            pdists[p] += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
+            pdists[p] += InterfaceElementBase::vertex_match_distance2(nthis, nopp, offset);
         }
       }
       double best_dist = pdists[0];
@@ -2489,8 +2476,7 @@ namespace pyoomph
         for (unsigned int p = 0; p < perms.size(); p++)
         {
           pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(perms[p][i]));
-          for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
-            pdists[p] += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
+            pdists[p] += InterfaceElementBase::vertex_match_distance2(nthis, nopp, offset);
         }
       }
       double best_dist = pdists[0];
@@ -2608,8 +2594,7 @@ namespace pyoomph
         for (unsigned int p = 0; p < perms.size(); p++)
         {
           pyoomph::Node *nopp = static_cast<pyoomph::Node *>(opposite_side->vertex_node_pt(perms[p][i]));
-          for (unsigned int k = 0; k < std::min(nthis->ndim(), nopp->ndim()); k++)
-            pdists[p] += (nthis->x(k) - nopp->x(k)+offset[k]) * (nthis->x(k) - nopp->x(k)+offset[k]);
+            pdists[p] += InterfaceElementBase::vertex_match_distance2(nthis, nopp, offset);
         }
       }
       double best_dist = pdists[0];

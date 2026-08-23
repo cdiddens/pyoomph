@@ -21,10 +21,41 @@ The main author may be contacted at c.diddens@utwente.nl
 
 #pragma once
 
+#include <array>
+#include <vector>
+#include <utility>
 #include "oomph_lib.hpp"
 
 namespace pyoomph
 {
+
+  // PYOOMPH_DISABLE_TOPOLOGICAL_INTERFACE_KEYS=1 forces the coupled-interface machinery back onto
+  // position matching. Only for negative tests: the mixed-order cases must FAIL with it set, and a test
+  // that passes both ways is measuring nothing. Defined in mesh.cpp.
+  bool topological_interface_keys_disabled();
+  // Re-read the environment variable behind it; called once per mesh per adaptation.
+  void refresh_topological_interface_key_setting();
+
+  // --- The digest behind pyoomph::Node::interface_topological_id (defined in mesh.cpp) ---
+  // A node identity is 128 bits mixed over a canonical description of where the node comes from, so it
+  // stays a fixed size at any refinement depth. Both the MeshTemplate (level-0 nodes) and the refinement
+  // sweep build ids with these, and they MUST agree: a C2 domain's midside node is a template node while
+  // the C1 domain's node at the same place is created by a refinement, and those two have to digest to
+  // the same value or the two sides stop recognising each other.
+  std::array<unsigned long long, 2> topo_digest_of_template_index(std::size_t template_index);
+  // The identity of a point given as an exact C1 combination of TEMPLATE nodes; see
+  // pyoomph::Node::interface_topological_expansion. Canonicalises (sorts, merges, drops zeros) in place.
+  std::array<unsigned long long, 2> topo_digest_of_expansion(std::vector<std::pair<std::size_t, double>> &expansion);
+  // ... and of an entity that has no such dyadic description (a triangle's centroid bubble, weight 1/3):
+  // deterministic and distinct, but deliberately NOT comparable with a refinement-created node, since no
+  // refinement ever creates a node there.
+  std::array<unsigned long long, 2> topo_digest_of_corner_set(const std::vector<std::size_t> &sorted_corners);
+  // Identity for a point whose C1 description is not dyadic (a centroid bubble); see mesh.cpp.
+  std::array<unsigned long long, 2> topo_digest_of_opaque_expansion(std::vector<std::pair<std::size_t, double>> expansion);
+  // A C1 shape weight as an exact dyadic integer; throws if it is not one.
+  long long topo_weight_exact(double w);
+  // ... and the non-throwing question, for deciding whether a node can be described this way at all.
+  bool topo_weight_is_dyadic(double w);
 
   enum AdditionalDofConstraintMode : unsigned
   {
@@ -85,6 +116,41 @@ namespace pyoomph
     // node's position is a cache of its masters that goes stale whenever something writes the dof vector
     // from outside the Newton solver.
     std::vector<std::pair<oomph::Node*, long long>> refinement_generating_key;
+    // Cross-domain topological identity of this node, as a 128-bit digest. {0,0} means "not assigned".
+    //
+    // refinement_generating_key above is the same idea WITHIN one mesh, and says why: matching by
+    // POSITION is only as good as the positions are. Across two coupled domains it cannot be used --
+    // the two sides' nodes are distinct objects, so father-node POINTERS mean nothing to each other --
+    // and yet that is exactly where position matching hurts most: a C2 domain's interface is a
+    // quadratic curve through three nodes while a C1 domain's is the chord between two of them, so a
+    // refinement promotes an off-chord midside node to a vertex on one side and creates a chord
+    // midpoint on the other (dev_docs/interface_refinement_coupling.md section 14.3).
+    //
+    // The identity is therefore built from what the two domains DO share, which is the MeshTemplate:
+    //   * a node created by the generator is stamped with its MeshTemplateNode index. Both domains read
+    //     the same template, so the same interface node gets the same number in both;
+    //   * a node created by a refinement is the C1 (vertex-linear) interpolation of its father's vertex
+    //     nodes at a dyadic local coordinate, so its identity is the canonical set of
+    //     (father vertex id, exact dyadic weight) pairs. Only the corners of the shared facet have a
+    //     non-zero weight there, and those agree by the line above -- whatever the element family, the
+    //     element space, or where the node physically ended up.
+    // Digested to 128 bits so the id is a fixed size at any refinement depth (a collision over the ~1e5
+    // keys in play is ~1e-29). Assigned by Mesh::assign_interface_topological_ids().
+    std::array<unsigned long long, 2> interface_topological_id = {0ULL, 0ULL};
+    // The identity in its unreduced form: this node's position as an exact C1 combination of TEMPLATE
+    // nodes, (template node index, weight), sorted by index with the weights summed.
+    //
+    // It has to be flattened all the way to the template, not expressed over the node's immediate
+    // parents, or it is not canonical. A node a quarter of the way along a level-0 edge is reached by a
+    // C2 domain as "the midside node of a level-1 element" (weights 3/4, 1/4 over the two level-0
+    // corners) and by a C1 domain as "the midpoint of a level-1 edge" (weights 1/2, 1/2 over a level-0
+    // corner and the level-0 midpoint). Digesting the immediate parents gives those two different
+    // values; flattening gives both 3/4, 1/4. The weights are dyadic, hence exact in double.
+    //
+    // Empty for a node whose position has no such description -- a triangle's centroid bubble is 1/3 of
+    // each corner, which no refinement ever produces, so it gets an opaque id instead and never appears
+    // in anyone else's expansion (only C1 CORNERS do).
+    std::vector<std::pair<std::size_t, double>> interface_topological_expansion;
   public:
     // Is this node a pyoomph::BoundaryNode? Overridden there to return `this`; the base returns NULL.
     // Every node in a mesh is a pyoomph::Node (see the Node typedef below), so a caller holding an
@@ -97,6 +163,12 @@ namespace pyoomph
     // See refinement_generating_key. Set once, when a refinement creates the node.
     virtual void set_refinement_generating_key(const std::vector<std::pair<oomph::Node*, long long>> &k) { refinement_generating_key = k; }
     virtual const std::vector<std::pair<oomph::Node*, long long>> &get_refinement_generating_key() const { return refinement_generating_key; }
+    // See interface_topological_id / interface_topological_expansion.
+    void set_interface_topological_id(const std::array<unsigned long long, 2> &id) { interface_topological_id = id; }
+    void set_interface_topological_expansion(const std::vector<std::pair<std::size_t, double>> &e) { interface_topological_expansion = e; }
+    const std::vector<std::pair<std::size_t, double>> &get_interface_topological_expansion() const { return interface_topological_expansion; }
+    const std::array<unsigned long long, 2> &get_interface_topological_id() const { return interface_topological_id; }
+    bool has_interface_topological_id() const { return interface_topological_id[0] || interface_topological_id[1]; }
     virtual void add_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode);
     virtual void remove_additional_dof_constraint(unsigned index, AdditionalDofConstraintMode mode);
     virtual const AdditionalDofConstrainingInfo *get_additional_dof_constraints() const { return additional_dof_constraints; }

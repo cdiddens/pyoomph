@@ -1738,6 +1738,89 @@ Index : Local coordinates (s0,s1,s2)
 	// intersection over the entity's corners - a face centre is on a boundary only if the whole face
 	// is - and the periodicity record keeps the *parents*, which is what set_element_code() matches
 	// against when it links up the partner side.
+	void MeshTemplate::build_topological_id_cache()
+	{
+		if (topo_cache_nodes == nodes.size() && topo_cache_intermediates == intermediate_node_map.size()) return;
+		topo_intermediate_corners.clear();
+		for (const auto &kv : intermediate_node_map)
+		{
+			std::vector<nodeindex_t> corners;
+			for (nodeindex_t c : kv.first)
+				if (c != (nodeindex_t)-1) corners.push_back(c); // the key is padded to 8 with -1
+			if (corners.size() >= 2) topo_intermediate_corners[kv.second] = corners;
+		}
+		topo_node_id_cache.assign(nodes.size(), std::array<unsigned long long, 2>{0ULL, 0ULL});
+		topo_node_expansion_cache.assign(nodes.size(), std::vector<std::pair<std::size_t, double>>());
+		topo_cache_nodes = nodes.size();
+		topo_cache_intermediates = intermediate_node_map.size();
+	}
+
+	// See the declaration. Resolves the expansion and the digest together, memoised, recursing through
+	// intermediate nodes (a brick's cell centre is keyed on corners that may themselves be face centres).
+	const std::vector<std::pair<std::size_t, double>> &MeshTemplate::topological_node_expansion(nodeindex_t ni)
+	{
+		build_topological_id_cache();
+		static const std::vector<std::pair<std::size_t, double>> empty;
+		if (ni >= topo_node_expansion_cache.size()) return empty;
+		if (topo_node_id_cache[ni][0] || topo_node_id_cache[ni][1]) return topo_node_expansion_cache[ni];
+
+		auto it = topo_intermediate_corners.find(ni);
+		if (it == topo_intermediate_corners.end())
+		{
+			// A corner, or a node of a predefined higher-order element: those never passed through
+			// add_intermediate_node_unique(), so intermediate_node_map has never seen them (see
+			// has_predefined_higher_order_elements) and their entity is not recoverable here. A corner is
+			// its own expansion; the second case is indistinguishable from it, which is why a mesh read in
+			// at second order cannot be matched topologically against a C1 neighbour's refinement.
+			topo_node_expansion_cache[ni] = std::vector<std::pair<std::size_t, double>>(1, std::make_pair((std::size_t)ni, 1.0));
+			topo_node_id_cache[ni] = topo_digest_of_template_index(ni);
+			return topo_node_expansion_cache[ni];
+		}
+		std::vector<nodeindex_t> corners = it->second;
+		const std::size_t nc = corners.size();
+		// Only an entity whose corner count is a power of two carries the dyadic weights a refinement
+		// produces (an edge mid-point 1/2, a quadrilateral face centre 1/4, a cell centre 1/8). A triangle
+		// centroid bubble is 1/3, which no refinement ever creates and which is not even exact in double,
+		// so it gets an opaque identity instead -- safe, because only C1 CORNERS enter an expansion and a
+		// bubble is never one.
+		const bool dyadic = (nc >= 2) && ((nc & (nc - 1)) == 0);
+		if (!dyadic)
+		{
+			std::vector<std::size_t> sc(corners.begin(), corners.end());
+			std::sort(sc.begin(), sc.end());
+			topo_node_expansion_cache[ni].clear();
+			topo_node_id_cache[ni] = topo_digest_of_corner_set(sc);
+			return topo_node_expansion_cache[ni];
+		}
+		std::vector<std::pair<std::size_t, double>> expansion;
+		const double w = 1.0 / (double)nc;
+		for (nodeindex_t c : corners)
+		{
+			const std::vector<std::pair<std::size_t, double>> &ce = topological_node_expansion(c);
+			if (ce.empty()) { expansion.clear(); break; } // an opaque corner makes this node opaque too
+			for (auto &t : ce) expansion.push_back(std::make_pair(t.first, t.second * w));
+		}
+		if (expansion.empty())
+		{
+			std::vector<std::size_t> sc(corners.begin(), corners.end());
+			std::sort(sc.begin(), sc.end());
+			topo_node_id_cache[ni] = topo_digest_of_corner_set(sc);
+			topo_node_expansion_cache[ni].clear();
+			return topo_node_expansion_cache[ni];
+		}
+		topo_node_id_cache[ni] = topo_digest_of_expansion(expansion);
+		topo_node_expansion_cache[ni] = expansion;
+		return topo_node_expansion_cache[ni];
+	}
+
+	std::array<unsigned long long, 2> MeshTemplate::topological_node_id(nodeindex_t ni)
+	{
+		topological_node_expansion(ni);
+		build_topological_id_cache();
+		if (ni >= topo_node_id_cache.size()) return topo_digest_of_template_index(ni);
+		return topo_node_id_cache[ni];
+	}
+
 	nodeindex_t MeshTemplate::add_intermediate_node_generic(const nodeindex_t *key_corners, unsigned nkey, const nodeindex_t *parents, unsigned nparents, bool boundary_possible)
 	{
 		intermediate_node_key_t key;
@@ -2227,6 +2310,16 @@ Index : Local coordinates (s0,s1,s2)
 				else
 				{
 					nodes[nii]->oomph_node = new pyoomph::BoundaryNode(this->problem->time_stepper_pt(), n_lagrangian, n_lagrangian_type, nodal_dim, 1, ntot);
+				}
+				// The cross-domain topological identity of a level-0 node is its TEMPLATE index. Two
+				// domains sharing an interface generate distinct Node objects for it (flush_oomph_nodes()
+				// below clears the cache between domains), but they read the same MeshTemplateNode, so
+				// this number is the one thing they agree on without looking at a coordinate. See
+				// pyoomph::Node::interface_topological_id.
+				{
+					pyoomph::Node *tn = static_cast<pyoomph::Node *>(nodes[nii]->oomph_node);
+					tn->set_interface_topological_expansion(this->topological_node_expansion(nodes[nii]->index));
+					tn->set_interface_topological_id(this->topological_node_id(nodes[nii]->index));
 				}
 
 				if (nodal_dim > 0)

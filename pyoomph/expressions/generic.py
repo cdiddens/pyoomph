@@ -128,6 +128,73 @@ def find_dominant_element_space(*spaces:FiniteElementSpaceEnum):
 			res=r
 	return res
 
+def find_subordinate_element_space(*spaces:FiniteElementSpaceEnum):
+	"""The MEET of the given spaces, i.e. the largest space contained in all of them.
+
+	The dual of find_dominant_element_space, and it has to be written as a lattice rather than as a
+	position in a list, for the same reason the join above needs its special case: the order is
+	C1 < C1TB < C2TB and C1 < C2 < C2TB, and C1TB and C2 are INCOMPARABLE -- a C2 element has no bubble
+	node, a C1TB element has no midside ones. Their join is C2TB ("only space that can hold both") and
+	their meet is C1.
+
+	Getting this wrong is not academic: get_interface_field_connection_space used to walk a total order
+	in which C1TB sat below C2, so a C2 domain coupled to a C1TB one negotiated a C1TB multiplier -- a
+	space the C2 element cannot carry at all, whose Nodal_Space_Index_To_Element_Index_Map row is empty.
+	The result was a segfault, not an error. See dev_docs/interface_refinement_coupling.md section 14.5.
+	"""
+	res=""
+	for space in spaces:
+		# Same conventions as find_dominant_element_space: compare the discontinuous spaces through
+		# their continuous counterpart, and treat "" as the not-yet-set sentinel.
+		r:str=space
+		if r=="":
+			continue
+		if r=="D0" or r=="DL":
+			r="C1"
+		elif r[0]=="D":
+			r="C"+r[1:]
+		if res=="":
+			res=r
+			continue
+		if (r=="C2" and res=="C1TB") or (r=="C1TB" and res=="C2"):
+			res="C1" # The only space contained in both
+			continue
+		space_in_order=["C1","C1TB","C2","C2TB"]
+		if space_in_order.index(r)<space_in_order.index(res):
+			res=r
+	return res
+
+def largest_facet_space(parent_space:str,parent_dim:int)->str:
+	"""The largest space a field on a FACET of a bulk domain can use, given the bulk domain's own space.
+
+	A facet does not inherit everything the bulk element has. The bubble spaces are the interesting case,
+	and the rule is not "the parent's space" but "does the parent element actually own a node there":
+
+	  * C1TB/C2TB need a bubble node. A C2 element has none -- BulkElementTri2dC2's C1TB row of
+	    Nodal_Space_Index_To_Element_Index_Map is literally empty (src/elements_2d.cpp). Asking for a
+	    C1TB field on such an interface used to index off the end of that empty row and SEGFAULT
+	    (dev_docs/interface_refinement_coupling.md section 14.5).
+	  * in 3d the facet is a 2d face, and a C1TB tet carries only a CELL bubble, not a face one. Only a
+	    C2TB tet provides the face bubble a C1TB facet field would need.
+
+	On the tensor-product families the TB variants are degenerate anyway (a quad's C1TB node map equals
+	its C1 one), so reducing C1TB to C1 there costs nothing and keeps this rule family-independent.
+	"""
+	if parent_space=="" or parent_space is None:
+		return ""
+	p:str=parent_space
+	if p=="D0" or p=="DL":
+		p="C1"
+	elif p[0]=="D":
+		p="C"+p[1:]
+	if p=="C1":
+		return "C1"
+	if p=="C1TB":
+		return "C1" if parent_dim>=3 else "C1TB"
+	if p=="C2":
+		return "C2"
+	return "C2TB"
+
 if TYPE_CHECKING:
 	from ..generic.codegen import FiniteElementCodeGenerator
 
