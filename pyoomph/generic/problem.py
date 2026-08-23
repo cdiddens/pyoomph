@@ -8323,6 +8323,21 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         for m in meshes:
             m.assign_global_base_element_indices()
 
+        # The ODE meshes are the one thing a remesh does NOT rebuild: they have no geometry, so they
+        # come into the second distribute() still carrying the halo marks of the first one, while every
+        # other mesh has just been regenerated whole and replicated. oomph then re-partitions a mesh
+        # that thinks it is already partitioned, and the ranks can come out deferring to each other -
+        # rank 0 "the owner is rank 1", rank 1 "the owner is rank 0" - so the element is owned by
+        # nobody and its dof is never numbered. On hanging_droplet.py that dof is globals/p_gas, the
+        # gas pressure enforcing the droplet volume: the constraint silently disappears (12097 dofs
+        # instead of 12098) and the next Newton solve diverges from 1.1 to 1e10.
+        #
+        # Put them back into the state the bulk meshes are in - undistributed, owned by everyone -
+        # and let the distribute below assign ownership from scratch, as it does at startup.
+        for _m in self._meshdict.values():
+            if isinstance(_m,ODEStorageMesh):
+                _m.get_element().set_halo_owner(-1)
+
         if not self.is_quiet():
             print("REDISTRIBUTING THE REMESHED PROBLEM")
         self.actions_before_distribute()

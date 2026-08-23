@@ -614,6 +614,15 @@ void PyReg_Mesh(nb::module_ &m)
 			#endif
 			}, "In parallel (MPI) runs, returns the rank of the processor that actually owns this element if it is a halo copy, or -1 if it is not a halo element or MPI is disabled")
 
+		.def("set_halo_owner", [](oomph::GeneralisedElement *self,int owner)
+			 {
+			#ifdef OOMPH_HAS_MPI
+			// owner<0 clears the halo mark (this rank owns the element), otherwise this copy becomes a
+			// halo of the one on rank `owner`.
+			if (owner<0) self->set_nonhalo();
+			else self->set_halo((unsigned)owner);
+			#endif
+			}, nb::arg("owner"), "In parallel (MPI) runs, declare who owns this element: -1 makes the calling process the owner, any other value marks this copy as a halo of the element on that process")
 		.def("set_must_be_kept_as_halo", [](oomph::GeneralisedElement *self,bool halo)
 			 {
 			#ifdef OOMPH_HAS_MPI
