@@ -1637,7 +1637,37 @@ class BaseEquations(_pyoomph.Equations):
                 master._tensorfields[name].append(row)
         return entries,diminfo
 
-    def set_facet_recovery(self,fieldname:str,expr:"ExpressionOrNum"):
+    #: Spaces a field on the interior-facet skeleton may live on (cf. the check in
+    #: _internal_define_scalar_field, which is the one that fires when the declaration is replayed).
+    _internal_facet_field_spaces={"D0","DL","D1","D1TB","D2","D2TB"}
+
+    def _defer_to_internal_facets(self,kind:str,space:"FiniteElementSpaceEnum | None",args:tuple[Any,...],kwargs:dict[str,Any]):
+        """Record a declaration made with at_internal_facets=True on the skeleton node.
+
+        define_fields() runs far too late to create the '_internal_facets_' domain - the node has to
+        exist by _fill_dummy_equations, i.e. before any code generator or InterfaceMesh is built - so
+        this only ever fills a skeleton that is already there. requires_interior_facet_terms in
+        __init__ is what puts it there, and a class formulating a facet weak form needs that anyway.
+        """
+        master=self._master()
+        cg=master._assert_codegen()
+        me=self.__class__.__name__
+        if isinstance(master,EquationTree) and master._codegen is not None and master._codegen is not cg:
+            # A dummy pass: _create_dummy_domains_for_DG builds throwaway generators for the two sides
+            # of a facet and runs this domain's define_fields() on them a second time, so that the
+            # skeleton's residuals can resolve the opposite-side fields. The real pass has already
+            # recorded everything, and recording again would double every entry.
+            return
+        if cg.get_domain_name()=="_internal_facets_":
+            raise self._add_exception_info(RuntimeError("at_internal_facets=True was used in "+me+", which is already attached to the interior-facet skeleton '_internal_facets_'. Just drop the argument."))
+        if space is not None and space not in self._internal_facet_field_spaces:
+            raise self._add_exception_info(NotImplementedError("Continuous fields on the interior-facet skeleton '_internal_facets_' are not supported (tried to define '"+str(args[0])+"' on space "+str(space)+" with at_internal_facets=True in "+me+"). Use a discontinuous facet space instead, i.e. "+", ".join(sorted(self._internal_facet_field_spaces))+"."))
+        facets=master._children.get("_internal_facets_") if isinstance(master,EquationTree) else None
+        if facets is None:
+            raise self._add_exception_info(RuntimeError("at_internal_facets=True was used in "+me+" on domain '"+cg.get_full_name()+"', but this domain has no interior-facet skeleton to put the field on. Set self.requires_interior_facet_terms=True in the __init__ of "+me+" (which add_interior_facet_residual requires anyway), or add the subdomain by hand with eqs+=Equations()@'_internal_facets_'."))
+        facets._pending_internal_facet_defs.append((kind,args,kwargs))
+
+    def set_facet_recovery(self,fieldname:str,expr:"ExpressionOrNum",at_internal_facets:bool=False):
         """
         Defines how a discontinuous (``DL`` or ``D0``) field of this domain is filled on elements that
         are created by a spatial adaptation or a remeshing and therefore receive no values from the old
@@ -1669,7 +1699,14 @@ class BaseEquations(_pyoomph.Equations):
         Args:
             fieldname: name of the ``DL``/``D0`` field to recover.
             expr: expression evaluated on the new element, e.g. ``avg(var("u"))``.
+            at_internal_facets: register this on the ``"_internal_facets_"`` child of this domain
+                instead of on this domain itself, so that a bulk equation class can declare the
+                recovery of a skeleton field it declared with ``at_internal_facets=True``. Returns
+                ``None`` in that case, since the local function is only created on replay.
         """
+        if at_internal_facets:
+            self._defer_to_internal_facets("recovery",None,(fieldname,expr),{})
+            return None
         return self.add_local_function("__facet_recovery_"+fieldname,expr)
 
     def add_integral_function(self, name:str, expr:"ExpressionOrNum"):
@@ -1955,7 +1992,7 @@ class Equations(BaseEquations):
             master._azimuthal_r0_info[2].add(name)
 
 
-    def define_scalar_field(self, name:str | list[str], space:"FiniteElementSpaceEnum",scale:"ExpressionOrNum | str | None"=None,testscale:"ExpressionOrNum | str | None"=None,discontinuous_refinement_exponent:float | None=None,allow_scales_with_fields:bool=False):
+    def define_scalar_field(self, name:str | list[str], space:"FiniteElementSpaceEnum",scale:"ExpressionOrNum | str | None"=None,testscale:"ExpressionOrNum | str | None"=None,discontinuous_refinement_exponent:float | None=None,allow_scales_with_fields:bool=False,at_internal_facets:bool=False):
         """
         Define a scalar field on this domain. Must be called within the specified implementation of the method :py:meth:`~BaseEquations.define_fields`.
 
@@ -1966,17 +2003,22 @@ class Equations(BaseEquations):
             testscale (ExpressionNumOrNone): The scale for the test function of the vector field for nondimensionalization. Defaults to None.
             discontinuous_refinement_exponent (Optional[float]): The exponent for the discontinuous refinement. Defaults to None.
             allow_scales_with_fields (bool): Whether to allow scales/testscales with fields included. Defaults to False.
+            at_internal_facets (bool): Define the field on the ``"_internal_facets_"`` skeleton of this domain instead of on this domain itself. The space must then be discontinuous (``D0``, ``DL``, ``D1``, ``D1TB``, ``D2``, ``D2TB``) and the domain must have a skeleton, i.e. ``self.requires_interior_facet_terms`` must be set in ``__init__``. Defaults to False.
         """
         if not isinstance(name, str):
             for n in name:
-                self.define_scalar_field(n, space, scale=scale, testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields)
+                self.define_scalar_field(n, space, scale=scale, testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields,at_internal_facets=at_internal_facets)
             return        
+        if at_internal_facets:
+            self._defer_to_internal_facets("scalar",space,(name,space),dict(scale=scale,testscale=testscale,discontinuous_refinement_exponent=discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields))
+            return
+        
         # BaseCoordinateSystem.define_scalar_field is annotated with scale/testscale:ExpressionOrNum|None,
         # but it just forwards them unchanged to Equations._internal_define_scalar_field, which does accept
         # a str (a named scale reference) as well - so passing a str through here is safe at runtime.
         self.get_coordinate_system().define_scalar_field(name, space, self,scale,testscale,discontinuous_refinement_exponent,allow_scales_with_fields=allow_scales_with_fields) #type:ignore
 
-    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", dim:int | None=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None,allow_scales_with_fields:bool=False):
+    def define_vector_field(self, name:str, space:"FiniteElementSpaceEnum", dim:int | None=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None,allow_scales_with_fields:bool=False,at_internal_facets:bool=False):
         """
         Define a vector field on this domain. Must be called within the specified implementation of the method :py:meth:`~BaseEquations.define_fields`.
 
@@ -1986,7 +2028,13 @@ class Equations(BaseEquations):
             dim (Optional[int]): The dimension of the vector field. If not provided, it defaults to the nodal dimension.
             scale (ExpressionNumOrNone): The scale for the vector field for nondimensionalization. Defaults to None.
             testscale (ExpressionNumOrNone): The scale for the test function of the vector field for nondimensionalization. Defaults to None.
+            at_internal_facets (bool): Define the field on the ``"_internal_facets_"`` skeleton of this domain instead of on this domain itself. See :py:meth:`define_scalar_field`. Defaults to False.
         """
+        if at_internal_facets:
+            # Deferred before dim is resolved, so that the default comes from the skeleton (it is the
+            # same nodal dimension, but the skeleton is the domain the field belongs to).
+            self._defer_to_internal_facets("vector",space,(name,space),dict(dim=dim,scale=scale,testscale=testscale,allow_scales_with_fields=allow_scales_with_fields))
+            return
                    
         dim = dim if dim is not None else self.get_nodal_dimension()  # TODO: Here, it should be nodal_dimension!
         v, vtest,comps = self.get_coordinate_system().define_vector_field(name, space, dim, self)
@@ -2028,7 +2076,10 @@ class Equations(BaseEquations):
                 
     
 
-    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", dim:int | None=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None, symmetric:bool=False,allow_scales_with_fields:bool=False):
+    def define_tensor_field(self, name:str, space:"FiniteElementSpaceEnum", dim:int | None=None,scale:"ExpressionNumOrNone"=None,testscale:"ExpressionNumOrNone"=None, symmetric:bool=False,allow_scales_with_fields:bool=False,at_internal_facets:bool=False):
+        if at_internal_facets:
+            self._defer_to_internal_facets("tensor",space,(name,space),dict(dim=dim,scale=scale,testscale=testscale,symmetric=symmetric,allow_scales_with_fields=allow_scales_with_fields))
+            return
         dim = dim if dim is not None else self.get_nodal_dimension()  # TODO: Here, it should be nodal_dimension!
         t, ttest,comps = self.get_coordinate_system().define_tensor_field(name, space, dim, self, symmetric)
         also_on_interface:bool = space in { "C1","C2","C1TB","C2TB","D2TB","D2","D1","D1TB"}
@@ -2066,6 +2117,37 @@ class DummyEquations(Equations):
         pass
     def define_residuals(self):
         pass
+
+
+class _InternalFacetFieldDeclarations(Equations):
+    """Replays the at_internal_facets=True declarations recorded on this skeleton node.
+
+    Attached to every '_internal_facets_' node by _fill_dummy_equations and inert when nothing was
+    declared. The recorded list is complete by the time this runs, because the declaring domain
+    always defines its fields first: a bulk domain in MeshFromTemplateBase.__init__, before the
+    interface meshes of its children exist at all, and an interface in _finalise_creation, which
+    walks the codim-1 domains before the codim-2 ones (see pyoomph/meshes/mesh.py)."""
+
+    def _recorded(self)->"list[tuple[str,tuple[Any,...],dict[str,Any]]]":
+        master=self._master()
+        assert isinstance(master,EquationTree), "the replay equation only ever sits on a skeleton domain"
+        return master._pending_internal_facet_defs
+
+    def define_fields(self):
+        for kind,args,kwargs in self._recorded():
+            if kind=="scalar":
+                self.define_scalar_field(*args,**kwargs)
+            elif kind=="vector":
+                self.define_vector_field(*args,**kwargs)
+            elif kind=="tensor":
+                self.define_tensor_field(*args,**kwargs)
+
+    def define_residuals(self):
+        # set_facet_recovery is add_local_function underneath, which needs the fields in place -
+        # same reason its docstring example puts it in define_residuals.
+        for kind,args,kwargs in self._recorded():
+            if kind=="recovery":
+                self.set_facet_recovery(*args,**kwargs)
 
 
 _ode_coordinate_system = ODECoordinateSystem()
@@ -2461,6 +2543,11 @@ class EquationTree(Equations):
         self._codegen:"FiniteElementCodeGenerator | None"=None
         self._children:dict[str,"EquationTree"] = {}
         self._compilation_flags:"EquationCompilationFlags | None"=None
+        #: Declarations made from the parent domain with at_internal_facets=True, replayed by
+        #: _InternalFacetFieldDeclarations when this (skeleton) node defines its own fields. Kept
+        #: on the node rather than on the declaring equation because one Equations instance may sit
+        #: on several domains (eqs @ ["left","right"]) and each skeleton must get exactly one copy.
+        self._pending_internal_facet_defs:list[tuple[str,tuple[Any,...],dict[str,Any]]]=[]
 
     @property
     def _mesh(self)->"AnyMesh | None":
@@ -2981,6 +3068,12 @@ class EquationTree(Equations):
                     facets=EquationTree(DummyEquations(),self)
                     facets._problem=problem
                     self._children["_internal_facets_"]=facets
+            # Whichever skeleton is there - auto-created above or written out by the user - gets the
+            # replay equation, so that define_*_field(...,at_internal_facets=True) in the equations
+            # of this domain has somewhere to land. It defines nothing when nothing was declared.
+            skeleton=self._children.get("_internal_facets_")
+            if skeleton is not None:
+                skeleton._equations=skeleton._equations+[_InternalFacetFieldDeclarations()]
         #for dn in list(self._children.keys()):
         for dn,v in self._children.items():
             #v=self._children[dn] # Cannot use .items() here

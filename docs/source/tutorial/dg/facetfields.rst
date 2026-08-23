@@ -8,6 +8,25 @@ Unknowns on facets (i.e. on the skeleton mesh) are the essential ingredient of h
 
 In pyoomph, the interior skeleton mesh is available under the reserved domain name ``"_internal_facets_"``. Whenever equations are added to this domain, i.e. by ``eqs+=MyFacetEquations()@"_internal_facets_"``, the skeleton is generated, and any field defined in ``define_fields`` of these equations is a genuine unknown on the facets. In particular, one does not have to set ``requires_interior_facet_terms`` by hand in that case, this is implied by the presence of equations on the skeleton. Instead one has to explitly define an equation class for the skeleton mesh.
 
+Alternatively, a facet field can be declared directly from the bulk equation class by passing ``at_internal_facets=True`` to :py:meth:`~pyoomph.generic.codegen.Equations.define_scalar_field` (likewise for :py:meth:`~pyoomph.generic.codegen.Equations.define_vector_field`, :py:meth:`~pyoomph.generic.codegen.Equations.define_tensor_field` and :py:meth:`~pyoomph.generic.codegen.BaseEquations.set_facet_recovery`). The field then still lives exclusively on the skeleton - it is merely *declared* in the bulk class, so that a formulation whose facet weak form is written there with ``add_interior_facet_residual`` does not need a second equation class just for the unknown::
+
+    class HDGPoisson(Equations):
+        def __init__(self):
+            super().__init__()
+            self.requires_interior_facet_terms=True   # required by add_interior_facet_residual anyway
+
+        def define_fields(self):
+            self.define_scalar_field("u","D2")
+            self.define_scalar_field("lam","DL",at_internal_facets=True)
+
+        def define_residuals(self):
+            u,v=var_and_test("u")
+            lam,mu=var_and_test("lam")
+            self.add_residual(weak(grad(u),grad(v))-weak(1,v))
+            self.add_interior_facet_residual(weak(lam,jump(v))+weak(jump(u),mu))
+
+In this route, ``self.requires_interior_facet_terms=True`` must be set in the constructor: unlike ``eqs+=MyFacetEquations()@"_internal_facets_"``, which tells pyoomph about the skeleton while the equation tree is still being assembled, ``define_fields`` is only called much later, when the skeleton mesh would already have had to be built. If it is missing, pyoomph raises an error saying exactly that.
+
 The degrees of freedom of such a facet field are stored in the facet element itself, not at nodes. Consequently, only discontinuous spaces, i.e. ``"D0"``, ``"DL"``, ``"D1"``, ``"D1TB"``, ``"D2"`` and ``"D2TB"``, can be used here. Each facet then owns its own set of values: two facets meeting at a common vertex do not share anything, which is exactly what one wants for a facet-wise trace. 
 
 As an example, we consider the Poisson equation

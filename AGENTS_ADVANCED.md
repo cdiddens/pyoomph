@@ -275,8 +275,16 @@ class MortarCoupling(Equations):
 
 eqs += MortarCoupling() @ "_internal_facets_"
 ```
-- Declaring a field there implies the skeleton, so `requires_interior_facet_terms`
-  need not be set. Allowed spaces: `"D0"` (one constant per facet), `"DL"` (constant +
+- A bulk class that already writes its facet weak form with
+  `add_interior_facet_residual` can declare the facet unknown in place instead, with
+  `at_internal_facets=True` on `define_scalar_field` / `define_vector_field` /
+  `define_tensor_field` / `set_facet_recovery`. The field then lives *only* on the
+  skeleton. It needs `self.requires_interior_facet_terms = True` in `__init__` (which
+  `add_interior_facet_residual` requires anyway): `define_fields()` runs long after the
+  skeleton domain would have had to be created, so the keyword fills an existing skeleton
+  rather than making one, and says so if there is none.
+- Declaring a field on `"_internal_facets_"` directly implies the skeleton, so
+  `requires_interior_facet_terms` need not be set in that case. Allowed spaces: `"D0"` (one constant per facet), `"DL"` (constant +
   one gradient mode per facet direction), and the nodal DG spaces
   `"D1"/"D2"/"D1TB"/"D2TB"`. Continuous spaces raise `NotImplementedError` — the dofs
   live in the facet element's own internal `Data`, and interior nodes are plain
