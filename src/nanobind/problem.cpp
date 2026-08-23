@@ -570,6 +570,16 @@ void PyReg_Problem(nb::module_ &m)
 		.def("is_floquet_mode", &pyoomph::PeriodicOrbitHandler::is_floquet_mode,
 			 "Whether the handler discretizes the orbit using the explicit Floquet mode (with an explicit degree of freedom "
 			 "at the end of the period) rather than a B-spline or finite-difference representation.")
+		.def("get_time_element_node_indices", &pyoomph::PeriodicOrbitHandler::get_time_element_node_indices,
+			 "Return, for each element of the time discretization, the list of time-block (knot) indices it spans. The "
+			 "element fills the orbit Jacobian rows of all but the last of these indices, from the columns of all of them, "
+			 "so this is the block bidiagonal structure along which the Floquet condensation slices. Empty in the modes "
+			 "that have no such structure (central/BDF2/B-spline).")
+		.def("get_naive_equation_order", &pyoomph::PeriodicOrbitHandler::get_naive_equation_order,
+			 "Return the augmented equation number of each row of the naive, time-major orbit layout "
+			 "[u_0 | u_1 | ... | u_nT-1 | T]. On a distributed (--distribute) problem the augmented rows are "
+			 "interleaved per rank, so a gathered global orbit Jacobian has to be permuted by this to be read "
+			 "time block by time block. Empty when the problem is not distributed, where the two orders agree.")
 		.def("get_T", &pyoomph::PeriodicOrbitHandler::get_T, "Return the current period of the tracked periodic orbit.")
 		.def("get_num_time_steps", &pyoomph::PeriodicOrbitHandler::n_tsteps,
 			 "Return the number of time steps used to discretize one period of the orbit.")

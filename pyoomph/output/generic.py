@@ -990,7 +990,12 @@ class GenericOutput(BaseEquations):
             return
         self._outputter[eqtree].output(step)
 
-    def change_output_directory(self, newdir:str,eqtree:"EquationTree"):
+    # This is the BaseEquations hook, which is underscored (ec1f960); the _BaseOutputter method it
+    # forwards to deliberately is not. Naming this one after the outputter's silently unhooked the
+    # whole relocation: EquationTree._change_output_directory dispatches "_change_output_directory",
+    # hit BaseEquations' no-op instead, and PeriodicOrbit.output_orbit() created its subdirectory and
+    # then wrote nothing into it.
+    def _change_output_directory(self, newdir:str,eqtree:"EquationTree"):
         self._outputter[eqtree].change_output_directory(newdir,eqtree)
 
 

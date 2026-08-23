@@ -226,7 +226,6 @@ or sit on augmented-system assembly that throws from C++ ("This likely does not 
 parallel", `sparse_assemble_row_or_column_compressed_base_problem`). They refuse early, by name,
 through `Problem._require_non_distributed`:
 
-- periodic orbit tracking / Floquet
 - the multi-assembly tensor cache
 - Lyapunov exponents
 - the periodic driving response
@@ -235,6 +234,12 @@ through `Problem._require_non_distributed`:
 - `refine_eigenfunction()` — for the history-dof reason in §3, not for an assembly reason
 - bifurcation branch switching, left eigenvectors and normal forms
   (`pyoomph/generic/bifurcation_tools.py`), which build global scipy matrices
+
+Periodic orbit tracking and Floquet multipliers are no longer on this list either — see
+[floquet_multipliers.md](floquet_multipliers.md) §8. What is still refused around them:
+`switch_to_hopf_orbit()` (it needs the first Lyapunov coefficient, which comes from the Python custom
+assembler) and the transient hand-back when leaving a `with orbit:` block (it writes history dof
+values, which oomph-lib declares unsupported when distributed).
 
 Bifurcation *tracking* itself is no longer on this list — see
 `dev_docs/mpi_augmented_systems.md`. What is still refused inside it: `blocksolve=True`,

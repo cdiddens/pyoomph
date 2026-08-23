@@ -210,7 +210,32 @@ class PeriodicOrbit:
     def __enter__(self):
         return self
     
+    def _current_base_dofs(self)->NPFloatArray:
+        """The base (non-augmented) part of the current dof vector, in base equation order.
+
+        get_current_dofs() gathers the AUGMENTED vector, and under --distribute its rows are
+        interleaved per rank (rank 0's base rows, then rank 0's time blocks, then rank 1's ...), so
+        its first nbase entries are NOT the base block there. The handler's naive ordering says where
+        they really are; it is empty, and this is a plain slice, when not distributed.
+        """
+        handler=self._get_handler()
+        nbase=handler.get_base_ndof()
+        dofs=self.problem.get_current_dofs()[0]
+        order=handler.get_naive_equation_order()
+        if len(order):
+            return dofs[numpy.asarray(order[:nbase],dtype=numpy.int64)]
+        return dofs[:nbase]
+
     def __exit__(self,exc_type: type[BaseException] | None, exc: BaseException | None, traceback: types.TracebackType | None):
+        if self.problem.is_distributed():
+            # Leaving the block seeds three history levels so that a plain run() continues the orbit
+            # transiently. Writing history dof values is not implemented for a distributed problem
+            # (oomph-lib declares the t>0 accessors unsupported there, and Problem::set_history_dofs
+            # refuses), so the orbit is simply dropped instead. Everything inside the block -- solving,
+            # continuing, sampling, Floquet multipliers -- does work under --distribute.
+            print("WARNING: leaving a periodic orbit does not set up the transient continuation on a distributed (--distribute) problem; the history dofs are not written. Solve, continuation, sampling and Floquet multipliers inside the block are unaffected.")
+            self.problem.deactivate_bifurcation_tracking()
+            return
         #  Setup the history dofs for a transient continuation
         N=self.get_num_time_steps()
         T=self.get_T(dimensional=False)
@@ -219,7 +244,7 @@ class PeriodicOrbit:
         history=[]
         for s in [0,-1/N,-2/N]:
             self._get_handler().set_dofs_to_interpolated_values(s) # TODO: We might need the time history for e.g. local expressions, integrals, etc. involving partial_t            
-            history.append(self.problem.get_current_dofs()[0][:self._get_handler().get_base_ndof()])
+            history.append(self._current_base_dofs())
         self._get_handler().restore_dofs()
         self.problem.deactivate_bifurcation_tracking()
         for i,h in enumerate(history):
@@ -319,8 +344,9 @@ class PeriodicOrbit:
         self._get_handler().restore_dofs()
         self.problem.set_current_time(tbackup,dimensional=False,as_float=True)
         
-    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True):
-        return self.problem.get_floquet_multipliers(n=n,valid_threshold=valid_threshold,shift=shift,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet)
+    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000):
+        """See :py:meth:`~pyoomph.generic.problem.Problem.get_floquet_multipliers`."""
+        return self.problem.get_floquet_multipliers(n=n,valid_threshold=valid_threshold,shift=shift,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet,method=method,dense_threshold=dense_threshold)
     
     def starts_supercritically(self):
         """
@@ -369,9 +395,8 @@ class PeriodicOrbit:
         if NT is None:
             NT=self.get_num_time_steps()
         history_dofs=[]
-        Nbase=self._get_handler().get_base_ndof()
         for T in self.iterate_over_samples(N=NT):
-            history_dofs.append(self.problem.get_current_dofs()[0][:Nbase])
+            history_dofs.append(self._current_base_dofs())
         T=self.get_T()
         self.problem.deactivate_bifurcation_tracking()
         self.problem.set_current_dofs(history_dofs.pop())
@@ -7114,7 +7139,6 @@ class Problem(_pyoomph.Problem):
         Returns:
             PeriodicOrbit: The resulting periodic orbit. Note that it still must be solved, i.e. it is only the provided guess at this stage.
         """
-        self._require_non_distributed("Periodic orbit tracking")
         self.deactivate_bifurcation_tracking()
         self.time_stepper_pt().make_steady()
         if len(history_dofs)==0:
@@ -7213,6 +7237,14 @@ class Problem(_pyoomph.Problem):
             qR,qI=numpy.real(q),numpy.imag(q)
             lyap_coeff=0
         else:
+            if self.is_distributed():
+                # Orbit tracking itself works under --distribute (PeriodicOrbitHandler carries an
+                # AugmentedDofDistributionHelper), but getting here from a Hopf bifurcation needs the
+                # first Lyapunov coefficient, and that is computed by the Python custom assembler in
+                # bifurcation_tools.py, which is not distributed yet (dev_docs/mpi_augmented_systems.md
+                # Part II). Say which half is missing rather than letting the generic refusal claim
+                # that orbit tracking is unsupported.
+                raise RuntimeError("switch_to_hopf_orbit is not supported on a distributed (--distribute) problem yet: the first Lyapunov coefficient it needs comes from the Python custom assembler, which is still serial. Periodic orbit tracking itself does work distributed - build the orbit guess yourself and use activate_periodic_orbit_handler, or pass dparam and orbit_amplitude to skip the Lyapunov coefficient.")
             lyap_coeff,sign,al,qR,qI=get_hopf_lyapunov_coefficient(self,param,omega=omega,q=q,FD_delta=FD_delta,FD_param_delta=FD_param_delta)
             print("AL",al,"QR MAGNITUDE",numpy.linalg.norm(qR+1j*qI))
             if dparam:
@@ -7291,9 +7323,24 @@ class Problem(_pyoomph.Problem):
                     #print("DOT",numpy.sqrt(numpy.dot(numpy.array(history_dofs[i])-numpy.array(u0),numpy.array(dofs)-numpy.array(u0))))
         return res
         
-    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True)->NPComplexArray:
-        """
-        TODO; Add documentation
+    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000)->NPComplexArray:
+        """Calculates the Floquet multipliers of the currently tracked periodic orbit.
+
+        The orbit must be discretized in a mode that carries an explicit degree of freedom at the end
+        of the period, i.e. ``mode="collocation"`` (the default) or ``mode="floquet"``, and it must be
+        solved before this is called.
+
+        Args:
+            n: Number of multipliers to compute. Defaults to all of them (the number of degrees of freedom of the underlying problem).
+            valid_threshold: Only used by ``method="eigenproblem"``: eigenvalues above this magnitude are discarded as spurious.
+            shift: Only used by ``method="eigenproblem"``: shift handed to the eigensolver.
+            ignore_periodic_unity: Remove the trivial multiplier 1 (which always exists, due to the time-shift invariance of the orbit) from the result. If ``True``, a tolerance of 1e-5 is used.
+            quiet: Suppress the eigensolver output, and the accuracy report of the trivial multiplier.
+            method: ``"condensed"`` (default) condenses the block bidiagonal orbit Jacobian into the monodromy matrix, which yields exactly the multipliers and nothing else. ``"periodic_schur"`` computes the same multipliers by a periodic Schur (periodic QR) sweep, which never forms the product and is therefore more accurate for multipliers many orders of magnitude below the dominant one, at a considerably higher cost. ``"eigenproblem"`` is the older formulation, which solves one large singular eigenproblem over all time points and filters the result.
+            dense_threshold: Only used by ``method="condensed"``: above this number of degrees of freedom, only the dominant multipliers are computed by default, and the monodromy matrix is applied matrix-free rather than formed whenever few enough of them are wanted.
+
+        Returns:
+            NPComplexArray: The Floquet multipliers, sorted by ascending magnitude.
         """
         # Main ideas from here: https://arxiv.org/html/2407.18230v1#S2.E6
         from .. import _pyoomph_core as _pyoomph
@@ -7304,12 +7351,19 @@ class Problem(_pyoomph.Problem):
         if not orbit_handler.is_floquet_mode():
             raise RuntimeError("Floquet mode not active. Call activate_periodic_orbit_handler with mode='floquet' first, then solve the orbit, then call this function")
         nbase=orbit_handler.get_base_ndof()
+        if n is not None and n<=0:
+            raise ValueError("Invalid number of Floquet multipliers requested: "+str(n))
+
+        if method in ("condensed","periodic_schur"):
+            # n=None is passed on rather than resolved here: the condensed method only defaults to
+            # "all of them" while the monodromy is small enough to be formed.
+            return self._get_floquet_multipliers_condensed(n=n,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet,dense_threshold=dense_threshold,shift=shift,valid_threshold=valid_threshold,periodic_schur=(method=="periodic_schur"))
+        elif method!="eigenproblem":
+            raise ValueError("Invalid method for the Floquet multipliers: "+str(method))
         if n is None:
             n=nbase
-        if n<=0:
-            raise ValueError("Invalid number of Floquet multipliers requested: "+str(n))
-        
-        Jfull=self.assemble_jacobian(with_residual=False)        
+
+        Jfull=self.assemble_jacobian(with_residual=False)
         nMat=Jfull.shape[0]-1
         Jfull=Jfull[:nMat,:nMat] # Remove the T equation        
         Mdiag=numpy.zeros(nMat)
@@ -7338,6 +7392,38 @@ class Problem(_pyoomph.Problem):
         eigv=eigv[sortinds,:]
         self._last_eigenvalues=gamms
         self._last_eigenvectors=numpy.c_[eigv,numpy.zeros(eigv.shape[0])]
+        self._last_eigenvalues_m=None
+        self._last_eigenvalues_k=None
+        return gamms
+
+    def _get_floquet_multipliers_condensed(self,n:int | None,ignore_periodic_unity:bool | float,quiet:bool,dense_threshold:int,shift:float | None,valid_threshold:float | None,periodic_schur:bool=False)->NPComplexArray:
+        """Floquet multipliers by condensing the block bidiagonal orbit Jacobian; see pyoomph.generic.floquet."""
+        from .floquet import floquet_multipliers
+        # These two only ever existed to tame the singular eigenproblem formulation. The condensation
+        # has no spurious eigenvalues to threshold away and needs no shift, so silently accepting them
+        # would leave the caller believing they still did something.
+        if shift is not None:
+            print("WARNING: 'shift' is ignored by the condensed Floquet method; pass method='eigenproblem' to use it")
+        if valid_threshold is not None and valid_threshold!=10000:
+            print("WARNING: 'valid_threshold' is ignored by the condensed Floquet method; pass method='eigenproblem' to use it")
+
+        gamms,eigv=floquet_multipliers(self,n=n,quiet=quiet,dense_threshold=dense_threshold,periodic_schur=periodic_schur)
+
+        if ignore_periodic_unity is True:
+            ignore_periodic_unity=1e-5
+        if ignore_periodic_unity is not False:
+            unity_eigval=numpy.argwhere(numpy.abs(gamms-1)<ignore_periodic_unity).flatten()
+            if unity_eigval.size>0:
+                if unity_eigval.size>1:
+                    print("WARNING: Found multiple unity Floquet multipliers. Usually, only one is present (except at distinct bifurcations of the orbit) ")
+                gamms=numpy.delete(gamms,unity_eigval)
+                eigv=numpy.delete(eigv,unity_eigval,axis=0)
+        # Sort by magnitude, as the eigenproblem method does, so callers can keep indexing from the end
+        sortinds=numpy.argsort(numpy.abs(gamms))
+        gamms=gamms[sortinds]
+        eigv=eigv[sortinds,:]
+        self._last_eigenvalues=gamms
+        self._last_eigenvectors=eigv
         self._last_eigenvalues_m=None
         self._last_eigenvalues_k=None
         return gamms

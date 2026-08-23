@@ -384,6 +384,8 @@ namespace pyoomph
     // Refresh the halo copies of Phi/Psi and broadcast the rank-0-owned parameter and Omega after
     // a Newton update (called from Problem::synchronise_all_dofs; no-op unless distributed).
     void synchronise() override;
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies.
+    void synchronise_base_dofs();
 #endif
 
     // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
@@ -487,6 +489,8 @@ namespace pyoomph
     // Refresh the halo copies of Y and broadcast the rank-0-owned parameter and Sigma after a
     // Newton update (called from Problem::synchronise_all_dofs; no-op unless distributed).
     void synchronise() override;
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies.
+    void synchronise_base_dofs();
 #endif
 
     // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
@@ -592,6 +596,8 @@ namespace pyoomph
     // Refresh the halo copies of Y and broadcast the rank-0-owned parameter after a Newton update
     // (called from Problem::synchronise_all_dofs; no-op unless distributed).
     void synchronise() override;
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies.
+    void synchronise_base_dofs();
 #endif
 
     // Describes the augmented block for the frozen sparsity machinery; see AugmentedBlockSpec.
@@ -729,6 +735,8 @@ namespace pyoomph
     // Refresh the halo copies of the eigenvector parts and broadcast the rank-0-owned parameter
     // and Omega after a Newton update (called from Problem::synchronise_all_dofs; no-op unless distributed).
     void synchronise() override;
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies.
+    void synchronise_base_dofs();
 #endif
 
     //  void realign_C_vector(); //Reset the C-vector (which enforces the non-triviality of the eigenvector)
@@ -763,14 +771,22 @@ namespace pyoomph
   {
   protected:
     Problem *Problem_pt;                    // Pointer to the problem class
+    // Dof bookkeeping, shared with the bifurcation-tracking handlers: the naive augmented layout
+    // [u_0 | u_1 | ... | u_{nT-1} | T] is exactly the historical Ndof*tindex+eqn numbering, so the
+    // helper's translation table serves it unchanged. See AugmentedDofDistributionHelper.
+    AugmentedDofDistributionHelper Dist_helper;
     unsigned Ndof;                          // Degrees of freedom of the original problem (non-augmented)
-    std::vector<std::vector<double>> Tadd;  // Additional time steps
-    std::vector<double> x0;                 // Start point for the periodic orbit
-    std::vector<double> n0;                 // Start normal for the periodic orbit
+    // The per-time-point unknowns and the orbit's reference data are all indexed by BASE equation
+    // number inside the element loops, i.e. by numbers this rank owns or halos. DoubleVectorWithHalo-
+    // Entries::global_value() serves exactly that, and degrades to plain [] when not distributed, so
+    // one code path covers serial, replicated mpirun and --distribute.
+    std::vector<oomph::DoubleVectorWithHaloEntries> Tadd;  // Additional time steps
+    oomph::DoubleVectorWithHaloEntries x0;  // Start point for the periodic orbit
+    oomph::DoubleVectorWithHaloEntries n0;  // Start normal for the periodic orbit
     double d_plane;                         // Plane offset for the Poincare section
     double T;                               // Period of the periodic orbit
     unsigned T_global_eqn, n_element;
-    oomph::Vector<int> Count;
+    oomph::DoubleVectorWithHaloEntries Count;
     PeriodicBSplineBasis *basis = NULL;     // If nonzero, we use a B-spline basis, otherwise BDF2, central FD between the nodes or
     bool floquet_mode;                      // if this is true (and basis==NULL), we use the Floquet mode, where we explictly have dofs for the periodic time point at s=1
     std::vector<double> s_knots;
@@ -778,7 +794,7 @@ namespace pyoomph
     // When we do not have a spline basis, we do finite differences. Here, we store the coefficients and indices
     unsigned FD_ds_order;
     unsigned T_constraint_mode;             // 0: Plane constraint, 1: Period constraint
-    std::vector<std::vector<double>> du0ds; // Derivatives of the start orbit for the phase constraint
+    std::vector<oomph::DoubleVectorWithHaloEntries> du0ds; // Derivatives of the start orbit for the phase constraint
 
     oomph::Mesh *time_mesh;
     oomph::Integral *collocation_gl;
@@ -802,6 +818,23 @@ namespace pyoomph
     void update_phase_constraint_information();
     unsigned get_problem_ndof() { return Ndof; } // Returning the degrees of freedom of the original system (non-augmented)
     bool is_floquet_mode() { return floquet_mode; }
+    AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
+    // Refresh the halo entries of the time-point unknowns and broadcast the rank-0-owned period
+    // after each Newton update. oomph calls this at the end of Problem::synchronise_all_dofs().
+    void synchronise() override;
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies.
+    void synchronise_base_dofs();
+    // Time-block (knot) indices of each element of the time discretization, in order. Element ie
+    // writes the equations of its first entries but reads all of them, i.e. it fills the orbit
+    // Jacobian rows of indices [0..n-2] of the returned list from the columns of all n indices.
+    // This is the block bidiagonal structure the Floquet condensation slices along; returns an
+    // empty list in the modes that have no such structure (central/BDF2/B-spline, which are not
+    // floquet_mode anyway and for which no Floquet multipliers are defined here).
+    std::vector<std::vector<unsigned>> get_time_element_node_indices();
+    // The augmented equation number of each naive [u_0 | u_1 | ... | u_{nT-1} | T] row, i.e. the
+    // permutation that puts a gathered global orbit Jacobian back into time-major order. Empty when
+    // the problem is not distributed, where the two orders are already the same.
+    std::vector<unsigned long> get_naive_equation_order();
     std::vector<std::tuple<double, double>> get_s_integration_samples(); // Returns tuples of (s,w), so that integral_0^1(f(U(s))*ds) ~= sum( f(U(s_i))*w_i )
     // Constructs the handler for an orbit of the given initial 'period' guess, discretized either
     // via a B-spline basis of order bspline_order (if >=0), or via nodal/Floquet finite differences

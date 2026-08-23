@@ -1431,6 +1431,19 @@ namespace pyoomph
 	// length (must match ndof()) and that t is within the timestepper's available history storage.
 	void Problem::set_history_dofs(unsigned t, const std::vector<double> &inp)
 	{
+#ifdef OOMPH_HAS_MPI
+		// set_dofs(t,...) below already refuses when distributed, but the fill loop underneath gets
+		// there first and overruns the heap doing it: 'dofs' is built on the dof distribution, so it
+		// holds nrow_local entries, while the loop writes ndof() -- the GLOBAL count -- of them. With
+		// 162 dofs on 4 ranks that is ~120 doubles past the end of the buffer, and the corruption only
+		// surfaces later in an unrelated malloc. Refuse before writing anything.
+		//
+		// Unreachable until now: the only callers are PeriodicOrbit.__exit__ and refine_eigenfunction(),
+		// and both used to be refused on the Python side before they got here.
+		if (this->distributed())
+			throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
+			                    "Only the current dof values are available under --distribute.");
+#endif
 		oomph::DoubleVector dofs;
 		dofs.build(this->dof_distribution_pt(), 0.0);
 		if (inp.size() != this->ndof())

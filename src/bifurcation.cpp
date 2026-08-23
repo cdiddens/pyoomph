@@ -4221,65 +4221,80 @@ namespace pyoomph
   // was requested; see the class comment in bifurcation.hpp for the three modes.
   PeriodicOrbitHandler::PeriodicOrbitHandler(Problem *const &problem_pt, const double &period, const std::vector<std::vector<double>> &tadd, int bspline_order, int gl_order, std::vector<double> knots,unsigned T_constraint) : Problem_pt(problem_pt), T(period), T_constraint_mode(T_constraint), time_mesh(NULL), collocation_gl(NULL)
   {
-    Ndof = problem_pt->ndof();
-    n_element = problem_pt->mesh_pt()->nelement();
-    Tadd=tadd;
-    x0.resize(Ndof);
-    n0.resize(Ndof);
-    double nlength=0;
+    // Must come first, while the DEFAULT assembly handler is still installed and before any dof is
+    // pushed: it snapshots the base distribution and rebuilds the dof halo scheme.
+    Dist_helper.initialise(problem_pt);
+    Ndof = Dist_helper.base_nrow();
+    const unsigned n_row_local = Dist_helper.base_nrow_local();
+    const unsigned first_row = Dist_helper.base_first_row();
+
     if (T_constraint_mode>1) throw_runtime_error("T_constraint_mode must be 0 or 1");
-    for (unsigned int i=0;i<Ndof;i++)
+
+    // The caller's guesses arrive globally replicated (they come from Python, which holds whole dof
+    // vectors); only this rank's rows are kept. The extra slot floquet mode appends is filled below,
+    // once x0 exists.
+    const unsigned n_tadd_given = tadd.size();
+    for (unsigned int ti=0;ti<n_tadd_given;ti++)
     {
-        x0[i]=*(problem_pt->GetDofPtr()[i]); // Store the x0 for the  plane equation
-        n0[i]=Tadd.back()[i]-Tadd.front()[i]; // Store the normal vector for the plane equation
-        nlength+=n0[i]*n0[i];
+      if (tadd[ti].size()!=Ndof) throw_runtime_error("The size of the additional time vector must be the same as the number of dofs at index "+std::to_string(ti));
     }
-    nlength=std::sqrt(nlength);
-    for (unsigned int i=0;i<Ndof;i++)    {    n0[i]/=nlength;    }
-    d_plane=0;
-    for (unsigned int i=0;i<Ndof;i++)    d_plane+=n0[i]*x0[i]; // Distance of the plane to the origin
 
-
-    Count.resize(Ndof, 0);
-
-    // Loop over all the elements in the problem
-    unsigned n_element = problem_pt->mesh_pt()->nelement();
-    for (unsigned e = 0; e < n_element; e++)
+    Dist_helper.build_base_vector(x0);
+    Dist_helper.build_base_vector(n0);
+    double nlength=0;
+    for (unsigned int n=0;n<n_row_local;n++)
     {
-      GeneralisedElement *elem_pt = problem_pt->mesh_pt()->element_pt(e);
-      // Loop over the local freedoms in an element
-      unsigned n_var = elem_pt->ndof();
-      for (unsigned n = 0; n < n_var; n++)
-      {
-        // Increase the associated global equation number counter
-        ++Count[elem_pt->eqn_number(n)];
-      }
-    }    
+        const unsigned i=first_row+n;
+        x0[n]=*(problem_pt->global_dof_pt(i)); // Store the x0 for the  plane equation
+        n0[n]=tadd.back()[i]-tadd.front()[i];  // Store the normal vector for the plane equation
+        nlength+=n0[n]*n0[n];
+    }
+    nlength=std::sqrt(Dist_helper.allreduce_sum(nlength));
+    double d_plane_local=0;
+    for (unsigned int n=0;n<n_row_local;n++)
+    {
+      n0[n]/=nlength;
+      d_plane_local+=n0[n]*x0[n]; // Distance of the plane to the origin
+    }
+    d_plane=Dist_helper.allreduce_sum(d_plane_local);
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed()) { x0.synchronise(); n0.synchronise(); }
+#endif
+
+    // Halo-skipping element count per equation, summed across ranks; n_element likewise, so that
+    // the 1/Count weights still telescope to 1 over all ranks.
+    Dist_helper.build_base_vector(Count);
+    Dist_helper.setup_count_and_nelement(Count, n_element);
 
     // Floquet mode: We explicitly store the 0th dofs at the last step 
     if (bspline_order==0 || bspline_order<-2 ) ////TODO: Set the floquet mode here also for time mesh mode
     {
       floquet_mode=true;
-      Tadd.push_back(std::vector<double>(x0));
     }
     else floquet_mode=false;
 
-
+    Tadd.resize(n_tadd_given + (floquet_mode ? 1 : 0));
     for (unsigned int ti=0;ti<Tadd.size();ti++)
-    {      
-      if (Tadd[ti].size()!=Ndof) throw_runtime_error("The size of the additional time vector must be the same as the number of dofs at index "+std::to_string(ti));
-      for (unsigned int i=0;i<Ndof;i++)
+    {
+      Dist_helper.build_base_vector(Tadd[ti]);
+      for (unsigned int n=0;n<n_row_local;n++)
       {
-        problem_pt->GetDofPtr().push_back(&Tadd[ti][i]);    
+        Tadd[ti][n] = (ti<n_tadd_given ? tadd[ti][first_row+n] : x0[n]);
       }
+#ifdef OOMPH_HAS_MPI
+      if (Dist_helper.distributed()) Tadd[ti].synchronise();
+#endif
     }
-    
-    
-    problem_pt->GetDofPtr().push_back(&T); 
-    T_global_eqn=problem_pt->GetDofPtr().size()-1;
-    // Non-distributed: see MyFoldHandler's first constructor for what true does under MPI.
-    problem_pt->GetDofDistributionPt()->build(problem_pt->communicator_pt(), Ndof * (Tadd.size()+1)+1 , false); 
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+
+    // Naive layout [u_0 | u_1 | ... | u_{nT-1} | T]: exactly the historical Ndof*tindex+eqn
+    // numbering, so eqn_number() below only has to run its result through the helper's table.
+    std::vector<AugmentedDofDistributionHelper::Block> layout;
+    for (unsigned int ti=0;ti<Tadd.size();ti++) layout.push_back(AugmentedDofDistributionHelper::Block::vector(&Tadd[ti]));
+    layout.push_back(AugmentedDofDistributionHelper::Block::scalar(&T));
+    Dist_helper.build_augmented_dofs(layout);
+    // The naive layout is [u_0 | Tadd[0] | ... | Tadd[nT-2] | T], i.e. nT = 1+Tadd.size() blocks of
+    // Ndof before the period, so T sits at Ndof*nT. eqn_number() translates it.
+    T_global_eqn=Ndof*this->n_tsteps();
 
     
     
@@ -4467,6 +4482,54 @@ namespace pyoomph
     return i;
   }
 
+  // The block bidiagonal time structure, handed to Python so the Floquet condensation can slice
+  // the orbit Jacobian along it instead of solving one huge singular pencil over all time points.
+  // The two floquet_mode discretizations state it differently but mean the same thing: in
+  // collocation mode it is the connectivity of the 1D time mesh (get_jacobian_collocation_mode()
+  // writes rows for nodes 0..nnode-2 of an element and columns for all of them), and in the plain
+  // midpoint mode it is the pair (ti,ti+1) that get_jacobian_floquet_mode() couples. Both leave
+  // row block nT-1 to the wrap-around identity, which is what closes the orbit.
+  std::vector<std::vector<unsigned>> PeriodicOrbitHandler::get_time_element_node_indices()
+  {
+    std::vector<std::vector<unsigned>> res;
+    if (!floquet_mode) return res; // No Floquet structure in the central/BDF2/B-spline modes
+    if (time_mesh)
+    {
+      res.reserve(time_mesh->nelement());
+      for (unsigned int ie = 0; ie < time_mesh->nelement(); ie++)
+      {
+        oomph::QElementBase *el = dynamic_cast<oomph::QElementBase *>(time_mesh->element_pt(ie));
+        std::vector<unsigned> inds(el->nnode());
+        for (unsigned int in = 0; in < el->nnode(); in++)
+        {
+          inds[in] = dynamic_cast<TimeNode *>(el->node_pt(in))->get_index();
+        }
+        res.push_back(inds);
+      }
+    }
+    else
+    {
+      const unsigned ntsteps = this->n_tsteps();
+      res.reserve(ntsteps - 1);
+      for (unsigned int ti = 0; ti + 1 < ntsteps; ti++) res.push_back({ti, ti + 1});
+    }
+    return res;
+  }
+
+  // Under --distribute the augmented rows are interleaved per rank (rank d's base rows, then its
+  // rows of each time block, ...), so a gathered global orbit Jacobian is NOT in the time-major order
+  // the Floquet condensation slices along. This hands out the translation so the caller can permute
+  // it back. Empty when not distributed, where the naive order IS the actual one.
+  std::vector<unsigned long> PeriodicOrbitHandler::get_naive_equation_order()
+  {
+    std::vector<unsigned long> res;
+    if (!Dist_helper.distributed()) return res;
+    const unsigned long total = (unsigned long)Ndof * this->n_tsteps() + 1;
+    res.resize(total);
+    for (unsigned long i = 0; i < total; i++) res[i] = Dist_helper.global_eqn(i);
+    return res;
+  }
+
   // Frees the time mesh/collocation integral/B-spline basis (if any) and restores the problem
   // to its original (non-augmented) size.
   PeriodicOrbitHandler::~PeriodicOrbitHandler()
@@ -4481,11 +4544,9 @@ namespace pyoomph
         delete collocation_gl;
         collocation_gl=NULL;
     }
-    Problem_pt->GetDofPtr().resize(Ndof);
-    Problem_pt->GetDofDistributionPt()->build(Problem_pt->communicator_pt(),
-                                              Ndof, false);
-    // Remove all previous sparse storage used during Jacobian assembly
-    Problem_pt->GetSparcseAssembleWithArraysPA().resize(0);
+    // Shrinks the dof vector back to the base length and puts the base distribution back (in place
+    // when replicated, pointer swap-back when distributed), plus drops the sparse-assembly cache.
+    Dist_helper.restore_base_distribution();
     if (basis) {delete this->basis; this->basis=NULL;}
   }
   // Maps a local dof index to the global equation number: the first nT*raw_ndof local dofs
@@ -4661,7 +4722,22 @@ namespace pyoomph
       global_eqn = T_global_eqn;
     }    
     //std::cout << " GIVES " << global_eqn << std::endl;  
-    return global_eqn;
+    // Naive [u_0 | u_1 | ... | T] number -> the per-rank interleaved augmented number. Identity
+    // unless --distribute.
+    return Dist_helper.global_eqn(global_eqn);
+  }
+
+  // Called by oomph at the end of Problem::synchronise_all_dofs, i.e. after every Newton update.
+  // The element loops read the time-point unknowns of dofs this rank does not own through
+  // global_value(), so their halo entries have to be refreshed; the period lives on rank 0 alone
+  // and is broadcast. No-op unless distributed.
+  void PeriodicOrbitHandler::synchronise()
+  {
+#ifdef OOMPH_HAS_MPI
+    if (!Dist_helper.distributed()) return;
+    for (unsigned int ti=0;ti<Tadd.size();ti++) Tadd[ti].synchronise();
+    Dist_helper.synchronise_scalars({&T});
+#endif
   }
   
  
@@ -4682,12 +4758,11 @@ namespace pyoomph
       DenseMatrix<double> jacobian(raw_ndof), M(raw_ndof);            
       Vector<double> current_res(raw_ndof),dof_backup(raw_ndof),dUds(raw_ndof),U(raw_ndof);             
       Vector<unsigned> glob_eqs(raw_ndof);
-      oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();  
       unsigned ntsteps=this->n_tsteps();
       for (unsigned int i=0;i<raw_ndof;i++)
       {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          dof_backup[i]=*(alldofs[glob_eq]);          
+          dof_backup[i]=*(Problem_pt->global_dof_pt(glob_eq));          
           glob_eqs[i]=glob_eq;
       }
       oomph::Vector<double> dU0ds(dof_backup.size());
@@ -4702,7 +4777,7 @@ namespace pyoomph
           oomph::DShape dpsi(el->nnode(),1);
           double w =el->dshape_eulerian_at_knot(igl,psi,dpsi);          
           w*=this->n_tsteps()*200;
-          for (unsigned int i=0;i<raw_ndof;i++) *(alldofs[glob_eqs[i]])=0.0;
+          for (unsigned int i=0;i<raw_ndof;i++) *(Problem_pt->global_dof_pt(glob_eqs[i]))=0.0;
           oomph::Vector<double> loc_coord(1);
           loc_coord[0] = el->integral_pt()->knot(igl, 0);          
           double x=el->interpolated_x(loc_coord,0);
@@ -4726,15 +4801,15 @@ namespace pyoomph
             { 
               for (unsigned int i=0;i<raw_ndof;i++) 
               {
-                U[i]+=psi(in)*Tadd[index-1][glob_eqs[i]];
-                dUds[i]+=dpsi(in,0)*Tadd[index-1][glob_eqs[i]];
+                U[i]+=psi(in)*Tadd[index-1].global_value(glob_eqs[i]);
+                dUds[i]+=dpsi(in,0)*Tadd[index-1].global_value(glob_eqs[i]);
               }
             }
             if (T_constraint_mode==1)
             {
               for (unsigned int i=0;i<raw_ndof;i++) 
               {
-                  dU0ds[i]+=dpsi(in,0)*du0ds[index][glob_eqs[i]];
+                  dU0ds[i]+=dpsi(in,0)*du0ds[index].global_value(glob_eqs[i]);
               }
             }
 
@@ -4746,7 +4821,7 @@ namespace pyoomph
           std::cout << " and dU0ds =" ; for (unsigned int i=0;i<raw_ndof;i++) std::cout << dU0ds[i] << "  " ; 
           std::cout << std::endl;
 
-          for (unsigned int i=0;i<raw_ndof;i++) *(alldofs[glob_eqs[i]])=U[i];
+          for (unsigned int i=0;i<raw_ndof;i++) *(Problem_pt->global_dof_pt(glob_eqs[i]))=U[i];
 
           current_res.initialise(0.0);
           M.initialise(0.0);
@@ -4754,7 +4829,7 @@ namespace pyoomph
           if (!parameter_pt) elem_pt->get_jacobian_and_mass_matrix(current_res, jacobian, M);                      
           else elem_pt->get_djacobian_and_dmass_matrix_dparameter(parameter_pt,current_res, jacobian, M);
 
-          for (unsigned int i=0;i<raw_ndof;i++) *(alldofs[glob_eqs[i]])=dof_backup[i];
+          for (unsigned int i=0;i<raw_ndof;i++) *(Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
 
           for (unsigned in=0;in<el->nnode();in++)
           {
@@ -4783,7 +4858,7 @@ namespace pyoomph
           {
             for (unsigned int i=0;i<raw_ndof;i++)
             {
-                residuals[raw_ndof*this->n_tsteps()]+=dU0ds[i]* U[i]/Count[glob_eqs[i]]*w;
+                residuals[raw_ndof*this->n_tsteps()]+=dU0ds[i]* U[i]/Count.global_value(glob_eqs[i])*w;
             }     
           }
 
@@ -4800,7 +4875,7 @@ namespace pyoomph
         {
           for (unsigned int i=0;i<raw_ndof;i++)
           {          
-            residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2][glob_eqs[i]]-dof_backup[i])/Count[glob_eqs[i]];
+            residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2].global_value(glob_eqs[i])-dof_backup[i])/Count.global_value(glob_eqs[i]);
           }
         }
       }
@@ -4808,7 +4883,7 @@ namespace pyoomph
 
       for (unsigned int i=0;i<raw_ndof;i++)
       {
-        *(this->Problem_pt->GetDofPtr()[glob_eqs[i]])=dof_backup[i];
+        *(this->Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
       }
 
       if (!parameter_pt && T_constraint_mode==0)
@@ -4817,8 +4892,8 @@ namespace pyoomph
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          double x=*(this->Problem_pt->GetDofPtr()[glob_eq]);
-          plane_eq+=x*n0[glob_eq]/Count[glob_eq];
+          double x=*(this->Problem_pt->global_dof_pt(glob_eq));
+          plane_eq+=x*n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }      
         residuals[raw_ndof*this->n_tsteps()]=plane_eq;
       }          
@@ -4849,12 +4924,11 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       DenseMatrix<double> jacobian(raw_ndof), M(raw_ndof);            
       Vector<double> current_res(raw_ndof),dof_backup(raw_ndof),dUds(raw_ndof),U(raw_ndof);             
       Vector<unsigned> glob_eqs(raw_ndof);
-      oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();  
       unsigned ntsteps=this->n_tsteps();      
       for (unsigned int i=0;i<raw_ndof;i++)
       {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          dof_backup[i]=*(alldofs[glob_eq]);          
+          dof_backup[i]=*(Problem_pt->global_dof_pt(glob_eq));          
           glob_eqs[i]=glob_eq;
       }
       oomph::Vector<double> dU0ds(dof_backup.size());
@@ -4876,7 +4950,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
               el->dshape_eulerian(local_coord,psi,dpsi);                            
               
               
-              for (unsigned int i=0;i<raw_ndof;i++) *(alldofs[glob_eqs[i]])=0.0;
+              for (unsigned int i=0;i<raw_ndof;i++) *(Problem_pt->global_dof_pt(glob_eqs[i]))=0.0;
               dUds.initialise(0.0);
               dU0ds.initialise(0.0);
               U.initialise(0.0);
@@ -4896,15 +4970,15 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
                 { 
                   for (unsigned int i=0;i<raw_ndof;i++) 
                   {
-                    U[i]+=psi(in)*Tadd[index-1][glob_eqs[i]];
-                    dUds[i]+=dpsi(in,0)*Tadd[index-1][glob_eqs[i]];
+                    U[i]+=psi(in)*Tadd[index-1].global_value(glob_eqs[i]);
+                    dUds[i]+=dpsi(in,0)*Tadd[index-1].global_value(glob_eqs[i]);
                   }
                 }
                 if (T_constraint_mode==1)
                 {
                   for (unsigned int i=0;i<raw_ndof;i++) 
                   {
-                      dU0ds[i]+=dpsi(in,0)*du0ds[index][glob_eqs[i]];
+                      dU0ds[i]+=dpsi(in,0)*du0ds[index].global_value(glob_eqs[i]);
                   }
                 }
 
@@ -4914,7 +4988,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
               unsigned index=dynamic_cast<TimeNode*>(el->node_pt(inode))->get_index();
 
 
-              for (unsigned int i=0;i<raw_ndof;i++) *(alldofs[glob_eqs[i]])=U[i];
+              for (unsigned int i=0;i<raw_ndof;i++) *(Problem_pt->global_dof_pt(glob_eqs[i]))=U[i];
 
               current_res.initialise(0.0);
               M.initialise(0.0);
@@ -4939,7 +5013,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
               {
                 for (unsigned int i=0;i<raw_ndof;i++)
                 {
-                    residuals[raw_ndof*this->n_tsteps()]+=dU0ds[i]* U[i]/Count[glob_eqs[i]]*deltaS*w;
+                    residuals[raw_ndof*this->n_tsteps()]+=dU0ds[i]* U[i]/Count.global_value(glob_eqs[i])*deltaS*w;
                 }     
               }
 
@@ -4958,7 +5032,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         {
           for (unsigned int i=0;i<raw_ndof;i++)
           {          
-            residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2][glob_eqs[i]]-dof_backup[i])/Count[glob_eqs[i]];
+            residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2].global_value(glob_eqs[i])-dof_backup[i])/Count.global_value(glob_eqs[i]);
           }
         }
       }
@@ -4966,7 +5040,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       for (unsigned int i=0;i<raw_ndof;i++)
       {
-        *(this->Problem_pt->GetDofPtr()[glob_eqs[i]])=dof_backup[i];
+        *(this->Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
       }
 
       if (!parameter_pt && T_constraint_mode==0)
@@ -4975,8 +5049,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          double x=*(this->Problem_pt->GetDofPtr()[glob_eq]);
-          plane_eq+=x*n0[glob_eq]/Count[glob_eq];
+          double x=*(this->Problem_pt->global_dof_pt(glob_eq));
+          plane_eq+=x*n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }      
         residuals[raw_ndof*this->n_tsteps()]+=plane_eq;
       }          
@@ -4998,12 +5072,11 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       DenseMatrix<double> jacobian(raw_ndof), M(raw_ndof);            
       Vector<double> current_res(raw_ndof),dof_backup(raw_ndof),U(raw_ndof),dUds(raw_ndof);             
       Vector<unsigned> glob_eqs(raw_ndof);
-      oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();  
       unsigned ntsteps=this->n_tsteps();
       for (unsigned int i=0;i<raw_ndof;i++)
       {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          dof_backup[i]=*(alldofs[glob_eq]);          
+          dof_backup[i]=*(Problem_pt->global_dof_pt(glob_eq));          
           glob_eqs[i]=glob_eq;
       }
       std::vector<double> U0=dof_backup;
@@ -5014,14 +5087,14 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         double invds=this->FD_ds_weights[ti][0];
         for (unsigned int i=0;i<U0.size();i++)
         {
-          Uplus[i]=Tadd[ti][glob_eqs[i]];
+          Uplus[i]=Tadd[ti].global_value(glob_eqs[i]);
         }
                    
         for (unsigned int i=0;i<raw_ndof;i++)
         {
             U[i]=0.5*(U0[i]+Uplus[i]);
             dUds[i]=invds*(Uplus[i]-U0[i]);
-            *(alldofs[glob_eqs[i]])=U[i];
+            *(Problem_pt->global_dof_pt(glob_eqs[i]))=U[i];
         }
         current_res.initialise(0.0);
         M.initialise(0.0);
@@ -5042,7 +5115,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         {
           for (unsigned int i=0;i<raw_ndof;i++)
           {
-            residuals[raw_ndof*this->n_tsteps()]+=du0ds[ti][glob_eqs[i]]*U[i]/Count[glob_eqs[i]];
+            residuals[raw_ndof*this->n_tsteps()]+=du0ds[ti].global_value(glob_eqs[i])*U[i]/Count.global_value(glob_eqs[i]);
           }
           
         }
@@ -5055,14 +5128,14 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       {
         for (unsigned int i=0;i<raw_ndof;i++)
         {
-          residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2][glob_eqs[i]]-dof_backup[i])/Count[glob_eqs[i]];
+          residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2].global_value(glob_eqs[i])-dof_backup[i])/Count.global_value(glob_eqs[i]);
         }
       }
 
 
       for (unsigned int i=0;i<raw_ndof;i++)
       {
-        *(this->Problem_pt->GetDofPtr()[glob_eqs[i]])=dof_backup[i];
+        *(this->Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
       }
 
       if (!parameter_pt && T_constraint_mode==0)
@@ -5071,8 +5144,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           for (unsigned int i=0;i<raw_ndof;i++)
           {
             unsigned glob_eq=elem_pt->eqn_number(i);
-            double x=*(this->Problem_pt->GetDofPtr()[glob_eq]);
-            plane_eq+=x*n0[glob_eq]/Count[glob_eq];
+            double x=*(this->Problem_pt->global_dof_pt(glob_eq));
+            plane_eq+=x*n0.global_value(glob_eq)/Count.global_value(glob_eq);
           }      
           residuals[raw_ndof*this->n_tsteps()]=plane_eq;
         }      
@@ -5107,7 +5180,6 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       Vector<double> dof_backup(raw_ndof);            
       Vector<unsigned> glob_eqs(raw_ndof);
       unsigned Teq=raw_ndof*this->n_tsteps();
-      oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();
       Vector<double> U(raw_ndof,0.0),dUds(raw_ndof,0.0);          
 
       std::vector<SinglePassMultiAssembleInfo> multi_assm;
@@ -5118,7 +5190,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       for (unsigned int i=0;i<raw_ndof;i++)
       {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          dof_backup[i]=*(alldofs[glob_eq]);          
+          dof_backup[i]=*(Problem_pt->global_dof_pt(glob_eq));          
           glob_eqs[i]=glob_eq;
       }            
 
@@ -5129,7 +5201,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       {
         for (unsigned int i=0;i<U0.size();i++)
         {
-          Uplus[i]=Tadd[ti][glob_eqs[i]];
+          Uplus[i]=Tadd[ti].global_value(glob_eqs[i]);
         }
         double invds=this->FD_ds_weights[ti][0];
         for (unsigned int i=0;i<raw_ndof;i++)
@@ -5139,7 +5211,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         }      
         for (unsigned int i=0;i<raw_ndof;i++)
         {
-             *(alldofs[glob_eqs[i]])=U[i];
+             *(Problem_pt->global_dof_pt(glob_eqs[i]))=U[i];
         }
         current_res.initialise(0.0);
         M.initialise(0.0);
@@ -5179,9 +5251,9 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         {
           for (unsigned int i=0;i<raw_ndof;i++)
           {
-            residuals[raw_ndof*this->n_tsteps()]+=du0ds[ti][glob_eqs[i]]*U[i]/Count[glob_eqs[i]];
-            jacobian(Teq,ti*raw_ndof+i)+=0.5*du0ds[ti][glob_eqs[i]]/Count[glob_eqs[i]];
-            jacobian(Teq,(ti+1)*raw_ndof+i)+=0.5*du0ds[ti][glob_eqs[i]]/Count[glob_eqs[i]];
+            residuals[raw_ndof*this->n_tsteps()]+=du0ds[ti].global_value(glob_eqs[i])*U[i]/Count.global_value(glob_eqs[i]);
+            jacobian(Teq,ti*raw_ndof+i)+=0.5*du0ds[ti].global_value(glob_eqs[i])/Count.global_value(glob_eqs[i]);
+            jacobian(Teq,(ti+1)*raw_ndof+i)+=0.5*du0ds[ti].global_value(glob_eqs[i])/Count.global_value(glob_eqs[i]);
           }
           
         }
@@ -5190,14 +5262,14 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
    
       for (unsigned int i=0;i<raw_ndof;i++)
       {
-        residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2][glob_eqs[i]]-dof_backup[i])/Count[glob_eqs[i]];
-        jacobian((ntsteps-1)*raw_ndof+i,(ntsteps-1)*raw_ndof+i)+=1.0/Count[glob_eqs[i]];
-        jacobian((ntsteps-1)*raw_ndof+i,i)+=-1.0/Count[glob_eqs[i]];
+        residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2].global_value(glob_eqs[i])-dof_backup[i])/Count.global_value(glob_eqs[i]);
+        jacobian((ntsteps-1)*raw_ndof+i,(ntsteps-1)*raw_ndof+i)+=1.0/Count.global_value(glob_eqs[i]);
+        jacobian((ntsteps-1)*raw_ndof+i,i)+=-1.0/Count.global_value(glob_eqs[i]);
       }
 
       for (unsigned int i=0;i<raw_ndof;i++)
       {
-        *(this->Problem_pt->GetDofPtr()[glob_eqs[i]])=dof_backup[i];
+        *(this->Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
       }
 
 
@@ -5207,8 +5279,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=glob_eqs[i];
-          double x=*(this->Problem_pt->GetDofPtr()[glob_eq]);
-          plane_eq+=x*n0[glob_eq]/Count[glob_eq];
+          double x=*(this->Problem_pt->global_dof_pt(glob_eq));
+          plane_eq+=x*n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }
 
         // Get the plane equation
@@ -5216,7 +5288,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=glob_eqs[i];
-          jacobian(Teq,i)+=n0[glob_eq]/Count[glob_eq];
+          jacobian(Teq,i)+=n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }
       }
   }
@@ -5235,11 +5307,10 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       DenseMatrix<double> jacobian(raw_ndof), M(raw_ndof);            
       Vector<double> current_res(raw_ndof),dof_backup(raw_ndof);             
       Vector<unsigned> glob_eqs(raw_ndof);
-      oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();      
       for (unsigned int i=0;i<raw_ndof;i++)
       {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          dof_backup[i]=*(alldofs[glob_eq]);          
+          dof_backup[i]=*(Problem_pt->global_dof_pt(glob_eq));          
           glob_eqs[i]=glob_eq;
       }     
 
@@ -5254,7 +5325,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
             index--;
             for (unsigned int i=0;i<raw_ndof;i++)
             {              
-              ddof_ds[i]+=this->FD_ds_weights[ti][ii]*Tadd[index][glob_eqs[i]];
+              ddof_ds[i]+=this->FD_ds_weights[ti][ii]*Tadd[index].global_value(glob_eqs[i]);
             }
           }
           else
@@ -5273,7 +5344,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           for (unsigned int i=0;i<raw_ndof;i++)
           {
             unsigned glob_eq=glob_eqs[i];
-            *(alldofs[glob_eq])=Tadd[ti-1][glob_eq];              
+            *(Problem_pt->global_dof_pt(glob_eq))=Tadd[ti-1].global_value(glob_eq);              
           }
         }            
         current_res.initialise(0.0);
@@ -5296,8 +5367,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           double ds=0.5*(this->get_knot_value(ti+1)-this->get_knot_value(ti-1));
           for (unsigned int i=0;i<raw_ndof;i++)
           {
-            residuals[raw_ndof*this->n_tsteps()]+=du0ds[ti][glob_eqs[i]]*(*(alldofs[glob_eqs[i]]))/Count[glob_eqs[i]]*ds;
-            //jacobian(raw_ndof*this->n_tsteps(),ti*raw_ndof+i)+=du0ds[ti][glob_eqs[i]]/Count[glob_eqs[i]];            
+            residuals[raw_ndof*this->n_tsteps()]+=du0ds[ti].global_value(glob_eqs[i])*(*(Problem_pt->global_dof_pt(glob_eqs[i])))/Count.global_value(glob_eqs[i])*ds;
+            //jacobian(raw_ndof*this->n_tsteps(),ti*raw_ndof+i)+=du0ds[ti].global_value(glob_eqs[i])/Count.global_value(glob_eqs[i]);            
           }
           
         }        
@@ -5305,7 +5376,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       for (unsigned int i=0;i<raw_ndof;i++)
       {
-        *(this->Problem_pt->GetDofPtr()[glob_eqs[i]])=dof_backup[i];
+        *(this->Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
       }
 
       if (!parameter_pt && T_constraint_mode==0)
@@ -5314,8 +5385,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          double x=*(this->Problem_pt->GetDofPtr()[glob_eq]);
-          plane_eq+=x*n0[glob_eq]/Count[glob_eq];
+          double x=*(this->Problem_pt->global_dof_pt(glob_eq));
+          plane_eq+=x*n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }      
         residuals[raw_ndof*this->n_tsteps()]=plane_eq;
       }
@@ -5337,13 +5408,12 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       DenseMatrix<double> jacobian(raw_ndof), M(raw_ndof);            
       Vector<double> current_res(raw_ndof),dof_backup(raw_ndof);             
       Vector<unsigned> glob_eqs(raw_ndof);
-      oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();      
       oomph::Vector<double> dU0ds;
       if (!parameter_pt && T_constraint_mode==1) dU0ds.resize(raw_ndof,0.0);
       for (unsigned int i=0;i<raw_ndof;i++)
       {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          dof_backup[i]=*(alldofs[glob_eq]);          
+          dof_backup[i]=*(Problem_pt->global_dof_pt(glob_eq));          
           glob_eqs[i]=glob_eq;
       }   
 
@@ -5370,7 +5440,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
             {
               for (unsigned int i=0;i<raw_ndof;i++)
               {
-                U_at_index[i]=Tadd[indices[psi_index]-1][glob_eqs[i]];
+                U_at_index[i]=Tadd[indices[psi_index]-1].global_value(glob_eqs[i]);
               }
             }
             // I guess this can be optimized and filled in a rotary buffer
@@ -5384,7 +5454,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
             {
               for (unsigned int i=0;i<raw_ndof;i++)
               {                
-                dU0ds[i]+=dpsi_ds[iGL][psi_index]*du0ds[indices[psi_index]][glob_eqs[i]];
+                dU0ds[i]+=dpsi_ds[iGL][psi_index]*du0ds[indices[psi_index]].global_value(glob_eqs[i]);
               }            
             }
           }
@@ -5392,7 +5462,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           for (unsigned int i=0;i<raw_ndof;i++)
           {
             //unsigned glob_eq=elem_pt->eqn_number(i);
-            *(alldofs[glob_eqs[i]])=Ulocal[i]; // Set the unknowns
+            *(Problem_pt->global_dof_pt(glob_eqs[i]))=Ulocal[i]; // Set the unknowns
           }
 
           current_res.initialise(0.0);
@@ -5405,7 +5475,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           {
             for (unsigned i = 0; i < raw_ndof; i++)
             {
-              double fact=dU0ds[i]/Count[glob_eqs[i]]*w[iGL];
+              double fact=dU0ds[i]/Count.global_value(glob_eqs[i])*w[iGL];
               residuals[raw_ndof*this->n_tsteps()]+=fact*Ulocal[i];
               //for (unsigned int l2=0;l2<indices.size();l2++)
               //{
@@ -5432,7 +5502,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       for (unsigned int i=0;i<raw_ndof;i++)
       {
-        *(this->Problem_pt->GetDofPtr()[glob_eqs[i]])=dof_backup[i];
+        *(this->Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
       }
       if (!parameter_pt && T_constraint_mode==0)
       {
@@ -5440,8 +5510,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          double x=*(this->Problem_pt->GetDofPtr()[glob_eq]);
-          plane_eq+=x*n0[glob_eq]/Count[glob_eq];
+          double x=*(this->Problem_pt->global_dof_pt(glob_eq));
+          plane_eq+=x*n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }      
         residuals[raw_ndof*this->n_tsteps()]=plane_eq;    
       }
@@ -5520,7 +5590,6 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     unsigned raw_ndof = elem_pt->ndof();    
     Vector<double> current_res(raw_ndof),dof_backup(raw_ndof),dUds(raw_ndof);             
     Vector<unsigned> glob_eqs(raw_ndof);
-    oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();  
     unsigned ntsteps=this->n_tsteps();
 
     
@@ -5534,7 +5603,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     for (unsigned int i=0;i<raw_ndof;i++)
     {
         unsigned glob_eq=elem_pt->eqn_number(i);
-        dof_backup[i]=*(alldofs[glob_eq]);          
+        dof_backup[i]=*(Problem_pt->global_dof_pt(glob_eq));          
         glob_eqs[i]=glob_eq;
     }
     std::vector<double> U0=dof_backup;
@@ -5550,7 +5619,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         oomph::DShape dpsi(el->nnode(),1);
         double w =el->dshape_eulerian_at_knot(igl,psi,dpsi);
         w*=this->n_tsteps();
-        for (unsigned int i=0;i<raw_ndof;i++) *(alldofs[glob_eqs[i]])=0.0;
+        for (unsigned int i=0;i<raw_ndof;i++) *(Problem_pt->global_dof_pt(glob_eqs[i]))=0.0;
         dUds.initialise(0.0);
         dU0ds.initialise(0.0);
         for (unsigned int in=0;in<el->nnode();in++)
@@ -5560,7 +5629,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           { 
             for (unsigned int i=0;i<raw_ndof;i++) 
             {
-              *(alldofs[glob_eqs[i]])+=psi(in)*dof_backup[i];
+              *(Problem_pt->global_dof_pt(glob_eqs[i]))+=psi(in)*dof_backup[i];
               dUds[i]+=dpsi(in,0)*dof_backup[i];
             }
           }
@@ -5568,15 +5637,15 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           { 
             for (unsigned int i=0;i<raw_ndof;i++) 
             {
-              *(alldofs[glob_eqs[i]])+=psi(in)*Tadd[index-1][glob_eqs[i]];
-              dUds[i]+=dpsi(in,0)*Tadd[index-1][glob_eqs[i]];
+              *(Problem_pt->global_dof_pt(glob_eqs[i]))+=psi(in)*Tadd[index-1].global_value(glob_eqs[i]);
+              dUds[i]+=dpsi(in,0)*Tadd[index-1].global_value(glob_eqs[i]);
             }
           }
           if (T_constraint_mode==1) 
           {
             for (unsigned int i=0;i<raw_ndof;i++)
             {
-              dU0ds[i]+=dpsi(in,0)*du0ds[index][glob_eqs[i]];
+              dU0ds[i]+=dpsi(in,0)*du0ds[index].global_value(glob_eqs[i]);
             }            
           }
         }
@@ -5635,7 +5704,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           //{
             //for (unsigned int i=0;i<raw_ndof;i++)
             //{
-              //residuals[raw_ndof*this->n_tsteps()]+=du0ds[index][glob_eqs[i]]**(alldofs[glob_eqs[i]])/Count[glob_eqs[i]]*psi[in]*w;
+              //residuals[raw_ndof*this->n_tsteps()]+=du0ds[index].global_value(glob_eqs[i])**(Problem_pt->global_dof_pt(glob_eqs[i]))/Count.global_value(glob_eqs[i])*psi[in]*w;
             //}            
           //}
 
@@ -5648,7 +5717,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         {
             for (unsigned i = 0; i < raw_ndof; i++)
             {            
-              residuals[raw_ndof*this->n_tsteps()]+=dU0ds[i]/Count[glob_eqs[i]]*w* *(alldofs[glob_eqs[i]]);             
+              residuals[raw_ndof*this->n_tsteps()]+=dU0ds[i]/Count.global_value(glob_eqs[i])*w* *(Problem_pt->global_dof_pt(glob_eqs[i]));             
             }
             for (unsigned in2=0;in2<el->nnode();in2++)
             {
@@ -5656,7 +5725,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
               if (floquet_mode && index2==ntsteps-1) continue;
               for (unsigned i = 0; i < raw_ndof; i++)
               {
-                jacobian(raw_ndof*this->n_tsteps(),index2*raw_ndof+i)+=dU0ds[i]/Count[glob_eqs[i]]*w *psi(in2);
+                jacobian(raw_ndof*this->n_tsteps(),index2*raw_ndof+i)+=dU0ds[i]/Count.global_value(glob_eqs[i])*w *psi(in2);
               }
             }
         }                
@@ -5683,16 +5752,16 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       }
       for (unsigned int i=0;i<raw_ndof;i++)
       {          
-        residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2][glob_eqs[i]]-dof_backup[i])/Count[glob_eqs[i]];
-        jacobian((ntsteps-1)*raw_ndof+i,(ntsteps-1)*raw_ndof+i)+=1.0/Count[glob_eqs[i]];
-        jacobian((ntsteps-1)*raw_ndof+i,i)+=-1.0/Count[glob_eqs[i]];
+        residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2].global_value(glob_eqs[i])-dof_backup[i])/Count.global_value(glob_eqs[i]);
+        jacobian((ntsteps-1)*raw_ndof+i,(ntsteps-1)*raw_ndof+i)+=1.0/Count.global_value(glob_eqs[i]);
+        jacobian((ntsteps-1)*raw_ndof+i,i)+=-1.0/Count.global_value(glob_eqs[i]);
       }
     }
 
 
     for (unsigned int i=0;i<raw_ndof;i++)
     {
-      *(this->Problem_pt->GetDofPtr()[glob_eqs[i]])=dof_backup[i];
+      *(this->Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
     }
 
     if (T_constraint_mode==0)
@@ -5701,14 +5770,14 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       for (unsigned int i=0;i<raw_ndof;i++)
       {
         unsigned glob_eq=elem_pt->eqn_number(i);
-        double x=*(this->Problem_pt->GetDofPtr()[glob_eq]);
-        plane_eq+=x*n0[glob_eq]/Count[glob_eq];
+        double x=*(this->Problem_pt->global_dof_pt(glob_eq));
+        plane_eq+=x*n0.global_value(glob_eq)/Count.global_value(glob_eq);
       }      
       residuals[raw_ndof*this->n_tsteps()]=plane_eq;
       for (unsigned int i=0;i<raw_ndof;i++)
       {
           unsigned glob_eq=glob_eqs[i];
-          jacobian(Teq,i)=n0[glob_eq]/Count[glob_eq];
+          jacobian(Teq,i)=n0.global_value(glob_eq)/Count.global_value(glob_eq);
       }
     }          
   }
@@ -5729,13 +5798,12 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       DenseMatrix<double> J(raw_ndof), M(raw_ndof);            
       Vector<double> current_res(raw_ndof),dof_backup(raw_ndof),dUds(raw_ndof),U(raw_ndof);             
       Vector<unsigned> glob_eqs(raw_ndof);
-      oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();  
       unsigned ntsteps=this->n_tsteps();    
       unsigned Teq=raw_ndof*this->n_tsteps();  
       for (unsigned int i=0;i<raw_ndof;i++)
       {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          dof_backup[i]=*(alldofs[glob_eq]);          
+          dof_backup[i]=*(Problem_pt->global_dof_pt(glob_eq));          
           glob_eqs[i]=glob_eq;
       }
       oomph::Vector<double> dU0ds(dof_backup.size());
@@ -5770,7 +5838,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
               local_coord[0]=gl_s;
               el->dshape_eulerian(local_coord,psi,dpsi);
               
-              for (unsigned int i=0;i<raw_ndof;i++) *(alldofs[glob_eqs[i]])=0.0;
+              for (unsigned int i=0;i<raw_ndof;i++) *(Problem_pt->global_dof_pt(glob_eqs[i]))=0.0;
               dUds.initialise(0.0);
               dU0ds.initialise(0.0);
               U.initialise(0.0);
@@ -5790,15 +5858,15 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
                 { 
                   for (unsigned int i=0;i<raw_ndof;i++) 
                   {
-                    U[i]+=psi(in)*Tadd[index-1][glob_eqs[i]];
-                    dUds[i]+=dpsi(in,0)*Tadd[index-1][glob_eqs[i]];
+                    U[i]+=psi(in)*Tadd[index-1].global_value(glob_eqs[i]);
+                    dUds[i]+=dpsi(in,0)*Tadd[index-1].global_value(glob_eqs[i]);
                   }
                 }
                 if (T_constraint_mode==1)
                 {
                   for (unsigned int i=0;i<raw_ndof;i++) 
                   {
-                      dU0ds[i]+=dpsi(in,0)*du0ds[index][glob_eqs[i]];
+                      dU0ds[i]+=dpsi(in,0)*du0ds[index].global_value(glob_eqs[i]);
                   }
                 }
 
@@ -5806,7 +5874,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
               }
 
 
-              for (unsigned int i=0;i<raw_ndof;i++) *(alldofs[glob_eqs[i]])=U[i];
+              for (unsigned int i=0;i<raw_ndof;i++) *(Problem_pt->global_dof_pt(glob_eqs[i]))=U[i];
               unsigned index=dynamic_cast<TimeNode*>(el->node_pt(inode))->get_index();
 
               current_res.initialise(0.0);                                          
@@ -5857,11 +5925,11 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
               {
                 for (unsigned int i=0;i<raw_ndof;i++)
                 {
-                    residuals[raw_ndof*this->n_tsteps()]+=dU0ds[i]* U[i]/Count[glob_eqs[i]]*deltaS*w;
+                    residuals[raw_ndof*this->n_tsteps()]+=dU0ds[i]* U[i]/Count.global_value(glob_eqs[i])*deltaS*w;
                     for (unsigned int nn2=0;nn2<el->nnode();nn2++)
                     {
                       unsigned index2=dynamic_cast<TimeNode*>(el->node_pt(nn2))->get_index();
-                      jacobian(raw_ndof*this->n_tsteps(),index2*raw_ndof+i)+=dU0ds[i]*psi[nn2]/Count[glob_eqs[i]]*deltaS*w;
+                      jacobian(raw_ndof*this->n_tsteps(),index2*raw_ndof+i)+=dU0ds[i]*psi[nn2]/Count.global_value(glob_eqs[i])*deltaS*w;
                     }
                 }     
               }
@@ -5878,16 +5946,16 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         //for (unsigned int i=0;i<raw_ndof;i++) residuals[raw_ndof*(this->n_tsteps()-1)+i]=0.0;        
           for (unsigned int i=0;i<raw_ndof;i++)
           {          
-            residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2][glob_eqs[i]]-dof_backup[i])/Count[glob_eqs[i]];
-            jacobian((ntsteps-1)*raw_ndof+i,(ntsteps-1)*raw_ndof+i)+=1.0/Count[glob_eqs[i]];
-            jacobian((ntsteps-1)*raw_ndof+i,i)+=-1.0/Count[glob_eqs[i]];
+            residuals[(ntsteps-1)*raw_ndof+i]+=(Tadd[ntsteps-2].global_value(glob_eqs[i])-dof_backup[i])/Count.global_value(glob_eqs[i]);
+            jacobian((ntsteps-1)*raw_ndof+i,(ntsteps-1)*raw_ndof+i)+=1.0/Count.global_value(glob_eqs[i]);
+            jacobian((ntsteps-1)*raw_ndof+i,i)+=-1.0/Count.global_value(glob_eqs[i]);
           }
       }
 
 
       for (unsigned int i=0;i<raw_ndof;i++)
       {
-        *(this->Problem_pt->GetDofPtr()[glob_eqs[i]])=dof_backup[i];
+        *(this->Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
       }
 
       if (T_constraint_mode==0)
@@ -5896,14 +5964,14 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          double x=*(this->Problem_pt->GetDofPtr()[glob_eq]);
-          plane_eq+=x*n0[glob_eq]/Count[glob_eq];
+          double x=*(this->Problem_pt->global_dof_pt(glob_eq));
+          plane_eq+=x*n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }      
         residuals[raw_ndof*this->n_tsteps()]+=plane_eq;
         for (unsigned int i=0;i<raw_ndof;i++)
         {
             unsigned glob_eq=glob_eqs[i];
-            jacobian(raw_ndof*this->n_tsteps(),i)+=n0[glob_eq]/Count[glob_eq];
+            jacobian(raw_ndof*this->n_tsteps(),i)+=n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }
       }          
   }
@@ -5939,7 +6007,6 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       Vector<double> current_res(raw_ndof);      
       Vector<double> dof_backup(raw_ndof);            
       Vector<unsigned> glob_eqs(raw_ndof);
-      oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();
 
       oomph::Vector<double> dU0ds;
       if (T_constraint_mode==1) dU0ds.resize(raw_ndof,0.0);
@@ -5956,7 +6023,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       for (unsigned int i=0;i<raw_ndof;i++)
       {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          dof_backup[i]=*(alldofs[glob_eq]);          
+          dof_backup[i]=*(Problem_pt->global_dof_pt(glob_eq));          
           glob_eqs[i]=glob_eq;
       }            
 
@@ -5985,7 +6052,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
               {
                 for (unsigned int i=0;i<raw_ndof;i++)
                 {
-                  U_at_index[i]=Tadd[indices[psi_index]-1][glob_eqs[i]];
+                  U_at_index[i]=Tadd[indices[psi_index]-1].global_value(glob_eqs[i]);
                 }
               }
               // I guess this can be optimized and filled in a rotary buffer
@@ -5998,7 +6065,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
               {
                 for (unsigned int i=0;i<raw_ndof;i++)
                 {
-                  dU0ds[i]+=dpsi_ds[iGL][psi_index]*du0ds[indices[psi_index]][glob_eqs[i]];
+                  dU0ds[i]+=dpsi_ds[iGL][psi_index]*du0ds[indices[psi_index]].global_value(glob_eqs[i]);
                 }            
               }
             }
@@ -6006,7 +6073,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
             for (unsigned int i=0;i<raw_ndof;i++)
             {
               unsigned glob_eq=elem_pt->eqn_number(i);
-              *(alldofs[glob_eq])=Ulocal[i]; // Set the unknowns
+              *(Problem_pt->global_dof_pt(glob_eq))=Ulocal[i]; // Set the unknowns
             }
 
             current_res.initialise(0.0);
@@ -6027,7 +6094,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
             {
               for (unsigned i = 0; i < raw_ndof; i++)
               {
-                double fact=dU0ds[i]/Count[glob_eqs[i]]*w[iGL];
+                double fact=dU0ds[i]/Count.global_value(glob_eqs[i])*w[iGL];
                 residuals[raw_ndof*this->n_tsteps()]+=fact*Ulocal[i];
                 for (unsigned int l2=0;l2<indices.size();l2++)
                 {
@@ -6078,7 +6145,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       for (unsigned int i=0;i<raw_ndof;i++)
       {
-        *(this->Problem_pt->GetDofPtr()[glob_eqs[i]])=dof_backup[i];
+        *(this->Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
       }
 
       if (this->T_constraint_mode==0)
@@ -6087,8 +6154,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=glob_eqs[i];
-          double x=*(this->Problem_pt->GetDofPtr()[glob_eq]);
-          plane_eq+=x*n0[glob_eq]/Count[glob_eq];
+          double x=*(this->Problem_pt->global_dof_pt(glob_eq));
+          plane_eq+=x*n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }
 
         // Get the plane equation
@@ -6096,7 +6163,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=glob_eqs[i];
-          jacobian(Teq,i)=n0[glob_eq]/Count[glob_eq];
+          jacobian(Teq,i)=n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }
       }
 
@@ -6116,23 +6183,25 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     if (T_constraint_mode==1)
     {
       unsigned ntsteps=this->n_tsteps();
-      oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();
+      // du0ds is read by BASE equation number inside the element loops, so it is a halo vector like
+      // the unknowns; it is written here over this rank's own rows and then pushed to the halos.
+      const unsigned n_row_local = Dist_helper.base_nrow_local();
       if (!basis)
       {
         if (time_mesh)
         {
           du0ds.resize(ntsteps);        
-        du0ds[0].resize(Ndof);
-        for (unsigned int i=0;i<Ndof;i++)
+        Dist_helper.build_base_vector(du0ds[0]);
+        for (unsigned int n=0;n<n_row_local;n++)
         {
-            du0ds[0][i]=*(alldofs[i]); // Just the U0 solution here, we do it via Gauss-Legendre in the residual/jacobian calculation
+            du0ds[0][n]=*(Problem_pt->GetDofPtr()[n]); // Just the U0 solution here, we do it via Gauss-Legendre in the residual/jacobian calculation
         }
         for (unsigned int ti=1;ti<ntsteps;ti++)
         {
-          du0ds[ti].resize(Ndof);
-          for (unsigned int i=0;i<Ndof;i++)
+          Dist_helper.build_base_vector(du0ds[ti]);
+          for (unsigned int n=0;n<n_row_local;n++)
           {
-            du0ds[ti][i]=Tadd[ti-1][i]; // Just the U0 solution here, we do it via Gauss-Legendre in the residual/jacobian calculation
+            du0ds[ti][n]=Tadd[ti-1][n]; // Just the U0 solution here, we do it via Gauss-Legendre in the residual/jacobian calculation
           }
         }                
         }
@@ -6140,17 +6209,17 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         {
 
           du0ds.resize(ntsteps-1);
-          du0ds[0].resize(Ndof);
-          for (unsigned int i=0;i<Ndof;i++)
+          Dist_helper.build_base_vector(du0ds[0]);
+          for (unsigned int n=0;n<n_row_local;n++)
           {
-              du0ds[0][i]=Tadd[0][i]-*(alldofs[i]); // Without 1/ds factor, since it will cancel out in the integral anyways
+              du0ds[0][n]=Tadd[0][n]-*(Problem_pt->GetDofPtr()[n]); // Without 1/ds factor, since it will cancel out in the integral anyways
           }
           for (unsigned int ti=1;ti<ntsteps-1;ti++)
           {
-            du0ds[ti].resize(Ndof);
-            for (unsigned int i=0;i<Ndof;i++)
+            Dist_helper.build_base_vector(du0ds[ti]);
+            for (unsigned int n=0;n<n_row_local;n++)
             {
-              du0ds[ti][i]=Tadd[ti][i]-Tadd[ti-1][i]; // Without 1/ds factor, since it will cancel out in the integral anyways
+              du0ds[ti][n]=Tadd[ti][n]-Tadd[ti-1][n]; // Without 1/ds factor, since it will cancel out in the integral anyways
             }
           }
 
@@ -6160,23 +6229,23 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           du0ds.resize(ntsteps);
           for (unsigned int ti=0;ti<ntsteps;ti++)
           {          
-            du0ds[ti].resize(Ndof,0.0);
+            Dist_helper.build_base_vector(du0ds[ti]);
             for (unsigned int ii=0;ii<this->FD_ds_inds[ti].size();ii++)
             {
               unsigned index=this->FD_ds_inds[ti][ii];
               if (index>0)
               {
                 index--;
-                for (unsigned int i=0;i<Ndof;i++)
+                for (unsigned int n=0;n<n_row_local;n++)
                 {              
-                  du0ds[ti][i]+=this->FD_ds_weights[ti][ii]*Tadd[index][i];
+                  du0ds[ti][n]+=this->FD_ds_weights[ti][ii]*Tadd[index][n];
                 }
               }
               else
               {
-                for (unsigned int i=0;i<Ndof;i++)
+                for (unsigned int n=0;n<n_row_local;n++)
                 {              
-                  du0ds[ti][i]+=this->FD_ds_weights[ti][ii]* (*alldofs[i]);
+                  du0ds[ti][n]+=this->FD_ds_weights[ti][ii]* (*(Problem_pt->GetDofPtr()[n]));
                 }
 
               }
@@ -6187,20 +6256,28 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       else
       {
         du0ds.resize(ntsteps);        
-        du0ds[0].resize(Ndof);
-        for (unsigned int i=0;i<Ndof;i++)
+        Dist_helper.build_base_vector(du0ds[0]);
+        for (unsigned int n=0;n<n_row_local;n++)
         {
-            du0ds[0][i]=*(alldofs[i]); // Just the U0 solution here, we do it via Gauss-Legendre in the residual/jacobian calculation
+            du0ds[0][n]=*(Problem_pt->GetDofPtr()[n]); // Just the U0 solution here, we do it via Gauss-Legendre in the residual/jacobian calculation
         }
         for (unsigned int ti=1;ti<ntsteps;ti++)
         {
-          du0ds[ti].resize(Ndof);
-          for (unsigned int i=0;i<Ndof;i++)
+          Dist_helper.build_base_vector(du0ds[ti]);
+          for (unsigned int n=0;n<n_row_local;n++)
           {
-            du0ds[ti][i]=Tadd[ti-1][i]; // Just the U0 solution here, we do it via Gauss-Legendre in the residual/jacobian calculation
+            du0ds[ti][n]=Tadd[ti-1][n]; // Just the U0 solution here, we do it via Gauss-Legendre in the residual/jacobian calculation
           }
         }                
       }
+#ifdef OOMPH_HAS_MPI
+      // Written above over this rank's own rows; the element loops read it by base equation number,
+      // including equations owned elsewhere.
+      if (Dist_helper.distributed())
+      {
+        for (unsigned int ti=0;ti<du0ds.size();ti++) du0ds[ti].synchronise();
+      }
+#endif
     }
   }
 
@@ -6234,7 +6311,6 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       Vector<double> dof_backup(raw_ndof);            
       Vector<unsigned> glob_eqs(raw_ndof);
       unsigned Teq=raw_ndof*this->n_tsteps();
-      oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();
       Vector<double> ddof_ds(raw_ndof,0.0);          
 
       std::vector<SinglePassMultiAssembleInfo> multi_assm;
@@ -6245,7 +6321,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       for (unsigned int i=0;i<raw_ndof;i++)
       {
           unsigned glob_eq=elem_pt->eqn_number(i);
-          dof_backup[i]=*(alldofs[glob_eq]);          
+          dof_backup[i]=*(Problem_pt->global_dof_pt(glob_eq));          
           glob_eqs[i]=glob_eq;
       }            
 
@@ -6261,7 +6337,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
               index--;
               for (unsigned int i=0;i<raw_ndof;i++)
               {              
-                ddof_ds[i]+=this->FD_ds_weights[ti][ii]*Tadd[index][glob_eqs[i]];
+                ddof_ds[i]+=this->FD_ds_weights[ti][ii]*Tadd[index].global_value(glob_eqs[i]);
               }
             }
             else
@@ -6280,7 +6356,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
             for (unsigned int i=0;i<raw_ndof;i++)
             {
               unsigned glob_eq=elem_pt->eqn_number(i);
-              *(alldofs[glob_eq])=Tadd[ti-1][glob_eq];              
+              *(Problem_pt->global_dof_pt(glob_eq))=Tadd[ti-1].global_value(glob_eq);              
             }
           }     
           else
@@ -6288,7 +6364,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
             for (unsigned int i=0;i<raw_ndof;i++)
             {
               unsigned glob_eq=elem_pt->eqn_number(i);
-              *(alldofs[glob_eq])=dof_backup[i];
+              *(Problem_pt->global_dof_pt(glob_eq))=dof_backup[i];
             }
           }       
           current_res.initialise(0.0);
@@ -6340,15 +6416,15 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
             double ds=0.5*(this->get_knot_value(ti+1)-this->get_knot_value(ti-1));
             for (unsigned int i=0;i<raw_ndof;i++)
             {
-              residuals[raw_ndof*this->n_tsteps()]+=du0ds[ti][glob_eqs[i]]*(*(alldofs[glob_eqs[i]]))/Count[glob_eqs[i]]*ds;
-              jacobian(raw_ndof*this->n_tsteps(),ti*raw_ndof+i)+=du0ds[ti][glob_eqs[i]]/Count[glob_eqs[i]]*ds;            
+              residuals[raw_ndof*this->n_tsteps()]+=du0ds[ti].global_value(glob_eqs[i])*(*(Problem_pt->global_dof_pt(glob_eqs[i])))/Count.global_value(glob_eqs[i])*ds;
+              jacobian(raw_ndof*this->n_tsteps(),ti*raw_ndof+i)+=du0ds[ti].global_value(glob_eqs[i])/Count.global_value(glob_eqs[i])*ds;            
             }          
           }                  
       }
 
       for (unsigned int i=0;i<raw_ndof;i++)
       {
-        *(this->Problem_pt->GetDofPtr()[glob_eqs[i]])=dof_backup[i];
+        *(this->Problem_pt->global_dof_pt(glob_eqs[i]))=dof_backup[i];
       }
 
       if (T_constraint_mode==0)
@@ -6357,8 +6433,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=glob_eqs[i];
-          double x=*(this->Problem_pt->GetDofPtr()[glob_eq]);
-          plane_eq+=x*n0[glob_eq]/Count[glob_eq];
+          double x=*(this->Problem_pt->global_dof_pt(glob_eq));
+          plane_eq+=x*n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }
 
         // Get the plane equation
@@ -6366,7 +6442,7 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=glob_eqs[i];
-          jacobian(Teq,i)=n0[glob_eq]/Count[glob_eq];
+          jacobian(Teq,i)=n0.global_value(glob_eq)/Count.global_value(glob_eq);
         }
       }
   }
@@ -6396,7 +6472,6 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         this->get_residuals(elem_pt, residuals);
         unsigned raw_ndof=elem_pt->ndof();
         unsigned tot_ndof=residuals.size();
-        oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();
         for (unsigned int i=0;i<tot_ndof;i++)
         {
           //unsigned glob_eq=this->eqn_number(elem_pt,i);
@@ -6406,18 +6481,18 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
           if (i==tot_ndof-1) glob_eq=T_global_eqn;
           else glob_eq=tindex*Ndof+elem_pt->eqn_number(iindex);
           //std::cout << "GLOB EQN " << glob_eq << " of " << tot_ndof << std::endl;
-          double backup=*(alldofs[glob_eq]);
+          double backup=*(Problem_pt->global_dof_pt(glob_eq));
           double eps=1e-8;
-          *(alldofs[glob_eq])=backup+eps;
-          //std::cout << "GLOB EQN " << glob_eq << " of " << tot_ndof << " BACKUP " << backup << " NEW " << *(alldofs[glob_eq]) << " PTR COMPARISON ";
-          //if (i<raw_ndof) " BASE "; else if(glob_eq==T_global_eqn) std::cout << " T_PERIOD "; else std::cout << " TADD " << &(Tadd[tindex-1][elem_pt->eqn_number(iindex)]) << " VS " << alldofs[glob_eq]<< std::endl;
+          *(Problem_pt->global_dof_pt(glob_eq))=backup+eps;
+          //std::cout << "GLOB EQN " << glob_eq << " of " << tot_ndof << " BACKUP " << backup << " NEW " << *(Problem_pt->global_dof_pt(glob_eq)) << " PTR COMPARISON ";
+          //if (i<raw_ndof) " BASE "; else if(glob_eq==T_global_eqn) std::cout << " T_PERIOD "; else std::cout << " TADD " << &(Tadd[tindex-1].global_value(elem_pt->eqn_number(iindex))) << " VS " << Problem_pt->global_dof_pt(glob_eq)<< std::endl;
           oomph::Vector<double> res_p(raw_ndof*this->n_tsteps()+1,0.0);
           this->get_residuals(elem_pt, res_p);
           for (unsigned int j=0;j<tot_ndof;j++)
           {
             jacobian(j,i)=(res_p[j]-residuals[j])/eps;
           }
-          *(alldofs[glob_eq])=backup;         
+          *(Problem_pt->global_dof_pt(glob_eq))=backup;         
         }
          */
       }
@@ -6444,7 +6519,6 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
     residuals.initialise(0.0);
     this->get_residuals(elem_pt, residuals);
     unsigned tot_ndof=residuals.size();
-    oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();
     for (unsigned int i=0;i<tot_ndof;i++)
     {
       //unsigned glob_eq=this->eqn_number(elem_pt,i);
@@ -6454,18 +6528,18 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       if (i==tot_ndof-1) glob_eq=T_global_eqn;
       else glob_eq=tindex*Ndof+elem_pt->eqn_number(iindex);
       //std::cout << "GLOB EQN " << glob_eq << " of " << tot_ndof << std::endl;
-      double backup=*(alldofs[glob_eq]);
+      double backup=*(Problem_pt->global_dof_pt(glob_eq));
       double eps=1e-8;
-      *(alldofs[glob_eq])=backup+eps;
-      //std::cout << "GLOB EQN " << glob_eq << " of " << tot_ndof << " BACKUP " << backup << " NEW " << *(alldofs[glob_eq]) << " PTR COMPARISON ";
-      //if (i<raw_ndof) " BASE "; else if(glob_eq==T_global_eqn) std::cout << " T_PERIOD "; else std::cout << " TADD " << &(Tadd[tindex-1][elem_pt->eqn_number(iindex)]) << " VS " << alldofs[glob_eq]<< std::endl;
+      *(Problem_pt->global_dof_pt(glob_eq))=backup+eps;
+      //std::cout << "GLOB EQN " << glob_eq << " of " << tot_ndof << " BACKUP " << backup << " NEW " << *(Problem_pt->global_dof_pt(glob_eq)) << " PTR COMPARISON ";
+      //if (i<raw_ndof) " BASE "; else if(glob_eq==T_global_eqn) std::cout << " T_PERIOD "; else std::cout << " TADD " << &(Tadd[tindex-1].global_value(elem_pt->eqn_number(iindex))) << " VS " << Problem_pt->global_dof_pt(glob_eq)<< std::endl;
       oomph::Vector<double> res_p(raw_ndof*this->n_tsteps()+1,0.0);
       this->get_residuals(elem_pt, res_p);
       for (unsigned int j=0;j<tot_ndof;j++)
       {
         jacobian(j,i)=(res_p[j]-residuals[j])/eps;
       }
-      *(alldofs[glob_eq])=backup;
+      *(Problem_pt->global_dof_pt(glob_eq))=backup;
 
     }
 
@@ -6538,28 +6612,38 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
   // Throws if a backup is already in progress (nested backup/restore is not supported).
   void PeriodicOrbitHandler::backup_dofs()
   {
-    oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();
     if (backed_up_dofs.size()) throw_runtime_error("The dofs have already been backed up. Likely, you try have a nested loop over the periodic orbit samples, which is not supported (or you forget to call restore_dofs() after a loop)");
-    backed_up_dofs.resize(Ndof);
-    for (unsigned int i=0;i<Ndof;i++)
+    // Owned rows only. These three routines write the BASE dofs wholesale rather than through an
+    // element, so unlike the assembly loops they cannot go through global_value(): a row this rank
+    // neither owns nor halos has no entry to reach. The augmented layout puts this rank's base rows
+    // first in Dof_pt, so index n is both the local dof and the local row of every base vector.
+    const unsigned n_row_local = Dist_helper.base_nrow_local();
+    backed_up_dofs.resize(n_row_local);
+    for (unsigned int n=0;n<n_row_local;n++)
     {
-      backed_up_dofs[i]=*(alldofs[i]);
+      backed_up_dofs[n]=*(Problem_pt->GetDofPtr()[n]);
     }
-    /*if (this->floquet_mode)
-    {
-      for (unsigned int i=0;i<Ndof;i++) std::cout << " LOOP CHECK " << i << "  " << backed_up_dofs[i] << " vs " << Tadd.back()[i] << " DIFFERENCE " << (backed_up_dofs[i]-Tadd.back()[i])*10000<< "  PTSRS " << alldofs[i] << " vs " << &(Tadd.back()[i]) << std::endl;
-    }*/
   }
   // Restores the problem dofs saved by backup_dofs() and clears the backup.
   void PeriodicOrbitHandler::restore_dofs()
   {
-    if (backed_up_dofs.size()!=Ndof) throw_runtime_error("The dofs have not been backed up");
-    oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();
-    for (unsigned int i=0;i<Ndof;i++)
+    const unsigned n_row_local = Dist_helper.base_nrow_local();
+    if (backed_up_dofs.size()!=n_row_local) throw_runtime_error("The dofs have not been backed up");
+    for (unsigned int n=0;n<n_row_local;n++)
     {
-      *(alldofs[i])=backed_up_dofs[i];
+      *(Problem_pt->GetDofPtr()[n])=backed_up_dofs[n];
     }
     backed_up_dofs.resize(0); // Clear the backup
+    synchronise_base_dofs();
+  }
+  // Only this rank's rows are written above and in set_dofs_to_interpolated_values(), so the halo
+  // copies other ranks read (when outputting, or evaluating an observable over the orbit) are stale
+  // until the problem pushes them across. No-op unless distributed.
+  void PeriodicOrbitHandler::synchronise_base_dofs()
+  {
+#ifdef OOMPH_HAS_MPI
+    if (Dist_helper.distributed()) Problem_pt->synchronise_all_dofs();
+#endif
   }
   // Overwrites the problem's dofs with the orbit state interpolated at normalized orbit
   // coordinate s (wrapped periodically into [0,1) via clamped_s), using linear interpolation
@@ -6569,35 +6653,33 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
   // (already overwritten, in a typical sampling loop) live dof values.
   void PeriodicOrbitHandler::set_dofs_to_interpolated_values(const double &s)
   {
-    if (backed_up_dofs.size()!=Ndof) throw_runtime_error("The dofs have not been backed up");
+    const unsigned n_row_local = Dist_helper.base_nrow_local();
+    if (backed_up_dofs.size()!=n_row_local) throw_runtime_error("The dofs have not been backed up");
     double clamped_s=s-floor(s);
-    oomph::Vector<double *> & alldofs=this->Problem_pt->GetDofPtr();
     unsigned start=0;
     while (s_knots[start+1]<clamped_s) start++;
     if (!basis)
     {
-      
       double lambda=(clamped_s-s_knots[start])/(s_knots[start+1]-s_knots[start]);
-      //std::cout << "AT " << clamped_s << " START " << start << " S_KNOTS " << s_knots[start] << " " << s_knots[start+1] << " TADD SIZE " << Tadd.size() << " LAMBDA " << lambda << " T =" << clamped_s*T << std::endl;
       if (start==0)
       {
-        for (unsigned int i=0;i<Ndof;i++)
+        for (unsigned int n=0;n<n_row_local;n++)
         {
-          *(alldofs[i])=(1-lambda)*backed_up_dofs[i]+Tadd[start][i]*lambda;
+          *(Problem_pt->GetDofPtr()[n])=(1-lambda)*backed_up_dofs[n]+Tadd[start][n]*lambda;
         }
       }
       else if (start>=Tadd.size())
       {
-        for (unsigned int i=0;i<Ndof;i++)
+        for (unsigned int n=0;n<n_row_local;n++)
         {
-          *(alldofs[i])=lambda*backed_up_dofs[i]+Tadd.back()[i]*(1-lambda);
+          *(Problem_pt->GetDofPtr()[n])=lambda*backed_up_dofs[n]+Tadd.back()[n]*(1-lambda);
         }
       }
       else
       {
-        for (unsigned int i=0;i<Ndof;i++)
+        for (unsigned int n=0;n<n_row_local;n++)
         {
-          *(alldofs[i])=(1-lambda)*Tadd[start-1][i]+Tadd[start][i]*lambda;
+          *(Problem_pt->GetDofPtr()[n])=(1-lambda)*Tadd[start-1][n]+Tadd[start][n]*lambda;
         }
       }
     }
@@ -6606,28 +6688,29 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       std::vector<unsigned> indices;
       std::vector<double> psi;
       unsigned numsupport=basis->get_interpolation_info(clamped_s,indices,psi);
-      for (unsigned int i=0;i<Ndof;i++)
+      for (unsigned int n=0;n<n_row_local;n++)
       {
-          *(alldofs[i])=0.0;
+          *(Problem_pt->GetDofPtr()[n])=0.0;
       }
       for (unsigned int iindex=0;iindex<numsupport;iindex++)
       {
         if (indices[iindex]==0)
         {
-          for (unsigned int i=0;i<Ndof;i++)
+          for (unsigned int n=0;n<n_row_local;n++)
           {
-            *(alldofs[i])+=psi[iindex]*backed_up_dofs[i];
+            *(Problem_pt->GetDofPtr()[n])+=psi[iindex]*backed_up_dofs[n];
           }
         }
         else
         {
-          for (unsigned int i=0;i<Ndof;i++)
+          for (unsigned int n=0;n<n_row_local;n++)
           {
-            *(alldofs[i])+=psi[iindex]*Tadd[indices[iindex]-1][i];
+            *(Problem_pt->GetDofPtr()[n])+=psi[iindex]*Tadd[indices[iindex]-1][n];
           }
         }
       }
     }
+    synchronise_base_dofs();
   }
 
   // Returns quadrature samples (s_i, w_i) such that integral_0^1 f(U(s)) ds ~= sum_i f(U(s_i))*w_i,

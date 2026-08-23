@@ -233,7 +233,53 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   tutorial; `AGENTS.md`/agent-facing docs for AI-assisted development.
 - numerical-data-file loading as numpy array with column and parameter information
 
+- **Periodic orbits and Floquet multipliers under `--distribute`.** `PeriodicOrbitHandler` was
+  entirely replicated -- `Tadd`, `x0`, `n0`, `du0ds` and `Count` were global-`Ndof` `std::vector`s
+  indexed by global equation number -- and orbit tracking refused a distributed problem outright. It
+  now carries an `AugmentedDofDistributionHelper` like the four bifurcation-tracking handlers: the
+  time-point unknowns and the orbit's reference data are `DoubleVectorWithHaloEntries` on the base
+  distribution, read by base equation number through `global_value()` (which degrades to plain `[]`
+  when not distributed, so one code path serves serial, replicated `mpirun` and `--distribute`);
+  `Count` and the element count come from a halo-skipping loop plus a reduction so the `1/Count`
+  weights still telescope to 1 across ranks; `eqn_number()` runs its naive number through the helper's
+  translation table; and a `synchronise()` override refreshes the halos and broadcasts the
+  rank-0-owned period after each Newton step. On an exact limit cycle of a reaction-diffusion system
+  the period comes out **bit-identical** serial and on 2, 3 and 4 ranks, the multipliers agree to
+  4e-14, and the sampled orbit states are identical to 14 digits.
+  - Two things around it are still serial and now say precisely why rather than claiming orbit
+    tracking is unsupported: `switch_to_hopf_orbit()` needs the first Lyapunov coefficient from the
+    Python custom assembler, and leaving a `with orbit:` block seeds history dof values, which
+    oomph-lib declares unsupported when distributed (it warns and drops the orbit instead). Build the
+    orbit guess yourself and use `activate_periodic_orbit_handler` there.
+
 ### Changed / Improved
+
+- **Floquet multipliers are computed by structured condensation now**, which is what
+  `get_floquet_multipliers()` does by default (`method="condensed"`). The periodic-orbit Jacobian is
+  block bidiagonal in time -- each element of the time discretization writes only its own time blocks
+  -- so condensing every element to one `nbase x nbase` transfer matrix and multiplying them along the
+  orbit gives the monodromy matrix directly. This is the classical Fairgrieve-Jepson condensation that
+  AUTO performs. It returns **exactly** as many multipliers as the problem has degrees of freedom,
+  deterministically, with no shift and no magnitude threshold.
+  - What it replaces still works as `method="eigenproblem"`: one pencil over all `nT*nbase` time
+    points whose mass matrix has rank `nbase`, so all but `nbase` of its eigenvalues are infinite and
+    had to be filtered by `valid_threshold`. That filter cannot tell a spurious eigenvalue from a
+    genuinely small multiplier, so small multipliers were discarded wholesale, a shift had to be
+    supplied by hand, and *how many* multipliers came back depended on the eigensolver -- the Langford
+    tutorial carried an explicit workaround saying it differed between a serial and an `mpirun` run.
+    That workaround is gone.
+  - **The mass matrix may be arbitrary, including singular.** It never appears on its own in the
+    condensation -- it is already folded into the element blocks -- so nothing inverts it and a DAE
+    goes through unchanged. But read such a spectrum carefully: Gauss-Legendre collocation is not
+    stiffly accurate, so an algebraic direction does not decay to a zero multiplier. It lands at
+    exactly `(-1)**(number of time intervals)`, which for an odd interval count is a spurious `-1`,
+    sitting where a period-doubling bifurcation would be. That is the discretization, not the method.
+  - For a problem too large to form the monodromy, only the dominant multipliers are computed, by
+    applying it matrix-free. `method="periodic_schur"` is an opt-in third route that never multiplies
+    the transfer matrices at all (periodic QR with the diagonal accumulated in logs), which is worth
+    it only for multipliers many orders of magnitude below the dominant one -- see
+    `dev_docs/floquet_multipliers.md` for the measurements, including why the plain product is far
+    better than its reputation.
 
 - **Internal `BaseEquations`/`Equations`/`ODEEquations` methods are now underscore-prefixed.** A survey
   of every call and override across the tutorials, the test suite and the example scripts found a
@@ -452,6 +498,22 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   full spellcheck.
 
 ### Fixed
+
+- **`output_orbit()` wrote nothing.** The underscore-prefixing above renamed the `BaseEquations` hook
+  to `_change_output_directory`, but `GenericOutput`'s override kept the outputter's public name, so
+  the equation-tree dispatch hit the base class no-op and no outputter ever relocated:
+  `PeriodicOrbit.output_orbit()` created its subdirectory and left it empty. Every other renamed hook
+  was checked for the same mismatch; this was the only one.
+
+- **`Problem::set_history_dofs` overran the heap on a distributed problem.** `set_dofs(t, ...)` already
+  refuses there -- the loops inside it index a local vector by global equation number -- but
+  `set_history_dofs` reached that refusal only after its own fill loop, which builds its vector on the
+  dof distribution (`nrow_local` entries) and then writes `ndof()`, the *global* count, into it. At 162
+  dofs on four ranks that is some 120 doubles past the end of the buffer. The refusal is now hoisted
+  above the loop. Previously unreachable -- both callers were refused on the Python side first -- and
+  worth recording for the next time this shape appears: the corruption surfaced as a glibc "corrupted
+  double-linked list" inside an unrelated `malloc` much later, whereupon PETSc's signal handler called
+  `MPI_Abort`, which allocates, so the job *hung* on the already-held malloc lock rather than dying.
 
 - **`EquationTree.__add__` on an already-placed tree.** `+` hands the children of *both* operands to
   the new node it returns, rewriting their `_parent`. Doing that to a tree that had already been
