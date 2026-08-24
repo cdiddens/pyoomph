@@ -1637,14 +1637,48 @@ namespace pyoomph
     void Problem::get_dofs(const unsigned& t, oomph::DoubleVector& dofs) const
 	{
 #ifdef OOMPH_HAS_MPI
-	  // oomph-lib declares the HISTORY dof accessors unsupported for distributed problems and guards
-	  // them with a PARANOID throw -- but pyoomph builds with PARANOID off by default, in which case
-	  // the guard vanishes and the loops below silently corrupt the heap: eqn_number() is a GLOBAL
-	  // equation number while the vector holds only this rank's rows. Refuse instead. The current-time
-	  // accessors (get_dofs/set_dofs without t) are distribution-aware and unaffected.
+	  // oomph-lib's own get_dofs(t,...) builds the vector on the dof distribution -- this rank's rows
+	  // -- and then indexes it by GLOBAL equation number, which is why it guards itself with a
+	  // PARANOID throw that vanishes in pyoomph's default build. Do the same walk here, writing only
+	  // the rows this rank owns; a halo copy's equation number falls outside the range and is skipped,
+	  // since the rank that owns it writes it.
 	  if (this->distributed())
-	    throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
-	                        "Only the current dof values are available under --distribute.");
+	  {
+	    // Reading only, but oomph-lib's global_data_pt()/mesh_pt() accessors have no const overload
+	    // (and Global_data_pt is private), so a non-const alias is the only way in from a const method.
+	    Problem *self = const_cast<Problem *>(this);
+	    dofs.build(this->dof_distribution_pt(), 0.0);
+	    const unsigned first_row = this->dof_distribution_pt()->first_row();
+	    const unsigned n_row_local = this->dof_distribution_pt()->nrow_local();
+	    auto store = [&](int eqn_number, double value)
+	    {
+	      if (eqn_number >= 0 && (unsigned)eqn_number >= first_row && (unsigned)eqn_number < first_row + n_row_local)
+	        dofs[(unsigned)eqn_number - first_row] = value;
+	    };
+	    for (unsigned i = 0, ni = self->nglobal_data(); i < ni; i++)
+	      for (unsigned j = 0, nj = self->global_data_pt(i)->nvalue(); j < nj; j++)
+	        store(self->global_data_pt(i)->eqn_number(j), self->global_data_pt(i)->value(t, j));
+	    for (unsigned i = 0, ni = self->mesh_pt()->nelement(); i < ni; i++)
+	    {
+	      oomph::GeneralisedElement *ele_pt = self->mesh_pt()->element_pt(i);
+	      for (unsigned j = 0, nj = ele_pt->ninternal_data(); j < nj; j++)
+	      {
+	        oomph::Data *d_pt = ele_pt->internal_data_pt(j);
+	        for (unsigned k = 0, nk = d_pt->nvalue(); k < nk; k++) store(d_pt->eqn_number(k), d_pt->value(t, k));
+	      }
+	    }
+	    for (unsigned i = 0, ni = self->mesh_pt()->nnode(); i < ni; i++)
+	    {
+	      oomph::Node *n_pt = self->mesh_pt()->node_pt(i);
+	      for (unsigned j = 0, nj = n_pt->nvalue(); j < nj; j++) store(n_pt->eqn_number(j), n_pt->value(t, j));
+	      // ...and the moving-mesh position dofs oomph-lib forgets, as in the serial branch below.
+	      pyoomph::Node *pn_pt = dynamic_cast<pyoomph::Node *>(n_pt);
+	      if (!pn_pt) continue;
+	      for (unsigned j = 0, nj = pn_pt->variable_position_pt()->nvalue(); j < nj; j++)
+	        store(pn_pt->variable_position_pt()->eqn_number(j), pn_pt->variable_position_pt()->value(t, j));
+	    }
+	    return;
+	  }
 #endif
       oomph::Problem::get_dofs(t,dofs);
 	  //std::cout << "GET HISTORY DOFS " << t << std::endl;
@@ -1668,14 +1702,47 @@ namespace pyoomph
 	void Problem::set_dofs(const unsigned& t, oomph::DoubleVector& dof_pt)
 	{
 #ifdef OOMPH_HAS_MPI
-	  // oomph-lib declares the HISTORY dof accessors unsupported for distributed problems and guards
-	  // them with a PARANOID throw -- but pyoomph builds with PARANOID off by default, in which case
-	  // the guard vanishes and the loops below silently corrupt the heap: eqn_number() is a GLOBAL
-	  // equation number while the vector holds only this rank's rows. Refuse instead. The current-time
-	  // accessors (get_dofs/set_dofs without t) are distribution-aware and unaffected.
+	  // As in get_dofs(t,...): write only the rows this rank owns, by the same range test, and then
+	  // let the halo exchange carry them to the other ranks' copies. Data::add_values_to_vector sends
+	  // every time level (it loops to ntstorage()), so synchronise_all_dofs() propagates history
+	  // values and not just the current ones -- which is what makes this possible at all.
 	  if (this->distributed())
-	    throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
-	                        "Only the current dof values are available under --distribute.");
+	  {
+	    const unsigned first_row = this->dof_distribution_pt()->first_row();
+	    const unsigned n_row_local = this->dof_distribution_pt()->nrow_local();
+	    auto fetch = [&](int eqn_number, double &out) -> bool
+	    {
+	      if (eqn_number < 0 || (unsigned)eqn_number < first_row || (unsigned)eqn_number >= first_row + n_row_local) return false;
+	      out = dof_pt[(unsigned)eqn_number - first_row];
+	      return true;
+	    };
+	    double v = 0.0;
+	    for (unsigned i = 0, ni = nglobal_data(); i < ni; i++)
+	      for (unsigned j = 0, nj = global_data_pt(i)->nvalue(); j < nj; j++)
+	        if (fetch(global_data_pt(i)->eqn_number(j), v)) global_data_pt(i)->set_value(t, j, v);
+	    for (unsigned i = 0, ni = mesh_pt()->nelement(); i < ni; i++)
+	    {
+	      oomph::GeneralisedElement *ele_pt = mesh_pt()->element_pt(i);
+	      for (unsigned j = 0, nj = ele_pt->ninternal_data(); j < nj; j++)
+	      {
+	        oomph::Data *d_pt = ele_pt->internal_data_pt(j);
+	        for (unsigned k = 0, nk = d_pt->nvalue(); k < nk; k++)
+	          if (fetch(d_pt->eqn_number(k), v)) d_pt->set_value(t, k, v);
+	      }
+	    }
+	    for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
+	    {
+	      oomph::Node *n_pt = mesh_pt()->node_pt(i);
+	      for (unsigned j = 0, nj = n_pt->nvalue(); j < nj; j++)
+	        if (fetch(n_pt->eqn_number(j), v)) n_pt->set_value(t, j, v);
+	      pyoomph::Node *pn_pt = dynamic_cast<pyoomph::Node *>(n_pt);
+	      if (!pn_pt) continue;
+	      for (unsigned j = 0, nj = pn_pt->variable_position_pt()->nvalue(); j < nj; j++)
+	        if (fetch(pn_pt->variable_position_pt()->eqn_number(j), v)) pn_pt->variable_position_pt()->set_value(t, j, v);
+	    }
+	    this->synchronise_all_dofs();
+	    return;
+	  }
 #endif
 	 oomph::Problem::set_dofs(t,dof_pt);
 	 //std::cout << "SET HISTORY DOFS " << t << std::endl;
@@ -1699,14 +1766,47 @@ namespace pyoomph
     void Problem::set_dofs(const unsigned& t, oomph::Vector<double*>& dof_pt)
 	{
 #ifdef OOMPH_HAS_MPI
-	  // oomph-lib declares the HISTORY dof accessors unsupported for distributed problems and guards
-	  // them with a PARANOID throw -- but pyoomph builds with PARANOID off by default, in which case
-	  // the guard vanishes and the loops below silently corrupt the heap: eqn_number() is a GLOBAL
-	  // equation number while the vector holds only this rank's rows. Refuse instead. The current-time
-	  // accessors (get_dofs/set_dofs without t) are distribution-aware and unaffected.
+	  // As in get_dofs(t,...): write only the rows this rank owns, by the same range test, and then
+	  // let the halo exchange carry them to the other ranks' copies. Data::add_values_to_vector sends
+	  // every time level (it loops to ntstorage()), so synchronise_all_dofs() propagates history
+	  // values and not just the current ones -- which is what makes this possible at all.
 	  if (this->distributed())
-	    throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
-	                        "Only the current dof values are available under --distribute.");
+	  {
+	    const unsigned first_row = this->dof_distribution_pt()->first_row();
+	    const unsigned n_row_local = this->dof_distribution_pt()->nrow_local();
+	    auto fetch = [&](int eqn_number, double &out) -> bool
+	    {
+	      if (eqn_number < 0 || (unsigned)eqn_number < first_row || (unsigned)eqn_number >= first_row + n_row_local) return false;
+	      out = *(dof_pt[(unsigned)eqn_number]);
+	      return true;
+	    };
+	    double v = 0.0;
+	    for (unsigned i = 0, ni = nglobal_data(); i < ni; i++)
+	      for (unsigned j = 0, nj = global_data_pt(i)->nvalue(); j < nj; j++)
+	        if (fetch(global_data_pt(i)->eqn_number(j), v)) global_data_pt(i)->set_value(t, j, v);
+	    for (unsigned i = 0, ni = mesh_pt()->nelement(); i < ni; i++)
+	    {
+	      oomph::GeneralisedElement *ele_pt = mesh_pt()->element_pt(i);
+	      for (unsigned j = 0, nj = ele_pt->ninternal_data(); j < nj; j++)
+	      {
+	        oomph::Data *d_pt = ele_pt->internal_data_pt(j);
+	        for (unsigned k = 0, nk = d_pt->nvalue(); k < nk; k++)
+	          if (fetch(d_pt->eqn_number(k), v)) d_pt->set_value(t, k, v);
+	      }
+	    }
+	    for (unsigned i = 0, ni = mesh_pt()->nnode(); i < ni; i++)
+	    {
+	      oomph::Node *n_pt = mesh_pt()->node_pt(i);
+	      for (unsigned j = 0, nj = n_pt->nvalue(); j < nj; j++)
+	        if (fetch(n_pt->eqn_number(j), v)) n_pt->set_value(t, j, v);
+	      pyoomph::Node *pn_pt = dynamic_cast<pyoomph::Node *>(n_pt);
+	      if (!pn_pt) continue;
+	      for (unsigned j = 0, nj = pn_pt->variable_position_pt()->nvalue(); j < nj; j++)
+	        if (fetch(pn_pt->variable_position_pt()->eqn_number(j), v)) pn_pt->variable_position_pt()->set_value(t, j, v);
+	    }
+	    this->synchronise_all_dofs();
+	    return;
+	  }
 #endif
      oomph::Problem::set_dofs(t,dof_pt);
 	 //std::cout << "SET HISTORY DOFS " << t << std::endl;
@@ -1730,21 +1830,11 @@ namespace pyoomph
 	// length (must match ndof()) and that t is within the timestepper's available history storage.
 	void Problem::set_history_dofs(unsigned t, const std::vector<double> &inp)
 	{
-#ifdef OOMPH_HAS_MPI
-		// set_dofs(t,...) below already refuses when distributed, but the fill loop underneath gets
-		// there first and overruns the heap doing it: 'dofs' is built on the dof distribution, so it
-		// holds nrow_local entries, while the loop writes ndof() -- the GLOBAL count -- of them. With
-		// 162 dofs on 4 ranks that is ~120 doubles past the end of the buffer, and the corruption only
-		// surfaces later in an unrelated malloc. Refuse before writing anything.
-		//
-		// Unreachable until now: the only callers are PeriodicOrbit.__exit__ and refine_eigenfunction(),
-		// and both used to be refused on the Python side before they got here.
-		if (this->distributed())
-			throw_runtime_error("History dof values (time level t>0) are not implemented for distributed problems. "
-			                    "Only the current dof values are available under --distribute.");
-#endif
+		// 'inp' is indexed by GLOBAL equation number while 'dofs' is built on the dof distribution,
+		// i.e. this rank's rows -- so the fill loop below is a scatter, not a copy, exactly as in
+		// set_current_dofs(). Writing ndof() entries into it used to overrun the heap by
+		// ndof()-nrow_local doubles per call when distributed.
 		oomph::DoubleVector dofs;
-		dofs.build(this->dof_distribution_pt(), 0.0);
 		if (inp.size() != this->ndof())
 		{
 			std::ostringstream oss; oss << "Try to set dofs of length " << inp.size() << " while problem has " << this->ndof() << " dofs";
@@ -1752,8 +1842,7 @@ namespace pyoomph
 		}
 		if (t>=this->time_stepper_pt()->ntstorage()) 
 		        throw_runtime_error("Wrong history offset");
-		for (unsigned int i = 0; i < this->ndof(); i++)
-			dofs[i] = inp[i];
+		scatter_global_to_double_vector(inp, dofs, this->dof_distribution_pt());
 		this->set_dofs(t, dofs);
 	}
 

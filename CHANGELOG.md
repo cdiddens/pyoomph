@@ -233,6 +233,18 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   tutorial; `AGENTS.md`/agent-facing docs for AI-assisted development.
 - numerical-data-file loading as numpy array with column and parameter information
 
+- **History degrees of freedom under `--distribute`.** `Problem::get_dofs(t,...)` and `set_dofs(t,...)`
+  work distributed now. oomph-lib's own versions build the vector on the dof distribution -- this
+  rank's rows -- and then index it by *global* equation number, which is why they guard themselves
+  with a `PARANOID` throw that vanishes in pyoomph's default build; pyoomph does the walk itself,
+  writing only the rows a rank owns and letting the halo exchange carry the rest (which works because
+  `Data::add_values_to_vector` transmits every time level, not just the current one). That unblocked
+  three things, each now tested against serial: **arclength continuation of a bifurcation locus**,
+  which was refused outright; the **transient hand-back** when leaving a `with orbit:` block, so a
+  plain `run()` continues the orbit; and `set_history_dofs` itself. `refine_eigenfunction()` stays
+  refused -- it was on the list for this reason but also adapts the mesh to an eigenfunction, which
+  needs its own validation.
+
 - **`switch_to_hopf_orbit()` under MPI**, replicated and `--distribute`, which completes the route from
   a Hopf point to a periodic orbit in parallel. Three things were in the way. The first Lyapunov
   coefficient used the local row block of the eigenproblem pencil as if it were the whole square

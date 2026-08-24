@@ -434,15 +434,7 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
     problem.activate_eigenbranch_tracking("complex",eigenvector=q_resolved,eigenvalue=1j*omega0)
     problem.solve()
     mu1=numpy.real(problem.get_last_eigenvalues()[0])
-    if problem.is_distributed():
-        # go_to_param() walks there by arclength continuation, which is refused while a tracker is
-        # installed on a distributed problem (it needs history dofs). The step here is one
-        # FD_param_delta -- 1e-3 by default -- from a converged eigenbranch, so a plain set-and-solve
-        # is well inside Newton's basin and is what the arclength walk would do in one step anyway.
-        param.value+=FD_param_delta
-        problem.solve()
-    else:
-        problem.go_to_param({param.get_name():param.value+FD_param_delta})
+    problem.go_to_param({param.get_name():param.value+FD_param_delta})
     mu2=numpy.real(problem.get_last_eigenvalues()[0])
     mup=-(mu2-mu1)/FD_param_delta
     if abs(mup)>1e12*abs(c1):

@@ -227,15 +227,6 @@ class PeriodicOrbit:
         return dofs[:nbase]
 
     def __exit__(self,exc_type: type[BaseException] | None, exc: BaseException | None, traceback: types.TracebackType | None):
-        if self.problem.is_distributed():
-            # Leaving the block seeds three history levels so that a plain run() continues the orbit
-            # transiently. Writing history dof values is not implemented for a distributed problem
-            # (oomph-lib declares the t>0 accessors unsupported there, and Problem::set_history_dofs
-            # refuses), so the orbit is simply dropped instead. Everything inside the block -- solving,
-            # continuing, sampling, Floquet multipliers -- does work under --distribute.
-            print("WARNING: leaving a periodic orbit does not set up the transient continuation on a distributed (--distribute) problem; the history dofs are not written. Solve, continuation, sampling and Floquet multipliers inside the block are unaffected.")
-            self.problem.deactivate_bifurcation_tracking()
-            return
         #  Setup the history dofs for a transient continuation
         N=self.get_num_time_steps()
         T=self.get_T(dimensional=False)
@@ -6021,12 +6012,6 @@ class Problem(_pyoomph.Problem):
         """
         if spatial_adapt>0 and self.get_bifurcation_tracking_mode()!="":
             raise RuntimeError("Cannot perform spatial adaptation during arclength continuation when bifurcation tracking is active. You can do the arclength step with spatial_adapt=0 followed by a solve(spatial_adapt="+str(spatial_adapt)+") to achieve a similar effect.")
-        if self.is_distributed() and self.get_bifurcation_tracking_mode()!="":
-            # Arclength continuation needs the dofs at history time levels (Problem::get_dofs(t,...)),
-            # which are still refused when distributed -- otherwise this dies several frames deep in
-            # C++ with a message about history dofs rather than about the thing being attempted.
-            # Locating a bifurcation with solve() does work distributed; continuing it does not yet.
-            raise RuntimeError("Arclength continuation while bifurcation tracking is active is not supported on a distributed (--distribute) problem yet (it needs history dofs, which are not distributed). A plain solve() to locate the bifurcation does work distributed.")
         self._activate_solver_callback()        
         self.invalidate_cached_mesh_data()
         if not self.is_initialised():

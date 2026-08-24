@@ -163,3 +163,44 @@ def test_orbit_still_matches_the_exact_limit_cycle_when_distributed(orbit_runs):
     rel = abs(dist["radius_mean"] - dist["radius_exact"]) / dist["radius_exact"]
     assert rel < 5e-3, (rel, dist)
     assert abs(dist["T"] - dist["T_exact"]) < 1e-6 * dist["T_exact"], dist
+
+
+# The three things the history-dof refusal blocked. oomph-lib's own get_dofs(t,...)/set_dofs(t,...)
+# build the vector on the dof distribution -- this rank's rows -- and then index it by GLOBAL equation
+# number, which is why they guard themselves with a PARANOID throw that vanishes in pyoomph's default
+# build. pyoomph now does that walk itself, writing only the rows a rank owns and letting the halo
+# exchange carry the rest: Data::add_values_to_vector loops to ntstorage(), so synchronise_all_dofs()
+# propagates every time level and not just the current one, which is what makes it possible.
+
+
+@pytest.fixture(scope="module")
+def history_runs(tmp_path_factory):
+    base = tmp_path_factory.mktemp("mpi_hopf_history")
+    return {w: (_run(base / (w + "_serial"), 1, False, w),
+                _run(base / (w + "_dist"), _NPROC, True, w)) for w in ("locus", "handback")}
+
+
+def test_bifurcation_locus_continues_when_distributed(history_runs):
+    """Arclength continuation of a Hopf locus, which used to be refused outright under --distribute.
+
+    The second parameter is the diffusivity, which the uniform Hopf mode does not feel at all, so the
+    locus is exactly mu=0 for every D. That makes the walk its own reference: any drift in mu is the
+    continuation going wrong, not physics.
+    """
+    serial, dist = history_runs["locus"]
+    assert dist["distributed"] is True, dist
+    assert len(dist["locus"]) == len(serial["locus"]) == 3, history_runs["locus"]
+    for a, b in zip(serial["locus"], dist["locus"]):
+        assert abs(a["D"] - b["D"]) < 1e-12, (a, b)      # the same steps were taken
+        assert abs(b["mu"]) < 1e-11, b                    # ...and stayed on the locus
+        assert abs(b["omega"] - 1.0) < 1e-9, b
+
+
+def test_transient_handback_when_distributed(history_runs):
+    """Leaving a `with orbit:` block and running on transiently, against the serial trajectory."""
+    serial, dist = history_runs["handback"]
+    assert dist["distributed"] is True, dist
+    for key in ("T", "radius_at_handback", "radius_after_one_period"):
+        assert abs(dist[key] - serial[key]) < 1e-8 * abs(serial[key]), (key, serial, dist)
+    # It really did integrate: one period of a slightly-off-amplitude guess relaxes towards the cycle.
+    assert dist["radius_after_one_period"] != dist["radius_at_handback"], dist

@@ -400,22 +400,23 @@ under a plain `mpirun` and under `--distribute`; see `dev_docs/hopf_normal_form.
 the way (an ungathered pencil, a memory-unsafe Hessian contraction, and an arclength walk for a
 finite-difference step) and for the measurement showing the gather it still does is not a bottleneck.
 
-### 10.2 History dof values are not written when distributed
+### 10.2 History dof values when distributed — done
 
-`PeriodicOrbit.__exit__` seeds three history levels so that a plain `run()` afterwards continues the
-orbit transiently. `Problem::set_history_dofs` refuses when distributed (§8, bug 2), so the exit
-warns and drops the orbit instead. Everything *inside* the `with` block works.
+`Problem::get_dofs(t,...)` and `set_dofs(t,...)` now work under `--distribute`. oomph-lib's own
+versions build the vector on the dof distribution — this rank's rows — and then index it by *global*
+equation number, which is why they guard themselves with a `PARANOID` throw that vanishes in
+pyoomph's default build. pyoomph does that walk itself now, writing only the rows a rank owns (a halo
+copy's equation number falls outside the range, and the rank owning it writes it) and letting the halo
+exchange carry the rest.
 
-oomph-lib declares the `t>0` dof accessors unsupported for distributed problems, and pyoomph's
-`get_dofs(t,...)`/`set_dofs(t,...)` overrides refuse for the same reason: their node loops index a
-local vector by global equation number. A distribution-aware version would build a
-`DoubleVectorWithHaloEntries` on the dof distribution and reach it through `global_value()`, the way
-the orbit handler's own vectors now do. That would also unblock `refine_eigenfunction()`, which is on
-`_require_non_distributed` for this reason and no other.
+What makes it possible: `Data::add_values_to_vector` loops to `ntstorage()`, so
+`Problem::synchronise_all_dofs()` propagates **every time level**, not just the current one.
 
-Check it with the `sample_absum` comparison of `tests/test_mpi_floquet.py` extended past the `with`
-block: seed the history distributed, run a few transient steps, and hold the trajectory against the
-serial one.
+Three things it unblocked, all now tested in `tests/test_mpi_hopf_lyapunov.py` against serial:
+arclength continuation of a bifurcation *locus* (previously refused outright), the transient hand-back
+when leaving a `with orbit:` block, and `Problem.set_history_dofs` itself (exact round-trip).
+`refine_eigenfunction()` is still refused — it was on the list for this reason, but it also adapts the
+mesh to an eigenfunction, which needs its own validation before the guard comes off.
 
 ### 10.3 The native distributed Floquet path — measured and not built
 

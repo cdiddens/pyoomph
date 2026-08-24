@@ -94,10 +94,14 @@ class NormalFormPDE(Equations):
         y, yt = var_and_test("y")
         mu = self.get_problem().mu
         r2 = x ** 2 + y ** 2
+        # The diffusivity is a global parameter so that the Hopf LOCUS can be continued in it. It has
+        # no effect on the uniform mode -- diffusion annihilates a uniform field -- so the locus is
+        # exactly mu=0 for every D, which makes it an exact reference for a two-parameter walk.
+        D = self.get_problem().D
         self.add_residual(weak(self.m * partial_t(x) - (mu * x - _W * y + self.sigma * x * r2), xt)
-                          + weak(_PDE_DIFFUSIVITY * grad(x), grad(xt)))
+                          + weak(D * grad(x), grad(xt)))
         self.add_residual(weak(self.m * partial_t(y) - (_W * x + mu * y + self.sigma * y * r2), yt)
-                          + weak(_PDE_DIFFUSIVITY * grad(y), grad(yt)))
+                          + weak(D * grad(y), grad(yt)))
 
 
 class BrusselatorODE(ODEEquations):
@@ -127,6 +131,7 @@ class NormalFormProblem(Problem):
         super().__init__()
         self.args = args
         # For the Brusselator this global parameter is B, whose Hopf is at 1+A^2; start just below.
+        self.D = self.define_global_parameter(D=_PDE_DIFFUSIVITY)
         self.mu = self.define_global_parameter(
             mu=(1.0 + args.A_bruss**2 - 0.2) if args.case == "brusselator" else -0.1)
 
@@ -164,6 +169,37 @@ def run(args):
         res = {"nproc": get_mpi_nproc(), "case": args.case, "sigma": args.sigma,
                "m1": args.m1, "m2": args.m2, "distributed": bool(problem.is_distributed()),
                "ndof": int(problem.ndof()), "mu_hopf": float(problem.mu.value)}
+
+        if args.what == "locus":
+            # Continue the Hopf LOCUS in a second parameter. Diffusion does not touch the uniform
+            # mode, so the locus is exactly mu=0 for every D -- an exact reference for the walk.
+            ds = 0.005
+            walk = []
+            for _ in range(3):
+                ds = problem.arclength_continuation("D", ds)
+                walk.append({"D": float(problem.D.value), "mu": float(problem.mu.value),
+                             "omega": float(problem._get_bifurcation_omega())})
+            res["locus"] = walk
+            return res
+
+        if args.what == "handback":
+            # Leaving the `with` block seeds three history levels so a plain run() continues the orbit
+            # transiently -- the thing the history-dof refusal blocked when distributed.
+            types, names = problem.get_dof_description()
+            is_x = numpy.array([names[t].endswith("/x") for t in types])
+            is_x = is_x[:problem.assembly_handler_pt().get_base_ndof()]
+            with problem.switch_to_hopf_orbit(eps=args.eps, NT=args.NT, order=3) as orbit:
+                T = float(orbit.get_T(dimensional=False))
+            res["T"] = T
+
+            def radius():
+                d = numpy.array(problem.get_current_dofs()[0])
+                return float(numpy.hypot(d[is_x].mean(), d[~is_x].mean()))
+
+            res["radius_at_handback"] = radius()
+            problem.run(T, outstep=False, startstep=T / 40, temporal_error=None, maxstep=T / 40)
+            res["radius_after_one_period"] = radius()
+            return res
 
         if args.what == "orbit":
             # The dof description has to be taken BEFORE the orbit handler is installed: it is sized
@@ -241,7 +277,7 @@ def main():
     p.add_argument("--outdir", required=True)
     p.add_argument("--case", default="ode", choices=["ode", "pde", "brusselator"])
     p.add_argument("--A-bruss", dest="A_bruss", type=float, default=1.0)
-    p.add_argument("--what", default="coeff", choices=["coeff", "orbit"])
+    p.add_argument("--what", default="coeff", choices=["coeff", "orbit", "locus", "handback"])
     p.add_argument("--sigma", type=float, default=-1.0)
     p.add_argument("--m1", type=float, default=1.0)
     p.add_argument("--m2", type=float, default=1.0)
