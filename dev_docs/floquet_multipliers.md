@@ -460,9 +460,45 @@ Measured on the Brusselator orbit at `nbase=802` (`nT=31`), eight multipliers, o
 | dense monodromy (all 802) | 1.2 s | reference |
 
 So shift-invert is 16x faster than plain Arnoldi and still 15x slower than simply forming the
-monodromy **at a size where the monodromy fits**. That is the honest shape of it: the matrix-free
-route exists for the sizes where `nbase**2` does not fit, and shift-invert is what makes it usable
-there rather than merely possible.
+monodromy at this size.
+
+### The crossover does not exist, at least not in time
+
+The obvious next question is where forming the monodromy stops being the cheaper option. It was
+measured, on the same Brusselator family, single-threaded, dense timing the whole spectrum and
+shift-invert the eight dominant multipliers:
+
+| `nbase` | orbit ndof | dense form + eig | shift-invert factorize + solve | dense faster by | dense RSS | matrix-free RSS |
+|---|---|---|---|---|---|---|
+| 802 | 24863 | 0.86 + 0.21 s | 0.63 + 12.5 s | 12x | 734 MB | 609 MB |
+| 1602 | 49663 | 4.34 + 1.42 s | 0.76 + 42.7 s | 7.5x | 1809 MB | 1243 MB |
+| 2402 | 74463 | 11.8 + 4.6 s | 0.89 + 178.0 s | 11x | 3527 MB | 2196 MB |
+| 3202 | 99263 | 25.0 + 11.3 s | 1.06 + 526.2 s | 14.5x | 5856 MB | 3443 MB |
+
+**Dense wins at every size, and past `nbase` ~ 1600 the gap widens rather than closes.** The
+factorization shift-invert needs stays trivially cheap throughout (0.6 s to 1.1 s); what explodes is
+the Arnoldi solve, 12 s to 526 s.
+
+The reason is in the spectrum, not the linear algebra. Refining the mesh **tightens the cluster**: the
+dominant multipliers go 0.992, 0.998, 0.9996, 0.9995, with exact degeneracies appearing by
+`nbase=2402` (0.999577391 twice, then 0.999502804 three times to nine digits). Diffusive modes bunch
+towards 1 as the mesh refines, so the iteration count grows faster than the per-iteration saving.
+Chasing that with a bigger Krylov basis does not work either, for the reason above.
+
+**The matrix-free route is therefore justified by memory, not speed** — and even there the margin is
+modest and grows slowly: 1.21x, 1.45x, 1.61x, 1.70x across the four sizes. Note those are whole-process
+figures; the monodromy itself is only 78 MB at `nbase=3202`, so what dense actually costs is the
+`Nelem` transfer matrices, the eigenvector array and LAPACK's workspace, not the monodromy.
+
+Two caveats on reading this table. It is one problem family, and a deliberately unfavourable one: a
+spectrum with well-separated dominant multipliers would let Arnoldi converge in a handful of
+iterations and the picture would invert. And it is single-threaded — with BLAS threads the dense route
+parallelises well (the matmul chain and `eig`) while the sparse triangular solves largely do not, so
+the real-world gap on a multicore box is wider still.
+
+`dense_threshold=2000` and `_DENSE_MONODROMY_CAP=4000` are consequently conservative on time: dense
+was the faster choice at every size measured. They are left where they are because the caps exist to
+stop a machine running out of memory, and 5.9 GB at `nbase=3202` is already a lot to ask.
 
 **Enlarging the Krylov basis was tried first, and is not a substitute.** Same orbit and count, one
 process so the numbers are internally consistent (its dense reference read 1.0 s against the 1.2 s
