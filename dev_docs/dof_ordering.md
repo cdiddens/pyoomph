@@ -1,6 +1,7 @@
 # Choosing the global dof numbering
 
-Status: **implemented**, serial and both MPI modes. Companion to
+Status: **implemented**, serial and both MPI modes, and **measured** (§6: 15x on a BoomerAMG
+elasticity solve, though not for the reason the layouts were built). Companion to
 [static_condensation.md](static_condensation.md) and
 [replicated_condensation_gather.md](replicated_condensation_gather.md), whose §2.2 this supersedes.
 
@@ -132,17 +133,90 @@ plan serves selections which *cannot* be made contiguous by renumbering — an i
 where the component genuinely percolates the mesh. It does retire §2.2's rejection of renumbering, and
 its §1 and §8 staging should be re-read in that light.
 
-## 6. Open
+## 6. Measured: what actually helps BoomerAMG
 
-* **Constant block size for AMG.** Nothing yet calls `MatSetBlockSize` or `setNearNullSpace`; the
-  matrix is plain AIJ. A constant stride additionally needs `apply_Dirichlet_BCs_by_dof_removing =
-  False`, and even then only holds where every node carries the same field set.
-* **The Dirichlet diagonal is still a literal `1.0`** (`remove_dirichlets_by_matrix_manipulation`).
-  Keeping the dofs now forces the diagonal into the pattern (that was a genuine zero-row bug, see
-  `tests/test_dirichlet_matrix_manipulation.py`), but the value is not yet magnitude-matched to its
-  neighbours, which is what AMG cares about. Any non-zero value gives an exactly zero increment, so
-  this is free to change.
-* **No benchmark.** Nothing here claims a speed-up. The permutation's own cost is one O(n log n) sort
-  and two O(nnode+nelement) walks inside a call whose elemental pass is ~96% of the total, but that
-  has not been measured, and whether a nodal-block layout actually helps BoomerAMG on a pyoomph
-  problem is untested.
+Script-level experiment, kept in `Scratchpad/amg_bench/` (`problem.py`, `bench.py`, `RESULTS.md`).
+3D linear elasticity, C1 vector field on a 2×1×1 brick, clamped at `left` **plus a symmetry plane
+`u_y=0` on `front`** (which matters — see below). CG, `rtol 1e-8`, unpreconditioned norm, PC =
+hypre/BoomerAMG, N=20, 54243 dofs. All arms converge to the same tip deflection to eight digits.
+
+The metric is the **iteration count**: deterministic, and immune to the machine load that makes
+wall-clock A/B comparisons on this machine untrustworthy. Times are in-process around `ksp.solve()`
+only, with the arms interleaved; across three reps the iteration counts were identical and the times
+within ~1%.
+
+| arm | what | ndof | iters | best t [s] | s/iter |
+|---|---|---|---|---|---|
+| A | default numbering, Dirichlet **removed** (the default) | 52080 | 43 | 44.11 | 1.026 |
+| B | default numbering, Dirichlet **kept** | 54243 | 43 | 44.35 | 1.031 |
+| C | nodal layout + kept + **`MatSetBlockSize(3)`** | 54243 | **14** | **2.91** | 0.208 |
+| D | C + `-pc_hypre_boomeramg_nodal_coarsen 4` | 54243 | 93 | 3.66 | 0.039 |
+| E | `MatSetBlockSize(3)` but Dirichlet **removed** | 52080 | 88 | 6.52 | 0.074 |
+
+**C is 15× faster than A**, and not only through the iteration count: each iteration is also 5×
+cheaper, which is the signature of scalar AMG building an expensive and poor hierarchy on a vector
+system — it cannot see that three unknowns belong to one point, so the coupling between the components
+wrecks the coarsening.
+
+### 6.1 Attribution — and the uncomfortable part
+
+**The whole gain is `MatSetBlockSize`, which pyoomph does not call anywhere.** Neither of this
+document's two mechanisms produces it:
+
+* `NodalBlockOrdering` is worth **nothing** here, because on this problem it is the *identity* — oomph
+  is already node-major (§1). That is not a disappointment so much as a confirmation of §1: the layout
+  earns its keep where oomph is not already right, and a plain single-mesh vector field is not such a
+  case.
+* Keeping the Dirichlet dofs is worth **nothing on its own** (B = A, 43 iterations either way).
+
+**What keeping them buys is the right to declare the block size at all, and that is worth 6× in
+iterations.** Arm E declares `bs=3` with the dofs removed: 88 iterations against C's 14, and 2.2×
+slower. PETSc accepts it silently, because `ndof` still happens to divide by 3 — the blocks simply no
+longer line up with the nodes.
+
+**That comparison only works because of the symmetry BC.** Without it, the clamped face pins all three
+components of each node, dof removal deletes whole 3-blocks, the stride survives, and E matches C
+exactly (15 iterations, 2.99 s) — i.e. a benchmark whose only Dirichlet condition constrains every
+component of a node "proves" that keeping the dofs is pointless. It is a roller/symmetry condition,
+pinning one component and not the other two, that actually breaks a strided layout. Worth knowing
+before repeating this measurement.
+
+**`nodal_coarsen` is a pessimisation** (D: 93 iterations against 14). Its iterations are the cheapest
+of any arm, so it does build a small hierarchy — just a much worse one. Not worth enabling by default.
+
+### 6.2 The unit Dirichlet diagonal does not hurt AMG
+
+The worry that motivated §6's original open item was that `remove_dirichlets_by_matrix_manipulation`
+writes a literal `1.0` on the constrained diagonal while the neighbouring entries scale with the
+modulus. Sweeping E over twelve orders of magnitude, at N=14 (19575 dofs), iteration counts:
+
+| E | A | B | C | D | E-arm |
+|---|---|---|---|---|---|
+| 1e-6 | 32 | 32 | 14 | 67 | 63 |
+| 1 | 32 | 32 | 14 | 65 | 63 |
+| 1e6 | 32 | 32 | 14 | 66 | 63 |
+
+Flat. The reason is structural: the manipulation zeroes the constrained row **and its column**, so the
+row is completely decoupled and AMG sees an isolated 1×1 block. A strength-of-connection measure is
+per-row and relative, so a row with no off-diagonals has nothing to be out of scale *with*.
+
+Magnitude-matching that diagonal therefore buys nothing for BoomerAMG — at least for a decoupled
+identity row and a hybrid-Gauss-Seidel smoother. It would still matter to anything that scales
+globally by the diagonal, and the condition number genuinely does change; but the original motivation
+does not survive measurement, so it is recorded here rather than left on the open list.
+
+## 7. Open
+
+* **Declare the block size from `PETSCSolver`.** §6 says this is where the entire measured gain is,
+  and it is a script trick today. The solver should ask the active layout for a constant block size
+  and call `MatSetBlockSize` itself. A constant stride exists only when
+  `apply_Dirichlet_BCs_by_dof_removing = False` *and* every node carries the same field set, so the
+  layout has to be able to answer "no".
+* **`setNearNullSpace` is untouched.** BoomerAMG never receives rigid-body modes; for elasticity that
+  is the next lever after the block size.
+* **The measurement covers one problem.** Serial, C1 elements, one preconditioner, a single vector
+  field. Nothing is claimed for Stokes or any multi-field problem, where a constant block size does
+  not exist in the first place, and nothing is claimed under MPI.
+* **The permutation's own cost is unmeasured.** One O(n log n) sort and two O(nnode+nelement) walks
+  inside a call whose elemental pass is ~96% of the total, so it should not register — but that is
+  arithmetic, not a benchmark.
