@@ -464,6 +464,22 @@ monodromy **at a size where the monodromy fits**. That is the honest shape of it
 route exists for the sizes where `nbase**2` does not fit, and shift-invert is what makes it usable
 there rather than merely possible.
 
+**Enlarging the Krylov basis was tried first, and is not a substitute.** Same orbit and count, one
+process so the numbers are internally consistent (its dense reference read 1.0 s against the 1.2 s
+above, i.e. the two runs agree to ~15%):
+
+| `ncv` | time | accuracy |
+|---|---|---|
+| default (`max(2k+1, 20)`) | 239 s | 2.8e-13 |
+| 40 | 89 s | 4.7e-14 |
+| 120 | **74 s** | 1.9e-14 |
+| 300 | 506 s | 5.4e-14 |
+
+A 3x win at best, still 4x short of shift-invert, and **non-monotonic** — 300 is worse than the
+default — so there is no safe value to raise the default to. The clustering that causes all this is
+worth quantifying: at the cut, `|lambda_9|/|lambda_8| = 0.9999928`. There is essentially no spectral
+gap where Arnoldi needs one, which no amount of basis is going to manufacture.
+
 ### 10.5 Asking for every multiplier costs `nbase x nT x nbase` complex
 
 `_last_eigenvectors` holds the eigenfunction of every returned multiplier over the whole orbit: 657 MB
