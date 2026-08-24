@@ -7,8 +7,8 @@ document that owns the reasoning, and none of that reasoning is repeated here.
 
 **How each claim was checked.** Every entry below was grepped against the tree — the guard, the class,
 the test file, the tutorial page — rather than taken from the document that asserts it. That is the
-whole point of the exercise: **nine claims turned out to be stale**, four of them inside a document that
-already contradicts itself elsewhere on the same page. §1 is the list of corrections owed; §2 onwards is
+whole point of the exercise: **eleven claims turned out to be stale**, four of them inside a document
+that already contradicts itself elsewhere on the same page. §1 is the list of corrections owed; §2 onwards is
 what is genuinely still missing.
 
 Two items are marked `UNTESTED` rather than open or closed: the code path exists and looks right, but
@@ -118,11 +118,26 @@ the monodromy machinery peaks at 1.6 GiB where the gathered Jacobian is 12 MiB, 
 multiplier cluster. Every "make it distributed" idea in that strand is optimising 2 % until something
 removes the dense object.
 
-**(e) Documentation, not code, is the largest single deficit.** Six documents independently note a
-missing tutorial chapter for a shipped, tested feature: `AdaptiveResolveRecovery`, non-convergence
-troubleshooting, `--largest_residuals`' dof mapping, the EHD capacitor/PB/DH/drop cases, the stabilized
-Navier–Stokes module, and the dof-ordering layouts. `nonconvergence_diagnostics.md` is entirely about
-this and is itself a planning document.
+**(e) Documentation is a real gap, but a smaller one than the first revision of this document claimed
+— and the overstatement was this document's own.** It said "six documents independently note a missing
+tutorial chapter for a shipped, tested feature". Checked one by one, that is wrong twice over:
+
+* **`stabilized_navier_stokes.md` and `dof_ordering.md` never make the claim.** The first one's §7 gap
+  is `tests/` coverage, not documentation; the second mentions neither a tutorial nor documentation
+  anywhere. Two of the six were miscounted outright.
+* **Two more were stale and are corrected in §1**: `--largest_residuals` *is* documented (one line in
+  `cmdlineoptions.rst`, which undersells it — the dof mapping is what is missing, not the flag), and the
+  EHD chapter that §10.6 called absent exists as `mcflow/salts/double_layer.rst` (the capacitor, the
+  charged wall in PB and DH, and the EHD drop are what is still missing from it).
+
+What survives is **two** genuinely absent chapters, and they are not independent: a tutorial chapter for
+`AdaptiveResolveRecovery` (confirmed — no hit anywhere under `docs/source/`) and the non-convergence
+troubleshooting chapter, both owned by `nonconvergence_diagnostics.md`, with
+`adaptive_resolve_recovery.md` §8 deferring to it. One strand, not six.
+
+So documentation is **not** the largest single deficit in this tree. That conclusion was an artefact of
+counting claims rather than checking them — the same mistake §1's header warns about, made inside the
+document that warns about it.
 
 ---
 
