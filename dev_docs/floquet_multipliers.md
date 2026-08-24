@@ -10,8 +10,9 @@ Two formulations live side by side in `Problem.get_floquet_multipliers()`
 * **`"eigenproblem"`** — the original code, kept verbatim as
   `Problem._get_floquet_multipliers_eigenproblem`. One large singular pencil over all time points.
 
-§1–§4 are the condensation and why it replaced the other; §5 records what was measured; §6 the
-things that are *not* fixed and the traps that remain.
+§1–§4 are the condensation and why it replaced the other; §5 records what was measured; §6 the traps
+that remain; §7 the opt-in periodic Schur; §8 periodic orbits under `--distribute`; §9 where the time
+actually goes and what parallelizes; §10 the open issues.
 
 ---
 
@@ -385,3 +386,90 @@ rule it out:
 The route that *would* serve very large `nbase` is the existing matrix-free operator, which needs no
 `nbase x nbase` object at all. Its limit is Arnoldi convergence on clustered spectra (§5), not the
 gather.
+
+
+## 10. Open issues
+
+Nothing here is a defect in what §1–§9 describe; these are the edges that were deliberately left,
+each with what it would take and how it would be checked.
+
+### 10.1 `switch_to_hopf_orbit()` is still serial
+
+**The biggest remaining usability gap**, because it is the normal way people reach an orbit: continue
+to a Hopf bifurcation, then switch. It needs the first Lyapunov coefficient, which
+`get_hopf_lyapunov_coefficient` computes with the Python custom assembler in
+`bifurcation_tools.py` — the half of `mpi_augmented_systems.md` (Part II, §7–§10) that was never
+implemented. It refuses with a message naming that specifically rather than claiming orbit tracking
+is unsupported.
+
+Until then the distributed route is to build the orbit guess yourself and call
+`activate_periodic_orbit_handler` (what `tests/floquet_worker.py`'s `pde` case does), or to pass
+`dparam` and `orbit_amplitude` to `switch_to_hopf_orbit`, which skips the Lyapunov coefficient
+entirely — that branch has not been tried distributed.
+
+Doing it properly means distributing `CustomAssemblyBase`/`AugmentedAssemblyHandler`, which serves
+branch switching, left eigenvectors and normal forms at the same time. That is a bigger piece than
+this document's subject and belongs in `mpi_augmented_systems.md`.
+
+### 10.2 History dof values are not written when distributed
+
+`PeriodicOrbit.__exit__` seeds three history levels so that a plain `run()` afterwards continues the
+orbit transiently. `Problem::set_history_dofs` refuses when distributed (§8, bug 2), so the exit
+warns and drops the orbit instead. Everything *inside* the `with` block works.
+
+oomph-lib declares the `t>0` dof accessors unsupported for distributed problems, and pyoomph's
+`get_dofs(t,...)`/`set_dofs(t,...)` overrides refuse for the same reason: their node loops index a
+local vector by global equation number. A distribution-aware version would build a
+`DoubleVectorWithHaloEntries` on the dof distribution and reach it through `global_value()`, the way
+the orbit handler's own vectors now do. That would also unblock `refine_eigenfunction()`, which is on
+`_require_non_distributed` for this reason and no other.
+
+Check it with the `sample_absum` comparison of `tests/test_mpi_floquet.py` extended past the `with`
+block: seed the history distributed, run a few transient steps, and hold the trajectory against the
+serial one.
+
+### 10.3 The native distributed Floquet path — measured and not built
+
+Extracting each time element's blocks as distributed PETSc Mats and running SLEPc on a shell matrix
+with one KSP per element. §9 has the numbers that rule it out: the gather it removes is 0.16 s of
+13 s and 12 MiB, while the dense monodromy machinery it feeds peaks at 1.6 GiB, so a problem too
+large to gather is already two orders of magnitude too large to form the monodromy.
+
+It only becomes the right answer *together with* 10.4 — i.e. once nothing in the pipeline needs an
+`nbase x nbase` object, at which point the gather really is the binding constraint. Building it
+before then optimises 2% of the runtime.
+
+### 10.4 Matrix-free Arnoldi converges badly on clustered spectra
+
+This is the real ceiling for very large `nbase`, since the matrix-free operator is the only route
+that needs no `nbase x nbase` object. It is currently plain `eigs(..., which="LM")`, and on the 1D
+Brusselator — whose multipliers cluster around 0.992 — it took 277 s for 8 multipliers against 65 s
+for forming the whole monodromy and taking all 802 (§5).
+
+The standard remedy is shift-invert, and it is available here at no structural cost: the inverse of
+the monodromy is the same chain run the other way (`E0_ie x = -L_ie y` instead of
+`L_ie y = -E0_ie x`), so `(Mono - sigma I)^-1` could be applied by the machinery that already exists,
+or a polynomial filter used instead. Nobody has needed it yet, which is why it is not built.
+
+### 10.5 Asking for every multiplier costs `nbase x nT x nbase` complex
+
+`_last_eigenvectors` holds the eigenfunction of every returned multiplier over the whole orbit: 657 MB
+at `nbase=1282`, `nT=25`, and `n=None` means *all* multipliers whenever `nbase <= dense_threshold`
+(2000). Batching (§9) made it 14x faster but not smaller.
+
+Nothing guards it. The clean fix is to make the reconstruction lazy — return the multipliers, and
+build the eigenfunctions when `get_last_eigenvectors()` is actually called — but `_last_eigenvectors`
+is a plain attribute several places read directly, so it is a small API change rather than a local
+one. Asking for a specific `n` avoids it entirely today.
+
+### 10.6 What has and has not been run
+
+Validated: `tests/test_floquet_multipliers.py` (21), `tests/test_mpi_floquet.py` (4),
+`tests/test_mpi_orbit_output.py`, `tests/test_mpi_bifurcation_tracking.py`,
+`tests/test_eigen_during_tracking.py`, `tests/test_mpi_eigenvalues.py`, and the Langford tutorial end
+to end (60 continuation steps, ~1e-3 median relative error against the analytical multiplier).
+
+**Not run: the full `tests/` suite and the tutorial harness.** Two of the fixes reach well outside the
+orbit code — the `_change_output_directory` hook rename in `pyoomph/output/generic.py` affects *every*
+outputter, not only `output_orbit()`, and `Problem::set_history_dofs` is shared with
+`refine_eigenfunction()`. Both deserve a full pass before this is merged into main.
