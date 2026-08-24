@@ -1860,9 +1860,17 @@ class Problem(_pyoomph.Problem):
         These callers assemble the eigenproblem matrices themselves and read the result as a square
         global matrix, which it stops being once the rows are partitioned across ranks -- scipy then
         raises about an indptr length, several frames away from the feature the user asked for. The
-        augmented-system ones (bifurcation tracking, periodic orbits) additionally sit on top of
+        remaining ones (the Lyapunov exponents, the periodic driving response, the multi-assembly
+        tensor cache, left eigenvectors and branch switching, and the Python custom assembler behind
+        get_hopf_lyapunov_coefficient) additionally sit on top of
         sparse_assemble_row_or_column_compressed_base_problem, which throws "This likely does not work
         in distributed parallel" from C++. Failing here names the feature instead.
+
+        Bifurcation tracking through the C++ handlers, and periodic orbits with their Floquet
+        multipliers, used to be on that list and are not any more -- see
+        dev_docs/mpi_augmented_systems.md and dev_docs/floquet_multipliers.md section 8.
+        refine_eigenfunction() is here for the history-dof reason instead of an assembly one:
+        Problem::set_history_dofs refuses when distributed.
         """
         if self.is_distributed():
             raise RuntimeError(what+" is not supported on a distributed (--distribute) problem yet. Run it without --distribute (plain eigenvalue solving via SLEPc does work distributed).")
