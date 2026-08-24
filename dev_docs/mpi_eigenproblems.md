@@ -232,8 +232,10 @@ through `Problem._require_non_distributed`:
   (both of these build a replicated system and call `solve_serial` on every rank — see
   [linear_solvers.md](linear_solvers.md) §9.2 for why they now have to say so first)
 - `refine_eigenfunction()` — for the history-dof reason in §3, not for an assembly reason
-- bifurcation branch switching, left eigenvectors and normal forms
-  (`pyoomph/generic/bifurcation_tools.py`), which build global scipy matrices
+Branch switching, left eigenvectors and the normal forms are no longer on this list either: they left
+the Python custom multi-assembly the way deflation and the Lyapunov coefficient did, and work under a
+plain `mpirun` and under `--distribute` — see [branch_switching.md](branch_switching.md)
+§"Under MPI" and `tests/test_mpi_branch_switch.py`.
 
 Periodic orbit tracking, Floquet multipliers and `switch_to_hopf_orbit()` are no longer on this list
 either — see [floquet_multipliers.md](floquet_multipliers.md) §8 and

@@ -763,15 +763,17 @@ and `-n 4`).
 * **Exposing the pattern to Python** (`problem.get_jacobian_sparsity()` → `(indptr, indices)`), so
   `CustomAssemblyBase` implementors and the eigen matrix manipulators — which do `csr` surgery row by row
   — can work on a fixed pattern too. Nice-to-have; nothing depends on it.
-* **Threaded assembly.** A precomputed scatter index makes a colour- or lock-free parallel scatter
-  feasible. Follow-up.
+* ~~**Threaded assembly.**~~ **Done** - see [openmp_assembly.md](openmp_assembly.md). `--omp N` threads
+  the element loop by gathering rather than scattering, bit-identically, and it *requires* the frozen
+  sparsity described here: without it the map-based fallbacks are not threaded and the loop declines.
 * **Extending the frozen path to `..._for_periodic_orbit`'s remaining fallback** and to the augmented
   systems on a *distributed* problem — see [mpi_augmented_systems.md](mpi_augmented_systems.md).
 
-**Found on the way, not part of this work:** distributed eigensolving is broken in the Python layer.
-`GenericEigenSolver.get_J_M_n_and_type()` wraps the *row-local* CSR that
-`assemble_eigenproblem_matrices()` returns in a `csr_matrix` of *global* shape, and scipy rejects it. It
-fails identically with the frozen route on or off; the C++ side is fine, as §5 verified below this layer.
+**Found on the way, not part of this work - since fixed:** distributed eigensolving was broken in the
+Python layer. `GenericEigenSolver.get_J_M_n_and_type()` wrapped the *row-local* CSR that
+`assemble_eigenproblem_matrices()` returns in a `csr_matrix` of *global* shape, and scipy rejected it. It
+failed identically with the frozen route on or off; the C++ side was fine, as §5 verified below this
+layer. It now builds `shape=(M_nr, n)`; see [mpi_eigenproblems.md](mpi_eigenproblems.md).
 Also worth knowing when testing that layer: the arrays `assemble_eigenproblem_matrices()` returns are
 **views** into `eigen_{Mass,Jacobian}MatrixPt`, which the next call deletes and reallocates — comparing
 two calls without copying first compares freed memory against live memory and reports pure noise. It

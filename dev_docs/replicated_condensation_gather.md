@@ -12,9 +12,11 @@ flagship case, not benchmarks. Companion to [static_condensation.md](static_cond
 ## 1. What is missing
 
 Replicated MPI (`mpirun` without `--distribute`) is served today — but only for selections whose dofs
-are element **internal**. The flagship **Crouzeix–Raviart** selection is refused, and
-`citools/test_all_tutorial_scripts.py:290` skips `cr_static_condensation.py` on the replicated pass
-because of it.
+are element **internal**. When this was written the flagship **Crouzeix–Raviart** selection was refused,
+and `citools/test_all_tutorial_scripts.py` skipped `cr_static_condensation.py` on the replicated pass
+because of it. **Both are gone**: the element-block dof layout of [dof_ordering.md](dof_ordering.md)
+makes a CR block contiguous, and the tutorial runs on that pass. What follows is therefore the analysis
+for a selection renumbering *cannot* make contiguous, e.g. interior-penalty DG.
 
 Replicated, every rank holds the whole mesh, every `Data` and the whole dof vector; only the element
 loop and the Jacobian's **rows** are split, the latter uniformly and **contiguously**

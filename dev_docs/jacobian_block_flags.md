@@ -3,7 +3,9 @@
 Status: **implemented and tested** (serial) — the flags are computed for every generated code, exposed
 to Python, AND-combined at problem level and printed into `_ccode/_jacobian_structure.txt`. The
 consumers they were built for (Schur-complement reuse in [static_condensation.md](static_condensation.md),
-PETSc fieldsplit KSP/PC selection) are **not built yet**; nothing reads the flags for decisions today.
+PETSc fieldsplit KSP/PC selection) are **not built yet**. A third consumer that was not on that list
+*is*: the whole-matrix symmetry verdict that switches the direct solvers and the eigensolver onto their
+symmetric paths, §7.
 A side effect of this work, the print-free global-parameter registration (§4), is active everywhere.
 
 **The idea.** Code generation already decides which (test field, unknown field) blocks of the elemental

@@ -6,7 +6,10 @@ Two halves of the same subject, at opposite ends of their lifecycle:
   `AzimuthalSymmetryBreakingHandler`) — **done**. They used to refuse `--distribute` outright; §1–§6
   record what had to change, what deliberately did not, and what is still refused.
 * **The Python custom assembler** (`CustomAssemblyBase` and the `AugmentedAssemblyHandler` family in
-  `pyoomph/generic/bifurcation_tools.py`) — **plan only, nothing implemented**. §7–§10.
+  `pyoomph/generic/bifurcation_tools.py`) — **stage 0 built, the rest plan only**. §7–§10.
+  `Problem.set_custom_assembler` now calls `_require_single_rank`, which became possible once the
+  normal form left this pipeline ([branch_switching.md](branch_switching.md)); what is still on it is
+  the `CustomBifurcationTracker` family, `DeflationAssemblyHandler` and `CriticalWavenumberTracker`.
 
 The two are independent implementations of the same idea, and the second one throws from deep inside
 C++ the moment `nproc > 1`.

@@ -819,7 +819,7 @@ atoms, and anything else fails - because expanding a 350 kB entry is precisely t
 Any failure returns the empty string and the entry is printed exactly as before, so a case the
 mathematics did not anticipate costs performance, never correctness.
 
-**Coefficients below `PYOOMPH_JACOBIAN_HOIST_MIN` (default 32) expression nodes are left inline.** This
+**Coefficients below `PYOOMPH_JACOBIAN_HOIST_MIN` expression nodes are left inline.** This
 is not a micro-optimisation, it is the difference between two regimes. Naming a coefficient makes it one
 more value live across the whole trial loop, and the register allocator works on the whole generated
 function - including the residual-only path, which never enters the `if (flag)` block the coefficients
@@ -834,6 +834,12 @@ live in and yet gets measurably slower. On the 3D solid element:
 | 48 | 0.2997 s | 1.6862 s (-63.2%) |
 | 64 | 0.0867 s | 2.4161 s (-47.2%) |
 | 96 | 0.0872 s | 2.4227 s (-47.1%) |
+
+*The default was 32 when this sweep was run, and is **1** today.* This whole table predates the flag
+split of §9.4.6, which took the coefficients out of the residual-only path and thereby removed the only
+reason to hold back; §9.4.7 item 1 predicted the optimum would move down, the sweep on the split build
+confirmed it, and §12 carries the re-run numbers. What follows is the pre-split reasoning, which is
+still what applies under `PYOOMPH_DISABLE_RJM_SPLIT`.
 
 The transition between 48 and 64 is a single coefficient: hoisting it is worth 16 points of Jacobian
 time and costs 0.21 s of residual-only time. Per Newton step (one residual evaluation plus one
@@ -926,7 +932,7 @@ Both changes of §9.4.5 and §9.4.6 are in and measured, but they were built in 
 invalidates assumptions the other made. The list below is roughly in the order it should be worked
 through, because the early items change what the later ones should be measured against.
 
-**1. Re-check the hoist limit.** `PYOOMPH_JACOBIAN_HOIST_MIN` was set to 32 by the sweep in §9.4.5, and
+**1. Re-check the hoist limit - DONE, and the optimum did move down: the default is now 1 (§12).** `PYOOMPH_JACOBIAN_HOIST_MIN` was set to 32 by the sweep in §9.4.5, and
 that sweep was run *before* the function split existed. Its whole shape came from one effect: naming a
 cheap coefficient slowed the residual-only path. §9.4.6 removed that effect entirely - the residual-only
 body no longer contains the Jacobian code, so there is nothing for a coefficient to be live across. The

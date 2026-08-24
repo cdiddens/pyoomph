@@ -726,10 +726,11 @@ in 2D is only honest for `lambda_D/L` above roughly 1e-3.
 
 ### 10.6 Documentation
 
-There is no tutorial chapter. The gas/liquid pairing and the EHD routes exist only as tests, which
-are written to pin behaviour rather than to teach, and the API documentation is autodoc over
-docstrings. A chapter covering a capacitor, a charged wall in both PB and DH, the gas/liquid pairing
-and an EHD drop is the missing piece for anyone who did not write these modules.
+There is one tutorial chapter, `docs/source/tutorial/mcflow/salts/double_layer.rst`, reached from the
+salts chapter rather than from anything named electrostatics: it resolves the double layer with PNP and
+covers the gas/liquid pairing. The **EHD routes** still exist only as tests, which are written to pin
+behaviour rather than to teach, and the API documentation is autodoc over docstrings. Still missing from
+the chapter this section asked for: a capacitor, a charged wall in both PB and DH, and an EHD drop.
 
 ## 11. Conservative transport on a moving mesh
 

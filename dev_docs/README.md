@@ -5,6 +5,11 @@ code that the source comments only have room to point at. Each document says at 
 subject is in. Many are cited by file name from `src/`, `pyoomph/` and `tests/`, so renaming one means
 chasing those citations.
 
+**[open_items.md](open_items.md)** is the cross-cutting register: every "open", "not done" and "still
+refused" section of every document below, merged, grouped by theme and re-checked against the tree.
+Start there if you are looking for something to pick up, or before believing any single document's
+claim that a thing does not exist.
+
 **Conventions.** Everything here is measured unless it says otherwise; a claim that was reasoned rather
 than executed says so. Rejected alternatives are kept with the reason, because the reason is usually
 the useful part. Code examples in `examples/` are runnable companions, not snippets.
@@ -33,9 +38,20 @@ the useful part. Code examples in `examples/` are runnable companions, not snipp
 | [distributed_state_files.md](distributed_state_files.md) | `save_state`/`load_state` on a distributed problem. |
 | [mpi_eigenproblems.md](mpi_eigenproblems.md) | Distributed eigenvalue problems through SLEPc. |
 | [mpi_augmented_systems.md](mpi_augmented_systems.md) | Bifurcation tracking under `--distribute` (done), and the plan for the Python custom assembler (not). |
+| [distributed_periodic_bc.md](distributed_periodic_bc.md) | Periodic boundaries under `--distribute`: periodicity is pointer aliasing rather than a constraint, what that costs the halo scheme, and the two things it still refuses (a moving mesh, and adapting after distribution). |
 | [deflation.md](deflation.md) | Finding several solutions of the same problem: why the deflated Newton step is one linear solve rather than three, why the deflation factor is normalised to 1 far away, and the two reductions on two different layouts that make it work under `mpirun` and `--distribute`. |
 | [hopf_normal_form.md](hopf_normal_form.md) | The first Lyapunov coefficient: the term-by-term audit of Kuznetsov's real-form algorithm as pyoomph implements it, where the mass-matrix generalisation belongs, why `ga` is not mesh-independent while the orbit amplitude is, and what the new tests pin. |
 | [floquet_multipliers.md](floquet_multipliers.md) | Condensing the block bidiagonal orbit Jacobian into the monodromy matrix instead of solving one large singular pencil, the opt-in periodic Schur, why a DAE's algebraic directions land on `±1` rather than 0, and periodic orbits under `--distribute`. |
+
+## Continuation, bifurcations and orbits
+
+| | |
+|---|---|
+| [bifurcation_loci.md](bifurcation_loci.md) | Two-parameter continuation of a bifurcation, the slice a diagram lives in, and the guards the bifurcation GUI needs — including what an orbit branch refuses and why `get_bifurcation_tracking_mode()` is the wrong thing to test. |
+| [branch_switching.md](branch_switching.md) | Stepping onto the other branch through a bifurcation: why seeding oomph's arclength state does not work, the ladder that replaced it, the signed projection, and how the normal form left the Python custom assembler and thereby works under MPI. |
+| [quick_continuation.md](quick_continuation.md) | Spotting a bifurcation along a sweep without solving an eigenproblem: the two test functions, why the free route is correct, and what a sign test cannot see. |
+| [arclength_inner_product.md](arclength_inner_product.md) | Why the default arclength metric is mesh-dependent, why one scalar is enough to fix it, and the two things it does not fix. |
+| [critical_wavenumber_tracking.md](critical_wavenumber_tracking.md) | The co-dimension-2 problem behind "the instability sets in at `k_c`": finding the wavenumber rather than prescribing it, for both the Cartesian and the azimuthal mode family. |
 
 ## Assembly, code generation and solvers
 
@@ -44,7 +60,9 @@ the useful part. Code examples in `examples/` are runnable companions, not snipp
 | [code_generation.md](code_generation.md) | Where code-generation time goes, and whether the emitted C can be made faster. (Mostly it cannot — the C compiler is already good at it.) |
 | [initialisation_cost.md](initialisation_cost.md) | Why `initialise()` took 25 s for a million dofs before anything was solved, what removed a quarter of it, and why skipping the elemental equation numbering cannot work (`assign_local_eqn_numbers` also rebuilds `eleminfo`). Also: how to profile any of this when `perf` is unavailable and `cProfile` cannot see nanobind. |
 | [structural_assembly.md](structural_assembly.md) | Precomputed CSR sparsity, value-only re-assembly, and the distributed exchange. |
-| [jacobian_block_flags.md](jacobian_block_flags.md) | Per-block proven symmetry/constancy bits from the symbolic block expressions, their problem-level AND-union in `_jacobian_structure.txt`, and the print-free global-parameter registration that came out of it. Consumers not built yet. |
+| [assembly_overhead.md](assembly_overhead.md) | What the C++ side does *around* each generated call: hanging bookkeeping (mostly not redundant), the shape-buffer fills (the biggest win, from an audit nobody had run) and external data inflating `ndof` (real, under a percent). |
+| [openmp_assembly.md](openmp_assembly.md) | Threading the element loop with `--omp N`: gather rather than scatter, bit-identical results, why `mpirun` silently turns it into a no-op without `--bind-to none`, and which wheels actually ship it. |
+| [jacobian_block_flags.md](jacobian_block_flags.md) | Per-block proven symmetry/constancy bits from the symbolic block expressions, their problem-level AND-union in `_jacobian_structure.txt`, and the print-free global-parameter registration that came out of it. §7 is the one consumer built so far, the symmetric-solver switch. |
 | [static_condensation.md](static_condensation.md) | Eliminating element-local dofs (CR bubbles, DL/D0/DG fields) from the assembled system and reconstructing them after the Newton update. Halves the factorisation time; serial, distributed and replicated MPI; experimental. |
 | [replicated_condensation_gather.md](replicated_condensation_gather.md) | Planning only, and no longer needed for Crouzeix-Raviart, which [dof_ordering.md](dof_ordering.md) serves instead: gathering a condensed block whose rows straddle the uniform row split of a replicated (`mpirun` without `--distribute`) run. Still the answer for a selection renumbering cannot make contiguous, e.g. interior-penalty DG. |
 | [dof_ordering.md](dof_ordering.md) | Choosing the global dof numbering from Python: nodal blocks for a block preconditioner, element blocks for static condensation. The permutation hook inside `assign_eqn_numbers`, aligning the replicated MPI row split with the blocks, and a measured BoomerAMG comparison (15x, from `MatSetBlockSize` rather than from the layout). |
@@ -59,6 +77,7 @@ the useful part. Code examples in `examples/` are runnable companions, not snipp
 | [stabilized_navier_stokes.md](stabilized_navier_stokes.md) | SUPG/PSPG/LSIC/GLS/ASGS/VMS for the momentum equations, the equal-order pairs they enable, and what a bulk stabilization leaves behind on a Neumann boundary. |
 | [stabilized_scalar_transport.md](stabilized_scalar_transport.md) | The same for advection-diffusion, mixture composition and temperature: shared `tau` machinery, why `div(grad(c))` had to be written as `trace(grad(grad(c)))`, and the measurement that no stabilization perturbs the interface physics. |
 | [tracers.md](tracers.md) | Passive tracer particles: formulation, adaptation, remeshing, MPI. |
+| [surfactant_transport.md](surfactant_transport.md) | Why the conservative form is the default for insoluble surfactant transport, measured against prescribed interface motion — and why smoothing the normal makes mass transfer ten times worse. |
 | [aiomfac_electrolytes.md](aiomfac_electrolytes.md) | Activity coefficients of a salt solution: the AIOMFAC middle- and long-range parts in all three back-ends, the parameter audit against the current AIOMFAC source (two ions had been attached to the wrong species), and the agreement with AIOMFAC itself. |
 | [salt_transport.md](salt_transport.md) | Salts without any electrostatics: one field per salt with the ambipolar diffusivity, the interface condition that keeps a salt in an evaporating liquid (three ALE forms, three different terms), salt-induced Marangoni and its direction, and the measured agreement with Poisson-Nernst-Planck. |
 | [electrohydrodynamics.md](electrohydrodynamics.md) | Electrostatics, electrolytes (PNP / Poisson-Boltzmann / Debye-Hückel / leaky dielectric) and the coupling into the flow: why the potential formulation, the shared permittivity scale that makes two-domain coupling work, the surface-charge sign, and the three EHD routes — one of which is silently wrong on a free surface. §10 is the open-issues list, including the log formulation for Nernst-Planck and an audit of what no test covers; §11 is the conservative (GCL) transport of the surface charge and the ions on a moving mesh, why the old surface-charge form did not converge in the time step at all under evaporation, ad-/desorption rates, and two sign conventions that were documented backwards. |

@@ -766,9 +766,11 @@ that defect is "converges without X, diverges with X, for X that should be harml
 
 ## 10. Not done
 
-* **A tutorial page for the benchmark.** The validation itself is now a test (section 8), but there
-  is no narrative version, and no `refs.bib` entries - the bibliography still contains nothing
-  viscoelastic.
+* ~~**A tutorial page for the benchmark.**~~ **Done**: `docs/source/tutorial/pde/navier/viscoelastic.rst`
+  is the narrative version, with `viscoelastic_cylinder.py` alongside it, and it carries the drag table
+  against Claus & Phillips as well as the stress profiles. The bibliography entries came with it
+  (`Oldroyd1950`, `Giesekus1982`, `FattalKupferman2004`, `Hulsen2005`, `Alves2001`, `Claus2013`), so the
+  claim below that there are none is superseded too.
 * **The wake.** Section 8.4 cannot separate the O-grid from the far field, because the estimator
   redistributes the far field whenever the O-grid changes. Pinning the wake - estimator restricted
   to the cylinder and near wake, or adaptivity off - is the experiment that would settle it, and the
@@ -780,8 +782,6 @@ that defect is "converges without X, diverges with X, for X that should be harml
 * **DEVSS-G.** SUPG exists (section 9) but DEVSS-G does not, and it is the other half of what the
   reference uses. Section 9.1 suggests neither is needed to cover the benchmark range.
 * **The two source-level fixes** of sections 6.1 and 6.2.
-* **Documentation.** No tutorial page, no `refs.bib` entries (the bibliography currently contains
-  nothing viscoelastic).
 * **3d**, per section 5.
 * **Inflow boundary conditions** beyond the two helpers `symmetric_2x2_matrix_log` and
   `oldroyd_b_shear_conformation`, which together give the fully developed log-conformation tensor for
@@ -791,5 +791,6 @@ that defect is "converges without X, diverges with X, for X that should be harml
 in `_in_plane_exponential` stays, because the fix does not make the genuinely degenerate rest state
 differentiable, and nothing can); the cylinder benchmark is `tests/test_viscoelastic_cylinder.py`;
 6.4 is fixed and 6.1 is sidestepped by using the library's convected derivatives. **The order to pick
-it up in:** the wake experiment of §8.4 first, since it is the one open question about the *numbers*,
-then the tutorial page and bibliography.
+it up in:** the wake experiment of §8.4, since it is the one open question about the *numbers*, and it
+is now the first item rather than the second - the tutorial page and bibliography that used to head this
+list are written.
