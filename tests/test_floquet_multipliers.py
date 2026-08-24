@@ -258,3 +258,28 @@ def test_periodic_schur_beats_the_product_at_the_bottom(tmp_path):
     assert numpy.max(e_prod[:2]) > 1e-6, e_prod
     assert numpy.max(e_schur[:2]) < 1e-9, e_schur
 
+
+
+# The matrix-free route seeks the multipliers near sigma rather than by largest magnitude. Plain
+# Arnoldi has the right TARGET but converges badly when the wanted multipliers are clustered, which is
+# the normal case for a PDE orbit -- on the 1D Brusselator, eight of them cost 277 s that way against
+# 18 s shift-inverted, to 2.6e-13. The shift is available exactly, and without forming the monodromy:
+# take the orbit Jacobian, keep its element rows, and replace the wrap-around row v_last - v_0 = 0 with
+# v_last - sigma*v_0 = b. The element rows still force v_k+1 = C_k v_k, so the last row reads
+# (Mono - sigma*I) v_0 = b, and one solve of a matrix the size of the orbit system is the shift-invert
+# apply -- factorized once, at the cost the orbit's own Newton step already pays each iteration.
+@pytest.mark.parametrize("shift_invert", [1, 0], ids=["shift_invert", "plain_arnoldi"])
+def test_matrix_free_agrees_with_dense_on_a_clustered_spectrum(tmp_path, shift_invert):
+    """The Stuart-Landau reaction-diffusion orbit, whose multipliers sit on top of each other at 0.95."""
+    dense = _run(tmp_path / "dense", case="pde", what="orbit", sigma=-1.0, N=20, n=4)
+    free = _run(tmp_path / "free", case="pde", what="orbit", sigma=-1.0, N=20, n=4,
+                dense_threshold=1, shift_invert=shift_invert)
+    # Folded onto the positive-imaginary representative before sorting: the two routes can list
+    # opposite halves of a conjugate pair, which says nothing about either being wrong.
+    def canon(res):
+        F = _multipliers(res)
+        F = numpy.where(F.imag >= 0, F, numpy.conjugate(F))
+        return numpy.array(sorted(F, key=lambda z: (abs(z), z.real, z.imag)))
+    a, b = canon(dense), canon(free)
+    assert len(a) == len(b) == 4, (a, b)
+    assert numpy.max(numpy.abs(a - b)) < 1e-8, (a, b)

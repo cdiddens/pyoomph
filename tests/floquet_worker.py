@@ -189,7 +189,9 @@ def run_pde(args):
         res["nT"] = orbit.get_num_time_steps()
         res["ndof"] = int(problem.ndof())
         res["T"] = float(orbit.get_T(dimensional=False))
-        F = orbit.get_floquet_multipliers(n=args.n if args.n > 0 else 6)
+        F = orbit.get_floquet_multipliers(n=args.n if args.n > 0 else 6,
+                                          dense_threshold=args.dense_threshold,
+                                          shift_invert=bool(args.shift_invert))
         res["mult_re"] = [float(numpy.real(z)) for z in F]
         res["mult_im"] = [float(numpy.imag(z)) for z in F]
         # Drives set_dofs_to_interpolated_values() and the halo push that follows it, which is the
@@ -245,6 +247,7 @@ def run(args):
                 if args.n > 0:
                     kwargs["n"] = args.n
                 kwargs["dense_threshold"] = args.dense_threshold
+                kwargs["shift_invert"] = bool(args.shift_invert)
             F = orbit.get_floquet_multipliers(**kwargs)
             res["mult_re"] = [float(numpy.real(z)) for z in F]
             res["mult_im"] = [float(numpy.imag(z)) for z in F]
@@ -287,6 +290,7 @@ def main():
     p.add_argument("--n", type=int, default=0)
     p.add_argument("--shift", type=float, default=3.0)
     p.add_argument("--dense-threshold", dest="dense_threshold", type=int, default=2000)
+    p.add_argument("--shift-invert", dest="shift_invert", type=int, default=1)
     p.add_argument("--expect-refusal", action="store_true")
     # parse_known_args, not parse_args: pyoomph reads its own flags (--distribute above all) straight
     # off sys.argv, and argparse would reject them here first.

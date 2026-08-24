@@ -429,17 +429,40 @@ It only becomes the right answer *together with* 10.4 — i.e. once nothing in t
 `nbase x nbase` object, at which point the gather really is the binding constraint. Building it
 before then optimises 2% of the runtime.
 
-### 10.4 Matrix-free Arnoldi converges badly on clustered spectra
+### 10.4 Matrix-free Arnoldi on clustered spectra — shift-invert
 
-This is the real ceiling for very large `nbase`, since the matrix-free operator is the only route
-that needs no `nbase x nbase` object. It is currently plain `eigs(..., which="LM")`, and on the 1D
-Brusselator — whose multipliers cluster around 0.992 — it took 277 s for 8 multipliers against 65 s
-for forming the whole monodromy and taking all 802 (§5).
+Plain `eigs(..., which="LM")` has the right *target* — stability lives at the largest moduli — but it
+converges badly when the wanted multipliers are clustered, which is the normal case for a PDE orbit.
+On the 1D Brusselator, whose multipliers sit on top of each other around 0.992, eight of them cost
+277 s that way.
 
-The standard remedy is shift-invert, and it is available here at no structural cost: the inverse of
-the monodromy is the same chain run the other way (`E0_ie x = -L_ie y` instead of
-`L_ie y = -E0_ie x`), so `(Mono - sigma I)^-1` could be applied by the machinery that already exists,
-or a polynomial filter used instead. Nobody has needed it yet, which is why it is not built.
+Shift-invert is the standard remedy, and the shift is available **exactly, without forming the
+monodromy**. The chain came from a sparse system in the first place: take the orbit Jacobian, keep its
+element rows, and replace the wrap-around row `v_last - v_0 = 0` with `v_last - sigma*v_0 = b`. The
+element rows still force `v_{k+1} = C_k v_k`, so `v_last = Mono v_0` and the last row reads
+
+```
+(Mono - sigma*I) v_0 = b
+```
+
+One solve of a matrix the size of the orbit system is therefore the shift-invert apply, exactly — and
+that matrix is factorized once and reused, at the cost the orbit's own Newton step already pays every
+iteration. `ShiftInvertMonodromyOperator` in `pyoomph/generic/floquet.py`; it is on by default for the
+matrix-free route, with `sigma` defaulting to just outside the unit circle. `shift_invert=False`
+restores plain Arnoldi.
+
+Measured on the Brusselator orbit at `nbase=802` (`nT=31`), eight multipliers, one BLAS thread:
+
+| route | time | accuracy |
+|---|---|---|
+| plain matrix-free Arnoldi | 277 s | — |
+| **shift-inverted matrix-free** | **0.73 s factorize + 17.3 s** | 2.6e-13 |
+| dense monodromy (all 802) | 1.2 s | reference |
+
+So shift-invert is 16x faster than plain Arnoldi and still 15x slower than simply forming the
+monodromy **at a size where the monodromy fits**. That is the honest shape of it: the matrix-free
+route exists for the sizes where `nbase**2` does not fit, and shift-invert is what makes it usable
+there rather than merely possible.
 
 ### 10.5 Asking for every multiplier costs `nbase x nT x nbase` complex
 

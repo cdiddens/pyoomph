@@ -233,6 +233,18 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   tutorial; `AGENTS.md`/agent-facing docs for AI-assisted development.
 - numerical-data-file loading as numpy array with column and parameter information
 
+- **Shift-invert for the matrix-free Floquet route.** Plain Arnoldi has the right target -- stability
+  lives at the largest moduli -- but converges badly when the wanted multipliers are clustered, which
+  is the normal case for a PDE orbit: eight of the 1D Brusselator's cost 277 s that way. The shift
+  turns out to be available *exactly*, without forming the monodromy, because the chain came from a
+  sparse system in the first place: keep the orbit Jacobian's element rows and replace the wrap-around
+  row `v_last - v_0 = 0` with `v_last - sigma*v_0 = b`, and the last row reads
+  `(Mono - sigma*I) v_0 = b`. One solve of a matrix the size of the orbit system is the shift-invert
+  apply, factorized once at the cost the orbit's own Newton step already pays each iteration. The same
+  eight multipliers then take 0.7 s to factorize plus 17 s, accurate to 2.6e-13. On by default for the
+  matrix-free route, with `sigma` just outside the unit circle; `shift_invert=False` restores the old
+  behaviour.
+
 - **History degrees of freedom under `--distribute`.** `Problem::get_dofs(t,...)` and `set_dofs(t,...)`
   work distributed now. oomph-lib's own versions build the vector on the dof distribution -- this
   rank's rows -- and then index it by *global* equation number, which is why they guard themselves

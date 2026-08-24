@@ -339,9 +339,9 @@ class PeriodicOrbit:
             self._get_handler().restore_dofs()
             self.problem.set_current_time(tbackup,dimensional=False,as_float=True)
         
-    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000):
+    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000,shift_invert:bool=True,sigma:complex | None=None):
         """See :py:meth:`~pyoomph.generic.problem.Problem.get_floquet_multipliers`."""
-        return self.problem.get_floquet_multipliers(n=n,valid_threshold=valid_threshold,shift=shift,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet,method=method,dense_threshold=dense_threshold)
+        return self.problem.get_floquet_multipliers(n=n,valid_threshold=valid_threshold,shift=shift,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet,method=method,dense_threshold=dense_threshold,shift_invert=shift_invert,sigma=sigma)
     
     def starts_supercritically(self):
         """
@@ -7337,7 +7337,7 @@ class Problem(_pyoomph.Problem):
                     #print("DOT",numpy.sqrt(numpy.dot(numpy.array(history_dofs[i])-numpy.array(u0),numpy.array(dofs)-numpy.array(u0))))
         return res
         
-    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000)->NPComplexArray:
+    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000,shift_invert:bool=True,sigma:complex | None=None)->NPComplexArray:
         """Calculates the Floquet multipliers of the currently tracked periodic orbit.
 
         The orbit must be discretized in a mode that carries an explicit degree of freedom at the end
@@ -7352,6 +7352,8 @@ class Problem(_pyoomph.Problem):
             quiet: Suppress the eigensolver output, and the accuracy report of the trivial multiplier.
             method: ``"condensed"`` (default) condenses the block bidiagonal orbit Jacobian into the monodromy matrix, which yields exactly the multipliers and nothing else. ``"periodic_schur"`` computes the same multipliers by a periodic Schur (periodic QR) sweep, which never forms the product and is therefore more accurate for multipliers many orders of magnitude below the dominant one, at a considerably higher cost. ``"eigenproblem"`` is the older formulation, which solves one large singular eigenproblem over all time points and filters the result.
             dense_threshold: Only used by ``method="condensed"``: above this number of degrees of freedom, only the dominant multipliers are computed by default, and the monodromy matrix is applied matrix-free rather than formed whenever few enough of them are wanted.
+            shift_invert: Only used by the matrix-free route: seek the multipliers near ``sigma`` rather than by largest magnitude. Plain Arnoldi converges badly when they are clustered, which is the normal case for a PDE orbit.
+            sigma: The shift for ``shift_invert``. Defaults to just outside the unit circle, where the stability question lives.
 
         Returns:
             NPComplexArray: The Floquet multipliers, sorted by ascending magnitude.
@@ -7371,7 +7373,7 @@ class Problem(_pyoomph.Problem):
         if method in ("condensed","periodic_schur"):
             # n=None is passed on rather than resolved here: the condensed method only defaults to
             # "all of them" while the monodromy is small enough to be formed.
-            return self._get_floquet_multipliers_condensed(n=n,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet,dense_threshold=dense_threshold,shift=shift,valid_threshold=valid_threshold,periodic_schur=(method=="periodic_schur"))
+            return self._get_floquet_multipliers_condensed(n=n,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet,dense_threshold=dense_threshold,shift=shift,valid_threshold=valid_threshold,periodic_schur=(method=="periodic_schur"),shift_invert=shift_invert,sigma=sigma)
         elif method!="eigenproblem":
             raise ValueError("Invalid method for the Floquet multipliers: "+str(method))
         if n is None:
@@ -7410,7 +7412,7 @@ class Problem(_pyoomph.Problem):
         self._last_eigenvalues_k=None
         return gamms
 
-    def _get_floquet_multipliers_condensed(self,n:int | None,ignore_periodic_unity:bool | float,quiet:bool,dense_threshold:int,shift:float | None,valid_threshold:float | None,periodic_schur:bool=False)->NPComplexArray:
+    def _get_floquet_multipliers_condensed(self,n:int | None,ignore_periodic_unity:bool | float,quiet:bool,dense_threshold:int,shift:float | None,valid_threshold:float | None,periodic_schur:bool=False,shift_invert:bool=True,sigma:complex | None=None)->NPComplexArray:
         """Floquet multipliers by condensing the block bidiagonal orbit Jacobian; see pyoomph.generic.floquet."""
         from .floquet import floquet_multipliers
         # These two only ever existed to tame the singular eigenproblem formulation. The condensation
@@ -7421,7 +7423,7 @@ class Problem(_pyoomph.Problem):
         if valid_threshold is not None and valid_threshold!=10000:
             print("WARNING: 'valid_threshold' is ignored by the condensed Floquet method; pass method='eigenproblem' to use it")
 
-        gamms,eigv=floquet_multipliers(self,n=n,quiet=quiet,dense_threshold=dense_threshold,periodic_schur=periodic_schur)
+        gamms,eigv=floquet_multipliers(self,n=n,quiet=quiet,dense_threshold=dense_threshold,periodic_schur=periodic_schur,shift_invert=shift_invert,sigma=sigma)
 
         if ignore_periodic_unity is True:
             ignore_periodic_unity=1e-5
