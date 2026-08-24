@@ -739,6 +739,13 @@ void PyReg_Problem(nb::module_ &m)
 			"which numbers every nodal value of a mesh before any element-internal one. \"reverse\" is a test layout: it is a genuine "
 			"bijection that moves nearly every dof, and exists to prove that the renumbering is transparent to the answer. Takes effect "
 			"at the next equation numbering, i.e. after the next initialise()/reapply_boundary_conditions()/adapt.")
+		.def("_clear_dof_ordering_specs", &pyoomph::Problem::clear_dof_ordering_specs,
+			 "Drop all dof ordering layouts, i.e. go back to oomph-lib's own numbering.")
+		.def("_add_dof_ordering_spec", &pyoomph::Problem::add_dof_ordering_spec, nb::arg("by_element"), nb::arg("patterns"),
+			 "Append one dof ordering layout. patterns are glob patterns over _get_global_field_names(), in the order the "
+			 "fields should appear within a block; by_element groups an element's dofs rather than a node's. Layouts are "
+			 "applied in the order they are added and a dof is claimed by the first one naming its field, so several meshes "
+			 "and several layouts compose. A pattern matching no (unclaimed) field is an error, not a no-op.")
 		.def_prop_rw(
 			"nodal_block_dof_arrangement_used",
 			[](pyoomph::Problem &p)

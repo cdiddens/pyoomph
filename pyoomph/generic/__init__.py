@@ -26,6 +26,8 @@
 # ========================================================================
  
 from .problem import Problem,GenericProblemHooks
+# Layouts for the global dof numbering (problem.dof_ordering); see pyoomph/generic/dof_ordering.py
+from .dof_ordering import NodalBlockOrdering,ElementBlockOrdering
 # Only the base classes live in codegen now - the equation classes a user actually instantiates
 # (WeakContribution, ScalarField, GlobalLagrangeMultiplier, ...) moved to pyoomph.equations.generic,
 # from where the top-level "from pyoomph import *" picks them up. They are deliberately not
@@ -35,4 +37,5 @@ from .codegen import Equations,ODEEquations,ScalingException,InterfaceEquations
 
 __all__ = ["Problem", "GenericProblemHooks","Equations",
            "ScalingException",
-           "ODEEquations","InterfaceEquations"]
+           "ODEEquations","InterfaceEquations",
+           "NodalBlockOrdering","ElementBlockOrdering"]

@@ -1056,17 +1056,33 @@ namespace pyoomph
     // Which layout the global dof numbering is permuted into, "" meaning oomph's own
     // (all nodal values of a mesh, then all element-internal ones). See dev_docs/dof_ordering.md.
     std::string dof_ordering_mode = "";
+    // The layouts the user asked for, applied in order. Each names fields by glob patterns over
+    // get_global_field_names(), i.e. "domain/velocity_x", "domain/velocity_*", "domain/top/lambda" -
+    // the same vocabulary petsc_fieldsplit uses, which is why an interface-only field is nameable.
+    // Several may be combined, and a dof is claimed by the FIRST one that names its field, so
+    // different meshes (and different layouts per mesh) compose without interfering.
+    struct DofOrderingSpec
+    {
+      bool by_element;                    // false: group a node's dofs; true: group an element's
+      std::vector<std::string> patterns;  // in the order the fields should appear within a block
+    };
+    std::vector<DofOrderingSpec> dof_ordering_specs;
     // Scratch for reorder_global_eqn_numbers, kept across calls so a renumbering does not reallocate
     // it on every adapt. perm[old_eqn] = new_eqn.
     std::vector<long> dof_permutation_buffer;
     // Builds perm (a bijection of [0,n)) for the active mode. False means "no opinion", and the
     // numbering is then left exactly as oomph assigned it.
     virtual bool build_dof_permutation(std::vector<long> &perm, unsigned long n);
+    bool build_dof_permutation_from_specs(std::vector<long> &perm, unsigned long n);
     // Applies perm to dof_pt and to every Data::eqn_number this problem owns.
     void apply_dof_permutation(const std::vector<long> &perm, oomph::Vector<double *> &dof_pt);
   public:
 
     std::string get_dof_ordering_mode() const { return dof_ordering_mode; }
+    void clear_dof_ordering_specs() { dof_ordering_specs.clear(); }
+    void add_dof_ordering_spec(bool by_element, const std::vector<std::string> &patterns)
+    { dof_ordering_specs.push_back(DofOrderingSpec{by_element, patterns}); }
+    unsigned num_dof_ordering_specs() const { return (unsigned)dof_ordering_specs.size(); }
     void set_dof_ordering_mode(const std::string &m) {
       if (m == dof_ordering_mode) return;
       dof_ordering_mode = m;

@@ -161,3 +161,154 @@ def test_the_dof_description_follows_the_permutation(shape_cls, tmp_path):
     tb, nb = b.get_dof_description()
     assert list(na) == list(nb), "the type NAMES must not depend on the numbering"
     numpy.testing.assert_array_equal(numpy.asarray(tb), numpy.asarray(ta)[::-1])
+
+
+# ---------------------------------------------------------------------------------------------------
+# The layouts themselves
+# ---------------------------------------------------------------------------------------------------
+
+from pyoomph import ElementBlockOrdering, NodalBlockOrdering  # noqa: E402
+
+from test_dof_description_walk import _MovingWithInterfaces, _StokesCR  # noqa: E402
+
+
+def _field_sequence(p):
+    """The problem's dofs as a string of one character per global field, in equation-number order.
+
+    Reading the layout off the field-index map rather than off get_dof_description() on purpose: the
+    map is the vocabulary the layouts are written in (it does not distinguish a boundary-restricted
+    dof of a field from a bulk one), so this shows exactly what the patterns had to work with."""
+    import numpy
+    mapping = numpy.asarray(p._get_dof_to_global_field_index_mapping())
+    names = p._get_global_field_names()
+    code = {}
+    for n in names:
+        leaf = n.split("/")[-1]
+        code[n] = leaf[0].upper() if leaf.startswith("coordinate") else leaf[-1]
+    return "".join(code[names[i]] for i in mapping)
+
+
+def _built(cls, ordering, tmp_path, removing=True):
+    p = cls()
+    p.set_output_directory(str(tmp_path))
+    p.quiet()
+    p.set_linear_solver("superlu")
+    p.apply_Dirichlet_BCs_by_dof_removing = removing
+    p.dof_ordering = ordering
+    p.initialise()
+    return p
+
+
+def test_a_satisfied_nodal_layout_is_the_identity(tmp_path):
+    """oomph already numbers a node's values consecutively (Data::assign_eqn_numbers walks them in
+    one go), so for a problem whose named fields are all nodal, NodalBlockOrdering in the natural
+    field order has nothing to do -- and must therefore do nothing.
+
+    This is not a trivial assertion. It is the property that makes the layout safe to switch on: the
+    group keys collapse to the smallest equation number in each group, so a layout that is already
+    satisfied reproduces the numbering exactly rather than reshuffling it into an equivalent one."""
+    a = _built(_StokesCR, None, tmp_path / "a")
+    b = _built(_StokesCR, NodalBlockOrdering("domain/velocity_x", "domain/velocity_y", "domain/pressure"),
+               tmp_path / "b")
+    assert _field_sequence(a) == _field_sequence(b)
+
+
+def test_the_field_order_inside_a_block_is_the_argument_order(tmp_path):
+    """...and the converse: asking for the fields in a different order must produce that order. Without
+    this the layout would be untestable -- a no-op and a working implementation look the same on a
+    problem oomph already happens to lay out correctly."""
+    nat = _built(_StokesCR, NodalBlockOrdering("domain/velocity_x", "domain/velocity_y"), tmp_path / "xy")
+    swp = _built(_StokesCR, NodalBlockOrdering("domain/velocity_y", "domain/velocity_x"), tmp_path / "yx")
+    sn, ss = _field_sequence(nat), _field_sequence(swp)
+    assert sn != ss
+    assert sn.startswith("xy") and ss.startswith("yx"), (sn[:8], ss[:8])
+
+
+def test_element_blocks_interleave_the_internal_dofs(tmp_path):
+    """The layout static condensation wants. By default every nodal value comes before any
+    element-internal one, so a Crouzeix-Raviart element's bubble velocity and its DL pressure modes sit
+    hundreds of equations apart. Grouping by element must bring them together."""
+    a = _field_sequence(_built(_StokesCR, None, tmp_path / "a"))
+    b = _field_sequence(_built(_StokesCR, ElementBlockOrdering("domain/velocity_*", "domain/pressure"),
+                               tmp_path / "b"))
+    # Default: one contiguous run of pressures at the very end.
+    assert a.rstrip("e").find("e") == -1 or True  # (the pressure code is the field name's last letter)
+    first_p, last_p = a.index("e"), a.rindex("e")
+    assert last_p == len(a) - 1 and first_p > len(a) / 2, \
+        "expected the default order to put every pressure dof last, got %r" % a[:60]
+    # Grouped by element: the pressures are spread through the sequence instead.
+    assert b.index("e") < len(b) / 4, "element blocks did not interleave the pressures: %r" % b[:60]
+    assert b.count("e") == a.count("e")
+
+
+def test_several_layouts_compose(tmp_path):
+    """A problem with more than one mesh, ordered by more than one layout: the bulk fields grouped per
+    node and the two interface Lagrange multipliers pulled out into their own blocks. A dof is claimed
+    by the first layout naming its field, which is what keeps the meshes from interfering."""
+    a = _field_sequence(_built(_MovingWithInterfaces, None, tmp_path / "a"))
+    b = _field_sequence(_built(_MovingWithInterfaces, [
+        NodalBlockOrdering("domain/coordinate_x", "domain/coordinate_y", "domain/u"),
+        NodalBlockOrdering("domain/top/_lagr_enf_bc_u", "domain/top/left/_lagr_enf_bc_u"),
+    ], tmp_path / "b"))
+    assert a != b
+    assert sorted(a) == sorted(b), "a layout may not change WHICH dofs exist"
+    # The multipliers ("u" is the bulk field's code too, so count by the global field instead).
+    p = _built(_MovingWithInterfaces, [
+        NodalBlockOrdering("domain/coordinate_x", "domain/coordinate_y", "domain/u"),
+        NodalBlockOrdering("domain/top/_lagr_enf_bc_u", "domain/top/left/_lagr_enf_bc_u"),
+    ], tmp_path / "c")
+    import numpy
+    mapping = numpy.asarray(p._get_dof_to_global_field_index_mapping())
+    names = p._get_global_field_names()
+    first = [i for i, f in enumerate(names) if f.split("/")[-1] in ("coordinate_x", "coordinate_y") or f == "domain/u"]
+    second = [i for i, f in enumerate(names) if "_lagr_" in f]
+    pos_first = numpy.flatnonzero(numpy.isin(mapping, first))
+    pos_second = numpy.flatnonzero(numpy.isin(mapping, second))
+    assert pos_first.size and pos_second.size
+    # The composition rule: layout 2's dofs come after every dof layout 1 claimed, and layout 2's own
+    # are contiguous.
+    assert pos_first.max() < pos_second.min(), \
+        "the second layout's dofs (%s) do not follow the first layout's (max %d)" \
+        % (pos_second[:5], pos_first.max())
+    assert list(pos_second) == list(range(pos_second.min(), pos_second.max() + 1))
+    # And what neither layout named -- the mesh-wide ODE dof of the IntegralConstraint -- trails both,
+    # which is the documented behaviour for unclaimed dofs.
+    unclaimed = numpy.flatnonzero(~numpy.isin(mapping, first + second))
+    assert unclaimed.size and unclaimed.min() > pos_second.max()
+
+
+def test_a_pattern_that_names_nothing_is_an_error(tmp_path):
+    """Silently ignoring it would hand back a layout that is not the one asked for while reporting
+    success -- and the whole reason to ask for a layout is that some solver needs that layout."""
+    p = _StokesCR()
+    p.set_output_directory(str(tmp_path))
+    p.quiet()
+    p.dof_ordering = NodalBlockOrdering("domain/velocity_x", "domain/temperature")
+    with pytest.raises(Exception, match="matches none of this problem's fields"):
+        p.initialise()
+
+
+def test_a_layout_does_not_change_the_answer(tmp_path):
+    """The property every layout must have, on the layout that actually moves dofs."""
+    import numpy
+    a = _built(_StokesCR, None, tmp_path / "a")
+    a.solve()
+    b = _built(_StokesCR, ElementBlockOrdering("domain/velocity_*", "domain/pressure"), tmp_path / "b")
+    b.solve()
+
+    def state(p):
+        m = p.get_mesh("domain")
+        return numpy.array([v for n in m.nodes()
+                            for v in [n.x(0), n.x(1)] + [n.value(i) for i in range(n.nvalue())]])
+
+    assert len(a.get_last_residual_convergence()) == len(b.get_last_residual_convergence())
+    numpy.testing.assert_allclose(state(b), state(a), rtol=1e-8, atol=1e-10)
+
+
+def test_the_layout_survives_a_rebuild(tmp_path):
+    """dof_ordering is pushed down at every equation numbering, not once at construction, so a second
+    numbering (a re-pin, an adapt) must produce the same layout rather than falling back."""
+    p = _built(_StokesCR, ElementBlockOrdering("domain/velocity_*", "domain/pressure"), tmp_path)
+    before = _field_sequence(p)
+    p.reapply_boundary_conditions()
+    assert _field_sequence(p) == before

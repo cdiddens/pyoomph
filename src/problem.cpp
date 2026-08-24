@@ -1068,17 +1068,173 @@ namespace pyoomph
 	// renumbering machinery is transparent to the answer. The layouts that are worth having
 	// (nodal-block for AMG, element-block for condensation) are built on Mesh::visit_global_dofs and
 	// come next; this one stays as the null hypothesis they are tested against.
+	// Glob match, '*' and '?' only, as used on the field names of a dof ordering spec. Written out
+	// rather than taken from <fnmatch.h> because that header is POSIX and pyoomph builds on Windows.
+	static bool dof_ordering_glob(const char *pat, const char *str)
+	{
+		const char *star = NULL, *ss = str;
+		while (*str)
+		{
+			if (*pat == '?' || *pat == *str) { pat++; str++; }
+			else if (*pat == '*') { star = pat++; ss = str; }
+			else if (star) { pat = star + 1; str = ++ss; }
+			else return false;
+		}
+		while (*pat == '*') pat++;
+		return !*pat;
+	}
+
+	// Builds the permutation for the active layout. Empty mode and no specs means "no opinion", and
+	// the numbering oomph assigned stands.
+	//
+	// "reverse" is a TEST layout and nothing else: the cheapest permutation that is a genuine bijection
+	// and moves essentially every dof, which is what is wanted to prove that the renumbering machinery
+	// is transparent to the answer. It is the null hypothesis the real layouts are tested against.
 	bool Problem::build_dof_permutation(std::vector<long> &perm, unsigned long n)
 	{
-		if (dof_ordering_mode == "") return false;
 		if (dof_ordering_mode == "reverse")
 		{
 			perm.resize(n);
 			for (unsigned long i = 0; i < n; i++) perm[i] = (long)(n - 1 - i);
 			return true;
 		}
-		throw_runtime_error("Unknown dof ordering mode '" + dof_ordering_mode + "'");
-		return false;
+		if (dof_ordering_mode != "")
+			throw_runtime_error("Unknown dof ordering mode '" + dof_ordering_mode + "'");
+		if (dof_ordering_specs.empty()) return false;
+		return build_dof_permutation_from_specs(perm, n);
+	}
+
+	// Turns the user's field patterns into a permutation.
+	//
+	// The vocabulary is get_global_field_names() -- "domain/velocity_x", "domain/top/lambda",
+	// "domain/coordinate_x" -- because that is the one name for a field that already exists in C++,
+	// already covers interface-only fields and nodal positions, and is what petsc_fieldsplit takes. It
+	// deliberately does NOT distinguish a field's boundary-restricted dofs from its bulk ones
+	// ("domain/left/u" and "domain/u" are both the field "domain/u"): for a layout that is the right
+	// granularity, since a block wants a node's fields together whether or not the node is on a
+	// boundary.
+	bool Problem::build_dof_permutation_from_specs(std::vector<long> &perm, unsigned long n)
+	{
+		const std::vector<std::string> fnames = this->get_global_field_names();
+		const unsigned nf = (unsigned)fnames.size();
+		if (!nf) return false;
+
+		// Resolve the patterns once per field, not once per dof. First spec that names a field wins,
+		// and within a spec the pattern's position is the field's rank inside a block.
+		const int nspec = (int)dof_ordering_specs.size();
+		std::vector<int> spec_of_field(nf, -1), rank_of_field(nf, 0);
+		std::vector<char> pattern_used(0);
+		for (int s = 0; s < nspec; s++)
+		{
+			const DofOrderingSpec &sp = dof_ordering_specs[s];
+			pattern_used.assign(sp.patterns.size(), 0);
+			for (unsigned f = 0; f < nf; f++)
+			{
+				if (spec_of_field[f] >= 0) continue;
+				for (unsigned q = 0; q < sp.patterns.size(); q++)
+				{
+					if (!dof_ordering_glob(sp.patterns[q].c_str(), fnames[f].c_str())) continue;
+					spec_of_field[f] = s;
+					rank_of_field[f] = (int)q;
+					pattern_used[q] = 1;
+					break;
+				}
+			}
+			for (unsigned q = 0; q < sp.patterns.size(); q++)
+			{
+				// A pattern that names nothing is a typo in a field name, and silently ignoring it gives
+				// the user a layout that is not the one they asked for while reporting success. The
+				// available names are listed because they are not guessable ("domain/coordinate_x" for a
+				// mesh position, and a field of an interface carries that interface's full path).
+				if (pattern_used[q]) continue;
+				std::string avail;
+				for (unsigned f = 0; f < nf; f++) avail += (f ? ", " : "") + fnames[f];
+				throw_runtime_error("The dof ordering pattern '" + sp.patterns[q] +
+									"' matches none of this problem's fields, or only fields already "
+									"claimed by an earlier ordering. Available: " + avail);
+			}
+		}
+
+		// NOT get_dof_to_global_field_index_mapping(): that one sizes its buffer with ndof(), which reads
+		// Dof_distribution_pt->nrow() -- and the distribution is rebuilt BELOW this hook, so inside it
+		// ndof() still reports the previous numbering's size (zero on the first call). Sizing by n, the
+		// length of the dof pointer vector being handed to us, is the only correct thing here. Getting
+		// this wrong is silent: the buffer simply came out the wrong length and the layout declined.
+		std::vector<int> field_of_dof(n, -1);
+		for (unsigned im = 0; im < this->nsub_mesh(); im++)
+		{
+			pyoomph::Mesh *m = dynamic_cast<pyoomph::Mesh *>(this->mesh_pt(im));
+			if (m) m->fill_dof_to_global_field_index_buffer(field_of_dof);
+		}
+
+		// Per dof: which spec claims it, and which group of that spec it belongs to. The group is
+		// identified by a POINTER (the node, or the element that claimed it first) and then collapsed to
+		// the smallest equation number in it, so that groups keep the relative order the mesh gave them
+		// and a layout that is already satisfied comes out as the identity.
+		std::vector<int> spec_of_dof(n, -1), rank_of_dof(n, 0);
+		std::vector<const void *> group_of_dof(n, NULL);
+		for (unsigned long e = 0; e < n; e++)
+		{
+			const int f = field_of_dof[e];
+			if (f < 0 || (unsigned)f >= nf) continue;
+			spec_of_dof[e] = spec_of_field[f];
+			rank_of_dof[e] = rank_of_field[f];
+		}
+
+		for (unsigned im = 0; im < this->nsub_mesh(); im++)
+		{
+			pyoomph::Mesh *m = dynamic_cast<pyoomph::Mesh *>(this->mesh_pt(im));
+			if (!m) continue;
+			m->visit_global_dofs([&](const Mesh::DofVisit &v)
+								 {
+									 if (v.eqn < 0 || (unsigned long)v.eqn >= n) return;
+									 const int s = spec_of_dof[v.eqn];
+									 if (s < 0) return;
+									 if (group_of_dof[v.eqn]) return; // first claim wins
+									 // A node's dofs group by the node, so its positions and its values
+									 // land in one block even though they live in different Data. An
+									 // element-local one groups by the element that reported it first,
+									 // which for a cell-interior bubble node is the only element there
+									 // is - that is what makes a Crouzeix-Raviart block contiguous.
+									 group_of_dof[v.eqn] = dof_ordering_specs[s].by_element
+															   ? (const void *)v.element
+															   : (v.node ? (const void *)v.node : (const void *)v.element);
+								 });
+		}
+
+		std::map<const void *, long> group_min;
+		for (unsigned long e = 0; e < n; e++)
+		{
+			if (spec_of_dof[e] < 0) continue;
+			if (!group_of_dof[e]) { spec_of_dof[e] = -1; continue; } // named, but no mesh reported it
+			std::map<const void *, long>::iterator it = group_min.find(group_of_dof[e]);
+			if (it == group_min.end()) group_min[group_of_dof[e]] = (long)e;
+			else if ((long)e < it->second) it->second = (long)e;
+		}
+
+		// The sort key. Unclaimed dofs trail, in their original order: a layout says where the dofs it
+		// names go, and inventing a position for the others would make adding one pattern move
+		// everything.
+		std::vector<unsigned long> order(n);
+		for (unsigned long e = 0; e < n; e++) order[e] = e;
+		std::vector<long> gmin(n, 0);
+		for (unsigned long e = 0; e < n; e++)
+			if (spec_of_dof[e] >= 0) gmin[e] = group_min[group_of_dof[e]];
+		std::stable_sort(order.begin(), order.end(),
+						 [&](unsigned long a, unsigned long b)
+						 {
+							 const int sa = spec_of_dof[a] < 0 ? nspec : spec_of_dof[a];
+							 const int sb = spec_of_dof[b] < 0 ? nspec : spec_of_dof[b];
+							 if (sa != sb) return sa < sb;
+							 if (sa == nspec) return a < b;
+							 if (gmin[a] != gmin[b]) return gmin[a] < gmin[b];
+							 if (rank_of_dof[a] != rank_of_dof[b]) return rank_of_dof[a] < rank_of_dof[b];
+							 return a < b;
+						 });
+
+		perm.assign(n, 0);
+		for (unsigned long i = 0; i < n; i++) perm[order[i]] = (long)i;
+		return true;
 	}
 
 	// Rewrites every equation number this problem owns through perm, and permutes Dof_pt to match.
@@ -1157,7 +1313,8 @@ namespace pyoomph
 	// See the base declaration in oomph-lib's problem.h for where this is called from and why there.
 	void Problem::reorder_global_eqn_numbers(oomph::Vector<double *> &dof_pt)
 	{
-		if (dof_ordering_mode == "") return; // the overwhelmingly common case: not even a function call's worth
+		// The overwhelmingly common case: no layout asked for, and not even a permutation buffer touched.
+		if (dof_ordering_mode == "" && dof_ordering_specs.empty()) return;
 		const unsigned long n = dof_pt.size();
 		if (!n) return;
 		if (!build_dof_permutation(dof_permutation_buffer, n)) return;

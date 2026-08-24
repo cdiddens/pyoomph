@@ -864,6 +864,13 @@ class Problem(_pyoomph.Problem):
         
         #: Set e.g. to {"domain/velocity_*":"u","domain/pressure":"p"} to automatically setup field split IS for PETSc with names "u" and "p". If None, the default split is set like the field indices in the Jacobian information file, i.e. using "0", "1", etc. as prefixes
         self.petsc_fieldsplit=None
+
+        #: Layout(s) for the global dof numbering, e.g.
+        #: ``NodalBlockOrdering("domain/velocity_x","domain/velocity_y","domain/pressure")``, or a list
+        #: of layouts for a problem with several meshes. None (the default) keeps oomph-lib's own
+        #: numbering, which puts every nodal value of a mesh before any element-internal one. See
+        #: pyoomph.generic.dof_ordering.
+        self.dof_ordering=None
         
         #: When set to True, we apply Dirichlet boundary conditions by removing the corresponding dofs from the system. This yields a smaller matrix, but iterative solvers using strided block matrices will run into troubles. If False, all DirichletBCs are kept in the dof vector and the matrix is augmented accordingly.
         self.apply_Dirichlet_BCs_by_dof_removing=True
@@ -3318,7 +3325,20 @@ class Problem(_pyoomph.Problem):
                 if not self.is_quiet():
                     print("PARAMETER ", varname, "SET TO",newvalue)
 
+    def _push_dof_ordering(self):
+        """Hand the requested dof layouts to the C++ side, which rebuilds the permutation from them
+        inside the next assign_eqn_numbers().
+
+        Pushed here rather than when the attribute is set, so that assigning problem.dof_ordering at
+        any point before the numbering has the same effect, and so that the field patterns are
+        resolved against the fields the problem actually ended up with."""
+        from .dof_ordering import _normalise
+        self._clear_dof_ordering_specs()
+        for o in _normalise(self.dof_ordering):
+            o._apply_to(self)
+
     def before_assigning_equation_numbers(self,dof_selector:"_DofSelector | None"):
+        self._push_dof_ordering()
         for hook in self._hooks:
             hook.before_assigning_equation_numbers(dof_selector,True)
         self._equation_system._before_assigning_equations(dof_selector)         
