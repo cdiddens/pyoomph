@@ -725,7 +725,15 @@ namespace pyoomph
     bool force_jacobian_diagonal_entries=false;      // The override value; only consulted when not auto
     bool force_jacobian_diagonal_entries_auto=true;  // Cleared by set_force_jacobian_diagonal_entries()
     bool solver_requires_explicit_diagonal=false;    // What the active linear solver last reported
-    bool diagonal_entries_are_forced() const { return force_jacobian_diagonal_entries_auto ? solver_requires_explicit_diagonal : force_jacobian_diagonal_entries; }
+    // Keeping the Dirichlet dofs forces the diagonal regardless of what the solver asked for.
+    // remove_dirichlets_by_matrix_manipulation() writes the constrained row's diagonal only where the
+    // pattern already holds a slot for it (values[i] = (col == row) ? d : 0.0 while scanning the
+    // stored entries), so without this a field whose own equation carries no self-coupling gets an
+    // identically ZERO row instead of an identity one - an exactly singular matrix. The case is not
+    // exotic: a DirichletBC on a Taylor-Hood pressure is it, because the continuity equation contains
+    // no pressure, and neither MUMPS nor SuperLU asks for an explicit diagonal. See
+    // tests/test_dirichlet_matrix_manipulation.py.
+    bool diagonal_entries_are_forced() const { return !dirichlets_by_removing_from_dof_vector || (force_jacobian_diagonal_entries_auto ? solver_requires_explicit_diagonal : force_jacobian_diagonal_entries); }
     // One scratch buffer PER MATRIX INDEX, not one shared buffer: a multi-matrix assembly fetches the
     // masks for all matrices of an element before using any of them, so the pointers handed out for
     // different matrix_index must stay valid simultaneously. Sharing one buffer silently aliased the
@@ -1051,7 +1059,15 @@ namespace pyoomph
     void set_Dirichlets_by_removing_from_dof_vector(bool v) {
       if (v==dirichlets_by_removing_from_dof_vector) return; // No change
       // TODO: Check here whether the problem is already initialized and throw an error if this is the case, since changing this after initialization would require a reinitialization of the problem
+      const bool diag_before = diagonal_entries_are_forced();
       dirichlets_by_removing_from_dof_vector=v;
+      // The strategy is one of the inputs to diagonal_entries_are_forced(), so flipping it can change
+      // the sparsity pattern - and a stale pattern here is the singular matrix that forcing exists to
+      // prevent. Invalidate exactly as set_force_jacobian_diagonal_entries() does.
+      if (diagonal_entries_are_forced() != diag_before) {
+        Sparse_assemble_with_arrays_previous_allocation.resize(0);
+        this->invalidate_jacobian_structure();
+      }
     }
     void assemble_defined_field_list(); // (Re)builds defined_fields/defined_fields_to_domain and the residual/jacobian-contribution tables from all currently loaded bulk element codes
     void update_jacobian_csr_structure(); // Rebuilds global_eqs_to_jacobian_buffer_index after the equation numbering or sparsity pattern has changed

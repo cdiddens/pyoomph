@@ -869,7 +869,10 @@ void PyReg_Problem(nb::module_ &m)
 					  "``requires_explicit_diagonal()``, since needing a diagonal is a property of the factorisation and not of the problem: only some PETSc "
 					  "factorisations require one, MUMPS does not. Assigning to it overrides the solver in either direction and stops it being consulted "
 					  "(call ``_set_force_jacobian_diagonal_entries_auto()`` to undo). Stored zeros are not free -- they change the matrix a direct solver "
-					  "sees, hence its pivoting. Only has an effect together with ``keep_structural_zeros``.")
+					  "sees, hence its pivoting. Only has an effect together with ``keep_structural_zeros``.\n\n"
+					  "Setting ``apply_Dirichlet_BCs_by_dof_removing = False`` also forces the diagonal, and that one cannot be overridden: the "
+					  "constrained row's identity diagonal is only written where the pattern already has a slot for it, so without it a Dirichlet "
+					  "condition on a field with no self-coupling gives an identically zero row.")
 #ifdef OOMPH_HAS_MPI
 		// oomph-lib only declares this inside its own OOMPH_HAS_MPI guard, so a build configured with
 		// PYOOMPH_USE_MPI=OFF does not have it at all.
