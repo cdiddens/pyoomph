@@ -573,6 +573,18 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Fixed
 
+- **Arclength continuation across a remesh did not work under `--distribute` at all.** The tangent is
+  carried through the history slots, and `get_history_dofs()` returns a GLOBALLY indexed vector while
+  `update_dof_vectors_for_continuation()` demanded `nrow_local()`, so
+  `remesh_handler_during_continuation()` threw "Mismatch in size of ddof and current dof vectors". The
+  reverse direction was wrong the same way, handing local-length data to `set_history_dofs()`. Both
+  boundaries are global now, matching the `get_history_dofs`/`set_history_dofs` and
+  `get_current_dofs`/`set_current_dofs` pairs; serially and under plain `mpirun` they are the identity,
+  which is why this only showed with `--distribute`. Found by running the experiment
+  `dev_docs/mpi_augmented_systems.md` section 6b asked for, which also established that the `ndof`
+  evidence that section rested on was a base-state count compared against an augmented one -- the
+  distributed base state agrees with serial to 8e-12 on the droplet shape.
+
 - **A differential-algebraic orbit's spurious Floquet multiplier is now flagged.**
   `get_floquet_multipliers()` returns `-1` for an algebraic direction whenever the orbit has an odd
   number of time intervals -- exactly where a period-doubling bifurcation lives. The value is a

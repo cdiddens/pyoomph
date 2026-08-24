@@ -2398,47 +2398,68 @@ namespace pyoomph
 		this->calculate_continuation_derivatives(&(p->value()));
 	}
 
-	// d(dof)/ds (arclength derivative) as a plain std::vector, exposing oomph-lib's internal Dof_derivative
+	// oomph-lib keeps Dof_derivative and Dof_current on the DOF DISTRIBUTION, i.e. this rank's rows
+	// only when the problem is distributed. Everything on the Python side of these three functions
+	// deals in GLOBAL dof vectors -- get_history_dofs()/set_history_dofs(), which is what
+	// remesh_handler_during_continuation() carries the tangent through, and get_current_dofs() --
+	// so these gather on the way out and scatter on the way in, and the two ends now agree.
+	//
+	// They did not. remesh_handler_during_continuation() reads the tangent back with
+	// get_history_dofs() (global, ndof long) and handed it to update_dof_vectors_for_continuation(),
+	// which required nrow_local: under --distribute that threw "Mismatch in size of ddof and current
+	// dof vectors" out of the middle of go_to_param(), so the hanging-droplet tutorial never reached
+	// its base state at all. The reverse direction was wrong too and would have written a local-length
+	// vector into a global history slot. Serially and under plain mpirun both are the identity, which
+	// is why this only ever showed with --distribute.
+	static void gather_local_dof_array_to_global(pyoomph::Problem *prob, const oomph::Vector<double> &src,
+												 std::vector<double> &res)
+	{
+		if (src.size() == 0) { res.clear(); return; } // "no continuation state", which callers test for
+		oomph::DoubleVector v(prob->dof_distribution_pt(), 0.0);
+		const unsigned n = v.nrow_local();
+		for (unsigned i = 0; i < n && i < src.size(); i++) v[i] = src[i];
+		pyoomph::Problem::gather_double_vector_to_global(v, res);
+	}
+
+	// d(dof)/ds (arclength derivative) as a plain std::vector, GLOBALLY indexed on every rank
 	std::vector<double> Problem::get_arclength_dof_derivative_vector()
 	{
-		std::vector<double> res(Dof_derivative.size());
-		for (unsigned i = 0; i < res.size(); i++)
-			res[i] = dof_derivative(i);
+		std::vector<double> res;
+		gather_local_dof_array_to_global(this, Dof_derivative, res);
 		return res;
 	}
 
-	// Dof values at the last continuation step (oomph-lib's internal Dof_current), as a std::vector
+	// Dof values at the last continuation step (oomph-lib's internal Dof_current), globally indexed
 	std::vector<double> Problem::get_arclength_dof_current_vector()
 	{
-		std::vector<double> res(Dof_current.size());
-		for (unsigned i = 0; i < res.size(); i++)
-			res[i] = dof_current(i);
+		std::vector<double> res;
+		gather_local_dof_array_to_global(this, Dof_current, res);
 		return res;
 	}
 
-    // Writes ddof/curr (locally distributed dof-derivative and current-dof vectors) into oomph-lib's
-    // internal Dof_derivative/Dof_current, resizing them first if necessary; used to seed/restore the
-    // arclength continuation state (e.g. from Python-side branch switching).
+    // Writes ddof/curr -- GLOBALLY indexed dof-derivative and current-dof vectors, ndof long on every
+    // rank -- into oomph-lib's internal Dof_derivative/Dof_current, which hold this rank's rows.
+    // See the comment on get_arclength_dof_derivative_vector() for why the boundary is global.
     void Problem::update_dof_vectors_for_continuation(const std::vector<double> &ddof, const std::vector<double> &curr)
     {
 		if (ddof.size() != curr.size()) throw_runtime_error("Mismatch in size of ddof and curr");
-		unsigned ndof_local = Dof_distribution_pt->nrow_local();
-		if (ddof.size() != ndof_local)
+		const unsigned ndof_local = Dof_distribution_pt->nrow_local();
+		if (ddof.size() != this->ndof())
 		{
-			throw_runtime_error("Mismatch in size of ddof and current dof vectors");
+			throw_runtime_error("Mismatch in size of ddof (" + std::to_string(ddof.size()) +
+								") and the problem's dof count (" + std::to_string(this->ndof()) +
+								"). These vectors are indexed GLOBALLY, as get_history_dofs() and "
+								"get_arclength_dof_derivative_vector() return them.");
 		}
-		if (Dof_derivative.size() != ndof_local)
-		{
-			Dof_derivative.resize(ndof_local, 0.0);
-		}
-		if (Dof_current.size() != ndof_local)
-		{
-			Dof_current.resize(ndof_local, 0.0);
-		}
+		if (Dof_derivative.size() != ndof_local) Dof_derivative.resize(ndof_local, 0.0);
+		if (Dof_current.size() != ndof_local) Dof_current.resize(ndof_local, 0.0);
+		// Take this rank's slice. first_row() is 0 and nrow_local() is ndof unless distributed, so
+		// this is the old loop verbatim in every other case.
+		const unsigned first = Dof_distribution_pt->first_row();
 		for (unsigned i = 0; i < ndof_local; i++)
 		{
-			Dof_derivative[i] = ddof[i];
-			Dof_current[i] = curr[i];
+			Dof_derivative[i] = ddof[first + i];
+			Dof_current[i] = curr[first + i];
 		}
     }
 

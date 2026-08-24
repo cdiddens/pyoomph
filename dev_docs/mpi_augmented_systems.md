@@ -210,24 +210,54 @@ this work, but the Navier–Stokes azimuthal eigensolve is currently broken with
 machine and is worth its own look. The azimuthal tracking case is built on a reaction-diffusion problem
 instead, which SLEPc handles.
 
-## 6b. Open: the moving-mesh droplet segfaults
+## 6b. The moving-mesh droplet: the evidence was misread, and the real bug was elsewhere
 
 `docs/source/tutorial/advstab/movmesh/hanging_droplet.py` — fold tracking on a moving mesh with an
-interface and Lagrange multipliers — **segfaults on rank 0 during the tracking solve** under
-`mpirun -n 2 --distribute`. Serially, and under plain `mpirun`, it is fine (`Bo_c = 2.946075780049` at
-`V = 2.0944`). Not diagnosed, and not re-run since — a segfault under MPI takes PETSc's `MPI_ABORT` with
-it.
+interface and Lagrange multipliers — was recorded here as segfaulting on rank 0 during the tracking
+solve under `mpirun -n 2 --distribute`, fine serially and under plain `mpirun`
+(`Bo_c = 2.946075780049` at `V = 2.0944`).
 
-The one observation says the failure is probably **not** in the handler: the distributed run reported
-`ndof = 7846` where serial has `15693`, i.e. its *base state* was already a different problem before
-tracking was activated. The script gets there through `go_to_param` with
-`remesh_handler_during_continuation` followed by `force_remesh()`, so it sits directly on distributed
-remeshing, whose stage 5 is deliberately unfinished. The sensible next step is to check whether a
-`--distribute` run of that script *without* any bifurcation tracking already produces the wrong `ndof`,
-which would settle it without touching the handlers.
+The experiment this section asked for has now been run — the base-state prefix (`go_to_param` with
+`remesh_handler_during_continuation`, `force_remesh()`, `solve()`) with **no bifurcation tracking at
+all**, so it cannot reach the segfault. It settles the question, in the opposite direction:
 
-Until that is understood, treat moving-mesh problems with remeshing as unvalidated here. The four handler
-cases above use fixed meshes.
+**The `ndof` observation was base against augmented.** Serial gives `ndof = 7846` for the base state —
+the *same* number the distributed run was reported as producing. `15693` is `2*7846 + 1`, i.e. the
+**augmented** count after the fold handler is installed. The two numbers were never in conflict, so the
+inference that the distributed base state "was already a different problem", and the "probably not in
+the handler" conclusion drawn from it, had no support. Measured directly instead: the distributed base
+state agrees with serial on the droplet's apex depth to **8e-12** (`-1.377206951739` against
+`-1.377206951731`, MIN-allreduced — a rank-local minimum over a distributed mesh is a statement about
+the partition and the first version of this probe got that wrong by 47 %).
+
+**A real distributed defect was found on the way, and is fixed.** The prefix did not merely give a
+different `ndof` under `--distribute`; it did not run at all, throwing
+
+    RuntimeError: Mismatch in size of ddof and current dof vectors
+
+out of `remesh_handler_during_continuation` → `update_dof_vectors_for_continuation`. The arclength
+tangent is carried across a remesh through the history slots, and `get_history_dofs()` returns a
+**globally indexed** vector while that setter demanded `nrow_local()`; the reverse direction was wrong
+the same way, `get_arclength_dof_derivative_vector()` handing local-length data to `set_history_dofs()`.
+Both boundaries are global now, matching `get_history_dofs`/`set_history_dofs` and
+`get_current_dofs`/`set_current_dofs`; serially and under plain `mpirun` they are the identity, which is
+why this only ever showed with `--distribute`. So **arclength continuation across a remesh did not work
+under `--distribute` at all**, which is a bigger statement than anything this section used to make.
+
+**What is still unknown.** Whether the tracking solve still segfaults once the base state actually
+builds. It has deliberately not been re-run: the standing rule in this repository is not to re-run a
+configuration known to segfault under MPI, because PETSc's `MPI_ABORT` takes the whole session with it.
+What has changed is that the failure it was attributed to is gone and the attribution itself was
+unfounded, so if it is retried it should be treated as an undiagnosed report, not as a continuation of
+this one.
+
+**One thing worth knowing before comparing distributed remeshes.** The `ndof` after a distributed
+remesh varies **between runs of the same script** — 7845 and 7846 both observed, against 7846 serially.
+The remesher rebuilds the geometry from boundary data gathered across the ranks, and that is evidently
+not bit-reproducible. Compare the physics, never the dof count.
+
+The four handler cases above use fixed meshes, and moving-mesh problems with remeshing remain
+unvalidated *for tracking* here.
 
 ## 6c. Eigensolving the base state while a handler is installed
 
