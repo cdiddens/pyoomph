@@ -313,6 +313,12 @@ namespace pyoomph
 
         BulkElementBase *father = dynamic_cast<BulkElementBase *>(be->father_element_pt());
         if (!father) { complete = false; continue; }
+        // Ask before calling: refusing is legitimate (a wedge or pyramid has no son->father map, and a
+        // tet refuses a pyramid father), and this sweep runs from actions_after_adapt() on EVERY
+        // refinement, so throwing here aborted any wedge/pyramid run that ever refined - the ids are
+        // only wanted for interface refinement coupling, which already falls back to position matching
+        // when they are incomplete. See BulkElementBase::can_report_nodal_s_in_father.
+        if (!be->can_report_nodal_s_in_father()) { complete = false; continue; }
         const std::vector<unsigned> &c1map = father->get_nodal_space_index_to_element_index_map()[SPACE_INDEX_C1];
         if (c1map.empty()) { complete = false; continue; }
 

@@ -225,6 +225,7 @@ namespace pyoomph
     void fill_element_nodal_indices_for_numpy(int *indices, unsigned isubelem, bool tesselate_tri, std::vector<std::vector<std::set<oomph::Node *>>> &add_nodes) const override;
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 1, order)); }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    bool can_report_nodal_s_in_father() const override { return true; }
   };
 
   // 1d line element, quadratic (C2) Lagrange interpolation (plus a C1 dummy sub-space), refineable + solid.
@@ -287,6 +288,7 @@ namespace pyoomph
     }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 1, order)); }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    bool can_report_nodal_s_in_father() const override { return true; }
   };
 
   // TRIANGULAR LINE ELEMENTS
@@ -489,6 +491,7 @@ namespace pyoomph
       return res;
     }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    bool can_report_nodal_s_in_father() const override { return true; }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 2, order)); }
   };
 
@@ -574,6 +577,7 @@ namespace pyoomph
       return res;
     }
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    bool can_report_nodal_s_in_father() const override { return true; }
     void set_integration_order(unsigned int order) override { this->set_integration_scheme(integration_scheme_storage.get_integration_scheme(false, 2, order)); }
   };
 
@@ -599,6 +603,7 @@ namespace pyoomph
     // triangle split. Mirrors the s_in_parent map in RefineableTElement<2>::build; handles the
     // 3-node (C1), 4-node (C1TB bubble), 6-node (C2) and 7-node (C2TB) tri layouts via nnode().
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    bool can_report_nodal_s_in_father() const override { return true; }
     BulkElementTri2dC1(bool has_bubble = false);
     unsigned get_meshio_type_index() const override { return 3; }
     void check_integrity(double &max_error) override { max_error = 0; } // TODO
@@ -723,6 +728,7 @@ namespace pyoomph
     int nedges() const override { return 3; }
     // See BulkElementTri2dC1::get_nodal_s_in_father. Same map; handles 6/7-node (C2/C2TB) via nnode().
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    bool can_report_nodal_s_in_father() const override { return true; }
     unsigned nnode_on_face() const override { return 3; }
     BulkElementTri2dC2(bool with_bubble = false);    
     unsigned get_meshio_type_index() const override { return 9; }
@@ -854,6 +860,7 @@ namespace pyoomph
     bool supports_second_spatial_derivatives(std::string &) const override { return true; }
 
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    bool can_report_nodal_s_in_father() const override { return true; }
     int get_num_numpy_elemental_indices(bool tesselate_tri, unsigned &nsubdiv, std::vector<std::vector<std::set<oomph::Node *>>> &) const override
     {
       if (tesselate_tri)
@@ -954,6 +961,7 @@ namespace pyoomph
     unsigned ninterpolating_node(const int &value_id) override;
     void interpolating_basis(const oomph::Vector<double> &s, oomph::Shape &psi, const int &value_id) const override;
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    bool can_report_nodal_s_in_father() const override { return true; }
     BulkElementBase *create_son_instance() const override
     {
       BulkElementBase::JITCodeScope __jit_scope11(jitcode);
@@ -979,6 +987,7 @@ namespace pyoomph
     // See BulkElementTri2dC1::get_nodal_s_in_father, 3d counterpart: the son's own local coordinate
     // mapped up through the barycentric affine son->father map of the 1->8 tet split.
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    bool can_report_nodal_s_in_father() const override; // false when the father is a pyramid
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<unsigned>> & get_nodal_space_index_to_element_index_map() const override {return Nodal_Space_Index_To_Element_Index_Map;}
@@ -1106,6 +1115,7 @@ namespace pyoomph
     // See BulkElementTri2dC1::get_nodal_s_in_father, 3d counterpart: the son's own local coordinate
     // mapped up through the barycentric affine son->father map of the 1->8 tet split.
     void get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather) override;
+    bool can_report_nodal_s_in_father() const override; // false when the father is a pyramid
     const std::vector<std::vector<int>> & get_element_index_to_nodal_space_index_map() const override {return Element_Index_To_Nodal_Space_Index_Map;}
     const std::vector<unsigned> & non_vertex_node_indices() const override {return Non_Vertex_Node_Indices;}
     const std::vector<std::vector<std::vector<unsigned>>> & get_dummy_value_interpolation_map() const override {return Dummy_Value_Interpolation_Map;}  

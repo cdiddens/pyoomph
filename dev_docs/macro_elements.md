@@ -761,8 +761,44 @@ One measurement worth quoting when someone asks whether refinement will fix a co
 does not. Every "before" number in this document — 7.6e-2, 7.13e-4, 1.5e-2 — is flat in the refinement
 level, because subdividing a polygon gives a finer polygon.
 
+## 10a. Refining a wedge or pyramid aborted the run, for a reason outside this work
+
+Found by an audit of the test suite, not by anything here, and worth recording because §6 claims
+wedges and pyramids place their refinement-generated nodes exactly and the claim was untestable at the
+time: `test_curved_wedge_and_pyramid_are_exact` failed for **every refined case** (`nref` 1 and 2, both
+shapes; `nref=0` passed, since it never refines) with a bare
+
+    RuntimeError: src/elements.hpp: Implement
+
+raised out of the middle of `refine_uniformly()`. Nothing to do with curved boundaries: it is
+`BulkElementBase::get_nodal_s_in_father()`, which wedges and pyramids do not implement — they have no
+son→father local-coordinate map — reached from `Mesh::assign_interface_topological_ids()`, which
+`actions_after_adapt()` runs on **every** refinement of **every** mesh.
+
+Refusing is legitimate there, and one shape already did: a tetrahedron refuses when its father is a
+**pyramid**, because the mixed red split is not the 1→8 tet map, and `tet3d_nodal_s_in_father` says so
+explicitly rather than returning a plausible-looking wrong coordinate. What was missing was a way to
+*ask* without provoking the throw, so a caller that can degrade does. `can_report_nodal_s_in_father()`
+is that predicate — default `false`, paired with the default that throws, so a shape implementing
+neither is consistent and the safe way round costs a fallback rather than a wrong coordinate. The id
+sweep now marks such a node unresolved and the mesh incomplete, which is a state the machinery was
+already designed for: `has_complete_interface_topological_ids()` is what makes interface refinement
+coupling fall back to matching by position.
+
+So the exactness claim of §6 now actually holds under refinement, measured: all six cases pass at
+`< 1e-14`. `test_refining_wedges_and_pyramids_falls_back_rather_than_throwing` pins the fallback
+itself, so the abort cannot come back disguised as a fix.
+
+**What this does not do** is give wedges and pyramids a son→father map. Interface refinement coupling
+across a wedge or pyramid mesh therefore matches by position, with whatever that costs
+([interface_refinement_coupling.md](interface_refinement_coupling.md) §14.1 is the reason to care);
+implementing the map is the real fix and is a separate job, the pyramid especially, since its refinement
+yields six pyramids and four tetrahedra and a son can have a father of a different shape.
+
 ## 11. Open
 
+* **A son→father local-coordinate map for wedges and pyramids** (§10a). Without it their interface
+  topological ids are incomplete and the coupling machinery falls back to position matching.
 * **Moving meshes** (§7), which is a policy decision plus the two coupled constraints of §7.2.
 * **`Problem.load_balance()` by hand** (§8.3), pre-existing and unrelated.
 * Curved 3d edges attachable independently of faces (§6.4), if a feature edge ever needs geometry its

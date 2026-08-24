@@ -118,14 +118,33 @@ namespace pyoomph
 		oomph::RefineableTElement<3>::son_to_father_local(s_son, tree->son_type(), sfather);
 	}
 
+	// The non-throwing form of the two refusals in tet3d_nodal_s_in_father above. Kept immediately
+	// next to it so the two cannot drift apart: whatever that function refuses, this must report.
+	static bool tet3d_can_report_nodal_s_in_father(const oomph::RefineableTElement<3> *son)
+	{
+		oomph::Tree *tree = const_cast<oomph::RefineableTElement<3> *>(son)->tree_pt();
+		if (!tree || !tree->father_pt()) return false;
+		return dynamic_cast<oomph::RefineableTElement<3> *>(tree->father_pt()->object_pt()) != NULL;
+	}
+
 	void BulkElementTetra3dC1::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
 	{
 		tet3d_nodal_s_in_father(this, l, sfather);
 	}
 
+	bool BulkElementTetra3dC1::can_report_nodal_s_in_father() const
+	{
+		return tet3d_can_report_nodal_s_in_father(this);
+	}
+
 	void BulkElementTetra3dC2::get_nodal_s_in_father(const unsigned int &l, oomph::Vector<double> &sfather)
 	{
 		tet3d_nodal_s_in_father(this, l, sfather);
+	}
+
+	bool BulkElementTetra3dC2::can_report_nodal_s_in_father() const
+	{
+		return tet3d_can_report_nodal_s_in_father(this);
 	}
 
 	//////////////////////////////

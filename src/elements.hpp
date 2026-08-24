@@ -1409,6 +1409,18 @@ namespace pyoomph
     // node l as seen in its father element (used to interpolate values from father to son node l).
     // Each concrete geometric element type must implement this according to its own son-numbering scheme.
     virtual void get_nodal_s_in_father(const unsigned int &, oomph::Vector<double> &) { throw_runtime_error("Implement"); }
+    // Whether get_nodal_s_in_father() will actually answer, asked WITHOUT provoking the throw above.
+    // Default false, paired with the default that throws: a shape that implements neither is
+    // consistent, and a shape that implements the map overrides both. Getting that pairing wrong the
+    // safe way round costs a fallback, never a wrong coordinate.
+    //
+    // It exists because refusing is legitimate here and two shapes do refuse: wedges and pyramids
+    // have no son->father map at all, and a TETRAHEDRON refuses when its father is a PYRAMID, since
+    // the mixed red split is not the 1->8 tet map (see tet3d_nodal_s_in_father). That is why the
+    // predicate is dynamic rather than a per-class constant. Callers that can degrade must ask first:
+    // Mesh::assign_interface_topological_ids() did not, so refining any wedge or pyramid mesh aborted
+    // the whole run inside actions_after_adapt() with a bare "Implement".
+    virtual bool can_report_nodal_s_in_father() const { return false; }
     // Inverse of the above for a SIMPLEX son of a simplex father: given a father-local coordinate,
     // returns this son's own local coordinate for the same point, or false if the point lies
     // outside this son. See the .cpp; used by restore_orphaned_interior_nodes.

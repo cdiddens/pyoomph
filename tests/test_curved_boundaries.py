@@ -819,6 +819,7 @@ def _worker_main(argv):
         problem.initialise()
         for _ in range(nref):
             problem.refine_uniformly()
+        print("TOPOIDS", problem.get_mesh("domain")._has_complete_interface_topological_ids())
         print("RESULT", _max_radius_error(problem.get_mesh("domain"), "shell", ndim=3))
         return
     elif kind == "tetball":
@@ -1130,6 +1131,26 @@ def test_curved_tet_ball_is_exact(space, nref, tmp_path):
 # --------------------------------------------------------------------------------------------
 # T5 -- wedges, pyramids, and the mixed forest
 # --------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", ["wedge", "pyramid"])
+def test_refining_wedges_and_pyramids_falls_back_rather_than_throwing(kind, tmp_path):
+    """These two shapes have no son->father local-coordinate map, and must degrade, not abort.
+
+    `Mesh::assign_interface_topological_ids()` runs from `actions_after_adapt()` on EVERY refinement
+    and used to call `get_nodal_s_in_father()` unconditionally, so refining any wedge or pyramid mesh
+    died with a bare "Implement" out of the middle of `refine_uniformly()` - which is what all four
+    refined cases of the test below were failing on, and it had nothing to do with curved boundaries.
+
+    Refusing is legitimate here: the ids exist for interface refinement coupling, which already falls
+    back to matching by position when they are incomplete. So the contract this pins is "incomplete,
+    reported as such", and it is the assertion that stops the abort coming back disguised as a fix.
+    """
+    out = _worker_lines(tmp_path, kind, "C1", 1)
+    assert "TOPOIDS" in out, "worker did not report the topological-id completeness: " + repr(out)
+    assert out["TOPOIDS"] == "False", \
+        "a refined " + kind + " mesh claims complete interface topological ids, but no son->father " \
+        "map exists for it - either the map was implemented (update this test) or the ids are wrong"
+
 
 @pytest.mark.parametrize("nref", [0, 1, 2])
 @pytest.mark.parametrize("kind", ["wedge", "pyramid"])

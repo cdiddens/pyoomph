@@ -573,6 +573,16 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Fixed
 
+- **Refining a wedge or pyramid mesh aborted the run.** `Mesh::assign_interface_topological_ids()`,
+  which `actions_after_adapt()` runs on every refinement of every mesh, called
+  `get_nodal_s_in_father()` unconditionally -- and wedges and pyramids do not implement it, having no
+  son->father local-coordinate map. Any refinement of such a mesh therefore died with a bare
+  "Implement" from the middle of `refine_uniformly()`. Refusing is legitimate there (a tetrahedron
+  already refuses a pyramid father, the mixed red split not being the 1->8 tet map); what was missing
+  was a way to ask without provoking the throw. The sweep now marks those nodes unresolved and the mesh
+  incomplete, which is the state interface refinement coupling already falls back to position matching
+  on. `dev_docs/macro_elements.md` section 10a.
+
 - **Inverted-element detection hung under MPI.** `set_detect_inverted_elements(True)` had never been
   run under `mpirun`, and did not work there: the throw is per element, oomph-lib splits the element
   loop by rank in BOTH MPI modes, so the rank holding the folded element left the loop while the others
