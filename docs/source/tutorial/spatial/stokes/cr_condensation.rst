@@ -118,7 +118,15 @@ However, there is of course overhead associated with the condensation in the ass
 
 
 .. note::
-	Under MPI, this particular selection has to be run with ``--distribute``. A block of selected degrees of freedom can only be eliminated on the process that owns all of its rows, and this selection pairs the bubble velocity (nodal) with the pressure gradients (element-internal), which oomph-lib numbers far apart - every nodal value comes before any internal one. In a *replicated* run (``mpirun`` without ``--distribute``) the two halves of a block therefore end up in different processes' row ranges and pyoomph refuses with a message saying so. With ``--distribute`` each process renumbers its own degrees of freedom contiguously and the question does not arise. A selection of purely element-internal degrees of freedom, e.g. the one of :numref:`secdghdg`, is served in both modes.
+	A block of selected degrees of freedom can only be eliminated on the process that owns all of its rows. With ``--distribute`` each process renumbers its own degrees of freedom contiguously, so that is automatic. In a *replicated* run (``mpirun`` without ``--distribute``) the mesh is not partitioned but the rows of the linear system still are, and this selection pairs the bubble velocity (nodal) with the pressure gradients (element-internal) - which oomph-lib numbers far apart, every nodal value coming before any internal one. The two halves of a block would then land in different processes' row ranges.
+
+	That is why the script above sets
+
+	.. code:: python
+
+		problem.dof_ordering = ElementBlockOrdering("domain/velocity_*", "domain/pressure")
+
+	before ``initialise()``: it numbers each element's velocities and pressure together, so the blocks are short enough for pyoomph to move the row split off them. In serial this changes nothing at all - the same blocks, the same non-zeros and the same answer - and with ``--distribute`` it is equally harmless. Without it, a replicated run is refused with a message saying so. A selection of purely element-internal degrees of freedom, e.g. the one of :numref:`secdghdg`, needs none of this and is served in both modes either way.
 
 
 .. warning::

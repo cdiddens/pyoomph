@@ -103,6 +103,7 @@ class DrivenCavity(Problem):
 
 if __name__ == "__main__":
     with DrivenCavity() as problem:
+        problem.dof_ordering = ElementBlockOrdering("domain/velocity_*", "domain/pressure")
         problem.initialise()
         problem.solve()
         stats = problem._get_static_condensation_stats()

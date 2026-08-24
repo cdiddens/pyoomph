@@ -287,20 +287,6 @@ for d in glob.glob("./*/"):
       # The deflation these two drive is a custom assembly handler, which has no MPI path yet.
       print("   SKIPPING",f,"-- custom assemblers not MPI capable yet")
       continue
-    if args.mpirun>0 and not args.distribute and f=="cr_static_condensation.py":
-      # Not a defect of the script: its selection pairs the bubble velocity (nodal) with the pressure
-      # gradients (element-internal), and oomph-lib numbers every nodal value before any internal one,
-      # so in a REPLICATED run the two halves of a block land on different ranks' rows and no rank can
-      # eliminate it. pyoomph says exactly that and refuses (src/problem.cpp), and the tutorial says it
-      # too. With --distribute the dofs are renumbered per rank and the script runs, so it is only this
-      # pass that has to leave it out.
-      # The restriction is now liftable: adding
-      #   problem.dof_ordering = ElementBlockOrdering("domain/velocity_*","domain/pressure")
-      # numbers the two halves together and the replicated run condenses (dev_docs/dof_ordering.md,
-      # tests/test_mpi_dof_ordering_rowsplit.py). The skip stays until the TUTORIAL is updated to say
-      # so, since it is the tutorial's text that currently documents the refusal.
-      print("   SKIPPING",f,"-- CR condensation needs --distribute under MPI, see the tutorial")
-      continue
     env=None if args.no_petsc else (env_complex if needs_complex_petsc(f) else env_real)
     print("   Testing",f,"-- with the complex PETSc" if env is not None and env is env_complex else "")
     cmd=[sys.executable, '-u', f]

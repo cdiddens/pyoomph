@@ -641,7 +641,6 @@ class Problem(_pyoomph.Problem):
         #: whatever the initial mesh setup needed, since the reconciliation during adapt is meant to get
         #: there first. Reset it yourself to measure a particular stretch of a run.
         self._interface_conformity_repairs:int=0
-        #: Cumulative number of elements refined by the vertex-connected balance closure of
         self.remove_macro_elements_after_initial_adaption:bool | Literal["auto"]="auto" # "auto" means: Only if the coordinates are free
         #: In distributed runs, we call load balance after each non-uniform adaptions
         self.call_load_balance_in_initial_adaption=False
