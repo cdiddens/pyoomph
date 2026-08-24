@@ -1,6 +1,7 @@
 from __future__ import annotations
 import scipy.sparse
 import scipy.sparse.linalg
+import scipy.special
 from .problem import Problem
 from ..expressions import GlobalParameter,ExpressionNumOrNone
 from ..typings import *
@@ -2000,129 +2001,342 @@ class PerformCustomMultiAssembly(AugmentedAssemblyHandler):
 
 
 
-class DeflationAssemblyHandler(AugmentedAssemblyHandler):
-    # Deflation as described in https://arxiv.org/pdf/1410.5620
-    def __init__(self,alpha=0.1,p=2):
-        super().__init__()
+class DeflationOperator:
+    """Shifted deflation, following Farrell, Birkisson & Funke (https://arxiv.org/pdf/1410.5620).
+
+    Given known solutions :math:`W_i` of :math:`R(U)=0`, the residual handed to Newton becomes
+    :math:`M(U)R(U)`, with a factor that blows up at every :math:`W_i` so that Newton cannot
+    converge there again:
+
+    .. math:: M(U)=\\prod_i\\left(\\frac{1}{\\alpha\\|U-W_i\\|^p}+1\\right)
+
+    Two properties of this implementation are worth knowing, because both differ from a literal
+    transcription of the paper and both matter:
+
+    * **The factor is normalised to its far-field value**, i.e. :math:`M\\to1` far from every known
+      solution, where the original formulation gives :math:`\\alpha^{k}` for :math:`k` known
+      solutions. Newton's convergence test reads ``max|M R| < newton_solver_tolerance``, so with the
+      default ``alpha=0.1`` an un-normalised factor shrinks the tested residual by ten per known
+      solution: after eight branches any starting guess passes the test at once and deflation
+      reports the perturbed guess as a solution. The normalisation is free, because the Newton
+      *step* depends on :math:`M` only through :math:`\\nabla\\log M`, which is invariant under
+      :math:`M\\to cM` -- the iterates are untouched, only the test is, and only ever in the
+      tightening direction.
+    * **The deflated Newton step is the ordinary one, rescaled by a scalar.** The deflated Jacobian
+      is a rank-one update of :math:`J` whose update vector is a multiple of the right-hand side, so
+      the Sherman-Morrison correction collapses to
+
+      .. math:: \\delta U_\\text{defl}=\\frac{\\delta U}{1+\\nabla\\log M\\cdot\\delta U}\\,,
+                \\qquad \\delta U=J^{-1}R\\,.
+
+      That is one linear solve and one dot product where a literal Sherman-Morrison implementation
+      does three solves of the same matrix. It is also what makes deflation cheap under MPI: the
+      only global reductions left are the distances and this one dot product.
+
+    Everything is evaluated in log space. The running product :math:`\\prod(1+q_i)` overflows for a
+    few tens of known solutions otherwise, and ``log1p``/``logaddexp`` also keep the far-field limit
+    exactly 1 instead of 1+eps per factor.
+    """
+
+    def __init__(self,alpha:float=0.1,p:int=2,shift_mode:Literal["single","each","scaled"]="each"):
+        if not isinstance(p,int):
+            raise ValueError("p must be an integer")
+        if p<1:
+            raise ValueError("p must be at least 1")
+        if not alpha>0:
+            raise ValueError("alpha must be positive")
+        if shift_mode not in ("single","each","scaled"):
+            raise ValueError("shift_mode must be one of 'single', 'each' or 'scaled', not "+repr(shift_mode))
         self.alpha=alpha
         self.p=p
-        self.shift_mode:Literal["single","each","scaled"]="each"
-        if not isinstance(self.p,int):
-            raise ValueError("p must be an integer")
-        if self.p<1:
-            raise ValueError("p must be at least 1")
-        self.Ws=[]
-        
-    def define_augmented_dofs(self, dofs):
-        # No augmentation of dofs
-        pass
-        
-    def add_known_solution(self,W):
-        U,=self.get_augmented_dofs().split(startindex=0)
-        if len(U)!=len(W):
-            raise ValueError("Length of known solution and augmented dof do not match")
+        self.shift_mode:Literal["single","each","scaled"]=shift_mode
+        self.problem:"Problem | None"=None
+        self.Ws:list[NPFloatArray]=[]
+        # log M is clamped rather than allowed to reach infinity. An iterate landing exactly on a
+        # known solution would otherwise scale the residual by inf, and inf*0 is nan for every dof
+        # whose residual happens to vanish -- a nan residual is not a failed Newton step to oomph-lib,
+        # it is a comparison that is false whichever way it is asked. A merely enormous factor trips
+        # the max_residuals test instead, which is exactly what the deflation drivers already treat
+        # as "this attempt failed, try another perturbation".
+        self._max_log_M=300.0
+        #: Length in dof space that the distances ||U-W|| are measured in, so that ``alpha`` is a
+        #: DIMENSIONLESS number. 1 reproduces the historical behaviour exactly; the drivers call
+        #: :py:meth:`auto_scale_from` to set it from the state instead.
+        #:
+        #: It matters more than it looks. ``alpha`` multiplies ``||U-W||^p``, so without a scale the
+        #: same physics written in different units is a different deflation problem. Measured on a
+        #: pitchfork PDE whose branch amplitude is a free scale S, scanning the parameter across the
+        #: bifurcation: at S=1 the default settings found 21 branches out of 21, at S=1e-3 they found
+        #: 7 of 21 -- and alpha = 0.1*S^-p, i.e. the same alpha in units of S, found 21 of 21 again.
+        self.scale:float=1.0
+
+    def _set_problem(self,problem:"Problem"):
+        self.problem=problem
+
+    # ---------------------------------------------------------------- dofs and reductions
+
+    def _local_dofs(self)->NPFloatArray:
+        """This rank's block of the dof vector.
+
+        Serially and on a replicated MPI run this is the whole vector; under ``--distribute`` it is
+        the owned rows only, which is also the layout every stored known solution is kept in.
+        """
+        assert self.problem is not None, "the deflation operator is not attached to a problem"
+        return self.problem._get_local_dof_values() #type:ignore
+
+    def _reduce_sum(self,x:NPFloatArray)->NPFloatArray:
+        """Sum an array of per-rank partial sums over the dof layout.
+
+        Only a distributed problem needs the reduction: replicated ranks each hold the whole dof
+        vector, so summing again would multiply the answer by the number of ranks. One call for all
+        known solutions at once, since this sits inside every residual assembly.
+        """
+        if self.problem is not None and self.problem.is_distributed():
+            from .mpi import get_mpi_sum
+            return numpy.asarray(get_mpi_sum(x),dtype=numpy.float64)
+        return x
+
+    # ---------------------------------------------------------------- the known solutions
+
+    def add_known_solution(self,W:NPFloatArray)->None:
+        """Register a solution to deflate away. Accepts either the global dof vector (what
+        ``Problem.get_current_dofs()`` returns) or this rank's block of it."""
+        W=numpy.asarray(W,dtype=numpy.float64)
+        if self.problem is not None and len(W)!=len(self._local_dofs()):
+            W=self._to_local_block(W)
         self.Ws.append(W)
-        
-    def clear_known_solutions(self):
+
+    def _to_local_block(self,W:NPFloatArray)->NPFloatArray:
+        """Cut a global dof vector down to this rank's rows, or complain with both lengths."""
+        assert self.problem is not None
+        nglobal,nrow_local,first_row,_=self.problem._get_dof_distribution_info()
+        if len(W)==nglobal and nrow_local!=nglobal:
+            return numpy.array(W[first_row:first_row+nrow_local])
+        raise ValueError("The known solution has "+str(len(W))+" entries, but this rank's dof vector has "
+                         +str(nrow_local)+" of "+str(nglobal)+" global ones")
+
+    def clear_known_solutions(self)->None:
         self.Ws=[]
-        
-    
-    def _get_alpha(self):
-        if len(self.Ws)==0 or self.shift_mode=="single" or self.shift_mode=="each":
-            return self.alpha
-        else:
-            return self.alpha**(1/len(self.Ws))
-    
-    def _get_eta_single(self,U,W):
-        # Return the inverse of the diagonal of the deflation matrix (just a constant scalar) with respect to a known solution W
-        #norm=numpy.sum((U-W)**self.p)
-        norm=numpy.linalg.norm(U-W)**self.p
-        if self.shift_mode=="single":
-            return norm
-        else:
-            return 1/(1/norm+self._get_alpha())
 
-    def _get_eta(self,U):
-        # Return the inverse of the diagonal of the deflation matrix (just a constant scalar) with respect to a all known solutions
-        res=1
-        for W in self.Ws:
-            res*=self._get_eta_single(U,W)
-        if self.shift_mode=="single":
-            if len(self.Ws)==0:
-                return 1
-            res=1/(1/res+self._get_alpha())
-            return res
-        else:
-            return res        
-    
-    def _get_eta_prime_single(self,U,W):
-        # Return derivative of eta_single(W) with respect to U   
-        
-        
-        if self.shift_mode=="single":            
-            raise RuntimeError("Implement single mode")
-            #dnorm=self.p*n**(self.p-1)        
-            return dnorm
-        else:            
-            n=numpy.linalg.norm(U-W)     
-            return self.p*n**(self.p-2)/(self._get_alpha()*n**self.p+1)**2 *(U-W)
-            #return dnorm/(self._get_alpha()*norm**2+1)
+    def __len__(self)->int:
+        return len(self.Ws)
 
-    def _get_eta_prime(self,U):    
-        # Return derivative of eta([W1,W2,...]) with respect to U
-        
+    # ---------------------------------------------------------------- the operator itself
+
+    def _shift(self)->float:
+        # "scaled" spreads the shift over the factors so that the far-field product stays alpha in
+        # the UNNORMALISED formulation. It is kept for compatibility; with the normalisation above it
+        # only changes how quickly each factor decays, not the far-field limit.
+        if self.shift_mode=="scaled" and len(self.Ws)>0:
+            return self.alpha**(1.0/len(self.Ws))
+        return self.alpha
+
+    def evaluate(self,need_gradient:bool=False,U:NPFloatArray | None=None)->tuple[float,NPFloatArray | None]:
+        """Return ``(log M, grad log M)`` at the current dofs; the gradient is ``None`` unless asked
+        for, since every residual assembly needs the scalar and only the Newton step needs the
+        vector. Both come from the same distances, which are the only reduction here.
+
+        ``U`` overrides the state to evaluate at, which is what lets the gradient be checked against a
+        finite difference of ``log M`` without moving the problem's dofs.
+        """
+        if len(self.Ws)==0:
+            return 0.0,None
+        if U is None:
+            U=self._local_dofs()
+        diffs=[U-W for W in self.Ws]
+        # One collective for all known solutions rather than one each.
+        sq=self._reduce_sum(numpy.array([float(numpy.dot(d,d)) for d in diffs]))
+        L=self.distance_scale()
+        n=numpy.sqrt(numpy.maximum(sq,0.0))/L
+        on_known=~(n>0.0)
+        nsafe=numpy.where(on_known,1.0,n)
+        p=float(self.p)
+        # log q_i = log(1/(alpha*n_i^p)); q_i -> 0 far away, -> inf on a known solution.
+        log_q=-numpy.log(self._shift())-p*numpy.log(nsafe)
         if self.shift_mode=="single":
-            if len(self.Ws)==0:
-                return 0
-            sum_deta=0
-            sum_eta=0
-            for W in self.Ws:
-                sum_eta+=self._get_eta_single(U,W)                
-                sum_deta+=self._get_eta_prime_single(U,W)
-            return sum_deta/(self._get_alpha()*sum_eta+1)**2
+            # One shift for the whole product: M = (prod_i n_i^-p)/alpha + 1.
+            log_q_tot=float(numpy.sum(log_q))+(len(self.Ws)-1)*numpy.log(self._shift())
+            log_M=float(numpy.logaddexp(0.0,log_q_tot))
+            weights=numpy.full(len(self.Ws),float(scipy.special.expit(log_q_tot)))
         else:
-            factor=1
-            sum=0
-            for W in self.Ws:
-                eta_s=self._get_eta_single(U,W)
-                factor*=eta_s
-                sum+=self._get_eta_prime_single(U,W)/eta_s
-            return factor*sum
-    
-        
+            log_M=float(numpy.sum(numpy.logaddexp(0.0,log_q)))
+            # d/dU log(1+q_i) = q_i/(1+q_i) * d(log q_i)/dU, and q/(1+q) is the logistic of log q.
+            weights=numpy.asarray(scipy.special.expit(log_q),dtype=numpy.float64)
+        if on_known.any():
+            log_M=self._max_log_M
+        log_M=min(log_M,self._max_log_M)
+        if not need_gradient:
+            return log_M,None
+        # d(log q_i)/dU = -p (U-W_i)/n_i^2, with n_i and U-W_i in the same units: the L cancels once,
+        # leaving one factor of 1/L^2 on the difference.
+        G=numpy.zeros_like(U)
+        for i,d in enumerate(diffs):
+            if on_known[i]:
+                continue
+            G-=(p*weights[i]/(nsafe[i]*nsafe[i]*L*L))*d   # L is a constant, so it differentiates through
+        return log_M,G
+
+    def distance_scale(self)->float:
+        """The length ||U-W|| is measured in. A CONSTANT of the operator, never a function of U.
+
+        It has to be constant, and that is the whole subtlety. A scale recomputed from the current
+        iterate looks attractive - it is always the right order - but it follows Newton away from the
+        known solution, so ||U-W||/L stays around 1 and the deflation never decays. Measured on the
+        pitchfork PDE below that is WORSE than no scale at all: 21 branches out of 21 became 12. It
+        also makes the analytic gradient wrong, since d(log M)/dU is derived with L held fixed.
+        """
+        if not (self.scale>0):
+            raise ValueError("The deflation distance scale must be positive, not "+repr(self.scale))
+        return float(self.scale)
+
+    def auto_scale_from(self,U:NPFloatArray | None=None)->float:
+        """Set :py:attr:`scale` from the state a search is about to start from, and return it.
+
+        The 2-norm of that state, or of the largest known solution if that is bigger. Called ONCE,
+        when the search starts, so the result is a constant for the whole solve.
+
+        Zero is possible and has to be handled: deflating the trivial state u=0 with nothing else
+        known gives ||U|| = 0, and there is then no length in the problem at all - the scale stays 1,
+        which is exactly what this did before scales existed.
+        """
+        if U is None:
+            U=self._local_dofs()
+        sq=[float(numpy.dot(U,U))]+[float(numpy.dot(W,W)) for W in self.Ws]
+        L=float(numpy.sqrt(max(0.0,float(numpy.amax(self._reduce_sum(numpy.array(sq)))))))
+        self.scale=L if L>0.0 else 1.0
+        return self.scale
+
+    def residual_scale(self)->float:
+        """The scalar M(U) that the residual is multiplied by. 1.0 without known solutions, so the
+        hook that calls this costs one exponential and nothing else when deflation is idle."""
+        if len(self.Ws)==0:
+            return 1.0
+        log_M,_=self.evaluate(need_gradient=False)
+        return float(numpy.exp(log_M))
+
+    def rescale_newton_step(self,x:NPFloatArray,first_row:int=0,reduce_dot:bool=False)->NPFloatArray:
+        """Turn the increment the linear solver returned into the deflated one.
+
+        ``x`` solves ``J x = M R``, so ``eta*x`` (eta = 1/M) is the ordinary Newton increment and the
+        deflated one is that divided by ``1 + grad log M . (eta x)``.
+
+        ``first_row`` locates ``x`` in the dof vector when the solver's row block is not the whole
+        thing, and ``reduce_dot`` says whether the dot product needs an allreduce. Both are decided
+        by the CALLER from which solver entry point it is -- never from ``len(x)``, which on a small
+        problem has rank 0 owning every row and rank 1 owning none, and would send the two ranks into
+        different branches of a collective.
+        """
+        if len(self.Ws)==0:
+            return x
+        log_M,G=self.evaluate(need_gradient=True)
+        assert G is not None
+        eta=float(numpy.exp(-log_M))
+        y=eta*numpy.asarray(x,dtype=numpy.float64)
+        # Which indexing G is in follows from the PROBLEM, not from the lengths: G is built from the
+        # local dof block, so under --distribute it already IS this rank's rows and must not be sliced
+        # again, while replicated it is the whole vector and the solver handed us a slice of it. On a
+        # small system the two cases have identical lengths on rank 0, so a length test would pick the
+        # wrong one there and silently offset the dot product.
+        assert self.problem is not None
+        if self.problem.is_distributed():
+            Gblock=G
+        else:
+            Gblock=G[first_row:first_row+len(y)]
+        if len(Gblock)!=len(y):
+            raise RuntimeError("The deflation gradient has "+str(len(G))+" entries and the solver returned "
+                               +str(len(y))+" rows from row "+str(first_row)+"; these are not the same layout")
+        s=float(numpy.dot(Gblock,y))
+        if reduce_dot:
+            from .mpi import get_mpi_sum
+            # The row count travels with the dot product, for one reduction rather than two: the
+            # blocks the ranks were handed have to TILE the dof vector, and if they do not, the sum
+            # above is a dot product over the wrong entries and there is nothing in the answer to say
+            # so. That is not hypothetical -- oomph passes first_row=0 on the back-substitution call,
+            # so a backend that trusts the argument gives every rank the block starting at 0.
+            packed=get_mpi_sum(numpy.array([s,float(len(y))]))
+            s=float(packed[0])
+            n_global=self.problem._get_dof_distribution_info()[0]
+            if int(round(float(packed[1])))!=int(n_global):
+                raise RuntimeError("The deflation rescale was handed row blocks covering "
+                                   +str(int(round(float(packed[1]))))+" rows in total, but the problem has "
+                                   +str(int(n_global))+" degrees of freedom. The linear solver is reporting "
+                                   "the wrong row offsets for its blocks.")
+        denom=1.0+s
+        # denom = 0 is the deflated Jacobian being singular, not a bug: it happens where the rank-one
+        # update exactly cancels a direction of J. A SolverError is reported to oomph-lib as a failed
+        # Newton solve (src/nanobind/solver.cpp), which the drivers retry from another perturbation.
+        if not numpy.isfinite(denom) or abs(denom)<1e-14:
+            from ..solvers.generic import SolverError
+            raise SolverError("The deflated Jacobian is singular (1+grad log M . dU = "+str(denom)+")")
+        return y/denom
+
+
+class DeflationAssemblyHandler(AugmentedAssemblyHandler):
+    """Deflation as an assembly handler.
+
+    Kept for scripts that construct it directly; it is a thin shell around
+    :class:`DeflationOperator`, which holds all the numerics and is what
+    ``Problem.set_deflation_operator`` installs.
+    """
+    def __init__(self,alpha:float=0.1,p:int=2):
+        super().__init__()
+        self.operator=DeflationOperator(alpha=alpha,p=p)
+
+    # The knobs used to live here; forward them so existing scripts keep working.
+    @property
+    def alpha(self)->float:
+        return self.operator.alpha
+    @alpha.setter
+    def alpha(self,v:float)->None:
+        self.operator.alpha=v
+    @property
+    def p(self)->int:
+        return self.operator.p
+    @property
+    def shift_mode(self)->Literal["single","each","scaled"]:
+        return self.operator.shift_mode
+    @shift_mode.setter
+    def shift_mode(self,v:Literal["single","each","scaled"])->None:
+        self.operator.shift_mode=v
+    @property
+    def Ws(self)->list[NPFloatArray]:
+        return self.operator.Ws
+
+    def initialize(self):
+        super().initialize()
+        self.operator._set_problem(self.get_problem())
+
+    def define_augmented_dofs(self, dofs):
+        # Deflation adds no unknowns: it scales the residual and rescales the Newton step.
+        pass
+
+    def add_known_solution(self,W):
+        self.operator.add_known_solution(W)
+
+    def clear_known_solutions(self):
+        self.operator.clear_known_solutions()
+
     def get_residuals_and_jacobian(self, require_jacobian, dparameter = None):
+        if dparameter is not None:
+            raise NotImplementedError("dparameter is not implemented for deflation")
         assm=self.start_multiassembly()
-        U,=self.get_augmented_dofs().split(startindex=0)
-        eta=self._get_eta(U)
+        M=self.operator.residual_scale()
         if require_jacobian:
-            if dparameter is not None:
-                raise NotImplementedError("dparameter not implemented for jacobian")
-            R,J=assm.R().J().assemble()            
-            return numpy.array(R)/eta,J # NOTE: J is not deflated, it requires the special solving method
+            R,J=assm.R().J().assemble()
+            # J is deliberately NOT deflated: the deflated Jacobian is a rank-one update of it, and
+            # custom_solve_routine() applies that update's effect as a scalar rescale of the step.
+            return numpy.array(R)*M,J
         else:
-            if dparameter is not None:
-                raise NotImplementedError("dparameter not implemented for residuals")
-            R,=assm.R().assemble()            
-            return numpy.array(R)/eta
-        
+            R,=assm.R().assemble()
+            return numpy.array(R)*M
+
     def has_custom_solve_routine(self):
         return True
-        
-    def custom_solve_routine(self, solve_Jx_b:Callable[[NPFloatArray],NPFloatArray], b:NPFloatArray) -> NPFloatArray:
-        if len(self.Ws)==0:
-            return solve_Jx_b(b)
-        U,=self.get_augmented_dofs().split(startindex=0)
-        eta=self._get_eta(U)
-        d=self._get_eta_prime(U)
-        f=-b/eta # Since R=R_nondeflated/eta, f=-R_nondeflated/eta**2
-        fsol=solve_Jx_b(f)
-        bsol=solve_Jx_b(b)
-        fdbsol=f*numpy.dot(d,bsol)
-        numer=solve_Jx_b(fdbsol)
-        denom=1+eta*numpy.dot(d,fsol)                
-        return eta*bsol-eta**2*numer/denom        
 
-         
+    def custom_solve_routine(self, solve_Jx_b:Callable[[NPFloatArray],NPFloatArray], b:NPFloatArray) -> NPFloatArray:
+        return self.operator.rescale_newton_step(solve_Jx_b(b))
+
+
 class NormalFormCalculator:
       def __init__(self,problem:Problem):
             self.problem=problem

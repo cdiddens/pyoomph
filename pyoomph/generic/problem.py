@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from ..meshes.remesher import RemesherBase
     from ..meshes.interpolator import BaseMeshToMeshInterpolator
     from .assembly import CustomAssemblyBase
+    from .bifurcation_tools import DeflationOperator
     from ..utils.num_text_out import NumericalTextOutputFile
     from ..output.latex import LaTeXPrinter
     import precice
@@ -837,6 +838,7 @@ class Problem(_pyoomph.Problem):
         self._abort_current_run=False
 
         self._custom_assembler:CustomAssemblyBase | None=None
+        self._deflation_operator:"DeflationOperator | None"=None
 
         #: Code generation settings used on every domain, unless a domain (or one of its parent
         #: domains) overrides individual ones by adding an
@@ -1283,14 +1285,17 @@ class Problem(_pyoomph.Problem):
             ref=getattr(solver_cb, "_current_problem_ref", None)
             if ref is not None and ref() is self:
                 solver_cb._current_problem_ref = None # type:ignore
-        # set_custom_assembler() (used e.g. for deflation/bifurcation tracking, see
-        # bifurcation_tools.py) creates a plain Python-level mutual reference: this Problem's
-        # own _custom_assembler points to the assembler, and the assembler's own "problem"
-        # attribute points back here. Break it explicitly rather than relying on cyclic gc
-        # picking it up eventually.
+        # set_custom_assembler() (bifurcation tracking, see bifurcation_tools.py) and
+        # set_deflation_operator() both create a plain Python-level mutual reference: this Problem's
+        # own attribute points to the object, and that object's own "problem" attribute points back
+        # here. Break both explicitly rather than relying on cyclic gc picking them up eventually.
         if self._custom_assembler is not None:
             self._custom_assembler.problem=None #type:ignore
             self._custom_assembler=None
+        if self._deflation_operator is not None:
+            self._deflation_operator.problem=None #type:ignore
+            self._deflation_operator=None
+            self.residual_scale_hook_active=False
         # _define_problem_for_additional_cartesian_stability_investigation()/
         # _define_problem_for_axial_symmetry_breaking_investigation() (normal-mode/azimuthal
         # stability setup) install a lambda here that closes over "self" - a plain Python
@@ -2795,6 +2800,7 @@ class Problem(_pyoomph.Problem):
                 print("DESIRED NDOF: "+str(ndof)+" -> "+str(self.desired_ndof)+", unrefining the "+str(m)+" best of "+str(nelem)+" elements (min_permitted_error="+str(thresh)+")")
 
     def _adapt(self) -> tuple[int, int]:
+        self._require_no_deflation("Mesh adaptation")
         nref,nunref=self._adapt_with_interfacial_errors()
         self._require_no_distributed_periodic_refinement("Mesh adaptation",nref+nunref)
         return nref,nunref
@@ -2935,6 +2941,60 @@ class Problem(_pyoomph.Problem):
 
     def get_custom_assembler(self) -> "CustomAssemblyBase | None":
         return self._custom_assembler
+
+    def set_deflation_operator(self,op:"DeflationOperator | None")->None:
+        """Install (or remove) a deflation operator.
+
+        Unlike :meth:`set_custom_assembler`, this leaves the assembly alone: the residual is
+        multiplied by the operator's scalar factor in C++ (``Problem::apply_residual_scale_factor``)
+        and the linear solver rescales the Newton step. Everything else -- the elemental assembly, the
+        frozen sparsity pattern, the choice of backend, MPI -- is the ordinary path, which is why
+        deflation works under ``mpirun`` and ``--distribute`` while the custom-assembler trackers do
+        not. See dev_docs/deflation.md.
+        """
+        if op is not None:
+            # The Newton step is rescaled by a scalar AFTER the linear solve, so anything that
+            # rewrites the system between the solve and the dof update sees an increment that no
+            # longer matches what it eliminated.
+            if self.use_static_condensation:
+                raise RuntimeError("Deflation cannot be combined with static condensation: the condensed "
+                                   "system's eliminated dofs are reconstructed from the Newton increment, "
+                                   "which deflation rescales afterwards. Switch use_static_condensation off.")
+            if self.get_bifurcation_tracking_mode()!="":
+                raise RuntimeError("Deflation cannot be combined with bifurcation tracking. Deactivate the "
+                                   "tracking first (deactivate_bifurcation_tracking()).")
+            op._set_problem(self)
+        self._deflation_operator=op
+        self.residual_scale_hook_active=op is not None
+
+    def get_deflation_operator(self)->"DeflationOperator | None":
+        return self._deflation_operator
+
+    def _require_no_deflation(self,what:str)->None:
+        """Stop with a clear message if ``what`` would change the dof vector under a deflation
+        operator that holds solutions expressed in the OLD one.
+
+        Every known solution is a vector of the current dof numbering. Adapting or remeshing changes
+        both the length and the meaning of that numbering, so the stored solutions become a set of
+        numbers about a mesh that no longer exists. The length check in ``add_known_solution`` would
+        catch the next registration but not the deflation factor computed from the ones already
+        there, which would simply be wrong -- and on a refinement that happens to preserve the dof
+        count, not even that.
+        """
+        if self._deflation_operator is not None and len(self._deflation_operator)>0:
+            raise RuntimeError(what+" is not possible while a deflation operator holds known solutions: "
+                               "they are dof vectors of the current numbering, which "+what.lower()+
+                               " changes. Call clear_known_solutions() first, or run the deflated search "
+                               "on a fixed mesh.")
+
+    def get_residual_scale_factor(self)->float:
+        """The scalar the assembled residual is multiplied by; 1 unless deflation is active.
+
+        Called from C++ once per residual assembly, and only while ``residual_scale_hook_active``.
+        """
+        if self._deflation_operator is None:
+            return 1.0
+        return self._deflation_operator.residual_scale()
     
 
     def get_custom_residuals_jacobian(self, info:_pyoomph.CustomResJacInfo) -> None:
@@ -5605,12 +5665,16 @@ class Problem(_pyoomph.Problem):
         # What n_unaugmented_dofs records is the dof count at the moment an augmentation was
         # INSTALLED, so !=0 means "a handler is installed", NOT "the dof vector grew":
         # AugmentedAssemblyHandler.initialize() sets it for every subclass, including the ones that
-        # append no dofs at all -- DeflationAssemblyHandler.define_augmented_dofs() is empty, and
-        # deflated_continuation() then yields to the caller with the operator still installed
-        # (keep_deflation_operator_active=True) precisely so that eigenproblems can be solved there.
-        # With no extra dofs the dof vector, its distribution and the assembled matrices are the base
-        # problem's, and the eigensolve is exactly the unaugmented one, so only a genuinely longer
-        # vector is refused here.
+        # append no dofs at all. With no extra dofs the dof vector, its distribution and the assembled
+        # matrices are the base problem's, and the eigensolve is exactly the unaugmented one, so only
+        # a genuinely longer vector is refused here.
+        #
+        # Deflation used to be the example of a handler that adds no dofs; it is not a handler at all
+        # any more (Problem.set_deflation_operator, dev_docs/deflation.md), so n_unaugmented_dofs
+        # stays 0 while it is installed. Eigensolving during deflated_continuation() -- which the
+        # tutorial does, with keep_deflation_operator_active=True -- therefore does not reach this
+        # guard, and it sees the ordinary, undeflated matrices as it must: the deflation factor scales
+        # the RESIDUAL, and the eigenproblem is assembled from the Jacobian and mass matrix.
         _n_unaug=self._get_n_unaugmented_dofs() #type:ignore
         if _n_unaug!=0 and _n_unaug!=self.ndof():
             raise RuntimeError("Cannot solve an eigenproblem while a custom augmented system (add_augmented_dofs / a CustomBifurcationTracker) adds dofs to the problem ("+str(_n_unaug)+" base dofs vs "+str(self.ndof())+" now). Remove the augmentation first.")
@@ -8306,6 +8370,26 @@ class Problem(_pyoomph.Problem):
         return currentdt
     
 
+    @staticmethod
+    def _deflation_solution_is_new(U:NPFloatArray,known:Iterable[NPFloatArray],tolerance:float)->bool:
+        """Is ``U`` distinct from every solution in ``known``?
+
+        Deflation guarantees Newton cannot converge ONTO a known solution, but it does not stop it
+        converging arbitrarily CLOSE to one: at a bifurcation point the branches meet, and the
+        deflated solve then returns the known solution again to the last few digits. Without this the
+        drivers open a fresh branch for it, which is where the one-point stub branches in the
+        deflated-continuation diagram came from.
+
+        Both vectors are the globally gathered dof vector, so this is the same number on every rank
+        and needs no reduction.
+        """
+        nU=float(numpy.linalg.norm(U))
+        for W in known:
+            scale=max(1.0,nU,float(numpy.linalg.norm(W)))
+            if float(numpy.linalg.norm(U-W))<=tolerance*scale:
+                return False
+        return True
+
     def deflated_solve_by_eigenperturbation(self, eigenindex:int=0, keep_deflation_active:bool=False, perturbation_factor:float=1,deflation_alpha:float=0.1,deflation_power:int=2,*, max_newton_iterations:int | None=None, newton_relaxation_factor:float | None=None, newton_solver_tolerance:float | None=None, globally_convergent_newton:bool=False):        
         """Tries to find another stationary solution by deflation. The procedure is implemented according to 'Deflation techniques for finding distinct solutions of nonlinear partial differential equations' by
 Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/1410.5620.pdf .
@@ -8323,24 +8407,27 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         if self.get_last_eigenvectors() is None or len(self.get_last_eigenvectors())<=eigenindex:            
             raise ValueError("No eigenvector at index "+str(eigenindex)+" available to perturb. Please solve the eigenproblem first.")
 
-        from .bifurcation_tools import DeflationAssemblyHandler        
-        old=self.get_custom_assembler()
-        if not isinstance(old, DeflationAssemblyHandler):
-            defl=DeflationAssemblyHandler(alpha=deflation_alpha, p=deflation_power)
-            self.set_custom_assembler(defl)            
-            defl.add_known_solution(self.get_current_dofs()[0])  
+        from .bifurcation_tools import DeflationOperator
+        old=self.get_deflation_operator()
+        if old is None:
+            defl=DeflationOperator(alpha=deflation_alpha, p=deflation_power)
+            self.set_deflation_operator(defl)
+            defl.add_known_solution(self.get_current_dofs()[0])
         else:
             defl=old
-        self.perturb_dofs(self.get_last_eigenvectors()[0]*perturbation_factor)
+        # numpy.real, and the requested index rather than the first: an eigenvector is complex in
+        # general and only its real part is a direction in dof space, and validating eigenindex above
+        # and then perturbing with [0] made the argument a no-op.
+        self.perturb_dofs(numpy.real(self.get_last_eigenvectors()[eigenindex])*perturbation_factor)
         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor,newton_solver_tolerance=newton_solver_tolerance,globally_convergent_newton=globally_convergent_newton)
         
         if not keep_deflation_active:
-            self.set_custom_assembler(old)
+            self.set_deflation_operator(old)
         else:
             defl.add_known_solution(self.get_current_dofs()[0])
             
 
-    def iterate_over_multiple_solutions_by_deflation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,keep_deflation_operator_active:bool=False)-> Generator[NPFloatArray,None,None]:
+    def iterate_over_multiple_solutions_by_deflation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,keep_deflation_operator_active:bool=False,random_seed:int | None=0,distinct_solution_tolerance:float=1e-6,deflation_scale:float | None=None)-> Generator[NPFloatArray,None,None]:
         """Tries to find multiple stationary solutions by deflation. The procedure is implemented according to 'Deflation techniques for finding distinct solutions of nonlinear partial differential equations' by
 Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/1410.5620.pdf .
 
@@ -8350,17 +8437,49 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             perturbation_amplitude (float, optional): Perturbation amplitude to move away from the previous solution. Defaults to 0.5.
             max_newton_iterations (Optional[int], optional): Optional override of the number of Newton iterations to try. Defaults to None.
             newton_relaxation_factor (Optional[float], optional): Optional override of the Newton relaxation factor. Defaults to None.
+            random_seed: Seed of the random perturbations. Pass None for a different sequence every run. Defaults to 0.
 
         Yields:
             The found solutions as lists of degrees of freedom
             
         """        
             
-        from .bifurcation_tools import DeflationAssemblyHandler
-        deflation=DeflationAssemblyHandler(alpha=deflation_alpha,p=deflation_p)
+        # A caller is free to walk away from this generator half-way -- the bifurcation GUI's Abort
+        # button does exactly that -- and the operator must come off when they do. Plain trailing code
+        # after the last yield does NOT run when a generator is closed; a finally does, so the body is
+        # delegated and the teardown put here.
+        try:
+            for _sol in self._iterate_over_multiple_solutions_by_deflation(
+                    deflation_alpha=deflation_alpha,deflation_p=deflation_p,
+                    perturbation_amplitude=perturbation_amplitude,max_newton_iterations=max_newton_iterations,
+                    newton_relaxation_factor=newton_relaxation_factor,use_eigenperturbation=use_eigenperturbation,
+                    skip_initial_solution=skip_initial_solution,num_random_tries=num_random_tries,
+                    keep_deflation_operator_active=keep_deflation_operator_active,random_seed=random_seed,
+                    distinct_solution_tolerance=distinct_solution_tolerance,deflation_scale=deflation_scale):
+                yield _sol
+        finally:
+            if not keep_deflation_operator_active:
+                self.set_deflation_operator(None)
+
+    def _iterate_over_multiple_solutions_by_deflation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,keep_deflation_operator_active:bool=False,random_seed:int | None=0,distinct_solution_tolerance:float=1e-6,deflation_scale:float | None=None)-> Generator[NPFloatArray,None,None]:
+        """The body of :py:meth:`iterate_over_multiple_solutions_by_deflation`; see there."""
+        from .bifurcation_tools import DeflationOperator
+        # A dedicated generator, seeded by default: the search is a sequence of random perturbations,
+        # so with the global numpy state it was irreproducible from one run to the next -- and under
+        # MPI every rank would draw a DIFFERENT perturbation, converge differently, and take different
+        # branches of the code below, which is how ranks end up in mismatched collectives.
+        rng=numpy.random.default_rng(random_seed)
+        deflation=DeflationOperator(alpha=deflation_alpha,p=deflation_p)
         if not self.is_initialised():
             self.initialise()
-        self.set_custom_assembler(deflation)
+        # The length the deflation measures ||U-W|| in, so that deflation_alpha is dimensionless. The
+        # perturbation amplitude is the honest choice: it is already the user's statement of how far
+        # away a different solution might be, and it is the only length available when the state being
+        # deflated is the trivial one. Without it, alpha carries units of ||U-W||^-p and the same
+        # physics written in different units is a different deflation problem.
+        deflation.scale=float(deflation_scale) if deflation_scale is not None \
+                        else max(abs(perturbation_amplitude),1e-300)*numpy.sqrt(max(self.ndof(),1))
+        self.set_deflation_operator(deflation)
         
         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor)
         numtries=1
@@ -8385,6 +8504,9 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                         numtries+=1
                         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor)
                         Unew=self.get_current_dofs()[0]
+                        if not self._deflation_solution_is_new(Unew,found_sols+new_sols,distinct_solution_tolerance):
+                            print("Eigenperturbation of solution "+str(i)+" converged back onto a known solution. Skipping.")
+                            continue
                         self.solve_eigenproblem(1)
                         eigv=numpy.real(self.get_last_eigenvectors()[0])
                         eigv=eigv/numpy.amax(abs(eigv))
@@ -8393,14 +8515,17 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                         deflation.add_known_solution(Unew)
                         
                         yield Unew
-                    except:
+                    except Exception:
                         print("Eigenperturbation of solution "+str(i)+" failed to converge. Trying random perturbation")
                 for j in range(num_random_tries):
-                    self.set_current_dofs(Ustart+(numpy.random.rand(self.ndof())-0.5)*(perturbation_amplitude))
+                    self.set_current_dofs(Ustart+(rng.random(self.ndof())-0.5)*(perturbation_amplitude))
                     try:
                         numtries+=1
                         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor)
                         Unew=self.get_current_dofs()[0]
+                        if not self._deflation_solution_is_new(Unew,found_sols+new_sols,distinct_solution_tolerance):
+                            print("Random perturbation "+str(j+1)+"/"+str(num_random_tries)+" of solution "+str(i)+" converged back onto a known solution. Skipping.")
+                            continue
                         new_sols.append(Unew)
                         if use_eigenperturbation:
                             self.solve_eigenproblem(1)
@@ -8409,19 +8534,19 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                             eigen_perts.append(eigv*perturbation_amplitude)
                         deflation.add_known_solution(Unew)
                         yield Unew
-                    except:
+                    except Exception:
                         print("Random perturbation "+str(j+1)+"/"+str(num_random_tries)+" of solution "+str(i)+" failed to converge")
             if len(new_sols)==0:
                 print("No new solutions found. Stopping deflation. Found in total "+str(len(found_sols))+" in "+str(numtries)+" attempts.")
                 if not keep_deflation_operator_active:
-                    self.set_custom_assembler(None)
+                    self.set_deflation_operator(None)
                 self.set_current_dofs(U)                
                 return
             else:
                 found_sols+=new_sols
                 
 
-    def deflated_continuation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,max_branches:int | None=None,branch_continue_iterations:int=10,**param_range):
+    def deflated_continuation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,max_branches:int | None=None,branch_continue_iterations:int=10,random_seed:int | None=0,distinct_solution_tolerance:float=1e-6,deflation_scale:float | None=None,**param_range):
         """Scan over a parameter range and try to find multiple solutions for each parameter step by deflation
         This is an implemetation according to: The computation of disconnected bifurcation diagrams by Patrick E. Farrell, Casper H. L. Beentjes, Ásgeir Birkisson
         https://arxiv.org/pdf/1603.00809.pdf
@@ -8434,13 +8559,32 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             newton_relaxation_factor: Optional override of the Newton relaxation factor during deflated search for additional solutions. Defaults to None.
             use_eigenperturbation: Whether to use eigen perturbation for the next solution during deflation. Defaults to False.            
             num_random_tries: Number of random tries for finding solutions during deflation. Defaults to 1.
+            random_seed: Seed of the random perturbations. Pass None for a different sequence every run. Defaults to 0.
             max_branches: Maximum number of branches to find. Defaults to None.
             branch_continue_iterations: Number of iterations for continuing branches. Defaults to 10.
             
         Yields:
             A tuple of branch index (from 0 to ...), the current parameter value and the current degrees of freedom (dofs) for the solution.
         """ 
-        from .bifurcation_tools import DeflationAssemblyHandler
+        # See iterate_over_multiple_solutions_by_deflation: a caller that stops consuming this
+        # generator (the GUI's Abort) must still get the operator taken off the problem.
+        try:
+            for _item in self._deflated_continuation(
+                    deflation_alpha=deflation_alpha,deflation_p=deflation_p,
+                    perturbation_amplitude=perturbation_amplitude,max_newton_iterations=max_newton_iterations,
+                    newton_relaxation_factor=newton_relaxation_factor,use_eigenperturbation=use_eigenperturbation,
+                    skip_initial_solution=skip_initial_solution,num_random_tries=num_random_tries,
+                    max_branches=max_branches,branch_continue_iterations=branch_continue_iterations,
+                    random_seed=random_seed,distinct_solution_tolerance=distinct_solution_tolerance,
+                    deflation_scale=deflation_scale,**param_range):
+                yield _item
+        finally:
+            self.set_deflation_operator(None)
+
+    def _deflated_continuation(self,deflation_alpha:float=0.1,deflation_p:int=2,perturbation_amplitude:float=0.5,max_newton_iterations:int | None=None,newton_relaxation_factor:float | None=None,use_eigenperturbation:bool=False,skip_initial_solution:bool=False,num_random_tries:int=1,max_branches:int | None=None,branch_continue_iterations:int=10,random_seed:int | None=0,distinct_solution_tolerance:float=1e-6,deflation_scale:float | None=None,**param_range):
+        """The body of :py:meth:`deflated_continuation`; see there."""
+        from .bifurcation_tools import DeflationOperator
+        rng=numpy.random.default_rng(random_seed)   # see iterate_over_multiple_solutions_by_deflation
         param=None
         rang=None
         for k,v in param_range.items():
@@ -8452,6 +8596,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         if param is None:
             raise RuntimeError("Please specify a parameter range like e.g. parameter_name=linspace(0,1,10)")
         assert rang is not None # rang is always set together with param in the loop above
+        # As iterate_over_multiple_solutions_by_deflation() does. Without it a parameter defined in
+        # define_problem() -- which has not run yet -- is reported as not existing.
+        if not self.is_initialised():
+            self.initialise()
         if param not in self.get_global_parameter_names():
             raise RuntimeError("Please specify a parameter that is defined in the problem")
         param_obj=self.get_global_parameter(param)
@@ -8461,14 +8609,14 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         self.go_to_param({param:rang.pop(0)})
         self.solve()
         branch_index=0
-        for dofs in self.iterate_over_multiple_solutions_by_deflation(max_newton_iterations=max_newton_iterations,perturbation_amplitude=perturbation_amplitude,deflation_alpha=deflation_alpha,deflation_p=deflation_p,newton_relaxation_factor=newton_relaxation_factor,use_eigenperturbation=use_eigenperturbation,skip_initial_solution=skip_initial_solution,num_random_tries=num_random_tries,keep_deflation_operator_active=True):
+        for dofs in self.iterate_over_multiple_solutions_by_deflation(max_newton_iterations=max_newton_iterations,perturbation_amplitude=perturbation_amplitude,deflation_alpha=deflation_alpha,deflation_p=deflation_p,newton_relaxation_factor=newton_relaxation_factor,use_eigenperturbation=use_eigenperturbation,skip_initial_solution=skip_initial_solution,num_random_tries=num_random_tries,keep_deflation_operator_active=True,random_seed=random_seed,distinct_solution_tolerance=distinct_solution_tolerance,deflation_scale=deflation_scale):
             active_branches[branch_index]=dofs
             yield branch_index,param_obj.value,dofs
             branch_index+=1            
-        deflator=cast(DeflationAssemblyHandler,self._custom_assembler)
+        deflator=cast(DeflationOperator,self._deflation_operator)
         if len(active_branches)==0:
             print("No solution found to start with")
-            self.set_custom_assembler(None)
+            self.set_deflation_operator(None)
             return
         
         for pv in rang:
@@ -8486,7 +8634,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     deflator.add_known_solution(newdofs)
                     active_branches[bi]=newdofs
                     yield bi,param_obj.value,newdofs
-                except:
+                except Exception:
                     branches_to_remove.append(bi)
             
             # It could have happened that we accidentially switched branches due to the order of the deflation selection
@@ -8494,13 +8642,23 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             new_branches_to_remove=[]
             for bind_to_rem in branches_to_remove:
                 switch_index=None
-                mindist=numpy.linalg.norm(active_branches[bind_to_rem]-old_branches[bind_to_rem])
+                # inf, not the distance from this branch's own stored dofs to itself: the branch
+                # FAILED to continue, so active_branches[bind_to_rem] was never updated and still
+                # equals old_branches[bind_to_rem]. That made mindist exactly zero, no candidate could
+                # ever beat it, and the whole reordering below was dead code. (It also used to assign
+                # to cdist instead of mindist, so it would not have tracked the minimum either.)
+                mindist=numpy.inf
                 for other_branch,otherdofs in active_branches.items():
                     if other_branch in branches_to_remove:
                         continue
                     cdist=numpy.linalg.norm(otherdofs-old_branches[bind_to_rem])
-                    if cdist<mindist:
-                        cdist=mindist
+                    # "Nearest survivor" alone is not a swap: on the pitchfork the trivial branch is
+                    # simply the closest thing to a lower branch that has just died, and taking it over
+                    # renames the trivial branch halfway through the diagram. A swap means the survivor
+                    # landed on the DEAD branch's old position rather than on its own, so require that
+                    # too.
+                    if cdist<mindist and cdist<numpy.linalg.norm(otherdofs-old_branches[other_branch]):
+                        mindist=cdist
                         switch_index=other_branch
                 if switch_index is not None:
                     print("Switching branch {} with {}".format(bind_to_rem,switch_index))
@@ -8520,17 +8678,28 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     
                     print("Checking for a new solution",branch_index,branches_to_remove)
                     self.set_current_dofs(dofs)
-                    self.perturb_dofs((numpy.random.rand(self.ndof())-0.5)*(perturbation_amplitude))
+                    self.perturb_dofs((rng.random(self.ndof())-0.5)*(perturbation_amplitude))
                     param_obj.value=pv
                     try:                    
                         self.solve(max_newton_iterations=max_newton_iterations,newton_relaxation_factor=newton_relaxation_factor)
-                        print("Found new solution after ",len(self.get_last_residual_convergence()),"steps",self.get_last_residual_convergence())
                         newdofs=self.get_current_dofs()[0]
+                        known=list(active_branches.values())+list(branches_to_add.values())
+                        if not self._deflation_solution_is_new(newdofs,known,distinct_solution_tolerance):
+                            # A branch that has just been continued and one found by deflation can be
+                            # the same solution: at a bifurcation the branches meet, and the deflated
+                            # solve lands back on the known one to the last few digits. Opening a
+                            # branch for it is what produced the one-point stubs in the diagram.
+                            print("Deflation converged back onto an existing branch. Not opening a new one.")
+                            remaining_perturbation_tries-=1
+                            if remaining_perturbation_tries<=0:
+                                success=False
+                            continue
+                        print("Found new solution after ",len(self.get_last_residual_convergence()),"steps",self.get_last_residual_convergence())
                         deflator.add_known_solution(newdofs)
                         branches_to_add[branch_index]=newdofs                        
                         yield branch_index,param_obj.value,newdofs
                         branch_index+=1
-                    except:
+                    except Exception:
                         remaining_perturbation_tries-=1
                         if remaining_perturbation_tries<=0:
                             success=False
@@ -8540,7 +8709,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             for bi,newdofs in branches_to_add.items():
                 active_branches[bi]=newdofs
         
-        self.set_custom_assembler(None)
+        self.set_deflation_operator(None)
         return
 
     def _check_distributed_remeshing_scope(self,remeshers:list["RemesherBase"],num_adapt:int | None)->None:
@@ -8708,6 +8877,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
         return len(levels)<=1
 
     def force_remesh(self, only_domains:set[MeshTemplate] | None=None, num_adapt:int | None=None,interpolator:type["BaseMeshToMeshInterpolator"] | None=None):
+        self._require_no_deflation("Remeshing")
         if interpolator is None:
             interpolator=self.mesh_interpolator
         if self._debug_remeshing:

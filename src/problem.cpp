@@ -1544,6 +1544,32 @@ namespace pyoomph
 		}
 	}
 
+	// Multiplies the residual in place by the deflation factor M(U) (1.0, i.e. a no-op, unless a
+	// deflation operator is installed - see get_residual_scale_factor()). A scalar times a row block
+	// is correct on any distribution and needs no communication, which is the whole reason deflation
+	// can ride on the ordinary assembly rather than the custom-assembler pipeline.
+	void Problem::apply_residual_scale_factor(oomph::DoubleVector &residuals)
+	{
+		if (!residual_scale_hook_active) return;
+		const double s = this->get_residual_scale_factor();
+		if (s == 1.0) return;
+		const unsigned n = residuals.nrow_local();
+		double *v = residuals.values_pt();
+		for (unsigned i = 0; i < n; i++) v[i] *= s;
+	}
+
+	// This rank's block of the dof vector, in the order the dof distribution numbers it. Serially and
+	// on a replicated run that is the whole vector; under --distribute it is the owned rows only.
+	// get_current_dofs() gathers instead, which is the right contract for its callers but costs
+	// O(ndof) per rank - deflation reads this on every residual assembly.
+	std::vector<double> Problem::get_local_dof_values()
+	{
+		const unsigned n = this->GetDofPtr().size();
+		std::vector<double> res(n);
+		for (unsigned i = 0; i < n; i++) res[i] = *(this->GetDofPtr()[i]);
+		return res;
+	}
+
 #ifdef OOMPH_HAS_MPI
 	// Fresh dof halo scheme for the CURRENT equation numbering. Deletes the previous scheme first:
 	// oomph's setup_dof_halo_scheme() plain-overwrites Halo_scheme_pt, which both leaks and -- worse --
@@ -2071,6 +2097,7 @@ namespace pyoomph
 				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the residual vector by matrix manipulation when bifurcation tracking is active, since the user-provided residual vector would still contain contributions from the dirichlet dofs, which would be wrong");
 				this->remove_dirichlets_by_matrix_manipulation(residuals);
 			}
+	apply_residual_scale_factor(residuals);
 		}
 		else
 		{
@@ -2143,6 +2170,7 @@ namespace pyoomph
 				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the jacobian matrix by matrix manipulation when bifurcation tracking is active, since the user-provided jacobian matrix would still contain contributions from the dirichlet dofs, which would be wrong");
 				this->remove_dirichlets_by_matrix_manipulation(residuals,&jacobian);
 			}
+			apply_residual_scale_factor(residuals);
 			// Static condensation comes LAST, after the Dirichlet manipulation, and that order is forced.
 			// Condensation is an exact algebraic elimination of whatever linear system it is given, so it
 			// has to be given the FINAL one; remove_dirichlets_by_matrix_manipulation() replaces a
@@ -2180,7 +2208,10 @@ namespace pyoomph
 			// coming out of a Newton solve hands in a matrix oomph-lib has already distributed, which
 			// is why this went unnoticed; _assemble_residual_jacobian(), i.e. Problem.assemble_jacobian()
 			// from Python, passes a fresh CRDoubleMatrix and segfaulted whenever a Python-side custom
-			// assembler (a CustomBifurcationTracker, deflation, ...) was installed.
+			// assembler (a CustomBifurcationTracker) was installed. Note the copy loop still writes
+			// info.residuals.size() entries regardless of what the caller's distribution says -- see
+			// dev_docs/mpi_augmented_systems.md B2, which is still open and is why this whole branch
+			// is refused under MPI.
 			if (!jacobian.distribution_built())
 			{
 				oomph::LinearAlgebraDistribution dist(this->communicator_pt(), info.residuals.size(), false);
@@ -5101,7 +5132,16 @@ namespace pyoomph
 		// condensation decides whenever it is on, and the layout is consulted only otherwise. Both
 		// cannot be served at once in general -- their blocks are different partitions of the same rows.
 		const bool for_condensation = use_static_condensation;
-		if (!for_condensation && dof_ordering_blocks.empty()) return;
+		// Deflation dots a DOF-layout vector (grad log M) against the Newton increment the solver
+		// returns, so under --distribute the solver's rows have to be the dof rows. oomph's default
+		// there is a uniform split, which is a different partition of the same global rows, and the two
+		// vectors are then not comparable entry by entry -- with 225 dofs on two ranks the dof blocks
+		// are 105/120 and the uniform ones 112/113. Replicated needs nothing: the gradient is the whole
+		// vector and the solver's block is a slice of it. Deflation and static condensation are
+		// mutually exclusive (Problem.set_deflation_operator refuses the combination), so they cannot
+		// both claim this.
+		const bool for_deflation = residual_scale_hook_active;
+		if (!for_condensation && !for_deflation && dof_ordering_blocks.empty()) return;
 
 		if (Problem_has_been_distributed)
 		{
@@ -5111,10 +5151,13 @@ namespace pyoomph
 			// Unconditionally, NOT gated on Dist_problem_matrix_distribution: oomph's own default for that
 			// enum is Uniform_matrix_distribution (problem.cc, the constructor), not the "Default"
 			// heuristic, so consulting it would simply mean never asking for the dof distribution at all.
-			if (!for_condensation) return; // a layout has nothing to add here; leave oomph's choice alone
+			if (!for_condensation && !for_deflation) return; // a layout has nothing to add here; leave oomph's choice alone
 			dist_pt = new oomph::LinearAlgebraDistribution(this->dof_distribution_pt());
 			return;
 		}
+		// Replicated: deflation alone has no preference (see above), so it must not drag the row split
+		// away from oomph's uniform one just by being switched on.
+		if (!for_condensation && dof_ordering_blocks.empty()) return;
 		const unsigned nproc = Communicator_pt->nproc(), my_rank = Communicator_pt->my_rank();
 		std::vector<unsigned> cuts = for_condensation ? condensation_row_cuts() : dof_ordering_row_cuts();
 		if (cuts.size() != nproc + 1) return;

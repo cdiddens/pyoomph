@@ -1072,8 +1072,11 @@ class PardisoSolver(GenericLinearSystemSolver):
                 
                 self._current_pardiso.iparm[3] = 63
                 bv=self.get_b(n,b)
-                if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-                    raise NotImplementedError("Custom solve not implemented for this case")
+                # The reuse branch verifies its own solve and may refactorise, so it cannot hand a
+                # plain re-solve callable to an augmented handler. Deflation only rescales the
+                # increment and is applied once, after the accuracy check below.
+                if self._custom_solve_routine_active():
+                    raise NotImplementedError("An augmented assembly handler's custom solve routine is not supported while Pardiso reuses its factorisation. Set try_to_reuse_solver=False.")
                 sol=self._current_pardiso.solve(bv)
                 #self._current_pardiso.iparm[3] = 0
                 err=numpy.amax(numpy.absolute(self._lastA*sol-bv))
@@ -1100,26 +1103,35 @@ class PardisoSolver(GenericLinearSystemSolver):
                     sol=self._current_pardiso.solve(bv)
                 elif self.verbose:
                     print("REUSE PARDISO AND REFACTOR DONE, ERROR",err,"IN ",self._current_pardiso.iparm[6],"ITERATIONS")
-                b[:]=sol[:]
+                b[:]=self._postprocess_newton_step(sol)
             else:
                 # solve_checked, not solve: this branch has no accuracy check of its own (unlike the
                 # try_to_reuse_solver branch above, which verifies its reused factors and refactorises),
                 # so an under-refined Pardiso solve would be returned silently. See solve_checked.
-                if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-                    pd = self._current_pardiso
-                    sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : pd.solve_checked(rhs), b) #type:ignore
+                pd = self._current_pardiso
+                # The RAW solve and the Newton step are kept apart, because the backward error below
+                # is only meaningful for the raw one: the deflation rescale multiplies it by a scalar,
+                # so ||A*sol - b|| would be a large number every time and would condemn a perfectly
+                # good factorisation on every Newton step. (Measured: 21 full factorisations instead
+                # of 1 + 21 phase-22 refreshes on a 14161-dof deflated solve.) An augmented handler's
+                # custom solve routine returns something that is not a solution of J x = b at all, so
+                # there is no raw vector to check in that case.
+                if self._custom_solve_routine_active():
+                    _raw = None
+                    sol = self._solve_newton_step(lambda rhs : pd.solve_checked(rhs), self.get_b(n,b)) #type:ignore
                 else:
-                    sol = self._current_pardiso.solve_checked(self.get_b(n,b))
+                    _raw = pd.solve_checked(self.get_b(n,b)) #type:ignore
+                    sol = self._postprocess_newton_step(_raw)
                 # For the symmetric mtypes, pardisoSolver holds only the upper triangle and cannot
                 # form the residual itself (last_backward_error stays None), which would silently
                 # disable the over-limit invalidation below - and the in-solver pivot escalation of
                 # solve_checked never fires either. The full matrix is still here, so form the same
                 # backward error at the same cost (one SpMV); discard-and-refactorise is the safety
                 # net that replaces the escalation. b still holds the right-hand side at this point.
-                if self._current_pardiso.last_backward_error is None and self._current_pardiso.mtype not in (11,13) and self._lastA is not None:
+                if _raw is not None and self._current_pardiso.last_backward_error is None and self._current_pardiso.mtype not in (11,13) and self._lastA is not None:
                     _scale=float(numpy.amax(numpy.absolute(b))) if b.size else 0.0
                     if _scale>0.0:
-                        self._current_pardiso.last_backward_error=float(numpy.amax(numpy.absolute(self._lastA*sol-b)))/_scale
+                        self._current_pardiso.last_backward_error=float(numpy.amax(numpy.absolute(self._lastA*_raw-b)))/_scale
                 # Once a factorisation has had to escalate its pivoting AND KEPT IT, the next one on
                 # this problem almost certainly will too -- under spatial adaptivity the mesh only
                 # gets harder from here. (An escalation that did not help withdraws itself and clears

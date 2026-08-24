@@ -167,6 +167,9 @@ class PETSCSolver(GenericLinearSystemSolver):
         self._structure_nnz:int=-1
         self._structure_nrow_local:int=-1
         self._structure_digest:bytes | None=None   # Fingerprint of the pattern the Mat was built for
+        #: First global row of this rank's block, as of the last distributed factorise. oomph passes
+        #: it only there, never on the back-substitution, so it has to be remembered.
+        self._solve_first_row:int=0
 
         # Whether a factorisation that has failed twice (see _ksp_solve_checked) raises, rather than
         # letting the untouched solution vector travel on as if it were an answer. Only ever consulted
@@ -730,8 +733,11 @@ class PETSCSolver(GenericLinearSystemSolver):
             self.petsc_rhs=bv
             self._setup_solver_if_needed()
 
-            if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-                raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
+            # An augmented handler wants to drive the solve itself (several re-solves of one
+            # factorisation), which the KSP path does not offer. Deflation is not in that class -- it
+            # only rescales the increment, applied below -- so it is no longer refused here.
+            if self._custom_solve_routine_active():
+                raise RuntimeError("Cannot use an augmented assembly handler's custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
                 import time
                 start_time = time.time()
@@ -743,7 +749,8 @@ class PETSCSolver(GenericLinearSystemSolver):
             # On a complex PETSc build (the one the eigensolvers need) the solution vector is complex
             # even though this system is real, so the imaginary part is pure roundoff -- drop it
             # explicitly instead of letting numpy discard it with a ComplexWarning.
-            b[:] = xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv #type:ignore
+            # Serial entry point: b is the whole system, so no row offset and no reduction.
+            b[:] = self._postprocess_newton_step(xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv) #type:ignore
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 
@@ -758,6 +765,12 @@ class PETSCSolver(GenericLinearSystemSolver):
     def solve_distributed(self, op_flag: int, allow_permutations: int, n: int, nnz_local: int, nrow_local: int, first_row: int, values: NPFloatArray, col_index: NPIntArray, row_start: NPIntArray, b: NPFloatArray, nprow: int, npcol: int, doc: int, data: NPUInt64Array, info: NPIntArray)->None:
         #print("solve distributed with flag ",op_flag)
         if op_flag == 1:
+            # oomph passes a meaningful first_row only on the FACTORISE call; on the
+            # back-substitution below it is 0 on every rank. Anything that needs to know which rows of
+            # the global system this block is has to remember it here -- see the deflation rescale at
+            # the end of op_flag==2, which dots a dof-length vector against b and silently used the
+            # wrong slice on every rank but the first while it trusted the argument.
+            self._solve_first_row = int(first_row)
             # Rank-deterministic (all its inputs are replicated), so no collective agreement is needed
             # for the symmetry decision itself.
             self._update_symmetry_engagement()
@@ -825,8 +838,11 @@ class PETSCSolver(GenericLinearSystemSolver):
 
             self._setup_solver_if_needed()
 
-            if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-                raise RuntimeError("Cannot use custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
+            # An augmented handler wants to drive the solve itself (several re-solves of one
+            # factorisation), which the KSP path does not offer. Deflation is not in that class -- it
+            # only rescales the increment, applied below -- so it is no longer refused here.
+            if self._custom_solve_routine_active():
+                raise RuntimeError("Cannot use an augmented assembly handler's custom solve routine with PETSc yet. Also, iterative solving might require different handling here")
             else:
                 import time
                 start_time = time.time()
@@ -838,7 +854,10 @@ class PETSCSolver(GenericLinearSystemSolver):
             # On a complex PETSc build (the one the eigensolvers need) the solution vector is complex
             # even though this system is real, so the imaginary part is pure roundoff -- drop it
             # explicitly instead of letting numpy discard it with a ComplexWarning.
-            b[:] = xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv #type:ignore
+            # Distributed entry point: b is this rank's row block, so the deflation dot product is
+            # an allreduce over the same split. first_row comes from the caller, never from len(b).
+            b[:] = self._postprocess_newton_step(xv.real if xv.dtype.kind == "c" and b.dtype.kind != "c" else xv,
+                                                 first_row=self._solve_first_row, reduce_dot=True) #type:ignore
 
             #print('Converged in', self.ksp.getIterationNumber(), 'iterations.') #type:ignore
 

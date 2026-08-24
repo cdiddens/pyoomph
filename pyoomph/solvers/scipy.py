@@ -152,10 +152,8 @@ class SuperLUSerial(GenericLinearSystemSolver):
 #			print("det","DET",self._current_LU.L.diagonal().prod()*self._current_LU.U.diagonal().prod())
 		elif op_flag==2:
 			self.setup_solver()
-			if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine():
-				sol=self.problem._custom_assembler.custom_solve_routine(lambda rhs : self._current_LU.solve(rhs,"T" if transpose==1 else "N"), b)
-			else:
-				sol=self._current_LU.solve(b,"T" if transpose==1 else "N") #type:ignore
+			# Serial entry point: b is the whole system, so no offset and no reduction.
+			sol=self._solve_newton_step(lambda rhs : self._current_LU.solve(rhs,"T" if transpose==1 else "N"), b) #type:ignore
 			b[:]=sol[:] #type:ignore
 		else:
 			raise RuntimeError("Cannot handle SuperLU mode "+str(op_flag)+" yet")

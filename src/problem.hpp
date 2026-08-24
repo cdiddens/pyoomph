@@ -1496,6 +1496,19 @@ namespace pyoomph
     // after the dofs took the increment, with that increment. Static condensation reconstructs the
     // dofs it eliminated here; with condensation off it returns on the first line.
     void actions_after_newton_dof_update(const oomph::DoubleVector &dx) override;
+    // Deflation (dev_docs/deflation.md): a scalar factor M(U) multiplying the residual, which blows
+    // up at every already-known solution so that Newton cannot converge onto one of them again.
+    // Overridden in Python by the installed DeflationOperator; the default makes every caller a
+    // no-op but for one virtual call and a comparison per assembly. The JACOBIAN is deliberately not
+    // scaled: the deflated Jacobian is a rank-one update of it, and the linear solver applies that
+    // update's effect as a scalar rescale of the Newton step instead.
+    // Gate on the hook above. Overriding a virtual in Python makes EVERY call go through the
+    // trampoline, and this one sits in every residual assembly of every problem, so the default
+    // must not pay for a feature almost nobody has switched on. Set from Problem.set_deflation_operator().
+    bool residual_scale_hook_active = false;
+    virtual double get_residual_scale_factor() { return 1.0; }
+    void apply_residual_scale_factor(oomph::DoubleVector &residuals); // Multiplies residuals in place by get_residual_scale_factor()
+    std::vector<double> get_local_dof_values(); // This rank's block of the dof vector (the values Dof_pt points at); NOT gathered, unlike get_current_dofs()
     #ifdef OOMPH_HAS_MPI
     using oomph::Problem::actions_before_distribute;
     using oomph::Problem::actions_after_distribute;

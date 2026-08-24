@@ -283,10 +283,6 @@ for d in glob.glob("./*/"):
       # This one spawns its own mpirun, so launching it under one already gives nested MPI.
       print("   SKIPPING",f,"-- it is just as spawner of other scripts")
       continue
-    if args.mpirun>0 and (f=="deflated_solve.py" or f=="deflated_continuation.py"):
-      # The deflation these two drive is a custom assembly handler, which has no MPI path yet.
-      print("   SKIPPING",f,"-- custom assemblers not MPI capable yet")
-      continue
     env=None if args.no_petsc else (env_complex if needs_complex_petsc(f) else env_real)
     print("   Testing",f,"-- with the complex PETSc" if env is not None and env is env_complex else "")
     cmd=[sys.executable, '-u', f]

@@ -153,6 +153,62 @@ class GenericLinearSystemSolver:
 		#: looks like a null result, so check this before believing one.
 		self.last_symmetry_decision:Optional[bool]=None
 		self.last_symmetry_decision_reason:str=""
+		#: Set while solve_gathered_to_root() drives a SERIAL backend on rank 0 with the gathered
+		#: system. That nested solve_serial() call goes through the same op_flag==2 branch as an
+		#: ordinary serial solve and would otherwise apply the Newton-step post-processing a second
+		#: time -- once on rank 0's gathered vector and once on each rank's block after the scatter.
+		#: Which of the two is the right place is not a matter of taste: the post-processing reduces,
+		#: and a reduction inside a rank-0-only branch deadlocks.
+		self._suppress_newton_step_postprocessing:bool=False
+
+	def _custom_solve_routine_active(self)->bool:
+		"""Is a custom assembler installed that wants to drive the solve itself?
+
+		Only the augmented (bifurcation-tracker) assemblers do. Deflation does not -- it is pure
+		post-processing of the increment -- which is why the two are asked separately: a backend that
+		cannot hand out a re-solve callable can still support deflation.
+		"""
+		ca=self.problem._custom_assembler #type:ignore
+		return ca is not None and ca.has_custom_solve_routine()
+
+	def _postprocess_newton_step(self,x:NPFloatArray,first_row:int=0,reduce_dot:bool=False)->NPFloatArray:
+		"""Turn the solved increment into the one the Newton update should take.
+
+		Today that means the deflation rescale and nothing else. ``first_row``/``reduce_dot`` describe
+		the row block ``x`` is: pass the block's offset and ``reduce_dot=True`` from a distributed
+		entry point, the defaults from a serial one. They are the CALLER's knowledge -- deciding them
+		from ``len(x)`` would send rank 0 (which owns every row of a small system) and rank 1 (which
+		owns none) into different branches of a collective.
+		"""
+		if self._suppress_newton_step_postprocessing:
+			return x
+		op=getattr(self.problem,"_deflation_operator",None)
+		if op is None or len(op)==0:
+			return x
+		return op.rescale_newton_step(x,first_row=first_row,reduce_dot=reduce_dot)
+
+	def _solve_newton_step(self,solve_fn:Callable[[NPFloatArray],NPFloatArray],b:NPFloatArray,
+						   first_row:int=0,reduce_dot:bool=False)->NPFloatArray:
+		"""Solve ``J x = b`` for the Newton increment, applying whatever post-processing is installed.
+
+		The one place every backend goes through, so that a new post-processing step is added once
+		rather than in each of them:
+
+		* a **deflation operator** turns the increment into the deflated one by a scalar rescale (one
+		  extra dot product, no extra solve -- see bifurcation_tools.DeflationOperator);
+		* a **custom assembler** with ``has_custom_solve_routine()`` (the augmented trackers) gets the
+		  solve handed to it as a callable, as before.
+
+		``first_row``/``reduce_dot`` describe the row block ``b`` is: pass the block's offset and
+		``reduce_dot=True`` from a distributed entry point, the defaults from a serial one. They are
+		the CALLER's knowledge -- deciding them from ``len(b)`` would send rank 0 (which owns every row
+		of a small system) and rank 1 (which owns none) into different branches of a collective.
+		"""
+		if self._custom_solve_routine_active():
+			ca=self.problem._custom_assembler #type:ignore
+			assert ca is not None
+			return ca.custom_solve_routine(solve_fn,b)
+		return self._postprocess_newton_step(solve_fn(b),first_row=first_row,reduce_dot=reduce_dot)
 
 	def _use_symmetric_factorisation_now(self)->bool:
 		"""Per-solve decision whether the matrix about to be factorised is proven symmetric.
@@ -368,13 +424,16 @@ class GenericLinearSystemSolver:
 			# block is then the whole system and there is nothing to gather.
 			self.solve_serial(op_flag,n,nnz_local,1 if op_flag==2 else 0,values,col_index,row_start,b,n,1)
 			return
-		# Replicated condition, checked before the first collective so all ranks refuse together. The
-		# custom solve routine would run on rank 0 alone, and the augmented handlers reach back into
-		# the problem from inside it; the custom assembler is not supported under MPI anyway.
-		if self.problem._custom_assembler is not None and self.problem._custom_assembler.has_custom_solve_routine(): #type:ignore
-			raise RuntimeError("A custom solve routine (deflation, an augmented assembly handler) cannot "
-							   "be used together with a linear solver that gathers the system onto rank 0 "
-							   "under MPI: it would run on rank 0 only. Use petsc_mumps, or run serially.")
+		# Replicated condition, checked before the first collective so all ranks refuse together. An
+		# augmented handler's custom solve routine would run on rank 0 alone while it reaches back into
+		# the problem, which is collective; the custom assembler is not supported under MPI anyway.
+		# Deflation used to be refused here for the same reason and is not any more: it needs no
+		# re-solve, only a rescale of the scattered increment, which every rank does on its own block
+		# below.
+		if self._custom_solve_routine_active():
+			raise RuntimeError("An augmented assembly handler's custom solve routine cannot be used "
+							   "together with a linear solver that gathers the system onto rank 0 under "
+							   "MPI: it would run on rank 0 only. Use petsc_mumps, or run serially.")
 
 		rank=get_mpi_rank()
 		error:BaseException | None=None
@@ -412,13 +471,23 @@ class GenericLinearSystemSolver:
 			if rank==0 and local_code==0:
 				assert b_global is not None
 				try:
-					self.solve_serial(2,n,0,1,_EMPTY_F64,_EMPTY_I32,_EMPTY_I32,b_global,n,1)
+					# The plain solve only: the Newton-step post-processing happens after the scatter,
+					# on every rank's own block, because it reduces.
+					self._suppress_newton_step_postprocessing=True
+					try:
+						self.solve_serial(2,n,0,1,_EMPTY_F64,_EMPTY_I32,_EMPTY_I32,b_global,n,1)
+					finally:
+						self._suppress_newton_step_postprocessing=False
 				except BaseException as e:
 					error=e
 					local_code=1 if isinstance(e,SolverError) else 2
 			code=self._agree_on_gathered_outcome(local_code)
 			if code==0:
 				mpi_scatter_vector(layout,b_global,b)
+				# After the scatter, not before: every rank now holds its own row block of the
+				# increment and can reduce the one dot product deflation needs. Doing it on rank 0
+				# inside the gathered solve would be a collective inside a single-rank branch.
+				b[:]=self._postprocess_newton_step(b,first_row=int(layout.vec_displs[rank]),reduce_dot=True)
 		if code==0:
 			return
 		if code==1:

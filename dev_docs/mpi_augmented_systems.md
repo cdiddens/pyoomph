@@ -268,9 +268,23 @@ the augmented one, reached SLEPc.
 
 # Part II — the Python custom assembler (plan only)
 
+> **Deflation left this part.** It is no longer a custom assembler: it adds no unknowns and does not
+> modify the Jacobian, so it now scales the assembled residual by a scalar and rescales the Newton
+> step on top of the ORDINARY assembly, and works serially, under plain `mpirun` and under
+> `--distribute`. See [deflation.md](deflation.md). That answers **B4** and **B6** below (the hang was
+> the unseeded RNG sending the ranks down different control flow) and removes the only user of
+> `has_custom_solve_routine` outside the augmented trackers. **B1, B2, B3 and B5 are untouched and
+> still block the `CustomBifurcationTracker` family**, which is what the rest of this part is about --
+> and B2 in particular is still a live memory-corruption bug worth fixing on its own merits.
+>
+> Two things deflation had to arrange are worth reading before porting anything else here: oomph
+> passes a meaningful `first_row` only on the FACTORISE call, never on the back-substitution; and
+> under `--distribute` the linear solver's default row split is a UNIFORM one, i.e. a different
+> partition of the same rows than the dof distribution. Both produced wrong answers with no error.
+
 `CustomAssemblyBase` (`pyoomph/generic/assembly.py`) and the `AugmentedAssemblyHandler` family in
-`pyoomph/generic/bifurcation_tools.py` — the fold/pitchfork/Hopf/normal-mode/eigenbranch trackers and the
-deflation handler — work only in serial. Under `mpirun`:
+`pyoomph/generic/bifurcation_tools.py` — the fold/pitchfork/Hopf/normal-mode/eigenbranch trackers —
+work only in serial. Under `mpirun`:
 
     RuntimeError: src/problem.cpp: This likely does not work in parallel
 
@@ -339,26 +353,30 @@ independent of everything else here**, and the one part of the plan worth doing 
 distribution with `distributed=false` while the solver picks a distributed one for the same ndof. In (a)
 that is survivable because the dof *values* are replicated; in (b) it is not.
 
-**B4 — no LA backend supports the deflation solve under MPI.** `DeflationAssemblyHandler` is the only
-assembler with `has_custom_solve_routine`: its routine wraps three solves of the same Jacobian into a
-Sherman-Morrison correction, using global dot products. PETSc refuses it outright in the serial *and* the
-distributed path — which also means deflation cannot use PETSc at all, not just under MPI. Pardiso's
-distributed path gathers the system onto rank 0 but then passes the **local** `b` into the routine
-(against the gathered `b_global` used on the line below it) — a latent wrong-answer bug. scipy/SuperLU is
-serial-only.
+**B4 — ANSWERED, and no longer about deflation.** It used to read: no LA backend supports the
+deflation solve under MPI, PETSc refuses it even serially, and the gather-to-root path passes the local
+`b` where the line below uses `b_global`. All of that is gone — the Sherman-Morrison correction turned
+out to collapse to a single solve and one dot product ([deflation.md](deflation.md) §2), so the
+"custom solve routine" it needed does not exist any more; the rescale is applied after the scatter, on
+each rank's own block. What remains under this number is the augmented trackers' own use of
+`has_custom_solve_routine`, which genuinely does need several re-solves of one factorisation and is
+still refused by PETSc and by the gather-to-root path.
 
 **B5 — the Python algebra is global.** Every reduction in the trackers (`numpy.dot`,
 `numpy.linalg.norm`), every `J@V`, and `split()` reading `Dof_pt` assume one rank owns everything. This
 costs nothing in regime (a) — the vectors really are replicated — and is the bulk of the work for (b).
 
-**B6 — unexplained hang.** The prototype completed several Newton solves and then stopped making
-progress. Candidates, in order of suspicion: a rank-dependent decision inside the deflation loop
-(`Problem.iterate_over_multiple_solutions_by_deflation` retries from random perturbations, and any RNG
-not identically seeded on every rank sends the ranks down different control flow), the
-Newton-failure/`max_newton_iterations` recovery path taking different branches per rank, and PETSc's
-`_ksp_solve_checked` rebuild retry. **Diagnose this before committing to stage 2** — it may be an entirely
-separate bug from the assembly, and it decides whether the "identical Python on every rank" assumption
-that stages 1–3 rest on actually holds.
+**B6 — ANSWERED: it was the RNG.** The prototype completed several Newton solves and then stopped
+making progress. The first candidate on the original list was the right one:
+`Problem.iterate_over_multiple_solutions_by_deflation` retried from `numpy.random.rand(...)`, which is
+not identically seeded across ranks, so the ranks perturbed differently, converged differently and took
+different branches of the driver — and deadlocked at the next collective. Both drivers now draw from a
+`numpy.random.default_rng(random_seed)`. The MPI deflation suite has not hung since, at `np=2` plain,
+`np=2 --distribute` and `np=3 --distribute`.
+
+The reassuring part for the rest of this plan: the "identical Python on every rank" assumption that
+stages 1–3 rest on does hold, provided nothing draws random numbers and every Newton failure is agreed
+on. Both are cheap to arrange.
 
 ## 9. Which parallelism, in which regime
 
@@ -418,7 +436,10 @@ the timings mean what they normally mean. Keep the `Problem_has_been_distributed
 Validate by asserting the assembled CSR matches the serial one at 1, 2 and 4 ranks — same element set, so
 only summation order differs; compare with a tolerance and say so.
 
-**Stage 3 — the deflation solve under MPI (B4).** Deflation needs `solve_Jx_b` several times on the same
+**Stage 3 — SUPERSEDED.** Deflation left this pipeline (see the note at the top of Part II), so the
+gather/scatter adapter described below was never needed. Kept for the design point in its last
+sentence, which still applies to anything else that needs a per-rank branch inside a solve: choose it
+from the caller, never from `len(b) == n`. The original text: **the deflation solve under MPI (B4).** Deflation needs `solve_Jx_b` several times on the same
 factorisation plus global dot products. With the system replicated (stage 2) and the solve
 row-distributed, the adapter is: `Allgatherv` the local RHS block, run the routine on global vectors with
 a `solve_Jx_b` that scatters into the KSP and gathers the result back, then write this rank's block into
@@ -436,8 +457,7 @@ small reduction API (`self.dot(a,b)`, `self.norm(a)`) so `numpy.dot`/`numpy.lina
 and user-written trackers have one obvious way to stay correct; `block_array` assembles local blocks with
 global column indices.
 
-**Validation** across the stages: the two deflation tutorials must report the same solution set as serial
-(`x = [0, 1, -1]` at `r=1`); one tracker tutorial per family at 1 vs 2 vs 4 ranks with the same critical
+**Validation** across the stages: one tracker tutorial per family at 1 vs 2 vs 4 ranks with the same critical
 parameter to solver tolerance and the same eigenvector up to sign/normalisation; and a unit test at the
 C++ boundary assembling the same augmented system in serial and at N ranks and comparing the CSR — which
 is what would have caught B2 immediately.

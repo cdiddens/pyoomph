@@ -156,8 +156,9 @@ namespace pyoomph
 		// driven from _assemble_multiassembly(), which sweeps the elements itself and asks each one for
 		// several named contributions at once. Refusing here puts such a solve back on that route
 		// instead of failing it -- deflated_solve.py died with "during threaded element assembly:
-		// Residual called" the moment the tutorials were run with --omp 2, and the same handler is why
-		// the tutorial harness already skips the deflation scripts under --mpirun.
+		// Residual called" the moment the tutorials were run with --omp 2. (Deflation no longer goes
+		// through this handler at all, see dev_docs/deflation.md; the CustomBifurcationTracker family
+		// still does, and is what this refusal is for now.)
 		if (dynamic_cast<CustomMultiAssembleHandler *>(this->assembly_handler_pt()))
 		{
 			report_parallel_refusal("the active assembly handler assembles several contributions per "

@@ -88,7 +88,7 @@ namespace pyoomph
 	class PyProblemTrampoline : public pyoomph::Problem
 	{
 	public:
-		NB_TRAMPOLINE(pyoomph::Problem, 18);
+		NB_TRAMPOLINE(pyoomph::Problem, 19);
 
 		void setup_pinning() override
 		{
@@ -173,6 +173,11 @@ namespace pyoomph
 		void get_custom_residuals_jacobian(pyoomph::CustomResJacInformation *info) override
 		{
 			NB_OVERRIDE(get_custom_residuals_jacobian, info);
+		}
+
+		double get_residual_scale_factor() override
+		{
+			NB_OVERRIDE(get_residual_scale_factor);
 		}
 
 		void _build_mesh() override
@@ -1304,7 +1309,24 @@ void PyReg_Problem(nb::module_ &m)
 				return vector_to_ndarray(rs);
 			},
 			nb::arg("t"), "Return the values of all degrees of freedom at history/time level ``t`` (t=0: current values, t=1: previous time step, ...).")
-		.def("get_last_residual_convergence", &pyoomph::Problem::get_last_residual_convergence,
+		.def(
+			"_get_local_dof_values", [](pyoomph::Problem *self)
+			{ return vector_to_ndarray(self->get_local_dof_values()); },
+			"Return this process's block of the degree-of-freedom vector as a numpy array. Unlike get_current_dofs(), this is NOT gathered: "
+			"serially and on a replicated MPI run it is the whole vector, but under --distribute it holds only the rows this process owns.")
+		.def_prop_rw(
+			"residual_scale_hook_active",
+			[](pyoomph::Problem &p)
+			{ return p.residual_scale_hook_active; },
+			[](pyoomph::Problem &p, bool s)
+			{ p.residual_scale_hook_active = s; },
+			"If True, the assembled residual is multiplied by get_residual_scale_factor() before it reaches the Newton solver. Set by "
+			"Problem.set_deflation_operator(); left False otherwise so that problems without deflation never call into the hook.")
+		.def("get_residual_scale_factor", &pyoomph::Problem::get_residual_scale_factor,
+			 "Return the scalar the assembled residual vector is multiplied by before it reaches the Newton solver. Returns 1.0 unless a "
+			 "deflation operator is installed, which overrides this to make Newton unable to converge onto an already-known solution. The "
+			 "Jacobian is deliberately left unscaled; the linear solver compensates by rescaling the Newton step.")
+				.def("get_last_residual_convergence", &pyoomph::Problem::get_last_residual_convergence,
 			 "Return the maximum residual recorded at the start of, and after each iteration of, the most recent Newton solve; useful for diagnosing convergence behavior.")
 		.def(
 			"get_residuals", [](pyoomph::Problem *self)
