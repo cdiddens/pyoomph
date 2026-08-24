@@ -33,6 +33,7 @@ the useful part. Code examples in `examples/` are runnable companions, not snipp
 | [distributed_state_files.md](distributed_state_files.md) | `save_state`/`load_state` on a distributed problem. |
 | [mpi_eigenproblems.md](mpi_eigenproblems.md) | Distributed eigenvalue problems through SLEPc. |
 | [mpi_augmented_systems.md](mpi_augmented_systems.md) | Bifurcation tracking under `--distribute` (done), and the plan for the Python custom assembler (not). |
+| [hopf_normal_form.md](hopf_normal_form.md) | The first Lyapunov coefficient: the term-by-term audit of Kuznetsov's real-form algorithm as pyoomph implements it, where the mass-matrix generalisation belongs, why `ga` is not mesh-independent while the orbit amplitude is, and what the new tests pin. |
 | [floquet_multipliers.md](floquet_multipliers.md) | Condensing the block bidiagonal orbit Jacobian into the monodromy matrix instead of solving one large singular pencil, the opt-in periodic Schur, why a DAE's algebraic directions land on `±1` rather than 0, and periodic orbits under `--distribute`. |
 
 ## Assembly, code generation and solvers

@@ -11,7 +11,7 @@ from ..solvers.generic import DefaultMatrixType
 
 from scipy.sparse import csr_matrix      
 
-def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD_delta:float=1e-5,FD_param_delta:float=1e-5,omega:float | None=None,q:NPComplexArray | None=None,mu0:float=0,omega_epsilon:float=1e-5,use_hopf_tracker_for_adjoint:bool=False):
+def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD_delta:float=1e-5,FD_param_delta:float=1e-5,omega:float | None=None,q:NPComplexArray | None=None,omega_epsilon:float=1e-5,use_hopf_tracker_for_adjoint:bool=False,verbose:bool=True,residual_tolerance:float=1e-6,check_derivatives_by_fd:bool=False):
     # Taken from § 10.2 of Yuri A. Kuznetsov, Elements of Applied Bifurcation Theory, Fourth Edition, Springer, 2004
     # Also implemented analogously in pde2path, file hogetnf.m 
     # XXX Here is the generalization of the code with mass matrix
@@ -91,13 +91,17 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
 
     problem._require_non_distributed("Bifurcation tracking")
     n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = problem.assemble_eigenproblem_matrices(0) #type:ignore
-    M=csr_matrix((M_val, M_ci, M_rs), shape=(n, n))	#TODO: Is csr or csc?
+    # Compressed sparse ROW, per the binding's own docstring ("both matrices in local compressed
+    # sparse row (CSR) format"), so (values, column_index, row_start) is the csr_matrix argument order
+    # and A/M come out un-transposed. A=-J because J=dR/dU while the pencil below is A q = i*omega*M q.
+    M=csr_matrix((M_val, M_ci, M_rs), shape=(n, n))
     A=csr_matrix((-J_val, J_ci, J_rs), shape=(n, n))
     AT=A.transpose().tocsr()
     MT=M.transpose().tocsr()
     
     if omega is None or q is None:
-        print("Solving for omega and q")
+        if verbose:
+            print("Solving for omega and q")
         eval,evect,_,_=problem.get_eigen_solver().solve(2,custom_J_and_M=(A,M),**eigensolve_kwargs)                    
         omega0=numpy.imag(eval[0])
         if omega0<0:
@@ -107,19 +111,17 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         else:
             qR=numpy.real(evect[0])
             qI=numpy.imag(evect[0])
-        mu0=numpy.real(eval[0])
     else:
         qR=numpy.real(q)
         qI=numpy.imag(q)
         omega0=omega
-    print("PREDOT",numpy.dot(qR,qI))
     qdenom=numpy.dot(qR,qR)+numpy.dot(qI,qI)
     qR/=numpy.sqrt(qdenom)
     qI/=numpy.sqrt(qdenom)
-    print("POSTDOT",numpy.dot(qR,qI))
     
-    if False or (numpy.amax(numpy.abs(A@qR+omega0*M@qI))>1e-7 or numpy.amax(-omega0*M@qR+A*qI)>1e-7):
-        print("Given q does not fulfill the eigenvector equation. Resolving it.")
+    if numpy.amax(numpy.abs(A@qR+omega0*M@qI))>1e-7 or numpy.amax(numpy.abs(-omega0*M@qR+A@qI))>1e-7:
+        if verbose:
+            print("Given q does not fulfill the eigenvector equation. Resolving it.")
         esolv_kwargs=eigensolve_kwargs.copy()
         if esolver.supports_target():
             esolv_kwargs["target"]=1j*omega0
@@ -150,13 +152,15 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         q=tmp.eigenvector
         qR=numpy.real(q)
         qI=numpy.imag(q)
-        print("After rotation, dot product is",numpy.dot(qR,qI))
+        if verbose:
+            print("After rotation, dot product is",numpy.dot(qR,qI))
         if numpy.abs(numpy.dot(qR,qI))>1e-7:
             raise ValueError("qR and qI are not orthogonal, i.e. the dot product is not zero, but {}. This is likely an issue with the eigenvalue solver. Please check the eigenvalue solver settings.".format(numpy.dot(qR,qI)))
     q_resolved=qR+1j*qI # q (the parameter) might still be None from the caller/auto-solve above; qR/qI are always resolved by this point
 
     esolv_kwargs=eigensolve_kwargs.copy()
-    if esolver.supports_target() or use_hopf_tracker_for_adjoint:
+    # 'or' here used to mean that asking for the Hopf tracker selected the eigensolver instead.
+    if esolver.supports_target() and not use_hopf_tracker_for_adjoint:
         esolv_kwargs["target"]=-1j*omega0
         evalT,evectT,_,_=problem.get_eigen_solver().solve(1,custom_J_and_M=(AT,MT),**esolv_kwargs,shift=-(1j+omega_epsilon)*omega0,v0=numpy.conjugate(q_resolved),sort=False,quiet=False)   # TODO: Is MT right here?                  #type:ignore
     else:
@@ -165,7 +169,9 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         problem.solve()
         evalT=problem.get_last_eigenvalues()
         evectT=problem.get_last_eigenvectors()
-        if evalT*omega0>0:
+        # evalT is an array; comparing the whole of it against a scalar raises. Only the mode we are
+        # after matters, and we want the one at -i*omega0.
+        if numpy.imag(evalT[0])*omega0>0:
             evalT=-evalT
             evectT=numpy.conjugate(evectT)        
         problem.set_custom_assembler(None)
@@ -193,7 +199,6 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
     #print("qI",qI)
     #print("pR",pR)
     #print("pI",pI)
-    verbose=True
     
     # XXX Here is the generalization of the code with mass matrix
     Mq=M@(qR+qI*1j)
@@ -208,60 +213,40 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
     pR=numpy.real(p) 
     pI=numpy.imag(p)
     pnorm=numpy.dot(pR,MqR)+numpy.dot(pI,MqI)
-    if numpy.abs(pnorm)<1e-10:                
-        print(numpy.dot(qR,qR)+numpy.dot(qI,qI),numpy.dot(qR,qI))
-        print(numpy.dot(pR,qR)+numpy.dot(pI,qI),numpy.dot(pR,qI)-numpy.dot(pI,qR))
-        print(numpy.linalg.norm(pR),numpy.linalg.norm(pI))
-        print("<p,q>",numpy.vdot(pR+1j*pI,qR+1j*qI))
-        print("<p,q*>",numpy.vdot(pR+1j*pI,qR-1j*qI))
-        for theta in numpy.linspace(0,2*numpy.pi,20):
-            p=(pR+pI*1j)*numpy.exp(1j*theta)
-            pRt=numpy.real(p) 
-            pIt=numpy.imag(p)
-            print("Theta",theta,"<p,q>",numpy.vdot(pRt+1j*pIt,qR+1j*qI),"<p,q*>",numpy.vdot(pRt+1j*pIt,qR-1j*qI))
-        #exit()
-        #print("pnorm is very small. This is likely an issue with the eigenvalue solver. Please check the eigenvalue solver settings.")
-        #raise ValueError("pnorm is very small. This is likely an issue with the eigenvalue solver. Please check the eigenvalue solver settings.")
-        #p*=numpy.exp(1j*numpy.pi/3)
-        #pR=numpy.real(p)
-        #pI=numpy.imag(p)
-        
-        #print("q",numpy.dot(qR,qR)+numpy.dot(qI,qI))
-        #print("<qR,qI>",numpy.dot(qR,qI))
-       
-        #pR=numpy.real(p) 
-        #pI=numpy.imag(p)
-        #pnorm=numpy.dot(pR,qR)+numpy.dot(pI,qI)
-        #print(pnorm)
-        
-        #exit()
-        #pnorm=1
+    if numpy.abs(pnorm)<1e-10:
+        # <p,Mq> is what the whole projection rests on: z=<p,Mx> is only a coordinate if it is 1.
+        # Near-zero means the adjoint the eigensolver returned does not pair with q -- usually the
+        # wrong mode of the conjugate pair -- and dividing by it produces a confident wrong answer.
+        raise ValueError("The adjoint eigenvector does not pair with the eigenvector: <p,Mq>={:.3e} is "
+                         "essentially zero, so it cannot be normalised to 1. This is usually the "
+                         "eigensolver returning the wrong member of the conjugate pair; check its "
+                         "settings, or pass a better omega/q.".format(pnorm))
     pR=pR/pnorm
     pI=pI/pnorm
     
-    qunitscale=max(numpy.amax(numpy.absolute(qR)),numpy.amax(numpy.absolute(qI)))
-    punitscale=max(numpy.amax(numpy.absolute(pR)),numpy.amax(numpy.absolute(pI)))
-    print("Q unitscale",qunitscale)
-    print("Q magnitude",numpy.linalg.norm(qR),numpy.linalg.norm(qI))
-    print("P unitscale",punitscale)
-    print("P magnitude",numpy.linalg.norm(pR),numpy.linalg.norm(pI))
-    qRus=qR/qunitscale
-    qIus=qI/qunitscale
-    pRus=pR/punitscale
-    pIus=pI/punitscale
-    
-    
+    # Every one of these must be zero for the projection to mean anything, and a wrong adjoint gives
+    # a confidently wrong coefficient rather than a failure -- so they are checked, not just printed.
+    # The abs() matters: amax() of a large NEGATIVE residual passes any positive threshold.
+    checks={
+        "A*qR + omega0*M*qI":   numpy.amax(numpy.abs(A@qR+omega0*M@qI)),
+        "A*qI - omega0*M*qR":   numpy.amax(numpy.abs(A@qI-omega0*M@qR)),
+        "AT*pR - omega0*MT*pI": numpy.amax(numpy.abs(AT@pR-omega0*MT@pI)),
+        "AT*pI + omega0*MT*pR": numpy.amax(numpy.abs(AT@pI+omega0*MT@pR)),
+        "<q,q> - 1":            numpy.abs(numpy.dot(qR,qR)+numpy.dot(qI,qI)-1),
+        "<qR,qI>":              numpy.abs(numpy.dot(qR,qI)),
+        "Re<p,Mq> - 1":         numpy.abs(numpy.dot(pR,MqR)+numpy.dot(pI,MqI)-1),
+        # <p,Mq*>=0 is automatic for omega0!=0 (p and q* belong to different eigenvalues of the
+        # pencil), so this one is a consistency check on the solver rather than a constraint.
+        "Im<p,Mq>":             numpy.abs(numpy.dot(pR,MqI)-numpy.dot(pI,MqR)),
+    }
     if verbose:
-        print("Step 1 : Checking equations")
-        print("Q Matrix equations (should be zero)")
-        print(numpy.amax(numpy.abs(A@qR+omega0*M@qI)))
-        print(numpy.amax(-omega0*M@qR+A@qI))
-        print("P Matrix equations (should be zero)")
-        print(numpy.amax(AT@pR-omega0*MT@pI))
-        print(numpy.amax(omega0*MT@pR+AT@pI))
-        print("Normalisation (1,0) required")
-        print(numpy.dot(qR,qR)+numpy.dot(qI,qI),numpy.dot(qR,qI))
-        print(numpy.dot(pR,MqR)+numpy.dot(pI,MqI),numpy.dot(pR,MqI)-numpy.dot(pI,MqR))
+        print("Step 1: eigenvector/adjoint residuals (all should be zero)")
+        for name,val in checks.items():
+            print("   {:24s} {:.3e}".format(name,val))
+    worst=max(checks.items(),key=lambda kv:kv[1])
+    if worst[1]>residual_tolerance:
+        print("WARNING: the Hopf eigenvector/adjoint pair is only satisfied to {:.3e} ({}); the first "
+              "Lyapunov coefficient will be correspondingly inaccurate".format(worst[1],worst[0]))
         #exit()
         #print("THIS gives:")
         #print("qR",qR)
@@ -272,41 +257,40 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
     
     
     
-    f0=nodalf(u)
-    def d2f(direct):                    
-        res_hess=-numpy.array(problem.get_second_order_directional_derivative(direct))        
-        if False:
+    def d2f(direct):
+        """B(v,v), from the analytic Hessian contraction."""
+        res_hess=-numpy.array(problem.get_second_order_directional_derivative(direct))
+        if check_derivatives_by_fd:
+            # Second difference of the residual itself. Only worth running when a newly written
+            # element's analytic Hessian is under suspicion -- it costs two extra assemblies per call
+            # and is far less accurate than what it is checking.
+            f0=nodalf(u)
             fp=nodalf(u+delt*direct)
             fm=nodalf(u-delt*direct)
             problem.set_current_dofs(u)
-            res_fd=(fm-2*f0+fp)/(delt**2)        
-            print("DIFFERENCE",numpy.amax(numpy.absolute(res_hess-res_fd)),"FD",numpy.amax(numpy.absolute(res_fd)),"HESS",numpy.amax(numpy.absolute(res_hess)),"DIRECT",numpy.amax(numpy.absolute(res_hess)))
-            return res_hess
+            res_fd=(fm-2*f0+fp)/(delt**2)
+            print("d2f vs FD: difference",numpy.amax(numpy.absolute(res_hess-res_fd)),
+                  "FD",numpy.amax(numpy.absolute(res_fd)),"Hessian",numpy.amax(numpy.absolute(res_hess)))
         return res_hess
         
     def d3f(direct):
-        direct_scale=numpy.amax(numpy.abs(direct))                
-        if direct_scale<1e-10:
-            direct_scale=1
-        else:
-            direct_scale=1/direct_scale        
-        direct_scale=1
-        problem.set_current_dofs(u+delt*direct*direct_scale)
+        # C(v,v,v), as a central difference of the analytic Hessian contraction along the same
+        # direction. There is no third derivative in the code generator, so this is the only route.
+        problem.set_current_dofs(u+delt*direct)
         res_hessp=-numpy.array(problem.get_second_order_directional_derivative(direct))
-        problem.set_current_dofs(u-delt*direct*direct_scale)
+        problem.set_current_dofs(u-delt*direct)
         res_hessm=-numpy.array(problem.get_second_order_directional_derivative(direct))
         problem.set_current_dofs(u)        
-        res_hess=0.5*(res_hessp-res_hessm)/(delt*direct_scale)
-        
-        if False:        
+        res_hess=0.5*(res_hessp-res_hessm)/delt
+        if check_derivatives_by_fd:
             fmm=nodalf(u-2*delt*direct)
             fm=nodalf(u-delt*direct)
             fp=nodalf(u+delt*direct)
             fpp=nodalf(u+2*delt*direct)
+            problem.set_current_dofs(u)
             res_fd=(-0.5*fmm+fm-fp+0.5*fpp)/(delt**3)
-            print("DIFFERENCE 3d order",numpy.amax(numpy.absolute(res_hess-res_fd)),"FD",numpy.amax(numpy.absolute(res_fd)),"HESS",numpy.amax(numpy.absolute(res_hess)),"DIRECT",numpy.amax(numpy.absolute(direct)))
-            #print("RESP",res_hessp,res_hessm,"DIRECT",direct)
-            return res_hess # (-0.5*fmm+fm-fp+0.5*fpp)/(delt**3)
+            print("d3f vs FD: difference",numpy.amax(numpy.absolute(res_hess-res_fd)),
+                  "FD",numpy.amax(numpy.absolute(res_fd)),"Hessian-FD",numpy.amax(numpy.absolute(res_hess)))
         return res_hess
     
     
@@ -331,27 +315,36 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         #print("b",b)
         #print("c",c)
 
-    #step 3
-    # I don't think this part of pde2path is correct
+    # Step 3: the two normal-form solves.
+    #   r  = A^-1 B(q,qb)        with B(q,qb) = a+b     (its imaginary part cancels by symmetry)
+    #   sv = (2i*omega0*M - A)^-1 B(q,q)  with B(q,q) = a-b+2i*c      = h20
+    # The mass matrix belongs in the h20 OPERATOR and nowhere else -- in particular not on either
+    # right-hand side. pde2path multiplies both right-hand sides by M; that is what the two commented
+    # lines below were, and the independent NormalFormCalculator.get_normal_form_hopf in this file
+    # agrees with the form used here (its psi200/psi110 solves carry no M on the right either).
     #r=solve_mat(A,M*(a+b))
     #sv=solve_mat(-A+2j*M*omega0,M*(a-b+2j*c))
-    # I think it should be this
     r=solve_mat(A,a+b)
     sv=solve_mat(-A+2j*M*omega0,a-b+2j*c)
     sR=numpy.real(sv)
     sI=numpy.imag(sv)
     if verbose:
-        print("Step 3")
-        #print("r",r)
-        #print("sR",sR)
-        #print("sI",sI)
-        print("CHECKING r",numpy.amax(numpy.absolute(A@r-M@(a+b))),"Rmagnitude",numpy.linalg.norm(r)) #type:ignore
-        print("CHECKING sR",numpy.amax(numpy.absolute(-A@sR-2*omega0*M@sI - M@(a-b))),"Sr magnitude",numpy.linalg.norm(sR))
-        print("CHECKING sI",numpy.amax(numpy.absolute(2*omega0*M@sR-A@sI - 2*M@c)), "SI magnitude",numpy.linalg.norm(sI))
+        # These used to check the pde2path form (an M@ on each right-hand side) while the lines above
+        # solved this one, so they reported a large error for a correct solve and were ignored.
+        print("Step 3: normal-form solve residuals (all should be zero)")
+        print("   {:24s} {:.3e}   |r| ={:.3e}".format("A*r - B(q,qb)",
+              numpy.amax(numpy.absolute(A@r-(a+b))),numpy.linalg.norm(r))) #type:ignore
+        print("   {:24s} {:.3e}   |sR|={:.3e}".format("Re[(2i*w*M-A)s - B(q,q)]",
+              numpy.amax(numpy.absolute(-A@sR-2*omega0*M@sI-(a-b))),numpy.linalg.norm(sR)))
+        print("   {:24s} {:.3e}   |sI|={:.3e}".format("Im[(2i*w*M-A)s - B(q,q)]",
+              numpy.amax(numpy.absolute(2*omega0*M@sR-A@sI-2*c)),numpy.linalg.norm(sI)))
 
     # step 4
+    # sig = Re<p,B(q,r)>. With r real, B(q,r) = B(qR,r) + i*B(qI,r), and
+    #   Re[(pR - i pI).(B(qR,r) + i B(qI,r))] = pR.B(qR,r) + pI.B(qI,r),
+    # so the second term takes pI (Kuznetsov), not pR (pde2path). Same for d3/d4 below.
     sig1=0.25*numpy.dot(pR,d2f(qR+r)-d2f(qR-r))
-    sig2=0.25*numpy.dot(pI,d2f(qI+r)-d2f(qI-r)) # TODO: In the book, it is pI, in pde2path is is pR    
+    sig2=0.25*numpy.dot(pI,d2f(qI+r)-d2f(qI-r))
     sig=sig1+sig2
     if verbose:
         print("Step 4")
@@ -360,10 +353,13 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         print("sig",sig)
     
     # step 5
+    # d0 = Re<p,B(qb,s)>. With qb = qR - i qI and s = sR + i sI,
+    #   B(qb,s) = [B(qR,sR)+B(qI,sI)] + i[B(qR,sI)-B(qI,sR)],
+    # so Re[(pR - i pI).that] = pR.B(qR,sR) + pR.B(qI,sI) + pI.B(qR,sI) - pI.B(qI,sR) = d1+d2+d3-d4.
     d1=0.25*numpy.dot(pR,d2f(qR+sR)-d2f(qR-sR))
     d2=0.25*numpy.dot(pR,d2f(qI+sI)-d2f(qI-sI))
-    d3=0.25*numpy.dot(pI,d2f(qR+sI)-d2f(qR-sI)) # TODO: In the book, it is pI, in pde2path is is pR
-    d4=0.25*numpy.dot(pI,d2f(qI+sR)-d2f(qI-sR)) # TODO: In the book, it is pI, in pde2path is is pR    
+    d3=0.25*numpy.dot(pI,d2f(qR+sI)-d2f(qR-sI))
+    d4=0.25*numpy.dot(pI,d2f(qI+sR)-d2f(qI-sR))
     d0=d1+d2+d3-d4
     if verbose:
         print("Step 5")
@@ -373,7 +369,9 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         print("d4",d4)
         print("d0",d0)
     
-    # Step 6        
+    # Step 6: g0 = Re<p,C(q,q,qb)>. Expanding C(q,q,qb) = C(uuu)+C(uvv) + i[C(uuv)+C(vvv)] with
+    # u=qR, v=qI gives pR.[C(uuu)+C(uvv)] + pI.[C(uuv)+C(vvv)], which is what the polarisation below
+    # assembles out of the three same-direction contractions C(w,w,w).
     g1=numpy.dot(pR,d3f(qR))
     g2=numpy.dot(pI,d3f(qI))
     g3=numpy.dot(pR+pI,d3f(qR+qI))
@@ -397,26 +395,20 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         print("c1",c1)
   
 
-    # Get dmu/dparam    
+    # d(Re lambda)/d(parameter), by continuing the eigenbranch rather than re-solving the
+    # eigenproblem at a shifted parameter: q_resolved, not q -- q is still None whenever the caller
+    # supplied neither omega nor an eigenvector and the auto-solve above produced them.
     old=param.value
-    if False:
-        param.value+=FD_param_delta    
-        evalsP,_=problem.solve_eigenproblem(2,**eigensolve_kwargs,shift=(1j+omega_epsilon)*omega0)
-        mu=numpy.real(evalsP[0])    
-        mup=-(mu-mu0)/FD_param_delta
-    else:
-        problem.activate_eigenbranch_tracking("complex",eigenvector=q,eigenvalue=1j*omega0)        
-        problem.solve()
-        mu1=numpy.real(problem.get_last_eigenvalues()[0])
-        problem.go_to_param({param.get_name():param.value+FD_param_delta})
-        mu2=numpy.real(problem.get_last_eigenvalues()[0])
-        mup=-(mu2-mu1)/FD_param_delta
-        if abs(mup)>1e12*abs(c1):
-            raise ValueError("Likely, the orbit originates like in the van der Pol oscillator. The first Lyapunov coefficient seems to be zero. Please manually specify dparam and the orbit amplitude")
-            
-        
-        problem.deactivate_bifurcation_tracking()
-        problem.set_current_dofs(u)                            
+    problem.activate_eigenbranch_tracking("complex",eigenvector=q_resolved,eigenvalue=1j*omega0)
+    problem.solve()
+    mu1=numpy.real(problem.get_last_eigenvalues()[0])
+    problem.go_to_param({param.get_name():param.value+FD_param_delta})
+    mu2=numpy.real(problem.get_last_eigenvalues()[0])
+    mup=-(mu2-mu1)/FD_param_delta
+    if abs(mup)>1e12*abs(c1):
+        raise ValueError("Likely, the orbit originates like in the van der Pol oscillator. The first Lyapunov coefficient seems to be zero. Please manually specify dparam and the orbit amplitude")
+    problem.deactivate_bifurcation_tracking()
+    problem.set_current_dofs(u)                            
 
     param.value=old
     

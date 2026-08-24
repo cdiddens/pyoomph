@@ -331,18 +331,22 @@ class PeriodicOrbit:
             Tend=float(Tend/TS)
         
         ssamples=numpy.linspace(Tstart,Tend,N,endpoint=endpoint)/T
-        print("Backing up dofs")
         self._get_handler().backup_dofs()
-        for s in ssamples:
-            self._get_handler().set_dofs_to_interpolated_values(s) # TODO: We might need the time history for e.g. local expressions, integrals, etc. involving partial_t            
-            self.problem.invalidate_cached_mesh_data()
-            Tcurr=s*T
-            if set_current_time:
-                self.problem.set_current_time(Tcurr,dimensional=False,as_float=True)
-            yield Tcurr*TS
-        print("Restoring dofs")
-        self._get_handler().restore_dofs()
-        self.problem.set_current_time(tbackup,dimensional=False,as_float=True)
+        # try/finally, because the backup is handler state: if the caller's loop body raises (or it
+        # breaks out early), an unrestored backup makes the NEXT backup_dofs() throw "the dofs have
+        # already been backed up", which is what the user then sees instead of their own error --
+        # including from PeriodicOrbit.__exit__ on the way out of the `with` block.
+        try:
+            for s in ssamples:
+                self._get_handler().set_dofs_to_interpolated_values(s) # TODO: We might need the time history for e.g. local expressions, integrals, etc. involving partial_t            
+                self.problem.invalidate_cached_mesh_data()
+                Tcurr=s*T
+                if set_current_time:
+                    self.problem.set_current_time(Tcurr,dimensional=False,as_float=True)
+                yield Tcurr*TS
+        finally:
+            self._get_handler().restore_dofs()
+            self.problem.set_current_time(tbackup,dimensional=False,as_float=True)
         
     def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000):
         """See :py:meth:`~pyoomph.generic.problem.Problem.get_floquet_multipliers`."""
@@ -7259,7 +7263,10 @@ class Problem(_pyoomph.Problem):
         # Get the Lyapunov coefficient
         if dparam is not None and orbit_amplitude is not None:
             parameter.value+=dparam
-            sign=1 if dparam>0 else 0
+            # +-1, like the dlam the Lyapunov coefficient returns in the other branch. It is only
+            # consumed by the parameter step below, which this branch has already taken, but a 0 here
+            # meant the two branches disagreed about what `sign` is.
+            sign=1 if dparam>0 else -1
             al=orbit_amplitude
             qR,qI=numpy.real(q),numpy.imag(q)
             lyap_coeff=0
@@ -7341,7 +7348,9 @@ class Problem(_pyoomph.Problem):
                         start=self.get_current_dofs()[0][:orbit_base_ndof]
                     else:
                         dist=numpy.linalg.norm(numpy.array(start)-numpy.array(self.get_current_dofs()[0][:orbit_base_ndof]))
-                        if dist>1e-5*avg_dists0:
+                        # avg_dists0 is a squared radius, so the threshold is taken against its root
+                        # to compare a length with a length.
+                        if dist>1e-5*numpy.sqrt(abs(avg_dists0)):
                             nontrivial=True
                             skip=True
                     i+=1
