@@ -43,7 +43,10 @@ from ...expressions.units import unit_to_string
 
 from .model import (eigen_settings, BifurcationGUISolutionPoint, BifurcationGUISolutionBranch, AxisSpec,
                     AXIS_OBSERVABLE, AXIS_PARAMETER, as_axis, observable_axis, parameter_axis,
-                    same_parameter_value, STABILITY_EIGEN, STABILITY_INFERRED, STABILITY_UNKNOWN)
+                    same_parameter_value, STABILITY_EIGEN, STABILITY_INFERRED, STABILITY_UNKNOWN,
+                    BRANCH_SOLUTION, BRANCH_LOCUS, BRANCH_ORBIT,
+                    ORBIT_MIN_TAG, ORBIT_MAX_TAG, ORBIT_T_KEY, orbit_band_names, orbit_band_base,
+                    is_orbit_band_name)
 
 from typing import Protocol
 from pathlib import Path
@@ -119,9 +122,15 @@ class InlineExecutor:
         return fn()
 
 
-def _eigen_columns(unit:str)->"list[str]":
-    """Header names for the two eigenvalue columns, carrying the rate unit when there is one."""
+def _eigen_columns(unit:str,orbit:bool=False)->"list[str]":
+    """Header names for the two eigenvalue columns, carrying the rate unit when there is one.
+
+    On an orbit branch the same two columns hold the Floquet EXPONENTS, which are rates in the same
+    unit but a different quantity, so they say so.
+    """
     suffix=" ["+unit+"]" if unit else ""
+    if orbit:
+        return ["ReFloquetExponent"+suffix,"ImFloquetExponent"+suffix]
     return ["ReEigen"+suffix,"ImEigen"+suffix]
 
 
@@ -331,6 +340,80 @@ class BifurcationController:
         #: solutions at one parameter value instead of finding the same one again.
         self._deflation_known:list[NPFloatArray]=[]
         self._deflation_at:float | None=None
+
+        # --- periodic orbits. A Hopf sheds a periodic orbit, and until now the GUI could only leave
+        # one transiently and see where the solution ended up. Switching onto the orbit itself and
+        # continuing it is what these settings drive; see dev_docs/bifurcation_loci.md.
+        #: Number of time steps the orbit is discretized with. Raised at use time to a multiple of the
+        #: collocation order and to an even number - with a DAE and an ODD number of time intervals a
+        #: spurious Floquet multiplier lands on exactly -1, which is where a period doubling would be
+        #: (dev_docs/floquet_multipliers.md).
+        self.orbit_NT=30
+        #: Discretization of the orbit. Only "collocation" and "floquet" carry an explicit degree of
+        #: freedom at the end of the period, which is what the Floquet multipliers are computed from;
+        #: the others can be continued but have no stability.
+        self.orbit_mode:str="collocation"
+        self.orbit_order=3
+        self.orbit_GL_order=-1
+        self.orbit_T_constraint:str="phase"
+        #: Extra factor on the amplitude of the starting guess, for a Hopf whose normal form is a poor
+        #: predictor of the orbit a finite step away from it.
+        self.orbit_amplitude_factor=1.0
+        #: Verify that the solved orbit did not collapse back onto the stationary branch. On, because
+        #: a collapsed "orbit" looks like a perfectly good branch of solutions until its period is
+        #: read.
+        self.orbit_check_collapse=True
+        #: Parameter step off the Hopf, or None to take what the current ds buys. The parameter offset
+        #: is eps**2, so this IS the epsilon the switch is made with, squared - which is why it is
+        #: taken from ds by default: the same key that steers the sweep steers the step onto the orbit.
+        self.orbit_eps:float | None=None
+        #: Samples per period used for the minimum, average and maximum of each observable, or None
+        #: for one per time step of the orbit. Each sample is a full observable sweep.
+        self.orbit_observable_samples:int | None=None
+        #: Store the orbit's own degrees of freedom as full state dumps, one per time point, instead
+        #: of the raw dof vector. Partition- and mesh-independent, at nT times the disk; forced on a
+        #: distributed problem, where the raw vector means nothing outside its own partitioning.
+        self.orbit_portable=False
+        #: Compute the Floquet multipliers at every continuation point, like the eigensolve on an
+        #: ordinary branch. Off means the orbit branch is drawn with unknown stability until they are
+        #: asked for.
+        self.floquet_enabled=True
+        self.floquet_method:str="condensed"
+        #: How many multipliers, or None for all of them (as far as the method allows).
+        self.floquet_n:int | None=None
+        #: Tolerance for recognising the TRIVIAL multiplier at 1, which every orbit has by
+        #: time-translation invariance. It must be removed, and not because it would look like a
+        #: bifurcation: it comes back as 1+-1e-15, so its exponent is a tiny number of EITHER SIGN, and
+        #: left in it flips the whole branch between stable and unstable from one point to the next.
+        self.floquet_unity_tol=1e-5
+        #: Deadband on |mu| > 1 for counting an unstable direction.
+        self.floquet_unstable_tol=1e-6
+        self.floquet_dense_threshold=2000
+        self.floquet_shift_invert=True
+        self.floquet_sigma:complex | None=None
+        #: Leave the Floquet eigenvectors on the problem instead of restoring what was there before.
+        #: They are the interesting field to plot on an orbit, but everything that reads
+        #: get_last_eigenvalues() would then be reading multipliers as eigenvalues.
+        self.floquet_feeds_eigen_panes=False
+        #: The orbit currently installed on the problem, or None. Never used as a context manager:
+        #: PeriodicOrbit.__exit__ deactivates the handler and re-seeds a transient history.
+        self._orbit:Any=None
+        #: Observables the exact time integral can serve, i.e. the mesh integral ones. ODE values and
+        #: extremum observables are not meshes' integral functions and are averaged by sampling.
+        self._integral_observables:set[str]=set()
+        #: Unit and multiplier of the period, resolved once like the observables' own.
+        self._orbit_T_unit=""
+        self._orbit_T_mult=1.0
+        #: Fingerprint of the equation numbering the installed orbit's blocks belong to, taken while
+        #: the plain system was still in place. See _capture_dof_fingerprint.
+        self._orbit_dof_fingerprint=""
+        #: How far the trivial multiplier came out from 1 in the last Floquet computation, i.e. the
+        #: accuracy of the discretization there. See _orbit_floquet.
+        self._orbit_trivial_multiplier_error=float("nan")
+        #: Relative amplitude below which a solved orbit is taken to have collapsed onto the
+        #: stationary branch. Measured as the widest band on the branch divided by the scale of its
+        #: own observable, so it is dimensionless and the same number serves every problem.
+        self.orbit_collapse_tolerance=1e-6
 
         #: Supplies the visible axis ranges, see :py:class:`BifurcationViewLimits`.
         self.view:BifurcationViewLimits=_FixedViewLimits()
@@ -624,6 +707,12 @@ class BifurcationController:
                             key=bn+"/"+valn
                             obs[key]=lambda domname=bn,valn=valn: _si_value(self.problem.get_mesh(domname).evaluate_observable(valn))
                             self._observable_unit_probes[key]=lambda domname=bn,valn=valn: self.problem.get_mesh(domname).evaluate_observable(valn)
+                            # These, and only these, are what PeriodicOrbit.evaluate_observable_time_integral
+                            # can integrate exactly over the period: it resolves the part before the
+                            # last "/" with get_mesh(). An ODE domain is an ODEStorageMesh and not a
+                            # mesh at all, and an extremum observable is not an integral function, so
+                            # both are averaged by sampling instead.
+                            self._integral_observables.add(key)
                     # ExtremumObservables are not integral functions, so they need their own listing.
                     # Each becomes several axis choices: the minimum and the maximum, and where each of
                     # them sits - "h_extreme  [max, val]", "h_extreme  [max, x]", ... The position is
@@ -721,6 +810,121 @@ class BifurcationController:
         except Exception as e:
             self.log("Could not determine the unit of the eigenvalues:",repr(e))
 
+    def _resolve_orbit_period_unit(self):
+        """Fix the unit the periods are recorded in, once, from the temporal scaling.
+
+        Same discipline as the observables (:py:meth:`_resolve_observable_units`): the prefix is
+        estimated once and the multiplier applied to every later period, so a branch cannot switch
+        from ms to s half way along.
+        """
+        self._orbit_T_unit=""
+        self._orbit_T_mult=1.0
+        try:
+            self._orbit_T_unit,self._orbit_T_mult=_unit_and_multiplier(self.problem.get_scaling("temporal"))
+        except Exception as e:
+            self.log("Could not determine the unit of the period:",repr(e))
+
+    # ------------------------------------------------------------------ periodic orbits
+
+    def _require_orbit(self):
+        """The orbit installed on the problem, or a refusal naming what to do about it."""
+        if self._orbit is None or self._orbit_handler() is None:
+            raise RuntimeError("There is no periodic orbit on the problem. Switch onto one at a Hopf "
+                               "bifurcation, or load a point of an orbit branch.")
+        return self._orbit
+
+    def orbit_period(self,dimensional:bool=True)->float:
+        """The period of the orbit currently installed, in the recorded unit."""
+        orbit=self._require_orbit()
+        if not dimensional:
+            return float(orbit.get_T(dimensional=False))
+        return _si_value(orbit.get_T())*self._orbit_T_mult
+
+    def _register_orbit_axes(self,names:"Iterable[str]"):
+        """Make the derived orbit names selectable as axes, once each.
+
+        Registered here rather than in the observable table because they only exist once an orbit has
+        been computed - exactly like the mode observables, and for the same reason. The unit is copied
+        from the observable the band belongs to and the multiplier is 1: these values have already
+        been through _observable_mults on their way in, and multiplying again would scale the band
+        away from its own centre line.
+        """
+        for name in names:
+            if name in self._avail_observables:
+                continue
+            self._avail_observables.append(name)
+            base=orbit_band_base(name)
+            if base is not None:
+                self._observable_units[name]=self._observable_units.get(base,"")
+            elif name==ORBIT_T_KEY:
+                self._observable_units[name]=self._orbit_T_unit
+            self._observable_mults[name]=1.0
+            self._extremum_axes.add(name)
+
+    def _evaluate_orbit_observables(self)->"tuple[dict[str,float],dict]":
+        """Minimum, average and maximum of every observable over one period, plus the period.
+
+        The average goes under the observable's OWN name, so that every axis, tangent, export and
+        selection path keeps working and an orbit branch continues the stationary line straight
+        through the Hopf it came from. The extremes go under the derived band names.
+        """
+        orbit=self._require_orbit()
+        handler=self._orbit_handler()
+        assert handler is not None
+        N=int(self.orbit_observable_samples or 0) or handler.get_num_time_steps()
+        mins:dict[str,float]={}
+        maxs:dict[str,float]={}
+        sums:dict[str,float]={}
+        count=0
+        # endpoint=False: s=0 and s=1 are the same state, so including both counts one sample twice
+        # and biases the mean by 1/N. It costs nothing here and would be invisible in the result.
+        for _t in orbit.iterate_over_samples(N=N,endpoint=False):
+            vals=self.evaluate_observables()
+            for k,v in vals.items():
+                if k in sums:
+                    sums[k]+=v
+                    mins[k]=min(mins[k],v)
+                    maxs[k]=max(maxs[k],v)
+                else:
+                    sums[k]=v
+                    mins[k]=v
+                    maxs[k]=v
+            count+=1
+        if count==0:
+            raise RuntimeError("The orbit produced no samples to evaluate the observables on")
+        avg={k:v/count for k,v in sums.items()}
+        # The exact, Gauss-Legendre weighted time average where the observable supports it. AFTER the
+        # sampling loop, never inside it: both back the dofs up on the handler, and the nested second
+        # one throws "the dofs have already been backed up".
+        exact=sorted(k for k in avg if k in self._integral_observables)
+        if exact:
+            try:
+                res=orbit.evaluate_observable_time_integral(*exact)
+                if len(exact)==1:
+                    res=(res,)
+                Tdim=_si_value(orbit.get_T())
+                if Tdim!=0:
+                    for k,val in zip(exact,res):
+                        avg[k]=_si_value(val)/Tdim*self._observable_mults.get(k,1.0)
+            except Exception as e:
+                self.log("Falling back to the sampled mean for the integral observables:",repr(e))
+                exact=[]
+        out=dict(avg)
+        for k in avg:
+            lo,hi=orbit_band_names(k)
+            out[lo]=mins[k]
+            out[hi]=maxs[k]
+        out[ORBIT_T_KEY]=self.orbit_period()
+        self._register_orbit_axes(out.keys())
+        info={"T":float(orbit.get_T(dimensional=False)),
+              "nT":int(handler.get_num_time_steps()),
+              "mode":str(orbit.mode),"order":int(orbit.order),"GL_order":int(orbit.GL_order),
+              "T_constraint":str(orbit.T_constraint),
+              "nbase":int(handler.get_base_ndof()),
+              "samples":int(count),
+              "exact_average":bool(exact)}
+        return out,info
+
     def _phys_eig(self,value):
         """One eigenvalue, or a sequence of them, as a physical rate."""
         if value is None:
@@ -764,7 +968,7 @@ class BifurcationController:
             groups.setdefault(b.slice_key(),[]).append(b)
         return groups
 
-    def _new_branch(self,*,kind:str="solution",tracked_parameter:str | None=None,
+    def _new_branch(self,*,kind:str=BRANCH_SOLUTION,tracked_parameter:str | None=None,
                     bifurcation_type:str | None=None)->BifurcationGUISolutionBranch:
         """Open a branch, stamped with the slice it is about to be computed in."""
         branch=BifurcationGUISolutionBranch(kind=kind,
@@ -804,6 +1008,8 @@ class BifurcationController:
         sections at a fixed value of the parameter now being varied, so they stay as they are and a
         new branch is opened at the current solution.
         """
+        if self.on_orbit():
+            raise RuntimeError("Changing the continued parameter re-solves the problem, which would have to be done on the orbit as a whole. Load a stationary point first.")
         if name not in self.all_parameter_names():
             raise ValueError("'"+str(name)+"' is not a global parameter of this problem")
         if name==self._paramname:
@@ -835,6 +1041,8 @@ class BifurcationController:
         Uses go_to_param, i.e. it continues there rather than jumping, so a large move still lands on
         a solution.
         """
+        if self.on_orbit():
+            raise RuntimeError("Moving a parameter continues the problem to the new value, which cannot be done while an orbit is installed. Load a stationary point first.")
         if name==self._paramname:
             raise ValueError("'"+name+"' is the continuation parameter; step in it instead of setting it")
         if name not in self.all_parameter_names():
@@ -859,7 +1067,31 @@ class BifurcationController:
     leave_locus_offset=0.05
 
     def on_locus(self)->bool:
-        return self.current_branch is not None and self.current_branch.kind=="locus"
+        return self.current_branch is not None and self.current_branch.kind==BRANCH_LOCUS
+
+    def on_orbit(self)->bool:
+        """Whether the current branch is a branch of periodic orbits."""
+        return self.current_branch is not None and self.current_branch.kind==BRANCH_ORBIT
+
+    def _orbit_handler(self)->"_pyoomph.PeriodicOrbitHandler | None":
+        """The periodic-orbit handler installed on the problem, or None."""
+        handler=self.problem.assembly_handler_pt()
+        return handler if isinstance(handler,_pyoomph.PeriodicOrbitHandler) else None
+
+    def _augmented_system_active(self)->bool:
+        """Whether ANY augmented system is installed: a bifurcation tracker OR a periodic orbit.
+
+        get_bifurcation_tracking_mode() answers "" for an orbit - start_orbit_tracking only swaps the
+        assembly handler and never touches the tracking mode - so every guard written against that
+        string alone is blind to an orbit, and would let a state be loaded, a mesh be adapted or a
+        tracker be reinstalled on top of the augmented orbit dof vector.
+        """
+        return self.problem.get_bifurcation_tracking_mode()!="" or self._orbit_handler() is not None
+
+    def _deactivate_any_augmentation(self):
+        """Take whatever augmented system is installed back off. Covers orbits, unlike the bare call."""
+        if self._augmented_system_active():
+            self.problem.deactivate_bifurcation_tracking()
 
     def _branch_of(self,pt)->"BifurcationGUISolutionBranch | None":
         for b in self.branches:
@@ -874,8 +1106,12 @@ class BifurcationController:
         tracker active, or a locus with none, both silently compute something else entirely. Only
         this method and the branch-opening calls are allowed to change the tracking state.
         """
-        want_locus=branch is not None and branch.kind=="locus"
-        active=self.problem.get_bifurcation_tracking_mode()!=""
+        want_locus=branch is not None and branch.kind==BRANCH_LOCUS
+        tracking=self.problem.get_bifurcation_tracking_mode()!=""
+        # An orbit handler counts as active here even though it reports no tracking mode; otherwise
+        # moving from an orbit branch to a solution point would leave it installed and every later
+        # solve would work on the augmented orbit system. See _augmented_system_active.
+        active=tracking or self._orbit_handler() is not None
         if want_locus:
             assert branch is not None
             if branch.tracked_parameter is None:
@@ -885,10 +1121,13 @@ class BifurcationController:
             # get_last_eigenvectors()[0] is whatever that secondary solve returned, not the tracked
             # critical vector -- reactivating from it would restart the tracker on the wrong mode.
             guess=None
-            if active:
+            if tracking:
+                # Only a TRACKER has a critical eigenvector to hand over; an orbit handler has none,
+                # and asking it for one would read the augmented orbit vector as an eigenfunction.
                 tracked=numpy.array(self.problem._get_bifurcation_eigenvector(),dtype=numpy.complex128) #type:ignore
                 if len(tracked)>0:
                     guess=tracked
+            if active:
                 self.problem.deactivate_bifurcation_tracking()
             if guess is None:
                 evs=self.problem.get_last_eigenvectors()
@@ -897,8 +1136,22 @@ class BifurcationController:
                                                        _as_tracking_type(branch.bifurcation_type),
                                                        eigenvector=guess)
             self.problem.reset_arc_length_parameters()
+        elif branch is not None and branch.kind==BRANCH_ORBIT:
+            # An orbit point's dump holds one phase of the cycle; the rest of it, and the period, come
+            # back out of the companion the point was written with. Without this the problem would sit
+            # on a single snapshot of the orbit and every later step would continue a stationary state.
+            if active:
+                self.problem.deactivate_bifurcation_tracking()
+            self._orbit=None
+            point=self.current_point
+            if point is None or point.orbit_info is None:
+                self.log("This orbit point carries no record of its cycle, so only the state it was "
+                         "dumped at could be restored")
+            else:
+                self._install_orbit_from_sidecar(point)
         elif active:
             self.problem.deactivate_bifurcation_tracking()
+            self._orbit=None
             self.problem.reset_arc_length_parameters()
 
     def start_locus(self,tracked:str,continue_in:str,bifurcation_type:str | None=None):
@@ -908,6 +1161,9 @@ class BifurcationController:
         the one being stepped, which traces the locus of the bifurcation in the (continue_in, tracked)
         plane - the fold curve Bo_c(V) of the hanging-droplet tutorial, for instance.
         """
+        if self.on_orbit():
+            raise RuntimeError("A locus is a curve of STATIONARY bifurcations; leave the orbit branch "
+                               "first.")
         cp=self.current_point
         if cp is None or cp.eig_value_Re!=0:
             raise RuntimeError("Continuing a bifurcation has to start AT one. Locate a bifurcation first.")
@@ -931,7 +1187,7 @@ class BifurcationController:
 
         self._paramname=continue_in
         self._tangs={}
-        self._new_branch(kind="locus",tracked_parameter=tracked,bifurcation_type=mode)
+        self._new_branch(kind=BRANCH_LOCUS,tracked_parameter=tracked,bifurcation_type=mode)
         # Both parameters vary along a locus, so that plane is what it should be drawn in.
         self._x_axis=parameter_axis(continue_in)
         self._y_axis=parameter_axis(tracked)
@@ -949,7 +1205,7 @@ class BifurcationController:
         has solutions and which one is not known in advance, so the candidates are tried in turn.
         """
         branch=self.current_branch
-        if branch is None or branch.kind!="locus":
+        if branch is None or branch.kind!=BRANCH_LOCUS:
             raise RuntimeError("Not on a bifurcation locus")
         tracked=branch.tracked_parameter
         assert tracked is not None
@@ -1010,6 +1266,10 @@ class BifurcationController:
         self._changed()
 
     def new_branch_from_state(self,statefile):
+        if self.on_orbit():
+            raise RuntimeError("A new branch is started from a stationary state; an orbit is "
+                               "restored by loading one of its own points, which is what "
+                               "carries the rest of its cycle.")
         self._new_branch()
         self.problem.load_state(statefile,ignore_continuation_data=True,ignore_eigendata=True)
         self.problem.reset_arc_length_parameters()
@@ -1089,7 +1349,7 @@ class BifurcationController:
         return None
 
     def _add_current_state(self,eig_value=None,eig_values=None,det_sign=None,dparam_ds=None,
-                           measured:bool=True,eig_modes=None):
+                           measured:bool=True,eig_modes=None,observables=None):
         """Record the problem's current state as a new point of the current branch.
 
         ``eig_value`` overrides the eigenvalue that would be read from the problem, which is what
@@ -1120,18 +1380,35 @@ class BifurcationController:
         elif eig_value is not None and eig_values is None:
             eig_values=[eig_value]
         state_file=self.problem.get_output_directory(os.path.join(self.data_subdir,"_states","state_{:06d}.dump".format(self._state_step)))
-        p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,self.evaluate_observables(),eig_value,state_file,self._state_step,
+        # observables are passed in for an orbit, where one value per observable is an average over a
+        # whole cycle and evaluating them here would record whichever phase the mesh happens to hold.
+        obs=self.evaluate_observables() if observables is None else dict(observables)
+        p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,obs,eig_value,state_file,self._state_step,
                                       param_values=self.current_parameter_values(),eig_values=eig_values,
                                       det_sign=det_sign,dparam_ds=dparam_ds,eig_modes=eig_modes,
                                       eig_settings=self.current_eigen_settings() if eig_values else None)
         self._record_mode_observables(p)
         # On a locus EVERY point has a zero real part, so classifying them all would run a normal-form
         # calculation per step for an answer already known: the tracked type.
-        if p.eig_value_Re==0 and self.classify_bifurcations and branch.kind!="locus":
+        # ... and on an ORBIT it would be a bifurcation of the orbit, which the normal-form
+        # calculation (a stationary construction, and one that solves an eigenproblem the orbit
+        # handler refuses) cannot describe.
+        if p.eig_value_Re==0 and self.classify_bifurcations and branch.kind not in (BRANCH_LOCUS,BRANCH_ORBIT):
             p.bifurcation_info=self._classify_current_point()
         if p.stability_source==STABILITY_EIGEN and p.eig_values:
             p.unstable_count=p.measured_unstable_count()
-        self.problem.save_state(state_file)
+        if branch.kind==BRANCH_ORBIT:
+            # The tangent belongs to the augmented orbit system, so writing it into the dump only
+            # produces a file that reports a mismatched length on every reload. It goes into the
+            # orbit's own sidecar instead, where it can be applied to the augmented system again.
+            keep_conti=self.problem.continuation_data_in_states
+            self.problem.continuation_data_in_states=False
+            try:
+                self.problem.save_state(state_file)
+            finally:
+                self.problem.continuation_data_in_states=keep_conti
+        else:
+            self.problem.save_state(state_file)
         self._state_step+=1
         self.current_point=p
         self.selected_point=None
@@ -1147,9 +1424,12 @@ class BifurcationController:
         # A point saved during tracked continuation has an arclength direction vector of the AUGMENTED
         # size, which cannot be read into the plain problem ("Mismatching size in the dof direction
         # vector"). The direction is re-established by _sync_tracking_to below anyway.
-        on_locus=branch is not None and branch.kind=="locus"
-        if self.problem.get_bifurcation_tracking_mode()!="":
-            self.problem.deactivate_bifurcation_tracking()
+        # An orbit's tangent is augmented for the same reason and just as unloadable, so it is dropped
+        # here too; _sync_tracking_to reinstalls the handler and its direction from the sidecar.
+        on_locus=branch is not None and branch.kind in (BRANCH_LOCUS,BRANCH_ORBIT)
+        # Not "is a tracker active": an orbit handler reports no tracking mode, and loading a state
+        # into the augmented orbit dof vector fails on the dof count instead.
+        self._deactivate_any_augmentation()
         self.problem.load_state(pt.statefile,ignore_outstep=True,ignore_continuation_data=on_locus)
         after=self.current_parameter_values()
         moved={n:(before[n],after[n]) for n in after
@@ -1466,6 +1746,14 @@ class BifurcationController:
             os.remove(fname)
         except OSError as e:
             self.log("Could not remove state file",fname,":",e)
+        # An orbit point owns a companion holding the rest of its cycle. Removed here rather than at
+        # the three call sites, and tolerantly: most points never had one.
+        npzfile,dirfile=self._orbit_sidecar_paths(fname)
+        try:
+            os.remove(npzfile)
+        except OSError:
+            pass
+        shutil.rmtree(dirfile,ignore_errors=True)
 
     def toggle_point_tag(self,pt,tag):
         if pt is None:
@@ -1502,10 +1790,19 @@ class BifurcationController:
         let alone captioned, so it goes into every file - including the tag files.
         """
         parts=[]
-        if branch.kind=="locus":
+        if branch.kind==BRANCH_LOCUS:
             parts.append("locus of {:s} bifurcations".format(branch.bifurcation_type or "unclassified"))
             if branch.tracked_parameter is not None:
                 parts.append("tracked in "+branch.tracked_parameter)
+        elif branch.kind==BRANCH_ORBIT:
+            # Which of the two averages produced the column matters to anyone comparing the file
+            # against their own post-processing, so it is stated rather than left to be guessed.
+            info=next((p.orbit_info for p in branch if p.orbit_info),None) or {}
+            parts.append("periodic orbits, {:d} time steps, {:s} order {:d}".format(
+                int(info.get("nT",0)),str(info.get("mode","?")),int(info.get("order",0))))
+            parts.append("the observable columns are the average over the period ({:s}), with its "
+                         "minimum and maximum alongside".format(
+                             "exact time integral" if info.get("exact_average") else "sampled"))
         if branch.continuation_parameter is not None:
             parts.append("continued in "+branch.continuation_parameter)
         desc=branch.describe_slice()
@@ -1520,9 +1817,27 @@ class BifurcationController:
         tutorials write by hand (``V``, ``Bo_c``), with the observables after them.
         """
         xspec=parameter_axis(branch.continuation_parameter) if branch.continuation_parameter else self.x_axis
-        yspecs=list(obs_cols)
-        if branch.kind=="locus" and branch.tracked_parameter is not None:
+        # Only the observables this branch actually has. Not every branch carries every name: the
+        # mode observables appear the first time a mode scan runs, and an orbit's min/max only on
+        # orbit branches - and get_coordinate raises KeyError rather than skipping, so exporting with
+        # output_all_observables used to take the whole export down with it.
+        have=branch[0].obs_values if len(branch) else {}
+        yspecs=[sp for sp in obs_cols if sp[0]!=AXIS_OBSERVABLE or sp[1] in have]
+        if branch.kind==BRANCH_LOCUS and branch.tracked_parameter is not None:
             yspecs=[parameter_axis(branch.tracked_parameter)]+yspecs
+        elif branch.kind==BRANCH_ORBIT:
+            # The exported average is only half of what an orbit point knows; the extremes follow each
+            # observable it has them for, and the period goes last so it is easy to cut off.
+            extra:list[AxisSpec]=[]
+            for sp in list(yspecs):
+                if sp[0]!=AXIS_OBSERVABLE:
+                    continue
+                lo,hi=orbit_band_names(sp[1])
+                if lo in have and hi in have:
+                    extra+=[observable_axis(lo),observable_axis(hi)]
+            if ORBIT_T_KEY in have:
+                extra.append(observable_axis(ORBIT_T_KEY))
+            yspecs=yspecs+extra
         return xspec,yspecs
 
     def output_curves(self):
@@ -1538,9 +1853,11 @@ class BifurcationController:
 
         Path(odir).mkdir(parents=True,exist_ok=True)
         # Now nested one level deeper (slice/branch/*.txt) than before, hence the two patterns.
-        for pattern in ("branch*/*.txt","slice*/branch*/*.txt","*.dump"):
+        for pattern in ("branch*/*.txt","slice*/branch*/*.txt","*.dump","*.orbit.npz"):
             for g in glob.glob(os.path.join(odir,pattern)):
                 os.remove(g)
+        for g in glob.glob(os.path.join(odir,"*_orbit")):
+            shutil.rmtree(g,ignore_errors=True)
 
         slices=self.slice_groups()
         # One directory per slice of parameter space, since curves from different slices are
@@ -1575,16 +1892,25 @@ class BifurcationController:
                 else:
                     fn="smoothed_unstable_{:03d}.txt".format(iunstab)
                     iunstab+=1
-                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header="\t".join([self.axis_label(export_x)]+column_names+_eigen_columns(self._eigen_unit))+header_suffix)
+                numpy.savetxt(os.path.join(bdir,fn),seg[:,:-1],header="\t".join([self.axis_label(export_x)]+column_names+_eigen_columns(self._eigen_unit,b.kind==BRANCH_ORBIT))+header_suffix)
             nbif=0
             for p in b:
                 if p.eig_value_Re==0:
                     fn="bifurcation_{:03d}.txt".format(nbif)
                     pc=p.get_coordinate(export_y,with_s=False,with_eigen=True,xspec=export_x)
-                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header="\t".join([self.axis_label(export_x)]+column_names+_eigen_columns(self._eigen_unit))+header_suffix)
+                    numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header="\t".join([self.axis_label(export_x)]+column_names+_eigen_columns(self._eigen_unit,b.kind==BRANCH_ORBIT))+header_suffix)
                     nbif+=1
                 if p.tag>=0 and p.statefile is not None:
                     shutil.copy2(p.statefile, os.path.join(odir,"tag{:02d}.dump".format(p.tag)))
+                    # The dump of an orbit point is one phase of the cycle; without its companion the
+                    # exported state cannot reproduce the orbit it was tagged for.
+                    src_npz,src_dir=self._orbit_sidecar_paths(p.statefile)
+                    dst_npz,dst_dir=self._orbit_sidecar_paths(os.path.join(odir,"tag{:02d}.dump".format(p.tag)))
+                    if os.path.exists(src_npz):
+                        shutil.copy2(src_npz,dst_npz)
+                    if os.path.isdir(src_dir):
+                        shutil.rmtree(dst_dir,ignore_errors=True)
+                        shutil.copytree(src_dir,dst_dir)
                     fn="tag_{:02d}.txt".format(p.tag)
                     pc=p.get_coordinate(export_y,with_s=False,xspec=export_x)
                     numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header="\t".join([export_x[1]]+column_names)+self._export_header_suffix(b))
@@ -1665,6 +1991,21 @@ class BifurcationController:
         # from axis_tangent() instead, which needs no solver internals.
         if self.on_locus():
             self._tangs={}
+            return
+        if self.on_orbit():
+            # Same reason as the locus, and one more: the augmented orbit vector has the same length
+            # as the dof vector, so the probe below would silently run - perturbing every time point
+            # of the orbit and paying one full sweep of the cycle per observable to do it. The drawn
+            # direction comes from the two most recent points instead, via axis_tangent().
+            self._tangs={}
+            cp=self._get_current_point()
+            prev=self._point_before_current()
+            if prev is not None and self._last_ds:
+                ds=float(self._last_ds)
+                self._tangs={k:numpy.array([(cp.param_value-prev.param_value)/ds,
+                                            (cp.obs_values[k]-prev.obs_values[k])/ds])
+                             for k in cp.obs_values if k in prev.obs_values}
+            cp._tangs=self._tangs.copy()
             return
         FD_eps=1e-6
         cp=self._get_current_point()
@@ -2086,6 +2427,22 @@ class BifurcationController:
         restore=self.current_point
         try:
             self.load_pt(point)
+            if point.orbit_info is not None:
+                # An orbit's stability is its Floquet multipliers - solve_eigenproblem refuses while
+                # the handler is installed, and the answer it would give is not the one being asked
+                # for. load_pt has just put the whole cycle back, so they can be computed here.
+                exps,mults=self._orbit_floquet()
+                if not exps:
+                    return False
+                point.eig_values=[complex(v) for v in exps]
+                point.eig_modes=None
+                point.eig_settings=None
+                point.floquet=mults
+                point.eig_value_Re=numpy.real(exps[0])
+                point.eig_value_Im=numpy.imag(exps[0])
+                point.stability_source=STABILITY_EIGEN
+                point.unstable_count=self.orbit_unstable_count(mults)
+                return True
             self.problem.solve_eigenproblem(self.neigen,self.shift,**self._mode_kwargs())
             # Back-filled spectra have to land in the same units as the ones recorded during the sweep.
             spectrum=self._phys_eig(list(self.problem.get_last_eigenvalues()))
@@ -2237,6 +2594,17 @@ class BifurcationController:
             raise RuntimeError("Cannot switch branches: the normal form of this bifurcation could not be "
                                "computed, so there is no prediction for where the other branch goes. The "
                                "reason is in the log above.")
+        # A Hopf has no second steady branch either, but it does have somewhere to go: the periodic
+        # orbit it sheds. Dispatched here so that the one key that means "leave this bifurcation
+        # sideways" does the right thing at every kind of bifurcation.
+        if cp.bifurcation_info.get("type")=="hopf":
+            refusal=self.orbit_can_be_started()
+            if refusal is not None:
+                self.log("A Hopf sheds a periodic orbit rather than a second steady branch, but that "
+                         "cannot be started here. "+refusal)
+                return False
+            self.log("A Hopf has no second steady branch - switching onto the periodic orbit instead")
+            return bool(self.switch_to_orbit())
         # Before any attempt to complete the normal form below: what rules a fold out is its TYPE, and
         # recovering predictors for a switch that is about to be refused would be work done to no end.
         if cp.bifurcation_info.get("type")=="fold":
@@ -2325,6 +2693,9 @@ class BifurcationController:
         rather than to a fixed multiple of an eigenvector of arbitrary norm, and fills in the history
         dofs so the first steps do not have to recover from an impulsive start.
         """
+        if self.on_orbit():
+            raise RuntimeError("A transient departure needs to time-step the problem, which cannot be "
+                               "done while an orbit is installed. Load a stationary point first.")
         self._status("LEAVING BRANCH TRANSIENTLY")
         evecs=self.problem.get_last_eigenvectors()
         if evecs is None or len(evecs)<=eigenindex:
@@ -2709,13 +3080,15 @@ class BifurcationController:
         if self._abort_requested:
             return
         locus=self.on_locus()
-        quick=self.quick_mode and not locus
+        orbit=self.on_orbit()
+        quick=self.quick_mode and not (locus or orbit)
         self._status("FOLLOWING THE BIFURCATION" if locus else
-                     ("QUICK STEPPING (no eigensolve)" if quick else "ARCLENGTH STEPPING"))
+                     ("CONTINUING THE ORBIT" if orbit else
+                      ("QUICK STEPPING (no eigensolve)" if quick else "ARCLENGTH STEPPING")))
         # A step from an exact fold has no tangent to start from and cannot compute one there; see
         # _prime_fold_continuation_tangent. Only a fold: at a branch point or a Hopf the ordinary
         # restart works and continues the branch we came in on, which is a step worth having.
-        if (not locus and origin.bifurcation_info is not None
+        if (not locus and not orbit and origin.bifurcation_info is not None
                 and origin.bifurcation_info.get("type")=="fold"
                 and len(self.problem.get_arclength_dof_derivative_vector())==0):
             if not self._prime_fold_continuation_tangent():
@@ -2736,12 +3109,19 @@ class BifurcationController:
             self._detect_bifurcation_between(origin,self.current_point)
         elif locus:
             self._add_locus_state()
+        elif orbit:
+            # No eigensolve: the problem refuses one while the orbit handler is installed, and the
+            # answer there is the Floquet multipliers, which _add_orbit_state computes.
+            self._add_orbit_state()
         else:
             self.problem.solve_eigenproblem(self.neigen,self.shift,
                                             **(self._mode_kwargs() if self.compute_modes_during_sweep else {}))
             self._add_current_state()
 
-        self._adapt_after_step()
+        if not orbit:
+            # Adapting renumbers the equations, which pulls the augmented orbit dof vector out from
+            # under the handler and invalidates every set of time blocks already stored on the branch.
+            self._adapt_after_step()
         # origin is where this step started: a step off the end of the branch extends it, rather than
         # being placed among the points already there.
         self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point(),
@@ -2773,6 +3153,583 @@ class BifurcationController:
             return 0.5
         rms=float(numpy.sqrt(numpy.mean(U*U))) if len(U) else 0.0
         return 0.1*rms if rms>0.0 else 0.5
+
+    def eigenvector_is_essentially_real(self,index:int=0,tol:float=1e-6)->bool:
+        """Whether eigenvector ``index`` has no imaginary part worth plotting.
+
+        A real eigenvalue's eigenvector is determined only up to a global phase, and a COMPLEX PETSc
+        build has no reason to return it with that phase set to zero. What comes back is exp(i*phi)*w
+        for a real w, so Re v = cos(phi)*w and Im v = sin(phi)*w are the SAME FUNCTION at two
+        amplitudes - and an autoscaled plot of the two is the same picture twice, which is exactly how
+        this was noticed.
+
+        Tested on the eigenVECTOR rather than on the eigenvalue: "is the imaginary part of lambda
+        small" needs a scale to be small against, and near a fold both parts of lambda go to zero
+        together. Whether Re v and Im v are parallel needs no such scale, and it is the question the
+        plot actually asks - it is about whether there are two functions to draw or one.
+        """
+        evs=self.problem.get_last_eigenvectors()
+        if evs is None or len(evs)<=index:
+            return True     # nothing to draw either way
+        v=numpy.asarray(evs[index])
+        if not numpy.iscomplexobj(v):
+            return True
+        re,im=numpy.real(v),numpy.imag(v)
+        nre,nim=float(numpy.linalg.norm(re)),float(numpy.linalg.norm(im))
+        if nre<=0.0 and nim<=0.0:
+            return True
+        # Either part alone being negligible is the phase being 0 or pi/2; i*w is as real a mode as w.
+        if nim<=tol*nre or nre<=tol*nim:
+            return True
+        return abs(float(numpy.dot(re,im)))/(nre*nim)>=1.0-tol
+
+    # ------------------------------------------------------------------ orbit stability
+
+    def _orbit_floquet(self)->"tuple[list[complex],list[complex]]":
+        """(Floquet exponents as physical rates, raw multipliers) of the installed orbit.
+
+        The exponents are ``log(mu)/T``, and they are what goes into the point's spectrum: the whole
+        stability machinery is written against a real part, and ``Re(log(mu)/T) > 0`` is exactly
+        ``|mu| > 1``. The multipliers are kept alongside because they, and not the exponents, say what
+        KIND of bifurcation is approaching - a multiplier leaving the unit circle through -1 is a
+        period doubling and a complex pair a torus, and the two have the same exponent real part.
+        """
+        orbit=self._require_orbit()
+        if not self.floquet_enabled:
+            return [],[]
+        handler=self._orbit_handler()
+        assert handler is not None
+        if not handler.is_floquet_mode():
+            self.log("No Floquet multipliers in '{:s}' mode: it carries no degree of freedom at the "
+                     "end of the period. Use collocation or floquet for the stability of an orbit."
+                     .format(str(orbit.mode)))
+            return [],[]
+        # get_floquet_multipliers OVERWRITES the problem's last eigenvalues and eigenvectors with the
+        # multipliers. Everything that reads them afterwards - _add_current_state's own branch,
+        # critical_eigenindex, _sync_tracking_to, the eigenfunction panes - would take multipliers for
+        # eigenvalues, so what was there is put back.
+        keep=(self.problem._last_eigenvalues,self.problem._last_eigenvectors,
+              self.problem._last_eigenvalues_m,self.problem._last_eigenvalues_k)
+        try:
+            self._status("FLOQUET MULTIPLIERS")
+            # ignore_periodic_unity=False on purpose: it is a TOLERANCE, and it removes every
+            # multiplier within it of 1. Near the Hopf the orbit's own multiplier tends to 1 as well
+            # - measured on the subcritical Lorenz orbit 1e-4 off its Hopf, the trivial one came out
+            # at 1+2.1e-9 and the physical one at 1+3.9e-6, and a tolerance of 1e-5 deleted both, i.e.
+            # exactly the number that answers whether the orbit is unstable. Every orbit has EXACTLY
+            # ONE trivial multiplier, so the one nearest 1 is removed below and nothing else is.
+            mults=self.problem.get_floquet_multipliers(
+                n=self.floquet_n,method=self.floquet_method,
+                ignore_periodic_unity=False,quiet=True,
+                dense_threshold=self.floquet_dense_threshold,
+                shift_invert=self.floquet_shift_invert,sigma=self.floquet_sigma)
+        except Exception as e:
+            self.log("Could not compute the Floquet multipliers here ("+str(e).split("\n")[0]+
+                     "); this point's stability stays unknown")
+            return [],[]
+        finally:
+            if not self.floquet_feeds_eigen_panes:
+                (self.problem._last_eigenvalues,self.problem._last_eigenvectors,
+                 self.problem._last_eigenvalues_m,self.problem._last_eigenvalues_k)=keep
+        # Belt and braces on the trivial multiplier: it is 1+-1e-15, so its exponent is a tiny number
+        # of either sign, and left in it flips the branch between stable and unstable from one point
+        # to the next. It is not a bifurcation marker - eig_value_Re would have to be exactly zero -
+        # but it does corrupt every count.
+        allm=[complex(m) for m in mults]
+        kept=list(allm)
+        self._orbit_trivial_multiplier_error=float("nan")
+        if kept:
+            # The one nearest 1 is the trivial multiplier, from the orbit's time-translation
+            # invariance. How far from 1 it actually came out is the accuracy of the discretization
+            # here and nothing else, which is worth saying when it is poor - it bounds what can be
+            # believed about every other multiplier.
+            i=min(range(len(kept)),key=lambda j: abs(kept[j]-1.0))
+            self._orbit_trivial_multiplier_error=abs(kept[i]-1.0)
+            if self._orbit_trivial_multiplier_error>self.floquet_unity_tol:
+                self.log("The trivial Floquet multiplier came out at 1{:+.3g} rather than at 1; that "
+                         "is how accurate this discretization is here, so nothing closer to the unit "
+                         "circle than that can be read. More time steps, or a higher order, tighten it."
+                         .format(float(numpy.real(kept[i]))-1.0))
+            kept.pop(i)
+        T=float(orbit.get_T(dimensional=False))
+        exps:list[complex]=[]
+        for m in kept:
+            if abs(m)<=0.0:
+                # An algebraic direction annihilated by the discretization: no finite exponent, and
+                # arbitrarily stable. Reported as a large negative rate rather than -inf, which
+                # nothing downstream can plot or compare.
+                exps.append(complex(-1e30,0.0))
+            else:
+                exps.append(complex(numpy.log(complex(m)))/T)
+        order=sorted(range(len(exps)),key=lambda i:-exps[i].real)
+        kept=[kept[i] for i in order]
+        exps=[exps[i] for i in order]
+        return list(self._phys_eig(exps) or []),kept
+
+    def orbit_unstable_count(self,mults:"Sequence[complex]")->int:
+        """How many multipliers are outside the unit circle, with a deadband."""
+        return sum(1 for m in mults if abs(m)>1.0+self.floquet_unstable_tol)
+
+    # ------------------------------------------------------------------ orbit state files
+
+    def _orbit_blocks(self)->"tuple[NPFloatArray,float]":
+        """The orbit's own unknowns as ``(nT, nbase)`` time blocks, plus the period.
+
+        Read straight out of the augmented dof vector in its naive time-major order rather than by
+        re-sampling the orbit: a resample interpolates, and PeriodicOrbit.change_sampling - the
+        obvious thing to copy - also duplicates the first time point and drops the last.
+        """
+        handler=self._orbit_handler()
+        assert handler is not None
+        nbase=handler.get_base_ndof()
+        nT=handler.get_num_time_steps()
+        dofs=numpy.asarray(self.problem.get_current_dofs()[0],dtype=float)
+        order=handler.get_naive_equation_order()
+        if len(order):
+            dofs=dofs[numpy.asarray(order,dtype=numpy.int64)]
+        return dofs[:nbase*nT].reshape(nT,nbase).copy(),float(dofs[nbase*nT])
+
+    def _capture_dof_fingerprint(self)->str:
+        """What the raw dof blocks are only meaningful for: this equation numbering.
+
+        A state dump is partition-independent because it is written per node; a raw dof vector is not,
+        and neither survives a mesh adaptation. Refusing on a mismatch is the whole point - a wrong
+        orbit loads perfectly happily and looks plausible.
+
+        Taken only while the PLAIN system is installed, and remembered: get_dof_description is sized by
+        ndof(), which is the augmented count under a handler, while its walk fills the base entries
+        alone - asked during orbit tracking it prints "UNASSIGNED DOF IN DOFLIST" and describes the
+        time-block copies by whatever the unfilled entries happen to hold.
+        """
+        import hashlib
+        if self._augmented_system_active():
+            return self._orbit_dof_fingerprint
+        try:
+            inds,names=self.problem.get_dof_description()
+            h=hashlib.sha1(numpy.asarray(inds,dtype=numpy.int64).tobytes())
+            h.update(("\0".join(str(n) for n in names)).encode("utf-8"))
+            self._orbit_dof_fingerprint=h.hexdigest()
+        except Exception as e:
+            self.log("Could not fingerprint the degrees of freedom:",repr(e))
+            self._orbit_dof_fingerprint=""
+        return self._orbit_dof_fingerprint
+
+    @staticmethod
+    def _orbit_sidecar_paths(statefile:str)->"tuple[str,str]":
+        """``(npz, directory)`` belonging to one state dump. Derived, so a point never loses them."""
+        base=statefile[:-5] if statefile.endswith(".dump") else os.path.splitext(statefile)[0]
+        return base+".orbit.npz",base+"_orbit"
+
+    def _write_orbit_sidecar(self,point)->dict:
+        """Store the orbit's unknowns next to the base state, and say where.
+
+        A state dump holds the mesh, i.e. ONE phase of the cycle. Everything that makes it an orbit -
+        the other time points and the period - lives in the handler and has to go somewhere else.
+        """
+        npzfile,dirfile=self._orbit_sidecar_paths(point.statefile)
+        blocks,T=self._orbit_blocks()
+        portable=self.orbit_portable or self.problem.is_distributed()
+        info=dict(point.orbit_info or {})
+        info["format"]="dumps" if portable else "dofs"
+        info["fingerprint"]="" if portable else self._orbit_dof_fingerprint
+        info["nbase"]=int(blocks.shape[1])
+        info["nT"]=int(blocks.shape[0])
+        info["T"]=float(T)
+        # The tangent belongs to the AUGMENTED system, so it is not written into the dump (it would be
+        # dropped on load with a note) but it is what makes a reloaded branch step on in the same
+        # direction instead of guessing one.
+        ddof=numpy.asarray(self.problem.get_arclength_dof_derivative_vector(),dtype=float)
+        extra={"T":numpy.array([T]),
+               "dof_deriv":ddof,
+               "param_deriv":numpy.array([self.problem.get_arc_length_parameter_derivative()]),
+               "theta_sqr":numpy.array([self.problem.get_arc_length_theta_sqr()])}
+        if portable:
+            Path(dirfile).mkdir(parents=True,exist_ok=True)
+            handler=self._orbit_handler()
+            assert handler is not None
+            nT=blocks.shape[0]
+            handler.backup_dofs()
+            try:
+                for i in range(nT):
+                    handler.set_dofs_to_interpolated_values(i/(nT-1))
+                    self.problem.invalidate_cached_mesh_data()
+                    self.problem.save_state(os.path.join(dirfile,"block_{:03d}.dump".format(i)),quiet=True)
+            finally:
+                handler.restore_dofs()
+                self.problem.invalidate_cached_mesh_data()
+            numpy.savez_compressed(os.path.join(dirfile,"orbit.npz"),**extra)
+        else:
+            numpy.savez_compressed(npzfile,blocks=blocks,**extra)
+        point.orbit_info=info
+        return info
+
+    def _install_orbit_from_sidecar(self,point):
+        """Put the orbit of a stored point back on the problem, exactly as it was."""
+        info=point.orbit_info or {}
+        npzfile,dirfile=self._orbit_sidecar_paths(point.statefile)
+        if info.get("format")=="dumps":
+            blocks,extra=self._read_orbit_dumps(dirfile,info)
+        else:
+            if not os.path.exists(npzfile):
+                raise RuntimeError("The orbit belonging to this point is missing ("+npzfile+"), so "
+                                   "only one phase of the cycle could be restored.")
+            data=numpy.load(npzfile)
+            blocks=numpy.asarray(data["blocks"],dtype=float)
+            extra=data
+            # Captured here, with the plain system still installed: load_pt has just taken any
+            # handler off, and this is the last moment the base numbering can be described.
+            want=info.get("fingerprint")
+            if want and want!=self._capture_dof_fingerprint():
+                raise RuntimeError(
+                    "This orbit was stored for a different arrangement of the degrees of freedom (a "
+                    "mesh adaptation, or a different number of processes), so its stored unknowns "
+                    "cannot be read back. Re-compute the branch, or store orbits in the portable "
+                    "format (controller.orbit_portable=True), which is partition-independent.")
+        T=float(numpy.asarray(extra["T"]).reshape(-1)[0])
+        self._install_orbit(info,blocks,T)
+        # The augmented tangent, so that continuing a reloaded branch goes on the way it was going.
+        try:
+            ddof=numpy.asarray(extra["dof_deriv"],dtype=float)
+            if len(ddof)==self.problem.ndof():
+                self.problem._set_dof_direction_arclength(ddof)
+                self.problem._set_arc_length_parameter_derivative(float(numpy.asarray(extra["param_deriv"]).reshape(-1)[0]))
+                self.problem._set_arc_length_theta_sqr(float(numpy.asarray(extra["theta_sqr"]).reshape(-1)[0]))
+        except Exception as e:
+            self.log("The stored orbit tangent could not be restored:",repr(e))
+
+    def _read_orbit_dumps(self,dirfile:str,info:dict):
+        """Harvest the time blocks from one state dump per time point (the portable format)."""
+        nT=int(info.get("nT",0))
+        blocks=[]
+        for i in range(nT):
+            fname=os.path.join(dirfile,"block_{:03d}.dump".format(i))
+            if not os.path.exists(fname):
+                raise RuntimeError("The orbit belonging to this point is incomplete ("+fname+" is missing)")
+            self.problem.load_state(fname,ignore_outstep=True,ignore_continuation_data=True,
+                                    ignore_eigendata=True,quiet=True)
+            blocks.append(numpy.asarray(self.problem.get_current_dofs()[0],dtype=float))
+        extra=numpy.load(os.path.join(dirfile,"orbit.npz"))
+        return numpy.array(blocks),extra
+
+    def _install_orbit(self,info:dict,blocks:"NPFloatArray",T_nondim:float):
+        """Re-create the handler from stored time blocks and write them back exactly."""
+        nT=int(blocks.shape[0])
+        if nT<2:
+            raise RuntimeError("A stored orbit needs at least two time points")
+        mode=str(info.get("mode","collocation"))
+        # In floquet/collocation mode the handler appends the end-of-period block itself, from the
+        # current state; handing it over as history as well would make the orbit one block longer on
+        # every reload.
+        floquet_mode=mode in ("collocation","floquet")
+        history=[blocks[i] for i in range(1,nT-1 if floquet_mode else nT)]
+        self._deactivate_any_augmentation()
+        self.problem.set_current_dofs(blocks[0])
+        orbit=self.problem.activate_periodic_orbit_handler(
+            T_nondim*self.problem.get_scaling("temporal"),history_dofs=history,mode=mode,
+            order=int(info.get("order",3)),GL_order=int(info.get("GL_order",-1)),
+            T_constraint=str(info.get("T_constraint","phase")))
+        handler=self._orbit_handler()
+        assert handler is not None
+        if handler.get_num_time_steps()!=nT:
+            self.problem.deactivate_bifurcation_tracking()
+            raise RuntimeError("The restored orbit has {:d} time points instead of {:d}".format(
+                handler.get_num_time_steps(),nT))
+        # Write every block back, the period included. activate_periodic_orbit_handler rebuilds the
+        # end-of-period block from the current state and re-nondimensionalises T, so this is what
+        # makes the restore exact rather than approximately right.
+        aug=numpy.concatenate([blocks.reshape(-1),[T_nondim]])
+        order=handler.get_naive_equation_order()
+        if len(order):
+            full=numpy.empty_like(aug)
+            full[numpy.asarray(order,dtype=numpy.int64)]=aug
+            aug=full
+        self.problem.set_current_dofs(aug)
+        self._orbit=orbit
+        return orbit
+
+    def _add_orbit_state(self):
+        """Record the installed orbit as a point of the current branch.
+
+        Not _add_current_state on its own: that one reads the problem's last eigenvalues when it is
+        given none, and after a Floquet computation those are MULTIPLIERS. It also evaluates the
+        observables at whatever phase of the cycle the mesh happens to be holding.
+        """
+        obs,info=self._evaluate_orbit_observables()
+        exps,mults=self._orbit_floquet()
+        collapsed=self._orbit_has_collapsed(obs,mults)
+        info["collapsed"]=bool(collapsed)
+        self._add_current_state(eig_value=(exps[0] if exps else None),
+                                eig_values=exps if exps else None,
+                                measured=bool(exps),observables=obs)
+        p=self.current_point
+        assert p is not None
+        p.orbit_info=info
+        p.floquet=mults
+        if mults:
+            # From |mu| > 1 with a deadband, not from the count of positive exponent real parts: the
+            # multiplier is the quantity with the clean threshold, and stability_indicator prefers
+            # unstable_count whenever it is set.
+            p.unstable_count=self.orbit_unstable_count(mults)
+        self._write_orbit_sidecar(p)
+        if collapsed:
+            # The point is recorded first and the failure raised after: it IS a converged solution,
+            # so throwing it away would be worse than leaving one the user can look at and delete.
+            # Raising rather than setting the abort flag, because that flag stops the current sweep
+            # and then quietly makes the NEXT Step do nothing; and because continuing from a
+            # collapsed point is precisely what must not happen silently.
+            raise RuntimeError(
+                "This orbit has collapsed onto the stationary branch: every observable is constant "
+                "over the 'cycle'. The point is recorded so it can be inspected, but continuing from "
+                "it would record stationary solutions as orbits. Delete it and step again with a "
+                "smaller ds.")
+        return p
+
+    def orbit_floquet_here(self)->bool:
+        """Recompute the Floquet multipliers at the current orbit point."""
+        if not self.on_orbit():
+            raise RuntimeError("Floquet multipliers belong to a periodic orbit; this is not one")
+        point=self._get_current_point()
+        obs,info=self._evaluate_orbit_observables()
+        exps,mults=self._orbit_floquet()
+        if not exps:
+            return False
+        point.obs_values.update(obs)
+        point.orbit_info=dict(info,**{k:v for k,v in (point.orbit_info or {}).items()
+                                      if k in ("format","fingerprint")})
+        point.floquet=mults
+        point.eig_values=[complex(v) for v in exps]
+        point.eig_value_Re=numpy.real(exps[0])
+        point.eig_value_Im=numpy.imag(exps[0])
+        point.stability_source=STABILITY_EIGEN
+        point.unstable_count=self.orbit_unstable_count(mults)
+        self.log("{:d} Floquet multiplier{:s}, {:d} outside the unit circle".format(
+            len(mults),"" if len(mults)==1 else "s",point.unstable_count))
+        self._changed()
+        return True
+
+    def orbit_floquet_for_branch(self,branch=None)->int:
+        """Fill in the multipliers along a whole orbit branch. Abortable between points."""
+        branch=branch if branch is not None else self._get_current_branch()
+        if branch.kind!=BRANCH_ORBIT:
+            raise RuntimeError("This is not a branch of periodic orbits")
+        done=0
+        restore=self.current_point
+        for p in list(branch):
+            if self._abort_requested:
+                self._abort_requested=False
+                self.log("Stopped after {:d} point{:s}".format(done,"" if done==1 else "s"))
+                break
+            if self.compute_spectrum(p):
+                done+=1
+        if restore is not None:
+            try:
+                self.load_pt(restore)
+            except Exception as e:
+                self.log("Could not return to the previous point:",repr(e))
+        self._changed()
+        return done
+
+    def output_orbit_cycle(self,subdir:str | None=None)->str:
+        """Write the problem's own output along the whole cycle, not just the phase it is sitting at."""
+        orbit=self._require_orbit()
+        name=subdir or "orbit_{:s}_{:.6g}".format(self._get_paramname_str(),
+                                                  self.get_bifurcation_parameter().value)
+        sub=os.path.join(self.data_subdir,"output",name)
+        orbit.output_orbit(sub)
+        out=self.problem.get_output_directory(sub)
+        self.log("Wrote the cycle to",out)
+        return out
+
+    def _orbit_has_collapsed(self,obs:"dict[str,float]",mults:"Sequence[complex]")->bool:
+        """Whether what was just solved is a stationary state wearing an orbit's clothes.
+
+        Continuation can walk an orbit branch straight back onto the stationary one it came from -
+        Newton has no reason not to, an unstable orbit least of all - and the result is a perfectly
+        converged solution that is recorded as an orbit, drawn as an orbit and is not one. The
+        collapse check in switch_to_hopf_orbit only guards the FIRST orbit; this guards every step.
+
+        Measured on the amplitude alone: every observable is constant over the "cycle", so every band
+        has zero width, relative to the observable's own scale. Not on the multipliers, tempting as it
+        is - a collapsed orbit does lose its multiplier at 1, but so does a perfectly good one whose
+        trivial multiplier the discretization has not resolved to within the tolerance, and the two
+        cannot be told apart that way. Measured: a genuine Lorenz orbit gives 7e-3 here and a collapsed
+        one 1e-11, so the two are three orders of magnitude clear of any threshold in between.
+        """
+        widest=0.0
+        for name in list(obs):
+            lo,hi=orbit_band_names(name)
+            if lo not in obs or hi not in obs:
+                continue
+            scale=max(abs(obs.get(name,0.0)),abs(obs[lo]),abs(obs[hi]))
+            if scale<=0.0:
+                continue
+            widest=max(widest,(obs[hi]-obs[lo])/scale)
+        return widest<self.orbit_collapse_tolerance
+
+    def orbit_can_be_started(self)->"str | None":
+        """Why switching onto an orbit here would fail, or None when it would not.
+
+        Answered up front because the reasons are all things the user has to go and change elsewhere,
+        and because the Hessian one cannot be recovered from once the handler is installed - the throw
+        comes out of the first Newton solve, with the augmented system already in place.
+        """
+        if self.on_locus():
+            return "Switching onto an orbit applies to an ordinary branch, not to a bifurcation locus"
+        if self.on_orbit():
+            return "This is already a branch of periodic orbits"
+        if not self.problem.are_hessian_products_calculated_analytically():
+            return ("A periodic orbit needs the analytic Hessian, which has to be generated when the "
+                    "problem is compiled: add problem.setup_for_stability_analysis(analytic_hessian="
+                    "True) BEFORE the problem is initialised and run the script again. The stored "
+                    "diagram is kept, so nothing computed so far is lost.")
+        if self.problem.is_distributed():
+            return ("Switching onto an orbit from a Hopf does not work on a distributed problem "
+                    "(--distribute); the orbit itself and its Floquet multipliers do.")
+        return None
+
+    def _orbit_NT(self)->int:
+        """The number of time steps to ask for, with the parity the multipliers need.
+
+        With a DAE and an ODD number of time intervals the algebraic directions land on exactly -1,
+        which is where a period doubling would be - a discretization artefact sitting on top of the
+        one multiplier value that matters most (dev_docs/floquet_multipliers.md).
+        """
+        NT=max(2,int(self.orbit_NT))
+        if self.orbit_mode=="collocation":
+            order=max(1,int(self.orbit_order))
+            step=order if order%2==0 else 2*order
+        else:
+            step=2
+        if NT%step:
+            NT=((NT//step)+1)*step
+            self.log("Using {:d} time steps: a multiple of the collocation order, and even - with an "
+                     "odd number of time intervals a DAE puts a spurious Floquet multiplier on "
+                     "exactly -1, where a period doubling would be.".format(NT))
+        return NT
+
+    def _hopf_eigenindex(self,tol:float=1e-8)->"int | None":
+        """The complex pair nearest the imaginary axis in the last eigensolve.
+
+        Restricted to |Im| > tol, unlike critical_eigenindex: at a located Hopf the tracker has put a
+        pair at exactly 0 +- i*omega, and a real eigenvalue can easily be nearer the axis than that.
+        """
+        evs=self.problem.get_last_eigenvalues()
+        if evs is None or len(evs)==0:
+            return None
+        best,bestre=None,None
+        for i,v in enumerate(evs):
+            if abs(numpy.imag(v))<=tol:
+                continue
+            re=abs(float(numpy.real(v)))
+            if bestre is None or re<bestre:
+                best,bestre=i,re
+        return best
+
+    def switch_to_orbit(self,eps:float | None=None):
+        """From a Hopf bifurcation, step onto the periodic orbit it sheds.
+
+        The numerics are Problem.switch_to_hopf_orbit, so the same manoeuvre is available to a plain
+        script; what is here is the part that is about the diagram - checking that it can work at all
+        before anything is installed, choosing the step off the Hopf, opening a branch for the result
+        and leaving the continuation ready to carry on.
+
+        The step off the bifurcation is taken from ds, like a branch switch: the parameter offset a
+        Hopf orbit starts at is eps**2, and branch_switch_parameter_offset() is what one ds buys in
+        the parameter, so passing it as dparam makes the first orbit sit exactly one step away. Which
+        SIDE of the Hopf it sits on is not ours to choose - it is where the orbits exist, and the
+        first Lyapunov coefficient says which side that is.
+        """
+        refusal=self.orbit_can_be_started()
+        if refusal is not None:
+            raise RuntimeError(refusal)
+        cp=self._get_current_point()
+        if cp.eig_value_Re!=0:
+            raise RuntimeError("Orbits are switched onto at a bifurcation; this is an ordinary point")
+        if cp.bifurcation_info is None:
+            self.log("This bifurcation was not classified; computing its normal form now")
+            cp.bifurcation_info=self._classify_current_point()
+        btype=cp.bifurcation_info.get("type") if cp.bifurcation_info is not None else None
+        if btype!="hopf":
+            raise RuntimeError("Only a Hopf bifurcation sheds a periodic orbit; this one is "+
+                               (str(btype) if btype else "not classified"))
+
+        offset=abs(float(eps)) if eps is not None else (
+            abs(float(self.orbit_eps)) if self.orbit_eps is not None
+            else self.branch_switch_parameter_offset())
+        if not offset>0:
+            # switch_to_hopf_orbit tests dparam for truth, so a zero would silently fall through to
+            # its own default eps rather than being used.
+            offset=self.branch_switch_offset*max(abs(float(self.get_bifurcation_parameter().value)),1.0)
+
+        # The tracker is off by now - locate_bifurcation deactivates it in its finally, and the
+        # normal-form calculation deactivates it too - but switch_to_hopf_orbit reads the Hopf out of
+        # an ACTIVE tracker. We are sitting on the solution, so this is a couple of Newton steps.
+        self._status("SOLVING THE HOPF FOR THE ORBIT")
+        self.problem.solve_eigenproblem(self.neigen,self.shift)
+        idx=self._hopf_eigenindex()
+        if idx is None:
+            raise RuntimeError("No complex eigenvalue pair could be found here, so there is no Hopf "
+                               "to start an orbit from. Solve the eigenproblem with more eigenvalues.")
+        evs=self.problem.get_last_eigenvalues()
+        self.log("Re-solving the Hopf to start the orbit from it (eigenvalue {:d}: {:.4g}{:+.4g}i)"
+                 .format(idx,float(numpy.real(evs[idx])),float(numpy.imag(evs[idx]))))
+        NT=self._orbit_NT()
+        # The last moment the plain equation numbering can be described; the orbit's stored blocks
+        # only mean anything against it.
+        self._capture_dof_fingerprint()
+        self.problem.activate_bifurcation_tracking(self._paramname,"hopf",eigenvector=idx)
+        try:
+            self.problem.solve(max_newton_iterations=20)
+            self._status("SWITCHING ONTO THE ORBIT")
+            self.log("Starting the orbit with a parameter step of {:.4g} (eps = {:.4g}), {:d} time "
+                     "steps, {:s}".format(offset,numpy.sqrt(offset),NT,self.orbit_mode))
+            orbit=self.problem.switch_to_hopf_orbit(
+                dparam=offset,NT=NT,mode=self.orbit_mode,order=self.orbit_order,
+                GL_order=self.orbit_GL_order,T_constraint=self.orbit_T_constraint,
+                amplitude_factor=self.orbit_amplitude_factor,do_solve=True,
+                check_collapse_to_stationary=self.orbit_check_collapse)
+        except Exception as e:
+            # switch_to_hopf_orbit switches the tracker off itself and can leave an ORBIT handler
+            # installed when its own solve fails; either one left behind would make every later
+            # command work on the wrong system.
+            self._deactivate_any_augmentation()
+            self._orbit=None
+            self.problem.reset_arc_length_parameters()
+            if "collapse" in str(e).lower():
+                self.log("The orbit collapsed back onto the stationary branch. Step further off the "
+                         "Hopf (a larger ds, or the parameter step in the Orbit tab), or raise the "
+                         "amplitude factor.")
+            try:
+                self.load_pt(cp)
+            except Exception as e2:
+                self.log("Could not return to the Hopf bifurcation:",repr(e2))
+            raise
+        self._orbit=orbit
+        lyap=orbit.emerging_info.get("lyap_coeff")
+        if lyap:
+            self.log("First Lyapunov coefficient {:.4g}: the Hopf is {:s}, so the orbits are "
+                     "initially {:s}".format(float(lyap),
+                     "supercritical" if orbit.starts_supercritically() else "subcritical",
+                     "stable" if orbit.starts_supercritically() else "unstable"))
+        self._new_branch(kind=BRANCH_ORBIT)
+        self._tangs={}
+        ds=orbit.get_init_ds()
+        # get_init_ds clamps to 5e-10 when the parameter barely moved, which would make every
+        # following step invisible. Its SIGN is the useful part - the side the orbits are on.
+        if abs(ds)<1e-9:
+            ds=numpy.sign(ds) if ds else 1.0
+            ds=float(ds)*offset
+        self._last_ds=float(ds)
+        p=self._add_orbit_state()
+        self.log("Period {:.6g}{:s} at {:s} = {:.6g}; ds set to {:.3g}".format(
+            self.orbit_period()," "+self._orbit_T_unit if self._orbit_T_unit else "",
+            self._get_paramname_str(),self.get_bifurcation_parameter().value,self._last_ds))
+        if p.floquet:
+            self.log("{:d} Floquet multiplier{:s}, {:d} outside the unit circle".format(
+                len(p.floquet),"" if len(p.floquet)==1 else "s",self.orbit_unstable_count(p.floquet)))
+        self._mode="al"
+        self._changed()
+        return True
 
     def _make_deflation_operator(self):
         """A deflation operator built from the current settings, attached to the problem."""
@@ -2842,6 +3799,8 @@ class BifurcationController:
         are deflated away, so pressing this repeatedly walks through the solutions at this parameter
         rather than finding the same one over and over. The parameter is not moved.
         """
+        if self.on_orbit():
+            raise RuntimeError("A deflated search looks for another STATIONARY solution; it cannot be run against an orbit. Load a stationary point first.")
         if self.current_point is None and self.current_branch is None:
             self.log("Deflation: solve or step once first, so there is a solution to deflate away")
             return False
@@ -2995,6 +3954,8 @@ class BifurcationController:
 
         Abortable between parameter steps. Returns the number of branches created.
         """
+        if self.on_orbit():
+            raise RuntimeError("A deflated scan looks for stationary solutions; it cannot be run against an orbit. Load a stationary point first.")
         if not isinstance(self._paramname,str):
             self.log("Deflated continuation needs a named continuation parameter")
             return 0
@@ -3086,6 +4047,8 @@ class BifurcationController:
         keeps whatever the point already had and adds what the scan found, which is the useful
         combination: the shift-invert spectrum plus the pairs it missed.
         """
+        if self.on_orbit():
+            raise RuntimeError("A stripe scan solves an eigenproblem, which the problem refuses while an orbit is installed. The stability of an orbit is its Floquet multipliers.")
         point=point if point is not None else self.current_point
         if point is None:
             return False
@@ -3239,9 +4202,10 @@ class BifurcationController:
         """
         if not self.adapt_to_eigenfunction:
             return
-        if self.problem.get_bifurcation_tracking_mode()!="":
-            self.log("Not refining towards an eigenfunction: a bifurcation tracker is active, and "
-                     "adapting would renumber the augmented system out from under it")
+        if self._augmented_system_active():
+            self.log("Not refining towards an eigenfunction: an augmented system is active (a "
+                     "bifurcation tracker or a periodic orbit), and adapting would renumber it out "
+                     "from under the handler")
             return
         if self.problem.is_distributed():
             self.log("Not refining towards an eigenfunction: not supported on a distributed problem")
@@ -3394,6 +4358,11 @@ class BifurcationController:
         if self.on_locus():
             raise RuntimeError("Already following a bifurcation. Leave the locus first "
                                "(Bifurcation -> Leave the locus) to work on an ordinary branch.")
+        if self.on_orbit():
+            raise RuntimeError("A bifurcation OF AN ORBIT is a Floquet multiplier leaving the unit "
+                               "circle, which the trackers here cannot locate. The multipliers in the "
+                               "Points tab show it coming; leave the orbit branch to track a "
+                               "stationary bifurcation.")
         self._status("BIFURCATION FINDING"+(" (PITCHFORK)" if pitchfork else ""))
         self.problem.solve_eigenproblem(self.neigen,self.shift,**self._mode_kwargs())
         if eigenindex is None:
@@ -3457,8 +4426,18 @@ class BifurcationController:
         btype=cp.bifurcation_info.get("type") if cp.bifurcation_info is not None else None
         if btype in ("transcritical","pitchfork"):
             return bool(self.branch_switch())
-        if btype in ("fold","hopf"):
-            self.log("A {:s} has no second steady branch, so this leaves it transiently".format(str(btype)))
+        if btype=="hopf":
+            # Used to leave transiently, on the grounds that nothing STEADY leaves a Hopf. What does
+            # leave it is the periodic orbit, which the diagram can now follow; a transient departure
+            # stays available on its own key for a Hopf whose orbit cannot be started.
+            refusal=self.orbit_can_be_started()
+            if refusal is None:
+                self.log("A Hopf sheds a periodic orbit - switching onto it")
+                return bool(self.switch_to_orbit())
+            self.log(refusal+" Leaving the branch transiently instead.")
+            return bool(self.transient_leave_branch())
+        if btype=="fold":
+            self.log("A fold has no second steady branch, so this leaves it transiently")
             return bool(self.transient_leave_branch())
         self.log("The type of this bifurcation could not be determined, so there is no way off it to "
                  "choose. Try 'Switch branch' or leaving the branch transiently by hand.")
@@ -3605,6 +4584,7 @@ class BifurcationController:
         elif not isinstance(self._paramname,str):
             self._paramname=self._paramname.get_name()
         self._resolve_eigen_unit()
+        self._resolve_orbit_period_unit()
         datadir=self.problem.get_output_directory(self.data_subdir)
         Path(datadir).mkdir(parents=True, exist_ok=True)
         Path(os.path.join(datadir,"_states")).mkdir(parents=True, exist_ok=True)
@@ -3744,6 +4724,9 @@ class BifurcationController:
         """Min/max along one axis over the whole diagram, for autoscaling after a switch."""
         lo,hi=1e30,-1e30
         found=False
+        kind,name=as_axis(spec)
+        # An orbit shows a band, and an autoscale that only saw the average would clip it.
+        band=orbit_band_names(name) if kind==AXIS_OBSERVABLE else ()
         for b in self.branches:
             for p in b:
                 try:
@@ -3753,6 +4736,10 @@ class BifurcationController:
                 lo=min(lo,v)
                 hi=max(hi,v)
                 found=True
+                for edge in band:
+                    if edge in p.obs_values:
+                        lo=min(lo,p.obs_values[edge])
+                        hi=max(hi,p.obs_values[edge])
         return (lo,hi) if found else None
 
     def observable_range(self,obs:str)->tuple[float,float] | None:

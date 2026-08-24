@@ -39,7 +39,7 @@ telling the user to reorder their imports when it lost that race.
 import matplotlib.text
 from matplotlib.figure import Figure
 
-from .model import AXIS_OBSERVABLE
+from .model import AXIS_OBSERVABLE, BRANCH_LOCUS, BRANCH_ORBIT
 
 from pathlib import Path
 import numpy
@@ -134,6 +134,14 @@ class BifurcationDiagramPlotter:
                 t.remove()
             except Exception:
                 pass
+        # Collections, for the same reason and in the same defensive form. fill_between (the orbit
+        # min/max band) returns one, and none of the loops above reaches it - so without this the
+        # bands accumulate one per redraw and the shading darkens on every keystroke.
+        for c in list(gca.collections):
+            try:
+                c.remove()
+            except Exception:
+                pass
 
     def _draw_faint_branch(self,branch,xaxis,yaxis):
         """A branch from another slice: one washed-out line, no markers, no stability coding.
@@ -196,7 +204,7 @@ class BifurcationDiagramPlotter:
             # bifurcation sits for every value of the second parameter. Every point of it IS the
             # bifurcation, which is also why the stability segmentation is bypassed - it would see a
             # zero real part at every point and alternate the line style from one to the next.
-            if b.kind=="locus":
+            if b.kind==BRANCH_LOCUS:
                 self._draw_locus_branch(b,xaxis,yaxis,current=b is controller.current_branch)
                 continue
             # A branch from another slice of parameter space is a different physical result. It is
@@ -208,6 +216,19 @@ class BifurcationDiagramPlotter:
                 self._draw_faint_branch(b,xaxis,yaxis)
                 continue
             color="red" if b == controller.current_branch else "grey"
+
+            # An orbit branch: the line below shows the cycle's AVERAGE, so the extremes are drawn
+            # under it as a shaded band. One polygon for the whole branch, not one per stability
+            # segment - the segments overlap by a point at every change of stability, and a
+            # per-segment band would darken visibly at each join.
+            if b.kind==BRANCH_ORBIT:
+                band=b.orbit_band(yaxis,xspec=xaxis,smooth=controller.interpolated_splines)
+                if band is not None:
+                    x,lo,hi=band
+                    # zorder 0.5: under every line (2) and marker, over the faint context branches (0).
+                    gca.fill_between(x,lo,hi,color=color,alpha=0.18,linewidth=0,zorder=0.5)
+                    # Deliberately NOT extend_lims: a branch does not grow the view here either, and
+                    # the band is part of the branch. Autoscaling picks it up through axis_range().
 
             if controller.interpolated_splines:
                 segs,stabs=b.smooth_branch_stab_list(yaxis,xspec=xaxis,

@@ -42,6 +42,7 @@
 # why the module has a single test function rather than one per aspect.
 
 import json
+import glob
 import os
 import shutil
 import sys
@@ -1033,6 +1034,9 @@ def test_arclength_retune_steps_aside_on_an_inconsistent_continuation_state():
             self.ddof, self.cur, self.n = ddof, cur, n
             self.written = []
         def _get_n_unaugmented_dofs(self): return 0
+        # An orbit handler is augmented without saying so through the count above, so the retune
+        # asks what is installed as well; nothing is, here.
+        def assembly_handler_pt(self): return None
         def is_distributed(self): return False
         def ndof(self): return self.n
         def get_arclength_dof_derivative_vector(self): return numpy.array(self.ddof, dtype=float)
@@ -2003,6 +2007,50 @@ def test_a_branch_can_be_split_at_a_point():
         raise AssertionError("splitting at the first point of a branch has to be refused")
 
 
+def test_a_real_eigenvalues_eigenvector_has_no_imaginary_part_to_plot():
+    """Re v and Im v of a real mode are the same function, so only one of them is worth drawing.
+
+    A real eigenvalue's eigenvector is fixed only up to a global phase, and a COMPLEX PETSc build has
+    no reason to return it with that phase set to zero: what comes back is exp(i*phi)*w for a real w,
+    so Re v = cos(phi)*w and Im v = sin(phi)*w. Autoscaled - which an eigenplot is, having no scale in
+    common with the solution - the two panes are the same picture twice, which is how this was
+    noticed.
+
+    The test is on the eigenVECTOR, not on the eigenvalue: "is Im(lambda) small" needs a scale to be
+    small against, and near a fold both parts of lambda go to zero together, while "are Re v and Im v
+    parallel" needs none and is the question the plot actually asks.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+
+    class _Stub:
+        def __init__(self, vectors):
+            self._v = vectors
+
+        def get_last_eigenvectors(self):
+            return self._v
+
+    def is_real(vectors, index=0):
+        c = BifurcationController.__new__(BifurcationController)
+        c.problem = _Stub(vectors)   # type:ignore[assignment]
+        return c.eigenvector_is_essentially_real(index)
+
+    w = numpy.array([1.0, -2.0, 0.5, 3.0])
+    # The case that started this: a real mode carrying an arbitrary phase.
+    for phi in (0.0, 0.3, 1.0, numpy.pi/2, 2.5, numpy.pi):
+        assert is_real([numpy.exp(1j*phi)*w]), "phase {:g} is still a real mode".format(phi)
+    # A real vector stored as real, and a purely imaginary one - i*w is as real a mode as w.
+    assert is_real([w.astype(complex)])
+    assert is_real([1j*w])
+    # A genuinely complex mode, i.e. a Hopf pair, has two independent functions and must keep both.
+    u = numpy.array([0.0, 1.0, 1.0, -1.0])
+    assert not is_real([w + 1j*u]), "a mode whose parts are not parallel is complex"
+    # Numerical dirt on top of a real mode does not make it complex.
+    assert is_real([numpy.exp(0.7j)*w + 1e-12j*u])
+    # Nothing solved yet, or fewer vectors than asked for: nothing to draw either way.
+    assert is_real(None)
+    assert is_real([w + 1j*u], index=3)
+
+
 def test_stability_is_not_inferred_across_a_point_with_no_test_function():
     """Propagation needs a test function at every point it walks across, not just at the ends.
 
@@ -2312,3 +2360,360 @@ def test_a_window_that_fails_to_open_is_not_left_standing(tmp_path):
     assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
     assert "GUI FAILED-SETUP TEARDOWN OK" in out
     assert "nanobind: leaked" not in out, "C++ objects outlived the process:\n" + out[-3000:]
+
+
+def test_clearing_the_artists_also_removes_a_shaded_band():
+    """A fill_between must not survive into the next redraw.
+
+    _clear_artists sweeps lines, artists, annotations and texts, none of which reaches a
+    PolyCollection - which is what fill_between (the orbit min/max band) returns. Left in, the bands
+    accumulate one per redraw: the shading darkens on every keystroke and the artist count grows
+    without bound over a session.
+    """
+    from pyoomph.utils.bifurcation_gui.plotter import BifurcationDiagramPlotter
+
+    plotter = BifurcationDiagramPlotter()
+    ax = plotter.axes
+    for _ in range(3):
+        ax.plot([0.0, 1.0], [0.0, 1.0])
+        ax.fill_between([0.0, 1.0], [0.0, 0.0], [1.0, 1.0])
+        plotter._clear_artists()
+        assert len(ax.lines) == 0
+        assert len(ax.collections) == 0, "a band survived the sweep and would be drawn again"
+
+
+def test_exporting_every_observable_skips_the_ones_a_branch_does_not_have(tmp_path):
+    """output_all_observables must not take the whole export down over one missing observable.
+
+    Not every branch carries every name in _avail_observables: the mode observables appear the first
+    time a mode scan runs, and an orbit's min/max only ever exist on orbit branches. get_coordinate
+    raises KeyError rather than skipping, so the export used to die on the first branch that predated
+    the observable being added.
+    """
+    from pyoomph.utils.bifurcation_gui.model import BRANCH_SOLUTION
+
+    c, first, second = _diagram_with_two_branches()
+    # A second observable that only the second branch has, exactly as a mode scan produces one.
+    for p in second:
+        p.obs_values["eigen/max Re [m=1]"] = 0.25
+    c._avail_observables = ["ode/u", "eigen/max Re [m=1]"]
+    c._observable_units = {}
+    c._eigen_unit = ""
+    c.output_all_observables = True
+    c.interpolated_splines = False
+    c.trust_inferred_stability = True
+    c.count_normal_modes_in_stability = True
+    c.data_subdir = "_bifurcation_gui_data"
+
+    class _FakeProblem:
+        def get_output_directory(self, sub):
+            return os.path.join(str(tmp_path), sub)
+    c.problem = _FakeProblem()
+
+    odir = c.output_curves()
+
+    files = glob.glob(os.path.join(odir, "*", "*", "*.txt"))
+    assert files, "nothing was exported"
+    headers = {f: open(f).readline() for f in files}
+    # The branch that has the mode observable gets its column; the one that does not is exported
+    # without it rather than not at all.
+    with_mode = [h for h in headers.values() if "eigen/max Re [m=1]" in h]
+    without = [h for h in headers.values() if "eigen/max Re [m=1]" not in h]
+    assert with_mode and without, "expected one branch with the column and one without: " + str(headers)
+    assert all("ode/u" in h for h in headers.values())
+
+
+def _orbit_branch(n=6, kind=None):
+    """A branch of periodic orbits: average 0, band +-r, period constant. No problem behind it."""
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint, BRANCH_ORBIT,
+                                                     ORBIT_T_KEY, orbit_band_names)
+    lo, hi = orbit_band_names("ode/x")
+    pts = []
+    for i in range(n):
+        mu = -0.5 + 0.1*i
+        r = abs(mu)**0.5
+        obs = {"ode/x": 0.0, lo: -r, hi: +r, ORBIT_T_KEY: 6.283185307179586}
+        p = BifurcationGUISolutionPoint(mu, obs, -0.3, "", i, param_values={"mu": mu})
+        p.scoord = float(i)
+        p.orbit_info = {"T": 6.283185307179586, "nT": 31, "mode": "collocation", "order": 3,
+                        "GL_order": -1, "T_constraint": "phase", "nbase": 2, "format": "dofs"}
+        p.floquet = [complex(0.6, 0.0)]
+        pts.append(p)
+    return BifurcationGUISolutionBranch(pts, kind=kind or BRANCH_ORBIT,
+                                        continuation_parameter="mu")
+
+
+def test_an_orbit_branch_round_trips_through_the_diagram_file():
+    """kind, the period, the band and the multipliers must all survive save/load.
+
+    The branch kind has always round-tripped, so no format version bump is involved; what is new is
+    the per-point orbit record, which follows the same "write it only when it is there, read it with
+    a default" convention as every other optional field.
+    """
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch, BRANCH_ORBIT,
+                                                     ORBIT_T_KEY, orbit_band_names)
+
+    b = _orbit_branch()
+    back = BifurcationGUISolutionBranch.from_dict(json.loads(json.dumps(b.to_state_dict())))
+    assert back.kind == BRANCH_ORBIT
+    lo, hi = orbit_band_names("ode/x")
+    for a, c in zip(b, back):
+        assert c.orbit_info is not None
+        assert c.orbit_info["T"] == a.orbit_info["T"]
+        assert c.orbit_info["mode"] == "collocation"
+        assert c.floquet == a.floquet
+        assert c.obs_values[lo] == a.obs_values[lo]
+        assert c.obs_values[hi] == a.obs_values[hi]
+        assert c.obs_values[ORBIT_T_KEY] == a.obs_values[ORBIT_T_KEY]
+    # A stationary point must stay distinguishable from an orbit point that happens to have no data.
+    plain = BifurcationGUISolutionBranch.from_dict(json.loads(json.dumps(
+        _orbit_branch(kind="solution").to_state_dict())))
+    assert plain.kind == "solution"
+    assert "orbit_info" in b[0].to_state_dict()
+    from pyoomph.utils.bifurcation_gui.model import BifurcationGUISolutionPoint
+    assert "orbit_info" not in BifurcationGUISolutionPoint(
+        1.0, {"ode/u": 0.0}, -1.0, "", 0).to_state_dict()
+
+
+def test_the_orbit_band_is_one_polyline_pair_over_the_whole_branch():
+    """The band must not be built per stability segment.
+
+    to_branch_stab_list repeats a point at every change of stability, so a band assembled from those
+    segments covers each join twice - with alpha, that is a visibly darker bar at exactly the places
+    the diagram is being read most carefully.
+    """
+    from pyoomph.utils.bifurcation_gui.model import observable_axis, parameter_axis
+
+    b = _orbit_branch()
+    # Make the branch change stability half way, which is what produces the overlapping segments.
+    for p in b[3:]:
+        p.eig_value_Re = +0.3
+    y, x = observable_axis("ode/x"), parameter_axis("mu")
+    segs, _ = b.to_branch_stab_list(y, xspec=x)
+    assert sum(len(s) for s in segs) > len(b), "expected the segments to overlap, or this proves nothing"
+
+    xs, lo, hi = b.orbit_band(y, xspec=x)
+    assert len(xs) == len(b), "one point per point of the branch, no repeats"
+    assert len(set(map(float, xs))) == len(xs), "a repeated x is a doubly covered join"
+    assert all(l <= h for l, h in zip(lo, hi))
+
+    xs_s, lo_s, hi_s = b.orbit_band(y, xspec=x, smooth=True)
+    assert len(xs_s) > len(xs)
+    assert all(l <= h + 1e-12 for l, h in zip(lo_s, hi_s)), "the smoothed band must not cross itself"
+
+
+def test_a_branch_without_a_band_is_simply_not_shaded():
+    """Everything that legitimately has no band returns None rather than raising."""
+    from pyoomph.utils.bifurcation_gui.model import observable_axis, parameter_axis, ORBIT_T_KEY
+
+    b = _orbit_branch()
+    x = parameter_axis("mu")
+    assert b.orbit_band(parameter_axis("mu"), xspec=x) is None, "a parameter on y has no band"
+    assert b.orbit_band(observable_axis(ORBIT_T_KEY), xspec=x) is None, "the period has no band"
+    assert b.orbit_band(observable_axis("ode/nosuch"), xspec=x) is None
+    assert _orbit_branch(kind="solution").orbit_band(observable_axis("ode/x"), xspec=x) is None
+    # A constant observable over the cycle: a degenerate band, which must still be a valid one.
+    flat = _orbit_branch()
+    from pyoomph.utils.bifurcation_gui.model import orbit_band_names
+    lo_n, hi_n = orbit_band_names("ode/x")
+    for p in flat:
+        p.obs_values[lo_n] = p.obs_values[hi_n] = p.obs_values["ode/x"]
+    xs, lo, hi = flat.orbit_band(observable_axis("ode/x"), xspec=x)
+    assert list(lo) == list(hi)
+
+
+def test_an_orbit_branch_says_what_it_is():
+    b = _orbit_branch()
+    text = b.describe()
+    assert "periodic orbit" in text
+    assert "31 time steps" in text
+    assert "collocation" in text and "order 3" in text
+    assert "continued in mu" in text
+
+
+def _run_orbit_worker(tmp_path, phase, extra=(), outdir=None):
+    """One phase of tests/orbit_gui_worker.py, returning its JSON result."""
+    import subprocess
+
+    libdir = _complex_petsc_pythonpath()
+    if libdir is None:
+        pytest.skip("no complex PETSc build found; the Hopf-to-orbit switch needs one (see CLAUDE.md)")
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "orbit_gui_worker.py")
+    out_dir = outdir if outdir is not None else os.path.join(str(tmp_path), "orbit")
+    proc = subprocess.run([sys.executable, worker, "--outdir", out_dir, "--phase", phase, *extra],
+                          cwd=here, capture_output=True, text=True, timeout=1800,
+                          env={**os.environ, "PYTHONPATH": libdir})
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-4000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-4000:]
+    line = [l for l in out.splitlines() if l.startswith("PYOOMPH_ORBIT_RESULT ")]
+    assert line, "worker produced no result:\n" + out[-4000:]
+    return json.loads(line[-1][len("PYOOMPH_ORBIT_RESULT "):])
+
+
+@pytest.mark.parametrize("portable", [False, True], ids=["dofs", "portable"])
+def test_a_hopf_switches_onto_its_periodic_orbit(tmp_path, portable):
+    """Branch switch at a Hopf lands on the orbit, and everything recorded there is checked
+    against the closed form of the normal form rather than against the code's own output.
+
+    The system is m*rdot = mu*r - r^3, m*thetadot = w with m = w = 1: the cycle at mu > 0 has radius
+    exactly sqrt(mu) and period exactly 2*pi, its only non-trivial Floquet multiplier is
+    exp(-2*mu*T), and the trivial one at 1 must not be recorded at all - left in, it flips the whole
+    branch between stable and unstable from one point to the next, because its exponent is a tiny
+    number of either sign.
+    """
+    outdir = os.path.join(str(tmp_path), "orbit")
+    extra = ["--portable"] if portable else []
+    res = _run_orbit_worker(tmp_path, "switch", extra + ["--steps", "3"], outdir=outdir)
+
+    assert res["hopf_type"] == "hopf"
+    assert abs(res["mu_hopf"]) < 1e-9, "the Hopf of this normal form is at mu = 0"
+    assert res["kind"] == "orbit"
+    # The step onto the orbit is the one the current ds buys in the parameter: the orbit's parameter
+    # offset is eps**2, and switch_to_hopf_orbit takes eps = sqrt(dparam).
+    assert res["mu_first_orbit"] == pytest.approx(res["offset"], rel=1e-9)
+
+    for p in res["points"]:
+        mu, T = p["mu"], p["T"]
+        r = mu**0.5
+        assert T == pytest.approx(2*numpy.pi, rel=1e-5), "the period is amplitude-independent here"
+        # The extremes are sampled on the orbit's own time grid, which does not sit on the peak of a
+        # cosine, so they fall short by r*(1-cos(pi/nT)) at most.
+        tol = 3*r*(1 - numpy.cos(numpy.pi/p["nT"])) + 1e-9
+        assert p["max_x"] == pytest.approx(+r, abs=tol)
+        assert p["min_x"] == pytest.approx(-r, abs=tol)
+        assert abs(p["avg_x"]) < 0.01*r, "x averages to zero over the cycle"
+        assert p["min_x"] < p["avg_x"] < p["max_x"]
+
+        assert p["nfloquet"] == 1, "the trivial multiplier at 1 must not be recorded"
+        mult = complex(*p["floquet"][0])
+        assert mult.real == pytest.approx(numpy.exp(-2*mu*T), rel=1e-3)
+        assert abs(mult.imag) < 1e-12
+        # The exponent is what the stability machinery reads, and log(mu)/T = -2*mu here.
+        exponent = complex(*p["exponents"][0])
+        assert exponent.real == pytest.approx(-2*mu, rel=1e-3)
+        assert p["unstable_count"] == 0, "a supercritical Hopf sheds stable orbits"
+
+    assert res["eigenvalues_survived_floquet"], \
+        "the multipliers were left on the problem, where everything else reads eigenvalues"
+    assert res["band_names_registered"]
+    assert res["period_axis_hidden_on_steady"], \
+        "a stationary branch has no period and must drop out of a period-vs-parameter plot"
+    header = res["export_header"]
+    assert "orbit min" in header and "orbit max" in header and "orbit/T" in header
+    assert "FloquetExponent" in header, "on an orbit those columns are not eigenvalues"
+    assert "periodic orbits, 31 time steps" in header
+
+    # ... and the whole thing has to come back off disk, exactly, in a fresh process.
+    back = _run_orbit_worker(tmp_path, "reload", extra, outdir=outdir)
+    assert back["handler_installed"], \
+        "without the handler the problem holds one phase of the cycle, not the orbit"
+    stored, again = back["stored"], back["recomputed"]
+    for key in ("T", "min_x", "max_x", "avg_x"):
+        assert again[key] == stored[key], "the restored orbit is not the one that was stored"
+    assert again["floquet"] == stored["floquet"]
+    # A step from the reloaded orbit goes on where the branch was going.
+    step = back["stepped"]
+    assert step["mu"] > stored["mu"]
+    assert complex(*step["floquet"][0]).real == pytest.approx(
+        numpy.exp(-2*step["mu"]*step["T"]), rel=1e-3)
+
+
+def test_an_orbit_stored_for_another_numbering_is_refused(tmp_path):
+    """A raw dof vector means nothing under a different equation numbering.
+
+    Unlike a state dump, which is written per node and can be read back anywhere, the orbit's time
+    blocks are indexed by equation number. A mesh adaptation or a different number of processes
+    renumbers, and the blocks would then load perfectly happily as a different, plausible-looking
+    orbit - so the numbering is fingerprinted and a mismatch refused.
+    """
+    outdir = os.path.join(str(tmp_path), "orbit")
+    _run_orbit_worker(tmp_path, "switch", ["--steps", "1"], outdir=outdir)
+    res = _run_orbit_worker(tmp_path, "fingerprint", outdir=outdir)
+    assert res["refused"], "a mismatched orbit was loaded instead of being refused"
+    assert "portable" in res["message"], "the refusal has to name the way out"
+
+
+def test_without_the_analytic_hessian_the_orbit_is_refused_up_front(tmp_path):
+    """There is no route to an orbit without it, and the refusal has to come BEFORE the handler.
+
+    The orbit handler's own Jacobian throws without the analytic Hessian (src/bifurcation.cpp), and
+    it throws from inside the first Newton solve - by which point the augmented system is installed
+    and every later command works on the wrong problem. And the remedy has to be applied before the
+    problem is initialised, so it cannot be offered as something to try again in this session.
+    """
+    res = _run_orbit_worker(tmp_path, "nohessian")
+    assert res["raised"]
+    assert "setup_for_stability_analysis" in res["refusal"]
+    assert "before" in res["refusal"].lower()
+    assert not res["handler_installed"], "a refused switch must leave the problem as it found it"
+    assert res["kind"] == "solution", "and must not leave an empty orbit branch behind"
+
+
+def test_the_orbit_tab_settings_reach_the_controller():
+    """The Orbit tab's wiring: the widgets exist, what is typed arrives, and a refresh writes back.
+
+    Its own worker because the tab's variables do not exist until a window has been built. The
+    numerics behind the settings are covered against a real problem by orbit_gui_worker.py.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "orbit_tab_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker],
+                          cwd=here, capture_output=True, text=True, timeout=600)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "ORBIT TAB OK" in out
+
+
+def test_a_multiplier_that_is_nearly_one_is_not_mistaken_for_the_trivial_one(tmp_path):
+    """Only ONE multiplier is trivial, so only one may be removed.
+
+    Near a Hopf the orbit's own multiplier tends to 1 along with the trivial one, and removing
+    "everything within a tolerance of 1" - which is what get_floquet_multipliers' ignore_periodic_unity
+    argument does - deletes exactly the number that says whether the orbit is stable, on the branch
+    where the answer is least obvious. At mu = 1e-7 the physical multiplier is 1 - 1.3e-6, well inside
+    the default tolerance.
+    """
+    res = _run_orbit_worker(tmp_path, "nearhopf")
+    mu, T = res["mu"], res["T"]
+    assert len(res["floquet"]) == 1, "the physical multiplier was deleted with the trivial one"
+    mult = complex(*res["floquet"][0])
+    assert abs(mult - 1.0) < 1e-5, "this test is pointless unless it is inside the tolerance"
+    assert mult.real == pytest.approx(numpy.exp(-2*mu*T), rel=1e-6)
+    # How far the trivial one came out from 1 is the accuracy of the discretization, nothing else.
+    assert res["trivial_error"] < 1e-8, res["trivial_error"]
+
+
+def test_an_orbit_that_collapsed_onto_the_stationary_branch_is_recognised():
+    """A collapsed orbit is a converged solution and looks like one; only its amplitude gives it away.
+
+    Continuation can walk an orbit branch back onto the stationary branch it came from, and what comes
+    back is recorded as an orbit, drawn as an orbit, and is not one. Not decided on the multipliers:
+    a collapsed orbit does lose its multiplier at 1, but so does a good one whose trivial multiplier
+    the discretization has not resolved, and the two cannot be told apart that way.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+    from pyoomph.utils.bifurcation_gui.model import orbit_band_names
+
+    c = BifurcationController.__new__(BifurcationController)
+    c.orbit_collapse_tolerance = 1e-6
+    lo, hi = orbit_band_names("nf/x")
+
+    # The numbers are the ones measured on the Lorenz orbit: a genuine cycle and the collapsed one
+    # the step after it, three orders of magnitude apart on either side of the threshold.
+    genuine = {"nf/x": 7.94, lo: 7.917, hi: 7.995}
+    collapsed = {"nf/x": 7.835342532, lo: 7.835342532, hi: 7.835342532 + 6.9e-11}
+    assert not c._orbit_has_collapsed(genuine, [complex(1.0208)])
+    assert c._orbit_has_collapsed(collapsed, [complex(0.985, 0.0156)])
+    # ... and a good orbit whose trivial multiplier was not resolved is still a good orbit.
+    assert not c._orbit_has_collapsed(genuine, [])
+    # An observable that is genuinely constant over the cycle does not by itself mean collapse, as
+    # long as something else varies - x^2+y^2 is exactly constant on the normal form's cycle.
+    mixed = dict(genuine)
+    mixed.update({"nf/r2": 0.5, "nf/r2"+lo[len("nf/x"):]: 0.5, "nf/r2"+hi[len("nf/x"):]: 0.5})
+    assert not c._orbit_has_collapsed(mixed, [])

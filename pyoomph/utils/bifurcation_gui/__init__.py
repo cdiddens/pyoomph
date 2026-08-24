@@ -128,6 +128,27 @@ class BifurcationGUI:
     _avail_observables=_fwd("_avail_observables")
     _mode=_fwd("_mode")
     _state_step=_fwd("_state_step")
+
+    # --- periodic orbits (a Hopf sheds one; see dev_docs/bifurcation_loci.md). Every one of these
+    # needs the problem to have been built with setup_for_stability_analysis(analytic_hessian=True):
+    # the orbit handler's own Jacobian refuses without it.
+    orbit_NT=_fwd("orbit_NT","Number of time steps the orbit is discretized with. Raised at use time to a multiple of the order and to an even number, so that a DAE's algebraic directions do not land on the -1 a period doubling would sit at.")
+    orbit_mode=_fwd("orbit_mode","Discretization of the orbit: 'collocation' (default), 'floquet', 'central', 'BDF2' or 'bspline'. Only the first two carry a degree of freedom at the end of the period, which is what the Floquet multipliers need.")
+    orbit_order=_fwd("orbit_order","Order of the collocation or B-spline discretization.")
+    orbit_GL_order=_fwd("orbit_GL_order","Gauss-Legendre integration order, or -1 for the default.")
+    orbit_T_constraint=_fwd("orbit_T_constraint","How the phase of the orbit is pinned: 'phase' or 'plane'.")
+    orbit_amplitude_factor=_fwd("orbit_amplitude_factor","Extra factor on the amplitude of the starting guess at the Hopf.")
+    orbit_check_collapse=_fwd("orbit_check_collapse","Verify the solved orbit did not collapse back onto the stationary branch.")
+    orbit_eps=_fwd("orbit_eps","Parameter step off the Hopf, or None to take what the current ds buys. The offset IS eps**2, so this is the epsilon of the switch, squared.")
+    orbit_observable_samples=_fwd("orbit_observable_samples","Samples per period for the minimum, average and maximum of each observable, or None for one per time step.")
+    orbit_portable=_fwd("orbit_portable","Store an orbit as one state dump per time point instead of as a raw dof vector: partition- and mesh-independent, at nT times the disk. Forced on a distributed problem.")
+    floquet_enabled=_fwd("floquet_enabled","Compute the Floquet multipliers at every continuation point of an orbit branch.")
+    floquet_method=_fwd("floquet_method","'condensed' (default), 'periodic_schur' or 'eigenproblem'.")
+    floquet_n=_fwd("floquet_n","How many multipliers, or None for all of them.")
+    floquet_unity_tol=_fwd("floquet_unity_tol","Tolerance for recognising the trivial multiplier at 1, which every orbit has and which must be removed.")
+    floquet_unstable_tol=_fwd("floquet_unstable_tol","Deadband on |mu| > 1 when counting unstable directions.")
+    floquet_shift_invert=_fwd("floquet_shift_invert","Seek the multipliers near sigma rather than by largest magnitude (matrix-free route only).")
+    floquet_sigma=_fwd("floquet_sigma","Shift for the shift-invert, or None for just outside the unit circle.")
     del _fwd
 
     # ---------------------------------------------------------------- forwarded commands
@@ -196,6 +217,25 @@ class BifurcationGUI:
     def leave_locus(self,continue_in:str | None=None,offset:float | None=None):
         """Step off a bifurcation locus onto an ordinary branch through it."""
         self.controller.leave_locus(continue_in,offset)
+
+    def switch_to_orbit(self,eps:float | None=None):
+        """From a located HOPF bifurcation, step onto the periodic orbit it sheds.
+
+        What "Switch branch" does at a Hopf, and what the Orbit tab drives. The branch that opens is
+        continued, drawn and saved like any other, except that each of its points is a whole cycle:
+        the line shows each observable's average over the period and the shaded band its extremes,
+        and the stability comes from the Floquet multipliers rather than from an eigenvalue.
+
+        ``eps`` is the step off the bifurcation IN THE PARAMETER (the orbit's offset is eps**2, so
+        this is that offset); None takes what the current ds buys, which is what makes the keys that
+        steer a sweep steer this too. Which SIDE of the Hopf the orbits are on is not a choice - the
+        first Lyapunov coefficient decides it.
+
+        Requires the problem to have been set up with
+        ``setup_for_stability_analysis(analytic_hessian=True)``: the orbit handler's own Jacobian
+        refuses without it, and that cannot be arranged after the problem is initialised.
+        """
+        return self.controller.switch_to_orbit(eps)
 
     def describe_slice(self)->str:
         """The parameters the current diagram holds fixed, e.g. ``"b = 0.3"``.

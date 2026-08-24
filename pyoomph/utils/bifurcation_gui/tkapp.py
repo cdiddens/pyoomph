@@ -56,7 +56,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk #type:ignore[attr-defined]
 
 from .actions import Action, KeyMap, event_to_accelerator, format_accelerator
-from .model import AXIS_PARAMETER
+from .model import AXIS_PARAMETER, BRANCH_LOCUS, BRANCH_ORBIT, ORBIT_T_KEY, orbit_band_names
 from .panes import PlotterPaneSet
 
 from ...typings import *
@@ -203,6 +203,24 @@ class BifurcationTkApp:
           enabled_when=lambda: isinstance(c._paramname,str),
           tooltip="Scan the continuation parameter, deflating at every value. Finds branches that are "
                   "not connected to this one, which arclength cannot; Abort stops it between steps.")
+        # --- periodic orbits
+        A("switch_to_orbit","Switch onto the periodic orbit",c.switch_to_orbit,is_solver_task=True,
+          enabled_when=lambda: (c.current_point is not None and c.current_point.eig_value_Re==0
+                                and not c.on_locus() and not c.on_orbit()),
+          tooltip="At a Hopf bifurcation, step onto the periodic orbit it sheds and continue that "
+                  "instead. The step off the Hopf is the one the current ds buys.")
+        A("orbit_floquet_here","Floquet multipliers here",c.orbit_floquet_here,is_solver_task=True,
+          enabled_when=lambda: c.on_orbit(),
+          tooltip="Recompute the Floquet multipliers of this orbit - its stability, the way an "
+                  "eigenvalue is a stationary solution's")
+        A("orbit_floquet_branch","Floquet multipliers along this branch",c.orbit_floquet_for_branch,
+          is_solver_task=True,enabled_when=lambda: c.on_orbit(),
+          tooltip="Fill in the multipliers at every point of this orbit branch; Abort stops it "
+                  "between points")
+        A("orbit_output","Write the orbit's cycle",c.output_orbit_cycle,is_solver_task=True,
+          enabled_when=lambda: c.on_orbit(),
+          tooltip="Run the problem's own output along the whole period, rather than at the single "
+                  "phase the solution is sitting at")
         A("deflation_forget","Forget the deflated solutions",c.clear_deflation_known_solutions,
           tooltip="Start the deflated search here over, instead of continuing to avoid what it has "
                   "already found at this parameter value")
@@ -430,6 +448,11 @@ class BifurcationTkApp:
         self._add_menu_item(m,"deflated_continuation")
         self._add_menu_item(m,"deflation_forget")
         m.add_separator()
+        self._add_menu_item(m,"switch_to_orbit")
+        self._add_menu_item(m,"orbit_floquet_here")
+        self._add_menu_item(m,"orbit_floquet_branch")
+        self._add_menu_item(m,"orbit_output")
+        m.add_separator()
         self._add_menu_item(m,"start_locus")
         self._add_menu_item(m,"leave_locus")
         m.add_separator()
@@ -655,6 +678,7 @@ class BifurcationTkApp:
         self._build_pointinfo_tab()
         self._build_branches_tab()
         self._build_deflation_tab()
+        self._build_orbit_tab()
 
         logframe=ttk.Frame(outer)
         outer.add(logframe,weight=1)
@@ -1039,6 +1063,219 @@ class BifurcationTkApp:
 
         tab.columnconfigure(1,weight=1)
 
+    def _build_orbit_tab(self):
+        """Periodic orbits: what a Hopf sheds, and how far the diagram follows it.
+
+        Same shape as the Deflation tab - the commands first, the settings that feed them below.
+        """
+        tab=ttk.Frame(self.side,padding=8)
+        self.side.add(tab,text="Orbit")
+
+        row=0
+        buttons=ttk.Frame(tab)
+        buttons.grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=(0,4))
+        ttk.Button(buttons,text="Switch onto orbit",width=18,
+                   command=lambda: self._invoke(self._actions["switch_to_orbit"])).pack(side=tk.LEFT)
+        ttk.Button(buttons,text="Write the cycle",width=16,
+                   command=lambda: self._invoke(self._actions["orbit_output"])).pack(side=tk.LEFT,padx=(4,0))
+        row+=1
+
+        # What this point is, and - when it cannot become an orbit - why not. The Hessian reason in
+        # particular cannot be fixed from inside the session, so it is worth saying before the button
+        # is pressed rather than after.
+        self.orbit_state_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.orbit_state_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,4))
+        row+=1
+
+        ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
+        row+=1
+        ttk.Label(tab,text="Starting the orbit",font=("TkDefaultFont",9,"bold")).grid(
+                  row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        ttk.Label(tab,text="Parameter step").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_eps_var=tk.StringVar()
+        self.orbit_eps_entry=ttk.Entry(tab,textvariable=self.orbit_eps_var,width=14)
+        self.orbit_eps_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_eps_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.orbit_eps_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+        # The offset IS eps**2, so "what ds buys in the parameter" is the whole story of the default
+        # and there is nowhere else it would be said.
+        self.orbit_eps_hint_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.orbit_eps_hint_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        ttk.Label(tab,text="Amplitude factor").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_ampl_var=tk.StringVar()
+        self.orbit_ampl_entry=ttk.Entry(tab,textvariable=self.orbit_ampl_var,width=14)
+        self.orbit_ampl_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_ampl_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.orbit_ampl_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+
+        self.orbit_collapse_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Check it did not collapse",variable=self.orbit_collapse_var,
+                        command=self._commit_orbit).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
+        row+=1
+        ttk.Label(tab,text="Discretization",font=("TkDefaultFont",9,"bold")).grid(
+                  row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        ttk.Label(tab,text="Time steps").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_nt_var=tk.StringVar()
+        self.orbit_nt_entry=ttk.Entry(tab,textvariable=self.orbit_nt_var,width=14)
+        self.orbit_nt_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_nt_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.orbit_nt_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+
+        ttk.Label(tab,text="Mode").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_mode_var=tk.StringVar()
+        self.orbit_mode_combo=ttk.Combobox(tab,state="readonly",width=12,textvariable=self.orbit_mode_var,
+                                           values=("collocation","floquet","central","BDF2","bspline"))
+        self.orbit_mode_combo.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_mode_combo.bind("<<ComboboxSelected>>",lambda *_: self._commit_orbit())
+        row+=1
+
+        ttk.Label(tab,text="Order").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_order_var=tk.StringVar()
+        self.orbit_order_entry=ttk.Entry(tab,textvariable=self.orbit_order_var,width=14)
+        self.orbit_order_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_order_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.orbit_order_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+
+        ttk.Label(tab,text="Phase constraint").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_tconstr_var=tk.StringVar()
+        self.orbit_tconstr_combo=ttk.Combobox(tab,state="readonly",width=12,
+                                              textvariable=self.orbit_tconstr_var,
+                                              values=("phase","plane"))
+        self.orbit_tconstr_combo.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_tconstr_combo.bind("<<ComboboxSelected>>",lambda *_: self._commit_orbit())
+        row+=1
+
+        ttk.Label(tab,text="Observable samples").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.orbit_samples_var=tk.StringVar()
+        self.orbit_samples_entry=ttk.Entry(tab,textvariable=self.orbit_samples_var,width=14)
+        self.orbit_samples_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.orbit_samples_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.orbit_samples_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+
+        self.orbit_portable_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Portable orbit files",variable=self.orbit_portable_var,
+                        command=self._commit_orbit).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
+        row+=1
+        ttk.Label(tab,text="Floquet multipliers",font=("TkDefaultFont",9,"bold")).grid(
+                  row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        self.floquet_enabled_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Compute at every step",variable=self.floquet_enabled_var,
+                        command=self._commit_orbit).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        ttk.Label(tab,text="Method").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.floquet_method_var=tk.StringVar()
+        self.floquet_method_combo=ttk.Combobox(tab,state="readonly",width=14,
+                                               textvariable=self.floquet_method_var,
+                                               values=("condensed","periodic_schur","eigenproblem"))
+        self.floquet_method_combo.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.floquet_method_combo.bind("<<ComboboxSelected>>",lambda *_: self._commit_orbit())
+        row+=1
+
+        ttk.Label(tab,text="How many").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.floquet_n_var=tk.StringVar()
+        self.floquet_n_entry=ttk.Entry(tab,textvariable=self.floquet_n_var,width=14)
+        self.floquet_n_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.floquet_n_entry.bind("<Return>",lambda *_: self._commit_orbit())
+        self.floquet_n_entry.bind("<FocusOut>",lambda *_: self._commit_orbit())
+        row+=1
+
+        self.floquet_shift_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Shift-invert",variable=self.floquet_shift_var,
+                        command=self._commit_orbit).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        ttk.Button(tab,text="Compute here",
+                   command=lambda: self._invoke(self._actions["orbit_floquet_here"])).grid(
+                   row=row,column=0,sticky=tk.W,pady=(2,0))
+        ttk.Button(tab,text="Along this branch",
+                   command=lambda: self._invoke(self._actions["orbit_floquet_branch"])).grid(
+                   row=row,column=1,sticky=tk.EW,pady=(2,0))
+        row+=1
+
+        self.floquet_info_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.floquet_info_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=(4,0))
+        row+=1
+
+        tab.columnconfigure(1,weight=1)
+
+    def _commit_orbit(self):
+        """Read the orbit and Floquet settings back off the tab."""
+        c=self.controller
+        try:
+            c.orbit_NT=max(2,int(float(self.orbit_nt_var.get())))
+        except ValueError:
+            c.log("The number of time steps must be an integer of at least 2")
+        try:
+            c.orbit_order=max(1,int(float(self.orbit_order_var.get())))
+        except ValueError:
+            c.log("The discretization order must be an integer of at least 1")
+        eps=self.orbit_eps_var.get().strip()
+        if eps.lower() in ("","auto","none","-"):
+            c.orbit_eps=None
+        else:
+            try:
+                c.orbit_eps=abs(float(eps))
+            except ValueError:
+                c.log("The parameter step must be a number, or 'auto' to take what ds buys")
+        try:
+            c.orbit_amplitude_factor=float(self.orbit_ampl_var.get())
+        except ValueError:
+            c.log("The amplitude factor must be a number")
+        samples=self.orbit_samples_var.get().strip()
+        if samples.lower() in ("","auto","none","-"):
+            c.orbit_observable_samples=None
+        else:
+            try:
+                c.orbit_observable_samples=max(2,int(float(samples)))
+            except ValueError:
+                c.log("The number of observable samples must be an integer, or 'auto' for one per "
+                      "time step of the orbit")
+        n=self.floquet_n_var.get().strip()
+        if n.lower() in ("","all","auto","none","-"):
+            c.floquet_n=None
+        else:
+            try:
+                c.floquet_n=max(1,int(float(n)))
+            except ValueError:
+                c.log("The number of Floquet multipliers must be an integer, or 'all'")
+        mode=self.orbit_mode_var.get().strip()
+        if mode:
+            c.orbit_mode=mode
+        tconstr=self.orbit_tconstr_var.get().strip()
+        if tconstr:
+            c.orbit_T_constraint=tconstr
+        method=self.floquet_method_var.get().strip()
+        if method:
+            c.floquet_method=method
+        c.orbit_check_collapse=bool(self.orbit_collapse_var.get())
+        c.orbit_portable=bool(self.orbit_portable_var.get())
+        c.floquet_enabled=bool(self.floquet_enabled_var.get())
+        c.floquet_shift_invert=bool(self.floquet_shift_var.get())
+        self._update_panels()
+
     def _commit_deflation(self):
         """Read the deflation operator settings back off the tab."""
         c=self.controller
@@ -1318,6 +1555,7 @@ class BifurcationTkApp:
         self.modes_sweep_var.set(bool(c.compute_modes_during_sweep))
         self.splines_var.set(bool(c.interpolated_splines))
         self._update_deflation_panel()
+        self._update_orbit_panel()
         self.mode_var.set(c.mode)
         self.movepoint_var.set(bool(c.move_point_active))
         self.movepoint_check.configure(state="normal" if c.mode=="mp" else "disabled")
@@ -1367,6 +1605,87 @@ class BifurcationTkApp:
             self._update_deflation_panel()
         except tk.TclError:
             pass    # the window went away underneath a pending draw
+
+    def _update_orbit_panel(self):
+        """Re-render the Orbit tab from the controller, and say what this point can and cannot do."""
+        import math
+        c=self.controller
+        if not self._is_focused(self.orbit_nt_entry):
+            self.orbit_nt_var.set("{:d}".format(int(c.orbit_NT)))
+        if not self._is_focused(self.orbit_order_entry):
+            self.orbit_order_var.set("{:d}".format(int(c.orbit_order)))
+        if not self._is_focused(self.orbit_eps_entry):
+            self.orbit_eps_var.set("auto" if c.orbit_eps is None else "{:g}".format(c.orbit_eps))
+        if not self._is_focused(self.orbit_ampl_entry):
+            self.orbit_ampl_var.set("{:g}".format(c.orbit_amplitude_factor))
+        if not self._is_focused(self.orbit_samples_entry):
+            self.orbit_samples_var.set("auto" if c.orbit_observable_samples is None
+                                       else "{:d}".format(int(c.orbit_observable_samples)))
+        if not self._is_focused(self.floquet_n_entry):
+            self.floquet_n_var.set("all" if c.floquet_n is None else "{:d}".format(int(c.floquet_n)))
+        self.orbit_mode_var.set(str(c.orbit_mode))
+        self.orbit_tconstr_var.set(str(c.orbit_T_constraint))
+        self.floquet_method_var.set(str(c.floquet_method))
+        self.orbit_collapse_var.set(bool(c.orbit_check_collapse))
+        self.orbit_portable_var.set(bool(c.orbit_portable))
+        self.floquet_enabled_var.set(bool(c.floquet_enabled))
+        self.floquet_shift_var.set(bool(c.floquet_shift_invert))
+
+        # Multipliers can only be had from a discretization that carries a degree of freedom at the
+        # end of the period. Greyed out rather than left to fail once per continuation step.
+        can_floquet=str(c.orbit_mode) in ("collocation","floquet")
+        try:
+            self.floquet_method_combo.configure(state="readonly" if can_floquet else "disabled")
+            self.floquet_n_entry.configure(state="normal" if can_floquet else "disabled")
+        except tk.TclError:
+            pass
+
+        point=c.current_point
+        info=(point.orbit_info if point is not None else None) or {}
+        if info and point is not None:
+            unit=(" "+c._orbit_T_unit) if c._orbit_T_unit else ""
+            text="Period {:.6g}{:s}, {:d} time steps ({:s} order {:d})".format(
+                float(point.obs_values.get(ORBIT_T_KEY,float("nan"))),unit,int(info.get("nT",0)),
+                str(info.get("mode","?")),int(info.get("order",0)))
+            if point.floquet:
+                lead=max(point.floquet,key=lambda m: abs(m))
+                text+=", leading |mu| = {:.4g}".format(abs(lead))
+        else:
+            try:
+                refusal=c.orbit_can_be_started()
+            except Exception:
+                refusal=None
+            at_hopf=(point is not None and point.eig_value_Re==0
+                     and (point.bifurcation_info or {}).get("type")=="hopf")
+            if refusal is not None:
+                text=refusal
+            elif at_hopf:
+                text="This is a Hopf bifurcation: it sheds a periodic orbit."
+            else:
+                text="Locate a Hopf bifurcation to switch onto its periodic orbit."
+        self.orbit_state_var.set(text)
+
+        # The step off the Hopf is the one ds buys, because the orbit's parameter offset IS eps**2.
+        hint=""
+        if c.orbit_eps is None:
+            try:
+                offset=c.branch_switch_parameter_offset()
+                if math.isfinite(offset) and offset>0:
+                    hint="ds currently buys {:.4g} in {:s}, i.e. eps = {:.4g}".format(
+                        offset,c._get_paramname_str(),math.sqrt(offset))
+            except Exception:
+                hint=""
+        self.orbit_eps_hint_var.set(hint)
+
+        if point is not None and point.floquet:
+            nun=c.orbit_unstable_count(point.floquet)
+            self.floquet_info_var.set("{:d} multiplier{:s}, {:d} outside the unit circle".format(
+                len(point.floquet),"" if len(point.floquet)==1 else "s",nun))
+        elif not can_floquet:
+            self.floquet_info_var.set("'{:s}' carries no degree of freedom at the end of the period, "
+                                      "so it has no Floquet multipliers.".format(str(c.orbit_mode)))
+        else:
+            self.floquet_info_var.set("")
 
     def _update_deflation_panel(self):
         """Refresh the Deflation tab. Entries under the cursor are left alone, as everywhere else."""
@@ -1460,7 +1779,10 @@ class BifurcationTkApp:
         desc=c.describe_current_slice()
         if branch is None:
             self.slice_label.configure(text="")
-        elif branch.kind=="locus":
+        elif branch.kind==BRANCH_ORBIT:
+            self.slice_label.configure(text="Periodic orbits, continued in {:s}.\nFixed: {:s}".format(
+                str(branch.continuation_parameter),branch.describe_slice()))
+        elif branch.kind==BRANCH_LOCUS:
             self.slice_label.configure(text="Locus of {:s} bifurcations in ({:s}, {:s}).\nFixed: {:s}".format(
                 branch.bifurcation_type or "unclassified",str(branch.continuation_parameter),
                 str(branch.tracked_parameter),desc or "-"))
@@ -1479,9 +1801,33 @@ class BifurcationTkApp:
             lines.append("{:s} = {:.10g}".format(c._get_paramname_str(),point.param_value))
             obs=c._current_observable
             if obs is not None and obs in point.obs_values:
-                lines.append("{:s} = {:.10g}".format(obs,point.obs_values[obs]))
-            lines.append("eigenvalue = {:.6g} {:+.6g}i".format(point.eig_value_Re,point.eig_value_Im))
-            if point.eig_value_Re==0:
+                if point.orbit_info is not None:
+                    # On an orbit the recorded value is the average over the cycle; showing it without
+                    # saying so invites it to be read as the solution's value.
+                    lo,hi=orbit_band_names(obs)
+                    lines.append("{:s} = {:.10g} (mean over the period)".format(obs,point.obs_values[obs]))
+                    if lo in point.obs_values and hi in point.obs_values:
+                        lines.append("   from {:.10g} to {:.10g}".format(point.obs_values[lo],
+                                                                         point.obs_values[hi]))
+                else:
+                    lines.append("{:s} = {:.10g}".format(obs,point.obs_values[obs]))
+            if point.orbit_info is not None:
+                info=point.orbit_info
+                unit=(" "+c._orbit_T_unit) if c._orbit_T_unit else ""
+                lines.append("period = {:.10g}{:s}".format(
+                    float(point.obs_values.get(ORBIT_T_KEY,float("nan"))),unit))
+                lines.append("{:d} time steps, {:s} order {:d}".format(
+                    int(info.get("nT",0)),str(info.get("mode","?")),int(info.get("order",0))))
+                if point.floquet:
+                    lead=max(point.floquet,key=lambda m: abs(m))
+                    lines.append("leading multiplier = {:.6g} {:+.6g}i  (|mu| = {:.6g})".format(
+                        float(lead.real),float(lead.imag),abs(lead)))
+                    hint=_multiplier_hint(lead)
+                    if hint:
+                        lines.append("--> "+hint)
+            lines.append(("Floquet exponent = " if point.orbit_info is not None else "eigenvalue = ")+
+                         "{:.6g} {:+.6g}i".format(point.eig_value_Re,point.eig_value_Im))
+            if point.eig_value_Re==0 and point.orbit_info is None:
                 kind="bifurcation"
                 if point.bifurcation_info is not None:
                     kind=str(point.bifurcation_info.get("type",kind))
@@ -1497,7 +1843,7 @@ class BifurcationTkApp:
     def _describe_branch(self,branch)->str:
         """The branch's own summary, plus how it relates to the diagram being worked on."""
         info=branch.describe()
-        if branch.kind=="locus":
+        if branch.kind==BRANCH_LOCUS:
             # A locus varies two parameters deliberately, so it sits in no single slice and calling it
             # "other slice" would be misleading - describe() already says what it is.
             pass
@@ -1521,7 +1867,11 @@ class BifurcationTkApp:
             self._eigen_signature=None
             return
         values=list(point.eig_values)
-        signature=(id(point),len(values),which,tuple(point.eig_modes or ()),c.count_normal_modes_in_stability)
+        # len(point.floquet) is in the signature because an orbit point's list is rebuilt from the
+        # multipliers: without it, switching to a point whose spectrum happens to be the same length
+        # leaves the previous point's multipliers on screen.
+        signature=(id(point),len(values),which,tuple(point.eig_modes or ()),
+                   c.count_normal_modes_in_stability,len(point.floquet))
         if signature==self._eigen_signature:
             return                      # nothing to redo on every redraw
         self._eigen_signature=signature
@@ -1544,6 +1894,28 @@ class BifurcationTkApp:
             self.eigen_label_var.set("{:s} point: {:d} eigenvalue{:s}{:s}, {:d} unstable".format(
                 which,len(values),"" if len(values)==1 else "s",note,nunstable))
         self.eigen_tree.delete(*self.eigen_tree.get_children())
+        if point.floquet:
+            # An orbit: the MULTIPLIERS are what is shown, because they are what says which kind of
+            # bifurcation is approaching. The exponents stored alongside them drive the stability of
+            # the drawn branch and are one column away, in the info box above.
+            self.eigen_tree.heading("mode",text="|mu|")
+            self.eigen_tree.heading("re",text="Re mu")
+            self.eigen_tree.heading("im",text="Im mu")
+            nun=c.orbit_unstable_count(point.floquet)
+            self.eigen_label_var.set("{:s} point: {:d} Floquet multiplier{:s}, {:d} outside the unit "
+                                     "circle".format(which,len(point.floquet),
+                                     "" if len(point.floquet)==1 else "s",nun))
+            for i,m in enumerate(sorted(point.floquet,key=lambda z: -abs(z))):
+                mag=abs(m)
+                tags=("unstable",) if mag>1.0+c.floquet_unstable_tol else (
+                     ("critical",) if abs(mag-1.0)<=c.floquet_unstable_tol else ())
+                self.eigen_tree.insert("","end",text=str(i),
+                                       values=("{:.6g}".format(mag),"{:+.6g}".format(float(m.real)),
+                                               "{:+.6g}".format(float(m.imag))),tags=tags)
+            return
+        self.eigen_tree.heading("mode",text="m/k")
+        self.eigen_tree.heading("re",text="Re")
+        self.eigen_tree.heading("im",text="Im")
         shown=values if values else [complex(point.eig_value_Re,point.eig_value_Im)]
         modes=point.eig_modes if point.eig_modes is not None and len(point.eig_modes)==len(shown) else None
         for i,v in enumerate(shown):
@@ -1779,9 +2151,20 @@ class BifurcationTkApp:
         self.fieldplot_menu.add_separator()
         # An eigenfunction plot is the same plot with eigenvector/eigenmode set, so it is derived from
         # the plotter the script already wrote rather than asked for again.
+        # A real eigenvalue's eigenvector is fixed only up to a global phase, and on a complex PETSc
+        # build there is no reason for that phase to come back as zero: Re v and Im v are then the
+        # same function at two amplitudes, and offering both draws the same picture twice.
+        real_mode=self.controller.eigenvector_is_essentially_real(0)
         for si,src in enumerate(sources):
             prefix=type(src).__name__+": " if len(sources)>1 else ""
             for mode in ("real","imag"):
+                if mode=="imag" and real_mode:
+                    # Disabled and labelled, rather than absent: an entry that silently disappears
+                    # between two refreshes is harder to understand than one that says why.
+                    self.fieldplot_menu.add_checkbutton(
+                        label=prefix+"Eigenfunction 0 (imag part - the eigenvector is real)",
+                        state="disabled")
+                    continue
                 var=self._eigen_vars.setdefault((si,0,mode),tk.BooleanVar())
                 var.set(self.plot_panes.eigen_pane_shown(si,0,mode))
                 self.fieldplot_menu.add_checkbutton(
@@ -2196,6 +2579,25 @@ class BifurcationTkApp:
             # Whatever ended the event loop - the close button, a script calling destroy(), an
             # exception on the way in - the window has to be destroyed and the problem released.
             self.teardown()
+
+
+def _multiplier_hint(mu)->str:
+    """What a Floquet multiplier approaching the unit circle would be, if it got there.
+
+    The multiplier says which of the three it is and the exponent cannot: a real multiplier leaving
+    through -1 and a complex pair leaving anywhere else both have the same exponent real part, and
+    they are a period doubling and a torus respectively. Nothing here LOCATES any of them - this is a
+    label on what the numbers are showing.
+    """
+    d=abs(abs(mu)-1.0)
+    if d>=0.05:
+        return ""
+    if abs(complex(mu).imag)>1e-8*abs(mu):
+        return "close to the unit circle as a complex pair: a torus (Neimark-Sacker) bifurcation"
+    if complex(mu).real<0:
+        return "close to -1: a period doubling (with a DAE and an odd number of time intervals, "\
+               "check that it is not the discretization's own -1)"
+    return "close to +1: a fold of the cycle"
 
 
 def _real_part(v):

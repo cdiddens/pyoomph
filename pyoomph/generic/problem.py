@@ -6002,6 +6002,13 @@ class Problem(_pyoomph.Problem):
             return 1.0
         if self._get_n_unaugmented_dofs()!=0:
             return 1.0   # bifurcation tracking: the dof vector is the augmented one, M would not match
+        # A periodic orbit is augmented too, but does not say so through the count above:
+        # start_orbit_tracking() only swaps the assembly handler and never runs the augmentation
+        # bookkeeping, so n_unaugmented_dofs stays 0. Without this the mass matrix would be assembled
+        # on the nT*Ndof+1 orbit distribution - the very thing solve_eigenproblem refuses there - and
+        # any arclength continuation of an orbit with an inner product set would die on the first step.
+        if isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler):
+            return 1.0
         v=self.get_arclength_dof_derivative_vector()
         current=self.get_arclength_dof_current_vector()
         # oomph keeps Dof_derivative and Dof_current as two independent vectors and does NOT always
