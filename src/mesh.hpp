@@ -21,6 +21,7 @@ The main author may be contacted at c.diddens@utwente.nl
 
 
 #pragma once
+#include <functional> // for the visit_global_dofs callback
 #include "oomph_lib.hpp"
 #include "nodes.hpp"
 #include "exception.hpp"
@@ -111,6 +112,53 @@ namespace pyoomph
 		// Pin all dofs of this mesh's elements, optionally restricted to only_dofs / excluding ignore_dofs.
 		// ignore_continuous_at_interfaces lists dof indices that must stay unpinned where continuous across an interface.
 		virtual void pin_all_my_dofs(std::set<std::string> only_dofs, std::set<std::string> ignore_dofs, std::set<unsigned> ignore_continuous_at_interfaces);
+		// What visit_global_dofs reports for one dof: WHERE it is stored, not what it should be called.
+		// The two consumers label the same dof differently - describe_global_dofs appends the position
+		// types after the field types under their mesh_* spelling, while
+		// fill_dof_to_global_field_index_buffer uses the reserved coordinate_* slots - so the label is
+		// deliberately not part of this struct. What is shared is the walk.
+		enum class DofKind
+		{
+			NodalPosition,	  // variable_position_pt(), value_index = the dimension
+			NodalContinuous,  // a base-bulk continuous field, value_index = its field index
+			NodalInterface,   // an interface-only continuous value assigned by a face element
+			DG,				  // a discontinuous space, see space_index/field_in_space
+			DL,				  // element-internal, one value per DL node
+			D0				  // element-internal, one value per element
+		};
+		struct DofVisit
+		{
+			long eqn;					   // always >= 0; pinned/constrained/halo dofs are not reported
+			DofKind kind;
+			oomph::Data *data;			   // the storage the value lives in
+			unsigned value_index;		   // which value of that Data
+			unsigned field_index;		   // field within its space/kind (the DL/D0/interface/continuous index)
+			unsigned space_index;		   // DG only: index into ft->dg_spaces
+			unsigned field_in_space;	   // DG only: field index within that space
+			pyoomph::Node *node;		   // the owning node, or null for DG/DL/D0 internal data
+			BulkElementBase *element;	   // the element that reported it
+			unsigned element_index;		   // its index in THIS mesh's element_pt
+			bool element_is_interface;	   // whether that element is an interface element
+			// DG only. A DG Data belongs to a bulk element but is reported by every element that can
+			// reach it, and a facet element reaches only the values sitting on its own facet - that is
+			// what get_DG_node_index() maps. True when this value is one of them. describe_global_dofs
+			// labels only those (so a facet element does not claim its neighbour's interior values),
+			// fill_dof_to_global_field_index_buffer labels all of them; the walk reports every value
+			// either way, because a consumer that has to see each dof exactly once must not have any
+			// of them filtered out underneath it.
+			bool dg_on_own_facet;
+		};
+		// Walk every dof this mesh's elements can reach and report it once per reporting element. A
+		// node shared by several elements is therefore reported several times - the callers either
+		// write into a per-equation array (idempotent) or claim each equation once.
+		//
+		// One walk rather than one per consumer: describe_global_dofs and
+		// fill_dof_to_global_field_index_buffer were copies of the same nested loop that had already
+		// drifted apart in three places (positions first vs last, the interface branch guarded
+		// differently, and a different DG buffer index), and a third copy for the dof ordering would
+		// have drifted again. The drift is preserved, not resolved: it lives in the two lambdas, where
+		// it is visible side by side instead of a hundred lines apart.
+		virtual void visit_global_dofs(const std::function<void(const DofVisit &)> &visit);
 		// Fill doftype/typnames with a description of each global dof (used for debugging/introspection).
 		virtual void describe_global_dofs(std::vector<int> &doftype, std::vector<std::string> &typnames);
 		virtual void describe_my_dofs(std::ostream &os, const std::string &in) { this->describe_local_dofs(os, in); }

@@ -4856,6 +4856,147 @@ namespace pyoomph
   // Answers for the WHOLE problem (doftype is indexed by the global equation number), but only about
   // the dofs this rank's own elements reach: on a distributed problem the caller has to merge the
   // per-rank answers, see Problem.get_dof_description().
+    // The single walk both dof descriptions are built from. See Mesh::DofVisit in mesh.hpp for why
+  // there is one rather than one per consumer.
+  //
+  // The order is element-driven, and a node shared by several elements is reported once per element:
+  // both consumers write into a per-equation array, so a repeat is idempotent, and a consumer that
+  // needs to attribute a shared dof to exactly ONE element (the dof ordering) wants to see the repeat
+  // in order to claim the first.
+  void Mesh::visit_global_dofs(const std::function<void(const DofVisit &)> &visit)
+  {
+    if (!this->nelement()) return;
+    DynamicJITCode *ci = dynamic_cast<BulkElementBase *>(this->element_pt(0))->get_jit_code();
+    if (!ci) return;
+    auto *ft = ci->get_func_table();
+
+    unsigned num_bulk_nodal = 0;
+    for (unsigned si = 0; si < ft->num_present_continuous_spaces; si++)
+      num_bulk_nodal += ft->present_continuous_spaces[si]->numfields_basebulk;
+
+    DofVisit v;
+    v.dg_on_own_facet = true; // only meaningful for DofKind::DG, set per value there
+    std::vector<char> own_facet;
+    for (unsigned ei = 0; ei < this->nelement(); ei++)
+    {
+      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
+      if (!e) continue;
+      v.element = e;
+      v.element_index = ei;
+      v.element_is_interface = (e->as_interface_element() != NULL);
+      v.space_index = 0;
+      v.field_in_space = 0;
+
+      for (unsigned nn = 0; nn < e->nnode(); nn++)
+      {
+        pyoomph::Node *n = static_cast<pyoomph::Node *>(e->node_pt(nn));
+        v.node = n;
+
+        // Nodal positions. Only a moving mesh has them as unknowns; on a fixed one their equation
+        // numbers are negative and the report never fires, so no guard on ft->moving_nodes is needed.
+        v.kind = DofKind::NodalPosition;
+        v.data = n->variable_position_pt();
+        for (unsigned d = 0; d < n->ndim(); d++)
+        {
+          const long eq = n->variable_position_pt()->eqn_number(d);
+          if (eq < 0) continue;
+          v.eqn = eq; v.value_index = d; v.field_index = d;
+          visit(v);
+        }
+
+        v.kind = DofKind::NodalContinuous;
+        v.data = n;
+        for (unsigned nv = 0; nv < num_bulk_nodal; nv++)
+        {
+          const long eq = n->eqn_number(nv);
+          if (eq < 0) continue;
+          v.eqn = eq; v.value_index = nv; v.field_index = nv;
+          visit(v);
+        }
+
+        // Interface-only continuous values, in the slots the face element assigned them.
+        oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(n);
+        if (bn)
+        {
+          v.kind = DofKind::NodalInterface;
+          for (unsigned si = 0; si < ft->num_present_continuous_spaces; si++)
+          {
+            auto *space_info = ft->present_continuous_spaces[si];
+            for (unsigned f = 0; f < space_info->numfields - space_info->numfields_basebulk; f++)
+            {
+              const unsigned nv = bn->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[f]);
+              const long eq = n->eqn_number(nv);
+              if (eq < 0) continue;
+              v.eqn = eq; v.value_index = nv;
+              v.field_index = space_info->buffer_offset_interf + f;
+              v.space_index = si; v.field_in_space = f;
+              visit(v);
+            }
+          }
+          v.space_index = 0; v.field_in_space = 0;
+        }
+      }
+
+      v.node = NULL;
+
+      // DG spaces. Reported by (space_index, field_in_space) rather than by a buffer index, because
+      // the two consumers do not agree on how to turn one into the other on an interface element.
+      v.kind = DofKind::DG;
+      for (unsigned si = 0; si < ft->num_present_dg_spaces; si++)
+      {
+        auto *space_info = ft->present_dg_spaces[si];
+        for (unsigned nf = 0; nf < space_info->numfields; nf++)
+        {
+          oomph::Data *data = e->get_DG_nodal_data(space_info->space_index, nf);
+          if (!data) continue;
+          v.data = data; v.space_index = space_info->space_index; v.field_in_space = nf;
+          v.field_index = nf;
+          own_facet.assign(data->nvalue(), 0);
+          for (unsigned ni = 0; ni < e->get_eleminfo()->nnode_of_space[space_info->space_index]; ni++)
+          {
+            const unsigned nj = e->get_DG_node_index(space_info->space_index, nf, ni);
+            if (nj < own_facet.size()) own_facet[nj] = 1;
+          }
+          for (unsigned nj = 0; nj < data->nvalue(); nj++)
+          {
+            const long eq = data->eqn_number(nj);
+            if (eq < 0) continue;
+            v.eqn = eq; v.value_index = nj; v.dg_on_own_facet = (own_facet[nj] != 0);
+            visit(v);
+          }
+        }
+      }
+      v.space_index = 0; v.field_in_space = 0;
+
+      v.kind = DofKind::DL;
+      for (unsigned nid = 0; nid < ft->info_DL.numfields; nid++)
+      {
+        oomph::Data *data = e->internal_data_pt(ft->info_DL.internal_offset_new + nid);
+        v.data = data; v.field_index = nid;
+        for (unsigned nv = 0; nv < data->nvalue(); nv++)
+        {
+          const long eq = data->eqn_number(nv);
+          if (eq < 0) continue;
+          v.eqn = eq; v.value_index = nv;
+          visit(v);
+        }
+      }
+      v.kind = DofKind::D0;
+      for (unsigned nid = 0; nid < ft->info_D0.numfields; nid++)
+      {
+        oomph::Data *data = e->internal_data_pt(ft->info_D0.internal_offset_new + nid);
+        v.data = data; v.field_index = nid;
+        for (unsigned nv = 0; nv < data->nvalue(); nv++)
+        {
+          const long eq = data->eqn_number(nv);
+          if (eq < 0) continue;
+          v.eqn = eq; v.value_index = nv;
+          visit(v);
+        }
+      }
+    }
+  }
+
   void Mesh::describe_global_dofs(std::vector<int> &doftype, std::vector<std::string> &typnames)
   {
     typnames.clear();
@@ -4876,7 +5017,9 @@ namespace pyoomph
 
     auto *ft = ci->get_func_table();
 
-    // TODO: Can't this be just copied from the functable Dirichlet_names ?
+    // The type names are the Dirichlet names past the three reserved coordinate slots, with the
+    // position types appended at the END under their mesh_* spelling. Hence the two-branch
+    // translation from a Dirichlet index in the visitor below.
     if (ft->Dirichlet_set_size >= 3)
     {
       typnames.reserve(ft->Dirichlet_set_size - 3);
@@ -4884,9 +5027,7 @@ namespace pyoomph
         typnames.push_back(ft->Dirichlet_names[i]);
     }
 
-   
-
-    unsigned moving_node_offset = typnames.size();
+    const unsigned moving_node_offset = typnames.size();
     if (ft->moving_nodes)
     {
       if (ft->nodal_dim > 0)
@@ -4896,100 +5037,47 @@ namespace pyoomph
       if (ft->nodal_dim > 2)
         typnames.push_back("mesh_z");
     }
-    unsigned int num_bulk_nodal=0;
-    for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
-    {
-      auto * space_info=ft->present_continuous_spaces[si];
-      num_bulk_nodal+=space_info->numfields_basebulk;      
-    }    
 
-    for (unsigned int ne = 0; ne < this->nelement(); ne++)
-    {
-      BulkElementBase *e = dynamic_cast<BulkElementBase *>(this->element_pt(ne));
-      for (unsigned nn = 0; nn < e->nnode(); nn++)
-      {
-        Node *n = static_cast<Node *>(e->node_pt(nn));
-        for (unsigned int nv = 0; nv < num_bulk_nodal; nv++)
-        {
-          if (n->eqn_number(nv) >= 0)
-          {
-            doftype[n->eqn_number(nv)] = nv;
-          }
-        }
-        oomph::BoundaryNodeBase *bn = dynamic_cast<oomph::BoundaryNodeBase *>(n);
-        if (bn)
-        {
-          for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
-          {
-            auto * space_info=ft->present_continuous_spaces[si];
-            for (unsigned int f = 0; f < space_info->numfields-space_info->numfields_basebulk; f++)
-            {
-              int nv = bn->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[f]);
-              if (n->eqn_number(nv) >= 0)
-              {
-                doftype[n->eqn_number(nv)] = space_info->buffer_offset_interf + f;
-              }
-            }
-          }          
-        }
-      }
-
-
-      for (unsigned si=0;si<ft->num_present_dg_spaces;si++)
-      {
-        auto * space_info=ft->present_dg_spaces[si];
-        for (unsigned nf = 0; nf < space_info->numfields; nf++)
-        {
-          for (unsigned int ni = 0; ni < e->get_eleminfo()->nnode_of_space[space_info->space_index]; ni++)
-          {
-            int eqn_no = e->get_DG_nodal_data(space_info->space_index,nf)->eqn_number(e->get_DG_node_index(space_info->space_index, nf, ni));
-            if (eqn_no >= 0)
-            {
-              doftype[eqn_no] = (nf <space_info->numfields_basebulk ? space_info->buffer_offset_basebulk : space_info->buffer_offset_interf - space_info->numfields_basebulk) + nf;
-            }
-          }
-        }
-
-      }
-
-      for (unsigned nid = 0; nid < ft->info_DL.numfields; nid++)
-      {
-        auto *idp = e->internal_data_pt(ft->info_DL.internal_offset_new + nid);
-        for (unsigned int nv = 0; nv < idp->nvalue(); nv++)
-        {
-          if (idp->eqn_number(nv) >= 0)
-          {
-            doftype[idp->eqn_number(nv)] = ft->info_DL.buffer_offset_basebulk + nid;
-          }
-        }
-      }
-      for (unsigned nid = 0; nid < ft->info_D0.numfields; nid++)
-      {
-        auto *idp = e->internal_data_pt(ft->info_D0.internal_offset_new + nid);
-        for (unsigned int nv = 0; nv < idp->nvalue(); nv++)
-        {
-          if (idp->eqn_number(nv) >= 0)
-          {
-            doftype[idp->eqn_number(nv)] = ft->info_D0.buffer_offset_basebulk + nid;
-          }
-        }
-      }
-
-      if (ft->moving_nodes)
-      {
-        for (unsigned nn = 0; nn < e->nnode(); nn++)
-        {
-          Node *n = static_cast<Node *>(e->node_pt(nn));
-          for (unsigned int nv = 0; nv < ft->nodal_dim; nv++)
-          {
-            if (n->variable_position_pt()->eqn_number(nv) >= 0)
-            {
-              doftype[n->variable_position_pt()->eqn_number(nv)] = moving_node_offset + nv;
-            }
-          }
-        }
-      }
-    }
+    // Translate a visit into this function's own type numbering. The field types come first, in
+    // Dirichlet-name order past the three reserved coordinate slots; the position types are the ones
+    // appended above.
+    this->visit_global_dofs([&doftype, ft, moving_node_offset](const DofVisit &v)
+                            {
+                              int t = -1;
+                              switch (v.kind)
+                              {
+                              case DofKind::NodalPosition:
+                                t = (int)(moving_node_offset + v.field_index);
+                                break;
+                              case DofKind::NodalContinuous:
+                              case DofKind::NodalInterface:
+                                t = (int)v.field_index;
+                                break;
+                              case DofKind::DG:
+                              {
+                                // A facet element labels only the values on its own facet; the rest of
+                                // that Data belongs to the bulk element and is labelled there.
+                                if (!v.dg_on_own_facet) return;
+                                // NOT get_DG_buffer_index(): this has always used the interface
+                                // element's formula for every element, which on a bulk element agrees
+                                // with the virtual one and on an interface element does not. See
+                                // fill_dof_to_global_field_index_buffer for the other choice.
+                                auto *space_info = &ft->dg_spaces[v.space_index];
+                                t = (int)((v.field_in_space < space_info->numfields_basebulk
+                                               ? space_info->buffer_offset_basebulk
+                                               : space_info->buffer_offset_interf - space_info->numfields_basebulk) +
+                                          v.field_in_space);
+                                break;
+                              }
+                              case DofKind::DL:
+                                t = (int)(ft->info_DL.buffer_offset_basebulk + v.field_index);
+                                break;
+                              case DofKind::D0:
+                                t = (int)(ft->info_D0.buffer_offset_basebulk + v.field_index);
+                                break;
+                              }
+                              doftype[v.eqn] = t;
+                            });
   }
 
   pyoomph::Node *Mesh::resolve_copy_master(pyoomph::Node *cpy)
@@ -5638,86 +5726,43 @@ namespace pyoomph
     if (!this->nelement()) return;
     auto *el0 = dynamic_cast<BulkElementBase *>(this->element_pt(0));
     auto *ft = el0->get_jit_code()->get_func_table();
-    int Doffset = 3;
-    long eqn_number=0;
-    unsigned int ncontfields=0;
-    for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
-    {
-      auto * space_info=ft->present_continuous_spaces[si];
-      ncontfields+=space_info->numfields_basebulk;
-    }
-    for (unsigned int ei = 0; ei < this->nelement(); ei++)
-    {
-      auto *el = dynamic_cast<BulkElementBase *>(this->element_pt(ei));
-      for (unsigned int ni=0;ni<el->nnode();ni++)
-      {
-        pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
-        // Handle moving mesh dofs
-        for (unsigned int d = 0; d < nodept->ndim(); d++)
-        {
-          int valindex = -1 - d;                    
-          if (eqn_number=nodept->variable_position_pt()->eqn_number(d); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[valindex + Doffset];          
-        }
-
-        // Handling continuous bulk dofs
-        for (unsigned int fieldindex = 0; fieldindex < ncontfields; fieldindex++)
-        {
-          if (eqn_number=nodept->eqn_number(fieldindex); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex  + Doffset];          
-        }                
-      }
-      
-      // Handling discontinuous dofs
-      for (unsigned int si=0;si<ft->num_present_dg_spaces;si++)
-      {
-        auto * space_info=ft->present_dg_spaces[si];
-        for (unsigned int fieldindex = 0; fieldindex < space_info->numfields; fieldindex++)
-        {
-          unsigned bindex = el->get_DG_buffer_index(space_info->space_index, fieldindex);
-          oomph::Data *data = el->get_DG_nodal_data(space_info->space_index, fieldindex);
-          for (unsigned int nj = 0; nj < data->nvalue(); nj++) 
-          {
-              if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[Doffset + bindex];          
-          }          
-        }
-      }
-
-            
-      // Handling interface dofs
-      if (el->as_interface_element())
-      {
-          for (unsigned int ni=0;ni<el->nnode();ni++)
-          {
-            pyoomph::Node *nodept = static_cast<pyoomph::Node *>(el->node_pt(ni));
-            for (unsigned int si=0;si<ft->num_present_continuous_spaces;si++)
-            {
-              auto * space_info=ft->present_continuous_spaces[si];
-              for (unsigned int fieldindex = 0; fieldindex < space_info->numfields-space_info->numfields_basebulk; fieldindex++)
-              {              
-                unsigned valindex = dynamic_cast<oomph::BoundaryNodeBase *>(nodept)->index_of_first_value_assigned_by_face_element(space_info->interface_dof_indices[fieldindex]);
-                if (eqn_number=nodept->eqn_number(valindex); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + space_info->buffer_offset_interf + Doffset];          
-              }
-            }
-          }
-      }
-      // Handling elemental dofs
-      for (unsigned int fieldindex = 0; fieldindex < ft->info_DL.numfields; fieldindex++)
-      {
-        oomph::Data *data=this->element_pt(ei)->internal_data_pt(ft->info_DL.internal_offset_new + fieldindex);
-        for (unsigned int nj = 0; nj < data->nvalue(); nj++) 
-        {
-            if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->info_DL.buffer_offset_basebulk + Doffset];          
-        }        
-      }
-      for (unsigned int fieldindex = 0; fieldindex < ft->info_D0.numfields; fieldindex++)
-      {
-        oomph::Data *data=this->element_pt(ei)->internal_data_pt(ft->info_D0.internal_offset_new + fieldindex);
-        for (unsigned int nj = 0; nj < data->nvalue(); nj++)        
-        {
-            if (eqn_number=data->eqn_number(nj); eqn_number>=0) dofs_to_global_field_index[eqn_number]=ft->dirichlet_field_index_to_global_field_index[fieldindex + ft->info_D0.buffer_offset_basebulk + Doffset];          
-        }
-
-      }
-    }    
+    // The Dirichlet buffer reserves its first three slots for the nodal positions, and it does so in
+    // REVERSE: coordinate_x is field index -1, y is -2, z is -3 (see FiniteElementCode's initial
+    // condition emitter), so with the +3 offset x lands in slot 2 and z in slot 0.
+    const int Doffset = 3;
+    this->visit_global_dofs([&dofs_to_global_field_index, ft](const DofVisit &v)
+                            {
+                              int dirichlet_index;
+                              switch (v.kind)
+                              {
+                              case DofKind::NodalPosition:
+                                dirichlet_index = Doffset - 1 - (int)v.field_index;
+                                break;
+                              case DofKind::NodalInterface:
+                                // Only from an interface element. That is what this walk has always
+                                // done and it differs from describe_global_dofs, which labels such a
+                                // value from any element touching the boundary node; which of the two
+                                // is right is a question about the field-index map, not about the
+                                // walk, so it is left alone here.
+                                if (!v.element_is_interface) return;
+                                dirichlet_index = Doffset + (int)v.field_index;
+                                break;
+                              case DofKind::DG:
+                                dirichlet_index = Doffset + (int)v.element->get_DG_buffer_index(v.space_index, v.field_in_space);
+                                break;
+                              case DofKind::DL:
+                                dirichlet_index = Doffset + (int)(ft->info_DL.buffer_offset_basebulk + v.field_index);
+                                break;
+                              case DofKind::D0:
+                                dirichlet_index = Doffset + (int)(ft->info_D0.buffer_offset_basebulk + v.field_index);
+                                break;
+                              default: // NodalContinuous
+                                dirichlet_index = Doffset + (int)v.field_index;
+                                break;
+                              }
+                              dofs_to_global_field_index[v.eqn] =
+                                  ft->dirichlet_field_index_to_global_field_index[dirichlet_index];
+                            });
   }
 
   // Applies (or, if only_update_vals, re-evaluates) the Dirichlet conditions marked
