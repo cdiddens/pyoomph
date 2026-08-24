@@ -1867,14 +1867,16 @@ class Problem(_pyoomph.Problem):
         global matrix, which it stops being once the rows are partitioned across ranks -- scipy then
         raises about an indptr length, several frames away from the feature the user asked for. The
         remaining ones (the Lyapunov exponents, the periodic driving response, the multi-assembly
-        tensor cache, left eigenvectors and branch switching, and the Python custom assembler behind
-        get_hopf_lyapunov_coefficient) additionally sit on top of
+        tensor cache, and the Python custom assembler behind get_hopf_lyapunov_coefficient's
+        HopfTracker route) additionally sit on top of
         sparse_assemble_row_or_column_compressed_base_problem, which throws "This likely does not work
         in distributed parallel" from C++. Failing here names the feature instead.
 
-        Bifurcation tracking through the C++ handlers, and periodic orbits with their Floquet
-        multipliers, used to be on that list and are not any more -- see
-        dev_docs/mpi_augmented_systems.md and dev_docs/floquet_multipliers.md section 8.
+        Bifurcation tracking through the C++ handlers, periodic orbits with their Floquet
+        multipliers, and -- since the normal form left the custom multi-assembly the way deflation
+        did -- left eigenvectors and branch switching, used to be on that list and are not any more.
+        See dev_docs/mpi_augmented_systems.md, dev_docs/floquet_multipliers.md section 10 and
+        dev_docs/branch_switching.md.
         refine_eigenfunction() is here for the history-dof reason instead of an assembly one:
         Problem::set_history_dofs refuses when distributed.
         """
@@ -2927,7 +2929,30 @@ class Problem(_pyoomph.Problem):
             #eqs.get_current_code_generator().set_remove_underived_modes(self._cartesian_normal_mode_stability.real_contribution_name,set([1]))
             #eqs.get_current_code_generator().set_remove_underived_modes(self._cartesian_normal_mode_stability.imag_contribution_name,set([1]))
 
+    def _require_single_rank(self,what:str)->None:
+        """Stop with a clear message if ``what`` is being attempted on more than one MPI process.
+
+        Distinct from :py:meth:`_require_non_distributed`, which is about ``--distribute`` alone:
+        this is about ``nproc > 1`` at all. The Python custom-assembler pipeline goes through
+        ``Problem::sparse_assemble_row_or_column_compressed_base_problem``, which throws for a plain
+        replicated ``mpirun`` as well -- and its residual/Jacobian handoff ignores the distribution
+        the caller built them on, so a run that got past the throw would write past the end of a
+        DoubleVector rather than fail (B2 of dev_docs/mpi_augmented_systems.md). Refusing where the
+        user switched the feature on names it, instead of arriving five frames deep from C++.
+        """
+        from .mpi import get_mpi_nproc
+        if get_mpi_nproc()>1:
+            raise RuntimeError(what+" only works on a single process. It goes through the Python "
+                               "custom-assembly pipeline, which is not implemented for MPI (see "
+                               "dev_docs/mpi_augmented_systems.md Part II). Run it without mpirun.")
+
     def set_custom_assembler(self,assm:"CustomAssemblyBase | None") -> None:
+        if assm is not None:
+            # Stage 0 of dev_docs/mpi_augmented_systems.md section 10, finally possible: the normal
+            # form left this pipeline the way deflation did, so the only things still on it are the
+            # CustomBifurcationTracker family and DeflationAssemblyHandler, none of which has ever
+            # worked under MPI.
+            self._require_single_rank("The custom assembler ("+type(assm).__name__+")")
         if self._custom_assembler:
             self._custom_assembler.finalize()
             
@@ -5836,8 +5861,16 @@ class Problem(_pyoomph.Problem):
                 startvector=self._adapted_eigeninfo[0].copy()
             else:
                 startvector=None
-            if self.get_eigen_solver().supports_target():                
-                self.solve_eigenproblem(resolve_neigen,v0=startvector,target=self._adapted_eigeninfo[1],shift=self._adapted_eigeninfo[1],azimuthal_m=self._adapted_eigeninfo[2],normal_mode_k=self._adapted_eigeninfo[3])
+            # A COMPLEX eigenvalue (a Hopf pair) needs supports_complex_target(): a real PETSc/SLEPc
+            # build answers supports_target() and then quietly keeps only Re(lambda), so the re-solve
+            # after adaptation would come back with a different mode than the one being followed. An
+            # untargeted re-solve is the honest fallback there.
+            _adapted_target=self._adapted_eigeninfo[1]
+            _can_target=(self.get_eigen_solver().supports_complex_target()
+                         if numpy.abs(numpy.imag(_adapted_target))>1e-8
+                         else self.get_eigen_solver().supports_target())
+            if _can_target:
+                self.solve_eigenproblem(resolve_neigen,v0=startvector,target=_adapted_target,shift=_adapted_target,azimuthal_m=self._adapted_eigeninfo[2],normal_mode_k=self._adapted_eigeninfo[3])
             else:
                 self.solve_eigenproblem(resolve_neigen,v0=startvector,azimuthal_m=self._adapted_eigeninfo[2],normal_mode_k=self._adapted_eigeninfo[3])
         self._adapted_eigeninfo=None
@@ -6592,7 +6625,7 @@ class Problem(_pyoomph.Problem):
         return numpy.real(self._last_eigenvalues[0])<=0 #type:ignore
 
     def classify_bifurcation(self,parameter:"str | _pyoomph.GiNaC_GlobalParam | None"=None,eigenindex:int=0,
-                             assume:str | None=None)->dict[str,Any]:
+                             assume:str | None=None,fd_eps:float | None=None)->dict[str,Any]:
         """Normal form of the bifurcation the problem is currently sitting at.
 
         The returned dict names the bifurcation in ``["type"]`` - ``"fold"``, ``"transcritical"``,
@@ -6613,7 +6646,14 @@ class Problem(_pyoomph.Problem):
             assume: ``"fold"`` or ``"branch_point"`` to decide that question rather than have it read
                 off the normal form. Worth passing whenever the branch itself already answers it - a
                 continuation that walked THROUGH the point without the parameter turning around did
-                not pass a fold.
+                not pass a fold. ``"pitchfork"`` or ``"transcritical"`` likewise force the second
+                decision, which the problem's symmetry usually answers better than the numbers do -
+                note that an imperfect pitchfork, one whose symmetry is broken by an inexact boundary
+                condition or a non-symmetric mesh, genuinely IS a transcritical and is now reported
+                as one.
+            fd_eps: Relative step of the finite difference that supplies the third derivative (there
+                is none in the code generator, so ``b3`` has to come from a difference of the
+                analytic Hessian). Defaults to ``1e-5``, near the ``eps_mach**(1/3)`` optimum.
 
         Returns:
             The normal-form dictionary.
@@ -6635,7 +6675,7 @@ class Problem(_pyoomph.Problem):
                 print("Warning: classifying a bifurcation where the critical eigenvalue has real part "+
                       "{:.3g}, which is not zero. This does not look like a bifurcation, and the normal ".format(critical)+
                       "form of a regular point is meaningless.")
-        return NormalFormCalculator(self).get_normal_form(parameter,eigenindex=eigenindex,assume=assume)
+        return NormalFormCalculator(self,fd_eps=fd_eps).get_normal_form(parameter,eigenindex=eigenindex,assume=assume)
 
     def switch_branch(self,parameter:"str | _pyoomph.GiNaC_GlobalParam",normal_form:dict[str,Any] | None=None,
                       offset:float | None=None,direction:int=1,relative_offset:float=0.02,
@@ -6672,7 +6712,8 @@ class Problem(_pyoomph.Problem):
             direction: ``+1`` or ``-1`` to pick which of the two branches through the bifurcation is
                 predicted first; both are tried either way. For a pitchfork this is the only thing that
                 tells its two arms apart - they sit on the same side of the parameter and differ in the
-                sign of the amplitude.
+                sign of the amplitude - and the landing is accepted only if it moved along the
+                requested direction, so which arm is reached is a guarantee and not a hope.
             relative_offset: Used when ``offset`` is not given.
             max_newton_iterations: For the solve onto the new branch.
             quiet: Suppress the progress messages.
@@ -6691,7 +6732,9 @@ class Problem(_pyoomph.Problem):
 
         Raises:
             RuntimeError: If the bifurcation is a fold (one branch, which turns around - there is
-                nothing to switch to), or if its normal form carries no branch predictor.
+                nothing to switch to), if it is a Hopf (which sheds a periodic orbit rather than a
+                second steady branch - see :py:meth:`switch_to_hopf_orbit`), or if its normal form
+                carries no branch predictor.
         """
         if isinstance(parameter,str):
             param=self.get_global_parameter(parameter)
@@ -6704,6 +6747,16 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("A fold has only one branch through it, which turns around - there is "
                                "nothing to switch to. Arclength continuation passes around a fold by "
                                "itself.")
+        if kind=="hopf":
+            # Not merely unsupported: a Hopf's normal form DOES carry both predictor keys, so the
+            # guard below cannot catch it, and its perturbation_predictor takes (dp, omega*t) and
+            # returns an absolute state - calling it with one argument gave a bare TypeError from
+            # inside a lambda. The bifurcation GUI routes a Hopf to switch_to_orbit() before it ever
+            # gets here, so this is the plain-script path only.
+            raise RuntimeError("A Hopf sheds a periodic ORBIT, not a second steady branch, so there "
+                               "is no steady branch to switch to. Use Problem.switch_to_hopf_orbit() "
+                               "instead: it computes the first Lyapunov coefficient and builds the "
+                               "orbit guess from it.")
         param_predictor=normal_form.get("param_predictor")
         perturbation_predictor=normal_form.get("perturbation_predictor")
         if param_predictor is None or perturbation_predictor is None:
@@ -6752,13 +6805,28 @@ class Problem(_pyoomph.Problem):
                                        "freedom".format(du.size,base.size))
                 param.value=p0+dp
                 self.set_current_dofs(base+du)
+                failed=False
                 try:
                     self.solve(max_newton_iterations=max_newton_iterations)
                 except Exception:
+                    failed=True
+                # OUTSIDE the try, and collective, so that every rank reaches it whether or not it
+                # was the one that failed. Insurance rather than a known bug: oomph's own convergence
+                # and max-residual tests already allreduce (DoubleVector::max, and
+                # consume_newton_abort_request), so the ranks normally agree. What is not covered is
+                # a rank-dependent linear-solver failure or a Python exception out of an actions_*
+                # hook - and a rank that took `continue` while the others carried on deadlocks at the
+                # next collective instead of failing, which is how B6 of
+                # dev_docs/mpi_augmented_systems.md cost a 600 s hang. Every other break and continue
+                # in this ladder is driven by rank-identical data: param.value is Python-side, the
+                # dof accessors gather and scatter by global equation number, and the dot product
+                # below runs on vectors that are identical on every rank.
+                from .mpi import get_mpi_nproc,get_mpi_any
+                if get_mpi_nproc()>1:
+                    failed=get_mpi_any(failed)
+                if failed:
                     continue
                 moved=numpy.array(self.get_current_dofs()[0])-base
-                if numpy.linalg.norm(moved)<=1e-9:
-                    continue          # did not leave the bifurcation at all
                 # What separates the two branches is the AMPLITUDE IN THE CRITICAL MODE: du points
                 # along it, the branch we came from has none of it (the normal form's own splitting
                 # puts that branch's tangent in the complement of the kernel). So project what Newton
@@ -6772,8 +6840,15 @@ class Problem(_pyoomph.Problem):
                 # get_arclength_dof_derivative_vector() is EMPTY unless an arclength continuation ran
                 # in this session - after go_to_param, or on a diagram loaded from disk, every
                 # candidate was rejected out of hand and the switch always reported failure.
+                #
+                # SIGNED, not abs(): a pitchfork's two arms differ only in the sign of the amplitude,
+                # so abs() accepted a landing on the arm opposite the one `direction` asked for and
+                # then reported it as that direction's result. Nothing becomes unreachable - `sides`
+                # tries both signs either way - the landings are just attributed correctly now. The
+                # test also subsumes the absolute |moved| <= 1e-9 check that used to sit above it,
+                # which was meaningless on a dof vector of arbitrary scale.
                 du_norm=float(numpy.linalg.norm(du))
-                if abs(float(numpy.dot(moved,du)))<0.1*du_norm*du_norm:
+                if float(numpy.dot(moved,du))<0.1*du_norm*du_norm:
                     continue
                 landed=dp
                 used_pside=pside
@@ -9369,9 +9444,12 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
         Writing to a FILE is collective under MPI in every case, distributed or not: no rank returns
         before the file is complete on disk, so a load_state of it right afterwards is safe. Writing
-        to a stream is rank-local, since the stream is."""
+        to a stream is rank-local when the problem is not distributed. When it IS, the merged stream
+        is broadcast so that every rank ends up holding the same complete state -- load_state needs
+        every rank to read the whole thing back."""
         distributed=self.is_distributed()
         to_file=isinstance(fname,str)
+
         # Every rank holds the whole problem when it is not distributed, so one of them writing the
         # FILE is enough. The others used to return right here - and then raced ahead into a
         # load_state of that very file while rank 0 was still writing it: FileNotFoundError on one
@@ -9418,6 +9496,28 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             mpi_share_root_failure(error,context="writing the state file")
         elif error is not None:
             raise error # a per-rank private stream: nothing to agree on
+        if distributed and not to_file and error is None:
+            # A DISTRIBUTED stream save left rank 0 holding the whole merged state and every other
+            # rank holding NOTHING -- measured at np=2 --distribute, 5726 bytes against 0 -- because
+            # the merge above sends the non-root ranks' bytes to /dev/null. That is right for a file,
+            # where there is one; for a stream "the file" is each rank's own private object.
+            #
+            # Broadcast rather than refuse, because load_state needs every rank to read the whole
+            # state back and _snapshot_state already had to do exactly this broadcast for itself. Left
+            # alone it does not fail, it HANGS: load_state of the empty stream raises on the non-root
+            # ranks while rank 0 loads happily, and the ranks then split -- the one that raised leaves
+            # for load_state's mpi_share_any_failure barrier while the others are still inside
+            # _load_state's own collectives (reapply_boundary_conditions -> assign_eqn_numbers ->
+            # MPI_Alltoall). That barrier cannot catch it: it sits AFTER _load_state, which is itself
+            # collective.
+            comm=get_mpi_world_comm()
+            if comm is not None and get_mpi_nproc()>1:
+                payload=comm.bcast(fname.getvalue() if get_mpi_rank()==0 else None,root=0) #type:ignore
+                if get_mpi_rank()>0:
+                    fname.seek(0) #type:ignore
+                    fname.truncate(0) #type:ignore
+                    fname.write(payload) #type:ignore
+                    fname.seek(0) #type:ignore
 
 
     def load_state(self, fname:str | IO[bytes],ignore_outstep:bool=False,relative_to_output:bool=False,ignore_eigendata:bool=False,ignore_continuation_data:bool=False,additional_info:dict[Any,Any]={},quiet:bool=False):
@@ -9568,16 +9668,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             self.save_state(fname,quiet=True)
             return fname
         buf=io.BytesIO()
+        # save_state now broadcasts the merged stream itself when distributed -- this method used to
+        # do that here, and it was the only thing standing between a plain user save_state(BytesIO())
+        # on a --distribute problem and a hang in the load_state that followed.
         self.save_state(buf,quiet=True)
-        if self.is_distributed():
-            # save_state merges the mesh into ONE partition-independent stream that only rank 0 ends
-            # up holding, while load_state needs every rank to read the whole thing. So the buffer
-            # has to travel; that broadcast is the only extra cost a distributed snapshot has.
-            comm=get_mpi_world_comm()
-            assert comm is not None
-            return cast(bytes,comm.bcast(buf.getvalue() if get_mpi_rank()==0 else None,root=0))
-        # Not distributed: every rank holds the whole problem and wrote its own complete buffer
-        # (save_state skips the redundant-writer guard for streams), so there is nothing to share.
         return buf.getvalue()
 
     def _state_snapshot_name(self)->str:

@@ -909,6 +909,17 @@ class GenericEigenSolver:
 	def supports_target(self)->bool:
 		return False
 
+	def supports_complex_target(self)->bool:
+		"""Whether a target with a nonzero IMAGINARY part is honoured, not just a real one.
+
+		Separate from supports_target() because a real PETSc/SLEPc build answers yes to that one and
+		then silently drops the imaginary part of the target (petsc4py casts a numpy complex to its
+		real ScalarType with nothing but a ComplexWarning). A Hopf's left eigenvector then came back as
+		some unrelated real mode - see NormalFormCalculator.get_left_eigenvector, which falls back to
+		scipy rather than believe it.
+		"""
+		return False
+
 	def setup_matrix_contributions(self,real_contribution:str,imag_contribution:str | None=None):
 		self.real_contribution=real_contribution
 		self.imag_contribution=imag_contribution

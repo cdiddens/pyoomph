@@ -1,6 +1,7 @@
 from __future__ import annotations
 import scipy.sparse
 import scipy.sparse.linalg
+import scipy.linalg
 import scipy.special
 from .problem import Problem
 from ..expressions import GlobalParameter,ExpressionNumOrNone
@@ -11,6 +12,73 @@ from .assembly import CustomAssemblyBase
 from ..solvers.generic import DefaultMatrixType
 
 from scipy.sparse import csr_matrix      
+
+def _fd_directional_step(u,directfd,fd_eps:float)->float:
+    """Absolute step for a central difference of an EXACTLY evaluated quantity along ``directfd``.
+
+    ``fd_eps`` is relative: the largest dof moves by ``fd_eps*|u|_inf``. Two things were wrong with
+    the fixed absolute step this replaces.
+
+    *Magnitude.* What is being differenced here is the ANALYTIC Hessian contraction, whose own error
+    is a relative machine epsilon rather than a truncation. Cancellation then costs ``eps/h`` and the
+    central difference truncates at ``h^2``, so the optimum is ``h ~ eps^(1/3) ~ 6e-6`` with an error
+    of ``eps^(2/3) ~ 4e-11``. At the old ``h = 1e-7`` the error was 2.2e-9, and at the Hopf path's
+    ``1e-8`` it was 2.2e-8 -- one and two decades of accuracy given away.
+
+    *Scaling.* ``directfd`` is the critical eigenvector, unit-normalised in the EUCLIDEAN dof norm,
+    so its entries are of order ``1/sqrt(N)`` and an unscaled step perturbed each dof by
+    ``fd_eps/sqrt(N)`` -- 7e-10 on a 20k-dof problem, at or below the roundoff floor of the dofs
+    themselves, and worse the finer the mesh. That is why b3 was the least trustworthy number in the
+    normal form.
+
+    The differenced result is divided by this same step, so it stays linear in the magnitude of
+    ``directfd`` exactly as before; only the step is now chosen rather than assumed.
+    """
+    scale=max(float(numpy.max(numpy.abs(numpy.asarray(u)))),1.0)
+    dmax=float(numpy.max(numpy.abs(numpy.asarray(directfd))))
+    return fd_eps*scale/max(dmax,1e-300)
+
+
+def _as_real_eigenvector(v,what:str,tol:float=1e-8)->"numpy.ndarray":
+    """A nominally real eigenvector as a real float64 array, with its arbitrary phase removed.
+
+    A real eigenvalue's eigenvector is determined only up to a scalar, and on a COMPLEX PETSc/SLEPc
+    build that scalar is complex: SLEPc happily returns ``exp(i*phi)*v``. Taking ``numpy.real()`` of
+    that gives ``cos(phi)*v``, which for an unlucky phase is a vector of roundoff -- and the callers
+    then divide by its norm, so the noise is normalised up into a direction the normal form is
+    entirely built out of. Nothing used to check it.
+
+    Rotated by the phase of the LARGEST-MAGNITUDE entry, which is well defined for any vector that
+    is real up to a phase (the alternative, the half-angle of ``sum(v_i^2)``, is degenerate for an
+    isotropic complex vector). ``numpy.argmax`` breaks ties by lowest index, and eigenvectors are
+    contractually replicated at full global length on every rank (see
+    ``SlepcEigenSolver._vector_to_global_array``), so every rank picks the same entry.
+
+    Returns a COPY: ``numpy.real()`` of a complex array is a view into it, and normalising that in
+    place used to rescale the problem's own stored eigenvector as a side effect.
+
+    Deliberately not routed through either existing rotation:
+    ``Problem.rotate_eigenvectors`` needs a NAMED set of dofs to fix the phase by, which a normal
+    form has none of; ``rotate_complex_eigenvector_nicely`` (src/bifurcation.cpp) solves the harder
+    genuinely-complex problem, is reachable only through an installed Hopf handler, and falls back
+    to the UNROTATED vector when its own denominator is small -- exactly the hole being closed here.
+    """
+    v=numpy.asarray(v)
+    if not numpy.iscomplexobj(v):
+        return numpy.array(v,dtype=numpy.float64)
+    mag=numpy.abs(v)
+    k=int(numpy.argmax(mag))
+    if mag[k]>0:
+        v=v*numpy.exp(-1j*numpy.angle(v[k]))
+    re=numpy.real(v)
+    nre=float(numpy.linalg.norm(re))
+    nim=float(numpy.linalg.norm(numpy.imag(v)))
+    if nim>tol*max(nre,1e-300):
+        raise RuntimeError(what+" is not real up to a phase: after rotating onto the real axis the "
+                           "imaginary part is still "+str(nim/max(nre,1e-300))+" of the real one. A "
+                           "real bifurcation needs a real null vector; a complex one is a Hopf.")
+    return numpy.array(re,dtype=numpy.float64)
+
 
 def _allgather_square(problem:Problem,mat:DefaultMatrixType,n:int)->DefaultMatrixType:
     """Turn a distributed row block into the whole square matrix, on every rank.
@@ -151,8 +219,16 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         if verbose:
             print("Given q does not fulfill the eigenvector equation. Resolving it.")
         esolv_kwargs=eigensolve_kwargs.copy()
-        if esolver.supports_target():
-            esolv_kwargs["target"]=1j*omega0
+        if not esolver.supports_complex_target():
+            # Both the target and the shift below are +-i*omega0; a real build silently keeps only
+            # their real parts (a ComplexWarning, nothing more) and then shift-inverts around ~0,
+            # which returns some other mode entirely. Nothing here can work around that, unlike the
+            # adjoint below, so say what is wrong rather than carry on with the wrong q.
+            raise RuntimeError("Re-solving for the Hopf eigenvector needs an eigensolver that can "
+                               "target a COMPLEX value. This one cannot (a real PETSc/SLEPc build "
+                               "would silently drop the imaginary part). Pass a q that satisfies the "
+                               "eigenvector equation, or use a complex PETSc/SLEPc build.")
+        esolv_kwargs["target"]=1j*omega0
         eval,evects,_,_=problem.get_eigen_solver().solve(1,custom_J_and_M=(A,M),**esolv_kwargs,shift=(1j+omega_epsilon)*omega0,v0=None if q is None else numpy.array(q),sort=False,quiet=False)
         #for ev,evec in zip(eval,evects):
         #    print("EVAL",ev)
@@ -188,7 +264,10 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
 
     esolv_kwargs=eigensolve_kwargs.copy()
     # 'or' here used to mean that asking for the Hopf tracker selected the eigensolver instead.
-    if esolver.supports_target() and not use_hopf_tracker_for_adjoint:
+    # supports_COMPLEX_target: the adjoint is the one at -i*omega0, and a real PETSc/SLEPc build
+    # answers supports_target() and then truncates that target to 0. The HopfTracker route below needs
+    # no complex arithmetic at all, so it is what a real build should take.
+    if esolver.supports_complex_target() and not use_hopf_tracker_for_adjoint:
         esolv_kwargs["target"]=-1j*omega0
         evalT,evectT,_,_=problem.get_eigen_solver().solve(1,custom_J_and_M=(AT,MT),**esolv_kwargs,shift=-(1j+omega_epsilon)*omega0,v0=numpy.conjugate(q_resolved),sort=False,quiet=False)   # TODO: Is MT right here?                  #type:ignore
     else:
@@ -309,13 +388,23 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
     def d3f(direct):
         # C(v,v,v), as a central difference of the analytic Hessian contraction along the same
         # direction. There is no third derivative in the code generator, so this is the only route.
-        problem.set_current_dofs(u+delt*direct)
+        #
+        # The step is RELATIVE (see _fd_directional_step): delt alone perturbs each dof by
+        # delt/sqrt(N) once direct is a unit-normalised eigenvector, which on a fine mesh is below
+        # the roundoff floor of the dofs. delt's numeric value (1e-5) is already near the
+        # eps_mach^(1/3) optimum and is unchanged; only its meaning is.
+        step=_fd_directional_step(u,direct,delt)
+        problem.set_current_dofs(u+step*direct)
         res_hessp=-numpy.array(problem.get_second_order_directional_derivative(direct))
-        problem.set_current_dofs(u-delt*direct)
+        problem.set_current_dofs(u-step*direct)
         res_hessm=-numpy.array(problem.get_second_order_directional_derivative(direct))
         problem.set_current_dofs(u)        
-        res_hess=0.5*(res_hessp-res_hessm)/delt
+        res_hess=0.5*(res_hessp-res_hessm)/step
         if check_derivatives_by_fd:
+            # Deliberately NOT the same step: this differences the RESIDUAL, not an analytic
+            # Hessian, so its optimum is eps_mach^(1/5) rather than eps_mach^(1/3). It is the
+            # sloppier of the two by construction - it costs two extra assemblies per call and is
+            # far less accurate than what it is checking.
             fmm=nodalf(u-2*delt*direct)
             fm=nodalf(u-delt*direct)
             fp=nodalf(u+delt*direct)
@@ -2338,59 +2427,255 @@ class DeflationAssemblyHandler(AugmentedAssemblyHandler):
 
 
 class NormalFormCalculator:
-      def __init__(self,problem:Problem):
+      def __init__(self,problem:Problem,fd_eps:float | None=None):
             self.problem=problem
-            self.fd_eps=1e-7
+            # RELATIVE, and near eps_mach^(1/3) -- see _fd_directional_step for both halves of why
+            # the old absolute 1e-7 was wrong. Overridable because it is the one tunable number in
+            # here whose optimum depends on how accurately the Hessian itself comes out, and because
+            # sweeping it is how the default was chosen.
+            self.fd_eps=1e-5 if fd_eps is None else float(fd_eps)
                   
       def d2f(self,direct):                    
         res_hess=-numpy.array(self.problem.get_second_order_directional_derivative(direct))                
         return res_hess
   
       def d3f(self,direct,directfd=None):
+            """C(direct,direct,directfd), as a central difference of the analytic Hessian contraction.
+
+            There is no third derivative in the code generator, so this is the only route.
+            """
             if directfd is None:
                 directfd=direct
             u=self.problem.get_current_dofs()[0]
-            direct_scale=1
-            self.problem.set_current_dofs(u+self.fd_eps*directfd*direct_scale)
+            step=_fd_directional_step(u,directfd,self.fd_eps)
+            self.problem.set_current_dofs(u+step*directfd)
             res_hessp=-numpy.array(self.problem.get_second_order_directional_derivative(direct))
-            self.problem.set_current_dofs(u-self.fd_eps*directfd*direct_scale)
+            self.problem.set_current_dofs(u-step*directfd)
             res_hessm=-numpy.array(self.problem.get_second_order_directional_derivative(direct))
             self.problem.set_current_dofs(u)        
-            res_hess=0.5*(res_hessp-res_hessm)/(self.fd_eps*direct_scale)
+            res_hess=0.5*(res_hessp-res_hessm)/step
             return res_hess
       
       
 
+      def pencil(self):
+            """``(A, M) = (-J, M)``, whole square matrices on EVERY rank.
+
+            The sign convention is the one of dev_docs/mpi_eigenproblems.md section 0: the C++ core
+            assembles ``J = dR/dU`` untouched, and the negation into the pencil ``A v = lambda M v``
+            happens exactly once, in Python. So ``A`` is also the ``L = -J`` the normal form wants,
+            and taking both from the same call is what makes the bordered solve's null vectors belong
+            to the matrix they border -- they come from the eigensolve of this very pencil.
+
+            Under --distribute the assembly hands back this rank's row block; _allgather_square makes
+            it whole, exactly as get_hopf_lyapunov_coefficient does. Every rank then runs the same
+            algebra on the same matrices, which is what the collective calls further down require.
+            """
+            n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
+            M=csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n))
+            A=csr_matrix((-J_val, J_ci, J_rs), shape=(J_nr, n))
+            if M.shape[0]!=n or A.shape[0]!=n:
+                M,A=_allgather_square(self.problem,M,n),_allgather_square(self.problem,A,n)
+            return A,M
+
+      def Hraw(self,v):
+            """H(v,v), the analytic Hessian contracted with ``v`` in both slots.
+
+            The RAW sign, i.e. +d(dR/dU)/dU contracted twice, which is what the multi-assembly's
+            ``dJdU(v)`` gives -- note :py:meth:`d2f` is its negative. Verified against the
+            multi-assembly to 4e-16; see dev_docs/branch_switching.md.
+            """
+            return numpy.array(self.problem.get_second_order_directional_derivative(numpy.asarray(v)))
+
+      def Hpair(self,a,b):
+            """H(a,b), the Hessian contracted with a DIFFERENT vector in each slot, by polarisation.
+
+            ``0.25*(H(a+b,a+b) - H(a-b,a-b))``: two assemblies rather than the three of the
+            symmetric form, and the idiom get_hopf_lyapunov_coefficient already uses. This is what
+            replaces the matrix ``dJdU(a)`` of the custom multi-assembly, which only ever appeared as
+            a product against a vector anyway -- and the multi-assembly does not work under MPI.
+
+            A complex argument is expanded BILINEARLY, not sesquilinearly: what it stands in for is a
+            matrix-vector product, and no conjugate appears in one of those.
+            """
+            a=numpy.asarray(a); b=numpy.asarray(b)
+            if numpy.iscomplexobj(a) or numpy.iscomplexobj(b):
+                  ar,ai=numpy.real(a),numpy.imag(a)
+                  br,bi=numpy.real(b),numpy.imag(b)
+                  return ((self._Hpair_real(ar,br)-self._Hpair_real(ai,bi))
+                          +1j*(self._Hpair_real(ar,bi)+self._Hpair_real(ai,br)))
+            return self._Hpair_real(a,b)
+
+      def _Hpair_real(self,a,b):
+            if not numpy.any(a) or not numpy.any(b):
+                  # An exactly zero slot gives an exactly zero contraction, and the two assemblies it
+                  # would otherwise cost are the common case on a trivial branch.
+                  return numpy.zeros(len(a),dtype=numpy.float64)
+            return 0.25*(self.Hraw(a+b)-self.Hraw(a-b))
+
+      def dJdp_dot(self,param:str,v):
+            """``(dJ/dparameter) @ v``, as a central difference of the ANALYTIC dR/dparameter.
+
+            Mixed partials commute, so ``(dJdp @ v)_i = d/dt [ dR_i/dparameter at u + t*v ]`` at
+            t=0 -- two cheap VECTOR assemblies, no matrix and no gather, where a difference in the
+            parameter would cost two whole eigen assemblies. Measured a decade more accurate than
+            that alternative as well (2.3e-11 against 3.8e-10 on the Bratu fold), because the
+            quantity being differenced is exact in the parameter and only the dofs move.
+            """
+            v=numpy.asarray(v)
+            if numpy.iscomplexobj(v):
+                  # Linear in v, so the two halves are two independent differences.
+                  return (self.dJdp_dot(param,numpy.real(v))
+                          +1j*self.dJdp_dot(param,numpy.imag(v)))
+            u=numpy.array(self.problem.get_current_dofs()[0])
+            step=_fd_directional_step(u,v,self.fd_eps)
+            self.problem.set_current_dofs(u+step*v)
+            dp=numpy.array(self.problem.get_parameter_derivative(param))
+            self.problem.set_current_dofs(u-step*v)
+            dm=numpy.array(self.problem.get_parameter_derivative(param))
+            self.problem.set_current_dofs(u)
+            return (dp-dm)/(2*step)
+
       def la_solve(self,A,rhs):
-        #res=numpy.linalg.solve(A.toarray(),rhs) # TODO: Improve here        
+        """A plain solve, for the systems on this path that really are NONSINGULAR.
+
+        At a Hopf, J is regular -- the singularity is in J +- i*omega*M -- so psi001, psi110 and
+        psi200 are ordinary solves and this is the right routine for them. The lsqr fallback should
+        therefore never fire here; if it does, J itself is near-singular, i.e. the Hopf is close to
+        a codim-2 point, and a least-squares answer papers over that rather than fixing it. Hence
+        the tight tolerances: the loose defaults (atol=btol=1e-6) would have returned a plausible
+        vector instead.
+
+        The SINGULAR solves of the real branch-point normal form do NOT come here -- see
+        :py:meth:`bordered_la_solve`.
+        """
         res= scipy.sparse.linalg.spsolve(A,rhs)# TODO: Improve here to use e.g. Pardiso (however, requires complex support)                   
         if numpy.isnan(numpy.sum(res)): #type:ignore
             print("Matrix rank warning. Going for a least squares solution")
-            #res= numpy.linalg.lstsq(A.toarray(),rhs,rcond=None)[0]
-            res=scipy.sparse.linalg.lsqr(A,rhs)[0] #type:ignore
+            res=scipy.sparse.linalg.lsqr(A,rhs,atol=1e-13,btol=1e-13)[0] #type:ignore
         return res
+
+      def bordered_la_solve(self,L,rhs,zeta,zeta_star,tol:float=1e-8):
+        """Solve ``L psi = rhs`` for the zeta_star-orthogonal component, through a BORDERED system.
+
+            [[L,        zeta], [psi]   [rhs]
+             [zeta_star^T, 0]] [ s ] = [ 0 ]
+
+        ``L = -J`` is EXACTLY singular at a branch point -- that is what makes it a branch point --
+        so a plain ``spsolve`` there is undefined. What it actually did was worse than failing:
+        measured on a transcritical PDE branch point it returned a FINITE vector with no warning,
+        so the NaN test never tripped, the lsqr fallback never ran, and b3 was whatever that vector
+        projected to. The outer ``E()`` projection removing the kernel component is the only reason
+        the answer was ever usable at all.
+
+        The bordered matrix is nonsingular whenever the singularity is simple, i.e.
+        ``<zeta,zeta_star> != 0``, which the caller has already checked, and its solution is the
+        zeta_star-orthogonal one directly -- at the conditioning of the BORDERED matrix rather than
+        of L.
+
+        ``s`` comes out zero by construction: ``rhs`` is E()-projected, hence orthogonal to
+        ``ker(L^T) = zeta_star``, and so is ``L psi``, so taking ``<zeta_star,.>`` of the first row
+        leaves ``s*<zeta_star,zeta> = 0``. A nonzero one says the border is inconsistent -- the
+        zeta and zeta_star handed in do not belong to this L -- which would silently give a wrong
+        psi, so it is checked rather than discarded.
+        """
+        n=L.shape[0]
+        rhs=numpy.asarray(rhs)
+        nrhs=float(numpy.linalg.norm(rhs))
+        if nrhs==0.0:
+            # Not a shortcut for speed: bmat on an all-zero right-hand side is fine, but the trivial
+            # branch of these problems has dR/dparameter identically zero, so this is the common case
+            # and the exact zero is the exact answer.
+            return numpy.zeros(n,dtype=numpy.float64)
+        zeta=numpy.asarray(zeta).reshape(n,1)
+        zs=numpy.asarray(zeta_star).reshape(1,n)
+        A=scipy.sparse.bmat([[L,scipy.sparse.csr_matrix(zeta)],
+                             [scipy.sparse.csr_matrix(zs),None]],format="csc")
+        b=numpy.concatenate([rhs,[0.0]])
+        x=scipy.sparse.linalg.spsolve(A,b) #type:ignore
+        if numpy.isnan(numpy.sum(x)): #type:ignore
+            raise RuntimeError("The bordered solve of the normal form is singular. That needs "
+                               "<zeta,zeta_star> != 0 AND a simple singularity of L; a second "
+                               "eigenvalue at zero would do this.")
+        s=float(x[n])
+        if abs(s)>tol*nrhs:
+            raise RuntimeError("The bordered solve's border residual is "+str(abs(s)/nrhs)+
+                               " of the right-hand side, where it must be zero. The null vectors do "
+                               "not belong to this Jacobian, so the normal form would be wrong.")
+        return numpy.asarray(x[:n])
             
-      def get_left_eigenvector(self,lamb):
-            self.problem._require_non_distributed("Left eigenvector calculation")
-            n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
-            M=csr_matrix((M_val, M_ci, M_rs), shape=(n, n))	#TODO: Is csr or csc?
-            A=csr_matrix((-J_val, J_ci, J_rs), shape=(n, n))
+      def _left_eigenvector_by_scipy(self,AT:DefaultMatrixType,MT:DefaultMatrixType,lamb:complex):
+            """Left eigenpair nearest ``lamb`` by a COMPLEX shift-invert done in scipy.
+
+            For eigen solvers that cannot target a complex value themselves. The matrices are cast to
+            complex128 on purpose: ARPACK's REAL driver rejects a complex sigma (it wants an OPpart and
+            then returns only one part of the shifted operator), while the complex driver takes it
+            directly. The cast is what selects the latter.
+            """
+            n=AT.shape[0]
+            if n<4:
+                # ARPACK needs k<n-1; below that a dense solve is cheap anyway.
+                evals,evects=scipy.linalg.eig(AT.toarray(),b=MT.toarray())
+                return numpy.asarray(evals),numpy.transpose(numpy.asarray(evects))
+            evals,evects=scipy.sparse.linalg.eigs(AT.astype(numpy.complex128),k=min(2,n-2),
+                                                  M=MT.astype(numpy.complex128),sigma=complex(lamb)) #type:ignore
+            return numpy.asarray(evals),numpy.transpose(numpy.asarray(evects))
+
+      def get_left_eigenvector(self,lamb,tolerance:float=1e-4,pencil=None):
+            """Left eigenvector of the eigenpair at ``lamb``, i.e. the null vector of the transposed pencil.
+
+            The eigenvalue actually found is checked against ``lamb`` (relative to its magnitude): a
+            shift-invert that lands on a different mode gives a left eigenvector that is simply wrong,
+            and every quantity of the normal form is a projection onto it, so a silent miss would come
+            out as a plausible-looking but meaningless normal form.
+
+            ``pencil`` is the ``(A, M)`` of :py:meth:`pencil`, passed in when the caller has already
+            built it so that the assembly (and, distributed, its gather) is not paid for twice -- and,
+            more importantly, so that the null vectors and the matrix they are the null vectors OF
+            come from one and the same assembly.
+            """
+            A,M=self.pencil() if pencil is None else pencil
             AT=A.transpose().tocsr()
             MT=M.transpose().tocsr()
-            if not self.problem.get_eigen_solver().supports_target():
-                if numpy.abs(numpy.imag(lamb))>1e-8:
-                    raise RuntimeError("Eigenvalue is not real. Complex left eigenvector must be implemented for a solver without target")
-                evals,evects,_,_=self.problem.get_eigen_solver().solve(2,shift=1e-7,custom_J_and_M=(AT,MT)) #type:ignore
+            solver=self.problem.get_eigen_solver()
+            is_complex=numpy.abs(numpy.imag(lamb))>1e-8
+            if is_complex and not solver.supports_complex_target():
+                # A real PETSc/SLEPc build passes supports_target() and then truncates the target to
+                # Re(lamb), returning some real mode instead of the Hopf pair - it used to reach the
+                # caller as a dtype error on "zeta_star /= <complex>", and would otherwise have been a
+                # wrong normal form. scipy needs no complex build for this.
+                evals,evects=self._left_eigenvector_by_scipy(AT,MT,lamb)
+            elif not solver.supports_target():
+                evals,evects,_,_=solver.solve(2,shift=1e-7,custom_J_and_M=(AT,MT)) #type:ignore
             else:    
-                evals,evects,_,_=self.problem.get_eigen_solver().solve(2,shift=1e-7,target=lamb,custom_J_and_M=(AT,MT)) #type:ignore
+                evals,evects,_,_=solver.solve(2,shift=1e-7,target=lamb,custom_J_and_M=(AT,MT)) #type:ignore
+            if len(evals)==0:
+                raise RuntimeError("The left eigenvector solve returned no eigenvalues at all")
             closest=numpy.argmin(numpy.abs(evals-lamb))
-            return evects[closest],evals[closest]
+            scale=max(numpy.abs(lamb),1.0)
+            if numpy.abs(evals[closest]-lamb)>tolerance*scale:
+                raise RuntimeError("The left eigenvector solve landed on the eigenvalue "+str(evals[closest])+
+                                   " instead of the requested "+str(lamb)+". The left eigenvector would belong "+
+                                   "to a different mode, so the normal form is not computed from it.")
+            # complex128 unconditionally: a solver that has only seen real eigenvalues hands back a real
+            # array, which the callers then divide by a complex scalar in place.
+            out=numpy.asarray(evects[closest],dtype=numpy.complex128)
+            # Broadcast, and not decoration. _left_eigenvector_by_scipy runs ARPACK REDUNDANTLY on
+            # every rank with no start vector, so nothing makes the ranks agree on the phase, the
+            # sign or the last bits. zeta_star is the border of the bordered solve, the projector in
+            # E(), and the vector every coefficient is a projection onto -- ranks that disagree about
+            # it compute different normal forms and then take different branches of switch_branch's
+            # acceptance test, which deadlocks at the next collective rather than failing.
+            from .mpi import get_mpi_nproc,get_mpi_bcast
+            if get_mpi_nproc()>1:
+                out=numpy.asarray(get_mpi_bcast(out),dtype=numpy.complex128)
+            return out,evals[closest]
       
-      def get_normal_form(self,param:str | None=None,eigenindex:int=0,assume:str | None=None):
+      def get_normal_form(self,param:str | None=None,eigenindex:int=0,assume:str | None=None,verbose:bool=True):
         """Normal form of the bifurcation the problem is sitting at, Hopf or real.
 
-        ``assume`` is passed on to :py:meth:`get_normal_form1d` and forces its fold/branch-point
-        decision; it has no meaning for a Hopf and is rejected there.
+        ``assume`` is passed on to :py:meth:`get_normal_form1d` and forces its fold/branch-point or
+        pitchfork/transcritical decision; it has no meaning for a Hopf and is rejected there.
         """
         if param is None:
             if self.problem._bifurcation_tracking_parameter_name is not None and self.problem._bifurcation_tracking_parameter_name!="":
@@ -2402,13 +2687,13 @@ class NormalFormCalculator:
         lambd=self.problem.get_last_eigenvalues()[eigenindex]
         if numpy.abs(numpy.imag(lambd))>1e-8:
             if assume is not None:
-                raise ValueError("assume applies to the fold/branch-point decision of a real "
+                raise ValueError("assume applies to the classification of a real "
                                  "bifurcation; this eigenvalue is complex, so it is a Hopf")
-            return self.get_normal_form_hopf(param=param,eigenindex=eigenindex)
+            return self.get_normal_form_hopf(param=param,eigenindex=eigenindex,verbose=verbose)
         else:
-            return self.get_normal_form1d(param=param,eigenindex=eigenindex,assume=assume)
+            return self.get_normal_form1d(param=param,eigenindex=eigenindex,assume=assume)  # its own printing is the classification report
         
-      def get_normal_form_hopf(self,param:str | None=None,eigenindex:int=0):
+      def get_normal_form_hopf(self,param:str | None=None,eigenindex:int=0,verbose:bool=False):
             # Translated from Julia language code BifurcationKitDocs.jl (https://bifurcationkit.github.io/BifurcationKitDocs.jl)
             #raise RuntimeError("Hopf calculation does not really work without considering the mass matrix")
             # Generalized by a mass matrix
@@ -2424,49 +2709,55 @@ class NormalFormCalculator:
             omega=numpy.imag(lambd)
             
             
-            zeta=self.problem.get_last_eigenvectors()[eigenindex]
+            # A copy, and complex: get_last_eigenvectors() hands out a VIEW of the problem's own array,
+            # so an in-place normalisation here rescaled the stored eigenvector as a side effect.
+            zeta=numpy.array(self.problem.get_last_eigenvectors()[eigenindex],dtype=numpy.complex128)
             # TODO: Scale zeta reasonably
             zeta/=numpy.linalg.norm(zeta)
             czeta=numpy.conj(zeta)            
             self.problem.deactivate_bifurcation_tracking()
             self.problem.timestepper.make_steady()
             
-            self.problem._require_non_distributed("Bifurcation branch switching")
-            n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = self.problem.assemble_eigenproblem_matrices(0) #type:ignore
-            M=csr_matrix((M_val, M_ci, M_rs), shape=(n, n)).copy()	#TODO: Is csr or csc?
+            # Same move as get_normal_form1d: off the Python custom multi-assembly, which throws for
+            # any nproc > 1, and onto accessors that are MPI-safe in both regimes.
+            A,M=self.pencil()
+            L=A                                   # A = -J
             
-            
-            zeta_star,lambd_star=self.get_left_eigenvector(numpy.conj(lambd))
+            zeta_star,lambd_star=self.get_left_eigenvector(numpy.conj(lambd),pencil=(A,M))
             zeta_star /= numpy.vdot(M@zeta,zeta_star )                        
                         
             
-            
-            dRdp,J,dJdp,HzetaR,HzetaI=PerformCustomMultiAssembly(self.problem,lambda a : a.dRdp(param).J().dJdp(param).dJdU(numpy.real(zeta)).dJdU(numpy.imag(zeta))).result()
-            Hzeta=(HzetaR+1j*HzetaI)/2
-            R01=-dRdp
-            L=-J
+            # Hzeta stood for the MATRIX (dJdU(Re zeta) + i*dJdU(Im zeta))/2, and only ever appeared
+            # as a product against a vector. Written out, that product is half the bilinear Hessian
+            # contraction, which is what Hpair gives -- so the factor of one half the TODO below is
+            # about is now in plain sight rather than folded into a matrix.
+            Hzeta_dot=lambda x: 0.5*self.Hpair(zeta,x)
+            cHzeta_dot=lambda x: numpy.conj(0.5*self.Hpair(zeta,numpy.conj(x)))
+            R01=-numpy.array(self.problem.get_parameter_derivative(param))
+            u=numpy.array(self.problem.get_current_dofs()[0])
             psi001=self.la_solve(L,-R01) # TODO: This must be checked
-            av=-dJdp@zeta
-            av += 2 * Hzeta@ psi001 # TODO: This must be checked
+            av=-self.dJdp_dot(param,zeta)
+            av = av + 2 * Hzeta_dot(psi001) # TODO: This must be checked
             a = numpy.vdot(av, zeta_star)
             
             
-            R20 = Hzeta@zeta
+            R20 = Hzeta_dot(zeta)
             psi200 = self.la_solve((2j*omega*M-L), R20)
-            R20 =  Hzeta@czeta
+            R20 =  Hzeta_dot(czeta)
             psi110 = self.la_solve(L, -R20)        
             
             # Third order term is a mess
-            u=self.problem.get_current_dofs()[0]
-            delt=1e-8
-            
             def R3(dx1,dx2,dx3):
-                self.problem.set_current_dofs(u+delt*dx1)
-                dJp,=PerformCustomMultiAssembly(self.problem,lambda a : a.dJdU(dx3)).result()
-                self.problem.set_current_dofs(u-delt*dx1)                
-                dJm,=PerformCustomMultiAssembly(self.problem,lambda a : a.dJdU(dx3)).result()
+                # d/dt H(dx3,dx2) along dx1, by a central difference with the same relative step the
+                # real path uses. The old absolute 1e-8 was two decades below the eps_mach^(1/3)
+                # optimum AND unscaled -- see _fd_directional_step.
+                step=_fd_directional_step(u,dx1,self.fd_eps)
+                self.problem.set_current_dofs(u+step*dx1)
+                hp=self.Hpair(dx3,dx2)
+                self.problem.set_current_dofs(u-step*dx1)                
+                hm=self.Hpair(dx3,dx2)
                 self.problem.set_current_dofs(u)
-                return -((dJp-dJm)@dx2)/(2*delt)
+                return -(hp-hm)/(2*step)
             
             def third_order(R3,dx1, dx2, dx3): # x2=x1 assumed here
                 dx1r = numpy.real(dx1);  dx2r=numpy.real(dx2); dx3r = numpy.real(dx3)
@@ -2480,16 +2771,32 @@ class NormalFormCalculator:
 
             
             
-            #bv = 2 * Hzeta@psi110 + 2 * numpy.conj(Hzeta)@psi200 + 3 * third_order(lambda d1,d2,d3:R3(d1,d2,d3), zeta,zeta,czeta)
-            # TODO: Here is still something not perfect in the quadratic terms...
-            bv =  Hzeta@psi110 +  2*numpy.conj(Hzeta)@psi200 + 3 * third_order(lambda d1,d2,d3:R3(d1,d2,d3), zeta,zeta,czeta)
-            print("HZETA1",Hzeta@psi110)
-            print("HZERA2",numpy.conj(Hzeta)@psi200)
-            
-            
+            # OPEN, with numbers rather than a bare TODO. Cross-checked against
+            # get_hopf_lyapunov_coefficient, which is an independent implementation of the same
+            # coefficient in Kuznetsov's invariant normalisation, ga = Re(b)/omega0 (see
+            # dev_docs/hopf_normal_form.md section 1). Measured on tests/hopf_lyapunov_worker.py:
+            #
+            #   case                     quadratic terms   ga*omega0 / b
+            #   ODE normal form, m=1,2   exactly zero      2.000000
+            #   Brusselator, A=1.5       dominant          0.99984
+            #   Brusselator, A=1.0       Re() cancels      2.2918
+            #
+            # So it is NOT one constant, and the old TODO's guess ("the quadratic terms") is at odds
+            # with the first row, where they are identically zero and b is still exactly half. Do not
+            # "fix" it by a factor: that makes row 1 right and row 2 wrong.
+            #
+            # What is NOT broken is the prediction, and that is why nothing caught this. On the ODE
+            # case the exact amplitude equation is m*rdot = mu*r + sigma*r^3, so with a unit-norm
+            # eigenvector (r = sqrt(2)*|z|) the true coefficient is 2*sigma/m while b comes out as
+            # sigma/m -- and perturbation_predictor below divides by 2*Re(b) where the normal form
+            # says Re(b), so the two errors cancel and the predicted orbit radius is exactly
+            # sqrt(-dp/sigma). Changing either alone breaks it.
+            bv1=Hzeta_dot(psi110)
+            bv2=cHzeta_dot(psi200)
+            bv3=third_order(lambda d1,d2,d3:R3(d1,d2,d3), zeta,zeta,czeta)
+            bv =  bv1 +  2*bv2 + 3 * bv3
             
             b = numpy.vdot(bv, zeta_star)            
-            #b*=2
             
             if omega>0:
                 a=numpy.conj(a)
@@ -2506,29 +2813,45 @@ class NormalFormCalculator:
             # omega_l=omega0+ imag(a)*dp - real(a)*imag(b)*dp/real(b) 
             
             
-            print("omega",omega)
-            print("a",a)
-            print("b",b)
+            if verbose:
+                print("Hopf normal form: omega =",omega,", a =",a,", b =",b)
             res:dict[str,Any]={}
             res["type"]="hopf"
+            res["a"]=a
+            res["b"]=b
+            res["omega"]=omega
+            # The three contributions to b separately: the two quadratic-times-quadratic terms and
+            # the genuine cubic one. Kept because which of them carries the open factor above is the
+            # whole question, and a bare "b" cannot say. As three scalars rather than a tuple, so
+            # that the bifurcation GUI's _normal_form_to_state keeps them - it stores complex
+            # scalars and silently drops anything it has no rule for.
+            res["b_term_quad1"]=complex(numpy.vdot(bv1,zeta_star))
+            res["b_term_quad2"]=complex(numpy.vdot(bv2,zeta_star))
+            res["b_term_cubic"]=complex(numpy.vdot(bv3,zeta_star))
             psign=1 if numpy.real(a)/numpy.real(b)<0 else -1
             res["psign"]=psign
             res["zeta"]=zeta
             res["param_predictor"]=lambda dp : psign*abs(dp)
             res["omega_predictor"]=lambda dp : omega+ numpy.imag(a)*dp - numpy.real(a)*numpy.imag(b)*dp/numpy.real(b) 
+            # The 2 in the denominator is not the textbook |z| = sqrt(-Re(a)*dp/Re(b)); it is the
+            # other half of the open factor recorded above, and it makes the predicted radius come
+            # out exactly right on the case where the exact orbit is known. See the block above
+            # before touching either.
             res["perturbation_predictor"]=lambda dp,omegat: u+numpy.sqrt(numpy.abs(numpy.real(a)*dp/(2*numpy.real(b))))*numpy.real(zeta*numpy.exp(1j*omegat)+czeta*numpy.exp(-1j*omegat))
             return res
             
             
             
             
-      def get_normal_form1d(self,param:str | None=None,eigenindex:int=0,assume:str | None=None,tol_fold:float=1e-3):
+      def get_normal_form1d(self,param:str | None=None,eigenindex:int=0,assume:str | None=None,tol_fold:float=1e-3,tol_pitchfork:float=1e-3):
             """Normal form of a real (non-Hopf) bifurcation the problem is sitting at.
 
             ``assume`` overrides the fold/branch-point decision with "fold" or "branch_point" - useful
             when the geometry of the branch already answers it, e.g. when the continuation walked
-            THROUGH the point without the parameter turning around, which no fold does. ``tol_fold`` is
-            compared against the scale-free measure described below, not against a itself.
+            THROUGH the point without the parameter turning around, which no fold does - or the
+            pitchfork/transcritical decision with "pitchfork" or "transcritical", which a caller who
+            knows the problem's symmetry often does. ``tol_fold`` and ``tol_pitchfork`` are compared
+            against the scale-free measures described below, not against ``a`` or ``b2`` themselves.
             """
             # Compute a normal form based on Golubitsky, Martin, David G Schaeffer, and Ian Stewart. Singularities and Groups in Bifurcation Theory. New York: Springer-Verlag, 1985, VI.1.d page 295.
             # Translated from Julia language code BifurcationKitDocs.jl (https://bifurcationkit.github.io/BifurcationKitDocs.jl)
@@ -2543,53 +2866,47 @@ class NormalFormCalculator:
             lambd=self.problem.get_last_eigenvalues()[eigenindex]
             # TODO: Check lambda small Re and no imag
             lambd=numpy.real(lambd)
-            zeta=self.problem.get_last_eigenvectors()[eigenindex]
-            zeta=numpy.real(zeta)
+            zeta=_as_real_eigenvector(self.problem.get_last_eigenvectors()[eigenindex],
+                                      "The critical eigenvector")
             # TODO: Scale zeta reasonably
             zeta/=numpy.linalg.norm(zeta)
             self.problem.deactivate_bifurcation_tracking()
             self.problem.timestepper.make_steady()
             
-            zeta_star,lambd_star=self.get_left_eigenvector(lambd)
-            zeta_star = numpy.real(zeta_star)
+            # One pencil, shared with the left eigensolve below and used as L. Everything the normal
+            # form needs used to come from the Python custom multi-assembly, which throws from
+            # Problem::sparse_assemble_row_or_column_compressed_base_problem the moment there is more
+            # than one rank -- with OR without --distribute. Each piece now comes from an accessor
+            # that is MPI-safe in both regimes, the same move deflation and
+            # get_hopf_lyapunov_coefficient made; see dev_docs/branch_switching.md.
+            A,_M=self.pencil()
+            L=A                                   # A = -J is exactly the L this wants
+            zeta_star,lambd_star=self.get_left_eigenvector(lambd,pencil=(A,_M))
+            zeta_star = _as_real_eigenvector(zeta_star,"The left eigenvector")
             lambd_star = numpy.real(lambd_star)
             if abs(numpy.dot(zeta, zeta_star)) < 1e-10:
                   raise RuntimeError("The left and right eigenvectors are orthogonal, which should not be")
             zeta_star /= numpy.dot(zeta, zeta_star)
-            dRdp,J,dJdp,Hzeta=PerformCustomMultiAssembly(self.problem,lambda a : a.dRdp(param).J().dJdp(param).dJdU(zeta)).result()
-            R01=-dRdp
+            R01=-numpy.array(self.problem.get_parameter_derivative(param))
             a = numpy.dot(R01, zeta_star)
-            L=-J
             
             E = lambda x: x - numpy.dot(x, zeta_star) *zeta
-            #print("zeta",zeta)
-            #print("zeta_star",zeta_star)
-            #print("L",L)
-            #print("R01",R01)
             ER01=E(R01)
-            #print("ER01",ER01)
-            psi01=E(self.la_solve(L,ER01))
-            
-            #print("psi01=",psi01,E(psi01))
-            #psiJulia=numpy.array([-2.844267585714278, 0.1853775935202674, -0.004439531011646893])
-            #print("RES PsiJulia",L@psiJulia-E(R01))
-            #print("dot1",numpy.dot(psiJulia,zeta_star))
-            #print("dot2",numpy.dot(psiJulia,zeta))
-            #print("RES JUlia",psiJulia,E(psiJulia))
-            #resPetsc=self.nullspace_la_solve(L,E(R01),zeta,zeta_star)
-            #print("RES PsiPetsc",resPetsc,E(resPetsc))
-            #exit()
-            dF=lambda x: -dJdp@x
-            R11=dF(zeta)
+            # bordered_la_solve, not la_solve: L is EXACTLY singular here. The outer E() is kept - it
+            # is now a no-op to machine precision, which is exactly the assertion.
+            psi01=E(self.bordered_la_solve(L,ER01,zeta,zeta_star))
+            # dJdp_dot BEFORE anything moves the dofs; it restores them itself, but the base state is
+            # what it has to difference around.
+            R11=-self.dJdp_dot(param,zeta)
             
             
-            b1 = numpy.dot(R11 + Hzeta@psi01, zeta_star)
+            b1 = numpy.dot(R11 + self.Hpair(zeta,psi01), zeta_star)
             
-            b2v = -Hzeta@zeta
+            b2v = -self.Hraw(zeta)                # H(zeta,zeta) needs no polarisation
             b2 = numpy.dot(b2v, zeta_star)
             
-            wst = E(self.la_solve(L, E(b2v))) # Golub. Schaeffer Vol 1 page 33, eq 3.22    
-            b3v = self.d3f(zeta) + 3 * Hzeta@wst
+            wst = E(self.bordered_la_solve(L, E(b2v), zeta, zeta_star)) # Golub. Schaeffer Vol 1 page 33, eq 3.22    
+            b3v = self.d3f(zeta) + 3 * self.Hpair(zeta,wst)
             b3 = numpy.dot(b3v, zeta_star)    
             # "Is a zero?" is the fold/branch-point question, but a itself carries no scale: zeta_star is
             # normalised by 1/<zeta,zeta_star>, so a mode whose left and right null vectors overlap
@@ -2599,14 +2916,47 @@ class NormalFormCalculator:
             # the range of J, i.e. the parameter cannot move the solution off the branch, and the cosine
             # says that scale-free. Measured: a genuine fold gives O(1) here, a branch point 1e-5 or less.
             a_rel=abs(a)/max(numpy.linalg.norm(R01)*numpy.linalg.norm(zeta_star),1e-300)
+            # How well zeta and zeta_star actually annihilate THIS L, and how well the bordered
+            # solves solved. Reported rather than merely trusted because everything below is a
+            # projection onto zeta_star, and the one way this can go quietly wrong is a zeta from
+            # one assembly against an L from another - which is precisely what the MPI route makes
+            # possible, since the two now come from separate calls.
+            Lnorm=max(float(scipy.sparse.linalg.norm(L)),1e-300)
+            diag={"L_zeta":float(numpy.linalg.norm(L@zeta))/Lnorm,
+                  "LT_zeta_star":float(numpy.linalg.norm(L.transpose()@zeta_star))/Lnorm,
+                  "psi01_residual":float(numpy.linalg.norm(L@psi01-ER01))/max(float(numpy.linalg.norm(ER01)),1e-300),
+                  "psi01_orth":abs(float(numpy.dot(psi01,zeta_star))),
+                  "norm_b2v":float(numpy.linalg.norm(b2v))}
+            # "Is b2 zero?" is the pitchfork/transcritical question, and it has exactly the scale
+            # problem a had - only worse, because the old test compared b2 against b3 DIRECTLY
+            # (100*|b2/2| < |b3/6|) and those two carry different powers of zeta. zeta is normalised
+            # to unit EUCLIDEAN length, so its entries are of order 1/sqrt(N) and the reductions give
+            # b1 ~ N^-1, b2 ~ N^-3/2, b3 ~ N^-2 -- i.e. the tested ratio |b2/b3| grows like sqrt(N)
+            # and the fixed factor 1/300 means something different on every mesh, always pushing the
+            # verdict toward transcritical. Measured on u_t = laplace(u) + lam*u - u^2 at N=8 and
+            # N=16 (225 and 961 dofs): |b2/b3| went 1467 -> 3277, a factor 2.23 against a predicted
+            # sqrt(4.27) = 2.07, while b2_rel below moved by less than a percent. Same root cause as
+            # the "unit" eigenvector scaling in dev_docs/mpi_augmented_systems.md section 6.
+            #
+            # What does not move is the ANGLE: b2 = <b2v, zeta_star> is zero for a pitchfork because
+            # the quadratic term has no component along the left null vector, and the cosine says
+            # that free of both the mesh and the arbitrary scaling of zeta (numerator and
+            # denominator carry the same power of it).
+            b2_rel=abs(b2)/max(numpy.linalg.norm(b2v)*numpy.linalg.norm(zeta_star),1e-300)
+            diag["b2_rel"]=b2_rel
             res={"a":a,"b1":b1,"b2":b2,"b3":b3,"a_rel":a_rel}
+            res.update(diag)
             print("a=",a," (relative to |dR/dp| and the left null vector:",a_rel,")")
             print("b1=",b1)
-            print("b2=",b2)
+            print("b2=",b2," (relative to |H(zeta,zeta)| and the left null vector:",b2_rel,")")
             print("b3=",b3)
-            if assume not in (None,"fold","branch_point"):
-                raise ValueError("assume must be None, 'fold' or 'branch_point', got "+repr(assume))
+            if assume not in (None,"fold","branch_point","pitchfork","transcritical"):
+                raise ValueError("assume must be None, 'fold', 'branch_point', 'pitchfork' or "
+                                 "'transcritical', got "+repr(assume))
             is_fold=(a_rel>=tol_fold) if assume is None else (assume=="fold")
+            if assume in ("pitchfork","transcritical"):
+                # These say which KIND of branch point, not that it is one.
+                is_fold=False
             if assume is not None:
                 print("Classified as a "+("fold" if is_fold else "branch point")+" on request, not from a")
             elif tol_fold/10<a_rel<tol_fold*10:
@@ -2617,7 +2967,24 @@ class NormalFormCalculator:
                       "- the fold/branch-point verdict is not clear-cut here. Pass assume='fold' or "
                       "assume='branch_point' if you know which it is.")
             if not is_fold:
-                if 100*abs(b2/2) < abs(b3/6):
+                if assume in ("pitchfork","transcritical"):
+                    is_pitchfork=(assume=="pitchfork")
+                    print("Classified as a "+assume+" on request, not from b2")
+                elif diag["norm_b2v"]==0.0:
+                    # Not a guarded division but an exact one: for an ODD nonlinearity the elemental
+                    # Hessian is 0.0 at every quadrature point, so b2v is the exact zero vector and
+                    # the cosine below would be 0/0. "The quadratic form vanishes identically" is a
+                    # stronger certificate than any threshold could be, so it is taken as one.
+                    is_pitchfork=True
+                    print("The Hessian contraction vanishes identically, so there is no quadratic "
+                          "term at all - a pitchfork")
+                else:
+                    is_pitchfork=(b2_rel<tol_pitchfork)
+                    if tol_pitchfork/10<b2_rel<tol_pitchfork*10:
+                        print("WARNING: this is only",b2_rel,"against a threshold of",tol_pitchfork,
+                              "- the pitchfork/transcritical verdict is not clear-cut here. Pass "
+                              "assume='pitchfork' or assume='transcritical' if you know which it is.")
+                if is_pitchfork:
                     print("Likely a pitchfork")
                     psign=1 if b1*b3<0 else -1
                     print("With sign",psign)
@@ -2627,6 +2994,15 @@ class NormalFormCalculator:
                     print("Likely transcritical")
                     res["type"]="transcritical"
                     res["psign"]="arbitrary" # Can be chosen arbitrarily
+                    if b2!=0.0 and b1*b3!=0.0:
+                        # NOT a classifier - it carries the parameter's units, and asymptotically
+                        # close to the bifurcation a quadratic term always beats a cubic one, so
+                        # "is it a pitchfork" is a symmetry question and not a size one. It IS the
+                        # number that says whether the quadratic term matters at the offset the
+                        # switch will actually take, which is what a caller wanting to override the
+                        # verdict needs to see.
+                        print("(at a parameter offset eps, the transcritical branch's amplitude is",
+                              abs(2/b2),"* sqrt(",abs(b1*b3/6),"* eps ) times the pitchfork's)")
             else:
                 print("Likely fold")
                 res["type"]="fold"

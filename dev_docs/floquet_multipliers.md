@@ -138,8 +138,9 @@ count.
   bifurcation would be.** It is a property of the discretization, not of the condensation — the
   eigenproblem method finds the same value, just to six digits fewer — and an even number of
   intervals moves it next to the trivial `+1` instead. A Radau IIA collocation would put it at 0.
-* **`--distribute` works**, for the orbit and for the multipliers — §8. Two things around it do not:
-  `switch_to_hopf_orbit()` and the transient hand-back when a `with orbit:` block exits.
+* **`--distribute` works**, for the orbit, for the multipliers, for `switch_to_hopf_orbit()` and for
+  the transient hand-back when a `with orbit:` block exits — §8, and §10.1 and §10.2 for the last two,
+  which used to be listed here as not working. `refine_eigenfunction()` is the one thing still refused.
 
 
 ## 7. `method="periodic_schur"`
@@ -276,15 +277,19 @@ the assembly's summation order, which the partitioning changes.
 
 ### What is still refused around it
 
-* **`switch_to_hopf_orbit()`** needs the first Lyapunov coefficient, computed by the Python custom
-  assembler in `bifurcation_tools.py`, which is still serial (`mpi_augmented_systems.md` Part II). It
-  now says exactly that instead of letting the generic refusal claim orbit tracking is unsupported.
-  Build the orbit guess yourself and call `activate_periodic_orbit_handler`, or pass `dparam` and
-  `orbit_amplitude` to skip the Lyapunov coefficient.
-* **Leaving a `with orbit:` block** seeds three history levels so that a plain `run()` continues the
-  orbit transiently. Writing history dof values is not implemented when distributed -- oomph-lib
-  declares the `t>0` dof accessors unsupported there -- so `PeriodicOrbit.__exit__` warns and drops
-  the orbit instead. Everything inside the block is unaffected.
+Both entries that used to stand here are **done**, and are recorded as such in §10.1 and §10.2. They
+are named rather than deleted because the reasons they were refused are the shape of problem that
+recurs, and because the claim survived in this section after being fixed elsewhere in this same file.
+
+* **`switch_to_hopf_orbit()`** -- was refused because the first Lyapunov coefficient came from the
+  Python custom assembler. It does not any more (`dev_docs/hopf_normal_form.md` §4), and works under a
+  plain `mpirun` and under `--distribute`; `tests/test_mpi_hopf_lyapunov.py` covers both.
+* **Leaving a `with orbit:` block** -- was refused because writing history dof values was not
+  implemented when distributed. It is now (§10.2), and the transient hand-back is tested against
+  serial.
+
+What remains refused is `refine_eigenfunction()`, which adapts the mesh to an eigenfunction and needs
+its own validation before its guard comes off.
 
 ### The bugs found on the way
 

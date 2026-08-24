@@ -34,7 +34,7 @@ reloading) can be driven headlessly from a test or a batch script. The user inte
 through the observer hooks installed by :py:meth:`BifurcationController.set_observer`.
 """
 
-from ...generic.bifurcation_tools import attach_normal_form_predictors
+from ...generic.bifurcation_tools import attach_normal_form_predictors, _as_real_eigenvector
 from ...generic.codegen import EquationTree
 from ...generic import Problem
 from ... import _pyoomph_core as _pyoomph
@@ -2091,7 +2091,13 @@ class BifurcationController:
             vec=self._solved_critical_eigenvector()
             if vec is None:
                 return False
-        zeta=numpy.real(numpy.asarray(vec,dtype=complex)).astype(float)
+        try:
+            zeta=_as_real_eigenvector(numpy.asarray(vec,dtype=complex),"The restored eigenvector")
+        except RuntimeError as e:
+            # Same rule as the rest of this method: a normal form that cannot be completed is a
+            # False, not an exception - the caller logs and recomputes.
+            self.log("The eigenvector for the saved classification is not real: "+str(e).split("\n")[0])
+            return False
         if zeta.size!=self.problem.ndof():
             return False
         n=float(numpy.linalg.norm(zeta))

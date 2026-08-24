@@ -999,6 +999,10 @@ class SlepcEigenSolver(GenericEigenSolver):
     def supports_target(self):
         return True
 
+    def supports_complex_target(self):
+        # Only a complex build: EPS.setTarget on a real one truncates the target to its real part.
+        return bool(numpy.issubdtype(numpy.dtype(PETSc.ScalarType),numpy.complexfloating)) #type:ignore
+
     def _eigen_parallel_layout(self,n:int)->tuple[int,int,bool]:
         """``(nrow_local, first_row, parallel)`` for the PETSc matrices of an n-row eigenproblem.
 

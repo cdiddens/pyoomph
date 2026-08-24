@@ -410,3 +410,31 @@ What makes it more than a mechanical port:
 Not planned for now: at the sizes this framework runs (the ≤200k-dof rule in `CLAUDE.md`) a state
 costs tens of milliseconds and is written once per output step. It becomes worth doing if states grow
 into the hundreds of MB, or if checkpointing every step ever becomes normal.
+
+## A stream save reached only rank 0, and the load then hung
+
+Found while moving the branch-switching normal form off the custom assembler, which wanted a state at
+the bifurcation to return to.
+
+`save_state(io.BytesIO())` on a `--distribute` problem left **rank 0 holding the whole merged state
+and every other rank holding nothing** — measured at `np=2`, 5726 bytes against 0. §7's merge sends
+the non-root ranks' bytes to `/dev/null`, which is exactly right when there is one file to write and
+wrong when "the file" is each rank's own private object. A save to a real FILE was never affected.
+
+The failure mode is why it mattered. `load_state` of the empty stream raises on the non-root ranks
+while rank 0 loads happily, and the ranks then split: the one that raised leaves for `load_state`'s
+`mpi_share_any_failure` barrier while the others are still inside `_load_state`'s own collectives
+(`reapply_boundary_conditions` → `assign_eqn_numbers` → `MPI_Alltoall`). **That barrier cannot catch
+this** — it sits *after* `_load_state`, and `_load_state` is itself collective — so the run hangs
+instead of failing. A hang with the ranks sitting in two *different* collectives is the signature.
+
+`save_state` now broadcasts the merged stream to every rank before returning. That is the same
+broadcast `Problem._snapshot_state` already had to do for itself, which is why the in-tree snapshot
+path never hit this while a user calling `save_state` directly did; `_snapshot_state` has dropped its
+copy. The condition is `distributed and not to_file`, identical on every rank, so the extra collective
+cannot itself split them.
+
+**The general lesson for this file**: an "agree on the outcome afterwards" barrier only works if every
+rank can *reach* it. Where the section it guards contains collectives of its own, a rank that leaves
+early strands the rest inside them, and the barrier is not the safety net it looks like.
+

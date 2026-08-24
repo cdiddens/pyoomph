@@ -268,10 +268,18 @@ the augmented one, reached SLEPc.
 
 # Part II — the Python custom assembler (plan only)
 
-> **Deflation left this part.** It is no longer a custom assembler: it adds no unknowns and does not
-> modify the Jacobian, so it now scales the assembled residual by a scalar and rescales the Newton
-> step on top of the ORDINARY assembly, and works serially, under plain `mpirun` and under
-> `--distribute`. See [deflation.md](deflation.md). That answers **B4** and **B6** below (the hang was
+> **Deflation and the normal form both left this part.** Deflation is no longer a custom assembler:
+> it adds no unknowns and does not modify the Jacobian, so it now scales the assembled residual by a
+> scalar and rescales the Newton step on top of the ORDINARY assembly, and works serially, under
+> plain `mpirun` and under `--distribute`. See [deflation.md](deflation.md).
+>
+> `NormalFormCalculator` — and with it `classify_bifurcation` and `switch_branch` — made the same
+> move afterwards: every quantity it took from the multi-assembly now comes from an accessor that is
+> already MPI-safe in both regimes (`assemble_eigenproblem_matrices` + `_allgather_square`,
+> `get_parameter_derivative`, and a polarisation of `get_second_order_directional_derivative`), each
+> A/B'd against the multi-assembly serially first. See [branch_switching.md](branch_switching.md).
+> **The `CustomBifurcationTracker` family is now the only thing left on this pipeline**, which is what
+> makes stage 0 below possible without breaking a working feature. That answers **B4** and **B6** below (the hang was
 > the unseeded RNG sending the ranks down different control flow) and removes the only user of
 > `has_custom_solve_routine` outside the augmented trackers. **B1, B2, B3 and B5 are untouched and
 > still block the `CustomBifurcationTracker` family**, which is what the rest of this part is about --
@@ -411,11 +419,13 @@ unchanged.
 
 ## 10. Stages
 
-**Stage 0 — refuse honestly (small, do first).** A `_require_single_rank(...)` guard next to
-`_require_non_distributed`, called from `Problem.set_custom_assembler` so the failure names the feature at
-the point the user switched it on, instead of arriving five frames deep from `problem.cpp` — or, worse,
-not arriving at all (B2 corrupts memory silently). Also fix the pardiso `b`/`b_global` mix-up (B4), a
-two-character fix that is wrong today regardless of this plan.
+**Stage 0 — refuse honestly. DONE.** `Problem._require_single_rank(...)` sits next to
+`_require_non_distributed` and is called from `Problem.set_custom_assembler`, so the failure names the
+feature at the point the user switched it on instead of arriving five frames deep from `problem.cpp`
+— or, worse, not arriving at all (B2 corrupts memory silently). It became possible only once the
+normal form left this pipeline; before that the guard would have refused `classify_bifurcation` and
+`switch_branch`, which now work under MPI. The pardiso `b`/`b_global` mix-up (B4) is separate and was
+already answered above.
 
 **Stage 1 — make the handoff distribution-correct (B2).** In the three custom branches: read
 `first_row()`/`nrow_local()` off the incoming `DoubleVector`/`CRDoubleMatrix`, copy only that row block,
@@ -473,3 +483,33 @@ is what would have caught B2 immediately.
   `CLAUDE.md` on benchmarking) rather than assumed.
 * Should the trackers' reduction API (stage 4) be introduced early, as no-ops in regime (a), so that
   user-written trackers written today keep working when (b) lands?
+
+---
+
+## 12. Two bugs found while moving the normal form off this pipeline
+
+Both outside the augmented systems themselves, both recorded here because they are the shape of thing
+this document is a catalogue of.
+
+**`Problem::get_current_dofs`'s `is_positional` mask is rank-dependent under `--distribute`**
+(`src/problem.cpp`). The mask is sized by the **global** `ndof()` but filled by walking
+`mesh_pt(ism)->nnode()`, i.e. this rank's own and halo nodes only, so a positional dof living on
+another partition is reported as non-positional here. Every caller that reads only
+`get_current_dofs()[0]` is unaffected, which is why nothing has tripped over it. Reproduction: compare
+`get_current_dofs()[1]` between a serial run and a `--distribute` one of any moving-mesh problem — the
+masks differ. The fix is an `MPI_LOR` allreduce over the mask, or building it from the base dof
+distribution instead; it is a C++ change and was deliberately not bundled into an otherwise
+rebuild-free one.
+
+**`save_state()` into an in-memory stream lost everything but rank 0's copy, and the load then hung.**
+Measured at `np=2 --distribute`: rank 0's `BytesIO` received the whole merged 5726-byte state and
+rank 1's received **zero** bytes. §7's merge sends the non-root ranks' bytes to `/dev/null`, which is
+right when there is one file and wrong when "the file" is each rank's own private object. The failure
+mode is the reason it mattered: `load_state` of the empty stream raises on the non-root ranks while
+rank 0 loads happily, and the ranks split — the one that raised leaves for `load_state`'s
+`mpi_share_any_failure` barrier while the others are still inside `_load_state`'s own collectives
+(`reapply_boundary_conditions` → `assign_eqn_numbers` → `MPI_Alltoall`). **That barrier cannot catch
+this**: it sits *after* `_load_state`, and `_load_state` is itself collective. So the run hangs rather
+than fails. `save_state` now broadcasts the merged stream, which is the broadcast `_snapshot_state`
+already had to do for itself and has now dropped. A save to a real FILE was never affected.
+
