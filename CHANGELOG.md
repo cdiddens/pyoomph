@@ -548,7 +548,59 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   downloadable scripts to `literalinclude`, several documentation gaps filled,
   full spellcheck.
 
+### Added
+
+- **`RemeshWhen(on_inverted_element=True)`: remeshing as the response to a folded mesh.** Off by
+  default. Every previous answer to an inverted element was "take a smaller step" -- the adaptive
+  timestepper halves `dt`, the arclength loop scales `Ds` by 2/3 -- and there is a class of problem
+  where no step size works: if the deformation is prescribed as a function of time, the fold sits at a
+  fixed TIME, so halving `dt` only approaches it more slowly. On the notch case of
+  `dev_docs/examples/inverted_element_notch.py` that meant 189 rejections, `dt` driven to the 1e-12
+  floor, `t` frozen at the fold time to six digits, and a dead run. With the option armed the same case
+  runs to t = 1.0, remeshing 11 times -- serially, under plain `mpirun`, and under `--distribute`, all
+  three reaching t = 1.001055.
+  - Switching it on also switches on the inverted-element detection, which is a **process-wide** flag,
+    so every domain of the problem then pays its ~2 % of the assembly time.
+  - The trigger is *not* "an element inverted": most inversions are transient Newton iterates on a mesh
+    whose converged states are all fine, and remeshing on those pre-empts the quality-based trigger that
+    would have done better. It fires when a step reported an inversion AND achieved less than
+    `inversion_remesh_dt_collapse` (default 1/16) of the last clean step, i.e. when time has stopped
+    advancing. `inversion_remesh_max_retries` (default 3) caps the remesh-and-retry loop.
+  - **The quality-based trigger remains the better instrument** where it applies, because it acts before
+    the mesh folds rather than after; this is a safety net for meshes that fold without any element
+    having grown, shrunk or lost quality enough to notice. Arming both does not degrade the quality one.
+  - `tests/test_inverted_element_remesh.py`; `dev_docs/mesh_construction.md` section 5.
+
 ### Fixed
+
+- **Inverted-element detection hung under MPI.** `set_detect_inverted_elements(True)` had never been
+  run under `mpirun`, and did not work there: the throw is per element, oomph-lib splits the element
+  loop by rank in BOTH MPI modes, so the rank holding the folded element left the loop while the others
+  were still inside the assembly's collectives. `mpirun -n 2` on a folding mesh did not disagree with
+  serial, it **hung**, having printed the error on one rank. An inversion is now recorded rather than
+  thrown while inside the element loop, reduced across the ranks with one `MPI_Allreduce`, and then
+  raised on every rank or on none -- the same shape of agreement `consume_newton_abort_request()`
+  already used. Replicated and distributed runs now fail at the same `dt` and the same fold time as
+  serial. `dev_docs/mesh_construction.md` section 5.4.
+
+- **A `RemeshWhen` firing inside a solve corrupted the dof vector.** `force_remesh()` was called from
+  `actions_after_newton_solve()`, which oomph-lib calls from inside `newton_solve()` -- and therefore
+  from inside `adaptive_unsteady_newton_solve()`, which brackets the whole step with a **flat-index**
+  dof snapshot and restores it the same way if the step is rejected on temporal error. A remesh in
+  between changes `ndof` and the meaning of every index, so the restore wrote the old mesh's values
+  into unrelated dofs of the new one -- and, whenever the remesh shrank the system, past the end of
+  `Dof_pt` entirely. What it looked like was a converged state coming back with a huge residual, the
+  retry diverging to `inf`, and `dt` being halved to below `Minimum_dt` until the run died with
+  "Max. residual has been exceeded" -- a message that mentions nothing about remeshing, which is why
+  it was never attributed. Only `RemeshWhen` **plus** temporal adaptivity (`temporal_error=...`) was
+  affected; four tutorials combine the two. The request is now recorded and carried out once the C++
+  call has returned (`Problem._perform_pending_remesh()`), so the temporal error estimate and the
+  accept/reject decision see the mesh the step was actually taken on.
+  - **One visible consequence**: with temporal adaptivity, a remesh now happens *after* the step's
+    error estimation rather than in the middle of it, so a script that remeshes under `temporal_error`
+    can end on a slightly different mesh than before (Rayleigh-Plateau: same 15 remeshes, 13024
+    instead of 12673 equations at the end). Without temporal adaptivity nothing moves at all.
+  - `tests/test_remesh_inside_solve.py`; `dev_docs/mesh_construction.md` section 5.1.
 
 - **The first Lyapunov coefficient had several defects around it**, found by auditing it term by term
   against Kuznetsov's real form before porting it (the mathematics itself is correct, including where

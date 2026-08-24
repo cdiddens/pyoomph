@@ -2064,6 +2064,83 @@ namespace pyoomph
 		return true;
 	}
 
+	// --- Inverted elements ---------------------------------------------------------------------
+	//
+	// Why any of this exists: the detector throws from inside the element loop, and that loop is split
+	// by element across the ranks in BOTH MPI modes. The rank holding the folded element left the loop
+	// while the others were still inside the assembly's collectives, so `mpirun -n 2` on a folding mesh
+	// hung instead of reporting anything - measured on dev_docs/examples/inverted_element_notch.py.
+	// Inside this scope the detector records instead of throwing, every rank finishes the loop, and
+	// raise_if_any() then reduces and throws on all of them or on none.
+
+	Problem::InvertedElementScope::InvertedElementScope(Problem *p) : prob(p)
+	{
+		// Nested scopes are possible (get_jacobian assembles residuals too on some paths); only the
+		// outermost one owns the flag, so an inner destructor cannot reopen the immediate throw.
+		outer = (prob->inverted_element_scope_depth++ == 0);
+		if (outer)
+		{
+			BulkElementBase::inverted_elements_detected = 0;
+			BulkElementBase::inverted_element_message.clear();
+			BulkElementBase::defer_inverted_element_errors = true;
+		}
+	}
+
+	Problem::InvertedElementScope::~InvertedElementScope()
+	{
+		prob->inverted_element_scope_depth--;
+		if (outer) BulkElementBase::defer_inverted_element_errors = false;
+	}
+
+	void Problem::InvertedElementScope::raise_if_any()
+	{
+		if (!outer) return;
+		bool seen = (BulkElementBase::inverted_elements_detected > 0);
+#ifdef OOMPH_HAS_MPI
+		if (prob->communicator_pt() && prob->communicator_pt()->nproc() > 1)
+		{
+			// MPI_MAX over one int, on a path that is collective anyway - the same shape of agreement
+			// consume_newton_abort_request() makes, and for the same reason: the condition is seen by
+			// whichever rank happens to hold the element, while the response has to be unanimous.
+			int mine = seen ? 1 : 0, any = 0;
+			MPI_Allreduce(&mine, &any, 1, MPI_INT, MPI_MAX, prob->communicator_pt()->mpi_comm());
+			seen = (any != 0);
+		}
+#endif
+		if (!seen) return;
+
+		// A rank that saw nothing has no message of its own; say so rather than reporting an empty one.
+		std::string msg = BulkElementBase::inverted_element_message;
+		if (msg.empty()) msg = "An inverted element was detected on another process.";
+
+		BulkElementBase::inverted_elements_detected = 0;
+		BulkElementBase::inverted_element_message.clear();
+
+		// One report per assembly that saw one, however many integration points of however many
+		// elements were involved.
+		prob->inversion_reports_in_this_solve_call++;
+
+		// Escalate once this solve() call has absorbed enough of them that reducing the step is
+		// clearly not the answer. See inversion_remesh_threshold in problem.hpp for why the count is
+		// per CALL rather than per run of consecutive solves - the run-based proxy the design proposed
+		// was measured and does not work.
+		//
+		// Unanimous by construction: the "seen" flag above is already reduced over the ranks and the
+		// counter is incremented on every rank, so every rank reaches the same verdict here without a
+		// second collective.
+		if (prob->inversion_remesh_threshold > 0 &&
+			prob->inversion_reports_in_this_solve_call >= prob->inversion_remesh_threshold)
+		{
+			std::ostringstream oss;
+			oss << "An inverted element has been reported " << prob->inversion_reports_in_this_solve_call
+				<< " times while trying to take this step, so reducing the step is not curing it. "
+				<< "Remeshing instead." << std::endl
+				<< msg;
+			throw pyoomph::InvertedElementRemeshRequest(oss.str());
+		}
+		throw oomph::InvertedElementError(msg, OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+	}
+
 	void Problem::get_residuals(oomph::DoubleVector &residuals)
 	{
 		// Before anything else, including the halo sync: an abandoned solve should cost nothing.
@@ -2088,10 +2165,13 @@ namespace pyoomph
 		// values need re-deriving at most once (see HangInterpPassScope). The MPI sync below is itself
 		// a full interpolate sweep, and it stamps, so its work is then not repeated per element.
 		HangInterpPassScope __hang_pass;
+		// Defer any inverted-element report until every rank is out of the (collective) element loop.
+		InvertedElementScope __inv(this);
 		sync_hanging_values_if_parallel(this);
 		if (!use_custom_residual_jacobian)
 		{
 			get_residuals_by_elemental_assembly(residuals);
+			__inv.raise_if_any();
 			if (!this->dirichlets_by_removing_from_dof_vector)
 			{
 				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the residual vector by matrix manipulation when bifurcation tracking is active, since the user-provided residual vector would still contain contributions from the dirichlet dofs, which would be wrong");
@@ -2160,11 +2240,13 @@ namespace pyoomph
 	void Problem::get_jacobian(oomph::DoubleVector &residuals, oomph::CRDoubleMatrix &jacobian)
 	{
 		HangInterpPassScope __hang_pass; // see Problem::get_residuals
+		InvertedElementScope __inv(this); // see Problem::get_residuals
 		sync_hanging_values_if_parallel(this);
 		last_jacobian_was_condensed = false;
 		if (!use_custom_residual_jacobian)
 		{
 			get_jacobian_by_elemental_assembly(residuals, jacobian);
+			__inv.raise_if_any();
 			if (!this->dirichlets_by_removing_from_dof_vector)
 			{
 				if (this->bifurcation_tracking_mode!="") throw_runtime_error("TODO: Cannot remove dirichlet dofs from the jacobian matrix by matrix manipulation when bifurcation tracking is active, since the user-provided jacobian matrix would still contain contributions from the dirichlet dofs, which would be wrong");

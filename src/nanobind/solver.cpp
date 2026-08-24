@@ -182,6 +182,16 @@ namespace pyoomph
         return lookup_python_type_once("pyoomph.solvers.generic", "SolverError", cached, resolved);
     }
 
+    // Counterpart for pyoomph::InvertedElementRemeshRequest, so that Problem.solve()'s retry loop can
+    // tell "an element inverted and a remesh is armed" from every other RuntimeError.
+    static PyObject *inverted_element_remesh_error_type()
+    {
+        static PyObject *cached = nullptr;
+        static bool resolved = false;
+        return lookup_python_type_once("pyoomph.generic.problem",
+                                       "InvertedElementRemeshRequest", cached, resolved);
+    }
+
     // Counterpart for oomph::AdaptiveResolveRecovered. Same lazy resolution and same fallback: if the
     // class cannot be found, a plain RuntimeError still carries the message.
     static PyObject *spatial_adapt_resolve_error_type()
@@ -490,6 +500,14 @@ void PyReg_Solvers(nb::module_ &m)
             catch (const oomph::AdaptiveResolveRecovered &e)
             {
                 PyObject *type = pyoomph::spatial_adapt_resolve_error_type();
+                PyErr_SetString(type ? type : PyExc_RuntimeError, e.what());
+            }
+            // An inverted element on enough consecutive solves that a remesh is the right answer.
+            // Its own class for the same reason as the one above: it is the one failure the caller
+            // is expected to recover from rather than report.
+            catch (const pyoomph::InvertedElementRemeshRequest &e)
+            {
+                PyObject *type = pyoomph::inverted_element_remesh_error_type();
                 PyErr_SetString(type ? type : PyExc_RuntimeError, e.what());
             }
         },

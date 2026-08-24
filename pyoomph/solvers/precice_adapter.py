@@ -99,6 +99,13 @@ class _PyoomphPreciceAdapater:
                 problem.adaptive_unsteady_newton_solve(dt,temporal_error,True)
                 dt=problem.get_current_time(as_float=True,dimensional=False)-current_time
 
+            # This loop drives the C++ solve itself instead of going through Problem.solve(), so it
+            # owns the deferred remesh too: actions_after_newton_solve() only records the request,
+            # because performing it inside the call corrupts the dof snapshot that
+            # adaptive_unsteady_newton_solve() restores from on a rejected step. See
+            # Problem._perform_pending_remesh().
+            problem._perform_pending_remesh()
+
             problem._equation_system._after_precice_solve(dt)
 
             interface.advance(dt)

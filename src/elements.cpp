@@ -413,6 +413,9 @@ namespace pyoomph
 	thread_local unsigned BulkElementBase::zeta_time_history = 0;
 	thread_local unsigned BulkElementBase::zeta_coordinate_type = 0; // 0 means Lagrangian, 1 Eulerian, on co-dimensional meshes it will be the boundary coordinate (if set)
 	bool BulkElementBase::detect_inverted_elements=false;
+	bool BulkElementBase::defer_inverted_element_errors=false;
+	unsigned BulkElementBase::inverted_elements_detected=0;
+	std::string BulkElementBase::inverted_element_message;
 
 	// Default (unimplemented) hook; concrete element types with higher-order interpolation on
 	// faces override this to return the boundary node at the given local face index/position.

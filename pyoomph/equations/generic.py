@@ -428,14 +428,18 @@ class RemeshingOptions:
         active: Flag indicating whether the remeshing is active.
         min_quality_decrease: Minimum quality decrease of an element before remeshing is invoked.
         on_invalid_triangulation: Flag indicating whether to remesh if the triangulation is invalid.
+        on_inverted_element: Remesh when an element turns inside out. Off by default; switching it on also
+            switches on the (global, off-by-default) inverted-element detection, since without it nothing
+            reports an inversion in the first place.
     """    
-    def __init__(self,max_expansion:float=1.75,min_expansion:float=0.6,min_solves_before_remesh:int=0,reinit_initial_size_after_one_step:bool=False,active:bool=True,min_quality_decrease:float=0.2,on_invalid_triangulation:bool=False):
+    def __init__(self,max_expansion:float=1.75,min_expansion:float=0.6,min_solves_before_remesh:int=0,reinit_initial_size_after_one_step:bool=False,active:bool=True,min_quality_decrease:float=0.2,on_invalid_triangulation:bool=False,on_inverted_element:bool=False):
         self.max_expansion=max_expansion
         self.min_expansion=min_expansion
         self.min_solves_before_remesh=min_solves_before_remesh
         self.reinit_initial_size_after_one_step=reinit_initial_size_after_one_step
         self.min_quality_decrease=min_quality_decrease
         self.on_invalid_triangulation=on_invalid_triangulation
+        self.on_inverted_element=on_inverted_element
         self.active=active
 
     def keys(self) -> list[str]:
@@ -459,7 +463,7 @@ class RemeshWhen(Equations):
         min_quality_decrease: Minimum quality decrease of an element before remeshing is invoked.
         on_invalid_triangulation: Flag indicating whether to remesh if the triangulation is invalid.
     """
-    def __init__(self,remeshing_opts:RemeshingOptions | None=None,*,max_expansion:float | None=None,min_expansion:float | None=None,min_solves_before_remesh:int | None=0,reinit_initial_size_after_one_step:bool | None=False,active:bool=True,min_quality_decrease:float | None=None,on_invalid_triangulation:bool=False):
+    def __init__(self,remeshing_opts:RemeshingOptions | None=None,*,max_expansion:float | None=None,min_expansion:float | None=None,min_solves_before_remesh:int | None=0,reinit_initial_size_after_one_step:bool | None=False,active:bool=True,min_quality_decrease:float | None=None,on_invalid_triangulation:bool=False,on_inverted_element:bool=False):
 
         super(RemeshWhen, self).__init__()
         if isinstance(remeshing_opts,RemeshingOptions):
@@ -469,6 +473,7 @@ class RemeshWhen(Equations):
             self.reinit_initial_size_after_one_step:bool | None=remeshing_opts.reinit_initial_size_after_one_step
             self.min_quality_decrease:float | None=remeshing_opts.min_quality_decrease
             self.on_invalid_triangulation=remeshing_opts.on_invalid_triangulation
+            self.on_inverted_element=remeshing_opts.on_inverted_element
             self.active=remeshing_opts.active
         else:
             self.max_expansion = max_expansion
@@ -476,6 +481,7 @@ class RemeshWhen(Equations):
             self.min_solves_before_remesh = min_solves_before_remesh
             self.reinit_initial_size_after_one_step = reinit_initial_size_after_one_step
             self.on_invalid_triangulation=on_invalid_triangulation
+            self.on_inverted_element=on_inverted_element
             self.active = active
             self.min_quality_decrease = min_quality_decrease
 
@@ -485,6 +491,37 @@ class RemeshWhen(Equations):
         if self.min_expansion and self.min_expansion>=1:
             raise ValueError("min_expansion must be <1")
 
+
+    def before_finalization(self,codegen:"FiniteElementCodeGenerator"):
+        """Arm the inverted-element trigger, at code generation time.
+
+        Detection is a **process-wide** switch (`BulkElementBase::detect_inverted_elements`), while
+        this equation is per domain, so arming it here turns the check on for every domain of the
+        problem and everyone pays its ~2 % of the assembly time. That is a deliberate trade rather
+        than an oversight - making it per-domain means threading a flag down to the element, on the
+        hottest read there is - but it is worth knowing before switching this on.
+        """
+        if not (self.active and self.on_inverted_element):
+            return
+        from .. import _pyoomph_core
+        _pyoomph_core.set_detect_inverted_elements(True)
+        # The C++ threshold is deliberately NOT armed here. Whether a fold has happened is decided in
+        # Problem._solve_with_inversion_remesh(), from whether the step collapsed, because counting
+        # inversions cannot tell a fold from a transient Newton iterate - measured, see that method.
+        # The threshold is armed only for the retry after a remesh, where an inversion does mean the
+        # remesh failed.
+
+    def on_apply_boundary_conditions(self,mesh:"AnyMesh"):
+        # Registers WHICH template to rebuild when an inversion escalates. Done here rather than in
+        # before_finalization because the mesh (and hence the template) does not exist there yet.
+        if not (self.active and self.on_inverted_element):
+            return
+        if isinstance(mesh,MeshFromTemplateBase) and mesh._templatemesh is not None:
+            if mesh._templatemesh.remesher is None:
+                raise RuntimeError("RemeshWhen(on_inverted_element=True) on '"+mesh.get_full_name()+
+                                   "' needs the corresponding MeshTemplate to have its 'remesher' property set, "
+                                   "otherwise there is nothing to remesh with when an element inverts.")
+            mesh.get_problem()._domains_remesh_on_inversion.add(mesh._templatemesh)
 
     def after_newton_solve(self):
         need_remesh=False

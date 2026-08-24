@@ -2568,7 +2568,17 @@ namespace pyoomph
 					<< "This usually means the mesh has been distorted too far, e.g. by too large a "
 					<< "time step or continuation step." << std::endl
 					<< "Detection can be switched off again with set_detect_inverted_elements(False).";
-				throw oomph::InvertedElementError(oss.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+				// Inside a collective element loop the throw has to wait: see the comment on
+				// defer_inverted_element_errors in elements.hpp. Throwing here would leave the other
+				// ranks in the assembly's collectives and hang the run rather than report anything.
+				if (defer_inverted_element_errors)
+				{
+					if (inverted_elements_detected++ == 0) inverted_element_message = oss.str();
+				}
+				else
+				{
+					throw oomph::InvertedElementError(oss.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
+				}
 			}
 		}
 

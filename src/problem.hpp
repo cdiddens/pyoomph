@@ -1663,6 +1663,54 @@ namespace pyoomph
     // True (having reported the reason) if an abort was requested on ANY rank, in which case the
     // caller must not assemble. Clears the request, so it fires once.
     bool consume_newton_abort_request();
+
+  public:
+    // --- Inverted elements: the unanimous report, and escalating to a remesh ---
+    // See BulkElementBase::defer_inverted_element_errors for why the report has to be deferred at
+    // all, and dev_docs/mesh_construction.md section 5 for what the escalation is for.
+
+    // How many inverted-element reports ONE solve() call may absorb before the next one is raised as
+    // InvertedElementRemeshRequest instead of being handed to oomph-lib to answer by halving dt.
+    // 0 disables the escalation entirely, which is the default and the old behaviour: an inversion is
+    // then always just a rejected step. RemeshWhen(on_inverted_element=True) sets it.
+    //
+    // Per solve() CALL, not per run of consecutive solves - and that is a correction to the design in
+    // dev_docs/mesh_construction.md section 5.2, which proposed counting consecutive rejections and
+    // suggested 3. Measured on the notch case, the run of consecutive inverting solves never exceeds
+    // FOUR even at a fold no step size can get past, because the adaptive loop interleaves solves that
+    // fail for other reasons (a microscopic step that converges, a dt floor) and each of those breaks
+    // the run. So a patience of 5 or more never fired at all and the run still died at the fold, while
+    // 3 fired on the TRANSIENT inversions of section 3.3 and pre-empted the quality-based trigger that
+    // would have prevented the fold one step later. There is barely a window, and it is the proxy that
+    // is wrong rather than the number.
+    //
+    // Counting per call has neither failure mode. A transient inversion costs 1-3 reports and then the
+    // step succeeds, ending the call; a genuine fold keeps reporting for as long as the call lasts
+    // (189 rejections in the measured case), so any modest threshold is reached and none is reached by
+    // accident.
+    unsigned inversion_remesh_threshold = 0;
+
+    // Opens a scope in which an inversion is recorded rather than thrown, and closes it by reducing
+    // over the ranks and throwing unanimously. Used around the element loop in get_residuals() and
+    // get_jacobian(); RAII so that an unrelated throw out of the assembly still closes it.
+    class InvertedElementScope
+    {
+      Problem *prob;
+      bool outer;
+    public:
+      InvertedElementScope(Problem *p);
+      ~InvertedElementScope();
+      // Reduce and throw if any rank saw one. Called explicitly at the end of a successful assembly,
+      // rather than from the destructor, because a destructor may not throw.
+      void raise_if_any();
+    };
+    // Start counting again: called at the start of every solve() call, and after a remesh (the count
+    // is a statement about one mesh, and the mesh has just been replaced).
+    void reset_inversion_counter() { inversion_reports_in_this_solve_call = 0; }
+    unsigned get_inversion_reports() const { return inversion_reports_in_this_solve_call; }
+  protected:
+    unsigned inversion_reports_in_this_solve_call = 0;
+    unsigned inverted_element_scope_depth = 0;
   public:
     void get_jacobian(oomph::DoubleVector &residuals,oomph::CRDoubleMatrix &jacobian) override;
     void get_derivative_wrt_global_parameter(double* const& parameter_pt,oomph::DoubleVector& result) override;

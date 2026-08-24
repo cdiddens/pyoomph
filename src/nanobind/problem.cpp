@@ -698,6 +698,14 @@ void PyReg_Problem(nb::module_ &m)
 		.def("_get_jacobian_information_string", &pyoomph::Problem::get_jacobian_information_string,
 			 "Return a human-readable summary of the defined fields, residuals and their Jacobian coupling structure, "
 			 "together with a flag whether the structure looks consistent; used for diagnostics/debugging.")
+		.def_rw("_inversion_remesh_threshold", &pyoomph::Problem::inversion_remesh_threshold,
+			 "How many consecutive Newton solves may report an inverted element before the next report is raised as "
+			 "InvertedElementRemeshRequest instead of being answered by halving the time step. 0 (the default) disables "
+			 "the escalation, i.e. an inversion is always just a rejected step. Set by RemeshWhen(on_inverted_element=True).")
+		.def("_get_inversion_reports", &pyoomph::Problem::get_inversion_reports,
+			 "How many inverted-element reports the current solve() call has absorbed so far.")
+		.def("_reset_inversion_counter", &pyoomph::Problem::reset_inversion_counter,
+			 "Start the inverted-element count again; called at the start of every solve() call and after a remesh.")
 		.def("_get_proven_matrix_symmetry", &pyoomph::Problem::get_proven_matrix_symmetry, nb::arg("residual_name") = "",
 			 "Return (jacobian_symmetric, mass_matrix_symmetric) for the named residual set: True only if every "
 			 "contributing block carries the symbolic symmetry proof AND no bifurcation tracking, dof augmentation, "

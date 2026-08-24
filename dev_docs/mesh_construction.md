@@ -168,13 +168,18 @@ square gets its signed `det(dx/ds)` tested, and a non-positive one raises
 described in `src/thirdparty/INFO_oomph-lib`: the adaptive timestepping loop, which rejects the step and
 halves `dt`, and the arclength continuation loop, which rejects and scales `Ds` by 2/3.
 
-**So the response to an inversion today is always "take a smaller step"**, and §3.2 is a case where that
-cannot work no matter how small the step gets.
+**So the response to an inversion used to be always "take a smaller step"**, and §3.2 is a case where
+that cannot work no matter how small the step gets. `RemeshingOptions(on_inverted_element=True)` is the
+other answer, and §5 is what it took to build it.
 
 One thing the flag is not: it is global, while `RemeshWhen` is per-domain. Any per-domain option that
 arms it therefore turns detection on everywhere and everyone pays the ~2 % assembly cost. Making it
 per-domain would mean threading a flag down to the element, which is not obviously worth it — but it
 needs saying in the user-facing documentation rather than being discovered.
+`RemeshingOptions(on_inverted_element=True)` is exactly such an option, so it carries that cost, and its
+docstring says so.
+
+The other thing it was not, until §5.4: **usable under MPI at all**.
 
 ### 3.1 The test case
 
@@ -318,7 +323,7 @@ in well under a minute and is the kind of thing that silently regresses.
 
 ---
 
-## 5. Remeshing as the response to an inversion — designed, not implemented
+## 5. Remeshing as the response to an inversion — implemented
 
 ### 5.1 Where a remesh may fire, and where it may not
 
@@ -327,7 +332,7 @@ This is the constraint everything else follows from. Three candidate places, onl
 **Inside the assembly**, where the exception is raised. Mid element-loop, with the assembler holding
 pointers into the mesh. Not a candidate.
 
-**In `actions_after_newton_solve`** — where `force_remesh` is called *today*. This looks like the natural
+**In `actions_after_newton_solve`** — where `force_remesh` used to be called. This looks like the natural
 place and is not, because oomph-lib calls it from inside `newton_solve()`, hence from inside
 `adaptive_unsteady_newton_solve`, which brackets the whole thing with a flat-index dof snapshot:
 
@@ -338,12 +343,49 @@ for (unsigned i = 0; i < ni; i++) dof(i) = dofs_current[i];            // on rej
 ```
 
 A remesh in between changes the dof count and their ordering, so the restore writes stale values into
-unrelated dofs, or runs off the end of the mesh. **This is a live hazard for the existing quality-based
-`RemeshWhen`, not only for anything new.** It has not been observed biting: in the test case the
-inversion exception aborts before that hook is reached, and the temporal error never rose enough to
-provoke an error-based rejection (a run with the tolerance tightened to 1e-7 still produced none, the
-deformation being linear in `t` and therefore integrated exactly by BDF2). Recorded as read off the
-source, not as a reproduction.
+unrelated dofs, or runs off the end of the mesh — `dof(i)` is `*(Dof_pt[i])`, so a remesh that SHRANK
+the system dereferences a pointer past the end of `Dof_pt` and writes through it.
+
+**This was a live hazard for the existing quality-based `RemeshWhen`, not only for anything new — and it
+is now fixed.** `actions_after_newton_solve` sets `Problem._remesh_requested_inside_solve` instead of
+remeshing, and `Problem._perform_pending_remesh()` carries the remesh out once the C++ call has
+returned. It is called from `_solve_with_adapt_recovery()`, from the two `solve()` branches that reach
+oomph directly, and from the preCICE loop, which drives the C++ solve itself. Deliberately not in a
+`finally`: a solve that threw leaves a state nothing should be remeshed from, so the request stays
+pending for the next successful solve.
+
+**Reproduced first, contrary to what this section used to say.** The earlier text recorded the hazard as
+"read off the source, not as a reproduction", and reported that a tolerance tightened to 1e-7 produced
+no rejection — that was an artefact of the test case, whose deformation is linear in `t` and therefore
+integrated exactly by BDF2, and of `global_temporal_error_norm()` being identically zero unless some
+field calls `set_temporal_error_factor`. With a field that has one and a source that actually varies in
+time, the coincidence is easy rather than rare:
+
+* a hair-trigger `RemeshWhen` on a Laplace-smoothed moving mesh remeshed inside 13 of ~24 steps, four of
+  those *shrinking* the system (1521 → 1081 among them, i.e. 440 out-of-bounds writes);
+* on the run where a remesh (619 → 1081) landed in a step that was then rejected, the restore turned a
+  converged state into `Initial Maximum residuals 2981` and the retry into `Maximum residuals inf`. The
+  step was rejected 26 more times, halving `dt` and restoring the same corrupt snapshot each time, until
+  the run died with "Max. residual has been exceeded".
+
+**Nothing in that failure mentions remeshing**, which is why it went unattributed for so long: it reads
+exactly like a physics problem or a too-large time step. Four tutorials combine `RemeshWhen` with
+`temporal_error` (`ale/beads_on_string.py`, `ale/rayleigh_plateau.py` and the two
+`evaporating_water_droplet.py`), so this was reachable from shipped examples.
+
+`tests/test_remesh_inside_solve.py` pins it: four tests, ~47 s, all four failing on the pre-fix tree —
+the first two by the run dying with an `OomphException`, the others by reporting the `ndof` that changed
+inside `actions_after_newton_solve`. Both kinds of assertion are kept on purpose, so that a "fix" which
+merely stops the crash, or one that quietly stops remeshing, does not pass.
+
+**What the fix moves, and what it does not.** The remesh now happens after the step's error estimation
+rather than in the middle of it, so under `temporal_error` the estimate and the accept/reject decision
+see the mesh the step was actually taken on — which is the point, and also means the mesh sequence can
+diverge from the old one. Measured on the two tutorials at the extremes: `ale/remeshing.py`, no temporal
+adaptivity, is bit-for-bit unchanged (3 remeshes, 2920 equations); `ale/rayleigh_plateau.py`, with
+`temporal_error=1`, still does 15 remeshes and still completes, but ends on 13024 equations against
+12673. Neither run rejected a step, so neither was corrupt before — the difference is purely where in
+the step the remesh lands.
 
 **In Python, after the C++ call returns.** Safe, and the only place where the state is coherent.
 
@@ -355,12 +397,54 @@ can do, and it must happen before any remesh.
 
 **So: detect inside, reject inside, remesh outside.**
 
-### 5.2 The plan
+### 5.2 What was built, and where the plan was wrong
 
-`RemeshingOptions(on_inverted_element=True)` arms `set_detect_inverted_elements(True)` and registers the
-domain, in the same way `on_invalid_triangulation` already registers one. The rejection stays in C++
-where the state can be restored; the remesh happens in `Problem.solve()`, after the C++ call has
-returned, followed by a retry of the step.
+`RemeshingOptions(on_inverted_element=True)` — off by default — arms `set_detect_inverted_elements(True)`
+in `RemeshWhen.before_finalization` and registers the domain in `on_apply_boundary_conditions`. The
+remesh happens in `Problem._solve_with_inversion_remesh()`, after the C++ call has returned, followed by
+a retry of the step at the original `dt` and a retry cap (`inversion_remesh_max_retries`, default 3).
+Serial, replicated `mpirun` and `--distribute` all reach the same answer;
+`tests/test_inverted_element_remesh.py` (6 tests, 13 s) is the guard.
+
+**The escalation criterion in the plan below does not work, and it took three attempts to find one that
+does.** The plan proposed counting consecutive inversion-caused rejections, defaulting to 3, on the
+argument that `k` rejections is a `dt` reduction of `2^-k`. Measured on the notch case:
+
+| criterion | what happened |
+|---|---|
+| run of consecutive Newton solves (the plan) | the run never exceeds **four** even at the fold, because the adaptive loop interleaves solves that fail for other reasons and each breaks the run. So a threshold of 5+ never fired at all and the run still died at the fold; 3 fired on the *transient* inversions of §3.3 |
+| reports within one `solve()` call | the caller feeds the returned `dt` back in, so the `dt` collapse is spread over many calls with a few reports each, and the count never gets anywhere |
+| reports since the last clean call | accumulates transient inversions too, and still fires on them |
+
+All three fire on the transient episode at t = 0.126, which **pre-empts the quality-based trigger that
+would have remeshed one step later from a converged state** — taking a configuration that reaches
+t = 1.02 down to t = 0.31. A safety net that makes a working setup fail is worse than no safety net,
+and that is the trap to remember here: *counting inversions cannot separate a fold from a transient
+Newton iterate, because locally they look the same.*
+
+What does separate them is what §3.2 already diagnosed: **at a fold, time stops advancing.** So the
+test is on the step that was achieved, not on how many things inverted — a step that reported an
+inversion counts as folded when it achieved less than `inversion_remesh_dt_collapse` (default 1/16,
+i.e. four halvings) of the last clean step. A transient costs one or two halvings and stays well above
+it; a fold goes to the `dt` floor and falls far below. That also settles §5.3's first open decision in
+favour of the ratio rather than the count.
+
+Measured, notch case, `temporal_error=1e-3` to t = 1.0:
+
+| triggers armed | reaches | remeshes |
+|---|---|---|
+| detection only, no remesh trigger | **dies at t = 0.1565** | 0 |
+| inverted-element trigger alone | t = 1.001 | 11 |
+| quality trigger alone (§4.3) | t = 1.020 | 8 |
+| both | t = 1.003 | 11 |
+
+The last row is the one that matters for shipping: arming the new trigger on top of a working quality
+trigger does not degrade it. The third row is the one that matters for using it: **the quality trigger
+is still the better instrument**, because it acts before the mesh folds rather than after, and the
+inverted-element trigger is a safety net for meshes that fold without any element having grown, shrunk
+or lost quality enough to notice.
+
+#### The original plan, for the record
 
 **When to escalate: not on the first inversion** (§3.3). Halving `dt` is the *correct* first response to
 a transient iterate fold and is already implemented; what distinguishes a real fold is that halving stops
@@ -378,16 +462,49 @@ that stays folded fails loudly instead of looping. **The fixed-`dt` path needs n
 the exception already propagates to Python today, so it is the same handler with the escalation logic
 skipped, and it is where the whole Python handler can be built and tested.
 
-**Fold the §5.1 hazard into the same change:** `actions_after_newton_solve` should set a pending flag
-instead of calling `force_remesh`, with the Python wrapper performing it once the C++ call has returned.
-That closes it for `RemeshWhen` generally. Check the interaction with
-`doubly_adaptive_unsteady_newton_solve`, which does spatial adaptation after the temporal loop and so has
-a second thing happening between "step accepted" and "back in Python".
+~~**Fold the §5.1 hazard into the same change:**~~ **done ahead of the rest, and independently of it** —
+`actions_after_newton_solve` sets a pending flag and `Problem._perform_pending_remesh()` performs it once
+the C++ call has returned, which closes it for `RemeshWhen` generally. So the escalation work below now
+starts from a codebase where "remesh outside" is already the rule, and needs only to add the trigger.
+
+Two notes from doing it. The deferral is unconditional rather than restricted to the calls that actually
+snapshot: one invariant ("a remesh happens only where the state is coherent") is easier to keep than two
+code paths with different ones, and `doubly_adaptive_unsteady_newton_solve` — which does spatial
+adaptation after the temporal loop, i.e. has a second thing happening between "step accepted" and "back
+in Python" — carries the same snapshot anyway. And it is a no-op where the hazard did not exist:
+`ale/remeshing.py`, which has no temporal adaptivity, produces the same 3 remeshes and the same final
+2920 equations before and after.
 
 **MPI:** the escalation decision has to be collective, because `force_remesh` is.
 `_agree_on_domains_to_remesh` already does this for the domain set, but "did any rank see an inversion"
 needs the same treatment — an inversion is inherently local to whichever rank owns the folded element,
 and a rank that saw none must not sail past the escalation point while the others remesh.
+
+*That turned out to understate it — see §5.4.*
+
+### 5.4 The detection was unusable under MPI, and that had to be fixed first
+
+Not a consequence of the new trigger: `set_detect_inverted_elements(True)` was **already** broken under
+`mpirun`, with or without `--distribute`, and nothing had ever run it there. The throw is per element,
+and oomph splits the element loop by rank in both MPI modes, so the rank holding the folded element left
+the loop while the others were still inside the assembly's collectives. `mpirun -n 2` on the notch case
+did not disagree with serial — it **hung**, reproducibly, having printed the error on one rank.
+
+The repair is the shape `consume_newton_abort_request()` already uses for a rank-local rejection.
+`BulkElementBase::defer_inverted_element_errors`, set by an RAII scope around the element loop in
+`Problem::get_residuals()`/`get_jacobian()`, makes the detector **record** instead of throwing; every
+rank then finishes the loop and reaches `InvertedElementScope::raise_if_any()`, which reduces the flag
+with one `MPI_Allreduce` and throws on all ranks or on none. Outside that scope (output, error
+estimation, a Z2 flux recovery) the immediate throw is kept, because those paths are not collective in
+the same way and a deferred report there would be silently dropped.
+
+Recording rather than throwing means the rest of the assembly runs against a folded element and produces
+meaningless numbers. That cannot escape: the matrix is discarded by the throw that follows, before any
+solver sees it.
+
+With that in place, all three modes agree: `detect,adaptive` dies at the same `dt = 7.27596e-13` and the
+same fold time in serial, at `-n 2`, and at `-n 2 --distribute`; and with the trigger armed all three
+reach t = 1.001055 with 11 remeshes.
 
 ### 5.3 Open decisions
 

@@ -556,6 +556,29 @@ namespace pyoomph
     // Problem gets a diagnostic it did not ask for, never a different answer.
     static bool detect_inverted_elements;
 
+    // --- Making the detection above safe under MPI ---
+    //
+    // The throw is per element, and an element belongs to exactly one rank's share of the assembly
+    // loop (oomph splits that loop by element whether or not the problem is --distributed). So the
+    // rank holding the folded element threw and left the element loop while the others were still
+    // inside it, waiting in the assembly's own collectives: `mpirun -n 2` on a folding mesh HUNG,
+    // reproducibly, rather than reporting anything. Detection was therefore unusable under MPI.
+    //
+    // The fix is to make the report unanimous. While defer_inverted_element_errors is set - which
+    // Problem::get_residuals()/get_jacobian() do for the duration of the element loop - an inversion
+    // is RECORDED here instead of thrown, so every rank finishes the loop and reaches the collective
+    // that follows it. Problem::raise_inverted_element_if_any() then reduces the flag over the ranks
+    // and throws on all of them or on none. Outside that scope (output, error estimation, a Z2 flux
+    // recovery) the immediate throw is kept: those paths are not collective in the same way, and a
+    // deferred report there would be silently dropped.
+    //
+    // Recording rather than throwing means the rest of the assembly runs against a folded element and
+    // produces meaningless numbers. That is fine and cannot escape: the matrix is discarded by the
+    // throw that follows, before any solver sees it.
+    static bool defer_inverted_element_errors;
+    static unsigned inverted_elements_detected;      // count on THIS rank since the scope was opened
+    static std::string inverted_element_message;     // the first one's message, for the report
+
     // Hang node X (one of THIS fine element's edge interpolating nodes for value_id) on the strictly
     // COARSER neighbour nb_re of a DIFFERENT shape, given X's fraction t along the shared coarse edge
     // whose real corner nodes are Pb (t=0) and Qb (t=1). The neighbour-local coordinate is the affine

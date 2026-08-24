@@ -521,6 +521,22 @@ def _destroy_superseded_mesh(m:"AnySpatialMesh") -> None:
 _TypeVarMeshTemplate=TypeVar("_TypeVarMeshTemplate",bound=MeshTemplate)
 
 #Problem with some automatic behaviour
+class InvertedElementRemeshRequest(RuntimeError):
+    """Raised from the C++ core when an element has been inside out on enough consecutive Newton
+    solves that reducing the step has clearly stopped helping, and a
+    ``RemeshWhen(on_inverted_element=True)`` is armed to remesh instead.
+
+    It is raised on **every** rank or on none - the decision is reduced across the processes before
+    it is taken, because an inversion is only seen by whichever rank happens to hold the folded
+    element while a remesh is collective.
+
+    Users do not normally see this: :py:meth:`Problem.solve` catches it, restores the last good
+    state, remeshes and retries the step. It escapes only when the retry budget
+    (:py:attr:`Problem.inversion_remesh_max_retries`) is exhausted, i.e. when remeshing did not
+    help either.
+    """
+
+
 class Problem(_pyoomph.Problem):
     """A class representing a problem in the pyoomph library.
 
@@ -582,6 +598,22 @@ class Problem(_pyoomph.Problem):
 
 
         self._domains_to_remesh:set[MeshTemplate]=set()
+        #: Templates carrying a RemeshWhen(on_inverted_element=True); non-empty is what arms the
+        #: snapshot-and-retry in _solve_with_inversion_remesh().
+        self._domains_remesh_on_inversion:set[MeshTemplate]=set()
+        #: How many times one solve() call may remesh and retry after an inverted element before
+        #: giving up. A domain that stays folded should fail loudly rather than loop.
+        self.inversion_remesh_max_retries:int=3
+        #: A step that reported an inversion counts as folded when it achieved less than this fraction
+        #: of the last clean step. 1/16 is four halvings: an ordinary transient inversion costs one or
+        #: two and stays well above it, while a fold goes to the dt floor and falls far below.
+        self.inversion_remesh_dt_collapse:float=1.0/16.0
+        #: The last step achieved without any inversion report; the yardstick for the test above.
+        self._inversion_reference_dt:float | None=None
+        #: Set by actions_after_newton_solve() when a RemeshWhen fired, and acted on by
+        #: _perform_pending_remesh() once the C++ solve call has returned. A remesh must NOT happen
+        #: inside that call - see _perform_pending_remesh() for what goes wrong if it does.
+        self._remesh_requested_inside_solve:bool=False
 
         # Static condensation: the Python-side, mesh-independent form of the rules. See
         # _sync_static_condensation_rules() for why the rules are kept here at all.
@@ -3531,7 +3563,11 @@ class Problem(_pyoomph.Problem):
         self._agree_on_domains_to_remesh()
         if len(self._domains_to_remesh)>0:
             if (self._solve_in_arclength_conti is None) and self.do_call_remeshing_when_necessary:
-                self.force_remesh(self._domains_to_remesh)
+                # RECORD the request; the remesh itself happens in _perform_pending_remesh(), after
+                # the C++ solve call has returned. Doing it here corrupts the dof vector - see there.
+                # The gate is evaluated here, where the old behaviour evaluated it, so that a
+                # remesh suppressed during arclength continuation stays suppressed.
+                self._remesh_requested_inside_solve=True
         self.invalidate_cached_mesh_data()
         if self._custom_assembler:
             self._custom_assembler.actions_after_successful_newton_solve()
@@ -3598,6 +3634,143 @@ class Problem(_pyoomph.Problem):
         if len(self._domains_to_remesh)>0:
             return True
         return False
+
+    def _solve_with_inversion_remesh(self, do_solve:Callable[[],Any]) -> Any:
+        """Run one oomph-lib solve call, remeshing and retrying if the mesh has folded.
+
+        Armed only by ``RemeshWhen(on_inverted_element=True)``; without it this is ``do_solve()``.
+
+        **Why a remesh is the right answer at all.** Every existing response to an inversion is "take
+        a smaller step" - the adaptive timestepper halves dt, the arclength loop scales Ds by 2/3 -
+        and there is a class of problem where no step size works. If the deformation is prescribed as
+        a function of time, the fold sits at a fixed *time*: halving dt only approaches it more
+        slowly, and the mesh is folded at t_fold + eps for every eps > 0. Measured on
+        `dev_docs/examples/inverted_element_notch.py`: 189 rejections, dt driven from 6e-3 to the
+        1e-12 floor, t frozen at the fold time to six digits, and the run dies.
+
+        **What distinguishes that from an ordinary transient inversion, and what does not.** Counting
+        inversions does not: an intermediate Newton iterate can be inside out on a mesh whose
+        converged states are all fine (the first assembly of a step has the boundary at its new
+        prescribed position and the interior still at the old one), and such an episode produces just
+        as many reports as a real fold does. Three counting rules were built and measured on the notch
+        case, and all three fire on the transient episode at t = 0.126, pre-empting the quality-based
+        trigger that would have remeshed one step later from a converged state - which took a
+        configuration that reaches t = 1.02 down to t = 0.31. A safety net that makes a working setup
+        fail is worse than no safety net.
+
+        What does distinguish them is the thing section 3.2 of the dev doc actually diagnosed:
+        **at a fold, time stops advancing.** A transient inversion costs a rejection or two and the
+        step then completes at a normal size; a fold drives dt to the floor while t stays put. So the
+        test here is on the step that was achieved, not on how many times anything inverted - which
+        also settles the open question in section 5.3 of that document in favour of the ratio.
+
+        **Why the C++ escalation threshold is armed only for the retry.** Once a remesh has happened
+        because of a fold, an inversion on the *fresh* mesh means the remesh did not help, and there is
+        nothing to gain by grinding dt down again to find that out. So the retry runs with the
+        threshold set, which turns the next report straight into another attempt.
+
+        Collective throughout: the report is reduced across the ranks before anyone sees it,
+        `_snapshot_state`/`_restore_state` go through `save_state`/`load_state`, and `force_remesh` is
+        collective - so every rank takes the same branch.
+        """
+        if not self._domains_remesh_on_inversion:
+            return do_solve()
+
+        def time_now()->float:
+            return float(self.get_current_time(as_float=True,dimensional=False))
+
+        def attempt(arm_threshold:bool)->tuple[bool,Any]:
+            """(fold_suspected, result). Raises anything that is not an inversion failure."""
+            n0=self._get_inversion_reports()
+            t0=time_now()
+            self._inversion_remesh_threshold=1 if arm_threshold else 0
+            try:
+                res=do_solve()
+            except InvertedElementRemeshRequest:
+                return True,None       # armed retry: the fresh mesh inverted straight away
+            except RuntimeError:
+                # The adaptive loop gave up (dt below Minimum_dt, say). That is a fold if inversions
+                # are why it gave up, and somebody else's problem if not.
+                if self._get_inversion_reports()>n0:
+                    return True,None
+                raise
+            finally:
+                self._inversion_remesh_threshold=0
+            if self._get_inversion_reports()==n0:
+                # A clean step. It sets the yardstick the next stalled one is measured against.
+                dt_done=time_now()-t0
+                if dt_done>0:
+                    self._inversion_reference_dt=dt_done
+                return False,res
+            # Inversions were reported AND the step still completed. Fold or transient? Compare the
+            # step actually taken against the last clean one: a transient gives up a factor of two or
+            # four, a fold gives up everything.
+            dt_done=time_now()-t0
+            ref=self._inversion_reference_dt
+            if ref is None or dt_done<=0:
+                return False,res
+            return (dt_done<ref*self.inversion_remesh_dt_collapse),res
+
+        snapshot=self._snapshot_state()
+        for i in range(self.inversion_remesh_max_retries+1):
+            fold,res=attempt(arm_threshold=(i>0))
+            if not fold:
+                return res
+            if i>=self.inversion_remesh_max_retries:
+                raise InvertedElementRemeshRequest(
+                    "The mesh kept folding after "+str(i)+" remeshes. Either the domain itself is "
+                    "degenerating, in which case no remesh can help, or the remesher is reproducing the "
+                    "same bad mesh. Problem.inversion_remesh_max_retries raises the budget.")
+            if not self.is_quiet():
+                print("INVERTED ELEMENT: the step collapsed without getting past the fold; restoring "
+                      "the last good state and remeshing (attempt "+str(i+1)+" of "+
+                      str(self.inversion_remesh_max_retries)+")")
+            self._restore_state(snapshot)
+            self.force_remesh(self._domains_remesh_on_inversion)
+            snapshot=self._snapshot_state()   # the old one describes the old mesh
+
+    def _perform_pending_remesh(self) -> bool:
+        """Carry out a remesh that a RemeshWhen asked for during the solve that has just returned.
+
+        **The remesh may not happen inside the C++ call, which is why this exists.**
+        ``oomph::Problem::adaptive_unsteady_newton_solve()`` snapshots the dofs by FLAT INDEX before
+        the step::
+
+            Vector<double> dofs_current(n_dof_local);
+            for (i < n_dof_local) dofs_current[i] = dof(i);
+
+        and, if the step is then rejected on temporal error, restores them the same way::
+
+            for (i < dofs_current.size()) dof(i) = dofs_current[i];
+
+        ``actions_after_newton_solve()`` runs between those two, from inside ``newton_solve()``. A
+        remesh there changes both ``ndof`` and the meaning of every index, so the restore writes the
+        old mesh's values into unrelated dofs of the new one - and, whenever the remesh SHRANK the
+        system, straight past the end of ``Dof_pt``, which is an out-of-bounds write through a
+        garbage pointer.
+
+        Observed, not reasoned: a 619 -> 1081 remesh inside a step that was then rejected turned a
+        converged state into ``Initial Maximum residuals 2981`` and the retry into
+        ``Maximum residuals inf``; the step was rejected 26 more times, halving dt each time and
+        restoring the same corrupt snapshot, until the run died with "Max. residual has been
+        exceeded". Nothing in that message points at remeshing.
+
+        So: detect inside, decide inside, remesh outside - the same rule
+        ``dev_docs/mesh_construction.md`` section 5.1 arrives at for inverted elements.
+
+        Collective, like ``force_remesh()`` itself: the flag is already unanimous, because
+        ``_agree_on_domains_to_remesh()`` made the domain set unanimous before it was set.
+        """
+        if not self._remesh_requested_inside_solve:
+            return False
+        self._remesh_requested_inside_solve=False
+        if len(self._domains_to_remesh)==0:
+            # actions_before_newton_solve() clears the set at the start of every solve, so a request
+            # raised by a step that was subsequently retried is re-raised by the retry. Reaching here
+            # with an empty set therefore means the last solve did not ask after all.
+            return False
+        self.force_remesh(self._domains_to_remesh)
+        return True
 
     def remesh_if_necessary(self) -> bool:
         """
@@ -8082,11 +8255,16 @@ class Problem(_pyoomph.Problem):
             self._last_step_was_stationary=False
             assert isinstance(timestep,(float,int))
             if spatial_adapt==0:                
-                if temporal_error is None:
-                    desired_dt=timestep                    
-                    self.unsteady_newton_solve(timestep,shift_values)
-                else:
-                    desired_dt=self.adaptive_unsteady_newton_solve(timestep,temporal_error,shift_values)
+                def run_once()->float:
+                    if temporal_error is None:
+                        self.unsteady_newton_solve(timestep,shift_values)
+                        return timestep
+                    return self.adaptive_unsteady_newton_solve(timestep,temporal_error,shift_values)
+                # These two do not go through _solve_with_adapt_recovery(), so they need both wrappers
+                # here: the inverted-element retry around the call, and the deferred remesh of
+                # actions_after_newton_solve() after it. The adaptive one is the call both exist for.
+                desired_dt=self._solve_with_inversion_remesh(run_once)
+                self._perform_pending_remesh()
                 self._first_step=False
                 self._suggested_next_dt=desired_dt
                 self.actions_after_transient_solve()
@@ -9006,6 +9184,10 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 
         
                 
+        # A run of "consecutive solves that inverted" is a statement about the mesh being replaced,
+        # so it must not carry over: see Problem::reset_inversion_counter.
+        self._reset_inversion_counter()
+
         self.actions_before_remeshing(remeshers)
         for r in remeshers:
             r.remesh()
@@ -9760,11 +9942,20 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
     def _solve_with_adapt_recovery(self,spatial_adapt:int,transient:bool,shift_values:bool,do_solve:Callable[[int,bool],Any])->Any:
         """Run the oomph-lib solve call, letting :py:attr:`adaptive_resolve_recovery` handle a failed
-        re-solve after an adaptation. Without a policy this is just ``do_solve(...)``."""
-        policy=self.adaptive_resolve_recovery
-        if policy is None or not policy.active or spatial_adapt<=0:
-            return do_solve(spatial_adapt,shift_values)
-        return policy.run(self,do_solve,spatial_adapt,shift_values,transient)
+        re-solve after an adaptation. Without a policy this is just ``do_solve(...)``.
+
+        Also the point at which a remesh requested during the solve is carried out - see
+        :py:meth:`_perform_pending_remesh` for why it cannot happen inside the call."""
+        def run_once()->Any:
+            policy=self.adaptive_resolve_recovery
+            if policy is None or not policy.active or spatial_adapt<=0:
+                return do_solve(spatial_adapt,shift_values)
+            return policy.run(self,do_solve,spatial_adapt,shift_values,transient)
+        res=self._solve_with_inversion_remesh(run_once)
+        # Deliberately NOT in a finally: a solve that threw leaves a state nothing should be
+        # remeshed from, and the request stays pending for the next successful solve.
+        self._perform_pending_remesh()
+        return res
 
     def _adaptive_solve_checkpoint(self,isolve:int,just_adapted:bool)->None:
         """Called from oomph-lib immediately before and after every adapt() in an adaptive solve."""
