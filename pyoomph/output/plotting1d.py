@@ -263,6 +263,20 @@ class MatplotLibMainAxes(MatplotLibAxes):
                 self.ax_y2.set_ylabel(y2lab,size=self.textsize,color=self.y2label_color) #type:ignore
             if self.y2log:
                 self.ax_y2.set_yscale("log")
+        if self.ax_y2 is not None:
+            # twinx() shares the x-axis - that part was always right - but it copies the parent's
+            # RECTANGLE once, when it is created, and does not follow later set_position() calls. The
+            # twin can be created before the margins above are applied (the inherited add_to_plot
+            # makes one as soon as y2label is set), so it kept matplotlib's default subplot rect and
+            # drew a second frame a few percent inside the real one: measured (0.125,0.11,0.775,0.77)
+            # against the main axes' (0.1,0.13,0.8,0.82). Re-applying the position is the whole fix;
+            # the shared x-axis needs nothing.
+            self.ax_y2.set_position(ax.get_position()) #type:ignore
+            # A twin draws its own frame on top of the parent's. Aligned they coincide exactly, but
+            # only the right spine carries anything, and leaving the rest visible doubles every line
+            # of the box at half opacity wherever antialiasing disagrees.
+            for side in ("top","bottom","left"):
+                self.ax_y2.spines[side].set_visible(False) #type:ignore
         # One bound at a time, unlike the inherited version, which applies a limit only when both
         # ends are known - so "ymin=0, autoscale the top" was not expressible at all.
         xlo,xhi=self._limits_for("x")
