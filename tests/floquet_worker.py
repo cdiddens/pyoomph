@@ -250,6 +250,17 @@ def run(args):
             res["mult_im"] = [float(numpy.imag(z)) for z in F]
             ev = problem.get_last_eigenvectors()
             res["eigvec_shape"] = list(numpy.shape(ev))
+            # The eigenfunction closes the orbit by construction: its last time block is the first
+            # one pushed once round, i.e. lambda times it. Anything wrong in the reconstruction --
+            # the batching above all -- shows up here and nowhere else.
+            nb, nTb = res["nbase"], res["nT"]
+            if numpy.size(ev):
+                first = ev[:, :nb]
+                last = ev[:, (nTb - 1) * nb:nTb * nb]
+                lam = numpy.array(res["mult_re"]) + 1j * numpy.array(res["mult_im"])
+                scale = numpy.maximum(numpy.max(numpy.abs(first), axis=1), 1e-300)
+                res["closure_residual"] = float(numpy.max(
+                    numpy.abs(last - lam[:, None] * first).max(axis=1) / scale))
             if args.reference:
                 from pyoomph.generic.floquet import time_elements
                 elems = time_elements(orbit._get_handler())

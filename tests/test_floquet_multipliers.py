@@ -122,6 +122,21 @@ def test_stuart_landau_multipliers(tmp_path):
     assert res["eigvec_shape"] == [2, res["nT"] * res["nbase"] + 1], res
 
 
+def test_eigenfunction_closes_the_orbit(tmp_path):
+    """v(s=1) = lambda*v(s=0) by construction, which is what pins the eigenfunction reconstruction.
+
+    The reconstruction pushes every eigenvector through the chain in one batch rather than one column
+    at a time -- asking for all multipliers of an nbase=1282 orbit spent 185 s on it column-by-column
+    against 13 s batched. Only the batching changed, not the arithmetic, and this is the invariant
+    that says so.
+    """
+    for case, nbase in (("sl", 2), ("dae", 3)):
+        res = _run(tmp_path / case, case=case, NT=48)
+        assert res["nbase"] == nbase, res
+        assert res["eigvec_shape"] == [nbase, res["nT"] * nbase + 1], res
+        assert res["closure_residual"] < 1e-9, (case, res["closure_residual"])
+
+
 def test_multiplier_converges_with_NT(tmp_path):
     err = []
     for NT in (24, 48, 96):

@@ -254,6 +254,17 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Changed / Improved
 
+- **Floquet multipliers got a lot faster, mostly serially.** Reconstructing the eigenfunction over the
+  orbit pushed each eigenvector through the time chain on its own, so asking for every multiplier of a
+  1282-dof orbit spent 185 s there against 13 s for everything else; they now go through together, for
+  a 14x cut on the whole call. Under MPI the per-element transfer solves are shared out by column
+  (2.8x on that step across 4 ranks) and the matrix product and eigendecomposition happen on rank 0
+  and are broadcast rather than repeated identically on every rank -- the repeated `eig` contended for
+  memory bandwidth badly enough to make a 4-rank Floquet solve slower than a serial one.
+  - Beyond that the calculation does not usefully parallelize: what remains is dense linear algebra on
+    `nbase x nbase` objects, and ranks on one node share memory bandwidth rather than adding to it.
+    MPI buys the orbit *solve* being distributed, not faster multipliers.
+
 - **Floquet multipliers are computed by structured condensation now**, which is what
   `get_floquet_multipliers()` does by default (`method="condensed"`). The periodic-orbit Jacobian is
   block bidiagonal in time -- each element of the time discretization writes only its own time blocks

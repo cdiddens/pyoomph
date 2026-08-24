@@ -310,3 +310,78 @@ Three, and the second and third are the interesting ones.
    `change_sampling()` sliced the first `nbase` entries off the gathered *augmented* vector to get
    the base state, which is only the base block when the two orderings agree. `_current_base_dofs()`
    now goes through the same naive ordering the Floquet permutation uses.
+
+
+## 9. Where the time actually goes, and what parallelizes
+
+Profiled on the distributed 1D orbit of §8 scaled up to `nbase=1282` (`N=320`, `NT=24`, orbit
+`ndof=32051` -- the largest these MPI constraints allow), **all ranks pinned to one BLAS thread**.
+
+That pinning is not a detail. The first profile was taken without it, and every rank of a 4-rank run
+had OpenBLAS spawning threads across all cores: the transfer solves read 13.9 s where the same work
+takes 1.34 s on one rank. Every wall-clock number below is with `OMP_NUM_THREADS=1` exported through
+`mpirun -x`, and any future measurement here has to do the same or it is measuring oversubscription.
+
+### The breakdown, one rank
+
+| step | time | note |
+|---|---|---|
+| gather the orbit Jacobian | 0.16 s | 12 MiB |
+| permute to time-major | 0.00 s | |
+| element LUs (`Nelem=8`) | 0.22 s | |
+| transfer solves | 1.34 s | 8 elements x 1282 right-hand sides |
+| matmul chain | 0.52 s | |
+| dense eig | 0.68 s | |
+| eigenfunction reconstruction | **~172 s** | before batching; see below |
+
+### What was fixed
+
+* **The eigenfunction reconstruction was 93% of a full call.** It pushed each eigenvector through the
+  chain on its own, so asking for all 1282 multipliers meant 1282 separate passes of sparse solves:
+  185 s, against 13 s for everything else. `orbit_eigenfunctions()` now pushes them all through
+  together. Same arithmetic per column, 14x on the whole call, and it is a *serial* win as much as a
+  parallel one. `test_eigenfunction_closes_the_orbit` pins the result through the invariant
+  `v(s=1) = lambda*v(s=0)`.
+* **The transfer solves are shared out by column** (`transfer_matrices()`), which is the one piece
+  that genuinely parallelizes: 1.34 s -> 0.72 s -> 0.48 s on 1, 2 and 4 ranks. One `Allgatherv` for
+  all elements together.
+* **The product and the eigendecomposition are done on rank 0 and broadcast.** Every rank used to
+  repeat both. That is not merely wasted work: the redundant `numpy.linalg.eig` went from 0.68 s on
+  one rank to 1.76 s on four as the copies contended for memory bandwidth, which made a 4-rank
+  Floquet solve *slower overall* than a serial one despite its solves being 2.8x faster.
+
+Do **not** replace the per-element transfer matrices with propagating the identity through the whole
+chain, which does the same solves holding one block instead of `Nelem` of them. It looks like a
+strict improvement and is not: the accumulated block enters the next element as the right-hand side
+`E0 @ X` of an ill-conditioned solve, so its rounding is amplified at every stage. On the stiff
+non-normal chain of §7 the two smallest multipliers went from ~1e-15 relative error to 5e+2 and
+4e+4. `test_periodic_schur_beats_the_product_at_the_bottom` catches it.
+
+### End to end, and why it stops there
+
+| | 1 rank | 2 ranks | 4 ranks |
+|---|---|---|---|
+| all 1282 multipliers | 13.1 s | 13.4 s | 16.1 s |
+| the 8 dominant ones | 3.7 s | 3.6 s | 4.7 s |
+
+**Floquet multipliers do not parallelize usefully across MPI ranks at these sizes.** What is left
+after the three fixes is dense linear algebra on `nbase x nbase` objects, and ranks on one node
+contend for the same memory bandwidth rather than adding to it. What MPI buys is the orbit *solve*
+being distributed (§8) and the problem fitting at all -- not a faster multiplier calculation.
+
+### Why the native distributed path was not built
+
+The plan's stage 4 was to stop gathering the orbit Jacobian: extract each time element's blocks as
+distributed PETSc Mats and run SLEPc on a shell matrix with one KSP per element. Two measurements
+rule it out:
+
+* **The gather is 0.16 s of 13 s**, so there is no time in it.
+* **The gathered Jacobian is 12 MiB; the dense monodromy machinery is 1.6 GiB** (peak RSS at
+  `nbase=1282`, dominated by the `nbase x nT*nbase` complex eigenfunction array and the eig
+  workspace). A problem too large to gather the Jacobian is, by two orders of magnitude, already too
+  large to form the monodromy -- so the memory case the native path was meant to serve does not
+  arise before the method itself does.
+
+The route that *would* serve very large `nbase` is the existing matrix-free operator, which needs no
+`nbase x nbase` object at all. Its limit is Arnoldi convergence on clustered spectra (§5), not the
+gather.

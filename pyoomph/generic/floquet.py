@@ -137,9 +137,14 @@ class _TimeElement:
             return self._sparse_lu.solve(numpy.ascontiguousarray(rhs.real)) + 1j * self._sparse_lu.solve(numpy.ascontiguousarray(rhs.imag))
         return self._sparse_lu.solve(rhs)
 
-    def transfer(self) -> NPFloatArray:
-        """The dense ``nbase x nbase`` transfer matrix ``v[inds[-1]] = C @ v[inds[0]]``."""
-        return self._solve(self._E0)[-self.nbase:, :]
+    def transfer(self, columns: tuple[int, int] | None = None) -> NPFloatArray:
+        """The dense ``nbase x nbase`` transfer matrix ``v[inds[-1]] = C @ v[inds[0]]``.
+
+        With ``columns``, only that range of it -- the right-hand sides are independent, which is what
+        lets the ranks share the solves out between them.
+        """
+        rhs = self._E0 if columns is None else self._E0[:, columns[0]:columns[1]]
+        return self._solve(rhs)[-self.nbase:, :]
 
     def propagate(self, v0: NPFloatArray) -> NPFloatArray:
         """The interior states of this element, ``v[inds[1]], ..., v[inds[-1]]``, stacked."""
@@ -231,12 +236,101 @@ class MonodromyOperator(scipy.sparse.linalg.LinearOperator):
         return v
 
 
-def monodromy_matrix(elems: list[_TimeElement]) -> NPFloatArray:
+def _column_range(nbase: int, nproc: int, rank: int) -> tuple[int, int]:
+    """The block of transfer-matrix columns this rank solves for. Derived only from
+    (nbase, nproc, rank), so every rank agrees on every rank's share without communicating."""
+    base, rem = divmod(nbase, nproc)
+    lo = rank * base + min(rank, rem)
+    return lo, lo + base + (1 if rank < rem else 0)
+
+
+def transfer_matrices(elems: list[_TimeElement], quiet: bool = True) -> list[NPFloatArray]:
+    """Every element's transfer matrix, with the right-hand sides shared out across the ranks.
+
+    Solving each element against all ``nbase`` right-hand sides is the dominant cost of a Floquet
+    solve -- 79% of a distributed one at nbase=1282, against 2% for gathering the Jacobian -- and
+    every rank used to repeat all of it identically. The columns are independent, so each rank solves
+    only its own range and the results are allgathered, in one collective for all elements together.
+
+    This deliberately keeps forming each transfer matrix separately rather than propagating the
+    identity through the whole chain, which would do the same solves with one block instead of
+    ``Nelem`` of them: on a strongly graded, non-normal chain the accumulated block loses its small
+    directions inside ``E0 @ X`` before the solve ever sees them, and the smallest multipliers go from
+    ~1e-15 relative error to complete nonsense. ``test_periodic_schur_beats_the_product_at_the_bottom``
+    catches that.
+    """
+    from .mpi import get_mpi_world_comm, get_mpi_rank, get_mpi_nproc
+    comm = get_mpi_world_comm()
+    nproc = get_mpi_nproc() if comm is not None else 1
+    if comm is None or nproc <= 1:
+        return [el.transfer() for el in elems]
+
+    nbase = elems[0].nbase
+    rank = get_mpi_rank()
+    ranges = [_column_range(nbase, nproc, r) for r in range(nproc)]
+    lo, hi = ranges[rank]
+    if not quiet:
+        print("Floquet: solving transfer columns %d:%d of %d on rank %d" % (lo, hi, nbase, rank))
+    # Transposed and stacked, so this rank's whole contribution is one contiguous run.
+    local = numpy.concatenate([numpy.ascontiguousarray(el.transfer((lo, hi)).T) for el in elems]) \
+        if hi > lo else numpy.zeros((0, nbase))
+
+    from mpi4py import MPI
+    counts = [len(elems) * (h - l) * nbase for (l, h) in ranges]
+    displs = numpy.concatenate(([0], numpy.cumsum(counts)[:-1])).astype(int)
+    buf = numpy.empty(int(sum(counts)), dtype=float)
+    comm.Allgatherv([numpy.ascontiguousarray(local.reshape(-1)), MPI.DOUBLE],
+                    [buf, counts, displs, MPI.DOUBLE])
+
+    out = [numpy.empty((nbase, nbase)) for _ in elems]
+    for r, (l, h) in enumerate(ranges):
+        if h <= l:
+            continue
+        chunk = buf[displs[r]:displs[r] + counts[r]].reshape(len(elems), h - l, nbase)
+        for ie in range(len(elems)):
+            out[ie][:, l:h] = chunk[ie].T
+    return out
+
+
+def monodromy_matrix(elems: list[_TimeElement], quiet: bool = True) -> NPFloatArray:
     """The dense ``nbase x nbase`` monodromy ``C_last @ ... @ C_0``."""
-    mono = elems[0].transfer()
-    for el in elems[1:]:
-        mono = el.transfer() @ mono
+    Cs = transfer_matrices(elems, quiet=quiet)
+    mono = Cs[0]
+    for C in Cs[1:]:
+        mono = C @ mono
     return mono
+
+
+def monodromy_eigendecomposition(elems: list[_TimeElement], n: int,
+                                 quiet: bool = True) -> tuple[NPComplexArray, NPComplexArray]:
+    """The n dominant eigenpairs of the monodromy: transfers in parallel, the rest on rank 0.
+
+    Only the transfer solves split by column (:func:`transfer_matrices`); the matrix product and the
+    eigendecomposition after them are O(nbase**3) and every rank used to repeat both. That is not
+    merely wasted -- measured at nbase=1282, the redundant `numpy.linalg.eig` went from 0.68 s on one
+    rank to 1.76 s on four as the copies contended for memory bandwidth, which made a 4-rank Floquet
+    solve slower overall than a serial one even though its solves were 2.8x faster. Rank 0 does them
+    once and broadcasts the result.
+    """
+    from .mpi import get_mpi_world_comm, get_mpi_rank, get_mpi_nproc
+    comm = get_mpi_world_comm()
+    nproc = get_mpi_nproc() if comm is not None else 1
+    Cs = transfer_matrices(elems, quiet=quiet)
+
+    def decompose() -> tuple[NPComplexArray, NPComplexArray]:
+        mono = Cs[0]
+        for C in Cs[1:]:
+            mono = C @ mono
+        eigs, eigv = numpy.linalg.eig(mono)  # type: ignore[misc]
+        if n < eigs.size:
+            keep = numpy.argsort(-numpy.abs(eigs))[:n]  # the n that decide stability
+            eigs, eigv = eigs[keep], eigv[:, keep]
+        return eigs, eigv
+
+    if comm is None or nproc <= 1:
+        return decompose()
+    pair = decompose() if get_mpi_rank() == 0 else None
+    return comm.bcast(pair, root=0)
 
 
 def _positive_diagonal_qr(A: NPComplexArray) -> tuple[NPComplexArray, NPComplexArray]:
@@ -291,7 +385,7 @@ def periodic_schur_multipliers(elems: list[_TimeElement], max_sweeps: int = 200,
 
     Returns ``(multipliers, sweeps_used, largest_block)``.
     """
-    Cs = [el.transfer() for el in elems]
+    Cs = transfer_matrices(elems, quiet=quiet)
     n = Cs[0].shape[0]
     Q: NPComplexArray = numpy.eye(n, dtype=complex)
     Rs: list[NPComplexArray] = []
@@ -357,20 +451,28 @@ def periodic_schur_multipliers(elems: list[_TimeElement], max_sweeps: int = 200,
     return eigs, sweeps, largest_block
 
 
-def orbit_eigenfunction(elems: list[_TimeElement], v0: NPFloatArray, nbase: int, nT: int) -> NPComplexArray:
-    """Push a monodromy eigenvector back through the chain to get the eigenfunction over the orbit.
+def orbit_eigenfunctions(elems: list[_TimeElement], V: NPComplexArray, nbase: int, nT: int) -> NPComplexArray:
+    """Push monodromy eigenvectors back through the chain to get their eigenfunctions over the orbit.
 
-    Returned with the same layout the eigenproblem formulation produces: ``nT*nbase`` entries, one
-    time block after the other, plus a trailing zero for the period unknown that the Floquet problem
-    does not carry.
+    ``V`` holds them as columns; the result has one row each, laid out as the eigenproblem
+    formulation produces: ``nT*nbase`` entries, one time block after the other, plus a trailing zero
+    for the period unknown that the Floquet problem does not carry.
+
+    All of them go through the chain together. Done one eigenvector at a time -- which is what this
+    did at first -- asking for every multiplier of an nbase=1282 orbit spent 185 s here against 3 s
+    for the multipliers themselves, because each column was its own pass of sparse solves. The
+    arithmetic per column is unchanged; only the batching is.
     """
-    out = numpy.zeros(nT * nbase + 1, dtype=complex)
-    out[:nbase] = v0
-    v = numpy.asarray(v0)
+    V = numpy.atleast_2d(numpy.asarray(V, dtype=complex))
+    if V.shape[0] != nbase:
+        V = V.T
+    out = numpy.zeros((V.shape[1], nT * nbase + 1), dtype=complex)
+    out[:, :nbase] = V.T
+    X = V
     for el in elems:
-        interior = el.propagate(v)
-        out[el.inds[1] * nbase:(el.inds[-1] + 1) * nbase] = interior
-        v = interior[-nbase:]
+        interior = el.propagate(X)
+        out[:, el.inds[1] * nbase:(el.inds[-1] + 1) * nbase] = interior.T
+        X = interior[-nbase:]
     return out
 
 
@@ -415,7 +517,7 @@ def floquet_multipliers(problem, n: int | None = None, quiet: bool = True,
     ``nbase``, not for scale.
 
     Returns ``(multipliers, eigenfunctions)`` unsorted; the caller applies its own ordering and
-    filtering. The eigenfunctions are laid out as described in :func:`orbit_eigenfunction`.
+    filtering. The eigenfunctions are laid out as described in :func:`orbit_eigenfunctions`.
     """
     handler = problem.assembly_handler_pt()
     nbase = handler.get_base_ndof()
@@ -458,7 +560,7 @@ def floquet_multipliers(problem, n: int | None = None, quiet: bool = True,
         eigs = eigs[order]
         eigv = numpy.column_stack([_eigenvector_by_inverse_iteration(mono, lam, i)
                                    for i, lam in enumerate(eigs)]) if eigs.size else numpy.zeros((nbase, 0), dtype=complex)
-        eigfuncs = numpy.array([orbit_eigenfunction(elems, eigv[:, i], nbase, nT) for i in range(eigs.size)])
+        eigfuncs = orbit_eigenfunctions(elems, eigv, nbase, nT)
         if not quiet and eigs.size:
             print("Floquet: trivial multiplier deviates from 1 by {:.3e}".format(
                 numpy.min(numpy.abs(eigs - 1.0))))
@@ -469,12 +571,7 @@ def floquet_multipliers(problem, n: int | None = None, quiet: bool = True,
         if nbase > dense_threshold and not quiet:
             print("Floquet: forming the " + str(nbase) + "x" + str(nbase) + " monodromy anyway, since "
                   + str(n) + " of its multipliers were asked for")
-        mono = monodromy_matrix(elems)
-        eigs, eigv = numpy.linalg.eig(mono)  # type: ignore[misc]
-        if n < nbase:
-            # Keep the n largest in magnitude; those are the ones that decide stability.
-            keep = numpy.argsort(-numpy.abs(eigs))[:n]
-            eigs, eigv = eigs[keep], eigv[:, keep]
+        eigs, eigv = monodromy_eigendecomposition(elems, n, quiet=quiet)
     else:
         if n >= nbase - 1:
             raise ValueError(
@@ -483,7 +580,7 @@ def floquet_multipliers(problem, n: int | None = None, quiet: bool = True,
         op = MonodromyOperator(elems, nbase)
         eigs, eigv = scipy.sparse.linalg.eigs(op, k=n, which="LM")  # type: ignore[misc]
 
-    eigfuncs = numpy.array([orbit_eigenfunction(elems, eigv[:, i], nbase, nT) for i in range(eigs.size)])
+    eigfuncs = orbit_eigenfunctions(elems, eigv, nbase, nT)
     if not quiet and eigs.size:
         trivial = numpy.min(numpy.abs(eigs - 1.0))
         print("Floquet: trivial multiplier deviates from 1 by {:.3e}".format(trivial))
