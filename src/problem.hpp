@@ -1067,6 +1067,13 @@ namespace pyoomph
       std::vector<std::string> patterns;  // in the order the fields should appear within a block
     };
     std::vector<DofOrderingSpec> dof_ordering_specs;
+    // The blocks the active layout built, as [first,last] equation ranges in the numbering it produced,
+    // disjoint and ascending. Rebuilt by every reorder_global_eqn_numbers and empty when no layout is
+    // active. Used to keep an MPI row split from cutting through a block; see dof_ordering_row_cuts().
+    // On a DISTRIBUTED problem these are rank-local (the permutation runs before synchronise_eqn_numbers
+    // shifts them), which is why the distributed branch of preferred_linear_solver_distribution does
+    // not use them - it hands back the dof distribution, whose ranges respect the blocks anyway.
+    std::vector<std::pair<int, int>> dof_ordering_blocks;
     // Scratch for reorder_global_eqn_numbers, kept across calls so a renumbering does not reallocate
     // it on every adapt. perm[old_eqn] = new_eqn.
     std::vector<long> dof_permutation_buffer;
@@ -1083,6 +1090,9 @@ namespace pyoomph
     void add_dof_ordering_spec(bool by_element, const std::vector<std::string> &patterns)
     { dof_ordering_specs.push_back(DofOrderingSpec{by_element, patterns}); }
     unsigned num_dof_ordering_specs() const { return (unsigned)dof_ordering_specs.size(); }
+    // Row cut points (nproc+1 of them) that no dof-ordering block straddles, or empty for "no opinion".
+    std::vector<unsigned> dof_ordering_row_cuts();
+    const std::vector<std::pair<int, int>> &get_dof_ordering_blocks() const { return dof_ordering_blocks; }
     void set_dof_ordering_mode(const std::string &m) {
       if (m == dof_ordering_mode) return;
       dof_ordering_mode = m;

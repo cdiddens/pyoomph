@@ -1068,6 +1068,11 @@ namespace pyoomph
 	// renumbering machinery is transparent to the answer. The layouts that are worth having
 	// (nodal-block for AMG, element-block for condensation) are built on Mesh::visit_global_dofs and
 	// come next; this one stays as the null hypothesis they are tested against.
+	// Defined further down, next to condensation_row_cuts, the other caller that wants a block-aligned
+	// row split.
+	static std::vector<unsigned> snap_cuts_to_blocks(const std::vector<std::pair<int, int>> &blocks,
+													 unsigned nproc, unsigned nd);
+
 	// Glob match, '*' and '?' only, as used on the field names of a dof ordering spec. Written out
 	// rather than taken from <fnmatch.h> because that header is POSIX and pyoomph builds on Windows.
 	static bool dof_ordering_glob(const char *pat, const char *str)
@@ -1234,7 +1239,39 @@ namespace pyoomph
 
 		perm.assign(n, 0);
 		for (unsigned long i = 0; i < n; i++) perm[order[i]] = (long)i;
+
+		// Record the blocks in the numbering just produced. A group's dofs are contiguous there by
+		// construction (the sort key is group-major), so one pass over the new order finds the runs.
+		// Singletons are skipped: a block of one cannot be cut through.
+		dof_ordering_blocks.clear();
+		unsigned long i0 = 0;
+		while (i0 < n)
+		{
+			const unsigned long e0 = order[i0];
+			unsigned long i1 = i0 + 1;
+			if (spec_of_dof[e0] >= 0)
+				while (i1 < n && spec_of_dof[order[i1]] == spec_of_dof[e0] &&
+					   group_of_dof[order[i1]] == group_of_dof[e0])
+					i1++;
+			if (i1 - i0 > 1) dof_ordering_blocks.push_back(std::make_pair((int)i0, (int)(i1 - 1)));
+			i0 = i1;
+		}
 		return true;
+	}
+
+	// A row split whose cut points fall between the layout's blocks rather than inside them.
+	//
+	// Only a REPLICATED run needs this. Distributed, each rank's dofs are one contiguous global range
+	// by construction (synchronise_eqn_numbers) and the permutation was rank-local, so no block can
+	// straddle a rank; the caller hands back the dof distribution there instead.
+	std::vector<unsigned> Problem::dof_ordering_row_cuts()
+	{
+		if (dof_ordering_blocks.empty()) return std::vector<unsigned>();
+		if (!Communicator_pt || Communicator_pt->nproc() < 2) return std::vector<unsigned>();
+		if (Problem_has_been_distributed) return std::vector<unsigned>();
+		const unsigned nd = this->ndof();
+		if (nd < Communicator_pt->nproc()) return std::vector<unsigned>();
+		return snap_cuts_to_blocks(dof_ordering_blocks, Communicator_pt->nproc(), nd);
 	}
 
 	// Rewrites every equation number this problem owns through perm, and permutes Dof_pt to match.
@@ -1314,6 +1351,7 @@ namespace pyoomph
 	void Problem::reorder_global_eqn_numbers(oomph::Vector<double *> &dof_pt)
 	{
 		// The overwhelmingly common case: no layout asked for, and not even a permutation buffer touched.
+		dof_ordering_blocks.clear();
 		if (dof_ordering_mode == "" && dof_ordering_specs.empty()) return;
 		const unsigned long n = dof_pt.size();
 		if (!n) return;
@@ -4798,6 +4836,39 @@ namespace pyoomph
 
 	// Row cut points that no element-local condensation block straddles; empty for "no preference".
 	//
+	// Moves the cut points of a uniform nproc-way row split off the blocks they would otherwise fall
+	// inside. blocks must be disjoint and ascending. Returns an empty vector when some block is longer
+	// than one rank's share, which cannot be stepped over by moving a cut at all -- only by handing a
+	// whole rank's worth of rows to somebody else.
+	//
+	// Shared by the two callers that want a block-aligned split for different reasons: static
+	// condensation, whose blocks are the components it inverts, and the dof ordering, whose blocks are
+	// the nodal or elemental blocks the layout built. They were the same fifteen lines.
+	static std::vector<unsigned> snap_cuts_to_blocks(const std::vector<std::pair<int, int>> &blocks,
+													 unsigned nproc, unsigned nd)
+	{
+		std::vector<unsigned> cuts;
+		const unsigned share = nd / nproc;
+		for (size_t i = 0; i < blocks.size(); i++)
+			if ((unsigned)(blocks[i].second - blocks[i].first + 1) > share) return cuts;
+
+		cuts.assign(nproc + 1, 0);
+		cuts[nproc] = nd;
+		size_t bi = 0;
+		for (unsigned p = 1; p < nproc; p++)
+		{
+			unsigned c = (unsigned)((unsigned long)nd * p / nproc);
+			if (c < cuts[p - 1]) c = cuts[p - 1];
+			while (bi < blocks.size() && (unsigned)blocks[bi].second < c) bi++;
+			// One step is enough: the blocks are disjoint, so blocks[bi].second+1 is at most
+			// blocks[bi+1].first, which is not strictly inside blocks[bi+1].
+			if (bi < blocks.size() && (unsigned)blocks[bi].first < c && c <= (unsigned)blocks[bi].second)
+				c = (unsigned)blocks[bi].second + 1;
+			cuts[p] = (c > nd ? nd : c);
+		}
+		return cuts;
+	}
+
 	// Only a REPLICATED run needs this. Distributed, oomph renumbers so that each rank's own dofs are
 	// one contiguous global range (synchronise_eqn_numbers), so a block of dofs belonging to one
 	// element is inside one rank's range by construction. Replicated, the numbering is the serial one
@@ -4892,47 +4963,42 @@ namespace pyoomph
 			else blocks.push_back(spans[i]);
 		}
 
-		// A block longer than one rank's share cannot be stepped over by moving a cut, only by handing a
-		// whole rank's worth of rows to somebody else. That is not a corner case: it is what a selection
-		// mixing NODAL and element-internal dofs looks like, because oomph numbers all nodal values
-		// before any internal ones, so a CR bubble velocity and the DL pressure of the same element sit
-		// hundreds of equations apart. Leave the uniform split alone then; the plan builder refuses with
-		// a message that names the dofs, which is far more use than a silently unbalanced partition.
-		const unsigned share = nd / nproc;
-		for (size_t i = 0; i < blocks.size(); i++)
-			if ((unsigned)(blocks[i].second - blocks[i].first + 1) > share) return std::vector<unsigned>();
-
-		cuts.assign(nproc + 1, 0);
-		cuts[nproc] = nd;
-		size_t bi = 0;
-		for (unsigned p = 1; p < nproc; p++)
-		{
-			unsigned c = (unsigned)((unsigned long)nd * p / nproc);
-			if (c < cuts[p - 1]) c = cuts[p - 1];
-			while (bi < blocks.size() && (unsigned)blocks[bi].second < c) bi++;
-			// One step is enough: the blocks are disjoint after the merge, so blocks[bi].second+1 is at
-			// most blocks[bi+1].first, which is not strictly inside blocks[bi+1].
-			if (bi < blocks.size() && (unsigned)blocks[bi].first < c && c <= (unsigned)blocks[bi].second)
-				c = (unsigned)blocks[bi].second + 1;
-			cuts[p] = (c > nd ? nd : c);
-		}
-		return cuts;
+		// An over-long block means the selection mixes NODAL and element-internal dofs, because oomph
+		// numbers all nodal values before any internal ones -- a CR bubble velocity and the DL pressure
+		// of the same element then sit hundreds of equations apart and no cut can be moved off them.
+		// snap_cuts_to_blocks returns empty there, the uniform split stands, and the plan builder
+		// refuses with a message naming the dofs, which is far more use than a silently unbalanced
+		// partition. An ElementBlockOrdering on those same fields is what makes the blocks short enough
+		// for this to succeed; see dev_docs/dof_ordering.md.
+		return snap_cuts_to_blocks(blocks, nproc, nd);
 	}
 
 	void Problem::preferred_linear_solver_distribution(oomph::LinearAlgebraDistribution *&dist_pt)
 	{
 		dist_pt = 0;
-		if (!use_static_condensation || !Communicator_pt || Communicator_pt->nproc() < 2) return;
+		if (!Communicator_pt || Communicator_pt->nproc() < 2) return;
+		// Two reasons to want a non-uniform row split, and condensation's is the stronger: it is a
+		// CORRECTNESS requirement (a component must be invertible on the rank owning its rows), whereas
+		// a dof layout only wants its blocks kept whole so a block preconditioner sees them. So
+		// condensation decides whenever it is on, and the layout is consulted only otherwise. Both
+		// cannot be served at once in general -- their blocks are different partitions of the same rows.
+		const bool for_condensation = use_static_condensation;
+		if (!for_condensation && dof_ordering_blocks.empty()) return;
+
 		if (Problem_has_been_distributed)
 		{
+			// Each rank's dofs are already one contiguous global range (synchronise_eqn_numbers) and any
+			// dof-ordering permutation was rank-local, so no block straddles a rank: the dof distribution
+			// is block-aligned for free, and is what condensation needs besides.
 			// Unconditionally, NOT gated on Dist_problem_matrix_distribution: oomph's own default for that
 			// enum is Uniform_matrix_distribution (problem.cc, the constructor), not the "Default"
 			// heuristic, so consulting it would simply mean never asking for the dof distribution at all.
+			if (!for_condensation) return; // a layout has nothing to add here; leave oomph's choice alone
 			dist_pt = new oomph::LinearAlgebraDistribution(this->dof_distribution_pt());
 			return;
 		}
 		const unsigned nproc = Communicator_pt->nproc(), my_rank = Communicator_pt->my_rank();
-		std::vector<unsigned> cuts = condensation_row_cuts();
+		std::vector<unsigned> cuts = for_condensation ? condensation_row_cuts() : dof_ordering_row_cuts();
 		if (cuts.size() != nproc + 1) return;
 		dist_pt = new oomph::LinearAlgebraDistribution(Communicator_pt, cuts[my_rank],
 													   cuts[my_rank + 1] - cuts[my_rank], cuts[nproc]);

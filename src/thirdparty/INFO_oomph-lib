@@ -661,6 +661,20 @@ serial or replicated run the numbers are already global and the permutation is t
 Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user of
 the library.
 
+problem.h / mesh.cc / linear_algebra_distribution.* / linear_solver.cc (Note added 24th August 2026,
+Block_dof_pt_start):
+The "Block_dof_pt_start" / "Block_dof_arrangement_used" machinery (problem.h, filled in
+Mesh::assign_global_eqn_numbers and Problem::assign_eqn_numbers) is DEAD and has been since it was
+added. Every consumer is commented out: the block-aware LinearAlgebraDistribution constructor
+(linear_algebra_distribution.h/.cc), and the call to it in SuperLUSolver::solve and
+Problem::assign_eqn_numbers. It was an attempt at the same goal pyoomph now reaches through
+reorder_global_eqn_numbers plus Problem::dof_ordering_row_cuts: keeping an MPI row split from cutting
+inside a node's block, so that Hypre AMG sees whole blocks.
+Left in place rather than reverted, because reverting it would touch four files of vendored code to
+delete something already inert. The Python property that exposed it
+(Problem.nodal_block_dof_arrangement_used) now RAISES and names the replacement, since a property
+that silently does nothing is worse than one that is gone.
+
 Telements.h (Changed on 15th August 2026, TBubbleEnrichedElementShape<3,3>::d2shape_local):
 d2psids(9, 2) added the quartic-bubble term as "32.0 * d2_quartic_bubble_ds3" instead of "..._ds2",
 i.e. it used the mixed d^2/(ds0 ds1) derivative where the pure d^2/ds2^2 one belongs. Every other

@@ -739,6 +739,12 @@ void PyReg_Problem(nb::module_ &m)
 			"which numbers every nodal value of a mesh before any element-internal one. \"reverse\" is a test layout: it is a genuine "
 			"bijection that moves nearly every dof, and exists to prove that the renumbering is transparent to the answer. Takes effect "
 			"at the next equation numbering, i.e. after the next initialise()/reapply_boundary_conditions()/adapt.")
+		.def("_dof_ordering_row_cuts", &pyoomph::Problem::dof_ordering_row_cuts,
+			 "The nproc+1 row cut points a replicated MPI run should split the Jacobian at so that no block of the active dof "
+			 "layout is cut through. Empty when there is no layout, fewer than two ranks, a distributed problem (where each "
+			 "rank's dofs are contiguous already), or when some block is longer than a rank's share.")
+		.def("_dof_ordering_blocks", &pyoomph::Problem::get_dof_ordering_blocks,
+			 "The [first,last] equation ranges of the active dof layout's blocks, for diagnostics and tests.")
 		.def("_clear_dof_ordering_specs", &pyoomph::Problem::clear_dof_ordering_specs,
 			 "Drop all dof ordering layouts, i.e. go back to oomph-lib's own numbering.")
 		.def("_add_dof_ordering_spec", &pyoomph::Problem::add_dof_ordering_spec, nb::arg("by_element"), nb::arg("patterns"),
@@ -748,11 +754,17 @@ void PyReg_Problem(nb::module_ &m)
 			 "and several layouts compose. A pattern matching no (unclaimed) field is an error, not a no-op.")
 		.def_prop_rw(
 			"nodal_block_dof_arrangement_used",
-			[](pyoomph::Problem &p)
-			{ return p.is_block_dof_arrangement_used(); },
+			[](pyoomph::Problem &p) -> bool
+			{ throw_runtime_error("nodal_block_dof_arrangement_used never had any effect and has been removed. "
+								  "Use problem.dof_ordering = NodalBlockOrdering(\"domain/velocity_x\", ...) instead, "
+								  "which actually permutes the numbering. See pyoomph.generic.dof_ordering."); return false; },
 			[](pyoomph::Problem &p, const bool &r)
-			{ p.set_block_dof_arrangement_used(r); },
-			"Whether the degrees of freedom are arranged nodal-block-wise (all values of a node contiguous), which is required by some block-preconditioned solvers.")
+			{ throw_runtime_error("nodal_block_dof_arrangement_used never had any effect and has been removed. "
+								  "Use problem.dof_ordering = NodalBlockOrdering(\"domain/velocity_x\", ...) instead, "
+								  "which actually permutes the numbering. See pyoomph.generic.dof_ordering."); },
+			"REMOVED - raises. It set oomph-lib's Block_dof_arrangement_used flag, whose every consumer is commented out in the "
+			"vendored copy (linear_solver.cc, linear_algebra_distribution.cc), so setting it did nothing at all. The working "
+			"replacement is ``problem.dof_ordering``; see pyoomph.generic.dof_ordering.")
 		.def_prop_rw(
 			"DTSF_minimum_dt",
 			[](pyoomph::Problem &p)
