@@ -138,6 +138,28 @@ count.
   bifurcation would be.** It is a property of the discretization, not of the condensation — the
   eigenproblem method finds the same value, just to six digits fewer — and an even number of
   intervals moves it next to the trivial `+1` instead. A Radau IIA collocation would put it at 0.
+
+  **`get_floquet_multipliers()` now says so.** The number cannot be fixed without changing the
+  collocation, but it can stop being read as physics, and nothing in the returned array distinguishes
+  the two: `Problem._warn_about_collocation_artefact_multipliers()` warns when a multiplier sits on
+  `-1` to within `floquet_artefact_tolerance` (1e-6; the artefact is exact to 1e-14, so anything that
+  loose is the artefact or is sitting on the bifurcation itself) and the interval count is odd, and
+  tells the reader the discriminating experiment: re-solve with an EVEN number of intervals, where the
+  artefact moves to `+1` and a genuine period doubling stays put.
+
+  It is keyed on the **signature** — a multiplier on `±1` to machine precision, with the matching
+  interval parity — rather than on proving the problem is differential-algebraic. Proving that means
+  asking for a mass matrix, and assembling one while the orbit handler is installed is refused by name
+  ([mpi_eigenproblems.md](mpi_eigenproblems.md) §5a); the signature costs nothing and is what the
+  reader has to act on anyway. The even-parity half warns too, because a doubled `+1` is harmless to a
+  stability verdict but makes the multiplicity of the trivial multiplier look like a bifurcation — and
+  the pre-existing "multiple unity Floquet multipliers" warning used to say exactly that ("except at
+  distinct bifurcations of the orbit"), which is wrong for a DAE. Both messages are corrected.
+
+  Not gated on `quiet`, which suppresses the eigensolver's chatter and the trivial multiplier's
+  accuracy report, not a warning about what the answer means. Pinned by three tests in
+  `tests/test_floquet_multipliers.py`, including a **plain-ODE control at both parities**: a warning's
+  failure mode is not being wrong, it is being noise.
 * **`--distribute` works**, for the orbit, for the multipliers, for `switch_to_hopf_orbit()` and for
   the transient hand-back when a `with orbit:` block exits — §8, and §10.1 and §10.2 for the last two,
   which used to be listed here as not working. `refine_eigenfunction()` is the one thing still refused.

@@ -100,6 +100,29 @@ def _run(tmp_path, timeout=900, **kw):
     return res
 
 
+def _run_capturing_output(tmp_path, timeout=900, **kw):
+    """Same as _run, but hands back what the worker PRINTED as well as what it returned.
+
+    Needed because the thing under test here is a warning, and a warning that nobody prints is worth
+    nothing. Deliberately does not go through _run: that one asserts on the result and would hide a
+    case where the warning fires but the numbers are wrong.
+    """
+    os.makedirs(str(tmp_path), exist_ok=True)
+    cmd = [sys.executable, _WORKER, "--outdir", str(tmp_path)]
+    for k, v in kw.items():
+        flag = "--" + k.replace("_", "-")
+        if v is True:
+            cmd.append(flag)
+        elif v is not False and v is not None:
+            cmd += [flag, str(v)]
+    out = subprocess.run(cmd, cwd=str(tmp_path), capture_output=True, text=True, timeout=timeout)
+    lines = [l for l in out.stdout.splitlines() if l.startswith("PYOOMPH_FLOQUET_RESULT ")]
+    assert len(lines) == 1, out.stdout[-4000:] + out.stderr[-4000:]
+    res = json.loads(lines[0][len("PYOOMPH_FLOQUET_RESULT "):])
+    assert "error" not in res, res.get("traceback", res.get("error"))
+    return res, out.stdout
+
+
 def _multipliers(res):
     return numpy.array(res["mult_re"]) + 1j * numpy.array(res["mult_im"])
 
@@ -199,6 +222,42 @@ def test_dae_algebraic_multiplier_sign(tmp_path, order, NT, expected):
     radial = F[numpy.argmin(numpy.abs(F))]
     tol = {1: 0.2, 2: 1e-2, 3: 1e-3}[order]
     assert abs(radial.real - _EXACT_RADIAL) / _EXACT_RADIAL < tol, F
+
+
+# --------------------------------------------------------------------------------------------
+# The collocation artefact has to be SAID, not just be true. test_dae_algebraic_multiplier_sign
+# above pins where the algebraic direction lands; these pin that a user is told, because the number
+# itself is indistinguishable from the physics it imitates -- an odd interval count puts it on -1,
+# which is exactly where a period doubling lives.
+# --------------------------------------------------------------------------------------------
+
+def test_an_odd_interval_dae_warns_that_the_minus_one_may_not_be_a_period_doubling(tmp_path):
+    res, printed = _run_capturing_output(tmp_path, case="dae", NT=45, order=3)
+    F = _multipliers(res)
+    assert numpy.min(numpy.abs(F + 1.0)) < 1e-9, F      # the artefact really is there
+    assert "sit on -1" in printed and "ODD" in printed, printed[-3000:]
+    assert "not a period doubling" in printed, printed[-3000:]
+
+
+def test_an_even_interval_dae_warns_that_the_plus_one_is_doubled(tmp_path):
+    # Harmless to a stability verdict, but it makes the multiplicity of the trivial multiplier look
+    # like a bifurcation of the orbit, which the pre-existing "multiple unity" warning used to say.
+    res, printed = _run_capturing_output(tmp_path, case="dae", NT=48, order=3)
+    F = _multipliers(res)
+    assert numpy.sum(numpy.abs(F - 1.0) < 1e-9) == 2, F
+    assert "sit on +1" in printed, printed[-3000:]
+
+
+@pytest.mark.parametrize("NT", [45, 48])
+def test_a_plain_ode_is_not_warned_about(tmp_path, NT):
+    """The control, at both parities: no algebraic direction, so nothing to warn about.
+
+    Without it the warnings above could be firing on every orbit, which would train the reader to
+    ignore them -- the failure mode of a warning is not being wrong, it is being noise.
+    """
+    _res, printed = _run_capturing_output(tmp_path, case="sl", NT=NT, order=3)
+    assert "sit on -1" not in printed, printed[-3000:]
+    assert "sit on +1" not in printed, printed[-3000:]
 
 
 def test_matrix_free_agrees_with_dense(tmp_path):

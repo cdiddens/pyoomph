@@ -573,6 +573,18 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Fixed
 
+- **A differential-algebraic orbit's spurious Floquet multiplier is now flagged.**
+  `get_floquet_multipliers()` returns `-1` for an algebraic direction whenever the orbit has an odd
+  number of time intervals -- exactly where a period-doubling bifurcation lives. The value is a
+  property of Gauss-Legendre collocation, which is not stiffly accurate, and cannot be fixed without
+  changing the quadrature; but nothing in the returned array distinguished it from the physics it
+  imitates. It now warns, and names the discriminating experiment: re-solve with an EVEN number of
+  intervals, where the artefact moves to `+1` while a genuine period doubling stays at `-1`. The
+  even-parity case warns too, because the doubled `+1` used to be reported by the "multiple unity
+  Floquet multipliers" message as "a distinct bifurcation of the orbit", which is wrong for a DAE.
+  Tolerance is `Problem.floquet_artefact_tolerance` (1e-6). `dev_docs/floquet_multipliers.md`
+  section 6.
+
 - **Refining a wedge or pyramid mesh aborted the run.** `Mesh::assign_interface_topological_ids()`,
   which `actions_after_adapt()` runs on every refinement of every mesh, called
   `get_nodal_s_in_father()` unconditionally -- and wedges and pyramids do not implement it, having no

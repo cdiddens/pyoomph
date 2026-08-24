@@ -7711,14 +7711,18 @@ class Problem(_pyoomph.Problem):
             eigv=eigv[valid_inds,:]
             valid_eigs=valid_eigs[valid_inds]        
         gamms:NPComplexArray=1/(1-valid_eigs) #type:ignore
-        
+
+        # BEFORE the unity filter: the even-interval half of this looks at the +1 multipliers, which
+        # that filter is about to delete.
+        self._warn_about_collocation_artefact_multipliers(gamms)
+
         if ignore_periodic_unity is True:
             ignore_periodic_unity=1e-5
         if ignore_periodic_unity is not False:
             unity_eigval=numpy.argwhere(numpy.abs(gamms-1)<ignore_periodic_unity).flatten()            
             if unity_eigval.size>0:
                 if unity_eigval.size>1:
-                    print("WARNING: Found multiple unity Floquet multipliers. Usually, only one is present (except at distinct bifurcations of the orbit) ")
+                    print("WARNING: Found multiple unity Floquet multipliers. Usually only one is present -- but a bifurcation of the orbit is not the only other explanation: with an even number of time intervals an algebraic direction lands on +1 too (see _warn_about_collocation_artefact_multipliers).")
                 gamms=numpy.delete(gamms,unity_eigval)
                 eigv=numpy.delete(eigv,unity_eigval,axis=0)  # TODO: Check if this is correct
         # Sort by magnitude
@@ -7730,6 +7734,67 @@ class Problem(_pyoomph.Problem):
         self._last_eigenvalues_m=None
         self._last_eigenvalues_k=None
         return gamms
+
+    #: Distance from -1 (or +1) within which a Floquet multiplier is taken to BE the collocation
+    #: artefact of _warn_about_collocation_artefact_multipliers rather than merely near it. The
+    #: artefact is exact -- verified to 1e-14 -- so anything this loose is the artefact or is sitting
+    #: on the bifurcation itself, and both are worth saying out loud.
+    floquet_artefact_tolerance:float=1e-6
+
+    def _warn_about_collocation_artefact_multipliers(self,gamms:NPComplexArray)->None:
+        """Say so when a multiplier is where Gauss collocation puts an ALGEBRAIC direction.
+
+        A differential-algebraic orbit has directions with no time derivative, and the honest
+        multiplier for those is 0. Gauss-Legendre collocation does not give 0, because it is not
+        stiffly accurate (``|R(inf)| = 1``): the perturbation of an algebraic direction is the
+        degree-``order`` polynomial vanishing at the ``order`` Gauss points of the element, those
+        points are symmetric about the midpoint, so its value at the end of an element is
+        ``(-1)**order`` times its value at the start, and over the orbit that accumulates to exactly
+        ``(-1)**n_intervals``. See dev_docs/floquet_multipliers.md section 6.
+
+        **Which lands it on -1 for an odd number of intervals -- exactly where a period-doubling
+        bifurcation lives.** That is the reason this warning exists: the number is not wrong, but read
+        as physics it says "the orbit is period doubling here" when nothing of the sort is happening,
+        and nothing in the returned array distinguishes the two. An even number of intervals moves it
+        onto +1 instead, next to the trivial multiplier, where it is harmless to a stability verdict
+        but makes the multiplicity of 1 look like a bifurcation of its own.
+
+        Deliberately keyed on the SIGNATURE (a multiplier sitting on +-1 to machine precision, with the
+        matching interval parity) rather than on proving the problem is a DAE. Proving it means asking
+        for a mass matrix, and assembling one while the orbit handler is installed is refused by name;
+        the signature costs nothing and is what the reader has to act on anyway.
+
+        Not gated on ``quiet``, which suppresses the eigensolver's own chatter and the trivial
+        multiplier's accuracy report -- not a warning about the meaning of the answer.
+        """
+        if len(gamms)==0:
+            return
+        handler=self.assembly_handler_pt()
+        try:
+            n_intervals=int(handler.get_num_time_steps())-1  #type:ignore
+        except Exception:
+            return  # no interval count to reason about; say nothing rather than guess
+        if n_intervals<1:
+            return
+        tol=self.floquet_artefact_tolerance
+        target=-1.0 if (n_intervals%2) else 1.0
+        hits=numpy.argwhere(numpy.abs(gamms-target)<tol).flatten()
+        if hits.size==0:
+            return
+        if target<0:
+            print("WARNING: "+str(hits.size)+" Floquet multiplier(s) sit on -1 to within "+str(tol)+
+                  ", and this orbit has an ODD number of time intervals ("+str(n_intervals)+"). If the "
+                  "problem is differential-algebraic, that is where Gauss collocation puts an algebraic "
+                  "direction whose true multiplier is 0 -- not a period doubling. Re-solve the orbit with "
+                  "an EVEN number of intervals: the artefact moves to +1, a genuine period doubling stays "
+                  "at -1. See dev_docs/floquet_multipliers.md section 6.")
+        elif hits.size>1:
+            # One +1 is the trivial multiplier of the time-shift invariance and is expected.
+            print("WARNING: "+str(hits.size)+" Floquet multipliers sit on +1 to within "+str(tol)+
+                  ". One is the trivial multiplier of the orbit's time-shift invariance; with an EVEN "
+                  "number of time intervals ("+str(n_intervals)+") a differential-algebraic direction "
+                  "lands there too, so a multiplicity of 1 here is not by itself a bifurcation. See "
+                  "dev_docs/floquet_multipliers.md section 6.")
 
     def _get_floquet_multipliers_condensed(self,n:int | None,ignore_periodic_unity:bool | float,quiet:bool,dense_threshold:int,shift:float | None,valid_threshold:float | None,periodic_schur:bool=False,shift_invert:bool=True,sigma:complex | None=None)->NPComplexArray:
         """Floquet multipliers by condensing the block bidiagonal orbit Jacobian; see pyoomph.generic.floquet."""
@@ -7744,13 +7809,17 @@ class Problem(_pyoomph.Problem):
 
         gamms,eigv=floquet_multipliers(self,n=n,quiet=quiet,dense_threshold=dense_threshold,periodic_schur=periodic_schur,shift_invert=shift_invert,sigma=sigma)
 
+        # BEFORE the unity filter: the even-interval half of this looks at the +1 multipliers, which
+        # that filter is about to delete.
+        self._warn_about_collocation_artefact_multipliers(gamms)
+
         if ignore_periodic_unity is True:
             ignore_periodic_unity=1e-5
         if ignore_periodic_unity is not False:
             unity_eigval=numpy.argwhere(numpy.abs(gamms-1)<ignore_periodic_unity).flatten()
             if unity_eigval.size>0:
                 if unity_eigval.size>1:
-                    print("WARNING: Found multiple unity Floquet multipliers. Usually, only one is present (except at distinct bifurcations of the orbit) ")
+                    print("WARNING: Found multiple unity Floquet multipliers. Usually only one is present -- but a bifurcation of the orbit is not the only other explanation: with an even number of time intervals an algebraic direction lands on +1 too (see _warn_about_collocation_artefact_multipliers).")
                 gamms=numpy.delete(gamms,unity_eigval)
                 eigv=numpy.delete(eigv,unity_eigval,axis=0)
         # Sort by magnitude, as the eigenproblem method does, so callers can keep indexing from the end
