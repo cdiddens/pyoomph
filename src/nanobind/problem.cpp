@@ -730,6 +730,16 @@ void PyReg_Problem(nb::module_ &m)
 			"If True (default), Dirichlet conditions are enforced the oomph-lib way, by removing the corresponding entries from the degree-of-freedom vector. "
 			"If False, all Dirichlet dofs are kept as regular degrees of freedom and the assembled system is manipulated afterwards instead.")
 		.def_prop_rw(
+			"_dof_ordering_mode",
+			[](pyoomph::Problem &p)
+			{ return p.get_dof_ordering_mode(); },
+			[](pyoomph::Problem &p, const std::string &m)
+			{ p.set_dof_ordering_mode(m); },
+			"Which layout the global degree-of-freedom numbering is permuted into. \"\" (the default) keeps oomph-lib's own order, "
+			"which numbers every nodal value of a mesh before any element-internal one. \"reverse\" is a test layout: it is a genuine "
+			"bijection that moves nearly every dof, and exists to prove that the renumbering is transparent to the answer. Takes effect "
+			"at the next equation numbering, i.e. after the next initialise()/reapply_boundary_conditions()/adapt.")
+		.def_prop_rw(
 			"nodal_block_dof_arrangement_used",
 			[](pyoomph::Problem &p)
 			{ return p.is_block_dof_arrangement_used(); },

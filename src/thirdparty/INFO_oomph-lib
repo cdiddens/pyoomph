@@ -635,6 +635,32 @@ The dead code just below the solver call site (the commented-out "if (problem_pt
 block) is an older, unconditional version of the same idea and was left as it was.
 Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user.
 
+problem.h / problem.cc (Changed on 24th August 2026, reorder_global_eqn_numbers):
+New public virtual "void reorder_global_eqn_numbers(Vector<double*>& dof_pt)" (problem.h, next to
+preferred_linear_solver_distribution), a no-op by default. Called from Problem::assign_eqn_numbers()
+at exactly one point: immediately after "n_dof = Mesh_pt->assign_global_eqn_numbers(...)" and before
+the "#ifdef OOMPH_HAS_MPI" block that either calls synchronise_eqn_numbers() or builds
+Dof_distribution_pt. An override permutes dof_pt and the matching Data::eqn_number() entries; it must
+not change WHICH values are dofs.
+It exists for pyoomph's user-selectable dof layouts (dev_docs/dof_ordering.md): oomph numbers every
+nodal value of a mesh before any element-internal one, which is the wrong layout for both consumers
+that care -- a block preconditioner (Hypre BoomerAMG) wants a node's fields adjacent so it can
+coarsen the vector system, and static condensation wants an element's selected dofs adjacent so a
+replicated row split can cut between the blocks rather than through them.
+The position in the function is the whole point and is not incidental. Everything that consumes the
+numbering is built BELOW it: Mesh::assign_local_eqn_numbers() with the elemental info,
+InterfaceMesh::update_equation_remapping(), the Dirichlet pinned-equation set, the dof distribution
+and pyoomph's sparsity generation id. A permutation applied here is therefore what the numbering IS,
+and nothing that caches a dof index can survive it -- which is what makes this safe where permuting
+after assign_eqn_numbers() had returned would not have been.
+The same call also serves both MPI modes. On a DISTRIBUTED problem the equation numbers at this point
+are still rank-local (0..my_n-1, halo data being Is_pinned) and synchronise_eqn_numbers() shifts them
+by the rank's base afterwards, so a rank-local permutation leaves each rank's global range
+contiguous, which the distributed assembly and the condensation row ownership both require. On a
+serial or replicated run the numbers are already global and the permutation is the whole thing.
+Upstream equivalent: none; this is a pyoomph-specific extension point, inert for any other user of
+the library.
+
 Telements.h (Changed on 15th August 2026, TBubbleEnrichedElementShape<3,3>::d2shape_local):
 d2psids(9, 2) added the quartic-bubble term as "32.0 * d2_quartic_bubble_ds3" instead of "..._ds2",
 i.e. it used the mixed d^2/(ds0 ds1) derivative where the pure d^2/ds2^2 one belongs. Every other

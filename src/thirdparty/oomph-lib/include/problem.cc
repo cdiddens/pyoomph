@@ -2344,6 +2344,20 @@ namespace oomph
 
       //Block_dof_pt_start.clear(); //FOR PYOOMPH - Deactivate this
 
+      //FOR PYOOMPH: let a derived Problem permute the numbering it has just been handed. This is
+      // deliberately the ONLY place it can happen, and it is here rather than after
+      // assign_eqn_numbers() returns because everything that consumes the numbering is built below:
+      // the local equation numbers and the elemental info, the interface equation remapping, the
+      // Dirichlet pinned-equation set, the dof distribution and the sparsity generation id. A
+      // permutation applied here is therefore simply what the numbering IS, and no cached dof index
+      // can survive it.
+      //
+      // It also serves both MPI modes with one implementation. Distributed, the equation numbers here
+      // are still rank-local 0..my_n-1 and synchronise_eqn_numbers() below shifts them by this rank's
+      // base afterwards, so a rank-local permutation leaves each rank's range contiguous, which is
+      // what the distributed assembly and the condensation row ownership rely on.
+      reorder_global_eqn_numbers(Dof_pt);
+
 #ifdef OOMPH_HAS_MPI
 
       // reset previous allocation

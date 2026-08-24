@@ -1060,6 +1060,110 @@ namespace pyoomph
 		/////		
 	}
 
+	// Builds the permutation for the active layout. Empty mode, or anything this build does not
+	// recognise, means "no opinion" and the numbering oomph assigned stands.
+	//
+	// "reverse" is a TEST layout and nothing else: it is the cheapest permutation that is a genuine
+	// bijection and moves essentially every dof, which is exactly what is wanted to prove that the
+	// renumbering machinery is transparent to the answer. The layouts that are worth having
+	// (nodal-block for AMG, element-block for condensation) are built on Mesh::visit_global_dofs and
+	// come next; this one stays as the null hypothesis they are tested against.
+	bool Problem::build_dof_permutation(std::vector<long> &perm, unsigned long n)
+	{
+		if (dof_ordering_mode == "") return false;
+		if (dof_ordering_mode == "reverse")
+		{
+			perm.resize(n);
+			for (unsigned long i = 0; i < n; i++) perm[i] = (long)(n - 1 - i);
+			return true;
+		}
+		throw_runtime_error("Unknown dof ordering mode '" + dof_ordering_mode + "'");
+		return false;
+	}
+
+	// Rewrites every equation number this problem owns through perm, and permutes Dof_pt to match.
+	//
+	// The Data enumeration mirrors synchronise_eqn_numbers()' bump loops rather than the field-aware
+	// walk of Mesh::visit_global_dofs, and deliberately so: this has to move EVERY dof, including any
+	// no field description reaches, or the numbering would end up self-inconsistent. Same reason it
+	// iterates Data::nvalue() rather than a field count.
+	void Problem::apply_dof_permutation(const std::vector<long> &perm, oomph::Vector<double *> &dof_pt)
+	{
+		const unsigned long n = dof_pt.size();
+		{
+			// NOT under PARANOID, which is off in every normal build (PYOOMPH_PARANOID defaults to OFF).
+			// A non-bijective perm silently aliases two dofs onto one row and surfaces much later as a
+			// Jacobian that is singular for no visible reason -- precisely the bug a layout under
+			// development produces, so the check has to be present in the build people actually use.
+			// One O(n) pass and an n-byte array, against a permutation that is already O(n log n) inside
+			// an assign_eqn_numbers() whose elemental pass is ~96% of the total; it does not register.
+			std::vector<char> seen(n, 0);
+			for (unsigned long i = 0; i < n; i++)
+			{
+				if (perm[i] < 0 || (unsigned long)perm[i] >= n)
+					throw_runtime_error("The dof permutation for mode '" + dof_ordering_mode + "' maps " +
+										std::to_string(i) + " to " + std::to_string(perm[i]) +
+										", which is outside [0," + std::to_string(n) + ").");
+				if (seen[perm[i]])
+					throw_runtime_error("The dof permutation for mode '" + dof_ordering_mode +
+										"' is not a bijection: two dofs map to " + std::to_string(perm[i]) + ".");
+				seen[perm[i]] = 1;
+			}
+		}
+
+		oomph::Vector<double *> permuted(n, NULL);
+		for (unsigned long i = 0; i < n; i++) permuted[perm[i]] = dof_pt[i];
+		dof_pt = permuted;
+
+		auto remap = [&perm, n](oomph::Data *d)
+		{
+			const unsigned nval = d->nvalue();
+			for (unsigned v = 0; v < nval; v++)
+			{
+				const long eq = d->eqn_number(v);
+				if (eq < 0) continue; // pinned, constrained, halo: not a dof, not in perm
+				if ((unsigned long)eq >= n) continue;
+				d->eqn_number(v) = perm[eq];
+			}
+		};
+
+		for (unsigned i = 0; i < this->nglobal_data(); i++) remap(this->global_data_pt(i));
+
+		oomph::Mesh *const gm = this->mesh_pt();
+		if (!gm) return;
+
+		const unsigned long nel = gm->nelement();
+		for (unsigned long e = 0; e < nel; e++)
+		{
+			oomph::GeneralisedElement *el = gm->element_pt(e);
+			const unsigned nint = el->ninternal_data();
+			for (unsigned i = 0; i < nint; i++) remap(el->internal_data_pt(i));
+		}
+
+		const unsigned long nnod = gm->nnode();
+		for (unsigned long j = 0; j < nnod; j++)
+		{
+			oomph::Node *nod = gm->node_pt(j);
+			// A periodic ("copy") node does not own its equation numbers: make_periodic() points its
+			// Eqn_number array at the master's, and master and copy are both in Node_pt. Remapping both
+			// would apply perm twice to the same long, i.e. perm[perm[eq]]. Same guard, and the same
+			// reason, as the bump loops in synchronise_eqn_numbers().
+			if (!nod->is_a_copy()) remap(nod);
+			oomph::SolidNode *snod = dynamic_cast<oomph::SolidNode *>(nod);
+			if (snod && !snod->position_is_a_copy()) remap(snod->variable_position_pt());
+		}
+	}
+
+	// See the base declaration in oomph-lib's problem.h for where this is called from and why there.
+	void Problem::reorder_global_eqn_numbers(oomph::Vector<double *> &dof_pt)
+	{
+		if (dof_ordering_mode == "") return; // the overwhelmingly common case: not even a function call's worth
+		const unsigned long n = dof_pt.size();
+		if (!n) return;
+		if (!build_dof_permutation(dof_permutation_buffer, n)) return;
+		apply_dof_permutation(dof_permutation_buffer, dof_pt);
+	}
+
 	// Performs the standard oomph-lib equation numbering, then lets every InterfaceMesh update its
 	// equation remapping (interface dofs referencing bulk equation numbers that may have just changed),
 	// and finally, when Dirichlet conditions are enforced by matrix manipulation rather than dof removal,

@@ -1052,7 +1052,30 @@ namespace pyoomph
     std::vector<std::map<unsigned,unsigned>> global_eqs_to_jacobian_buffer_index; // [global col][global row]->[index in the jacobian buffer]
 
     DirichletMatrixManipulationInfo dirichlet_info;  // only used if not dirichlets_by_removing_from_dof_vector
+
+    // Which layout the global dof numbering is permuted into, "" meaning oomph's own
+    // (all nodal values of a mesh, then all element-internal ones). See dev_docs/dof_ordering.md.
+    std::string dof_ordering_mode = "";
+    // Scratch for reorder_global_eqn_numbers, kept across calls so a renumbering does not reallocate
+    // it on every adapt. perm[old_eqn] = new_eqn.
+    std::vector<long> dof_permutation_buffer;
+    // Builds perm (a bijection of [0,n)) for the active mode. False means "no opinion", and the
+    // numbering is then left exactly as oomph assigned it.
+    virtual bool build_dof_permutation(std::vector<long> &perm, unsigned long n);
+    // Applies perm to dof_pt and to every Data::eqn_number this problem owns.
+    void apply_dof_permutation(const std::vector<long> &perm, oomph::Vector<double *> &dof_pt);
   public:
+
+    std::string get_dof_ordering_mode() const { return dof_ordering_mode; }
+    void set_dof_ordering_mode(const std::string &m) {
+      if (m == dof_ordering_mode) return;
+      dof_ordering_mode = m;
+      // The numbering only changes at the next assign_eqn_numbers(); everything derived from it is
+      // rebuilt there, so there is nothing to invalidate here.
+    }
+    // See the base declaration in oomph-lib's problem.h. Called from assign_eqn_numbers() after the
+    // numbering has been assigned and before anything reads it.
+    void reorder_global_eqn_numbers(oomph::Vector<double *> &dof_pt) override;
 
     bool are_Dirichlets_by_removing_from_dof_vector() const { return dirichlets_by_removing_from_dof_vector; }
     // Switches between the two Dirichlet-enforcement strategies (see dirichlets_by_removing_from_dof_vector); no-op if unchanged

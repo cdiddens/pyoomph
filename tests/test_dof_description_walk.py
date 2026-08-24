@@ -117,6 +117,10 @@ class _StokesD1D0(Problem):
         for b in ["left", "right", "bottom"]:
             eqs += DirichletBC(velocity_x=0, velocity_y=0) @ b
         eqs += DirichletBC(velocity_x=1, velocity_y=0) @ "top"
+        # Without this the pressure level is undetermined -- the mode refuses create_pressure_fixation
+        # -- and the two runs of test_dof_ordering.py then differ by a constant pressure shift that has
+        # nothing to do with the numbering.
+        eqs += IntegralConstraint(pressure=0)
         self += eqs @ "domain"
 
 
