@@ -7271,14 +7271,6 @@ class Problem(_pyoomph.Problem):
             qR,qI=numpy.real(q),numpy.imag(q)
             lyap_coeff=0
         else:
-            if self.is_distributed():
-                # Orbit tracking itself works under --distribute (PeriodicOrbitHandler carries an
-                # AugmentedDofDistributionHelper), but getting here from a Hopf bifurcation needs the
-                # first Lyapunov coefficient, and that is computed by the Python custom assembler in
-                # bifurcation_tools.py, which is not distributed yet (dev_docs/mpi_augmented_systems.md
-                # Part II). Say which half is missing rather than letting the generic refusal claim
-                # that orbit tracking is unsupported.
-                raise RuntimeError("switch_to_hopf_orbit is not supported on a distributed (--distribute) problem yet: the first Lyapunov coefficient it needs comes from the Python custom assembler, which is still serial. Periodic orbit tracking itself does work distributed - build the orbit guess yourself and use activate_periodic_orbit_handler, or pass dparam and orbit_amplitude to skip the Lyapunov coefficient.")
             lyap_coeff,sign,al,qR,qI=get_hopf_lyapunov_coefficient(self,param,omega=omega,q=q,FD_delta=FD_delta,FD_param_delta=FD_param_delta)
             print("AL",al,"QR MAGNITUDE",numpy.linalg.norm(qR+1j*qI))
             if dparam:
@@ -7305,14 +7297,15 @@ class Problem(_pyoomph.Problem):
         self.activate_periodic_orbit_handler(T,history_dofs[1:],mode,order=order,GL_order=GL_order,T_constraint=T_constraint)
         history_dofs.append(history_dofs[0])
         res=PeriodicOrbit(self,mode,lyap_coeff,param,omega,pvalue,parameter.value,al,order,GL_order,T_constraint)
-        orbit_base_ndof=cast(_pyoomph.PeriodicOrbitHandler,self.assembly_handler_pt()).get_base_ndof()
         ncnt:int | None=None
         avg_dists0:float | None=None
         if check_collapse_to_stationary:
             avg_dists0=0
             ncnt=0
             for T in res.iterate_over_samples():
-                dofs=self.get_current_dofs()[0][:orbit_base_ndof]
+                # Not get_current_dofs()[0][:nbase]: under --distribute the augmented rows are
+                # interleaved per rank, which is what _current_base_dofs() exists for.
+                dofs=res._current_base_dofs()
                 avg_dists0+=(numpy.dot(numpy.array(history_dofs[ncnt])-numpy.array(u0),numpy.array(dofs)-numpy.array(u0)))
                 ncnt+=1
             assert avg_dists0 is not None and ncnt is not None
@@ -7326,7 +7319,7 @@ class Problem(_pyoomph.Problem):
                 avg_dists=0.0
                 i=0
                 for T in res.iterate_over_samples():
-                    dofs=self.get_current_dofs()[0][:orbit_base_ndof]
+                    dofs=res._current_base_dofs()
                     add=numpy.dot(numpy.array(history_dofs[i])-numpy.array(u0),numpy.array(dofs)-numpy.array(u0))
                     #print("adding",add,numpy.amax(numpy.absolute(numpy.array(history_dofs[i])-numpy.array(u0))))
                     avg_dists+=add
@@ -7345,9 +7338,9 @@ class Problem(_pyoomph.Problem):
                     if skip:
                         continue
                     if i==0:
-                        start=self.get_current_dofs()[0][:orbit_base_ndof]
+                        start=res._current_base_dofs()
                     else:
-                        dist=numpy.linalg.norm(numpy.array(start)-numpy.array(self.get_current_dofs()[0][:orbit_base_ndof]))
+                        dist=numpy.linalg.norm(numpy.array(start)-numpy.array(res._current_base_dofs()))
                         # avg_dists0 is a squared radius, so the threshold is taken against its root
                         # to compare a length with a length.
                         if dist>1e-5*numpy.sqrt(abs(avg_dists0)):

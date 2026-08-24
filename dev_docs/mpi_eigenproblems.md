@@ -235,11 +235,13 @@ through `Problem._require_non_distributed`:
 - bifurcation branch switching, left eigenvectors and normal forms
   (`pyoomph/generic/bifurcation_tools.py`), which build global scipy matrices
 
-Periodic orbit tracking and Floquet multipliers are no longer on this list either — see
-[floquet_multipliers.md](floquet_multipliers.md) §8. What is still refused around them:
-`switch_to_hopf_orbit()` (it needs the first Lyapunov coefficient, which comes from the Python custom
-assembler) and the transient hand-back when leaving a `with orbit:` block (it writes history dof
-values, which oomph-lib declares unsupported when distributed).
+Periodic orbit tracking, Floquet multipliers and `switch_to_hopf_orbit()` are no longer on this list
+either — see [floquet_multipliers.md](floquet_multipliers.md) §8 and
+[hopf_normal_form.md](hopf_normal_form.md) §4. What is still refused around them: the `HopfTracker`
+route to the Hopf adjoint (`use_hopf_tracker_for_adjoint=True`, the Python custom assembler; the
+eigensolver route is taken automatically under MPI) and the transient hand-back when leaving a
+`with orbit:` block (it writes history dof values, which oomph-lib declares unsupported when
+distributed).
 
 Bifurcation *tracking* itself is no longer on this list — see
 `dev_docs/mpi_augmented_systems.md`. What is still refused inside it: `blocksolve=True`,

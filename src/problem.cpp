@@ -3243,29 +3243,58 @@ namespace pyoomph
 	// get_hessian_vector_products() (kept for reference).
 	std::vector<double> Problem::get_second_order_directional_derivative(std::vector<double> dir)
 	{
-		if (dof_distribution_pt()->nrow_local()!=dir.size()) throw_runtime_error("Mismatch in size of dir vector and the number of DoFs");
+		// Both 'dir' and the result are indexed by GLOBAL equation number, the same contract as
+		// Problem::get_residuals(), which is what the callers pair this with.
+		//
+		// It used to demand dir.size() == nrow_local() while indexing dir[jG] by a global equation
+		// number, size the result by ndof() but never reduce it across ranks, and count halo elements
+		// twice. That is correct exactly where nrow_local() == ndof() -- serially, and under a plain
+		// replicated mpirun -- and a heap overrun plus a wrong answer under --distribute. Same shape
+		// as the Problem::set_history_dofs overrun (see dev_docs/floquet_multipliers.md section 8).
+		if (dir.size() != this->ndof())
+			throw_runtime_error("Mismatch in size of dir vector and the number of DoFs");
 
-		/*
-		oomph::DoubleVectorWithHaloEntries d1;
-		oomph::Vector<oomph::DoubleVectorWithHaloEntries> d2(1);
-		oomph::Vector<oomph::DoubleVectorWithHaloEntries> res(1);
-    	d1.build(dof_distribution_pt(), 0.0);
-    	d2[0].build(dof_distribution_pt(), 0.0);
-		res[0].build(dof_distribution_pt(), 0.0);
-		for (unsigned int i=0;i<dir.size();i++) 
-		{
-			d1[i]=dir[i];
-			d2[0][i]=dir[i];
-		}
-		this->get_hessian_vector_products(d1,d2,res);
-		std::vector<double> result(this->ndof(), 0.0);
-		for (unsigned int i=0;i<this->ndof();i++) result[i]=0.5*res[0][i];
-		return result;
-		*/
-
-		std::vector<double> result(this->ndof(), 0.0);
 		HangInterpPassScope __hang_pass; // see Problem::get_residuals
 		const unsigned long n_elements = mesh_pt()->nelement();
+
+#ifdef OOMPH_HAS_MPI
+		if (this->distributed())
+		{
+			// Owned rows plus halos, so an equation shared with another rank can be accumulated here
+			// and summed there; halo ELEMENTS are skipped so nothing is counted twice.
+			oomph::DoubleVectorWithHaloEntries res;
+			res.build(this->dof_distribution_pt(), 0.0);
+			res.build_halo_scheme(this->GetHaloSchemePt());
+			for (unsigned int ne = 0; ne < n_elements; ne++)
+			{
+				BulkElementBase *elem_pt = dynamic_cast<BulkElementBase *>(mesh_pt()->element_pt(ne));
+				if (!elem_pt || elem_pt->is_halo()) continue;
+				const unsigned nvar = assembly_handler_pt()->ndof(elem_pt);
+				oomph::DenseMatrix<double> hessian_buffer(nvar, nvar * nvar, 0.0);
+				elem_pt->assemble_hessian_tensor(hessian_buffer);
+				for (unsigned int i = 0; i < nvar; i++)
+				{
+					unsigned iG = assembly_handler_pt()->eqn_number(elem_pt, i);
+					for (unsigned int j = 0; j < nvar; j++)
+					{
+						unsigned jG = assembly_handler_pt()->eqn_number(elem_pt, j);
+						for (unsigned int k = 0; k < nvar; k++)
+						{
+							double hval = hessian_buffer(i, k * nvar + j);
+							unsigned kG = assembly_handler_pt()->eqn_number(elem_pt, k);
+							res.global_value(iG) += hval * dir[jG] * dir[kG];
+						}
+					}
+				}
+			}
+			res.sum_all_halo_and_haloed_values();
+			std::vector<double> result;
+			gather_double_vector_to_global(res, result);
+			return result;
+		}
+#endif
+
+		std::vector<double> result(this->ndof(), 0.0);
 		for (unsigned int ne = 0; ne < n_elements; ne++)
 		{
 			BulkElementBase *elem_pt = dynamic_cast<BulkElementBase *>(mesh_pt()->element_pt(ne));
@@ -3280,9 +3309,9 @@ namespace pyoomph
 					unsigned jG = assembly_handler_pt()->eqn_number(elem_pt, j);
 					for (unsigned int k = 0; k < nvar; k++)
 					{
-						double hval = hessian_buffer(i, k * nvar + j);						
+						double hval = hessian_buffer(i, k * nvar + j);
 						unsigned kG = assembly_handler_pt()->eqn_number(elem_pt, k);
-						result[iG]+=hval*dir[jG]*dir[kG];
+						result[iG] += hval * dir[jG] * dir[kG];
 					}
 				}
 			}

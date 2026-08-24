@@ -393,23 +393,12 @@ gather.
 Nothing here is a defect in what §1–§9 describe; these are the edges that were deliberately left,
 each with what it would take and how it would be checked.
 
-### 10.1 `switch_to_hopf_orbit()` is still serial
+### 10.1 `switch_to_hopf_orbit()` — done
 
-**The biggest remaining usability gap**, because it is the normal way people reach an orbit: continue
-to a Hopf bifurcation, then switch. It needs the first Lyapunov coefficient, which
-`get_hopf_lyapunov_coefficient` computes with the Python custom assembler in
-`bifurcation_tools.py` — the half of `mpi_augmented_systems.md` (Part II, §7–§10) that was never
-implemented. It refuses with a message naming that specifically rather than claiming orbit tracking
-is unsupported.
-
-Until then the distributed route is to build the orbit guess yourself and call
-`activate_periodic_orbit_handler` (what `tests/floquet_worker.py`'s `pde` case does), or to pass
-`dparam` and `orbit_amplitude` to `switch_to_hopf_orbit`, which skips the Lyapunov coefficient
-entirely — that branch has not been tried distributed.
-
-Doing it properly means distributing `CustomAssemblyBase`/`AugmentedAssemblyHandler`, which serves
-branch switching, left eigenvectors and normal forms at the same time. That is a bigger piece than
-this document's subject and belongs in `mpi_augmented_systems.md`.
+Was the biggest remaining gap here, since it is the normal way people reach an orbit. It now works
+under a plain `mpirun` and under `--distribute`; see `dev_docs/hopf_normal_form.md` §4 for what was in
+the way (an ungathered pencil, a memory-unsafe Hessian contraction, and an arclength walk for a
+finite-difference step) and for the measurement showing the gather it still does is not a bottleneck.
 
 ### 10.2 History dof values are not written when distributed
 

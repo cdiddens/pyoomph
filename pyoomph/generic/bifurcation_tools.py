@@ -11,6 +11,26 @@ from ..solvers.generic import DefaultMatrixType
 
 from scipy.sparse import csr_matrix      
 
+def _allgather_square(problem:Problem,mat:DefaultMatrixType,n:int)->DefaultMatrixType:
+    """Turn a distributed row block into the whole square matrix, on every rank.
+
+    ``mpi_gather_csr_rows`` collects onto one rank; the callers here need the matrix everywhere, since
+    they all execute the same collective-laden routine together. Broadcasting the gathered triple is
+    the cheapest way to that and keeps the gather itself in one place.
+    """
+    from .mpi import get_mpi_world_comm,get_mpi_rank,mpi_row_layout,mpi_gather_csr_rows
+    comm=get_mpi_world_comm()
+    assert comm is not None, "a distributed matrix without an MPI communicator"
+    _,nrow_local,first_row,_=problem._get_base_dof_distribution_info()
+    layout=mpi_row_layout(n,first_row,nrow_local,mat.nnz)
+    assert layout is not None
+    got=mpi_gather_csr_rows(layout,mat.data,mat.indices,mat.indptr,
+                            context="gathering the Hopf pencil for the Lyapunov coefficient")
+    got=comm.bcast(got if get_mpi_rank()==0 else None,root=0) #type:ignore
+    vals,cols,rs=got
+    return csr_matrix((vals,cols,rs),shape=(n,n))
+
+
 def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD_delta:float=1e-5,FD_param_delta:float=1e-5,omega:float | None=None,q:NPComplexArray | None=None,omega_epsilon:float=1e-5,use_hopf_tracker_for_adjoint:bool=False,verbose:bool=True,residual_tolerance:float=1e-6,check_derivatives_by_fd:bool=False):
     # Taken from § 10.2 of Yuri A. Kuznetsov, Elements of Applied Bifurcation Theory, Fourth Edition, Springer, 2004
     # Also implemented analogously in pde2path, file hogetnf.m 
@@ -89,13 +109,20 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
     
 
 
-    problem._require_non_distributed("Bifurcation tracking")
-    n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = problem.assemble_eigenproblem_matrices(0) #type:ignore
     # Compressed sparse ROW, per the binding's own docstring ("both matrices in local compressed
     # sparse row (CSR) format"), so (values, column_index, row_start) is the csr_matrix argument order
     # and A/M come out un-transposed. A=-J because J=dR/dU while the pencil below is A q = i*omega*M q.
-    M=csr_matrix((M_val, M_ci, M_rs), shape=(n, n))
-    A=csr_matrix((-J_val, J_ci, J_rs), shape=(n, n))
+    #
+    # Under --distribute each rank assembles only its own row block, and everything below -- the
+    # transposes, the two sparse solves, the dot products -- needs the whole square matrix. It is
+    # ALLgathered rather than gathered to rank 0, so that every rank runs the whole routine in
+    # lockstep: nodalf(), d2f() and d3f() go through set_current_dofs() and get_residuals(), which are
+    # collective, so doing this on rank 0 alone would deadlock rather than merely be slow.
+    n, M_nzz, M_nr, M_val, M_ci, M_rs, J_nzz, J_nr, J_val, J_ci, J_rs = problem.assemble_eigenproblem_matrices(0) #type:ignore
+    M=csr_matrix((M_val, M_ci, M_rs), shape=(M_nr, n))
+    A=csr_matrix((-J_val, J_ci, J_rs), shape=(J_nr, n))
+    if M.shape[0]!=n or A.shape[0]!=n:
+        M,A=_allgather_square(problem,M,n),_allgather_square(problem,A,n)
     AT=A.transpose().tocsr()
     MT=M.transpose().tocsr()
     
@@ -164,6 +191,11 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         esolv_kwargs["target"]=-1j*omega0
         evalT,evectT,_,_=problem.get_eigen_solver().solve(1,custom_J_and_M=(AT,MT),**esolv_kwargs,shift=-(1j+omega_epsilon)*omega0,v0=numpy.conjugate(q_resolved),sort=False,quiet=False)   # TODO: Is MT right here?                  #type:ignore
     else:
+        # The Python custom assembler, which throws from
+        # sparse_assemble_row_or_column_compressed_base_problem the moment there is more than one rank
+        # (dev_docs/mpi_augmented_systems.md Part II). Say so here rather than there.
+        problem._require_non_distributed("Computing the Hopf adjoint through the Python HopfTracker "
+                                         "(the eigensolver route needs a solver supporting a target, e.g. SLEPc)")
         problem.deactivate_bifurcation_tracking()        
         problem.set_custom_assembler(HopfTracker(problem,param.get_name(),numpy.conjugate(q_resolved),omega=-omega0,left_eigenvector=True,eigenscale=1))
         problem.solve()
@@ -402,7 +434,15 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
     problem.activate_eigenbranch_tracking("complex",eigenvector=q_resolved,eigenvalue=1j*omega0)
     problem.solve()
     mu1=numpy.real(problem.get_last_eigenvalues()[0])
-    problem.go_to_param({param.get_name():param.value+FD_param_delta})
+    if problem.is_distributed():
+        # go_to_param() walks there by arclength continuation, which is refused while a tracker is
+        # installed on a distributed problem (it needs history dofs). The step here is one
+        # FD_param_delta -- 1e-3 by default -- from a converged eigenbranch, so a plain set-and-solve
+        # is well inside Newton's basin and is what the arclength walk would do in one step anyway.
+        param.value+=FD_param_delta
+        problem.solve()
+    else:
+        problem.go_to_param({param.get_name():param.value+FD_param_delta})
     mu2=numpy.real(problem.get_last_eigenvalues()[0])
     mup=-(mu2-mu1)/FD_param_delta
     if abs(mup)>1e12*abs(c1):

@@ -233,6 +233,22 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   tutorial; `AGENTS.md`/agent-facing docs for AI-assisted development.
 - numerical-data-file loading as numpy array with column and parameter information
 
+- **`switch_to_hopf_orbit()` under MPI**, replicated and `--distribute`, which completes the route from
+  a Hopf point to a periodic orbit in parallel. Three things were in the way. The first Lyapunov
+  coefficient used the local row block of the eigenproblem pencil as if it were the whole square
+  matrix; it is now allgathered rather than gathered to one rank, so every rank runs the routine in
+  lockstep (it calls `set_current_dofs`/`get_residuals`, which are collective, so doing the work on
+  rank 0 alone would deadlock). `Problem::get_second_order_directional_derivative` indexed the
+  caller's direction by *global* equation number while requiring it to be `nrow_local` long, counted
+  halo elements twice and never reduced across ranks -- a heap overrun when distributed, correct
+  under a replicated `mpirun` only because the two lengths coincide there; it now takes and returns
+  global-length vectors like `get_residuals()`. And the final `d(Re lambda)/d(parameter)` walked one
+  finite-difference step by arclength continuation, which is refused while a tracker is installed on
+  a distributed problem; a step that small does not need it.
+  - Measured against serial on a distributed 1D problem: the coefficient agrees to 2e-12, the orbit
+    radius to 8e-11 and the period to 1e-14. The whole coefficient costs 0.09 s at 1602 degrees of
+    freedom -- the Hopf tracking and the orbit solve around it dominate by orders of magnitude.
+
 - **Periodic orbits and Floquet multipliers under `--distribute`.** `PeriodicOrbitHandler` was
   entirely replicated -- `Tadd`, `x0`, `n0`, `du0ds` and `Count` were global-`Ndof` `std::vector`s
   indexed by global equation number -- and orbit tracking refused a distributed problem outright. It
@@ -509,6 +525,22 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
   full spellcheck.
 
 ### Fixed
+
+- **The first Lyapunov coefficient had several defects around it**, found by auditing it term by term
+  against Kuznetsov's real form before porting it (the mathematics itself is correct, including where
+  the mass-matrix generalisation belongs). The three `CHECKING r/sR/sI` diagnostics carried an `M` on
+  the right-hand side from a rejected variant, so they printed the residual of an equation that was
+  never solved; `use_hopf_tracker_for_adjoint` was inverted, so asking for the Hopf tracker selected
+  the eigensolver; three "should be zero" checks had no `abs()` before `amax()`, so a large negative
+  residual passed; `activate_eigenbranch_tracking` was handed an eigenvector that is `None` whenever
+  the auto-solve produced it; and a near-zero `<p,Mq>` printed diagnostics and then divided by it
+  anyway, which yields a confident wrong answer and now raises. None of them moved a result on the
+  systems tested, and `tests/test_hopf_lyapunov.py` now pins the coefficient, the amplitude and the
+  criticality, which nothing did before.
+
+- **`PeriodicOrbit.iterate_over_samples` leaked its dof backup** when the caller's loop body raised,
+  so the next `backup_dofs()` reported "the dofs have already been backed up" and that, rather than
+  the user's own error, is what surfaced -- including on the way out of the `with` block.
 
 - **`output_orbit()` wrote nothing.** The underscore-prefixing above renamed the `BaseEquations` hook
   to `_change_output_directory`, but `GenericOutput`'s override kept the outputter's public name, so

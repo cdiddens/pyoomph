@@ -109,9 +109,69 @@ system, including ones with no closed-form cycle.
 
 ## 4. MPI
 
-Still to do; see the plan. `switch_to_hopf_orbit` refuses `--distribute` because this routine
-gathers the global pencil and calls scipy, and because
-`Problem::get_second_order_directional_derivative` is memory-unsafe when distributed (it indexes the
-caller's direction by *global* equation number while requiring it to be `nrow_local` long, skips no
-halo elements and never reduces — the same shape as the `set_history_dofs` overrun fixed in
-`a56b6ce`). It is correct under a plain replicated `mpirun`, where `nrow_local == ndof()`.
+`switch_to_hopf_orbit()` works under a plain `mpirun` and under `--distribute`. Three things were in
+the way, and none of them was the one the plan expected:
+
+1. **The pencil.** `get_hopf_lyapunov_coefficient` used the local row block as if it were the whole
+   square matrix. It is now **allgathered, not gathered to rank 0**, so every rank runs the routine in
+   lockstep — `nodalf()`, `d2f()` and `d3f()` go through `set_current_dofs()` and `get_residuals()`,
+   which are collective, so doing the work on one rank alone would deadlock rather than merely be
+   slow. `_allgather_square()` in `bifurcation_tools.py` is the one place that gather lives.
+2. **`Problem::get_second_order_directional_derivative` was memory-unsafe** when distributed: it
+   indexed the caller's direction by *global* equation number while requiring it to be `nrow_local`
+   long, counted halo elements twice, and never reduced across ranks. It now takes and returns
+   global-length vectors, the same contract as `get_residuals()`, skipping halo elements and summing
+   the shared rows. Correct under a replicated `mpirun` before only because the two lengths coincide
+   there. Same shape as the `set_history_dofs` overrun of `a56b6ce`.
+3. **The final `d(Re λ)/d(parameter)` used `go_to_param()`**, i.e. arclength continuation, which is
+   refused while a tracker is installed on a distributed problem (it needs history dofs). A single
+   `FD_param_delta` step from a converged eigenbranch does not need arclength; when distributed it
+   now sets the parameter and re-solves. The serial path is untouched.
+
+Still refused: the `HopfTracker` route to the adjoint (`use_hopf_tracker_for_adjoint=True`), which is
+the Python custom assembler and throws from
+`sparse_assemble_row_or_column_compressed_base_problem`. The eigensolver route is taken automatically
+under MPI, since SLEPc supports a target.
+
+### Validated
+
+`tests/test_mpi_hopf_lyapunov.py`, on the normal form applied pointwise on a 1D mesh plus diffusion
+(the uniform state stays exact, and the mesh distributes). Serial against `mpirun -n 4` and
+`mpirun -n 4 --distribute`, `nbase=248`:
+
+| | serial | replicated | `--distribute` |
+|---|---|---|---|
+| `ga` | -0.048780487804814 | -0.048780487804853 | -0.048780487804902 |
+| orbit radius | 0.099861588481334 | | 0.099861588489617 |
+| period | 6.2831855344120 | | 6.2831855344120 |
+
+i.e. `ga` to 2e-12 relative, the radius to 8e-11, the period to 1e-14. The remaining difference is the
+assembly's summation order, which the partitioning changes.
+
+### It is not a bottleneck
+
+The plan assumed the gather plus the two `scipy.sparse.linalg.spsolve` calls would be a scaling wall,
+unlike the Floquet gather. Measured, with one BLAS thread per rank, it is not:
+
+| `nbase` | serial | `-n 4 --distribute` |
+|---|---|---|
+| 402 | 0.022 s | 0.030 s |
+| 1602 | 0.091 s | 0.057 s |
+
+The whole coefficient costs a tenth of a second at `nbase=1602` — the Hopf tracking and the orbit
+solve around it dominate by orders of magnitude. So the C++ left-eigenvector Hopf tracker that would
+remove the gather (see below) is not justified on performance grounds at any size these constraints
+allow, exactly as the native distributed Floquet path was not.
+
+That measurement also confirms the normalisation scaling of §1 exactly: `ga = -2/201` at 201 nodes and
+`-2/801` at 801, i.e. `2σ` divided by the node count, to every digit.
+
+### The C++ left eigenvector, if it is ever wanted
+
+It would be cheaper than it looks. `MyHopfHandler` assembles its eigen rows from the *dense* element
+Jacobian, so `Jᵀ` at element level is the same loop with the index pair swapped — no transposed
+assembly anywhere — and the transposed Hessian contraction it would need already exists
+(`add_hessian(Y, J, M, transposed=true)`, generated-code flags 4/5, computing
+`Σ_j Y_j ∂²R_j/∂U_i∂U_k`). `Dist_helper` and `synchronise()` would be untouched, so it would be
+distributed for free. What it would *not* remove: the `r` and `s` solves (one complex, which would
+have to be recast as the real 2n×2n block system), the B/C contractions, and the dot products.
