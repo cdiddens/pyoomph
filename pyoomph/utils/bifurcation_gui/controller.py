@@ -281,6 +281,57 @@ class BifurcationController:
         #: it off shows those segments as unknown, since a Hopf crossing would make it wrong.
         self.trust_inferred_stability=True
 
+        # --- deflation (dev_docs/deflation.md). Deflation looks for solutions the diagram does not
+        # have yet: it multiplies the residual by a factor that blows up at every solution already
+        # known, so Newton cannot converge onto one of them again and has to go somewhere else.
+        #: Shift of the deflation operator. Larger means the known solutions are pushed away over a
+        #: shorter range, so a nearby second solution is easier to reach and a distant one harder.
+        self.deflation_alpha=0.1
+        #: Order of the deflation, i.e. the power of 1/||U-W||. Integer, at least 1.
+        self.deflation_p=2
+        #: How far the guess is moved off a known solution before the deflated solve, or None for a
+        #: value read off the current solution. It carries the SCALE of the whole search: the
+        #: deflation measures ||U-W|| in units of it, so alpha is dimensionless and this is the one
+        #: number that has to match the problem. A fixed 0.5 was wrong by orders of magnitude for any
+        #: field that is not O(1) - measured on a pitchfork PDE of amplitude 1e-3, it found 7 of 21
+        #: branches where a perturbation matched to the field found 21 of 21.
+        self.deflation_perturbation:float | None=None
+        #: Random perturbations tried per deflated solve before giving up. A failed attempt is a
+        #: Newton solve that gives up early, so these are cheap next to the ones that succeed.
+        self.deflation_random_tries=4
+        #: Perturb along the leading eigenvector as well. That direction is a FIELD, so unlike a random
+        #: dof-index vector it means the same thing however the mesh is partitioned, and it usually
+        #: points at the branch that is about to appear. Costs one eigensolve per attempt.
+        self.deflation_use_eigenperturbation=True
+        #: Seed of the random perturbations; None for a different sequence every run. Seeded by default
+        #: so that a search can be repeated -- and, under MPI, so that every rank perturbs identically.
+        self.deflation_random_seed:int | None=0
+        #: Newton iteration cap for a deflated solve, or None for the problem's own. A deflated solve
+        #: is asked to fail often (that is how the search terminates), so a low cap costs little.
+        self.deflation_max_newton_iterations:int | None=20
+        #: Number of parameter steps a deflated continuation takes from the current value. Ten,
+        #: matching initial_view_ds_ahead: with the default increment below that is exactly the part
+        #: of the parameter axis a fresh diagram opens on, so the default scan covers the plot and
+        #: stops there rather than being reported as cut short before it starts.
+        self.deflated_scan_steps=10
+        #: Signed parameter increment per step, or None for ds. Deflated continuation steps the
+        #: parameter where arclength steps the arclength, so ds is the step size the user has already
+        #: chosen and the one the direction arrow is drawn with -- which also makes "Reverse
+        #: direction" reverse the scan.
+        self.deflated_scan_dparam:float | None=None
+        #: Solve an eigenproblem at every point of a deflated scan. On, like an ordinary continuation
+        #: step: a branch drawn without stability is half a bifurcation diagram, and finding a new
+        #: branch without knowing whether it is stable rarely answers the question that led to it.
+        #: Turn it off on a problem where the eigensolves dominate; the spectra can then be filled in
+        #: afterwards with "Compute the eigenvalues along this branch", once it is clear which of the
+        #: branches found are worth them.
+        self.deflated_scan_eigensolve=True
+        #: Dof vectors the deflated search is currently avoiding, and the parameter value they belong
+        #: to. Accumulated across clicks, so pressing "Deflated solve" repeatedly walks through the
+        #: solutions at one parameter value instead of finding the same one again.
+        self._deflation_known:list[NPFloatArray]=[]
+        self._deflation_at:float | None=None
+
         #: Supplies the visible axis ranges, see :py:class:`BifurcationViewLimits`.
         self.view:BifurcationViewLimits=_FixedViewLimits()
         #: Swappable so a worker-thread executor can be dropped in without touching the numerics.
@@ -1268,6 +1319,47 @@ class BifurcationController:
         sel_branch.remove(torem)
         self._changed()
 
+    def delete_branch(self,branch=None)->int:
+        """Remove a whole branch and every state file it owns. Returns how many points went.
+
+        Defaults to the SELECTED branch, falling back to the current one, which is what the tree
+        offers. Deleting the branch the problem is sitting on has to leave it somewhere, so a
+        neighbouring branch's last point is loaded; the last remaining branch cannot be deleted, for
+        the same reason delete_selected_point() refuses the last point.
+
+        This throws the dumps away, so it is the one command in the diagram that cannot be undone by
+        reloading. The confirmation for that lives in the GUI, not here: a script driving the
+        controller has already decided.
+        """
+        if branch is None:
+            branch=self.selected_branch if self.selected_branch is not None else self._get_current_branch()
+        index=self._branch_index_of(branch)
+        if len(self.branches)==1:
+            raise RuntimeError("Cannot delete the last branch of the diagram")
+        npoints=len(branch)
+        was_current=branch is self.current_branch
+        for p in branch:
+            if p.statefile:
+                self._remove_statefile(p.statefile)
+        del self.branches[index]
+        self.selected_point=None
+        self.selected_branch=None
+        if was_current:
+            # The problem is holding a solution whose point has just been thrown away. Put it on a
+            # neighbour's last point rather than leave current_point dangling - every later command
+            # reads it, and a step from a state with no point would record onto a branch it is not on.
+            neighbour=self.branches[min(index,len(self.branches)-1)]
+            self.current_branch=neighbour
+            self.current_point=None
+            if len(neighbour):
+                self.load_pt(neighbour[-1])
+            self._tangs={}
+            self.problem.reset_arc_length_parameters()
+        self.log("Deleted a branch of {:d} point{:s}; {:d} branch{:s} left".format(
+            npoints,"" if npoints==1 else "s",len(self.branches),"" if len(self.branches)==1 else "es"))
+        self._changed()
+        return npoints
+
     def split_branch(self,point=None,branch=None)->"BifurcationGUISolutionBranch":
         """Cut a branch in two at a point, which becomes the first point of the new half.
 
@@ -1932,6 +2024,15 @@ class BifurcationController:
         be stepped along the branch and flipped at each recorded change. Where a LATER measured point
         disagrees with the propagated value, that is a crossing the determinant could not see - a Hopf -
         and it is reported rather than hidden.
+
+        That argument needs a TEST FUNCTION at every point walked across, and propagation stops at a
+        point that has none - no det_sign and no dparam_ds. Without one there is nothing saying an
+        eigenvalue did not cross in between, and carrying the count on regardless would not be an
+        inference, it would be an assumption painted in the same colour as a measurement. Two kinds of
+        point are in that position: the ones a DEFLATED SCAN records (it steps the parameter with no
+        arclength control and no test function, in exactly the regions where branches appear and
+        disappear), and the ones where an eigensolve returned nothing at all. Both are left unknown,
+        and "Compute the eigenvalues along this branch" is what fills them in.
         """
         branches=[branch] if branch is not None else self.branches
         for b in branches:
@@ -1954,6 +2055,12 @@ class BifurcationController:
                                       "one.").format(self._get_paramname_str(),p.param_value,count,p.unstable_count))
                         count=p.unstable_count
                         last_det=p.det_sign
+                        continue
+                    if p.det_sign is None and p.dparam_ds is None:
+                        # No test function here, so the walk cannot see past this point. Not merely
+                        # "leave this one unknown": everything beyond it is behind the same blind spot.
+                        count=None
+                        last_det=None
                         continue
                     if count is None:
                         continue
@@ -2488,6 +2595,67 @@ class BifurcationController:
         ds=abs(self._last_ds) or 1.0
         return numpy.array([(a[0]-b[0])/ds,(a[1]-b[1])/ds])
 
+    #: How far ahead of the first point a fresh diagram opens, in units of the initial ds, and how
+    #: far behind it. Ahead, because that is where Step is about to go and roughly what a multistep
+    #: sweep covers before it hits the border; a little behind, so that the point is not glued to the
+    #: edge and a Reverse has somewhere to land.
+    initial_view_ds_ahead=10.0
+    initial_view_ds_behind=2.0
+
+    def initial_view_box(self)->tuple[float,float,float,float]:
+        """The window a fresh diagram opens on, as (xmin, xmax, ymin, ymax).
+
+        Along the axis carrying the continuation parameter the range is set from ds, so that the first
+        several steps and the direction arrow are visible without zooming. The other axis keeps the
+        tiny box: nothing is known about the observable's scale before a step has been taken, and the
+        view only ever grows as points arrive, so guessing there would only be wrong more expensively.
+
+        An explicit initial view set on the GUI wins over all of this.
+        """
+        cp=self._get_current_point().get_coordinate(self.y_axis,xspec=self.x_axis)
+        box=[cp[0]-1e-4,cp[0]+1e-4,cp[1]-1e-4,cp[1]+1e-4]
+        ds=float(self._last_ds or 0.0)
+        if ds!=0.0 and isinstance(self._paramname,str):
+            pax=parameter_axis(self._paramname)
+            ahead,behind=ds*self.initial_view_ds_ahead,-ds*self.initial_view_ds_behind
+            if as_axis(self.x_axis)==pax:
+                box[0],box[1]=min(cp[0]+ahead,cp[0]+behind),max(cp[0]+ahead,cp[0]+behind)
+            elif as_axis(self.y_axis)==pax:
+                box[2],box[3]=min(cp[1]+ahead,cp[1]+behind),max(cp[1]+ahead,cp[1]+behind)
+        return (box[0],box[1],box[2],box[3])
+
+    def plotted_tangent(self)->"NPFloatArray | None":
+        """Direction the continuation arrow should show, per unit ds, in the current axes.
+
+        Normally the arclength tangent recorded for the plotted observable. On a FRESH branch there is
+        none - one point, no step taken - and the arrow was simply missing at the moment it is most
+        wanted, which is when the user is deciding whether to press Step or Reverse first. A first
+        continuation step moves the parameter and, to first order, nothing else, so a unit vector
+        along whichever axis carries the continuation parameter is the honest answer: multiplied by
+        ds it draws (ds, 0) on the ordinary diagram.
+
+        The fallback is deliberately restricted to a branch with fewer than two points. At a LOCATED
+        BIFURCATION `_tangs` is empty too, on purpose (see _update_tangents), and the arrows worth
+        drawing there are the departure directions the plotter draws itself - one more arrow along the
+        parameter axis would say something untrue about a point that has no arclength tangent.
+        """
+        key=self.y_axis[1] if self.y_axis[0]==AXIS_OBSERVABLE else None
+        if key is not None:
+            tang=self._tangs.get(key)
+            if tang is not None:
+                return tang
+        branch=self.current_branch
+        if branch is not None and len(branch)>=2:
+            return None
+        if not isinstance(self._paramname,str):
+            return None
+        pax=parameter_axis(self._paramname)
+        if as_axis(self.x_axis)==pax:
+            return numpy.array([1.0,0.0])
+        if as_axis(self.y_axis)==pax:
+            return numpy.array([0.0,1.0])
+        return None
+
     def _tangent_length(self)->float:
         """Length of the direction of travel in the current axes, 0 if there is none yet."""
         tvec=self.axis_tangent()
@@ -2585,6 +2753,328 @@ class BifurcationController:
 
         return ds
 
+    # ------------------------------------------------------------------ deflation
+
+    def deflation_perturbation_value(self)->float:
+        """The perturbation amplitude to use, resolving None to a value read off the current solution.
+
+        A tenth of the solution's RMS magnitude: far enough off the known solution for the deflation
+        to be finite, small enough to stay in a basin. When the state is exactly zero - the trivial
+        branch, before anything has bifurcated off it - there is no length in the problem at all and
+        nothing can be derived; it falls back to 0.5, which is the historical value, and the tab says
+        so. That is the one case where the number has to be set by hand, and it is worth setting: it
+        is the scale the whole search is measured in.
+        """
+        if self.deflation_perturbation is not None:
+            return abs(float(self.deflation_perturbation))
+        try:
+            U=numpy.asarray(self.problem.get_current_dofs()[0],dtype=float)
+        except Exception:
+            return 0.5
+        rms=float(numpy.sqrt(numpy.mean(U*U))) if len(U) else 0.0
+        return 0.1*rms if rms>0.0 else 0.5
+
+    def _make_deflation_operator(self):
+        """A deflation operator built from the current settings, attached to the problem."""
+        from ...generic.bifurcation_tools import DeflationOperator
+        op=DeflationOperator(alpha=self.deflation_alpha,p=int(self.deflation_p))
+        # Distances in units of the perturbation, so alpha means the same thing at every scale; the
+        # same rule Problem.iterate_over_multiple_solutions_by_deflation applies to its own operator.
+        op.scale=max(self.deflation_perturbation_value(),1e-300)*numpy.sqrt(max(self.problem.ndof(),1))
+        return op
+
+    def deflation_known_count(self)->int:
+        """How many solutions the deflated search is currently avoiding."""
+        return len(self._deflation_known)
+
+    def clear_deflation_known_solutions(self):
+        """Forget them, so the next deflated solve starts the search over from here."""
+        self._deflation_known=[]
+        self._deflation_at=None
+        self.log("Deflation: forgot the known solutions")
+        self._changed()
+
+    def _refresh_deflation_known(self):
+        """Make sure the avoided set belongs to the parameter value we are actually at.
+
+        The set is only meaningful at ONE parameter value: a solution at a different value is not a
+        solution here, and deflating it would push the search away from a perfectly good root for no
+        reason. Moving the parameter therefore starts a fresh search.
+        """
+        here=float(self.get_bifurcation_parameter().value)
+        if self._deflation_at is None or not same_parameter_value(self._deflation_at,here):
+            self._deflation_known=[]
+            self._deflation_at=here
+        current=self.problem.get_current_dofs()[0]
+        if all(not self._same_solution(current,W) for W in self._deflation_known):
+            self._deflation_known.append(numpy.array(current))
+
+    @staticmethod
+    def _same_solution(a,b,tol:float=1e-6)->bool:
+        if len(a)!=len(b):
+            return False
+        scale=max(1.0,float(numpy.linalg.norm(a)),float(numpy.linalg.norm(b)))
+        return float(numpy.linalg.norm(numpy.asarray(a)-numpy.asarray(b)))<=tol*scale
+
+    def _deflation_perturbation(self,rng)->NPFloatArray:
+        """The direction the guess is moved in before a deflated solve.
+
+        The eigenvector when there is one and the user asked for it, a random dof vector otherwise.
+        The eigenvector is worth preferring where it exists: it is a field rather than a list of dof
+        indices, and it points along the mode that is about to go unstable, which is where a new
+        branch usually is.
+        """
+        n=self.problem.ndof()
+        if self.deflation_use_eigenperturbation:
+            evs=self.problem.get_last_eigenvectors()
+            if evs is not None and len(evs)>0 and len(evs[0])==n:
+                v=numpy.real(numpy.array(evs[0]))
+                m=float(numpy.amax(numpy.absolute(v)))
+                if m>0:
+                    return v/m*self.deflation_perturbation_value()
+            self.log("Deflation: no usable eigenvector for the perturbation, using a random one")
+        return (rng.random(n)-0.5)*self.deflation_perturbation_value()
+
+    def deflated_solve(self)->bool:
+        """One deflated solve here; a solution that is genuinely new opens a new branch.
+
+        The current solution, and everything found by earlier clicks at this same parameter value,
+        are deflated away, so pressing this repeatedly walks through the solutions at this parameter
+        rather than finding the same one over and over. The parameter is not moved.
+        """
+        if self.current_point is None and self.current_branch is None:
+            self.log("Deflation: solve or step once first, so there is a solution to deflate away")
+            return False
+        self._refresh_deflation_known()
+        before=numpy.array(self.problem.get_current_dofs()[0])
+        op=self._make_deflation_operator()
+        rng=numpy.random.default_rng(self.deflation_random_seed)
+        self.problem.set_deflation_operator(op)
+        found_one=False
+        try:
+            for W in self._deflation_known:
+                op.add_known_solution(W)
+            for attempt in range(max(1,int(self.deflation_random_tries))):
+                if self._abort_requested:
+                    self._abort_requested=False
+                    self.log("Deflated solve aborted")
+                    break
+                self._status("DEFLATED SOLVE {:d}/{:d} (avoiding {:d})".format(
+                    attempt+1,max(1,int(self.deflation_random_tries)),len(self._deflation_known)))
+                self.problem.set_current_dofs(before+self._deflation_perturbation(rng))
+                try:
+                    self.problem.solve(max_newton_iterations=self.deflation_max_newton_iterations)
+                except Exception as e:
+                    self.log("Deflated solve attempt {:d} did not converge ({:s})".format(attempt+1,type(e).__name__))
+                    continue
+                found=self.problem.get_current_dofs()[0]
+                if any(self._same_solution(found,W) for W in self._deflation_known):
+                    # Deflation stops Newton converging ONTO a known solution but not arbitrarily
+                    # close to one; near a bifurcation the branches meet. Opening a branch for that
+                    # would put a duplicate on top of the one already there.
+                    self.log("Deflated solve attempt {:d} came back to a known solution".format(attempt+1))
+                    continue
+                self._deflation_known.append(numpy.array(found))
+                found_one=True
+                # Off before the eigensolve and before the point is recorded: everything from here on
+                # -- the eigenproblem, the state dump, any later step -- must see the ordinary
+                # residual, not the deflated one.
+                self.problem.set_deflation_operator(None)
+                self._new_branch()
+                if self.quick_mode:
+                    self._add_current_state(measured=False)
+                else:
+                    self.problem.solve_eigenproblem(self.neigen,self.shift,
+                                                    **(self._mode_kwargs() if self.compute_modes_during_sweep else {}))
+                    self._add_current_state()
+                # The new solution is not on the branch the arclength tangent describes, so an
+                # ordinary Step from here has to start a fresh one.
+                self.problem.reset_arc_length_parameters()
+                self._tangs={}
+                self.log("Deflation found a new solution, on branch {:d} (now avoiding {:d})".format(
+                    len(self.branches)-1,len(self._deflation_known)))
+                self.save_all()
+                self._changed()
+                return True
+            self.log("Deflation found nothing new here after {:d} attempt{:s}".format(
+                max(1,int(self.deflation_random_tries)),"" if self.deflation_random_tries==1 else "s"))
+            return False
+        finally:
+            self.problem.set_deflation_operator(None)
+            if not found_one:
+                # Every attempt perturbed the dofs and then failed or came back to a known solution,
+                # so the problem is holding whichever of those it stopped on. Put the state the user
+                # was looking at back; it is a converged solution already, so no solve is needed.
+                self.problem.set_current_dofs(before)
+
+    def scanned_parameter_axis_limits(self)->"tuple[float,float] | None":
+        """The visible range of the axis that shows the continuation parameter, or None.
+
+        Which axis that is depends on what the user pinned; on the usual diagram it is x, but either
+        can carry either, and the parameter need not be drawn at all - in which case there is no
+        range to run out of and the scan is bounded only by its step count.
+        """
+        if not isinstance(self._paramname,str):
+            return None
+        pax=parameter_axis(self._paramname)
+        if as_axis(self.x_axis)==pax:
+            lim=self.view.get_xlim()
+        elif as_axis(self.y_axis)==pax:
+            lim=self.view.get_ylim()
+        else:
+            return None
+        lo,hi=min(lim),max(lim)
+        # A view is only a bound if it is a number. Matplotlib will hand out a non-finite limit if a
+        # non-finite coordinate ever reached extend_lims, and comparing against it silently answers
+        # False to everything - which came out of the tab as a scan range of "nan ... nan".
+        if not (numpy.isfinite(lo) and numpy.isfinite(hi)):
+            return None
+        return (float(lo),float(hi))
+
+    def deflated_scan_values(self)->list[float]:
+        """The parameter values a deflated continuation would visit, current value first.
+
+        Truncated where the parameter leaves the visible axes, in the same spirit as
+        :py:meth:`multistep`: a scan that marches off the plot is computing points nobody asked to
+        see. Two things follow multistep rather than being stricter than it, and both were wrong the
+        first time round -- the label read "in 0 steps" and the button did nothing:
+
+        * the first value OUTSIDE the range is kept, so the scan steps and then notices it has left,
+          exactly as multistep does (it steps first and tests afterwards). A scan therefore always
+          takes at least one step;
+        * if the starting value is not inside the range at all, nothing is clipped. The view then says
+          nothing about where this scan should stop -- most often it has not been framed yet, since a
+          diagram with no points has never had its limits set -- and clipping against it would leave
+          the whole scan behind.
+        """
+        start=float(self.get_bifurcation_parameter().value)
+        n=max(1,int(self.deflated_scan_steps))
+        dp=self.deflated_scan_dparam
+        if dp is None:
+            # ds, signed: the same step the arclength continuation would take and the same length the
+            # direction arrow is drawn with. A rule based on the parameter's own magnitude instead
+            # (0.05*|p|, as this was) has nothing to do with either, and on a fresh diagram - whose
+            # window is 10 ds wide - a single step of it could already leave the plot, so the scan
+            # reported itself as cut short after one step.
+            dp=float(self._last_ds) or 0.05*max(abs(start),1.0)
+        dp=float(dp)
+        if not (numpy.isfinite(start) and numpy.isfinite(dp)):
+            return [start]
+        values=[start+i*dp for i in range(n+1)]
+        lim=self.scanned_parameter_axis_limits()
+        # Clipped only when the view actually bounds this scan, i.e. the starting value is inside it
+        # AND at least one whole step fits inside it too. Otherwise the view has nothing to say and the
+        # full scan runs: after ten continuation steps the point sits exactly ON the right edge (the
+        # plotter grows the limits to include it), and clipping there reported a ten-step scan as a
+        # one-step one. The view is not a wall in any case - it grows as the scan draws into it - and
+        # the loop's own box test is what stops a scan that has genuinely left the diagram.
+        if lim is not None and lim[0]<=start<=lim[1] and lim[0]<=start+dp<=lim[1]:
+            keep=[values[0]]
+            for v in values[1:]:
+                keep.append(v)
+                if v<lim[0] or v>lim[1]:
+                    break
+            values=keep
+        return values
+
+    def deflated_scan_is_clipped(self)->bool:
+        """Whether the visible range shortens the scan the settings ask for."""
+        return len(self.deflated_scan_values())<max(1,int(self.deflated_scan_steps))+1
+
+    def deflated_continuation(self)->int:
+        """Scan the continuation parameter, looking for new solutions at every value.
+
+        Farrell, Beentjes & Birkisson (arXiv:1603.00809), driven through
+        :py:meth:`~pyoomph.generic.problem.Problem.deflated_continuation`. Unlike arclength
+        continuation this cannot turn a fold -- it steps the parameter, full stop -- but it does find
+        branches that are not connected to the one being followed, which arclength never can.
+
+        Every branch it reports becomes a NEW branch of the diagram, including the continuation of
+        the solution we started from: a parameter scan and an arclength branch are different objects
+        and merging them would put points on a branch whose ordering they do not respect.
+
+        Abortable between parameter steps. Returns the number of branches created.
+        """
+        if not isinstance(self._paramname,str):
+            self.log("Deflated continuation needs a named continuation parameter")
+            return 0
+        values=self.deflated_scan_values()
+        self.log("Deflated continuation in '{:s}' over {:g} ... {:g} in {:d} steps".format(
+            self._paramname,values[0],values[-1],len(values)-1))
+        by_index:dict[int,BifurcationGUISolutionBranch]={}
+        xlim,ylim=self.view.get_xlim(),self.view.get_ylim()
+        at_value=float(values[0])
+        step_points,any_visible=0,False
+        gen=self.problem.deflated_continuation(
+            deflation_alpha=self.deflation_alpha,deflation_p=int(self.deflation_p),
+            perturbation_amplitude=self.deflation_perturbation_value(),
+            max_newton_iterations=self.deflation_max_newton_iterations,
+            use_eigenperturbation=self.deflation_use_eigenperturbation,
+            num_random_tries=max(1,int(self.deflation_random_tries)),
+            random_seed=self.deflation_random_seed,
+            **{self._paramname:values})
+        try:
+            for branch_index,pvalue,_dofs in gen:
+                if self._abort_requested:
+                    self._abort_requested=False
+                    self.log("Deflated continuation aborted")
+                    break
+                if not same_parameter_value(pvalue,at_value):
+                    # A parameter step is done. Stop if nothing it produced was on the plot: the
+                    # parameter itself may still be inside the visible range (or not drawn at all)
+                    # while every branch has left it through the other axis, which is the case
+                    # multistep's box test catches and a range check on the parameter alone does not.
+                    if step_points and not any_visible:
+                        self.log("Deflated continuation stopped: every branch has left the visible axes")
+                        break
+                    at_value=float(pvalue)
+                    step_points,any_visible=0,False
+                branch=by_index.get(branch_index)
+                if branch is None:
+                    branch=self._new_branch()
+                    by_index[branch_index]=branch
+                self.current_branch=branch
+                self._status("DEFLATED SCAN {:s}={:g} ({:d} branch{:s})".format(
+                    str(self._paramname),float(pvalue),len(by_index),"" if len(by_index)==1 else "es"))
+                if self.deflated_scan_eigensolve:
+                    self.problem.solve_eigenproblem(self.neigen,self.shift,
+                                                    **(self._mode_kwargs() if self.compute_modes_during_sweep else {}))
+                    self._add_current_state()
+                else:
+                    # measured=False: no eigensolve was done here, so the point must be recorded WITHOUT
+                    # a spectrum rather than with whatever the problem still holds from an earlier one.
+                    # Its stability then reads as unknown and "Compute the eigenvalues along this
+                    # branch" fills it in on demand.
+                    self._add_current_state(measured=False)
+                step_points+=1
+                cp=self._get_current_point().get_coordinate(self.y_axis,xspec=self.x_axis)
+                if xlim[0]<=cp[0]<=xlim[1] and ylim[0]<=cp[1]<=ylim[1]:
+                    any_visible=True
+        finally:
+            # close() rather than letting it be collected: the generator takes the deflation operator
+            # off the problem in its own finally, and an aborted scan must not leave it installed.
+            gen.close()
+            self.problem.set_deflation_operator(None)
+            # Put the problem back on the last point that was RECORDED. A scan ends on whatever its
+            # last attempt left behind, and its last attempt is by construction a failed one - the
+            # hunt for new solutions stops when a deflated solve stops converging - so the dofs are a
+            # diverged state that is on no branch. Everything downstream assumes current_point is what
+            # the problem holds: the next command starts from it, and a second Deflated continuation
+            # went straight to inf/nan residuals because its opening solve began there.
+            if self.current_point is not None:
+                self.load_pt(self.current_point)
+            # The parameter was moved by hand, so oomph's arclength tangent describes a step that was
+            # never taken. An ordinary Step from here has to start a fresh one.
+            self.problem.reset_arc_length_parameters()
+            self._tangs={}
+            for b in by_index.values():
+                self.propagate_stability(b)
+            self.save_all()
+            self._changed()
+        self.log("Deflated continuation created {:d} branch{:s}".format(
+            len(by_index),"" if len(by_index)==1 else "es"))
+        return len(by_index)
+
     def scan_stripe(self,point=None)->bool:
         """Find every eigenvalue in the stripe ``|Re|<stripe_re``, ``|Im|<stripe_im`` at one point.
 
@@ -2624,7 +3114,11 @@ class BifurcationController:
             self._store_spectrum(point,found,modes,merge=self.stripe_merge)
             return True
         except Exception as e:
-            self.log("The stripe scan failed:",repr(e))
+            # str, not repr, when there is something to read: the messages the eigensolver raises here
+            # explain themselves (a real-scalar PETSc cannot integrate a contour at all), and repr()
+            # buried that behind "PETSc.Error(56)"-style noise.
+            msg=str(e).strip()
+            self.log("The stripe scan failed: "+(msg if msg else repr(e)))
             return False
         finally:
             if restore is not None and restore is not point:
@@ -2921,10 +3415,19 @@ class BifurcationController:
                 kind,mode,btype))
         self.problem.activate_bifurcation_tracking(self._paramname,btype,
                                                    eigenvector=eigenindex,**track_kw)
-        self.problem.solve(max_newton_iterations=20)
-        self._add_current_state()
-        self._update_tangents()
-        self.problem.deactivate_bifurcation_tracking()
+        # The teardown belongs HERE, with the call that switched tracking on, not in whichever caller
+        # happens to catch the failure. The tracking solve is the one that can diverge, and when it did
+        # the augmented system stayed installed: every later solve then worked on the wrong problem,
+        # and the next attempt to locate a bifurcation reported "a non-zero shift is required" from its
+        # opening eigensolve - the leftover tracker's message, with nothing about the solve that
+        # actually failed. Two of the three entry points (Locate pitchfork, Locate the bifurcation of
+        # the selected eigenvalue) call this directly and had no cleanup at all.
+        try:
+            self.problem.solve(max_newton_iterations=20)
+            self._add_current_state()
+            self._update_tangents()
+        finally:
+            self.problem.deactivate_bifurcation_tracking()
         self.reorder_branch_upon_point_insertion(self._get_current_branch(),self._get_current_point())
 
     #: Solve the eigenproblem once when a bifurcation whose classification was READ BACK from a saved
@@ -2969,8 +3472,10 @@ class BifurcationController:
             try:
                 self.locate_bifurcation(eigenindex=eigenindex)
             except Exception as e:
-                # Bifurcation tracking must be switched off again, otherwise the augmented system
-                # stays active and every subsequent solve operates on the wrong problem.
+                # A backstop only: locate_bifurcation switches tracking off in its own finally, and
+                # the other way off a bifurcation (leave_bifurcation -> branch_switch /
+                # transient_leave_branch) manages its own. Left here because the cost of being wrong
+                # about that is every later solve silently working on an augmented system.
                 self.problem.deactivate_bifurcation_tracking()
                 self.log("Bifurcation finding failed:",e)
 

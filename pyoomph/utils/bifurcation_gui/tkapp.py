@@ -46,6 +46,7 @@ user can trigger goes through :py:meth:`BifurcationTkApp._invoke`, which refuses
 task while one is running; that guard is what makes pumping the event loop mid-solve safe.
 """
 
+import math
 import os
 import traceback
 
@@ -193,6 +194,18 @@ class BifurcationTkApp:
                   "its spectra filled in afterwards")
         A("refine_detected","Refine the detected bifurcation",self._refine_detected,is_solver_task=True,
           enabled_when=lambda: self._nearest_detected() is not None)
+        # --- deflation
+        A("deflated_solve","Deflated solve",c.deflated_solve,is_solver_task=True,
+          enabled_when=lambda: c.current_point is not None or c.current_branch is not None,
+          tooltip="Look for ANOTHER solution at this parameter value by deflating away the ones "
+                  "already known. A solution that is genuinely new opens a new branch.")
+        A("deflated_continuation","Deflated continuation",c.deflated_continuation,is_solver_task=True,
+          enabled_when=lambda: isinstance(c._paramname,str),
+          tooltip="Scan the continuation parameter, deflating at every value. Finds branches that are "
+                  "not connected to this one, which arclength cannot; Abort stops it between steps.")
+        A("deflation_forget","Forget the deflated solutions",c.clear_deflation_known_solutions,
+          tooltip="Start the deflated search here over, instead of continuing to avoid what it has "
+                  "already found at this parameter value")
         A("refresh_plots","Refresh field plots",self._refresh_plots,
           enabled_when=lambda: self.plot_panes.has_any(),
           tooltip="Re-render the problem's plotters from the current solution")
@@ -261,6 +274,10 @@ class BifurcationTkApp:
         A("merge_branches","Merge selected branch into current",self._merge_branches,
           enabled_when=lambda: c.selected_branch is not None and c.selected_branch is not c.current_branch,
           tooltip="Join two branches that are one curve, ordered by which of their ends meet")
+        A("delete_branch","Delete branch...",self._delete_branch,
+          enabled_when=lambda: len(c.branches)>1,
+          tooltip="Remove a whole branch and every state dump it owns. Asks first - unlike splitting "
+                  "or merging, this cannot be undone by reloading the diagram.")
 
         # --- view
         A("toggle_splines","Interpolated splines",self._toggle_splines,kind="check",
@@ -409,6 +426,10 @@ class BifurcationTkApp:
         self._add_menu_item(m,"scan_stripe_branch")
         self._add_menu_item(m,"toggle_stripe_merge")
         m.add_separator()
+        self._add_menu_item(m,"deflated_solve")
+        self._add_menu_item(m,"deflated_continuation")
+        self._add_menu_item(m,"deflation_forget")
+        m.add_separator()
         self._add_menu_item(m,"start_locus")
         self._add_menu_item(m,"leave_locus")
         m.add_separator()
@@ -435,6 +456,7 @@ class BifurcationTkApp:
         m.add_separator()
         self._add_menu_item(m,"split_branch")
         self._add_menu_item(m,"merge_branches")
+        self._add_menu_item(m,"delete_branch")
         m.add_separator()
         self._add_menu_item(m,"toggle_mode")
         self._add_menu_item(m,"toggle_move_point")
@@ -614,6 +636,11 @@ class BifurcationTkApp:
         self.nav.update()
         self.nav.pack(side=tk.BOTTOM,fill=tk.X)
         self.canvas.mpl_connect("button_press_event",self._on_canvas_click)
+        # Zooming or panning changes what the deflated scan will cover, and nothing else would tell
+        # the tab: a navigation-toolbar zoom repaints the canvas without going through refresh().
+        # draw_event fires after every repaint and this handler only assigns StringVars, so it cannot
+        # draw again and cannot recurse.
+        self.canvas.mpl_connect("draw_event",lambda *_: self._on_canvas_drawn())
 
         # The problem's own plotters, rendered live. Nothing is added when the problem has none, so a
         # script without a plotter gets exactly the window it got before.
@@ -627,6 +654,7 @@ class BifurcationTkApp:
         self._build_parameters_tab()
         self._build_pointinfo_tab()
         self._build_branches_tab()
+        self._build_deflation_tab()
 
         logframe=ttk.Frame(outer)
         outer.add(logframe,weight=1)
@@ -855,6 +883,16 @@ class BifurcationTkApp:
     def _build_branches_tab(self):
         tab=ttk.Frame(self.side,padding=4)
         self.side.add(tab,text="Branches")
+        # The commands that act on a WHOLE branch, next to the tree that selects one. They are in the
+        # Branches menu as well, but that is not where anyone looks after clicking a branch here.
+        buttons=ttk.Frame(tab)
+        buttons.pack(side=tk.BOTTOM,fill=tk.X,pady=(4,0))
+        ttk.Button(buttons,text="Split",width=7,
+                   command=lambda: self._invoke(self._actions["split_branch"])).pack(side=tk.LEFT)
+        ttk.Button(buttons,text="Merge",width=7,
+                   command=lambda: self._invoke(self._actions["merge_branches"])).pack(side=tk.LEFT,padx=3)
+        ttk.Button(buttons,text="Delete branch...",
+                   command=lambda: self._invoke(self._actions["delete_branch"])).pack(side=tk.LEFT)
         self.tree=ttk.Treeview(tab,columns=("info",),show="tree headings",selectmode="browse")
         self.tree.heading("#0",text="Branch / point")
         self.tree.heading("info",text="Details")
@@ -866,6 +904,210 @@ class BifurcationTkApp:
         self.tree.pack(side=tk.LEFT,fill=tk.BOTH,expand=True)
         self.tree.bind("<<TreeviewSelect>>",self._on_tree_select)
         self.tree.bind("<Double-1>",lambda *_: self._invoke(self._actions["goto_selected"]))
+
+    def _build_deflation_tab(self):
+        """Deflation: look for solutions the diagram does not have yet.
+
+        Two commands and the settings behind them. The commands are the interesting part -- everything
+        else on this tab feeds them -- so they sit at the top rather than after a screen of entries.
+        """
+        tab=ttk.Frame(self.side,padding=8)
+        self.side.add(tab,text="Deflation")
+
+        row=0
+        buttons=ttk.Frame(tab)
+        buttons.grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=(0,4))
+        ttk.Button(buttons,text="Deflated solve",width=15,
+                   command=lambda: self._invoke(self._actions["deflated_solve"])).pack(side=tk.LEFT)
+        ttk.Button(buttons,text="Deflated continuation",width=20,
+                   command=lambda: self._invoke(self._actions["deflated_continuation"])).pack(side=tk.LEFT,padx=(4,0))
+        row+=1
+
+        # What a deflated solve is avoiding right now. Without this the button looks stateless and the
+        # second click, which deliberately behaves differently from the first, is a surprise.
+        self.defl_known_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.defl_known_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+        ttk.Button(tab,text="Forget known solutions",
+                   command=lambda: self._invoke(self._actions["deflation_forget"])).grid(
+                   row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,6))
+        row+=1
+
+        ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
+        row+=1
+        ttk.Label(tab,text="Deflation operator",font=("TkDefaultFont",9,"bold")).grid(
+                  row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        ttk.Label(tab,text="Shift alpha").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_alpha_var=tk.StringVar()
+        self.defl_alpha_entry=ttk.Entry(tab,textvariable=self.defl_alpha_var,width=14)
+        self.defl_alpha_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_alpha_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_alpha_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+
+        ttk.Label(tab,text="Power p").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_p_var=tk.StringVar()
+        self.defl_p_entry=ttk.Entry(tab,textvariable=self.defl_p_var,width=14)
+        self.defl_p_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_p_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_p_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+
+        ttk.Label(tab,text="Perturbation").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_pert_var=tk.StringVar()
+        self.defl_pert_entry=ttk.Entry(tab,textvariable=self.defl_pert_var,width=14)
+        self.defl_pert_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_pert_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_pert_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+        # This one number sets the scale the deflation is measured in (alpha is dimensionless in units
+        # of it), so what "auto" came out as belongs on the screen rather than only in the log.
+        self.defl_pert_hint_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.defl_pert_hint_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W)
+        row+=1
+
+        ttk.Label(tab,text="Random tries").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_tries_var=tk.StringVar()
+        self.defl_tries_entry=ttk.Entry(tab,textvariable=self.defl_tries_var,width=14)
+        self.defl_tries_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_tries_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_tries_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+
+        ttk.Label(tab,text="Random seed").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_seed_var=tk.StringVar()
+        self.defl_seed_entry=ttk.Entry(tab,textvariable=self.defl_seed_var,width=14)
+        self.defl_seed_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_seed_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_seed_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+
+        ttk.Label(tab,text="Max Newton it.").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_newton_var=tk.StringVar()
+        self.defl_newton_entry=ttk.Entry(tab,textvariable=self.defl_newton_var,width=14)
+        self.defl_newton_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_newton_entry.bind("<Return>",lambda *_: self._commit_deflation())
+        self.defl_newton_entry.bind("<FocusOut>",lambda *_: self._commit_deflation())
+        row+=1
+
+        self.defl_eigpert_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Perturb along the eigenvector",variable=self.defl_eigpert_var,
+                        command=self._commit_deflation).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
+        row+=1
+        ttk.Label(tab,text="Deflated continuation",font=("TkDefaultFont",9,"bold")).grid(
+                  row=row,column=0,columnspan=2,sticky=tk.W,pady=(0,2))
+        row+=1
+
+        # The scan stops where the diagram does, the way Multistep does: it is truncated to the part of
+        # the parameter axis that is visible, and it gives up early if a whole parameter step produced
+        # nothing inside the axes at all.
+        ttk.Label(tab,text="Steps").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_steps_var=tk.StringVar()
+        self.defl_steps_entry=ttk.Entry(tab,textvariable=self.defl_steps_var,width=14)
+        self.defl_steps_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_steps_entry.bind("<Return>",lambda *_: self._commit_deflated_scan())
+        self.defl_steps_entry.bind("<FocusOut>",lambda *_: self._commit_deflated_scan())
+        row+=1
+
+        ttk.Label(tab,text="d(parameter)").grid(row=row,column=0,sticky=tk.W,pady=2)
+        self.defl_dparam_var=tk.StringVar()
+        self.defl_dparam_entry=ttk.Entry(tab,textvariable=self.defl_dparam_var,width=14)
+        self.defl_dparam_entry.grid(row=row,column=1,sticky=tk.EW,pady=2)
+        self.defl_dparam_entry.bind("<Return>",lambda *_: self._commit_deflated_scan())
+        self.defl_dparam_entry.bind("<FocusOut>",lambda *_: self._commit_deflated_scan())
+        row+=1
+
+        self.defl_scan_eig_var=tk.BooleanVar()
+        ttk.Checkbutton(tab,text="Solve eigenproblems during the scan",variable=self.defl_scan_eig_var,
+                        command=self._commit_deflated_scan).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
+        row+=1
+
+        # The range the scan will actually cover, recomputed on every refresh. "auto" for d(parameter)
+        # IS ds, so Reverse direction reverses the scan too and the default scan is exactly the window
+        # a fresh diagram opens on; there is no other place that would say so.
+        self.defl_range_var=tk.StringVar(value="")
+        ttk.Label(tab,textvariable=self.defl_range_var,wraplength=300,
+                  foreground="#555555").grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=(4,0))
+        row+=1
+
+        tab.columnconfigure(1,weight=1)
+
+    def _commit_deflation(self):
+        """Read the deflation operator settings back off the tab."""
+        c=self.controller
+        try:
+            alpha=float(self.defl_alpha_var.get())
+            if not alpha>0:
+                raise ValueError("alpha must be positive")
+            c.deflation_alpha=alpha
+        except ValueError:
+            c.log("The deflation shift alpha must be a positive number")
+        try:
+            p=int(float(self.defl_p_var.get()))
+            if p<1:
+                raise ValueError("p must be at least 1")
+            c.deflation_p=p
+        except ValueError:
+            c.log("The deflation power p must be an integer of at least 1")
+        pert=self.defl_pert_var.get().strip()
+        if pert.lower() in ("","auto","none","-"):
+            c.deflation_perturbation=None
+        else:
+            try:
+                c.deflation_perturbation=abs(float(pert))
+            except ValueError:
+                c.log("The perturbation amplitude must be a number, or 'auto' to read one off the "
+                      "current solution")
+        try:
+            c.deflation_random_tries=max(1,int(float(self.defl_tries_var.get())))
+        except ValueError:
+            c.log("The number of random tries must be an integer of at least 1")
+        seed=self.defl_seed_var.get().strip()
+        if seed.lower() in ("","none","-"):
+            # A different sequence every run, which is what you want once a seeded search has stopped
+            # finding anything new.
+            c.deflation_random_seed=None
+        else:
+            try:
+                c.deflation_random_seed=int(float(seed))
+            except ValueError:
+                c.log("The random seed must be an integer, or empty for an unseeded search")
+        newton=self.defl_newton_var.get().strip()
+        if newton.lower() in ("","none","-","auto"):
+            c.deflation_max_newton_iterations=None
+        else:
+            try:
+                c.deflation_max_newton_iterations=max(1,int(float(newton)))
+            except ValueError:
+                c.log("The Newton iteration cap must be an integer, or empty for the problem's own")
+        c.deflation_use_eigenperturbation=bool(self.defl_eigpert_var.get())
+        self._update_panels()
+
+    def _commit_deflated_scan(self):
+        """Read the deflated continuation settings back off the tab."""
+        c=self.controller
+        try:
+            c.deflated_scan_steps=max(1,int(float(self.defl_steps_var.get())))
+        except ValueError:
+            c.log("The number of scan steps must be an integer of at least 1")
+        dp=self.defl_dparam_var.get().strip()
+        if dp.lower() in ("","auto","none","-"):
+            c.deflated_scan_dparam=None
+        else:
+            try:
+                c.deflated_scan_dparam=float(dp)
+            except ValueError:
+                c.log("The parameter increment must be a number, or 'auto' to follow ds and the "
+                      "parameter's own magnitude")
+        c.deflated_scan_eigensolve=bool(self.defl_scan_eig_var.get())
+        self._update_panels()
 
     def _build_statusbar(self):
         bar=ttk.Frame(self.root,relief=tk.SUNKEN,padding=(6,3))
@@ -1075,6 +1317,7 @@ class BifurcationTkApp:
             self.modes_var.set(",".join("{:g}".format(m) for m in c.normal_modes))
         self.modes_sweep_var.set(bool(c.compute_modes_during_sweep))
         self.splines_var.set(bool(c.interpolated_splines))
+        self._update_deflation_panel()
         self.mode_var.set(c.mode)
         self.movepoint_var.set(bool(c.move_point_active))
         self.movepoint_check.configure(state="normal" if c.mode=="mp" else "disabled")
@@ -1110,6 +1353,81 @@ class BifurcationTkApp:
         if slice_desc:
             summary+=" | fixed: "+slice_desc
         self.summary_var.set(summary)
+
+    def _on_canvas_drawn(self):
+        """The diagram was repainted, possibly because the user zoomed or panned.
+
+        Only the Deflation tab's range line depends on the axis limits, so only that is recomputed -
+        a full _update_panels() here would rebuild the trees on every repaint, and a repaint happens
+        during a sweep at every status update.
+        """
+        if self._torn_down:
+            return
+        try:
+            self._update_deflation_panel()
+        except tk.TclError:
+            pass    # the window went away underneath a pending draw
+
+    def _update_deflation_panel(self):
+        """Refresh the Deflation tab. Entries under the cursor are left alone, as everywhere else."""
+        c=self.controller
+        if not self._is_focused(self.defl_alpha_entry):
+            self.defl_alpha_var.set("{:g}".format(c.deflation_alpha))
+        if not self._is_focused(self.defl_p_entry):
+            self.defl_p_var.set(str(int(c.deflation_p)))
+        if not self._is_focused(self.defl_pert_entry):
+            self.defl_pert_var.set("auto" if c.deflation_perturbation is None
+                                   else "{:g}".format(c.deflation_perturbation))
+        if not self._is_focused(self.defl_tries_entry):
+            self.defl_tries_var.set(str(int(c.deflation_random_tries)))
+        if not self._is_focused(self.defl_seed_entry):
+            self.defl_seed_var.set("" if c.deflation_random_seed is None else str(int(c.deflation_random_seed)))
+        if not self._is_focused(self.defl_newton_entry):
+            self.defl_newton_var.set("" if c.deflation_max_newton_iterations is None
+                                     else str(int(c.deflation_max_newton_iterations)))
+        self.defl_eigpert_var.set(bool(c.deflation_use_eigenperturbation))
+        if not self._is_focused(self.defl_steps_entry):
+            self.defl_steps_var.set(str(int(c.deflated_scan_steps)))
+        if not self._is_focused(self.defl_dparam_entry):
+            self.defl_dparam_var.set("auto" if c.deflated_scan_dparam is None
+                                     else "{:g}".format(c.deflated_scan_dparam))
+        self.defl_scan_eig_var.set(bool(c.deflated_scan_eigensolve))
+
+        # The perturbation carries the SCALE of the whole search, so what "auto" resolved to has to be
+        # visible - and so does the case where it could not resolve to anything, on a solution that is
+        # exactly zero, which is the one time the number has to be set by hand.
+        if c.deflation_perturbation is None:
+            try:
+                amp=c.deflation_perturbation_value()
+                self.defl_pert_hint_var.set(
+                    "auto = {:g}".format(amp) if amp!=0.5 or c.current_point is None else
+                    "auto: the solution is zero, so 0.5 is a guess - set the field's own scale here")
+            except Exception:
+                self.defl_pert_hint_var.set("")
+        else:
+            self.defl_pert_hint_var.set("")
+
+        n=c.deflation_known_count()
+        self.defl_known_var.set("Avoiding {:d} solution{:s} at this parameter value".format(
+            n,"" if n==1 else "s") if n else
+            "Nothing deflated yet: the first solve will avoid the current solution")
+        # The scan range needs a parameter and an initialised problem to read its value from.
+        try:
+            values=c.deflated_scan_values() if isinstance(c._paramname,str) else None
+        except Exception:
+            values=None
+        if values and len(values)>1 and all(math.isfinite(v) for v in values):
+            text="Scan: {:s} = {:g} ... {:g} in {:d} step{:s}".format(
+                str(c._paramname),values[0],values[-1],len(values)-1,
+                "" if len(values)==2 else "s")
+            # Say so when the view is what shortened it, or the step count reads as a bug.
+            if c.deflated_scan_is_clipped():
+                text+=" (cut short by the visible range)"
+            self.defl_range_var.set(text)
+        else:
+            # No parameter, no step size, or a value that is not a number: say nothing rather than
+            # print "nan ... nan".
+            self.defl_range_var.set("")
 
     def _update_parameter_table(self):
         c=self.controller
@@ -1612,6 +1930,41 @@ class BifurcationTkApp:
             self.controller.split_branch()
         except RuntimeError as e:
             messagebox.showwarning("Cannot split",str(e),parent=self.root)
+
+    def _delete_branch(self):
+        """Delete a whole branch, after saying exactly which one and what is lost.
+
+        The only command in the diagram that throws state dumps away for good, so it names the branch,
+        its point count and the fact that reloading will not bring it back - and defaults to Cancel,
+        because the branch that is one click away in the tree is the one people mean to keep.
+        """
+        c=self.controller
+        branch=c.selected_branch if c.selected_branch is not None else c.current_branch
+        if branch is None:
+            messagebox.showwarning("Cannot delete","There is no branch to delete",parent=self.root)
+            return
+        if len(c.branches)<2:
+            messagebox.showwarning("Cannot delete",
+                                   "This is the last branch of the diagram; deleting it would leave "
+                                   "the problem sitting on nothing.",parent=self.root)
+            return
+        try:
+            index=c._branch_index_of(branch)
+        except RuntimeError as e:
+            messagebox.showwarning("Cannot delete",str(e),parent=self.root)
+            return
+        which="the branch you are on" if branch is c.current_branch else "the selected branch"
+        if not messagebox.askokcancel(
+                "Delete branch",
+                "Delete {:s} (branch {:d}, {:d} point{:s})?\n\n"
+                "Its state dumps are removed from disk as well, so this cannot be undone by "
+                "reloading the diagram.".format(which,index,len(branch),"" if len(branch)==1 else "s"),
+                default=messagebox.CANCEL,icon=messagebox.WARNING,parent=self.root):
+            return
+        try:
+            self.controller.delete_branch(branch)
+        except RuntimeError as e:
+            messagebox.showwarning("Cannot delete",str(e),parent=self.root)
 
     def _merge_branches(self):
         # Named in the question, because which branch survives and which one disappears from the tree

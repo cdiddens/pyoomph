@@ -951,6 +951,27 @@ def _account_for_own_petsc_options()->None:
 atexit.register(_account_for_own_petsc_options)
 
 
+def _require_complex_petsc_for_region()->None:
+    """Refuse a region (CISS) solve on a real-scalar PETSc, where it cannot work.
+
+    CISS answers "which eigenvalues are inside this rectangle" by integrating along its boundary,
+    which is a contour in the COMPLEX plane; SLEPc therefore has no implementation of it for real
+    scalars and EPSSolve comes back with PETSc error 56, PETSC_ERR_SUP, "no support for requested
+    operation". That number on its own tells a user nothing - and it is the same number a stale
+    ``eps_type`` in the options database produces (see _apply_eigenvalue_region), so it cannot even be
+    looked up unambiguously after the fact. Checked before the solve instead, where the build can be
+    named.
+    """
+    if not numpy.issubdtype(numpy.dtype(PETSc.ScalarType),numpy.complexfloating): #type:ignore
+        raise RuntimeError(
+            "Scanning a region of the complex plane for eigenvalues needs a COMPLEX PETSc/SLEPc "
+            "build, and this one is real (PETSc.ScalarType is "+numpy.dtype(PETSc.ScalarType).name+ #type:ignore
+            "). The contour-integral solver it uses integrates around the region's boundary, which "
+            "SLEPc does not implement for real scalars - it fails with PETSc error 56 (no support for "
+            "requested operation). Put the complex build's petsc4py on PYTHONPATH "
+            "($PETSC_DIR/$PETSC_ARCH_COMPLEX/lib), or use an ordinary shift-invert eigensolve instead.")
+
+
 @GenericEigenSolver.register_solver()
 class SlepcEigenSolver(GenericEigenSolver):
     idname = "slepc"
@@ -1116,12 +1137,16 @@ class SlepcEigenSolver(GenericEigenSolver):
         if not (re_min<re_max and im_min<im_max):
             raise ValueError("An eigenvalue region needs re_min<re_max and im_min<im_max, got "
                              "({:g},{:g},{:g},{:g})".format(re_min,re_max,im_min,im_max))
+        _require_complex_petsc_for_region()
         self.eigenvalue_region=(float(re_min),float(re_max),float(im_min),float(im_max))
 
     def _apply_eigenvalue_region(self,E)->bool: #type:ignore
         """Configure CISS over self.eigenvalue_region. Returns whether it was applied."""
         if self.eigenvalue_region is None:
             return False
+        # Again here, not only in set_eigenvalue_region(): the attribute is public and scripts do
+        # assign it directly.
+        _require_complex_petsc_for_region()
         re_min,re_max,im_min,im_max=self.eigenvalue_region
         # The PETSc options database is global and sticky, and setFromOptions applies it AFTER
         # setType, so whatever an earlier ordinary solve left there wins:

@@ -225,6 +225,131 @@ Everything else follows from that:
   pair (`b`, `mu_c`) the way the tutorials write `V`, `Bo_c`. Exporting everything in the current view
   labelled the locus with a parameter it does not vary.
 
+## The stripe scan needs a complex PETSc
+
+Scanning a rectangle of the complex plane for every eigenvalue in it is SLEPc's contour-integral
+solver (CISS), which integrates along the rectangle's boundary. There is no such thing on a
+real-scalar build, and SLEPc says so with `PETSC_ERR_SUP`, i.e. `PETSc.Error(56)`, "no support for
+requested operation" - a number that tells the user nothing, and that a stale `eps_type` in the
+options database produces as well (see `_apply_eigenvalue_region`), so it cannot even be looked up
+unambiguously after the fact. `_require_complex_petsc_for_region()` therefore refuses before the
+solve, where the build can be named and the fix stated. Reproduced both ways: the same scan is
+`STRIPE OK` against `$PETSC_ARCH_COMPLEX` and `PETSc.Error(56)` against the real arch.
+
+## The Deflation tab
+
+Arclength continuation follows the branch it is on. Deflation ([deflation.md](deflation.md)) is how the
+GUI reaches a branch that is not connected to it: it multiplies the residual by a factor that blows up
+at every solution already known, so Newton has to converge somewhere else or not at all.
+
+Two commands, both in the Bifurcation menu and on the tab:
+
+- **Deflated solve** (`BifurcationController.deflated_solve`) stands still in parameter space and looks
+  for another solution *here*. A solution that is genuinely new opens a **new branch**; the parameter
+  is not moved. The set of solutions being avoided is kept between clicks and reset when the parameter
+  moves (`_refresh_deflation_known`), so pressing it repeatedly walks through the solutions at one
+  parameter value instead of finding the same one again - "Forget known solutions" restarts that.
+  Two things it must not skip: taking the operator **off** before the eigensolve and before the point
+  is recorded (everything downstream has to see the ordinary residual), and putting the dofs back when
+  nothing was found, since every failed attempt left a perturbed state behind.
+- **Deflated continuation** (`deflated_continuation`) drives `Problem.deflated_continuation` over a
+  parameter scan and maps each `branch_index` it reports onto a new GUI branch. A scan and an arclength
+  branch are different objects - a scan steps the parameter and cannot turn a fold - so *every* index
+  becomes a new branch, including the continuation of the one we started from, rather than being
+  appended to a branch whose ordering it does not respect. Abortable between parameter steps.
+
+The default step is **ds** and the default count is **10**, which is not a coincidence: a fresh
+diagram opens on `initial_view_ds_ahead = 10` ds ahead of the first point, so the default scan is
+exactly the visible window and ends on its right edge. Tying the increment to the parameter's own
+magnitude instead (`0.05*|p|`, as it first was) has nothing to do with either, and on a fresh diagram
+a single step of it could already leave the plot - which the tab then reported as a scan cut short
+after one step.
+
+A scan stops where the diagram does, in the same spirit as `multistep`, and it takes **two** tests to
+mean that, not one:
+
+- `deflated_scan_values()` truncates the value list where the parameter leaves the visible range of
+  whichever axis shows it (`scanned_parameter_axis_limits()` - either axis can carry either quantity,
+  and the parameter need not be drawn at all). Three conditions took a few tries to get right, and
+  each wrong version showed up in the tab as a nonsense step count:
+  - the first value **outside** the range is kept, so the scan steps and then notices it has left,
+    exactly as multistep does. That also guarantees at least one step;
+  - the view has to actually **bound** this scan for the clip to apply: the starting value inside it
+    *and* at least one whole step fitting inside it. Both halves matter. A diagram with no points has
+    never had its limits set, so the view is still matplotlib's default `(0, 1)` and says nothing
+    about a parameter of 20 (that read *"in 0 steps"*); and after ten continuation steps the point
+    sits exactly **on** the right edge, because the plotter grew the limits to include it, so there is
+    no room ahead and clipping there reported a ten-step scan as a one-step one;
+  - a non-finite limit is not a bound. Matplotlib hands one out if a non-finite coordinate ever
+    reached `extend_lims`, and comparing against it answers False to everything, which came out of the
+    tab as a range of *"nan ... nan"*.
+
+  The view is not a wall in any case - it grows as the scan draws into it - and the loop's own box
+  test below is what stops a scan that has genuinely left the diagram. The tab says when the range is
+  what shortened the scan, rather than the step count, and it recomputes that line on every canvas
+  repaint (`_on_canvas_drawn`), since a navigation-toolbar zoom changes the answer without going
+  through `refresh()`.
+- The loop also gives up once a whole parameter step has produced nothing inside the axes. A range
+  check on the parameter alone cannot see that: on `du/dt = mu - u^2` with the view at `|u| < 1.2`,
+  both arms `u = +-sqrt(mu)` are off the plot from `mu > 1.44` while `mu` itself is still deep inside
+  its own range. That is exactly what `multistep`'s box test catches. It is judged per parameter step
+  rather than per point, because one branch running off the top must not end a scan the others are
+  still on.
+
+**Stability is not inferred along a scanned branch.** `propagate_stability()` carries an unstable
+count along a branch on the argument that `sign(det J)` flips exactly when an odd number of real
+eigenvalues crosses zero - which says nothing about a point that records neither a determinant sign nor
+a `dparam_ds`, and a deflated scan records neither. It steps the parameter with no arclength control
+and no test function, in precisely the regions where branches appear and disappear, so carrying a
+neighbour's count across would not be an inference but an assumption drawn in the same colour as a
+measurement. Propagation therefore stops at any point with no test function at all, and everything
+beyond it stays unknown from that side. Quick mode is untouched: its points always carry one of the
+two. The other beneficiary is the point recorded when an eigensolve returned nothing, which was in the
+same position and was being coloured just as confidently.
+
+"Solve eigenproblems during the scan" is **on** by default, like an ordinary continuation step: a
+branch drawn without stability is half a bifurcation diagram, and finding a new branch without knowing
+whether it is stable rarely answers the question that led to it. Turned off - worth it where the
+eigensolves dominate - the points are recorded with `_add_current_state(measured=False)`: no eigensolve
+was done, so the point must say it has **no** spectrum rather than carry whatever the problem still
+held from an earlier one. Its stability then reads as unknown, exactly like a quick-mode point, and
+"Compute the eigenvalues along this branch" fills it in once it is clear which of the branches found
+are worth the eigensolves.
+
+Afterwards the scan does two things that are easy to forget and both break the *next* command rather
+than itself. It resets the arclength state - the parameter was moved by hand, so oomph's tangent
+describes a step that was never taken and an ordinary Step has to start a fresh one. And it **reloads
+the last recorded point**: a scan ends on whatever its last attempt left behind, and its last attempt
+is by construction a failed one, since the hunt for new solutions is what stops when a deflated solve
+stops converging. Without the reload the problem sits on a diverged state that is on no branch, which
+is exactly the invariant `current_point` is supposed to carry - and a second Deflated continuation
+began its opening solve from there and went straight to inf/nan residuals.
+
+## Deleting a branch
+
+`delete_branch()` is the one diagram command that reloading cannot undo - it removes the state dumps as
+well - so the GUI asks first, names the branch and its point count, and defaults the dialog to Cancel.
+Two things it has to get right, both pinned by tests: the **last** branch cannot be deleted (the
+problem would be sitting on a solution the diagram does not know about, and every command that reads
+`current_point` would work from a stale one), and deleting the branch the problem is **on** has to
+*reload* a neighbour's last point rather than merely re-point `current_branch` at it, or the next step
+continues from a solution the diagram does not show.
+
+## Switching tracking off belongs where it was switched on
+
+`locate_bifurcation()` activates the tracker, solves the augmented system and records the point. The
+solve is the part that can diverge, and the teardown used to sit in one *caller*
+(`locate_bifurcation_or_switch`) rather than beside the activation - so a diverged tracking solve left
+the augmented system installed, and two of the three entry points (Locate pitchfork, Locate the
+bifurcation of the selected eigenvalue) call `locate_bifurcation` directly and had no cleanup at all.
+
+The symptom was thoroughly misleading. Everything afterwards silently solved the augmented problem,
+and the next attempt to locate a bifurcation failed in its opening `solve_eigenproblem` with *"a
+non-zero shift is required"* - the leftover tracker's own guard (SS6), correct in itself and saying
+nothing whatever about the solve that had actually failed one click earlier. The activation and the
+`deactivate` are now a try/finally, and the test stubs the solve to raise rather than driving it to
+divergence, so it pins the invariant instead of one route to it.
+
 ## Other guards worth surfacing early
 
 `arclength_continuation` refuses, while tracking is active, `spatial_adapt > 0` and any

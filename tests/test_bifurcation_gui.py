@@ -177,6 +177,38 @@ def test_bifurcation_gui_controller(tmp_path):
         # augmented.
         assert not problem.get_bifurcation_tracking_mode()
 
+        # ... and not when the tracking solve FAILS either, which is the case that used to go wrong.
+        # The teardown lived in one caller rather than beside the activation, so a diverged tracking
+        # solve left the augmented system installed; the next attempt to locate a bifurcation then
+        # reported "a non-zero shift is required" from its opening eigensolve - the leftover tracker's
+        # message, saying nothing about the solve that actually failed. Two of the three entry points
+        # (Locate pitchfork, Locate the bifurcation of the selected eigenvalue) had no cleanup at all.
+        # The solve is stubbed rather than driven to divergence, so the invariant is tested and not
+        # some particular way of reaching it.
+        real_solve = problem.solve
+        boom = RuntimeError("the tracking solve diverged")
+
+        def failing_solve(*a, **kw):
+            raise boom
+
+        problem.solve = failing_solve   # type:ignore[method-assign]
+        # try/except rather than pytest.raises: this function imports pytest locally further down,
+        # which makes the name local to the whole function and unbound up here.
+        raised = None
+        try:
+            c.locate_bifurcation()
+        except RuntimeError as e:
+            raised = e
+        finally:
+            problem.solve = real_solve  # type:ignore[method-assign]
+        assert raised is boom, "the real failure has to reach the caller, not be swallowed"
+        assert not problem.get_bifurcation_tracking_mode(), \
+            "a failed locate must leave the tracker off, or every later solve is augmented"
+        # And the problem is usable again straight away, which is the point of the invariant.
+        c.locate_bifurcation()
+        assert numpy.isclose(c.current_point.param_value, mu_c, atol=1e-7)
+        assert not problem.get_bifurcation_tracking_mode()
+
         # the stability split now has the fold as its boundary
         segs, stabs = c.branches[0].to_branch_stab_list("ode/u")
         assert len(segs) == len(stabs) and len(segs) >= 1
@@ -1807,6 +1839,143 @@ def _diagram_with_two_branches():
     return c, first, second
 
 
+def test_a_fresh_diagram_opens_on_a_window_derived_from_ds():
+    """The starting window along the parameter axis: 10 ds ahead of the first point, 2 ds behind it.
+
+    It used to be a 1e-4 box in both directions, which made the very first thing on the screen -- the
+    direction arrow, which is ds long -- five hundred times wider than the axes. Ahead is where Step
+    is about to go and roughly what a multistep sweep covers before it stops at the border; a little
+    behind so the point is not glued to the edge and Reverse has somewhere to land.
+
+    Across the parameter the tiny box stays: nothing is known about the observable's scale before
+    anything has been solved, and the view only ever grows as points arrive.
+    """
+    from pyoomph.utils.bifurcation_gui.model import observable_axis, parameter_axis
+
+    c, first, _second = _diagram_with_two_branches()
+    c._tangs = {}
+    fresh = type(first)([first[0]], continuation_parameter="mu")
+    c.branches = [fresh]
+    c.current_branch, c.current_point = fresh, fresh[0]
+    mu = float(fresh[0].param_value)
+    u = float(fresh[0].obs_values["ode/u"])
+
+    c._last_ds = 0.05
+    assert numpy.allclose(c.initial_view_box(),
+                          [mu - 0.1, mu + 0.5, u - 1e-4, u + 1e-4]), c.initial_view_box()
+    # Stepping the other way opens the window the other way round, not upside down.
+    c._last_ds = -0.05
+    assert numpy.allclose(c.initial_view_box(),
+                          [mu - 0.5, mu + 0.1, u - 1e-4, u + 1e-4]), c.initial_view_box()
+    # It follows the axes rather than assuming the parameter is on x.
+    c._last_ds = 0.05
+    c._x_axis, c._y_axis = observable_axis("ode/u"), parameter_axis("mu")
+    assert numpy.allclose(c.initial_view_box(),
+                          [u - 1e-4, u + 1e-4, mu - 0.1, mu + 0.5]), c.initial_view_box()
+    c._x_axis = c._y_axis = None
+    # A zero ds has no direction and no length, so there is nothing to derive a window from.
+    c._last_ds = 0.0
+    assert numpy.allclose(c.initial_view_box(),
+                          [mu - 1e-4, mu + 1e-4, u - 1e-4, u + 1e-4]), c.initial_view_box()
+
+
+def test_the_default_deflated_scan_is_the_default_window():
+    """The default scan covers exactly what a fresh diagram shows, and reports itself as uncut.
+
+    Three defaults have to agree for that: the increment is ds, the count is 10, and the window opens
+    initial_view_ds_ahead = 10 ds ahead of the first point. When they did not -- the increment used to
+    be 0.05*|parameter|, which is unrelated to ds and to the window -- one step could already leave
+    the plot and the tab read "1 step (cut short by the visible range)" before anything had been done.
+
+    Checked over four parameter magnitudes and both directions, because the failure was scale
+    dependent: it only showed up where 0.05*|parameter| was large against ds.
+    """
+    class _ViewFromBox:
+        """Stands in for the plotter: the window initialise_view() would have set."""
+
+        def __init__(self, c):
+            self.c = c
+
+        def get_xlim(self):
+            b = self.c.initial_view_box()
+            return (b[0], b[1])
+
+        def get_ylim(self):
+            b = self.c.initial_view_box()
+            return (b[2], b[3])
+
+        def get_xscale(self):
+            return "linear"
+
+        def get_yscale(self):
+            return "linear"
+
+    for param, ds in ((20.0, 0.05), (0.5, 0.01), (-3.0, 0.2), (1000.0, 1.0)):
+        for signed in (ds, -ds):
+            c, first, _second = _diagram_with_two_branches()
+            c._tangs = {}
+            c._last_ds = signed
+            c.deflated_scan_steps = 10
+            c.deflated_scan_dparam = None
+            fresh = type(first)([type(first[0])(param, {"ode/u": 0.5}, -1.0, "", 0,
+                                                param_values={"mu": param})],
+                                continuation_parameter="mu")
+            c.branches = [fresh]
+            c.current_branch, c.current_point = fresh, fresh[0]
+            c.get_bifurcation_parameter = lambda p=param: type("P", (), {"value": p})()
+            c.view = _ViewFromBox(c)
+
+            values = c.deflated_scan_values()
+            assert len(values) - 1 == 10, \
+                "mu0={:g} ds={:g}: {:d} steps".format(param, signed, len(values) - 1)
+            assert not c.deflated_scan_is_clipped(), \
+                "mu0={:g} ds={:g}: the default scan must fit the default window".format(param, signed)
+            assert abs(values[-1] - (param + 10*signed)) < 1e-9*max(1.0, abs(param)), values[-1]
+            assert (values[-1] > values[0]) == (signed > 0), "the scan must follow the sign of ds"
+
+
+def test_a_fresh_diagram_shows_which_way_step_will_go():
+    """The continuation arrow on a brand-new diagram, where there is no tangent yet.
+
+    The arrow is drawn from the arclength tangent recorded for the plotted observable, and a diagram
+    with one point has none -- so it used to be missing at the moment it is most wanted, before the
+    first Step, when the question is exactly "which way?". A first step moves the parameter and, to
+    first order, nothing else, so the fallback is a unit vector along whichever axis carries the
+    parameter; the plotter multiplies by ds, which draws (ds, 0) on the ordinary diagram.
+
+    The fallback must NOT reach a located bifurcation, where _tangs is emptied on purpose and the
+    arrows worth drawing are the departure directions the plotter draws itself.
+    """
+    from pyoomph.utils.bifurcation_gui.model import observable_axis, parameter_axis
+
+    c, first, second = _diagram_with_two_branches()
+    c._tangs = {}
+    c._last_ds = 0.05
+
+    # A branch of one point: no tangent, so the parameter axis is the answer.
+    fresh = type(first)([first[0]], continuation_parameter="mu")
+    c.branches = [fresh]
+    c.current_branch, c.current_point = fresh, fresh[0]
+    assert numpy.allclose(c.plotted_tangent(), [1.0, 0.0]), c.plotted_tangent()
+    # Reversing ds does not flip the VECTOR -- the plotter multiplies by ds and gets the sign there.
+    c._last_ds = -0.05
+    assert numpy.allclose(c.plotted_tangent(), [1.0, 0.0]), c.plotted_tangent()
+    # ... and it follows the axes rather than assuming the parameter is on x.
+    c._x_axis, c._y_axis = observable_axis("ode/u"), parameter_axis("mu")
+    assert numpy.allclose(c.plotted_tangent(), [0.0, 1.0]), c.plotted_tangent()
+    c._x_axis = c._y_axis = None
+
+    # A real tangent always wins over the fallback.
+    c._tangs = {"ode/u": numpy.array([0.3, 0.9])}
+    assert numpy.allclose(c.plotted_tangent(), [0.3, 0.9])
+
+    # A branch that has points but no tangent is a located bifurcation: no fallback arrow there.
+    c._tangs = {}
+    c.branches = [first]
+    c.current_branch, c.current_point = first, first[-1]
+    assert c.plotted_tangent() is None, "the fallback must not reach a bifurcation"
+
+
 def test_a_branch_can_be_split_at_a_point():
     """Cutting a branch in two, for when a continuation step landed on a different one.
 
@@ -1832,6 +2001,90 @@ def test_a_branch_can_be_split_at_a_point():
         assert "first point" in str(e)
     else:
         raise AssertionError("splitting at the first point of a branch has to be refused")
+
+
+def test_stability_is_not_inferred_across_a_point_with_no_test_function():
+    """Propagation needs a test function at every point it walks across, not just at the ends.
+
+    The argument for carrying an unstable count along a branch is that sign(det J) flips exactly when
+    an odd number of real eigenvalues crosses zero -- which says nothing at all about a point that has
+    no det_sign and no dparam_ds either. A DEFLATED SCAN records exactly such points: it steps the
+    parameter with no arclength control and no test function, in precisely the regions where branches
+    appear and disappear. Carrying the count across them would not be an inference, it would be an
+    assumption drawn in the same colour as a measurement.
+
+    Quick mode is unaffected -- its points always carry one of the two -- and that is asserted here
+    too, because the cheap way to "fix" this would be to stop propagating anywhere.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint, STABILITY_EIGEN,
+                                                     STABILITY_INFERRED, STABILITY_UNKNOWN)
+
+    def point(mu, u, det=None, dparam=None, eig=None):
+        return BifurcationGUISolutionPoint(mu, {"ode/u": u}, eig, "", 0,
+                                           param_values={"mu": mu},
+                                           eig_values=[eig] if eig is not None else None,
+                                           det_sign=det, dparam_ds=dparam)
+
+    def propagate(branch):
+        c = BifurcationController.__new__(BifurcationController)
+        c._on_changed = c._on_status = c._on_busy = None
+        c._on_log = lambda *a: None
+        c._paramname = "mu"
+        c.branches = [branch]
+        c.propagate_stability(branch)
+        return branch
+
+    # Quick mode: one measured anchor, then determinant signs. Still inferred, still flipped where
+    # the sign changes.
+    b = propagate(BifurcationGUISolutionBranch(
+        [point(0.0, 0.0, eig=-1.0), point(0.1, 0.1, det=1), point(0.2, 0.2, det=-1),
+         point(0.3, 0.3, det=-1)]))
+    assert [p.stability_source for p in b] == [STABILITY_EIGEN] + [STABILITY_INFERRED]*3
+    assert [p.unstable_count for p in b] == [0, 0, 1, 1]
+
+    # "Folds only": dparam_ds and no determinant is still a test function.
+    b = propagate(BifurcationGUISolutionBranch(
+        [point(0.0, 0.0, eig=-1.0), point(0.1, 0.1, dparam=0.5), point(0.2, 0.2, dparam=0.5)]))
+    assert all(p.stability_source == STABILITY_INFERRED for p in b[1:])
+
+    # A deflated scan: neither, so the points stay unknown however close the measured one is.
+    b = propagate(BifurcationGUISolutionBranch(
+        [point(0.0, 0.0, eig=-1.0), point(0.5, 0.7), point(1.0, 1.0)]))
+    assert b[0].stability_source == STABILITY_EIGEN
+    assert all(p.stability_source == STABILITY_UNKNOWN and p.unstable_count is None for p in b[1:])
+
+    # The blind spot hides what is beyond it, but only from that side: a point past it is still
+    # reached from the anchor on the other end.
+    b = propagate(BifurcationGUISolutionBranch(
+        [point(0.0, 0.0, eig=-1.0), point(0.5, 0.7), point(1.0, 1.0, det=1), point(1.5, 1.2, eig=2.0)]))
+    assert b[1].stability_source == STABILITY_UNKNOWN
+    assert b[2].stability_source == STABILITY_INFERRED
+
+
+def test_a_branch_can_be_deleted_whole():
+    """Deleting a branch removes it and nothing else, and the last one is refused.
+
+    The refusal is the part worth pinning: with no branches left the problem would be sitting on a
+    solution the diagram does not know about, and every command that reads current_point would be
+    working from a stale one. Deleting the branch the problem is ON is the other half and needs a real
+    Problem to reload from, so it lives in delete_branch_worker.py.
+    """
+    c, first, second = _diagram_with_two_branches()
+    # The one that is NOT current, so nothing has to be reloaded.
+    c.selected_branch, c.selected_point = second, second[0]
+    npoints = len(second)
+    assert c.delete_branch() == npoints
+    assert c.branches == [first], "only the deleted branch may go"
+    assert c.current_branch is first and c.current_point is first[-1], \
+        "deleting another branch must not move the problem"
+    assert c.selected_branch is None and c.selected_point is None, \
+        "the selection pointed into the branch that is gone"
+
+    with pytest.raises(RuntimeError, match="last branch"):
+        c.delete_branch()
+    assert c.branches == [first], "the refusal must leave the diagram untouched"
 
 
 def test_two_branches_can_be_merged_by_the_ends_that_meet():
@@ -1933,6 +2186,69 @@ def test_arclength_metric_radio_group(tmp_path):
     assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
     assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
     assert "ARCLENGTH METRIC OK" in out
+
+
+def test_deflation_finds_the_branch_arclength_cannot_reach(tmp_path):
+    """The Deflation tab's two commands, against a problem whose whole solution set is known.
+
+    du/dt = mu - u^2 has exactly the two solutions u = +-sqrt(mu), and arclength continuation started
+    on one of them reaches the other only by going round the fold at mu = 0. Deflation has to find it
+    standing still - and, because there are only two, a SECOND deflated solve has to find nothing,
+    which is what separates deflation from perturbing and re-converging onto the branch one is on.
+
+    Out of process because it needs its own Problem, following the worker pattern the rest of this
+    suite uses; no window is involved, the controller is driven directly.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "deflation_gui_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "DEFLATION GUI OK" in out
+
+
+def test_deleting_the_branch_the_problem_is_on(tmp_path):
+    """The other half of test_a_branch_can_be_deleted_whole, which needs a real Problem.
+
+    Deleting the branch the problem is sitting on has to leave it loaded somewhere else -- not merely
+    re-pointed at another branch, the dofs have to be those of the point it landed on, or the next
+    step continues from a solution the diagram does not show. The state dumps must be gone too, which
+    is what makes this the one diagram command reloading cannot undo.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "delete_branch_worker.py")
+    proc = subprocess.run([sys.executable, worker, "--outdir", os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "DELETE BRANCH OK" in out
+
+
+def test_deflation_tab_settings_round_trip(tmp_path):
+    """What is typed into the Deflation tab reaches the controller, and a refresh brings it back.
+
+    The tab's variables only exist once the window is built, i.e. tk.Tk(), so this runs as a worker
+    under gui_launch_prefix() like the other window-opening tests. It also pins the two settings whose
+    empty value means something other than zero - the random seed (unseeded) and the Newton cap (the
+    problem's own) - and that a refused value leaves the old one in place rather than a default.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "deflation_tab_worker.py")
+    proc = subprocess.run(gui_launch_prefix() + [sys.executable, worker],
+                          cwd=here, capture_output=True, text=True, timeout=300)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "DEFLATION TAB OK" in out
 
 
 def test_every_default_shortcut_reaches_a_command(tmp_path):
