@@ -3120,6 +3120,13 @@ class MatplotlibPlotter(BasePlotter):
 
     def _reset_before_plot(self):
         self._added_parts=[]
+        if not self._embedded:
+            # A file output takes a FRESH figure instead of whatever plt.gcf() happens to be. It used
+            # to inherit the current one, which is fine in a script (_after_plot closes it again) but
+            # not next to an embedded plot: the bifurcation GUI's panes aim pyplot at their own figure
+            # and leave it current, so an output() from the GUI drew on top of a pane - putting the
+            # primary y-label on the graph's secondary axis as well - and then closed the pane's figure.
+            plt.figure()
         if self.aspect_ratio:
             if self.aspect_ratio is True:
                 plt.gca().set_aspect('equal') #type:ignore
