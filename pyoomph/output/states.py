@@ -27,6 +27,9 @@ from __future__ import annotations
 # ========================================================================
  
  
+import filecmp
+import os
+import shutil
 import struct
 from typing import IO
 from ..typings import *
@@ -205,6 +208,147 @@ class DumpFile:
             s=self.read_numpy_data()
             s=setter(s)
             return s
+
+
+# ---------------------------------------------------------------------------------------------
+# Moving a state file elsewhere
+#
+# A state file names the .msh file its mesh template was built from, RELATIVE to the directory the
+# dump itself sits in (MeshTemplate._define_state_file), and a load resolves it against the directory
+# of the file being loaded. So a dump that is merely copied somewhere else points at nothing as soon
+# as the two directories differ in depth - which is exactly what "put a copy of this point next to
+# its output" does. The functions below read those names out again and rewrite them, so the .msh can
+# travel with the dump.
+#
+# They walk the first few entries of the format by hand rather than through Problem, because there is
+# no problem to hand: the point is to fix a file up without loading it. That makes them the one place
+# outside Problem._define_state_file that knows the layout, so they only go as far as they must - the
+# header, five fixed-width entries and then the templates - and refuse anything they do not
+# recognise. Keep them in step with Problem._define_state_file / _define_state_header when the entries
+# before the mesh templates change.
+
+def _state_read_int(f:IO[bytes])->int:
+    b=f.read(8)
+    if len(b)<8:
+        raise RuntimeError("truncated state file")
+    return int.from_bytes(b,byteorder="little",signed=True)
+
+
+def _state_read_string(f:IO[bytes])->str:
+    return f.read(_state_read_int(f)).decode("ascii")
+
+
+def _scan_state_mesh_files(f:IO[bytes])->"List[Tuple[int,str]]":
+    """The mesh files a state file names, as (offset of the entry, stored path).
+
+    The offset is that of the entry's length prefix, i.e. what has to be replaced to store a
+    different path. Templates without a mesh file of their own store "" and are listed as such, so
+    that the returned list is one entry per mesh template, in file order.
+    """
+    f.seek(0)
+    header=_state_read_string(f)
+    if header!="pyoomph_dump":
+        raise RuntimeError("not a pyoomph state file")
+    version=_state_read_string(f)
+    try:
+        parts=tuple(int(v) for v in version.split("."))
+    except ValueError:
+        raise RuntimeError("state file with an unreadable version '"+version+"'")
+    if parts+(0,)*(3-len(parts))>=(0,1,1):
+        _sharding=_state_read_string(f)
+    f.read(struct.calcsize("<d"))   # current time
+    _state_read_int(f)              # output step
+    _state_read_int(f)              # continue section step
+    _state_read_int(f)              # numpy compression level
+    ntempl=_state_read_int(f)
+    if ntempl<0 or ntempl>100000:
+        raise RuntimeError("state file with an implausible number of mesh templates")
+    res:"List[Tuple[int,str]]"=[]
+    for _i in range(ntempl):
+        offset=f.tell()
+        res.append((offset,_state_read_string(f)))
+        has_remesher=_state_read_int(f)
+        if has_remesher:
+            _state_read_int(f)      # the remesher's counter
+    return res
+
+
+def get_state_file_mesh_files(fname:str)->"List[str]":
+    """The mesh files a state file refers to, as absolute paths. Templates without one are skipped."""
+    with open(fname,"rb") as f:
+        entries=_scan_state_mesh_files(f)
+    base=os.path.dirname(os.path.abspath(fname))
+    return [os.path.normpath(os.path.join(base,rel)) for _o,rel in entries if rel!=""]
+
+
+def copy_state_file(src:str,dst:str,copy_mesh_files:bool=True,extra_mesh_extensions:"Sequence[str]"=(".geo",".geo_unrolled")) -> "List[str]":
+    """Copy a state file to ``dst``, taking the mesh files it refers to along.
+
+    Each referenced .msh is copied next to ``dst`` and the path stored in the copy is rewritten to
+    point at it, so the destination directory stands on its own and can be moved or shipped. Files
+    of the same trunk listed in ``extra_mesh_extensions`` (the .geo Gmsh unrolled the geometry into)
+    come along as documentation; nothing reads them back.
+
+    The mesh keeps its own name unless that would overwrite a DIFFERENT mesh already sitting there -
+    two states from a remeshed run refer to two files both called e.g. GmshTemplate.msh, and exports
+    put them in one directory. An identical file is shared instead of numbered, which is the common
+    case when several dumps of one run are copied side by side.
+
+    Returns the mesh files written. With ``copy_mesh_files=False`` this is a plain copy, which is
+    only correct while ``dst`` sits in the same directory as ``src``.
+    """
+    if not copy_mesh_files:
+        shutil.copy2(src,dst)
+        return []
+    with open(src,"rb") as f:
+        data=f.read()
+        f.seek(0)
+        entries=_scan_state_mesh_files(f)
+    srcdir=os.path.dirname(os.path.abspath(src))
+    dstdir=os.path.dirname(os.path.abspath(dst))
+    written:"List[str]"=[]
+    out=bytearray()
+    read_upto=0
+    copied_as:"Dict[str,str]"={}
+    for offset,rel in entries:
+        if rel=="":
+            continue
+        mshsrc=os.path.normpath(os.path.join(srcdir,rel))
+        if not os.path.exists(mshsrc):
+            # Nothing to relocate, and no way to check what the old path meant. Left exactly as it
+            # was rather than rewritten to a file that is not there either.
+            continue
+        name=copied_as.get(mshsrc)
+        if name is None:
+            trunk,ext=os.path.splitext(os.path.basename(mshsrc))
+            i=0
+            while True:
+                name=trunk+ext if i==0 else trunk+"_"+str(i)+ext
+                target=os.path.join(dstdir,name)
+                taken=name in copied_as.values() or (os.path.exists(target)
+                                                     and not filecmp.cmp(mshsrc,target,shallow=False))
+                if not taken:
+                    break
+                i+=1
+            copied_as[mshsrc]=name
+            os.makedirs(dstdir,exist_ok=True)
+            shutil.copy2(mshsrc,os.path.join(dstdir,name))
+            written.append(os.path.join(dstdir,name))
+            for ext in extra_mesh_extensions:
+                side=os.path.splitext(mshsrc)[0]+ext
+                if os.path.exists(side):
+                    sidedst=os.path.join(dstdir,os.path.splitext(name)[0]+ext)
+                    shutil.copy2(side,sidedst)
+                    written.append(sidedst)
+        out+=data[read_upto:offset]
+        enc=name.encode("ascii")
+        out+=len(enc).to_bytes(8,byteorder="little",signed=True)+enc
+        read_upto=offset+8+len(rel.encode("ascii"))
+    out+=data[read_upto:]
+    with open(dst,"wb") as f:
+        f.write(bytes(out))
+    shutil.copystat(src,dst)
+    return written
 
 
 from ..typings import _set_public_api
