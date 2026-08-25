@@ -174,6 +174,18 @@ def test_bifurcation_gui_controller(tmp_path):
         assert numpy.isclose(fold.param_value, mu_c, atol=1e-7), "fold should be at mu=-b^2/4"
         assert numpy.isclose(fold.obs_values["ode/u"], u_c, atol=1e-5)
         assert fold.eig_value_Re == 0, "a located bifurcation is flagged by a zero real part"
+        # The base state's OWN spectrum is solved for at the located bifurcation too, which is what
+        # says whether the branch was already unstable here and which mode goes next. tracked_eigenindex
+        # is set only when that extra eigensolve ran, so it is also the certificate that it did.
+        assert fold.tracked_eigenindex is not None, "the rest of the spectrum has to be solved for"
+        assert not any("Could not solve the eigenproblem" in str(m) for m in logged), logged
+        # ... and the tracked eigenvalue is in that spectrum exactly ONCE, at its exact value: the
+        # solve returns its own rounding-error-sized copy, and listing both would show the same mode
+        # twice while the copy's positive real part had the point counted as unstable.
+        assert complex(fold.eig_values[fold.tracked_eigenindex]) == complex(fold.eig_value_Re,
+                                                                           fold.eig_value_Im)
+        assert len(fold.eig_values) == c.neigen, fold.eig_values
+        assert fold.measured_unstable_count() == 0, "an exact zero is not a positive real part"
         # Bifurcation tracking must not stay active afterwards, or every later solve would be
         # augmented.
         assert not problem.get_bifurcation_tracking_mode()
@@ -450,16 +462,19 @@ def test_bifurcation_gui_controller(tmp_path):
             # eigenproblem was assembled on the BASE, not the augmented, dof layout.
             assert len(p.eig_values) == c.neigen, p.eig_values
             assert numpy.isclose(numpy.real(p.eig_values[0]), 0.0, atol=1e-6), p.eig_values
+            # The tracked eigenvalue appears exactly once and at the tracker's exact value: the
+            # eigensolve's own copy of it is replaced rather than listed beside it.
+            assert p.tracked_eigenindex == 0, p.tracked_eigenindex
+            assert complex(p.eig_values[0]) == complex(p.eig_value_Re, p.eig_value_Im)
         # ...and the eigensolve really ran. Both ways of not running it -- the deliberately non-fatal
         # except (a failed shift-invert must not abort a long two-parameter sweep) and
-        # locus_eigen_shift=None -- fall back to recording the synthetic critical value alone, which
-        # on this fold is exactly 0 with neigen == 1 and would satisfy both assertions above without
-        # a single eigenproblem having been solved. A solved fold eigenvalue is a rounding-error-sized
-        # number rather than an exact zero, so at least one point has to differ from its own critical
-        # value; the log is checked as well, so a failure says which of the two happened.
+        # tracked_eigen_shift=None -- record the synthetic critical value alone and leave
+        # tracked_eigenindex at None, which on this one-dof fold is otherwise indistinguishable from a
+        # solved spectrum: the tracked value replaces the solved one, so nothing numerical is left to
+        # tell them apart. The log is checked as well, so a failure says which of the two happened.
         assert not any("Could not solve the eigenproblem" in str(m) for m in logged), logged
-        assert any(complex(p.eig_values[0]) != complex(p.eig_value_Re, p.eig_value_Im) for p in locus), \
-            [(p.eig_values[0], p.eig_value_Re) for p in locus]
+        assert all(p.tracked_eigenindex is not None for p in locus), \
+            [p.tracked_eigenindex for p in locus]
         assert len({round(p.param_values["b"], 6) for p in locus}) == len(locus), "b really moved"
         # No normal form is computed per locus point even with classification on: the type is known.
         assert all(p.bifurcation_info is None for p in locus)
@@ -929,6 +944,195 @@ def test_ds_is_recast_when_the_arclength_metric_changes():
     stub.theta, stub.dpds = 3.252, 0.7071067811865476
     assert c._recast_ds_after_metric_change(-0.05, 1.0, 0.88) == -0.05
 
+
+def _tracked_spectrum_controller(spectrum, evecs, tracked_vec, crit, tracked_m=None):
+    """A controller wired to a stub problem that reports one tracked eigenvalue and one spectrum.
+
+    A stub, because what is under test is which entry of the returned spectrum is recognised as the
+    tracked one - pure bookkeeping over numbers a real eigensolve would take minutes to produce, and
+    the interesting cases (two eigenvalues on the axis at once, a solve that never returns the
+    tracked mode) are ones a test problem cannot be talked into reliably.
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+
+    class StubProblem:
+        def __init__(self):
+            # What tracked continuation leaves behind: the single synthetic eigenvalue and its vector.
+            self._last_eigenvalues = numpy.array([crit], dtype=numpy.complex128)
+            self._last_eigenvectors = numpy.array([tracked_vec], dtype=numpy.complex128)
+            # What a tracked solve() leaves: one entry, the tracked mode, when there is one.
+            self._last_eigenvalues_m = None if tracked_m is None else numpy.array([tracked_m])
+            self._last_eigenvalues_k = None
+            self.solves = 0
+            self.raise_on_solve = None
+        def get_last_eigenvalues(self):
+            return self._last_eigenvalues
+        def get_last_eigenvectors(self):
+            return self._last_eigenvectors
+        def get_last_eigenmodes_m(self):
+            return self._last_eigenvalues_m
+        def get_last_eigenmodes_k(self):
+            return self._last_eigenvalues_k
+        def _get_bifurcation_eigenvector(self):
+            return tracked_vec
+        def _get_bifurcation_omega(self):
+            return float(numpy.imag(crit))
+        def _critical_normal_mode(self, eigenindex=0):
+            return None if not tracked_m else ("m", float(tracked_m))
+        def solve_eigenproblem(self, n, shift, quiet=False, **kw):
+            self.solves += 1
+            assert shift, "an eigensolve while tracking needs a non-zero shift"
+            if self.raise_on_solve is not None:
+                raise self.raise_on_solve
+            self._last_eigenvalues = numpy.array(spectrum, dtype=numpy.complex128)
+            self._last_eigenvectors = numpy.array(evecs, dtype=numpy.complex128)
+            # Untouched, like the real one: with no mode argument the plain path never writes these,
+            # so they stay at the single tracked entry and no longer match the spectrum's length.
+            return self._last_eigenvalues, self._last_eigenvectors
+
+    logged: list = []
+    c = BifurcationController.__new__(BifurcationController)
+    c._on_log = logged.append
+    c._on_changed = None
+    c._on_status = None
+    c._on_busy = None
+    c._eigen_mult = 1.0
+    c._eigen_unit = ""
+    c.neigen = len(spectrum)
+    c.tracked_eigen_shift = 0.1
+    c.problem = StubProblem()  # type: ignore[assignment]
+    return c, logged
+
+
+def test_tracked_spectrum_lists_the_tracked_eigenvalue_exactly_once():
+    """The tracker's exact zero replaces the eigensolve's own copy of it, and nothing else."""
+    # A fold sitting next to a SECOND eigenvalue on the axis, i.e. an incipient codim-2 point - the
+    # one case where "the entry nearest the critical value" is not good enough, and the only case
+    # where getting it wrong costs anything, since that second eigenvalue is why the spectrum is
+    # being solved for on a locus at all. The tracked vector is (1,0); the impostor's is (0,1).
+    tracked_vec = numpy.array([1.0, 0.0, 0.0], dtype=complex)
+    spectrum = [-0.5 + 0j, 1e-9 + 0j, -3e-10 + 0j]
+    evecs = [numpy.array([0.0, 0.0, 1.0], dtype=complex),   # some other mode entirely
+             numpy.array([0.0, 1.0, 0.0], dtype=complex),   # NEARER zero, but a different mode
+             numpy.array([1.0, 0.0, 0.0], dtype=complex)]   # the tracked one
+    c, logged = _tracked_spectrum_controller(spectrum, evecs, tracked_vec, 0j)
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert idx == 2, "the tracked mode is identified by its eigenvector, not by being nearest zero"
+    assert crit == 0j and spec is not None
+    assert spec[idx] == 0j, "and it is listed at the tracker's exact value"
+    assert spec[1] == 1e-9 + 0j, "the second eigenvalue on the axis is a different mode and stays"
+    assert len(spec) == 3, spec
+    assert modes is None
+
+    # ...and the problem is left holding the TRACKED eigenpair, not what the extra solve returned:
+    # the normal-form classification that runs next reads get_last_eigenvalues()[0].
+    assert list(c.problem.get_last_eigenvalues()) == [0j]
+    assert numpy.allclose(c.problem.get_last_eigenvectors()[0], tracked_vec)
+
+    # The same, with an azimuthal tracker installed. solve_eigenproblem takes the mode from the
+    # tracker's own global parameter and reports none per eigenvalue, so the whole solved spectrum
+    # belongs to the tracked mode and has to be labelled with it - the single-value record a located
+    # azimuthal bifurcation used to carry did say m, and losing that would leave the point looking
+    # like a base-state one.
+    c, logged = _tracked_spectrum_controller(spectrum, evecs, tracked_vec, 0j, tracked_m=1)
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert idx == 2 and modes == [1.0, 1.0, 1.0], modes
+
+    # A Hopf: the conjugate partner at -i*omega is a genuinely different entry of the spectrum and
+    # must survive, however close its eigenvector is to a phase of the tracked one.
+    zeta = numpy.array([1.0, 1j, 0.0], dtype=complex)
+    spectrum = [3e-11 + 2.0j, -1e-11 - 2.0j, -0.7 + 0j]
+    evecs = [zeta, numpy.conj(zeta), numpy.array([0.0, 0.0, 1.0], dtype=complex)]
+    c, logged = _tracked_spectrum_controller(spectrum, evecs, zeta, 2.0j)
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert idx == 0 and spec is not None
+    assert spec[0] == 2.0j, "the tracked value, exactly"
+    # The partner stays in the list - it is a genuinely different entry of the spectrum - but it is
+    # snapped onto the axis too: the tracker holds the whole PAIR there, and the solved copy's real
+    # part is rounding-sized with an arbitrary sign, which a positive one turns into a spurious
+    # "unstable" at the bifurcation itself.
+    assert spec[1] == -2.0j, spec
+    assert len(spec) == 3
+    assert sum(1 for v in spec if numpy.real(v) > 0) == 0, spec
+
+    # An eigensolve that never sees the tracked mode - too few eigenvalues, or a shift too far away.
+    # The point still has to read as a bifurcation, so the tracked value goes in front rather than
+    # being dropped, and it is said out loud, since the answer is to raise neigen or move the shift.
+    c, logged = _tracked_spectrum_controller([-0.5 + 0j, -0.9 + 0j],
+                                             [numpy.array([0.0, 1.0], dtype=complex),
+                                              numpy.array([1.0, 1.0], dtype=complex)],
+                                             numpy.array([1.0, 0.0], dtype=complex), 0j)
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert idx == 0 and spec is not None and spec[0] == 0j and len(spec) == 3
+    assert any("did not return the tracked eigenvalue" in str(m) for m in logged), logged
+
+    # Switched off: the historical single synthetic value, and no eigensolve at all.
+    c, logged = _tracked_spectrum_controller([0j], [numpy.array([1.0], dtype=complex)],
+                                             numpy.array([1.0], dtype=complex), 0j)
+    c.tracked_eigen_shift = None
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert (crit, spec, idx) == (0j, None, None)
+    assert c.problem.solves == 0
+
+    # A failed shift-invert costs this point its spectrum and nothing else: a two-parameter sweep
+    # that has been running for hours must not be aborted by one factorisation that would not go
+    # through. The tracked eigenpair is still what the problem is left holding.
+    c, logged = _tracked_spectrum_controller([0j], [numpy.array([1.0], dtype=complex)],
+                                             numpy.array([1.0], dtype=complex), 0j)
+    c.problem.raise_on_solve = RuntimeError("MUMPS zero pivot")
+    crit, spec, modes, idx = c._tracked_spectrum()
+    assert (crit, spec, idx) == (0j, None, None)
+    assert any("Could not solve the eigenproblem" in str(m) for m in logged), logged
+    assert list(c.problem.get_last_eigenvalues()) == [0j]
+
+
+def test_a_located_bifurcation_keeps_its_exact_zero():
+    """Nothing that re-solves a spectrum at a bifurcation may demote it to an ordinary point.
+
+    Its leading eigenvalue is the tracker's exact zero, which no eigensolve taken from the dump can
+    reproduce - there is no tracker installed any more, and the state IS the singularity. Both ways
+    to a fresh spectrum are covered: recomputing it outright (refused) and a stripe scan (merged).
+    """
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController
+    from pyoomph.utils.bifurcation_gui.model import BifurcationGUISolutionPoint
+
+    c = BifurcationController.__new__(BifurcationController)
+    c._on_log = lambda *a: None
+    c._on_changed = None
+    c._on_status = None
+    c._on_busy = None
+    c.neigen = 4
+    c.shift = 0
+    c.normal_modes = []
+    c._paramname = "mu"
+
+    class StubProblem:
+        def is_normal_mode_stability_set_up(self):
+            return None
+    c.problem = StubProblem()  # type: ignore[assignment]
+
+    p = BifurcationGUISolutionPoint(1.0, {}, 0j, "state.dump", 0,
+                                    eig_values=[-0.2 + 0j, 0j, -1.0 + 0j], tracked_eigenindex=1)
+    assert not c.compute_spectrum(p), "a located bifurcation must not be re-solved from its dump"
+    assert p.eig_value_Re == 0 and p.eig_values[1] == 0j
+
+    # A stripe scan at a bifurcation is worth having - a Hopf pair far up the axis is exactly what it
+    # finds - so it merges rather than being refused, and carries the tracked zero across. The scan's
+    # own copy of it (a rounding-error-sized number) is dropped, not listed beside it.
+    c._store_spectrum(p, [7e-12 + 0j, -0.2 + 0j, -0.05 + 3.0j, -0.05 - 3.0j], None, merge=True)
+    assert p.eig_value_Re == 0, "still a bifurcation"
+    assert p.tracked_eigenindex is not None
+    assert p.eig_values[p.tracked_eigenindex] == 0j
+    assert sum(1 for v in p.eig_values if abs(v) < 1e-6) == 1, p.eig_values
+    assert p.measured_unstable_count() == 0, p.eig_values
+    assert complex(-0.05, 3.0) in p.eig_values, "and the scan's own findings are kept"
+
+    # An ordinary point has no tracked entry, and a stale index would mark an unrelated eigenvalue.
+    q = BifurcationGUISolutionPoint(1.0, {}, -0.2 + 0j, "state.dump", 0,
+                                    eig_values=[-0.2 + 0j], tracked_eigenindex=0)
+    c._store_spectrum(q, [-0.3 + 0j, -0.9 + 0j], None, merge=False)
+    assert q.tracked_eigenindex is None
+    assert numpy.isclose(q.eig_value_Re, -0.3)
 
 def test_arclength_proportion_must_be_a_proper_fraction():
     """D outside (0,1) would make oomph divide by D or by 1-D when it retunes theta^2."""

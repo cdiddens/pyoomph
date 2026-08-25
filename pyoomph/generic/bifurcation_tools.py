@@ -2682,6 +2682,9 @@ class NormalFormCalculator:
                 param=self.problem._bifurcation_tracking_parameter_name
             else:
                 raise RuntimeError("Pass a parameter or use this with solved bifurcation tracking active")
+        # Here rather than only in Problem.classify_bifurcation, because this is the chokepoint every
+        # route to a normal form goes through - the bifurcation GUI builds the calculator itself.
+        self.problem._refuse_at_normal_mode_bifurcation("Computing a normal form",eigenindex)
         if self.problem.get_last_eigenvalues() is None or eigenindex>=len(self.problem.get_last_eigenvalues()):
             raise RuntimeError("Eigenpair at index "+str(eigenindex)+" not calculated!")
         lambd=self.problem.get_last_eigenvalues()[eigenindex]

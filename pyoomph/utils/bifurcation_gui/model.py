@@ -187,7 +187,7 @@ class BifurcationGUISolutionPoint:
     def __init__(self,param_value,obs_values,eig_value,statefile,outstep,param_values:dict[str,float] | None=None,
                  eig_values:"Sequence[complex] | None"=None,det_sign:int | None=None,
                  dparam_ds:float | None=None,eig_modes:"Sequence[float] | None"=None,
-                 eig_settings:"tuple | None"=None) -> None:
+                 eig_settings:"tuple | None"=None,tracked_eigenindex:int | None=None) -> None:
         self.param_value=param_value
         #: Every global parameter at this point, not just the continued one. The state dump restores
         #: all of them, so without this the diagram could not say which slice of parameter space it
@@ -220,6 +220,11 @@ class BifurcationGUISolutionPoint:
         #: (neigen, shift, modes) the spectrum was computed with, so a point can be recognised as stale
         #: after the eigenvalue count is raised. None for points from before this was recorded.
         self.eig_settings:tuple | None=tuple(eig_settings) if eig_settings is not None else None
+        #: Which entry of :py:attr:`eig_values` is the eigenvalue a bifurcation tracker was holding on
+        #: the axis here, so the list can mark it. Set only where a tracker was installed AND the base
+        #: state's own spectrum was solved for alongside it, which is what distinguishes a point whose
+        #: whole spectrum is known from one carrying the tracker's synthetic value alone.
+        self.tracked_eigenindex:int | None=int(tracked_eigenindex) if tracked_eigenindex is not None else None
         self.statefile=statefile
         self.outstep=outstep
         self.scoord:float=0
@@ -250,7 +255,7 @@ class BifurcationGUISolutionPoint:
         #: stationary point, which is also how "is this an orbit" is answered everywhere.
         self.orbit_info:dict | None=None
         #: Floquet multipliers, kept alongside the exponents in :py:attr:`eig_values`. The exponents
-        #: drive the stability machinery (Re > 0 is |mu| > 1); the multipliers say what KIND of
+        #: drive the stability machinery (Re > 0 is ``|mu| > 1``); the multipliers say what KIND of
         #: bifurcation is approaching, which the exponents cannot - a multiplier leaving through -1 is
         #: a period doubling and a complex pair on the unit circle a torus, and both have the same
         #: exponent real part.
@@ -279,6 +284,8 @@ class BifurcationGUISolutionPoint:
             inst.eig_values=[complex(r,i) for r,i in zip(re_list,im_list)]
         modes=res.get("eig_modes")
         inst.eig_modes=[float(m) for m in modes] if modes is not None else None
+        tracked=res.get("tracked_eigenindex")
+        inst.tracked_eigenindex=int(tracked) if tracked is not None else None
         settings=res.get("eig_settings")
         # Rebuilt through the canonicaliser, since json gives the nested modes back as a list and a
         # stale check compares these for equality.
@@ -326,6 +333,8 @@ class BifurcationGUISolutionPoint:
             res["eig_values_Im"]=[float(numpy.imag(v)) for v in self.eig_values]
             if self.eig_modes is not None:
                 res["eig_modes"]=[float(m) for m in self.eig_modes]
+            if self.tracked_eigenindex is not None:
+                res["tracked_eigenindex"]=int(self.tracked_eigenindex)
         if self.eig_settings is not None:
             n,sr,si,modes=self.eig_settings
             res["eig_settings"]=[n,sr,si,list(modes)]

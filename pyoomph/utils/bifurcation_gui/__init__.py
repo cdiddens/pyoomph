@@ -116,6 +116,7 @@ class BifurcationGUI:
 
     neigen=_fwd("neigen","Number of eigenvalues computed at every solution point.")
     shift=_fwd("shift","Shift handed to the eigensolver.")
+    tracked_eigen_shift=_fwd("tracked_eigen_shift","Shift for the eigensolve taken while a bifurcation tracker is installed - at a located bifurcation and at every point of a locus - which is how the rest of the spectrum is recorded there. It cannot be 0: the tracker has put an eigenvalue exactly there. None skips that eigensolve and records the tracked value alone.")
     classify_bifurcations=_fwd("classify_bifurcations","Compute the normal form at each located bifurcation, naming it fold/transcritical/pitchfork. On by default; branch switching computes it on demand if it is off.")
     interpolated_splines=_fwd("interpolated_splines","Draw and export spline-interpolated branches instead of the raw polylines.")
     arclength_proportion=_fwd("arclength_proportion","Fraction D of the arclength given to the continued parameter while the scaling is on, i.e. (dparameter/ds)^2 == D after every step. Set it through set_arclength_proportion() to have it reach the problem.")
@@ -146,7 +147,7 @@ class BifurcationGUI:
     floquet_method=_fwd("floquet_method","'condensed' (default), 'periodic_schur' or 'eigenproblem'.")
     floquet_n=_fwd("floquet_n","How many multipliers, or None for all of them.")
     floquet_unity_tol=_fwd("floquet_unity_tol","Tolerance for recognising the trivial multiplier at 1, which every orbit has and which must be removed.")
-    floquet_unstable_tol=_fwd("floquet_unstable_tol","Deadband on |mu| > 1 when counting unstable directions.")
+    floquet_unstable_tol=_fwd("floquet_unstable_tol","Deadband on ``|mu| > 1`` when counting unstable directions.")
     floquet_shift_invert=_fwd("floquet_shift_invert","Seek the multipliers near sigma rather than by largest magnitude (matrix-free route only).")
     floquet_sigma=_fwd("floquet_sigma","Shift for the shift-invert, or None for just outside the unit circle.")
     del _fwd

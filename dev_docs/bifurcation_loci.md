@@ -36,7 +36,7 @@ It is accurate: six steps along the locus land on the analytic parabola to `2.6e
 Five things bite, in the order you meet them; §6 then covers eigensolving on a locus in its own
 right, since that is where most of the machinery ended up.
 
-### 1. The *critical* eigenvalue on a locus is not solved for - but the rest of the spectrum is
+### 1. The *critical* eigenvalue at a tracked point is not solved for - but the rest of the spectrum is
 
 **This section used to say `solve_eigenproblem` refuses outright while tracking. It no longer does**;
 see §6 below for what changed and what is still refused.
@@ -47,21 +47,43 @@ locus points read as bifurcations to code that tests `eig_value_Re == 0`; re-sol
 the exact zero into a small nonzero number and the point would stop being a bifurcation. Store that
 value.
 
-The **rest** of the spectrum is worth having, and is what `BifurcationController.step` now records on
-a locus (`_add_locus_state`): a second eigenvalue reaching zero, or a pair crossing the axis, is a
-codim-2 point on the curve being followed, and without the spectrum there is no way to see one
-coming. Two things about it:
+The **rest** of the spectrum is worth having, and `BifurcationController._tracked_spectrum` records
+it at **every** point a tracker has converged onto - each step of a locus (`_add_locus_state`) and
+each freshly located bifurcation (`locate_bifurcation`) alike. On a locus a second eigenvalue
+reaching zero is a codim-2 point on the curve being followed; at a located bifurcation the rest of
+the spectrum is what says whether the branch was already unstable there and which mode goes next.
+Four things about it:
 
-- it needs a **non-zero shift** (`BifurcationController.locus_eigen_shift`, default `0.1`; the
-  ordinary `self.shift` defaults to `0`, which is exactly the value that cannot work), and
+- it needs a **non-zero shift** (`BifurcationController.tracked_eigen_shift`, default `0.1`, formerly
+  `locus_eigen_shift` and still readable under that name; the ordinary `self.shift` defaults to `0`,
+  which is exactly the value that cannot work),
 - it is **non-fatal**: a failed shift-invert factorisation costs that point its spectrum rather than
-  aborting a two-parameter sweep that may have been running for hours.
+  aborting a two-parameter sweep that may have been running for hours,
+- the synthetic critical value **replaces** the solved copy of the same eigenvalue rather than being
+  listed beside it. Both would show one mode twice, and the solved copy's real part is a
+  rounding-error-sized number of arbitrary sign, so a positive one counts the located bifurcation as
+  unstable. Which entry it is is decided by **eigenvector overlap**, not by `|lambda - crit|`: at a
+  codim-2 point two eigenvalues sit on the axis together, which is precisely the case the spectrum is
+  being solved for. A Hopf's partner at `conj(crit)` is a different entry and stays in the list, but
+  is snapped onto the axis for the same sign reason. `BifurcationGUISolutionPoint.tracked_eigenindex`
+  records which entry the tracked one is; the Points tab marks it with a `*`, and
+- `tracked_eigenindex` is set **only when that eigensolve actually ran**, which is also the only way
+  to tell a solved spectrum from the fallback on a problem with one dof.
 
-`_sync_tracking_to` no longer takes its re-activation guess from `get_last_eigenvectors()[0]`, since
-that is now whatever the secondary eigensolve returned; it asks the handler through
+Nothing may re-solve the spectrum at a located bifurcation afterwards: the exact zero is what makes
+it a bifurcation everywhere in the diagram and no eigensolve taken from its dump can reproduce it
+(no tracker is installed any more, and the state *is* the singularity). `compute_spectrum` refuses
+outright and `_store_spectrum` - the stripe scan's way in, which is worth having there - carries the
+tracked value across the merge.
+
+`_sync_tracking_to` does not take its re-activation guess from `get_last_eigenvectors()[0]`: although
+`_tracked_spectrum` puts the tracked eigenpair back when it is done, anything that eigensolves in
+between would leave that pointing at a different mode. It asks the handler through
 `_get_bifurcation_eigenvector()` instead. **Any other code that reads `get_last_eigenvectors()[0]`
 expecting the tracked vector has the same problem** - the handler is the authority while tracking is
-active.
+active. The put-back matters for what runs *at* the point: `NormalFormCalculator.get_normal_form`
+reads `get_last_eigenvalues()[0]`/`get_last_eigenvectors()[0]`, so a located bifurcation would
+otherwise be classified from whichever mode the secondary solve happened to lead with.
 
 ### 2. A locus point's dump cannot be loaded into a plain problem
 

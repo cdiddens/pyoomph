@@ -6797,6 +6797,70 @@ class Problem(_pyoomph.Problem):
             raise RuntimeError("Cannot find out whether a solution is stable when bifurcation tracking is active")
         return numpy.real(self._last_eigenvalues[0])<=0 #type:ignore
 
+    def _critical_normal_mode(self,eigenindex:int=0)->"tuple[str,float] | None":
+        """``("m", value)`` or ``("k", value)`` when the eigenpair at ``eigenindex`` belongs to a
+        NON-trivial normal mode, and ``None`` when it is a base-mode (m = 0 / k = 0) one.
+
+        The tracked mode is asked first: while an azimuthal or Cartesian normal-mode tracker is
+        installed, the mode is whatever its own global parameter holds, and the per-eigenvalue arrays
+        describe whatever eigensolve happened to run last, which need not be the tracker's.
+
+        Those arrays are read positionally, so they are trusted only when they are as long as
+        :py:meth:`get_last_eigenvalues` - an array left over from an earlier mode scan describes
+        eigenvalues that are no longer there.
+        """
+        mode=self.get_bifurcation_tracking_mode()
+        if mode=="azimuthal" and self._azimuthal_mode_param_m is not None:
+            m=float(self._azimuthal_mode_param_m.value)
+            return ("m",m) if m!=0 else None
+        if mode=="cartesian_normal_mode" and self._normal_mode_param_k is not None:
+            k=float(self._normal_mode_param_k.value)
+            return ("k",k) if abs(k)>1e-7 else None
+        n=len(self._last_eigenvalues) if self._last_eigenvalues is not None else 0
+        ms=self._last_eigenvalues_m
+        if ms is not None and len(ms)==n and 0<=eigenindex<n and float(ms[eigenindex])!=0:
+            return ("m",float(ms[eigenindex]))
+        ks=self._last_eigenvalues_k
+        if ks is not None and len(ks)==n and 0<=eigenindex<n and abs(float(ks[eigenindex]))>1e-7:
+            return ("k",float(ks[eigenindex]))
+        return None
+
+    def _refuse_at_normal_mode_bifurcation(self,what:str,eigenindex:int=0,
+                                          mode:"tuple[str,float] | None"=None):
+        """Refuse ``what`` when the critical eigenpair is a normal mode rather than a base-mode one.
+
+        Everything built on a normal form - the classification, the branch switch, the orbit a Hopf
+        sheds - assumes the bifurcating branch is a direction in THIS dof vector. At an azimuthal
+        m != 0 or a Cartesian k != 0 bifurcation it is not: the eigenfunction varies as exp(i*m*phi)
+        (or exp(i*k*x)) and the solution it gives birth to breaks the very symmetry these degrees of
+        freedom impose, so it is not representable here at any amplitude. Nothing about that shows up
+        as a failure - the eigenvector has the base-mode length and every matrix contraction goes
+        through - so without this the normal form comes out as a plausible fold/pitchfork built from
+        the BASE-mode Hessian contracted with a mode-m eigenvector, which is the coefficient of
+        nothing, and the "switch" that follows converges back onto the branch it started from.
+        """
+        # ``mode`` lets a caller that knows the answer say so: the bifurcation GUI reaches this from
+        # a point loaded off a diagram, where the tracker is long gone and the last eigensolve was a
+        # base-mode one, so nothing on the problem remembers which mode the bifurcation belonged to.
+        found=mode if mode is not None else self._critical_normal_mode(eigenindex)
+        if found is None:
+            return
+        kind,value=found
+        if kind=="m":
+            name="azimuthal mode m = {:g}".format(value)
+            phase,direction="exp(i*m*phi)","azimuthal"
+        else:
+            name="Cartesian normal mode k = {:g}".format(value)
+            phase,direction="exp(i*k*x)","extra Cartesian"
+        raise RuntimeError(
+            what+" is not possible at a bifurcation of a normal mode (here the "+name+"). Its "
+            "eigenfunction varies as "+phase+", so the branch it sheds breaks the symmetry this dof "
+            "vector is built on and is not representable in it at all - and a normal form computed "
+            "here would contract the base-mode Hessian with a mode-"+kind+" eigenvector, which is "
+            "the coefficient of nothing. Follow that branch in a problem that resolves the "+
+            direction+" direction explicitly. Continuing the bifurcation itself does work: keep the "
+            "tracker on and use arclength_continuation in a second parameter.")
+
     def classify_bifurcation(self,parameter:"str | _pyoomph.GiNaC_GlobalParam | None"=None,eigenindex:int=0,
                              assume:str | None=None,fd_eps:float | None=None)->dict[str,Any]:
         """Normal form of the bifurcation the problem is currently sitting at.
@@ -6812,6 +6876,10 @@ class Problem(_pyoomph.Problem):
 
         Needs an analytic Hessian, so the problem must have been set up with
         ``setup_for_stability_analysis(analytic_hessian=True)``.
+
+        Refused at a bifurcation of an azimuthal ``m != 0`` or Cartesian ``k != 0`` normal mode: the
+        normal form would be the base-mode Hessian contracted with a mode-``m`` eigenvector, and the
+        branch it describes cannot be represented in these degrees of freedom.
 
         Args:
             parameter: The parameter the bifurcation is in. Defaults to the one being tracked.
@@ -6834,6 +6902,7 @@ class Problem(_pyoomph.Problem):
         from .bifurcation_tools import NormalFormCalculator
         if isinstance(parameter,_pyoomph.GiNaC_GlobalParam):
             parameter=parameter.get_name()
+        self._refuse_at_normal_mode_bifurcation("Computing a normal form",eigenindex)
         if self.get_bifurcation_tracking_mode()=="":
             # get_normal_form reads the critical eigenpair from the last eigensolve. While tracking is
             # active that already IS the critical one and solve_eigenproblem would refuse to run.
@@ -6906,13 +6975,19 @@ class Problem(_pyoomph.Problem):
         Raises:
             RuntimeError: If the bifurcation is a fold (one branch, which turns around - there is
                 nothing to switch to), if it is a Hopf (which sheds a periodic orbit rather than a
-                second steady branch - see :py:meth:`switch_to_hopf_orbit`), or if its normal form
-                carries no branch predictor.
+                second steady branch - see :py:meth:`switch_to_hopf_orbit`), if it belongs to an
+                azimuthal ``m != 0`` or Cartesian ``k != 0`` normal mode (the branch it sheds breaks
+                the symmetry this dof vector is built on and cannot be represented in it), or if its
+                normal form carries no branch predictor.
         """
         if isinstance(parameter,str):
             param=self.get_global_parameter(parameter)
         else:
             param=parameter
+        # Before anything else, and not left to classify_bifurcation: the caller may hand a normal
+        # form in, which is what the bifurcation GUI does, and that path would otherwise never see
+        # the guard.
+        self._refuse_at_normal_mode_bifurcation("Branch switching")
         if normal_form is None:
             normal_form=self.classify_bifurcation(param)
         kind=normal_form.get("type")
@@ -7577,6 +7652,11 @@ class Problem(_pyoomph.Problem):
         
         from .bifurcation_tools import get_hopf_lyapunov_coefficient    
         
+        # First, so that an azimuthal or Cartesian normal-mode Hopf says what is actually wrong: the
+        # check below would refuse it too, but as "Hopf tracking not activated", which is not the
+        # problem - the tracker IS a Hopf tracker, its mode is just not one this dof vector can hold
+        # the resulting orbit in (a rotating or travelling wave, not a standing oscillation).
+        self._refuse_at_normal_mode_bifurcation("Switching onto the periodic orbit a Hopf sheds")
         if self._bifurcation_tracking_parameter_name is None or self.get_bifurcation_tracking_mode()!="hopf" or len(self.get_last_eigenvalues())!=1:
             raise ValueError("Hopf bifurcation tracking not activated or solved. Please call activate_bifurcation_tracking first, then solve. Then call this routine.")        
         # Store the information from the Hopf tracker
@@ -8333,8 +8413,18 @@ class Problem(_pyoomph.Problem):
                 self._last_eigenvectors=numpy.array([self._get_bifurcation_eigenvector()],dtype=numpy.complex128) #type:ignore
                 if self.get_bifurcation_tracking_mode()=="azimuthal":
                     self._last_eigenvalues_m=numpy.array([int(self._azimuthal_mode_param_m.value)],dtype=numpy.int32) #type:ignore
+                    self._last_eigenvalues_k=None
                 elif self.get_bifurcation_tracking_mode()=="cartesian_normal_mode":
                     self._last_eigenvalues_k=numpy.array([self._normal_mode_param_k.value]) #type:ignore
+                    self._last_eigenvalues_m=None
+                else:
+                    # Cleared, like arclength_continuation does: _last_eigenvalues has just been cut
+                    # down to the single tracked value, so a mode array left over from an earlier
+                    # scan describes eigenvalues that are no longer there. It is read positionally
+                    # (get_last_eigenmodes_m()[i] is the mode of eigenvalue i), so a stale one made
+                    # the tracked eigenvalue answer with the mode of whatever the scan found first.
+                    self._last_eigenvalues_m=None
+                    self._last_eigenvalues_k=None
                 self._last_eigenvectors=self.process_eigenvectors(self._last_eigenvectors)
             else:
                 self._last_eigenvalues_m=None

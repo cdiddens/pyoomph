@@ -881,7 +881,8 @@ class BifurcationTkApp:
         self.eigen_tree.heading("mode",text="m/k")
         self.eigen_tree.heading("re",text="Re")
         self.eigen_tree.heading("im",text="Im")
-        self.eigen_tree.column("#0",width=34,minwidth=28,stretch=False,anchor=tk.E)
+        # Wide enough for the index plus the "*" that marks the tracked eigenvalue at a bifurcation.
+        self.eigen_tree.column("#0",width=42,minwidth=34,stretch=False,anchor=tk.E)
         self.eigen_tree.column("mode",width=40,minwidth=30,stretch=False,anchor=tk.E)
         self.eigen_tree.column("re",width=100,minwidth=70,anchor=tk.E)
         self.eigen_tree.column("im",width=100,minwidth=70,anchor=tk.E)
@@ -1871,7 +1872,7 @@ class BifurcationTkApp:
         # multipliers: without it, switching to a point whose spectrum happens to be the same length
         # leaves the previous point's multipliers on screen.
         signature=(id(point),len(values),which,tuple(point.eig_modes or ()),
-                   c.count_normal_modes_in_stability,len(point.floquet))
+                   c.count_normal_modes_in_stability,len(point.floquet),point.tracked_eigenindex)
         if signature==self._eigen_signature:
             return                      # nothing to redo on every redraw
         self._eigen_signature=signature
@@ -1891,6 +1892,10 @@ class BifurcationTkApp:
                 # The settings were changed after this was computed, which is precisely when the
                 # Recompute command is what the user is looking for.
                 note+=" - computed with older settings, recompute to refresh"
+            if point.tracked_eigenindex is not None:
+                # Otherwise the "*" in the list is unexplained, and the one thing it has to say is
+                # which of these the bifurcation was tracked on - the rest are the base state's.
+                note+=", * = tracked"
             self.eigen_label_var.set("{:s} point: {:d} eigenvalue{:s}{:s}, {:d} unstable".format(
                 which,len(values),"" if len(values)==1 else "s",note,nunstable))
         self.eigen_tree.delete(*self.eigen_tree.get_children())
@@ -1922,7 +1927,10 @@ class BifurcationTkApp:
             re,im=float(v.real),float(v.imag)
             tags=("unstable",) if re>0 else (("critical",) if re==0 else ())
             mode="" if modes is None else "{:g}".format(modes[i])
-            self.eigen_tree.insert("","end",text=str(i),
+            # The tracked one is marked rather than left out: it IS part of this spectrum, and its
+            # index is what "Locate the bifurcation of the selected eigenvalue" is read off.
+            label=str(i)+("*" if i==point.tracked_eigenindex else "")
+            self.eigen_tree.insert("","end",text=label,
                                    values=(mode,"{:+.6g}".format(re),"{:+.6g}".format(im)),tags=tags)
 
     def _update_tree(self):
@@ -2223,7 +2231,9 @@ class BifurcationTkApp:
         if not sel:
             return None
         try:
-            return int(self.eigen_tree.item(sel[0],"text"))
+            # rstrip: the tracked eigenvalue's row carries a trailing "*", and int() of that is a
+            # ValueError - which this used to swallow, leaving the button silently doing nothing.
+            return int(str(self.eigen_tree.item(sel[0],"text")).rstrip("*"))
         except (ValueError,tk.TclError):
             return None
 
@@ -2464,6 +2474,15 @@ class BifurcationTkApp:
                                 initialvalue=float(_real_part(self.controller.shift)))
         if s is not None:
             self.controller.shift=s
+        # Its own value, because the shift above defaults to 0 and 0 is the one value that cannot work
+        # at a tracked point: the tracker has put an eigenvalue exactly there. 0 therefore means "do
+        # not take that eigensolve at all", which is also how it is switched off from a script.
+        t=simpledialog.askfloat("Eigenvalue settings",
+                                "Shift at a tracked bifurcation (0 = do not solve the rest of the "
+                                "spectrum there):",parent=self.root,
+                                initialvalue=float(_real_part(self.controller.tracked_eigen_shift or 0)))
+        if t is not None:
+            self.controller.tracked_eigen_shift=t if t else None
 
     def _dialog_parameter_range(self):
         c=self.controller

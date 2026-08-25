@@ -497,16 +497,51 @@ every digit across all three:
 and the landings sit on the analytic branches (`u ~ B(lam-lam_c)phi` and `u ~ +-A sqrt(lam-lam_c) phi`)
 to 0.5% at the offset actually taken, which is what a leading-order prediction is worth.
 
-## Not done
+## Normal-mode bifurcations are refused, at Problem level
 
-**Branch switching for symmetry-breaking bifurcations** - azimuthal `m != 0`, Cartesian normal mode
-`k != 0`. The normal form is computed on the `m = 0` dof vector throughout: `zeta` from
+Azimuthal `m != 0` and Cartesian normal-mode `k != 0` bifurcations have no branch to switch to here,
+and this **used to be a "not done" note in this file rather than a guard in the code**.
+
+The normal form is computed on the base-mode dof vector throughout: `zeta` from
 `get_last_eigenvectors()`, the Hessian contraction from the base dofs, `dR/dp` from the base parameter
 derivative. For `m != 0` the bifurcating branch lives in a **different function space** - a
 three-dimensional solution off an axisymmetric base state - so there is no dof vector on this problem
-to switch onto; the `m != 0` mode would have to be reconstructed into a full problem first. Worth
-naming because `AzimuthalSymmetryBreakingHandler` itself works under `--distribute`, so a user will
-reasonably expect the switch to follow.
+to switch onto; the mode would have to be reconstructed into a full problem first.
+
+Nothing about that announces itself. The eigenvector has the base-mode length, every contraction goes
+through, and what came back was a plausible `pitchfork` assembled from the base-mode Hessian
+contracted with an `m = 1` eigenvector - the coefficient of nothing - followed by a "switch" that
+converges back onto the branch it started from. (On the reaction-diffusion probe of
+`tests/test_normal_mode_branch_switch.py` it happens to trip over its own bordered solve first, with
+`The left eigenvector solve landed on the eigenvalue 8.9 instead of the requested 0.0` - which says
+the same thing from the other end: the base-mode Jacobian is not singular at an `m = 1` onset.)
+
+So it is refused, and at `Problem` level rather than in the bifurcation GUI, since a plain script
+meets it just as readily:
+
+- `Problem._critical_normal_mode(eigenindex)` answers `("m", value)` / `("k", value)` / `None`. It
+  asks the **tracker** first - while an azimuthal or normal-mode tracker is installed the mode is
+  whatever its own global parameter holds - and falls back to `get_last_eigenmodes_m/k()`, which it
+  trusts only when they are as long as `get_last_eigenvalues()`: those arrays are read positionally,
+  and one left over from an earlier scan describes eigenvalues that are no longer there. (`solve()`
+  now clears them under a non-normal-mode tracker, as `arclength_continuation` already did.)
+- `Problem._refuse_at_normal_mode_bifurcation(what, eigenindex, mode=None)` raises with the reason.
+  It is called from `NormalFormCalculator.get_normal_form` (the chokepoint every route to a normal
+  form goes through, the GUI included), from `Problem.classify_bifurcation` before its eigensolve,
+  from `Problem.switch_branch` **before** anything else - the GUI hands a normal form in, so the
+  `classify_bifurcation` guard would never be reached on that path - and from
+  `Problem.switch_to_hopf_orbit`, which would otherwise refuse an azimuthal Hopf as "Hopf tracking
+  not activated", which is not the problem.
+- The `mode=` override exists for the GUI: by the time a branch switch is asked for, the tracker that
+  knew the mode is gone and the last eigensolve may have been a base-mode one, so the problem no
+  longer remembers. The recorded point does - `BifurcationGUISolutionPoint.eig_modes` at
+  `tracked_eigenindex`, see `dev_docs/bifurcation_loci.md` §1.
+
+What still works, and is the answer to give the user: **continuing the bifurcation itself**. The
+tracker is fine - `AzimuthalSymmetryBreakingHandler` works under `--distribute` too - so
+`arclength_continuation` in a second parameter traces the `m != 0` locus as usual.
+
+## Not done
 
 **The Hopf normal form's factor of two** - see the comment at `get_normal_form_hopf`'s `bv`. The old
 bare TODO now carries measurements against `get_hopf_lyapunov_coefficient`, which computes the same

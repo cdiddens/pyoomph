@@ -177,12 +177,13 @@ class BifurcationController:
         self.data_subdir="_bifurcation_gui_data"
         self.neigen=10
         self.shift=0
-        # A separate shift for the eigensolves taken ON A LOCUS, because self.shift's default of 0 is
-        # the one value that cannot work there: the tracker has put an eigenvalue exactly at 0 (fold,
-        # pitchfork) or +-i*omega (Hopf, azimuthal), which is precisely where a zero shift asks the
-        # shift-invert transform to factorise. Set to None to skip the locus eigensolve entirely and
-        # keep the historical single synthetic value per locus point.
-        self.locus_eigen_shift:float | complex | None=0.1
+        # A separate shift for the eigensolves taken WHILE A TRACKER IS INSTALLED - on a locus and at
+        # a freshly located bifurcation alike - because self.shift's default of 0 is the one value
+        # that cannot work there: the tracker has put an eigenvalue exactly at 0 (fold, pitchfork,
+        # transcritical) or +-i*omega (Hopf, azimuthal), which is precisely where a zero shift asks
+        # the shift-invert transform to factorise. Set to None to skip that eigensolve entirely and
+        # keep the historical single synthetic value per tracked point.
+        self.tracked_eigen_shift:float | complex | None=0.1
         self.branches:list[BifurcationGUISolutionBranch]=[]
         self.current_branch:BifurcationGUISolutionBranch | None=None
         self.current_point:BifurcationGUISolutionPoint | None=None
@@ -386,7 +387,7 @@ class BifurcationController:
         #: bifurcation: it comes back as 1+-1e-15, so its exponent is a tiny number of EITHER SIGN, and
         #: left in it flips the whole branch between stable and unstable from one point to the next.
         self.floquet_unity_tol=1e-5
-        #: Deadband on |mu| > 1 for counting an unstable direction.
+        #: Deadband on ``|mu| > 1`` for counting an unstable direction.
         self.floquet_unstable_tol=1e-6
         self.floquet_dense_threshold=2000
         self.floquet_shift_invert=True
@@ -1066,6 +1067,15 @@ class BifurcationController:
     #: Fraction of the parameter's own magnitude used as the first offset when stepping off a fold.
     leave_locus_offset=0.05
 
+    @property
+    def locus_eigen_shift(self)->"float | complex | None":
+        """Former name of :py:attr:`tracked_eigen_shift`, from when only a locus took that eigensolve."""
+        return self.tracked_eigen_shift
+
+    @locus_eigen_shift.setter
+    def locus_eigen_shift(self,value:"float | complex | None"):
+        self.tracked_eigen_shift=value
+
     def on_locus(self)->bool:
         return self.current_branch is not None and self.current_branch.kind==BRANCH_LOCUS
 
@@ -1116,10 +1126,12 @@ class BifurcationController:
             assert branch is not None
             if branch.tracked_parameter is None:
                 raise RuntimeError("Locus branch has no tracked parameter recorded")
-            # Take the guess from the handler BEFORE deactivating, when there is one. Since a locus
-            # step now also solves the base state's eigenproblem to record its spectrum,
-            # get_last_eigenvectors()[0] is whatever that secondary solve returned, not the tracked
-            # critical vector -- reactivating from it would restart the tracker on the wrong mode.
+            # Take the guess from the handler BEFORE deactivating, when there is one. The handler is
+            # the authority on the tracked vector: a tracked point also solves the base state's
+            # eigenproblem to record its spectrum, and although _tracked_spectrum puts the tracked
+            # eigenpair back afterwards, anything else that eigensolves in between would leave
+            # get_last_eigenvectors()[0] pointing at a different mode, and the tracker would restart
+            # on that one.
             guess=None
             if tracking:
                 # Only a TRACKER has a critical eigenvector to hand over; an orbit handler has none,
@@ -1278,32 +1290,158 @@ class BifurcationController:
         self._update_tangents()
         self._changed()
 
+    def _index_of_tracked_eigenvalue(self,spectrum,evecs,crit,tracked_vec,exclude=None)->"int | None":
+        """Which entry of a base-state spectrum IS the eigenvalue the tracker is holding on the axis.
+
+        Matched by EIGENVECTOR overlap among the entries that are numerically at ``crit``, not by
+        |lambda - crit| alone: at a codim-2 point two eigenvalues sit on the axis together, and a
+        nearest-value rule would then drop whichever of them rounding happened to favour - which is
+        the one situation where getting this wrong actually costs something, since the second
+        eigenvalue reaching zero is the whole reason for solving the spectrum here. The overlap
+        |<v,w>|/(|v||w|) is 1 for the tracked mode and small for any other, however close its
+        eigenvalue. It also keeps a Hopf's conjugate partner at -i*omega, which is a genuinely
+        different entry of the spectrum and must stay in the list.
+
+        Falls back to the nearest value when there are no eigenvectors to compare. None when nothing
+        is close enough at all, i.e. the eigensolve never saw the tracked mode - too few eigenvalues,
+        or a shift too far away from it.
+        """
+        if not spectrum:
+            return None
+        vals=numpy.asarray(spectrum,dtype=complex)
+        scale=float(max(float(numpy.max(numpy.abs(vals))),abs(crit),1.0))
+        # Deliberately generous: this window only has to rule out eigenvalues that are plainly
+        # somewhere else, the overlap below does the discriminating. Tightened to 1e-4 when there are
+        # no eigenvectors and the distance is all there is to go on.
+        cand=[i for i in range(len(vals)) if abs(vals[i]-crit)<=1e-2*scale and i!=exclude]
+        if not cand:
+            return None
+        nearest=int(min(cand,key=lambda i: abs(vals[i]-crit)))
+        w=None if tracked_vec is None else numpy.asarray(tracked_vec,dtype=complex).ravel()
+        if w is not None and evecs is not None and len(evecs)>0 and w.size>0:
+            nw=float(numpy.linalg.norm(w))
+            best,best_overlap=None,-1.0
+            for i in cand:
+                if i>=len(evecs):
+                    continue
+                v=numpy.asarray(evecs[i],dtype=complex).ravel()
+                nv=float(numpy.linalg.norm(v))
+                if v.size!=w.size or nv<=0 or nw<=0:
+                    continue
+                overlap=abs(complex(numpy.vdot(v,w)))/(nv*nw)
+                if overlap>best_overlap:
+                    best,best_overlap=i,overlap
+            if best is not None and best_overlap>=0.5:
+                return best
+        return nearest if abs(vals[nearest]-crit)<=1e-4*scale else None
+
+    def _tracked_spectrum(self)->"tuple[complex,list[complex] | None,list[float] | None,int | None]":
+        """The spectrum to record at a point a bifurcation tracker has converged onto.
+
+        Returns ``(critical, spectrum, modes, tracked_index)`` as physical rates. ``critical`` is the
+        synthetic value the tracker reports - 0 + i*omega, exactly zero in the real part, which is
+        what makes the point read as a bifurcation everywhere the diagram tests ``eig_value_Re == 0``.
+        Re-solving THAT would turn the exact zero into a small nonzero number and the point would stop
+        being a bifurcation.
+
+        The rest of the spectrum is worth having and is solved for here: on a locus a second
+        eigenvalue reaching the axis is a codim-2 point, and at a freshly located bifurcation the rest
+        of the spectrum is what says whether the branch was already unstable and which mode goes next.
+        The base state's eigenproblem is available while a tracker is installed, see
+        Problem.solve_eigenproblem; it needs a nonzero shift (self.tracked_eigen_shift, which is also
+        how the whole thing is switched off), since the tracker has just put an eigenvalue exactly
+        where a zero shift would factorise.
+
+        ``critical`` REPLACES the entry of the solved spectrum it belongs to rather than being pushed
+        in front of it, so the tracked mode is listed once and at its exact value; ``tracked_index``
+        says which entry that is. Recording both copies would show the same mode twice, a hand-width
+        apart, and the solved copy's rounding-error-sized positive real part would have the point
+        counted as unstable.
+
+        ``spectrum`` and ``tracked_index`` are None when no extra eigensolve was taken - switched off,
+        or failed. The failure is non-fatal on purpose: a shift-invert factorisation that does not go
+        through should cost this point its spectrum, not abort a two-parameter sweep that may have
+        been running for hours.
+        """
+        prob=self.problem
+        # What tracked continuation and a tracked solve() leave behind: the single synthetic
+        # eigenvalue, in the same nondimensional units as any other, plus the mode it belongs to.
+        raw=prob.get_last_eigenvalues()
+        crit=(complex(raw[0]) if raw is not None and len(raw)>0
+              else 0+1j*float(prob._get_bifurcation_omega())) #type:ignore
+        crit_modes=self._last_solved_modes(1)
+        if not self.tracked_eigen_shift:
+            return self._phys_eig(crit),None,crit_modes,None
+        tracked_vec=None
+        try:
+            vec=numpy.array(prob._get_bifurcation_eigenvector(),dtype=numpy.complex128) #type:ignore
+            tracked_vec=vec if vec.size>0 else None
+        except Exception:
+            tracked_vec=None
+        # The eigensolve overwrites the problem's record of the tracked eigenpair, and everything that
+        # runs afterwards at this point - the normal-form classification above all, which reads
+        # get_last_eigenvalues()[0]/get_last_eigenvectors()[0] - expects the tracked one there. The
+        # handler stays the authority (see _sync_tracking_to), but nothing else has to know that if
+        # what the solve found is put back the way it was.
+        keep=(prob._last_eigenvalues,prob._last_eigenvectors,
+              prob._last_eigenvalues_m,prob._last_eigenvalues_k)
+        try:
+            evs,evecs=prob.solve_eigenproblem(self.neigen,self.tracked_eigen_shift,quiet=True)
+            spectrum=[complex(v) for v in evs]
+            modes=self._last_solved_modes(len(spectrum))
+            if modes is None:
+                # With no mode argument, solve_eigenproblem assembles at whatever the azimuthal m /
+                # Cartesian k parameter holds - the TRACKED mode while a normal-mode tracker is
+                # installed - and reports no per-eigenvalue modes for it. Saying so keeps a located
+                # azimuthal bifurcation labelled with its m, which the single-value record it used to
+                # carry did.
+                tracked_mode=prob._critical_normal_mode(0)
+                if tracked_mode is not None:
+                    modes=[tracked_mode[1]]*len(spectrum)
+            idx=self._index_of_tracked_eigenvalue(spectrum,evecs,crit,tracked_vec)
+            if idx is None:
+                self.log("The eigensolve at this bifurcation did not return the tracked eigenvalue "
+                         "itself; it is listed first, ahead of the {:d} that were found. Raise the "
+                         "eigenvalue count or move the shift closer to it.".format(len(spectrum)))
+                spectrum.insert(0,crit)
+                if modes is not None:
+                    modes.insert(0,crit_modes[0] if crit_modes else 0.0)
+                idx=0
+            else:
+                spectrum[idx]=crit
+                if numpy.imag(crit)!=0:
+                    # A Hopf (or azimuthal) tracker holds the whole PAIR on the axis, so the partner
+                    # at conj(crit) is exactly there too and is snapped as well. Its solved copy's
+                    # real part is rounding-error-sized with an ARBITRARY SIGN, and a positive one had
+                    # the located bifurcation counting itself unstable - measured on an ODE Hopf,
+                    # where the partner came back at +4e-17. Only the tracked one is marked, though:
+                    # it is the value the point reports, and the pair is one mode.
+                    #
+                    # In the branch above instead of beside it: an inserted value shifts every index
+                    # past it, and evecs would no longer line up with spectrum.
+                    conj=self._index_of_tracked_eigenvalue(
+                        spectrum,evecs,numpy.conj(crit),
+                        None if tracked_vec is None else numpy.conj(tracked_vec),exclude=idx)
+                    if conj is not None:
+                        spectrum[conj]=complex(numpy.conj(crit))
+            return self._phys_eig(crit),self._phys_eig(spectrum),modes,idx
+        except Exception as e:
+            self.log("Could not solve the eigenproblem at the tracked point ("+str(e).split("\n")[0]+
+                     "); recording the critical eigenvalue only")
+            return self._phys_eig(crit),None,crit_modes,None
+        finally:
+            (prob._last_eigenvalues,prob._last_eigenvectors,
+             prob._last_eigenvalues_m,prob._last_eigenvalues_k)=keep
+
     def _add_locus_state(self):
         """Record the current point of a bifurcation locus, spectrum included.
 
-        The critical eigenvalue is NOT re-solved: every point of a locus IS the bifurcation, and that
-        is what the synthetic 0 + i*omega the tracker reports says. Re-solving would turn the exact
-        zero into a small nonzero value and the point would stop reading as a bifurcation.
-
-        The REST of the spectrum is solved for, though, since that is the only way to see a codim-2
-        point coming (a second eigenvalue reaching zero, a pair crossing) - the base state's
-        eigenproblem is available while tracking, see Problem.solve_eigenproblem. It needs a nonzero
-        shift; see self.locus_eigen_shift, which is also how the eigensolve is switched off.
-
-        Non-fatal on purpose: a shift-invert factorisation that fails should cost this point its
-        spectrum, not abort a two-parameter sweep that may have been running for hours.
+        Everything about which eigenvalues are recorded here, and why the critical one is not
+        re-solved, is in :py:meth:`_tracked_spectrum`.
         """
-        # omega comes out of the tracker in the same nondimensional units as any eigenvalue, so it
-        # needs the same conversion as everything else that reaches a point.
-        crit=self._phys_eig(0+1j*self.problem._get_bifurcation_omega()) #type:ignore
-        spectrum=None
-        if self.locus_eigen_shift:
-            try:
-                evs,_=self.problem.solve_eigenproblem(self.neigen,self.locus_eigen_shift,quiet=True)
-                spectrum=self._phys_eig(list(evs))
-            except Exception as e:
-                self.log("Could not solve the eigenproblem on the locus ("+str(e).split("\n")[0]+"); recording the critical eigenvalue only")
-        self._add_current_state(eig_value=crit,eig_values=spectrum)
+        crit,spectrum,modes,tracked=self._tracked_spectrum()
+        self._add_current_state(eig_value=crit,eig_values=spectrum,eig_modes=modes,
+                                tracked_eigenindex=tracked)
 
     def _record_mode_observables(self,point):
         """Expose each mode's leading eigenvalue as an observable, so it can go on a plot axis.
@@ -1349,7 +1487,8 @@ class BifurcationController:
         return None
 
     def _add_current_state(self,eig_value=None,eig_values=None,det_sign=None,dparam_ds=None,
-                           measured:bool=True,eig_modes=None,observables=None):
+                           measured:bool=True,eig_modes=None,observables=None,
+                           tracked_eigenindex:int | None=None):
         """Record the problem's current state as a new point of the current branch.
 
         ``eig_value`` overrides the eigenvalue that would be read from the problem, which is what
@@ -1357,7 +1496,8 @@ class BifurcationController:
         would turn an exact zero into a small nonzero value and the point would stop being a
         bifurcation. ``eig_values`` likewise overrides the recorded spectrum; when only ``eig_value``
         is given the spectrum is just that one value, since whatever the problem still holds belongs
-        to a different solve.
+        to a different solve. ``tracked_eigenindex`` says which entry of that spectrum a bifurcation
+        tracker was holding on the axis, see :py:meth:`_tracked_spectrum`.
         """
         branch=self.current_branch if self.current_branch is not None else self._new_branch()
         if eig_value is None and measured and det_sign is None and dparam_ds is None:
@@ -1386,7 +1526,8 @@ class BifurcationController:
         p=BifurcationGUISolutionPoint(self.get_bifurcation_parameter().value,obs,eig_value,state_file,self._state_step,
                                       param_values=self.current_parameter_values(),eig_values=eig_values,
                                       det_sign=det_sign,dparam_ds=dparam_ds,eig_modes=eig_modes,
-                                      eig_settings=self.current_eigen_settings() if eig_values else None)
+                                      eig_settings=self.current_eigen_settings() if eig_values else None,
+                                      tracked_eigenindex=tracked_eigenindex)
         self._record_mode_observables(p)
         # On a locus EVERY point has a zero real part, so classifying them all would run a normal-form
         # calculation per step for an answer already known: the tracked type.
@@ -1394,7 +1535,7 @@ class BifurcationController:
         # calculation (a stationary construction, and one that solves an eigenproblem the orbit
         # handler refuses) cannot describe.
         if p.eig_value_Re==0 and self.classify_bifurcations and branch.kind not in (BRANCH_LOCUS,BRANCH_ORBIT):
-            p.bifurcation_info=self._classify_current_point()
+            p.bifurcation_info=self._classify_current_point(p)
         if p.stability_source==STABILITY_EIGEN and p.eig_values:
             p.unstable_count=p.measured_unstable_count()
         if branch.kind==BRANCH_ORBIT:
@@ -2430,6 +2571,16 @@ class BifurcationController:
         """
         if point is None or not point.statefile:
             return False
+        if point.eig_value_Re==0:
+            # A located bifurcation's leading eigenvalue is the tracker's exact zero, and that exact
+            # zero is what makes the point a bifurcation everywhere in the diagram. Re-solving it from
+            # the dump - with no tracker installed, at a state whose Jacobian is singular - would
+            # replace it by a rounding-error-sized number and silently demote the point to an ordinary
+            # one, losing its classification and its departure arrows with it. Its spectrum is
+            # recorded when the point is made, see _tracked_spectrum.
+            self.log("Not recomputing the spectrum at the bifurcation at "+self._get_paramname_str()+
+                     " = {:.6g}: that would overwrite the tracked exact zero".format(point.param_value))
+            return False
         restore=self.current_point
         try:
             self.load_pt(point)
@@ -2504,7 +2655,7 @@ class BifurcationController:
     #: own magnitude. Smaller is more faithful to the normal form but closer to the singular point.
     branch_switch_offset=0.02
 
-    def _classify_current_point(self)->dict | None:
+    def _classify_current_point(self,point=None)->dict | None:
         """Normal form of the bifurcation the problem is sitting at, or None if it cannot be had.
 
         Non-fatal on purpose. This is computed while a bifurcation is being recorded, and a normal-form
@@ -2512,6 +2663,26 @@ class BifurcationController:
         worse outcome than not knowing which kind it is.
         """
         from ...generic.bifurcation_tools import NormalFormCalculator
+        # ``point`` explicitly, not self.current_point: this runs from inside _add_current_state, where
+        # the point being classified has not been installed as the current one yet, and the previous
+        # point's modes say nothing about this bifurcation.
+        try:
+            mode=self.problem._critical_normal_mode(0)
+        except Exception:
+            # A problem that cannot answer is not a reason to refuse, and a controller built without a
+            # real one at all (the stub-based tests) has no modes by construction.
+            mode=None
+        if mode is None:
+            mode=self._point_normal_mode(point)
+        if mode is not None:
+            # Said plainly rather than let the refusal below come back as "Could not compute the
+            # normal form": there is nothing wrong here to fix, and the point is a perfectly good
+            # bifurcation - it just has no normal form in these degrees of freedom.
+            self.log("This is a bifurcation of the {:s} = {:g}, whose branch is not representable in "
+                     "this problem's degrees of freedom, so no normal form is computed for it. The "
+                     "bifurcation itself is located and can be continued in a second parameter."
+                     .format("azimuthal mode m" if mode[0]=="m" else "Cartesian mode k",mode[1]))
+            return None
         try:
             if self.problem.get_bifurcation_tracking_mode()=="":
                 # get_normal_form reads the critical eigenpair from the last eigensolve. While tracking
@@ -2572,6 +2743,27 @@ class BifurcationController:
                 return eps
         return self.branch_switch_offset*max(abs(float(self.get_bifurcation_parameter().value)),1.0)
 
+    def _point_normal_mode(self,point)->"tuple[str,float] | None":
+        """``("m", value)`` / ``("k", value)`` of the mode a point's bifurcation belongs to, or None.
+
+        Read off the POINT, not off the problem: by the time a branch switch is asked for, the tracker
+        that knew the mode has been deactivated and the last eigensolve may well have been a base-mode
+        one, so the problem no longer remembers. The point does - see _tracked_spectrum.
+        """
+        # The point's own record first, so that this needs nothing of the problem for a point that
+        # carries no modes - which is every point of a problem that has none.
+        if point is None or not point.eig_modes:
+            return None
+        kind=self.normal_mode_kind()
+        if not kind:
+            return None
+        i=point.tracked_eigenindex if point.tracked_eigenindex is not None else 0
+        if not 0<=i<len(point.eig_modes):
+            return None
+        mode=float(point.eig_modes[i])
+        nontrivial=mode!=0 if kind=="m" else abs(mode)>1e-7
+        return (kind,mode) if nontrivial else None
+
     def branch_switch(self,offset:float | None=None,direction:int | None=None):
         """Step onto the other branch through the current bifurcation and record it as a new branch.
 
@@ -2590,12 +2782,17 @@ class BifurcationController:
         cp=self._get_current_point()
         if cp.eig_value_Re!=0:
             raise RuntimeError("Can only switch branches at bifurcations")
+        # Before the normal form is computed, not after: at a normal-mode bifurcation the calculation
+        # would go through and hand back a plausible fold or pitchfork built from the wrong Hessian.
+        found=self._point_normal_mode(cp)
+        if found is not None:
+            self.problem._refuse_at_normal_mode_bifurcation("Branch switching",mode=found)
         if cp.bifurcation_info is None:
             # Computed here rather than sending the user away to set a flag and redo the run: the problem
             # is sitting at the bifurcation, which is all the normal form needs. This is also what makes
             # switching work at a point loaded from a diagram recorded without classification.
             self.log("This bifurcation was not classified; computing its normal form now")
-            cp.bifurcation_info=self._classify_current_point()
+            cp.bifurcation_info=self._classify_current_point(cp)
         if cp.bifurcation_info is None:
             raise RuntimeError("Cannot switch branches: the normal form of this bifurcation could not be "
                                "computed, so there is no prediction for where the other branch goes. The "
@@ -2621,7 +2818,7 @@ class BifurcationController:
             # so one eigensolve completes it - much less than the normal form costs to compute again.
             if not self._ensure_normal_form(cp,allow_eigensolve=True):
                 self.log("The saved classification could not be completed; recomputing the normal form")
-                cp.bifurcation_info=self._classify_current_point()
+                cp.bifurcation_info=self._classify_current_point(cp)
             if cp.bifurcation_info is None or cp.bifurcation_info.get("param_predictor") is None:
                 raise RuntimeError("Cannot switch branches: this bifurcation's normal form has no "
                                    "prediction for where the other branch goes. The reason is in the "
@@ -3591,6 +3788,15 @@ class BifurcationController:
         if self.problem.is_distributed():
             return ("Switching onto an orbit from a Hopf does not work on a distributed problem "
                     "(--distribute); the orbit itself and its Floquet multipliers do.")
+        mode=self._point_normal_mode(self.current_point)
+        if mode is not None:
+            # What a Hopf of an m != 0 mode sheds is a rotating or travelling wave, not a standing
+            # oscillation of these degrees of freedom. Answered here as well as at Problem level so
+            # that the menu can grey the command out instead of offering a call that will refuse.
+            return ("This is a Hopf of the {:s} = {:g}; the orbit it sheds is a wave running in the "
+                    "{:s} direction, which this problem's degrees of freedom cannot represent."
+                    .format("azimuthal mode m" if mode[0]=="m" else "Cartesian mode k",mode[1],
+                            "azimuthal" if mode[0]=="m" else "extra Cartesian"))
         return None
 
     def _orbit_NT(self)->int:
@@ -3653,7 +3859,7 @@ class BifurcationController:
             raise RuntimeError("Orbits are switched onto at a bifurcation; this is an ordinary point")
         if cp.bifurcation_info is None:
             self.log("This bifurcation was not classified; computing its normal form now")
-            cp.bifurcation_info=self._classify_current_point()
+            cp.bifurcation_info=self._classify_current_point(cp)
         btype=cp.bifurcation_info.get("type") if cp.bifurcation_info is not None else None
         if btype!="hopf":
             raise RuntimeError("Only a Hopf bifurcation sheds a periodic orbit; this one is "+
@@ -4123,6 +4329,18 @@ class BifurcationController:
         """
         vals=[complex(v) for v in values]
         mods=list(modes) if modes is not None else None
+        # A located bifurcation's tracked eigenvalue is the tracker's EXACT zero, and no eigensolve
+        # taken here can produce it again: the tracker is long gone and this state is precisely where
+        # the Jacobian is singular. It is carried across whatever is stored, or a stripe scan at a
+        # bifurcation would replace it by a rounding-error-sized number and quietly demote the point
+        # to an ordinary one, taking its classification and its departure arrows with it.
+        tracked=None
+        tracked_mode=0.0
+        if point.eig_value_Re==0 and point.tracked_eigenindex is not None \
+                and point.tracked_eigenindex<len(point.eig_values):
+            tracked=point.eig_values[point.tracked_eigenindex]
+            if point.eig_modes is not None and point.tracked_eigenindex<len(point.eig_modes):
+                tracked_mode=point.eig_modes[point.tracked_eigenindex]
         if merge and point.eig_values:
             old_modes=point.eig_modes if point.eig_modes is not None else [0.0]*len(point.eig_values)
             new_modes=mods if mods is not None else [0.0]*len(vals)
@@ -4137,12 +4355,29 @@ class BifurcationController:
                 keptv.append(v)
                 keptm.append(m)
             vals,mods=keptv,(keptm if (mods is not None or point.eig_modes is not None) else None)
+        if tracked is not None:
+            # Drop whatever this solve found in its place - one entry per mode, and the exact one is
+            # the one to keep - and put the tracked value back. Uniform over merge: with merging the
+            # dedup above has already kept the exact copy, so this only reinstates it after a replace.
+            scale=max(1.0,abs(tracked))
+            keptv=[v for v in vals if abs(v-tracked)>1e-8*scale]
+            keptm=([m for v,m in zip(vals,mods) if abs(v-tracked)>1e-8*scale]
+                   if mods is not None else None)
+            vals=[tracked]+keptv
+            mods=None if keptm is None else [tracked_mode]+keptm
         order=sorted(range(len(vals)),key=lambda i: -numpy.real(vals[i]))
         point.eig_values=[vals[i] for i in order]
         point.eig_modes=[mods[i] for i in order] if mods is not None else None
         if point.eig_values:
             point.eig_value_Re=numpy.real(point.eig_values[0])
             point.eig_value_Im=numpy.imag(point.eig_values[0])
+        # None on an ordinary point: a spectrum solved without a tracker installed has no tracked
+        # entry, and a stale index would mark an unrelated eigenvalue after the re-sort.
+        point.tracked_eigenindex=(None if tracked is None else
+                                  next((i for i,v in enumerate(point.eig_values) if v==tracked),None))
+        if tracked is not None and point.tracked_eigenindex is not None:
+            point.eig_value_Re=numpy.real(tracked)
+            point.eig_value_Im=numpy.imag(tracked)
         point.stability_source=STABILITY_EIGEN
         point.unstable_count=point.measured_unstable_count()
         point.eig_settings=self.current_eigen_settings()
@@ -4399,7 +4634,18 @@ class BifurcationController:
         # the selected eigenvalue) call this directly and had no cleanup at all.
         try:
             self.problem.solve(max_newton_iterations=20)
-            self._add_current_state()
+            # The whole spectrum, not just the tracked eigenvalue the solve leaves behind: on a branch
+            # that is already unstable, which modes are unstable HERE is exactly what says whether the
+            # right bifurcation was found, and a second eigenvalue sitting on the axis alongside the
+            # tracked one is a codim-2 point the diagram would otherwise never show. See
+            # _tracked_spectrum for the shift it needs and how the tracked value is kept unique.
+            crit,spectrum,modes,tracked=self._tracked_spectrum()
+            if spectrum is not None:
+                self.log("Spectrum at the bifurcation: {:d} eigenvalue{:s}, {:d} unstable; the tracked "
+                         "one is #{:d}".format(len(spectrum),"" if len(spectrum)==1 else "s",
+                         sum(1 for v in spectrum if numpy.real(v)>0),tracked if tracked is not None else 0))
+            self._add_current_state(eig_value=crit,eig_values=spectrum,eig_modes=modes,
+                                    tracked_eigenindex=tracked)
             self._update_tangents()
         finally:
             self.problem.deactivate_bifurcation_tracking()
@@ -4424,11 +4670,24 @@ class BifurcationController:
         that is an ordinary step, and around a fold it is the null-vector restart.
         """
         cp=self._get_current_point()
+        mode=self._point_normal_mode(cp)
+        if mode is not None:
+            # Every way off a bifurcation offered here - a branch switch, an orbit, a transient
+            # departure along the eigenvector - moves along the critical eigenfunction, and this one
+            # is not a direction in these degrees of freedom. Said here rather than left to come out
+            # as "the type could not be determined", which is not the reason.
+            self.log("This is a bifurcation of the {:s} = {:g}. What leaves it breaks the symmetry "
+                     "these degrees of freedom impose, so there is no way off it in this problem - "
+                     "follow it in a second parameter instead (Bifurcation -> Continue the "
+                     "bifurcation), or resolve the {:s} direction explicitly."
+                     .format("azimuthal mode m" if mode[0]=="m" else "Cartesian mode k",mode[1],
+                             "azimuthal" if mode[0]=="m" else "extra Cartesian"))
+            return False
         if cp.bifurcation_info is None:
             # Same reasoning as in branch_switch: the problem is sitting at the bifurcation, which is
             # all the normal form needs, so it is cheaper to classify here than to send the user away.
             self.log("This bifurcation was not classified; computing its normal form now")
-            cp.bifurcation_info=self._classify_current_point()
+            cp.bifurcation_info=self._classify_current_point(cp)
         btype=cp.bifurcation_info.get("type") if cp.bifurcation_info is not None else None
         if btype in ("transcritical","pitchfork"):
             return bool(self.branch_switch())
