@@ -1,9 +1,17 @@
 # What is still open across the development notes
 
-Status: **audit, 2026-08-24, on `develop` at `3abb7c6`.** This merges the "open", "not done", "still
-refused" and "what is left" sections of all 47 documents in `dev_docs/` into one register, and says for
-each whether the claim is **still true**. It is a map, not a plan: every item keeps a pointer to the
-document that owns the reasoning, and none of that reasoning is repeated here.
+Status: **audit, started 2026-08-24 at `3abb7c6`, current as of 2026-08-25 at `9259455`.** This merges
+the "open", "not done", "still refused" and "what is left" sections of all 47 documents in `dev_docs/`
+into one register, and says for each whether the claim is **still true**. It is a map, not a plan: every
+item keeps a pointer to the document that owns the reasoning, and none of that reasoning is repeated
+here.
+
+**Five commits have landed since the first pass.** Four of them closed or corrected an entry here, and
+along the way **two defects turned up that were on no list at all** — the dof corruption of §1a and the
+wedge/pyramid refinement abort. Both were found by *acting* on a register entry rather than by reading
+one, which is the argument for re-running this exercise instead of trusting the register between passes.
+Everything is folded into the entries below rather than appended, so each reads as the current state and
+not as a diary; §1b is the summary.
 
 **How each claim was checked.** Every entry below was grepped against the tree — the guard, the class,
 the test file, the tutorial page — rather than taken from the document that asserts it. That is the
@@ -54,6 +62,24 @@ Details in `mesh_construction.md` §5.1.
 
 ---
 
+## 1b. What has moved since the first pass
+
+| what | commit | where it now stands |
+|---|---|---|
+| A remesh from inside a solve corrupts the flat-index dof snapshot | `dc97952` | **fixed** — §1a, and `mesh_construction.md` §5.1. Was not on any open list as a defect; the doc had it as a hazard "read off the source, not as a reproduction". |
+| `RemeshingOptions(on_inverted_element=…)` | `dc97952` | **built**, off by default, and the design's escalation criterion had to be replaced after measurement — `mesh_construction.md` §5.2. Also fixed the inverted-element detector **hanging** under `mpirun`, which had never been run there (§5.4). |
+| Refining a wedge or pyramid aborted the run | `bfa6238` | **fixed** — `macro_elements.md` §10a. Not on this list either: the four failing tests read as a curved-boundary problem and were nothing of the kind. It leaves a NEW open item, §3.2. |
+| The spurious `-1` Floquet multiplier | `199d5de` | **warned about**, which is all that can be done without changing the collocation — `floquet_multipliers.md` §6. |
+| The moving-mesh droplet segfault (`mpi_augmented_systems.md` §6b) | `c33f4b0` | **the evidence was misread**; the experiment turned up an unrelated real defect (arclength continuation across a remesh was broken under `--distribute`), now fixed. See §3.1. |
+| "Documentation is the largest single deficit" | `9259455` | **withdrawn** — §2(e). Two of the six documents cited never made the claim and two more were stale. |
+
+Rows 1 and 3 are the ones worth naming: **neither was on this register, or on any other list**, and both
+surfaced only because someone went to work on a neighbouring entry. A register of what the documents
+*say* is open is a starting point for looking, not a substitute for it — and §2(e) below is the same
+lesson from the other end, an entry that was on the list and should not have been.
+
+---
+
 ## 1. Corrections owed: claims that are no longer true
 
 These are recorded first because a stale "not done" is worse than no note at all — it sends someone to
@@ -81,10 +107,15 @@ Six of them are the entire bifurcation/continuation strand.
 
 ---
 
-## 2. The five things named by more than one document
+## 2. The cross-cutting themes
 
 Read this section if you want the shortest list of what is actually holding things up. Everything in §3
 that recurs, recurs for one of these reasons.
+
+This used to be headed "the five things named by more than one document", and **(e) is why it is not
+any more**: it was the one entry here that failed that test, and it failed it because the count was
+never checked. It is kept, as a correction rather than a theme, because the way it went wrong is more
+useful than the claim ever was.
 
 **(a) History dofs under `--distribute` — mostly closed, and the residue is one call.**
 `Problem::get_dofs(t,…)`/`set_dofs(t,…)` were the single blocker behind four separate refusals
@@ -182,6 +213,12 @@ absence, or the missing file was checked in this tree today.
   still comes from the mesh-level pass. — same.
 * **Tet per-element hanging inside `adapt_mesh`**, hence a `refine_selected`/`custom_adapt` hanging gap.
   — same.
+* **A son→father local-coordinate map for wedges and pyramids.** New, and the residue of `bfa6238`:
+  neither shape implements `get_nodal_s_in_father()`, so their interface topological ids stay incomplete
+  and interface refinement coupling across such a mesh falls back to matching by position. The abort
+  that used to hide this is gone; the map itself is a separate job, the pyramid especially, whose
+  refinement yields six pyramids and four tetrahedra so a son can have a father of a different shape.
+  — `macro_elements.md` §10a, §11.
 * **Curvilinear macro elements on a moving mesh.** `macro_elements.md` §7.1 was *corrected* in the other
   direction: the route the plan proposed **does** exist, and two wires are missing —
   `Undeformed_macro_elem_pt` is never set, and `RefineableSolidElement::further_build`'s flag never
@@ -274,7 +311,11 @@ absence, or the missing file was checked in this tree today.
 * **A DAE's algebraic directions land on `(-1)**(number of intervals)`, not 0**, because Gauss–Legendre
   collocation is not stiffly accurate. With an **odd** number of intervals that puts a spurious
   multiplier exactly where a period-doubling bifurcation would be. Radau IIA would put it at 0. Verified
-  to 1e-14. Not a defect to fix so much as one to know. — `floquet_multipliers.md` §6.
+  to 1e-14. **The value still cannot be fixed without changing the collocation, but it is no longer
+  silent**: `get_floquet_multipliers()` warns on the signature and names the discriminating experiment
+  (re-solve with an even interval count — the artefact moves to `+1`, a period doubling stays at `-1`).
+  Keyed on the signature rather than on proving the problem is a DAE, since assembling a mass matrix
+  under the orbit handler is refused by name. — `floquet_multipliers.md` §6.
 * **Asking for every Floquet multiplier costs `nbase × nT × nbase` complex** — 657 MB at `nbase=1282`,
   unguarded. The clean fix is a lazy reconstruction, but `_last_eigenvectors` is a plain attribute
   several places read directly (CONFIRMED: `bifurcation_tools.py:823`, `periodic_driving_response.py:213,275`),
@@ -417,8 +458,8 @@ Listed so that nobody reopens them from this register. Each has the reason in it
 | `internal_facet_fields.md` | §5.4, §7, §7.2 |
 | `jacobian_block_flags.md` | §6 |
 | `linear_solvers.md` | §6.6 |
-| `macro_elements.md` | §7.1, §8.3, §11 |
-| `mesh_construction.md` | §5 (all of it) |
+| `macro_elements.md` | §7.1, §8.3, §10a (the residue), §11 |
+| `mesh_construction.md` | §5.3 only — §5 is built as of `dc97952` |
 | `mesh_data_cache.md` | §10 |
 | `mesh_point_locator.md` | §4.4, §5, §12 |
 | `mpi_augmented_systems.md` | §4, §6b, §7–§11 |
