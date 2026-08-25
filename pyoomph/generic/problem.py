@@ -7142,7 +7142,10 @@ class Problem(_pyoomph.Problem):
         Args:
             parameter: The parameter to change in order to find the bifurcation. If None, we track the current eigenbranch, i.e. Re(lambda) will be found and is not necessarily 0.
             bifurcation_type (Optional[Literal["hopf", "fold", "pitchfork", "azimuthal"]]): The type of bifurcation to track. Defaults to None, i.e. auto-detect.
-            blocksolve (bool): Flag indicating whether to use block solve. Defaults to False. Should be kept False.
+            blocksolve (bool): **Refused.** Passing True raises: upstream's block linear solvers cast the
+                installed handler to oomph-lib's own FoldHandler/HopfHandler with a static_cast, which
+                pyoomph's handlers are not, so the fold and Hopf paths segfault and every other type
+                ignores the flag. See the error message and dev_docs/mpi_augmented_systems.md section 4.
             eigenvector (Optional[Union[NPFloatArray, NPComplexArray, int]]): The eigenvector to use for tracking. Defaults to None, which means the eigenvector corresponding to the eigenvalue with largest real part. Can be either an index or a custom vector.
             omega (Optional[float]): The omega value for Hopf bifurcation tracking. Defaults to None, then it will be Im(lambda).
             azimuthal_mode (Optional[int]): The azimuthal mode for azimuthal bifurcation tracking. Defaults to None.
@@ -7154,6 +7157,35 @@ class Problem(_pyoomph.Problem):
                 problem is. This is recommended for very large systems. It does not move the bifurcation itself,
                 only the (always arbitrary) amplitude of the reported eigenfunction.
         """
+
+        if blocksolve:
+            # Refused OUTRIGHT, and not only under MPI, because it does not work anywhere.
+            #
+            # blocksolve installs one of oomph-lib's own block linear solvers,
+            # AugmentedBlockFoldLinearSolver or BlockHopfLinearSolver. Both begin with
+            #
+            #     FoldHandler* handler_pt = static_cast<FoldHandler*>(problem_pt->assembly_handler_pt());
+            #
+            # (assembly_handler.cc) and then call a FoldHandler method on the result. pyoomph installs
+            # MyFoldHandler/MyHopfHandler, which derive from oomph::AssemblyHandler and NOT from those
+            # classes, so the static_cast reinterprets an unrelated object and the first member access
+            # is undefined behaviour. Measured: a plain serial Bratu fold track dies with
+            # "Caught signal number 11 SEGV" from inside PETSc's error handler, with the default linear
+            # solver and with petsc_mumps alike. It is not an MPI problem and never was - the guard
+            # that used to sit here only covered --distribute, so the serial and replicated crashes
+            # went straight through it.
+            #
+            # For every OTHER bifurcation type the flag was silently ignored (only fold and Hopf ever
+            # installed a block solver; the pitchfork one is commented out in problem.cpp), which is
+            # its own small lie and is why this refuses rather than warns.
+            raise RuntimeError(
+                "blocksolve=True is not supported and cannot be: oomph-lib's block linear solvers "
+                "static_cast the assembly handler to their own FoldHandler/HopfHandler, and pyoomph's "
+                "handlers do not derive from those, so fold and Hopf tracking segfault while every "
+                "other bifurcation type ignores the flag entirely. This is true serially as well as "
+                "under mpirun and --distribute. Drop the argument (the default, blocksolve=False, is "
+                "the full augmented solve and is what every tested path uses). "
+                "See dev_docs/mpi_augmented_systems.md section 4.")
 
         # Distributed (--distribute) support is decided per bifurcation type AFTER the type has been
         # resolved (see the check further down); no blanket refusal here anymore.
@@ -7281,8 +7313,8 @@ class Problem(_pyoomph.Problem):
             _distributed_supported={"fold","hopf","pitchfork","azimuthal","cartesian_normal_mode"}
             if bifurcation_type not in _distributed_supported:
                 raise RuntimeError("Bifurcation tracking of type '"+str(bifurcation_type)+"' is not supported on a distributed (--distribute) problem yet. Run it without --distribute.")
-            if blocksolve:
-                raise RuntimeError("blocksolve=True is not supported for bifurcation tracking on a distributed (--distribute) problem")
+            # blocksolve used to be refused here, as though it were a distributed-only restriction. It
+            # is refused unconditionally at the top of this method now: it segfaults serially too.
         self._bifurcation_tracking_parameter_name=parameter
         if bifurcation_type=="fold":
 #            must_reapply_bcs=self._equation_system._before_eigen_solve(self.get_eigen_solver(), 0)

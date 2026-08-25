@@ -99,9 +99,28 @@ reach the bifurcation parameter, where `Parameter_pt` says it directly. The azim
 
 ## 4. Still refused when distributed
 
-- **`blocksolve=True`**, and the handlers' block modes (`solve_block_system`, `solve_complex_system`,
-  `Block_augmented_J`, …). They rebuild replicated in-place dof vectors, and upstream's own augmented
-  block path throws when distributed too.
+- ~~**`blocksolve=True`**~~ — **it does not work anywhere, and is now refused outright rather than only
+  when distributed.** Listing it here was itself misleading: it is not an MPI restriction. The flag
+  installs one of oomph-lib's own block linear solvers, and both of those open with
+
+      FoldHandler* handler_pt = static_cast<FoldHandler*>(problem_pt->assembly_handler_pt());
+
+  (`assembly_handler.cc`) and then call a `FoldHandler` method on the result. pyoomph installs
+  `MyFoldHandler`/`MyHopfHandler`, which derive from `oomph::AssemblyHandler` and **not** from those
+  classes, so the `static_cast` reinterprets an unrelated object and the first member access is
+  undefined behaviour. Measured: a plain **serial** Bratu fold track dies with "Caught signal number 11
+  SEGV", with the default linear solver and with `petsc_mumps` alike. The guard that used to sit here
+  covered `--distribute` only, so every serial and replicated crash went straight through it.
+
+  For every other bifurcation type the flag was **silently ignored** — only fold and Hopf ever installed
+  a block solver, the pitchfork one being commented out — which is why it is refused rather than warned
+  about. `Problem.activate_bifurcation_tracking` raises before anything is installed, and
+  `Problem::activate_my_fold_tracking`/`activate_my_hopf_tracking` throw as a backstop for any caller
+  that bypasses Python. Nothing in `pyoomph/`, `tests/`, `docs/` or `citools/` passed it.
+  `tests/test_blocksolve_refused.py`.
+- The handlers' block MODES (`solve_block_system`, `solve_complex_system`, `Block_augmented_J`, …)
+  remain refused when distributed on their own terms: they rebuild replicated in-place dof vectors.
+  Nothing reaches them now that the only caller is gone, but the guards are kept.
 - **Periodic orbit tracking.** `PeriodicOrbitHandler` temporarily overwrites arbitrary global dofs during
   assembly; a separate project. Its Poincaré-plane constraint also has a pre-existing inconsistency worth
   fixing first: `-d_plane` is not divided by `nelement` while the row is assembled additively per

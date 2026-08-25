@@ -573,6 +573,19 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Fixed
 
+- **`activate_bifurcation_tracking(blocksolve=True)` segfaulted instead of being refused.** It installs
+  one of oomph-lib's own block linear solvers, and both of those open with a
+  `static_cast<FoldHandler*>(problem_pt->assembly_handler_pt())` and then call a `FoldHandler` method on
+  the result. pyoomph installs `MyFoldHandler`/`MyHopfHandler`, which derive from
+  `oomph::AssemblyHandler` and not from those classes, so the cast reinterprets an unrelated object and
+  the first member access is undefined behaviour -- a plain serial Bratu fold track died with "Caught
+  signal number 11 SEGV", with any linear solver. **This was never an MPI restriction**, although the
+  only guard covered `--distribute`, so serial and replicated crashes went straight through it. For
+  every other bifurcation type the flag was silently ignored, only fold and Hopf ever installing a block
+  solver, which is why it is now refused rather than warned about. Python raises before anything is
+  installed and the C++ activators throw as a backstop; nothing in the repository passed it.
+  `tests/test_blocksolve_refused.py`, `dev_docs/mpi_augmented_systems.md` section 4.
+
 - **Arclength continuation across a remesh did not work under `--distribute` at all.** The tangent is
   carried through the history slots, and `get_history_dofs()` returns a GLOBALLY indexed vector while
   `update_dof_vectors_for_continuation()` demanded `nrow_local()`, so

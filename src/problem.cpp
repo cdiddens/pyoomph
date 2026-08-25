@@ -2477,16 +2477,29 @@ namespace pyoomph
 
 
     // Installs oomph-lib's MyFoldHandler (fold/limit-point bifurcation tracking assembly handler) with a
+	// Backstop for the Python refusal in Problem.activate_bifurcation_tracking(). oomph-lib's block
+	// linear solvers open with
+	//     FoldHandler* handler_pt = static_cast<FoldHandler*>(problem_pt->assembly_handler_pt());
+	// (assembly_handler.cc) and then call a FoldHandler method on it. pyoomph installs MyFoldHandler /
+	// MyHopfHandler, which derive from oomph::AssemblyHandler and not from those classes, so that cast
+	// reinterprets an unrelated object and the first member access is undefined behaviour -- measured
+	// as a plain SEGV on a serial Bratu fold track, with any linear solver. Throwing here rather than
+	// installing the solver turns a crash into a message for any caller that bypasses Python.
+	static void refuse_block_solve(const char *what)
+	{
+		throw_runtime_error(std::string(what) + " with block_solve=true is not supported: oomph-lib's "
+							"block linear solvers static_cast the assembly handler to their own "
+							"FoldHandler/HopfHandler, which pyoomph's handlers are not. Use the full "
+							"augmented solve (block_solve=false).");
+	}
+
     // given starting null-eigenvector guess; if block_solve, additionally switches to the augmented block
     // linear solver that exploits the bordered system's block structure instead of a full dense solve.
     void Problem::activate_my_fold_tracking(double *const &parameter_pt, const oomph::DoubleVector &eigenvector, const bool &block_solve)
 	{
 		reset_assembly_handler_to_default();
 		this->assembly_handler_pt() = new MyFoldHandler(this, parameter_pt, eigenvector);
-		if (block_solve)
-		{
-			this->linear_solver_pt() = new oomph::AugmentedBlockFoldLinearSolver(this->linear_solver_pt());
-		}
+		if (block_solve) refuse_block_solve("Fold tracking");
 	}
 
 	// Same as above, but lets MyFoldHandler determine the initial null-eigenvector itself
@@ -2494,10 +2507,7 @@ namespace pyoomph
 	{
 		reset_assembly_handler_to_default();
 		this->assembly_handler_pt() = new MyFoldHandler(this, parameter_pt);
-		if (block_solve)
-		{
-			this->linear_solver_pt() = new oomph::AugmentedBlockFoldLinearSolver(this->linear_solver_pt());
-		}
+		if (block_solve) refuse_block_solve("Fold tracking");
 	}
 
 	// Installs the Hopf-bifurcation tracking assembly handler (bordered system with complex null vector
@@ -2506,10 +2516,7 @@ namespace pyoomph
 	{
 		reset_assembly_handler_to_default();
 		this->assembly_handler_pt() = new MyHopfHandler(this, parameter_pt, omega, null_real, null_imag);
-		if (block_solve)
-		{
-			this->linear_solver_pt() = new oomph::BlockHopfLinearSolver(this->linear_solver_pt());
-		}
+		if (block_solve) refuse_block_solve("Hopf tracking");
 	}
 
 	// oomph-lib hook (raw parameter_pt) resolved to the parameter's name and forwarded to the
