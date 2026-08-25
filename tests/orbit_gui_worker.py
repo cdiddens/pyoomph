@@ -239,6 +239,115 @@ def run_reload(args):
         return res
 
 
+def run_rediscretize(args):
+    """Switch off the Hopf with bsplines, then convert the orbit to collocation.
+
+    The reason to want this: bsplines converge more readily on the step off a Hopf, but carry no
+    degree of freedom at the end of the period, so the orbit has no Floquet multipliers at all. The
+    conversion has to produce the SAME orbit - which is checkable here, since the closed form pins
+    the period, the amplitude and the one non-trivial multiplier.
+    """
+    problem, gui, c = build(args)
+    with problem:
+        res = {"phase": "rediscretize"}
+        c.orbit_mode = "bspline"
+        c.start(0.02)
+        c.locate_bifurcation()
+        assert c.branch_switch(), "the branch switch at the Hopf did not take"
+        res["kind"] = c.current_branch.kind
+
+        def facts(tag):
+            f = _orbit_facts(c, c.current_point)
+            f["mode"] = str((c.current_point.orbit_info or {}).get("mode"))
+            res[tag] = f
+            return f
+
+        facts("bspline")
+        npoints_before = len(c.current_branch)
+        res["mu"] = float(c.current_point.param_value)
+
+        c.orbit_mode = "collocation"
+        assert c.change_orbit_discretisation(), "the re-discretization reported failure"
+        facts("collocation")
+        # The same point, not another one: it is the same solution at the same parameter value.
+        res["points_unchanged"] = (len(c.current_branch) == npoints_before)
+        res["mu_unchanged"] = float(c.current_point.param_value)
+
+        # It continues as an orbit branch afterwards, in the new discretization.
+        c.step()
+        facts("stepped")
+
+        # ... and the converted point reloads with the cycle it was rewritten with.
+        c.save_all()
+        c.load_pt(c.current_branch[0])
+        res["reloaded_nT"] = int(c._orbit_handler().get_num_time_steps())
+        res["reloaded_mode"] = str(c._orbit.mode)
+        return res
+
+
+def run_go_back(args):
+    """Going back to an earlier point of an orbit branch, and stepping on from there.
+
+    oomph's FIRST arclength step after a reset is not one: it increments the parameter by the whole of
+    ds and only then builds the derivatives. A point that is LOADED has no tangent unless one is put
+    back - the state dump of an augmented system cannot carry it - so the step from it degenerated
+    into a plain parameter jump of the current ds. Measured before the fix, with ds grown from 0.02 to
+    0.63 over three steps: going back to the point the Hopf switch created and stepping took mu from
+    0.02 to 0.647, straight off the branch, where the tangent gives 0.064.
+
+    Points reached BY a step keep their tangent in the orbit's sidecar, and this checks that too: the
+    restored tangent has to be the one that was in force, and stepping with the same ds has to
+    reproduce the point the forward sweep found.
+    """
+    problem, gui, c = build(args)
+    with problem:
+        res = {"phase": "goback"}
+        c.start(0.02)
+        c.locate_bifurcation()
+        assert c.branch_switch(), "the branch switch at the Hopf did not take"
+        b = c.current_branch
+
+        def arclength():
+            return (numpy.asarray(problem.get_arclength_dof_derivative_vector(), dtype=float).copy(),
+                    float(problem.get_arc_length_parameter_derivative()),
+                    float(problem.get_arc_length_theta_sqr()), float(c._last_ds))
+
+        recorded = {}
+        for _ in range(3):
+            c.step()
+            recorded[len(b)-1] = arclength()
+        res["npoints"] = len(b)
+        res["ds_after_three_steps"] = float(c._last_ds)
+        res["mu"] = [float(p.param_value) for p in b]
+
+        # (a) the FIRST point of the branch - the one the switch made, which never had a tangent.
+        c.load_pt(b[0])
+        d, dp, th, _ds = arclength()
+        res["first"] = {"tangent_len": len(d), "ndof": int(problem.ndof()),
+                        "dparam_ds": dp, "mu_before": float(problem.mu.value)}
+        c.step()
+        res["first"]["mu_after"] = float(problem.mu.value)
+        res["first"]["ds_used"] = float(res["ds_after_three_steps"])
+
+        # (b) a point reached BY a step: its tangent must come back exactly, and stepping with the ds
+        # that was in force must land where the forward sweep landed.
+        k = 1
+        d0, dp0, th0, ds0 = recorded[k]
+        mu_forward = float(b[k+1].param_value)
+        c.load_pt(b[k])
+        d, dp, th, _ds = arclength()
+        res["restored"] = {
+            "tangent_len": len(d), "same_length": len(d) == len(d0),
+            "max_abs_diff": float(numpy.max(numpy.abs(d-d0))) if len(d) == len(d0) else None,
+            "dparam_ds": dp, "dparam_ds_stored": dp0,
+            "theta_sqr": th, "theta_sqr_stored": th0}
+        c._last_ds = ds0
+        c.step()
+        res["restored"]["mu_after"] = float(problem.mu.value)
+        res["restored"]["mu_forward"] = mu_forward
+        return res
+
+
 def run_bad_fingerprint(args):
     """A stored orbit that no longer matches the problem must be refused, not loaded."""
     problem, gui, c = build(args)
@@ -280,7 +389,8 @@ def run_no_hessian(args):
 
 
 PHASES = {"switch": run_switch, "reload": run_reload, "fingerprint": run_bad_fingerprint,
-          "nohessian": run_no_hessian, "nearhopf": run_near_hopf}
+          "nohessian": run_no_hessian, "nearhopf": run_near_hopf,
+          "rediscretize": run_rediscretize, "goback": run_go_back}
 
 
 def main():

@@ -40,6 +40,7 @@ from ...generic import Problem
 from ... import _pyoomph_core as _pyoomph
 from ...typings import *
 from ...expressions.units import unit_to_string
+from ...output.states import copy_state_file
 
 from .model import (eigen_settings, BifurcationGUISolutionPoint, BifurcationGUISolutionBranch, AxisSpec,
                     AXIS_OBSERVABLE, AXIS_PARAMETER, as_axis, observable_axis, parameter_axis,
@@ -50,6 +51,8 @@ from .model import (eigen_settings, BifurcationGUISolutionPoint, BifurcationGUIS
 
 from typing import Protocol
 from pathlib import Path
+import contextlib
+import functools
 import numpy
 import os
 import json
@@ -159,6 +162,26 @@ def _unit_and_multiplier(value)->"tuple[str,float]":
         return "",1.0
     unit,_factor,mult=unit_to_string(value)   #type:ignore[misc]
     return str(unit),float(mult)
+
+
+def _rolls_back(what:str):
+    """Decorator for a command that must leave everything as it found it when it fails.
+
+    Every one of these ends in a Newton solve of some kind, and a failed solve leaves the dofs -
+    and, under a tracker, the continuation parameter - at the last iterate. See
+    BifurcationController._rollback_on_failure for what is put back.
+
+    Applied to the single steps rather than to what loops over them: multistep and the deflated scan
+    record a point per iteration, and rolling those back to where the LOOP started would throw away
+    the steps that did work.
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(self,*args,**kwargs):
+            with self._rollback_on_failure(what):
+                return fn(self,*args,**kwargs)
+        return wrapper
+    return decorate
 
 
 class BifurcationController:
@@ -1103,6 +1126,104 @@ class BifurcationController:
         if self._augmented_system_active():
             self.problem.deactivate_bifurcation_tracking()
 
+    def _continuation_snapshot(self):
+        """The arclength state a step works from: the tangent, dparam/ds and theta^2.
+
+        Taken alongside the state dump rather than left to it, because the dump DROPS it whenever the
+        system is augmented (see Problem._define_state_file: an augmented tangent is meaningless on
+        the plain system, so it is not written) - and a locus or an orbit step is exactly that case.
+        Restoring only the dump there would reset the arclength parameters and lose the direction of
+        travel and the step size the user had built up.
+        """
+        try:
+            return (numpy.array(self.problem.get_arclength_dof_derivative_vector(),dtype=float),
+                    float(self.problem.get_arc_length_parameter_derivative()),
+                    float(self.problem.get_arc_length_theta_sqr()))
+        except Exception as e:
+            self.log("Could not read the continuation data:",repr(e))
+            return None
+
+    def _restore_continuation_snapshot(self,snap):
+        if snap is None:
+            return
+        tangent,dparam_ds,thetasqr=snap
+        if len(tangent)==0 or len(tangent)!=self.problem.ndof():
+            # Nothing to put back, or the dof count changed under it (an adapt inside the failed
+            # block). oomph rebuilds the tangent on the next step from the reset parameters.
+            self.problem.reset_arc_length_parameters()
+            return
+        self.problem._set_dof_direction_arclength(tangent)
+        self.problem._set_arc_length_parameter_derivative(dparam_ds)
+        self.problem._set_arc_length_theta_sqr(thetasqr)
+
+    @contextlib.contextmanager
+    def _rollback_on_failure(self,what:str):
+        """Put the problem, and the diagram's idea of where it is, back if the block does not finish.
+
+        A Newton solve that fails leaves the dofs at the last iterate - oomph-lib's steady solve
+        re-raises without restoring anything - and in a TRACKED solve the continuation parameter is
+        one of those dofs. A bifurcation search that diverges therefore walks the problem off the
+        branch and drags the parameter with it, and nothing said so: the diagram went on showing the
+        point that was still current while the problem sat somewhere else entirely, so the field
+        plots showed the diverged state and the next continuation step set off from it. A failed
+        arclength step, branch switch, transient departure or deflated solve leaves the same mess.
+
+        What comes back is everything the next command reads: the dofs and every global parameter
+        (an in-memory state, the same thing the diagram writes per point), the arclength tangent,
+        dparam/ds and theta^2, the step size ``ds``, and the current point/branch/axes - so a failed
+        command costs the attempt and nothing else. A branch the failed block had opened but never
+        put a point on goes with it; one that DID get points is left alone, since those points are
+        results, not debris.
+
+        Only on failure. A block that returns normally is left exactly as it left the problem, which
+        is the whole point of most of these commands.
+
+        Failing to take the backup is logged and otherwise ignored: without one this behaves exactly
+        as it did before, which is better than refusing to run the command at all.
+        """
+        backup=None
+        try:
+            backup=self.problem.backup_state()
+        except Exception as e:
+            self.log("Could not back the state up before "+what+":",repr(e))
+        if backup is None:
+            # Nothing to put back, so nothing is recorded either - and the block runs exactly as it
+            # did before this guard existed.
+            yield
+            return
+        conti=self._continuation_snapshot()
+        last_ds=self._last_ds
+        here=(self.current_point,self.current_branch,self._paramname,self._x_axis,self._y_axis,
+              dict(self._tangs),len(self.branches))
+        try:
+            yield
+        except BaseException:
+            try:
+                (self.current_point,self.current_branch,self._paramname,self._x_axis,
+                 self._y_axis,self._tangs,nbranches)=here
+                # Only the ones with nothing on them: a command that got as far as recording points
+                # found something, and throwing that away would cost more than the failure.
+                self.branches=[b for i,b in enumerate(self.branches) if i<nbranches or len(b)>0]
+                # Exactly the order load_pt uses, and for the same reason. A state file holds the
+                # BASE problem - the augmented unknowns of a tracker or an orbit handler live outside
+                # the meshes and are not in it - so the augmentation comes off before the load and
+                # _sync_tracking_to puts back whatever the branch the current point sits on needs.
+                # On a LOCUS that is the tracker itself, and it must survive: continuing a tracked
+                # bifurcation without it silently continues an ordinary branch instead. (Measured
+                # while writing this: loading the state on its own took ndof from 3 back to 1.)
+                self._deactivate_any_augmentation()
+                backup.seek(0)
+                self.problem.load_state(backup,ignore_outstep=True,quiet=True)
+                self._sync_tracking_to(self._branch_of(self.current_point))
+                # After the re-sync, not before: reinstating a locus tracker resets the arclength
+                # parameters, which would otherwise throw the tangent away again.
+                self._restore_continuation_snapshot(conti)
+                self._last_ds=last_ds
+                self.log("Put the problem back where it was before "+what+".")
+            except Exception as e:
+                self.log("Could not put the problem back after "+what+" failed:",repr(e))
+            raise
+
     def _branch_of(self,pt)->"BifurcationGUISolutionBranch | None":
         for b in self.branches:
             if pt in b:
@@ -1142,8 +1263,11 @@ class BifurcationController:
             if active:
                 self.problem.deactivate_bifurcation_tracking()
             if guess is None:
-                evs=self.problem.get_last_eigenvectors()
-                guess=evs[0] if evs is not None and len(evs)>0 else None
+                # NOT eigenvector 0: a plain eigensolve is sorted by descending real part, so on a
+                # branch that is already unstable that is the mode which went unstable earlier, and
+                # the tracker would restart the locus on it. _solved_critical_eigenvector picks the
+                # one the point is a bifurcation OF.
+                guess=self._solved_critical_eigenvector(self.current_point)
             self.problem.activate_bifurcation_tracking(branch.tracked_parameter,
                                                        _as_tracking_type(branch.bifurcation_type),
                                                        eigenvector=guess)
@@ -1166,6 +1290,7 @@ class BifurcationController:
             self._orbit=None
             self.problem.reset_arc_length_parameters()
 
+    @_rolls_back("starting the locus")
     def start_locus(self,tracked:str,continue_in:str,bifurcation_type:str | None=None):
         """From a bifurcation, follow it through parameter space.
 
@@ -1191,8 +1316,10 @@ class BifurcationController:
                                "on a distributed (--distribute) problem. Locating one does work there.")
 
         self._status("STARTING BIFURCATION LOCUS")
-        evs=self.problem.get_last_eigenvectors()
-        guess=evs[0] if evs is not None and len(evs)>0 else None
+        # The mode this point is a bifurcation of, not eigenvector 0 - see _located_eigenindex. Right
+        # after a locate the two are the same (the tracker's own pair is all there is), but at a point
+        # loaded from a diagram the whole stored spectrum is back and index 0 is the leading mode.
+        guess=self._solved_critical_eigenvector(cp)
         self.problem.activate_bifurcation_tracking(tracked,_as_tracking_type(bifurcation_type),eigenvector=guess)
         mode=self.problem.get_bifurcation_tracking_mode() or (bifurcation_type or "fold")
         self.problem.reset_arc_length_parameters()
@@ -1207,6 +1334,7 @@ class BifurcationController:
         self.log("Following the "+mode+" in "+tracked+", continuing in "+continue_in)
         self._changed()
 
+    @_rolls_back("leaving the locus")
     def leave_locus(self,continue_in:str | None=None,offset:float | None=None):
         """Drop off the locus onto an ordinary branch through the bifurcation.
 
@@ -1226,8 +1354,8 @@ class BifurcationController:
             raise ValueError("'"+str(target)+"' is not a global parameter of this problem")
 
         self._status("LEAVING THE LOCUS")
-        evs=self.problem.get_last_eigenvectors()
-        zeta=numpy.real(numpy.asarray(evs[0])) if evs is not None and len(evs)>0 else None
+        vec=self._solved_critical_eigenvector(self.current_point)
+        zeta=numpy.real(numpy.asarray(vec)) if vec is not None else None
         if zeta is not None:
             nrm=numpy.linalg.norm(zeta)
             zeta=zeta/nrm if nrm>0 else None
@@ -1781,6 +1909,179 @@ class BifurcationController:
         self._changed()
         return npoints
 
+    def _view_normalised_coordinates(self,branch)->"NPFloatArray | None":
+        """The branch's points as they SIT ON SCREEN, scaled so that the visible box is the unit square.
+
+        The unit square is what makes "shortest" mean anything: the parameter and the observable have
+        different units and usually differ by decades, so a length in raw coordinates is whichever of
+        the two happens to be numerically larger. This is the same normalisation
+        reorder_branch_upon_point_insertion measures its arclength in and select_nearest_point picks a
+        point with, so the three agree about what "near" is.
+
+        A logarithmic axis is taken in its logarithm, since that is where its points are drawn - unless
+        something on it is non-positive, in which case that axis falls back to a linear scaling rather
+        than dropping the point.
+
+        None when a point cannot be placed at all, e.g. an observable that was never evaluated on it.
+        """
+        xlim=self.view.get_xlim()
+        ylim=self.view.get_ylim()
+        try:
+            raw=numpy.array([p.get_coordinate(self.y_axis,xspec=self.x_axis) for p in branch],dtype=float)
+        except (KeyError,TypeError,ValueError):
+            return None
+        if raw.ndim!=2 or raw.shape[1]<2 or not numpy.all(numpy.isfinite(raw[:,:2])):
+            return None
+        out=numpy.empty((raw.shape[0],2),dtype=float)
+        for j,(lo,hi,scale) in enumerate(((xlim[0],xlim[1],self.view.get_xscale()),
+                                          (ylim[0],ylim[1],self.view.get_yscale()))):
+            col=raw[:,j]
+            if scale=="log" and numpy.all(col>0) and lo>0 and hi>0:
+                col=numpy.log10(col)
+                lo,hi=numpy.log10(lo),numpy.log10(hi)
+            span=abs(hi-lo)
+            out[:,j]=col/(span if span>0 else 1.0)
+        return out
+
+    @staticmethod
+    def _shortest_open_path(dist:"NPFloatArray",starts)->"list[int]":
+        """Order the points so that the polyline through all of them is as short as it can be made.
+
+        The open-path travelling salesman, which has no cheap exact answer, so: a nearest-neighbour
+        chain from each candidate start, keep the shortest, then 2-opt it - repeatedly reverse the
+        segment between two positions whenever that shortens the path - until nothing improves. Both
+        halves matter: nearest-neighbour alone leaves the long "jump back for the one it skipped"
+        edges that are exactly what a tangled branch looks like, and 2-opt is what removes a crossing.
+        """
+        n=dist.shape[0]
+        best,bestlen=None,float("inf")
+        for start in starts:
+            unvisited=set(range(n))
+            unvisited.discard(start)
+            order=[start]
+            total=0.0
+            cur=start
+            while unvisited:
+                rest=numpy.fromiter(unvisited,dtype=numpy.int64,count=len(unvisited))
+                nxt=int(rest[int(numpy.argmin(dist[cur,rest]))])
+                total+=float(dist[cur,nxt])
+                order.append(nxt)
+                unvisited.discard(nxt)
+                cur=nxt
+            if total<bestlen:
+                best,bestlen=order,total
+        assert best is not None
+        order=best
+        # 2-opt. The gain of reversing order[i:j+1] is the two edges it replaces minus the two it
+        # makes; the ends of an OPEN path have only one edge each, which is what the bounds encode.
+        improved=True
+        rounds=0
+        while improved and rounds<50:
+            improved=False
+            rounds+=1
+            for i in range(1,n-1):
+                a=order[i-1]
+                for j in range(i+1,n):
+                    b=order[j]
+                    delta=dist[a,b]-dist[a,order[i]]
+                    if j+1<n:
+                        delta+=dist[order[i],order[j+1]]-dist[b,order[j+1]]
+                    if delta<-1e-12:
+                        order[i:j+1]=order[i:j+1][::-1]
+                        improved=True
+                        break
+                else:
+                    continue
+                break
+        return order
+
+    #: Above this many points, "Disentangle branch" refuses rather than building an N x N distance
+    #: matrix and running an O(N^2) improvement loop over it. A branch that long is not something a
+    #: hand-moved point tangled up.
+    disentangle_max_points=2000
+
+    def disentangle_branch(self,branch=None)->bool:
+        """Reorder a branch's points so the curve drawn through them is the shortest one there is.
+
+        Moving points by hand (Grab selected point) reorders nothing: the point keeps its place in the
+        branch while its coordinates move, so the line drawn through the branch doubles back on itself.
+        The order is bookkeeping rather than data - every point is a full solution in its own right,
+        and which curve is drawn through them is a choice - so it can simply be recomputed, and the
+        useful criterion is the one the eye uses: the shortest polyline through all of them, measured
+        in the visible box (see :py:meth:`_view_normalised_coordinates`).
+
+        In the CURRENT VIEW, deliberately. A branch that spans decades looks tangled or not depending
+        on what is on the axes and how they are scaled, and the answer this gives is the one that makes
+        the picture in front of you come out right.
+
+        Nothing is recomputed and no state file is touched, so this is undone by reloading the diagram.
+        Returns False when there is nothing to do.
+        """
+        if branch is None:
+            _point,branch=self._ensure_selection()
+        if len(branch)<4:
+            self.log("A branch of {:d} point{:s} cannot be tangled.".format(
+                len(branch),"" if len(branch)==1 else "s"))
+            return False
+        if len(branch)>self.disentangle_max_points:
+            self.log("This branch has {:d} points, more than the {:d} this can reorder. Raise "
+                     "controller.disentangle_max_points if you mean it.".format(
+                         len(branch),self.disentangle_max_points))
+            return False
+        pts=self._view_normalised_coordinates(branch)
+        if pts is None:
+            self.log("The points of this branch cannot all be placed on the current axes, so there is "
+                     "no length to minimise. Pick axes every point of it has a value for.")
+            return False
+
+        def path_length(order):
+            d=numpy.diff(pts[order],axis=0)
+            return float(numpy.sum(numpy.sqrt(numpy.sum(d*d,axis=1))))
+
+        before=path_length(list(range(len(branch))))
+        dist=numpy.sqrt(numpy.sum((pts[:,None,:]-pts[None,:,:])**2,axis=2))
+        # Every point as a start when that is affordable; otherwise the two ends of the order it
+        # already has, which is the right guess when only a point or two was moved.
+        n=len(branch)
+        starts=range(n) if n<=200 else (0,n-1)
+        order=self._shortest_open_path(dist,starts)
+        # Which END comes first is not decided by the length - a path and its reverse are the same
+        # curve - so the direction of travel the branch already had is kept. Getting this wrong would
+        # make Step continue backwards and swap what "select next" means.
+        if order[-1]==0 or (order[0]!=0 and order.index(0)>order.index(n-1)):
+            order=order[::-1]
+        after=path_length(order)
+        if after>=before-1e-12:
+            self.log("This branch is already as short as it gets ({:.6g} in the visible box); "
+                     "nothing reordered.".format(before))
+            return False
+        branch.data=[branch.data[i] for i in order]
+        # scoord is what everything downstream sorts and interpolates by - the splines, the export,
+        # the stability segmentation - so it has to agree with the new order, not with the old one.
+        self._renormalise_scoords(branch)
+        self.log("Disentangled the branch: the curve through its {:d} points is {:.6g} instead of "
+                 "{:.6g} in the visible box ({:.0f}% shorter).".format(
+                     n,after,before,100*(1-after/before) if before>0 else 0))
+        self._changed()
+        return True
+
+    def _renormalise_scoords(self,branch):
+        """Set every point's s to its normalised arclength along the branch AS IT NOW STANDS."""
+        pts=self._view_normalised_coordinates(branch)
+        if pts is None or len(branch)==0:
+            for i,p in enumerate(branch):
+                p.scoord=float(i)/max(1,len(branch)-1)
+            return
+        d=numpy.sqrt(numpy.sum(numpy.diff(pts,axis=0)**2,axis=1))
+        s=numpy.concatenate([[0.0],numpy.cumsum(d)])
+        total=float(s[-1])
+        if total<=0:
+            s=numpy.linspace(0.0,1.0,len(branch))
+        else:
+            s=s/total
+        for p,v in zip(branch,s):
+            p.scoord=float(v)
+
     def split_branch(self,point=None,branch=None)->"BifurcationGUISolutionBranch":
         """Cut a branch in two at a point, which becomes the first point of the new half.
 
@@ -1895,6 +2196,35 @@ class BifurcationController:
         except OSError:
             pass
         shutil.rmtree(dirfile,ignore_errors=True)
+
+    def _copy_statefile(self,src:str,dst:str):
+        """Copy one state dump to ``dst``, mesh files and orbit companion included.
+
+        copy_state_file rather than shutil.copy2: a dump names its .msh relative to its own
+        directory, and every destination here is at a different depth from the diagram's _states
+        folder, so a plain copy of a GmshTemplate problem would point at nothing. The mesh travels
+        with the dump instead - including for each block of an orbit's companion, which are state
+        files in their own right and resolve against the companion directory.
+
+        The dump of an orbit point is one phase of the cycle; without its companion the copy cannot
+        reproduce the orbit it was taken from.
+        """
+        copy_state_file(src,dst)
+        src_npz,src_dir=self._orbit_sidecar_paths(src)
+        dst_npz,dst_dir=self._orbit_sidecar_paths(dst)
+        if os.path.exists(src_npz):
+            shutil.copy2(src_npz,dst_npz)
+        if os.path.isdir(src_dir):
+            shutil.rmtree(dst_dir,ignore_errors=True)
+            os.makedirs(dst_dir,exist_ok=True)
+            for fn in sorted(os.listdir(src_dir)):
+                fsrc=os.path.join(src_dir,fn)
+                if os.path.isdir(fsrc):
+                    shutil.copytree(fsrc,os.path.join(dst_dir,fn))
+                elif fn.endswith(".dump"):
+                    copy_state_file(fsrc,os.path.join(dst_dir,fn))
+                else:
+                    shutil.copy2(fsrc,os.path.join(dst_dir,fn))
 
     def toggle_point_tag(self,pt,tag):
         if pt is None:
@@ -2042,16 +2372,7 @@ class BifurcationController:
                     numpy.savetxt(os.path.join(bdir,fn),numpy.array([pc],ndmin=2),header="\t".join([self.axis_label(export_x)]+column_names+_eigen_columns(self._eigen_unit,b.kind==BRANCH_ORBIT))+header_suffix)
                     nbif+=1
                 if p.tag>=0 and p.statefile is not None:
-                    shutil.copy2(p.statefile, os.path.join(odir,"tag{:02d}.dump".format(p.tag)))
-                    # The dump of an orbit point is one phase of the cycle; without its companion the
-                    # exported state cannot reproduce the orbit it was tagged for.
-                    src_npz,src_dir=self._orbit_sidecar_paths(p.statefile)
-                    dst_npz,dst_dir=self._orbit_sidecar_paths(os.path.join(odir,"tag{:02d}.dump".format(p.tag)))
-                    if os.path.exists(src_npz):
-                        shutil.copy2(src_npz,dst_npz)
-                    if os.path.isdir(src_dir):
-                        shutil.rmtree(dst_dir,ignore_errors=True)
-                        shutil.copytree(src_dir,dst_dir)
+                    self._copy_statefile(p.statefile,os.path.join(odir,"tag{:02d}.dump".format(p.tag)))
                     fn="tag_{:02d}.txt".format(p.tag)
                     pc=p.get_coordinate(export_y,with_s=False,xspec=export_x)
                     numpy.savetxt(os.path.join(odir,fn),numpy.array([pc],ndmin=2),header="\t".join([export_x[1]]+column_names)+self._export_header_suffix(b))
@@ -2063,7 +2384,8 @@ class BifurcationController:
 
         The curve export only copies a tagged point's state dump, which preserves the solution but shows
         nothing. This loads each one and runs the problem's own output into its own directory,
-        ``output/tag01/`` and so on.
+        ``output/tag01/`` and so on, with a copy of the dump as ``state.dump`` - and of the .msh it
+        was built from - beside it, so the folder stands on its own.
 
         Follows the discipline PeriodicOrbit.output_orbit uses for the same trick (problem.py:280): the
         output directory, ``write_states`` and ``_output_step`` are all put back afterwards - without
@@ -2098,9 +2420,15 @@ class BifurcationController:
                     # new location RELATIVE to the problem's base directory and writes there. The base
                     # directory itself must NOT be moved, or that relative path is computed against a
                     # directory that no longer exists.
-                    self.problem._change_output_directory(os.path.join(odir,"tag{:02d}".format(p.tag)))
+                    tagdir=os.path.join(odir,"tag{:02d}".format(p.tag))
+                    self.problem._change_output_directory(tagdir)
                     self.problem._output_step=0
                     self.problem.output()
+                    # The fields alone cannot be continued from. The dump goes in beside them - with
+                    # the mesh files it refers to - so the folder is self-contained:
+                    # load_state("<tag>/state.dump") puts the problem back where the point was tagged.
+                    os.makedirs(tagdir,exist_ok=True)
+                    self._copy_statefile(p.statefile,os.path.join(tagdir,"state.dump"))
                     done+=1
                 except Exception as e:
                     self.log("Could not output tag {:d}: {:s}".format(p.tag,repr(e)))
@@ -2126,7 +2454,35 @@ class BifurcationController:
 
     # ------------------------------------------------------------------ tangents
 
+    def _ensure_continuation_tangent(self)->bool:
+        """Make sure the solver holds an arclength tangent here, computing one if it does not.
+
+        oomph's FIRST arclength step after a reset is not an arclength step at all: it increments the
+        parameter by the whole of ds and only then builds the derivatives. That is the right thing at
+        the start of a diagram, where ds is small and deliberately chosen. It is not the right thing at
+        a point LOADED later, when ds has since grown - and a loaded point has no tangent unless one is
+        restored or computed, because the state dump of an augmented system (an orbit, a locus) cannot
+        carry one.
+
+        Measured on an orbit branch: three steps grew ds from 0.02 to 0.63, and going back to the point
+        the Hopf switch created and stepping took the parameter from 0.02 straight to 0.647 - exactly
+        ds, in one plain parameter jump right off the branch - where the tangent computed here gives
+        0.064, which is where the branch actually goes.
+
+        Cheap where it is not needed: after an ordinary step the tangent is already there and this is
+        one length check.
+        """
+        if self.current_point is None:
+            return False
+        if len(self.problem.get_arclength_dof_derivative_vector())>0:
+            return True
+        return self._compute_continuation_tangent(self.current_point)
+
     def _update_tangents(self):
+        # The ARCLENGTH tangent, which is not the drawn arrow, and is wanted on every kind of branch -
+        # so it comes before the early returns below, which are about the drawn one. It used to sit
+        # further down, past both of them, so an orbit or a locus never got one filled in.
+        self._ensure_continuation_tangent()
         # On a locus the arclength derivative belongs to the augmented system and the finite-difference
         # probe below would perturb its eigenvector/parameter entries too. The plotted direction comes
         # from axis_tangent() instead, which needs no solver internals.
@@ -2151,8 +2507,7 @@ class BifurcationController:
         FD_eps=1e-6
         cp=self._get_current_point()
         backup,_=self.problem.get_current_dofs()
-        if len(self.problem.get_arclength_dof_derivative_vector())==0:
-            self._compute_continuation_tangent(cp)
+        # (the tangent was filled in at the top, for every branch kind)
         dp=self.problem.get_arc_length_parameter_derivative()
         ddof=numpy.array(self.problem.get_arclength_dof_derivative_vector())
         if len(ddof)==len(backup) and len(ddof)>0:
@@ -2181,22 +2536,72 @@ class BifurcationController:
         self._update_departure_tangents(cp,backup)
         self.problem.set_current_dofs(backup)
 
-    def _solved_critical_eigenvector(self)->NPComplexArray | None:
-        """The eigenvector of the mode nearest the imaginary axis in the last eigensolve.
+    def _shift_for_an_eigensolve_at_a_bifurcation(self):
+        """:py:attr:`shift`, unless it is zero and we are sitting AT a bifurcation.
 
-        Nearest by REAL part, not by modulus: at a Hopf the critical pair sits at +-i*omega and is the
-        furthest from the origin of anything in the spectrum, while every stable mode it is competing
-        with has a real part well below zero. None when no eigensolve is at hand, which is what a point
-        just loaded from a diagram looks like - state files do not carry eigenvectors.
+        A located REAL bifurcation has an exactly singular Jacobian, which is what makes it one - and
+        a shift-invert eigensolve at sigma = 0 asks the transform to factorise it. Measured on a
+        pitchfork at mu = 0 with a second mode at -1: the critical eigenvalue came back as
+        +0.3678794411714423 (and on another problem as -1.2e18, and on a third it was simply absent
+        from the spectrum), so the mode the classification is about was not in the answer at all. The
+        normal form then either failed outright - "the left eigenvector solve landed on the
+        eigenvalue 1.3e-23 instead of the requested 0.368" - or was built from another mode.
+
+        This is the same hazard :py:attr:`tracked_eigen_shift` exists for, one step later: that one
+        covers the eigensolve taken WHILE the tracker holds an eigenvalue at zero, this one the
+        eigensolve taken after it has let go. Its value is reused, since it is the shift the user has
+        already chosen for "near a mode sitting on the axis", and 0.1 stands in when it is switched
+        off. A shift the user has deliberately set is left alone.
+        """
+        if self.shift:
+            return self.shift
+        return self.tracked_eigen_shift if self.tracked_eigen_shift else 0.1
+
+    def _located_eigenindex(self,point=None)->"int | None":
+        """Which entry of the last eigensolve is the mode the bifurcation we are sitting at belongs to.
+
+        NOT index 0, which is what every normal-form entry point defaults to. The spectrum is sorted
+        by descending real part, so on a branch that is ALREADY unstable index 0 is whatever went
+        unstable earlier - a mode that is not bifurcating here at all. Measured on a Hopf at
+        omega = 1.7 sitting on a branch carrying a real unstable eigenvalue at +0.3: classifying it
+        after the fact built the normal form out of that +0.3 mode, came back "pitchfork", and the
+        orbit switch then refused the Hopf as "this one is pitchfork".
+
+        The mode that is critical HERE is the one on the imaginary axis. When the point records which
+        eigenvalue the tracker held - it does, that is what makes it a bifurcation - that value is
+        matched directly, which also keeps a Hopf's +-i*omega apart from a real zero at a codim-2
+        point where both sit on the axis. Otherwise the nearest to the axis by real part is taken.
+
+        None when there is no eigensolve to index into.
         """
         try:
-            evecs=self.problem.get_last_eigenvectors()
             evals=self.problem.get_last_eigenvalues()
         except Exception:
             return None
-        if evecs is None or evals is None or len(evecs)==0 or len(evals)==0:
+        if evals is None or len(evals)==0:
             return None
-        idx=int(numpy.argmin(numpy.abs(numpy.real(numpy.asarray(evals,dtype=complex)))))
+        vals=numpy.asarray(evals,dtype=complex)
+        if point is not None and getattr(point,"eig_value_Re",None)==0:
+            target=1j*float(point.eig_value_Im)
+            return int(numpy.argmin(numpy.abs(vals-target)))
+        return int(numpy.argmin(numpy.abs(numpy.real(vals))))
+
+    def _solved_critical_eigenvector(self,point=None)->NPComplexArray | None:
+        """The eigenvector of the mode the bifurcation belongs to, from the last eigensolve.
+
+        Which mode that is, is :py:meth:`_located_eigenindex` - nearest the axis by REAL part, or the
+        one the point recorded: at a Hopf the critical pair sits at +-i*omega and is the furthest
+        from the origin of anything in the spectrum, while every stable mode it competes with has a
+        real part well below zero. None when no eigensolve is at hand, which is what a point just
+        loaded from a diagram looks like - state files do not carry eigenvectors.
+        """
+        try:
+            evecs=self.problem.get_last_eigenvectors()
+        except Exception:
+            return None
+        idx=self._located_eigenindex(point)
+        if evecs is None or idx is None or len(evecs)==0:
+            return None
         return numpy.asarray(evecs[min(idx,len(evecs)-1)])
 
     def _ensure_normal_form(self,cp,allow_eigensolve:bool=False)->bool:
@@ -2218,27 +2623,35 @@ class BifurcationController:
             return False
         if bi.get("zeta") is not None:
             return True
-        vec=self._solved_critical_eigenvector()
+        vec=self._solved_critical_eigenvector(cp)
         if vec is None:
             if not allow_eigensolve:
                 return False
             self.log("Solving the eigenproblem to recover the eigenvector of this restored "
                      +str(bi.get("type"))+", which was not saved with the diagram")
             try:
-                self.problem.solve_eigenproblem(self.neigen,self.shift)
+                self.problem.solve_eigenproblem(self.neigen,self._shift_for_an_eigensolve_at_a_bifurcation())
             except Exception as e:
                 self.log("... which did not work: "+str(e).split("\n")[0])
                 return False
-            vec=self._solved_critical_eigenvector()
+            vec=self._solved_critical_eigenvector(cp)
             if vec is None:
                 return False
-        try:
-            zeta=_as_real_eigenvector(numpy.asarray(vec,dtype=complex),"The restored eigenvector")
-        except RuntimeError as e:
-            # Same rule as the rest of this method: a normal form that cannot be completed is a
-            # False, not an exception - the caller logs and recomputes.
-            self.log("The eigenvector for the saved classification is not real: "+str(e).split("\n")[0])
-            return False
+        if bi.get("type")=="hopf":
+            # A Hopf's null vector IS complex - it is Re(zeta*exp(i*omega*t)) that the orbit starts
+            # along - so it is kept as it comes. Putting it through _as_real_eigenvector refused
+            # every restored Hopf with "a real bifurcation needs a real null vector; a complex one is
+            # a Hopf", which is true and beside the point. Only its phase is arbitrary, and a phase
+            # is a shift in t.
+            zeta=numpy.asarray(vec,dtype=complex)
+        else:
+            try:
+                zeta=_as_real_eigenvector(numpy.asarray(vec,dtype=complex),"The restored eigenvector")
+            except RuntimeError as e:
+                # Same rule as the rest of this method: a normal form that cannot be completed is a
+                # False, not an exception - the caller logs and recomputes.
+                self.log("The eigenvector for the saved classification is not real: "+str(e).split("\n")[0])
+                return False
         if zeta.size!=self.problem.ndof():
             return False
         n=float(numpy.linalg.norm(zeta))
@@ -2258,8 +2671,14 @@ class BifurcationController:
         not of how the point was reached, so it can simply be computed: one solve of J dU = -dR/dp,
         normalised onto the arclength constraint, which is what the end of every step does anyway.
 
-        Not AT a bifurcation - that Jacobian is singular, and it is the one place where having no
-        tangent is the right answer (see :py:meth:`_update_tangents`).
+        Not at a bifurcation on an ORDINARY branch - the plain Jacobian is singular there, and it is
+        the one place where having no tangent is the right answer: :py:meth:`_update_tangents` empties
+        the arrows there on purpose, and :py:meth:`_prime_fold_continuation_tangent` recognises a fold
+        by the tangent being absent. On a LOCUS every point has a zero real part and none of that
+        applies: the system installed there is the augmented tracker, whose Jacobian is regular at the
+        bifurcation - that is what a tracker is for - and it is the system a locus step continues.
+        Measured on a fold locus: the tangent computed here at a reloaded point agrees with the one
+        that was in force when the point was made to every digit.
 
         The arclength scaling is switched off for the call. With it on, oomph retunes theta^2 as part of
         computing the derivatives, so that the parameter takes its desired share of the arclength - 50%
@@ -2269,7 +2688,7 @@ class BifurcationController:
         a step, which rescales ds to match (_recast_ds_after_metric_change); a direction merely being
         asked about must not move the metric under the step size.
         """
-        if cp.eig_value_Re==0 or self.on_locus():
+        if cp.eig_value_Re==0 and not self.on_locus():
             return False
         if self.scale_arc_length:
             self.problem.set_arc_length_parameter(scale_arc_length=False)
@@ -2294,7 +2713,7 @@ class BifurcationController:
         bi=cp.bifurcation_info
         cand=bi.get("zeta") if bi is not None else None
         if cand is None:
-            cand=self._solved_critical_eigenvector()
+            cand=self._solved_critical_eigenvector(cp)
         if cand is None:
             return None
         # A Hopf's eigenvector is complex, and its REAL part is where the transient starts from:
@@ -2684,13 +3103,21 @@ class BifurcationController:
                      .format("azimuthal mode m" if mode[0]=="m" else "Cartesian mode k",mode[1]))
             return None
         try:
+            eigenindex=0
             if self.problem.get_bifurcation_tracking_mode()=="":
                 # get_normal_form reads the critical eigenpair from the last eigensolve. While tracking
-                # is active that is already the critical one AND solve_eigenproblem would refuse, so this
-                # only runs when classifying after the fact.
-                self.problem.solve_eigenproblem(self.neigen,self.shift)
+                # is active that is the tracked pair and nothing else, so index 0 is right; classifying
+                # AFTER THE FACT - a point loaded from a diagram, or a branch switch at one that was
+                # never classified - solves the whole spectrum, and index 0 is then the LEADING
+                # eigenvalue. On a branch that is already unstable that is the mode which went unstable
+                # earlier, not the one bifurcating here: a Hopf at omega = 1.7 on a branch with a real
+                # unstable eigenvalue at +0.3 was classified from that +0.3 mode, came back
+                # "pitchfork", and switching onto its orbit then refused it as not being a Hopf.
+                self.problem.solve_eigenproblem(self.neigen,self._shift_for_an_eigensolve_at_a_bifurcation())
+                eigenindex=self._located_eigenindex(point if point is not None else self.current_point) or 0
             return NormalFormCalculator(self.problem).get_normal_form(
-                self._get_paramname_str(),assume=self._fold_ruled_out_by_the_branch())
+                self._get_paramname_str(),eigenindex=eigenindex,
+                assume=self._fold_ruled_out_by_the_branch())
         except Exception as e:
             self.log("Could not compute the normal form of this bifurcation: "+repr(e))
             return None
@@ -2712,7 +3139,8 @@ class BifurcationController:
         if prev is None or cur is None:
             return None
         evs=self.problem.get_last_eigenvalues()
-        if evs is not None and len(evs)>0 and abs(numpy.imag(evs[0]))>1e-8:
+        idx=self._located_eigenindex(cur)
+        if evs is not None and idx is not None and idx<len(evs) and abs(numpy.imag(evs[idx]))>1e-8:
             return None   # a Hopf also passes straight through; this test says nothing about one
         lo,hi=sorted((float(prev.param_value),float(cur.param_value)))
         if hi-lo<=0:
@@ -2764,6 +3192,7 @@ class BifurcationController:
         nontrivial=mode!=0 if kind=="m" else abs(mode)>1e-7
         return (kind,mode) if nontrivial else None
 
+    @_rolls_back("a branch switch")
     def branch_switch(self,offset:float | None=None,direction:int | None=None):
         """Step onto the other branch through the current bifurcation and record it as a new branch.
 
@@ -2873,6 +3302,7 @@ class BifurcationController:
     #: travelled: it has arrived somewhere and the remaining growth times would only confirm it.
     transient_settle_tolerance=1e-3
 
+    @_rolls_back("the transient departure")
     def transient_leave_branch(self,eigenindex=0):
         """Perturb along an eigenfunction and integrate until the solution settles somewhere else.
 
@@ -3276,6 +3706,7 @@ class BifurcationController:
                 self._last_ds*=min(1,max_ds/ds)
         self._changed()
 
+    @_rolls_back("an arclength step")
     def step(self,ds=None):
         if ds is None:
             ds=self._last_ds
@@ -3687,6 +4118,65 @@ class BifurcationController:
                 "smaller ds.")
         return p
 
+    @_rolls_back("re-discretizing the orbit")
+    def change_orbit_discretisation(self)->bool:
+        """Re-discretize the orbit that is installed, using the settings in the Orbit tab.
+
+        The orbit is one object; how it is sampled in time is a separate choice, and the best
+        discretization for FINDING it is not the best one for reading its stability off. B-splines
+        converge more readily when switching off a Hopf, but carry no degree of freedom at the end of
+        the period, so they have no Floquet multipliers at all (see _orbit_floquet). So: switch onto
+        the orbit with bsplines, then convert it here.
+
+        PeriodicOrbit.change_sampling does the work - it samples the installed orbit at the requested
+        number of time points, reinstalls the handler with the new mode and solves from there, so the
+        converted orbit is the same orbit rather than a fresh guess. Measured on the Hopf normal form
+        (tests/orbit_gui_worker.py): a bspline orbit converted to collocation lands on the same
+        multiplier as one switched onto in collocation from the start, to nine digits.
+
+        The current point is updated in place rather than recorded again - it is the same solution at
+        the same parameter value - so its stored cycle is rewritten with the new discretization and
+        its multipliers are computed if the new mode has any. Points recorded EARLIER on the branch
+        keep the discretization they were computed with, which is what their own stored cycles hold.
+        """
+        orbit=self._require_orbit()
+        handler=self._orbit_handler()
+        assert handler is not None   # _require_orbit checked both
+        point=self._get_current_point()
+        NT=self._orbit_NT()
+        before="{:s}/order {:d}, {:d} time points".format(str(orbit.mode),int(orbit.order),
+                                                          handler.get_num_time_steps())
+        self._status("RE-DISCRETIZING THE ORBIT")
+        # NT is the number of SAMPLES taken off the current orbit; collocation and floquet then add
+        # the explicit end-of-period block, so the count reported afterwards is one higher.
+        self.log("Re-discretizing the orbit: "+before+" -> {:s}/order {:d}, resampled at {:d} "
+                 "time points".format(self.orbit_mode,int(self.orbit_order),NT))
+        orbit.change_sampling(mode=self.orbit_mode,NT=NT,order=int(self.orbit_order),
+                              GL_order=int(self.orbit_GL_order),
+                              T_constraint=self.orbit_T_constraint,do_solve=True)
+        obs,info=self._evaluate_orbit_observables()
+        exps,mults=self._orbit_floquet()
+        point.obs_values.update(obs)
+        # The stored format and fingerprint belong to the sidecar, which is rewritten below, so they
+        # are the two keys that must NOT be carried over from the old discretization.
+        point.orbit_info=info
+        point.floquet=mults
+        if exps:
+            point.eig_values=[complex(v) for v in exps]
+            point.eig_value_Re=numpy.real(exps[0])
+            point.eig_value_Im=numpy.imag(exps[0])
+            point.stability_source=STABILITY_EIGEN
+            point.unstable_count=self.orbit_unstable_count(mults)
+        self._write_orbit_sidecar(point)
+        handler=self._orbit_handler()
+        assert handler is not None
+        self.log("The orbit is now {:s} with {:d} time points, period {:.6g}{:s}".format(
+            str(orbit.mode),handler.get_num_time_steps(),self.orbit_period(),
+            "" if not mults else "; {:d} of {:d} multipliers outside the unit circle".format(
+                point.unstable_count or 0,len(mults))))
+        self._changed()
+        return True
+
     def orbit_floquet_here(self)->bool:
         """Recompute the Floquet multipliers at the current orbit point."""
         if not self.on_orbit():
@@ -3837,6 +4327,7 @@ class BifurcationController:
                 best,bestre=i,re
         return best
 
+    @_rolls_back("switching onto the orbit")
     def switch_to_orbit(self,eps:float | None=None):
         """From a Hopf bifurcation, step onto the periodic orbit it sheds.
 
@@ -4004,6 +4495,7 @@ class BifurcationController:
             self.log("Deflation: no usable eigenvector for the perturbation, using a random one")
         return (rng.random(n)-0.5)*self.deflation_perturbation_value()
 
+    @_rolls_back("the deflated solve")
     def deflated_solve(self)->bool:
         """One deflated solve here; a solution that is genuinely new opens a new branch.
 
@@ -4596,6 +5088,7 @@ class BifurcationController:
             return branch[-2]
         return branch[i-1] if i>0 else None
 
+    @_rolls_back("bifurcation finding")
     def locate_bifurcation(self,pitchfork:bool=False,eigenindex:int | None=None):
         """Find the nearest bifurcation and record it.
 
@@ -4639,6 +5132,8 @@ class BifurcationController:
         # opening eigensolve - the leftover tracker's message, with nothing about the solve that
         # actually failed. Two of the three entry points (Locate pitchfork, Locate the bifurcation of
         # the selected eigenvalue) call this directly and had no cleanup at all.
+        # It must also run BEFORE the @_rolls_back guard: a state cannot be loaded into the augmented
+        # dof vector, and an inner finally is what guarantees that order.
         try:
             self.problem.solve(max_newton_iterations=20)
             # The whole spectrum, not just the tracked eigenvalue the solve leaves behind: on a branch

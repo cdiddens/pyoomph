@@ -209,6 +209,12 @@ class BifurcationTkApp:
                                 and not c.on_locus() and not c.on_orbit()),
           tooltip="At a Hopf bifurcation, step onto the periodic orbit it sheds and continue that "
                   "instead. The step off the Hopf is the one the current ds buys.")
+        A("orbit_change_mode","Re-discretize this orbit",c.change_orbit_discretisation,
+          is_solver_task=True,enabled_when=lambda: c.on_orbit(),
+          tooltip="Re-sample the orbit that is installed with the discretization set below, keeping "
+                  "the orbit itself. The way to switch off a Hopf with bsplines - which converge "
+                  "more readily - and then convert to collocation, which is the one that has Floquet "
+                  "multipliers.")
         A("orbit_floquet_here","Floquet multipliers here",c.orbit_floquet_here,is_solver_task=True,
           enabled_when=lambda: c.on_orbit(),
           tooltip="Recompute the Floquet multipliers of this orbit - its stability, the way an "
@@ -292,6 +298,11 @@ class BifurcationTkApp:
         A("merge_branches","Merge selected branch into current",self._merge_branches,
           enabled_when=lambda: c.selected_branch is not None and c.selected_branch is not c.current_branch,
           tooltip="Join two branches that are one curve, ordered by which of their ends meet")
+        A("disentangle_branch","Disentangle branch",c.disentangle_branch,
+          enabled_when=lambda: len(c.selected_branch or c.current_branch or ())>3,
+          tooltip="Reorder the points of this branch so that the curve drawn through them is the "
+                  "shortest one, measured in the visible box. For a branch that moving points by hand "
+                  "has left doubling back on itself; nothing is recomputed.")
         A("delete_branch","Delete branch...",self._delete_branch,
           enabled_when=lambda: len(c.branches)>1,
           tooltip="Remove a whole branch and every state dump it owns. Asks first - unlike splitting "
@@ -449,6 +460,7 @@ class BifurcationTkApp:
         self._add_menu_item(m,"deflation_forget")
         m.add_separator()
         self._add_menu_item(m,"switch_to_orbit")
+        self._add_menu_item(m,"orbit_change_mode")
         self._add_menu_item(m,"orbit_floquet_here")
         self._add_menu_item(m,"orbit_floquet_branch")
         self._add_menu_item(m,"orbit_output")
@@ -479,6 +491,7 @@ class BifurcationTkApp:
         m.add_separator()
         self._add_menu_item(m,"split_branch")
         self._add_menu_item(m,"merge_branches")
+        self._add_menu_item(m,"disentangle_branch")
         self._add_menu_item(m,"delete_branch")
         m.add_separator()
         self._add_menu_item(m,"toggle_mode")
@@ -1174,6 +1187,14 @@ class BifurcationTkApp:
                         command=self._commit_orbit).grid(row=row,column=0,columnspan=2,sticky=tk.W,pady=2)
         row+=1
 
+        # These settings otherwise only take effect on the NEXT switch onto an orbit. This applies
+        # them to the one already installed, which is what makes "find it with bsplines, read its
+        # stability off in collocation" a two-button operation.
+        ttk.Button(tab,text="Apply to this orbit",
+                   command=lambda: self._invoke(self._actions["orbit_change_mode"])).grid(
+                   row=row,column=0,columnspan=2,sticky=tk.W,pady=(2,0))
+        row+=1
+
         ttk.Separator(tab,orient=tk.HORIZONTAL).grid(row=row,column=0,columnspan=2,sticky=tk.EW,pady=4)
         row+=1
         ttk.Label(tab,text="Floquet multipliers",font=("TkDefaultFont",9,"bold")).grid(
@@ -1678,10 +1699,20 @@ class BifurcationTkApp:
                 hint=""
         self.orbit_eps_hint_var.set(hint)
 
+        # What the INSTALLED orbit is discretized with, which is not the same question as the mode
+        # set above: the settings apply to the next switch until "Apply to this orbit" is pressed,
+        # and telling the user their mode has multipliers while the orbit in front of them has none
+        # is the confusion that button exists to resolve.
+        installed=str(info.get("mode","")) if (point is not None and info) else ""
         if point is not None and point.floquet:
             nun=c.orbit_unstable_count(point.floquet)
             self.floquet_info_var.set("{:d} multiplier{:s}, {:d} outside the unit circle".format(
                 len(point.floquet),"" if len(point.floquet)==1 else "s",nun))
+        elif installed and installed not in ("collocation","floquet"):
+            self.floquet_info_var.set(
+                "This orbit is discretized with '{:s}', which carries no degree of freedom at the end "
+                "of the period, so it has no Floquet multipliers. Set the mode to collocation and "
+                "press 'Apply to this orbit'.".format(installed))
         elif not can_floquet:
             self.floquet_info_var.set("'{:s}' carries no degree of freedom at the end of the period, "
                                       "so it has no Floquet multipliers.".format(str(c.orbit_mode)))

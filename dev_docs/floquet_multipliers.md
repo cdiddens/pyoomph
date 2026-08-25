@@ -27,6 +27,17 @@ actually goes and what parallelizes; §10 the open issues.
 already have the explicit end-of-period block and always did; only `central`, `BDF2` and `bspline`
 do not, and `is_floquet_mode()` refuses those.
 
+That refusal is not the end of the road for a `bspline` orbit, which is worth having: bsplines
+converge more readily on the step off a Hopf than collocation does. `PeriodicOrbit.change_sampling()`
+resamples the installed orbit and reinstalls the handler in another mode, so the orbit can be FOUND
+with bsplines and then converted to collocation to be read. The bifurcation GUI exposes it as
+`BifurcationController.change_orbit_discretisation()` ("Apply to this orbit" in the Orbit tab), which
+also rewrites the point's stored cycle and recomputes its multipliers. Measured on the Hopf normal
+form (`tests/test_bifurcation_gui.py::test_an_orbit_can_be_re_discretized_in_place`): the converted
+orbit lands on the same multiplier as one switched onto in collocation from the start, to nine
+digits. Note that the count of time points goes UP by one in the conversion - `NT` is the number of
+samples taken, and collocation/floquet then add the explicit end-of-period block.
+
 Per element `ie` of the time discretization (Lagrange order `m`; `m = 1` for the plain midpoint
 `mode="floquet"`), `get_jacobian_collocation_mode()` loops `inode < el->nnode()-1` for the
 equations but over all `el->nnode()` for the unknowns. So the element

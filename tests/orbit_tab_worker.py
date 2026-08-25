@@ -53,14 +53,14 @@ def main() -> int:
         titles = [app.side.tab(i, "text") for i in range(app.side.index("end"))]
         assert "Orbit" in titles, "no Orbit tab: " + ", ".join(titles)
 
-        for action_id in ("switch_to_orbit", "orbit_floquet_here", "orbit_floquet_branch",
-                          "orbit_output"):
+        for action_id in ("switch_to_orbit", "orbit_change_mode", "orbit_floquet_here",
+                          "orbit_floquet_branch", "orbit_output"):
             assert action_id in app._actions, action_id + " is not a command"
             assert action_id in app._menu_entries, action_id + " is in no menu"
 
         # None of them applies away from an orbit, and switching applies only at a bifurcation.
-        for action_id in ("switch_to_orbit", "orbit_floquet_here", "orbit_floquet_branch",
-                          "orbit_output"):
+        for action_id in ("switch_to_orbit", "orbit_change_mode", "orbit_floquet_here",
+                          "orbit_floquet_branch", "orbit_output"):
             assert not app._actions[action_id].enabled_when(), \
                 action_id + " is offered on a diagram with no orbit and no bifurcation"
 

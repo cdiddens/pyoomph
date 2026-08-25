@@ -2676,6 +2676,15 @@ class NormalFormCalculator:
 
         ``assume`` is passed on to :py:meth:`get_normal_form1d` and forces its fold/branch-point or
         pitchfork/transcritical decision; it has no meaning for a Hopf and is rejected there.
+
+        ``eigenindex`` picks which eigenpair of the LAST EIGENSOLVE the normal form is built from, and
+        the default of 0 is only right when that eigensolve holds the critical mode first. It does
+        while bifurcation tracking is active - there is one pair and it is the tracked one - but a
+        plain solve_eigenproblem() sorts by descending real part, so on a branch that is ALREADY
+        unstable index 0 is whatever went unstable earlier. Classifying from it describes a mode that
+        is not bifurcating at all: measured on a Hopf at omega = 1.7 sitting on a branch with a real
+        unstable eigenvalue at +0.3, the answer came back "pitchfork". Pass the index of the mode on
+        the imaginary axis (the bifurcation GUI's BifurcationController._located_eigenindex).
         """
         if param is None:
             if self.problem._bifurcation_tracking_parameter_name is not None and self.problem._bifurcation_tracking_parameter_name!="":

@@ -1488,6 +1488,32 @@ def test_outputting_a_tagged_point_writes_its_fields(tmp_path):
     assert "TAGOUT OK" in out
 
 
+def test_failed_command_rolls_back(tmp_path):
+    """A command that fails leaves the problem, and the diagram, where it started.
+
+    oomph-lib's steady Newton solve re-raises without restoring the dofs, and under a tracker the
+    continuation parameter is one of them - so a diverging search used to walk the problem off the
+    branch and take the parameter with it (measured: -0.629 -> +2.371), while the diagram still
+    showed the point that was current. The field plots then drew the diverged state and the next
+    continuation step started from it and died.
+
+    Two failures are exercised, because the recovery is not the same in both. On an ordinary branch
+    the state simply goes back. On a LOCUS the bifurcation tracker has to survive it: a state file
+    holds the base problem only, so loading one takes the augmentation off (measured: ndof 3 -> 1)
+    and every later step would then continue an ordinary branch while claiming to follow the fold.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "command_rollback_worker.py")
+    proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
+    assert "ROLLBACK OK" in out
+
+
 @pytest.mark.parametrize("policy", ["off", "when_needed", "every_n"])
 def test_adaptivity_during_continuation(policy, tmp_path):
     """The GUI can remesh/adapt during a sweep, and the arclength metric survives it.
@@ -1569,6 +1595,93 @@ def test_a_state_dumped_while_tracking_can_be_reloaded(tmp_path):
     assert "PYOOMPH_WORKER_DONE" in out, "worker did not finish:\n" + out[-3000:]
     assert "Mismatching size" not in out
     assert "TRACKED STATE OK" in out
+
+
+def _stub_branch(controller, coords):
+    """A branch of synthetic points at the given (x, y), in the order given."""
+    from pyoomph.utils.bifurcation_gui.model import (BifurcationGUISolutionBranch,
+                                                     BifurcationGUISolutionPoint)
+    pts = [BifurcationGUISolutionPoint(float(x), {"u": float(y)}, -1 + 0j, None, i,
+                                       param_values={"mu": float(x)})
+           for i, (x, y) in enumerate(coords)]
+    b = BifurcationGUISolutionBranch(list(pts), kind="solution", continuation_parameter="mu")
+    controller.branches = [b]
+    controller.current_branch = b
+    controller.current_point = b[0]
+    return b
+
+
+def _branch_length(controller, branch):
+    pts = controller._view_normalised_coordinates(branch)
+    return float(numpy.sum(numpy.sqrt(numpy.sum(numpy.diff(pts, axis=0)**2, axis=1))))
+
+
+def test_disentangle_branch_shortens_the_curve_and_keeps_its_direction():
+    """Reorder a branch that moving points by hand has left doubling back on itself.
+
+    Grabbing a point moves its coordinates but not its place in the branch, so the line drawn through
+    the branch crosses itself. The order is bookkeeping - each point is a full solution in its own
+    right - so it is recomputed as the shortest polyline through all of them, measured in the visible
+    box, which is the criterion the eye uses.
+
+    The curve here is x = u - u^3, an S with two folds, precisely because sorting by the parameter is
+    NOT the answer on a bifurcation diagram: the shortest path has to follow the S around both folds.
+    It is checked against the exact order the points were built in, from a full shuffle.
+    """
+    import random
+
+    from pyoomph.utils.bifurcation_gui.controller import BifurcationController, _FixedViewLimits
+
+    c = BifurcationController.__new__(BifurcationController)
+    c._on_log = lambda *a: None
+    c._on_changed = None
+    c._on_status = None
+    c._on_busy = None
+    c._paramname = "mu"
+    c._x_axis = None
+    c._y_axis = None
+    c._current_observable = "u"
+    c._avail_observables = ["u"]
+    c._extremum_axes = set()
+    c.view = _FixedViewLimits(xlim=(-1.2, 1.2), ylim=(-1.6, 1.6))
+    c.disentangle_max_points = 2000
+
+    u = numpy.linspace(-1.5, 1.5, 41)
+    b = _stub_branch(c, list(zip(u - u**3, u)))
+    exact = [p.obs_values["u"] for p in b]
+    straight = _branch_length(c, b)
+
+    order = list(range(len(b)))
+    random.Random(7).shuffle(order)
+    pts = list(b.data)
+    b.data = [pts[i] for i in order]
+    assert _branch_length(c, b) > 5 * straight, "the shuffle did not tangle it"
+
+    assert c.disentangle_branch(b) is True
+    assert _branch_length(c, b) == pytest.approx(straight, rel=1e-12)
+    got = [p.obs_values["u"] for p in b]
+    assert numpy.allclose(got, exact), "the S-curve order was not recovered"
+    # Following the curve, not sorting by the parameter: x turns around twice along it.
+    xs = [p.param_value for p in b]
+    assert not (xs == sorted(xs) or xs == sorted(xs, reverse=True))
+
+    # Idempotent, and it says so rather than reordering for nothing.
+    assert c.disentangle_branch(b) is False
+
+    # A branch travelling the other way keeps that direction - otherwise Step would continue backwards
+    # and "select next" would mean the other end.
+    b.data = list(reversed(pts))
+    c._renormalise_scoords(b)
+    b.data.insert(30, b.data.pop(5))
+    assert c.disentangle_branch(b) is True
+    got = [p.obs_values["u"] for p in b]
+    assert got[0] > got[-1], "the direction of travel was flipped"
+    assert numpy.allclose(got, exact[::-1])
+
+    # s is what the splines, the export and the stability segmentation sort by.
+    s = [p.scoord for p in b]
+    assert s[0] == 0.0 and s[-1] == pytest.approx(1.0)
+    assert all(s[i] <= s[i+1] for i in range(len(s)-1))
 
 
 def test_branch_switch_refuses_a_fold():
@@ -2823,6 +2936,166 @@ def test_a_hopf_switches_onto_its_periodic_orbit(tmp_path, portable):
     assert step["mu"] > stored["mu"]
     assert complex(*step["floquet"][0]).real == pytest.approx(
         numpy.exp(-2*step["mu"]*step["T"]), rel=1e-3)
+
+
+def test_an_orbit_can_be_re_discretized_in_place(tmp_path):
+    """Find the orbit with bsplines, read its stability off in collocation.
+
+    The two discretizations are good at different things: bsplines converge more readily on the step
+    off a Hopf, but carry no degree of freedom at the end of the period and therefore have no Floquet
+    multipliers at all. "Apply to this orbit" converts the one that is installed, and the point of
+    the test is that what comes out is the SAME orbit - which the normal form pins exactly: period
+    2*pi, amplitude sqrt(mu), and one non-trivial multiplier exp(-2*mu*T).
+    """
+    res = _run_orbit_worker(tmp_path, "rediscretize")
+    assert res["kind"] == "orbit"
+    bspl, coll = res["bspline"], res["collocation"]
+
+    # The reason for the exercise: bsplines have no multipliers, whatever else they are good for.
+    assert bspl["mode"] == "bspline" and bspl["nfloquet"] == 0
+    assert coll["mode"] == "collocation" and coll["nfloquet"] == 1
+
+    # The same orbit, before and after, and the closed form judges both.
+    mu = res["mu"]
+    assert res["mu_unchanged"] == mu, "the conversion moved the parameter"
+    assert res["points_unchanged"], "the conversion recorded a second point instead of updating one"
+    for facts in (bspl, coll):
+        assert facts["T"] == pytest.approx(2*numpy.pi, rel=1e-4)
+        assert facts["max_x"] == pytest.approx(numpy.sqrt(mu), rel=2e-2)
+        assert facts["min_x"] == pytest.approx(-numpy.sqrt(mu), rel=2e-2)
+    assert complex(*coll["floquet"][0]).real == pytest.approx(
+        numpy.exp(-2*mu*coll["T"]), rel=1e-3), "the converted orbit has the wrong stability"
+
+    # It goes on being an orbit branch afterwards, in the new discretization.
+    step = res["stepped"]
+    assert step["mode"] == "collocation" and step["nfloquet"] == 1
+    assert step["mu"] > mu
+    assert complex(*step["floquet"][0]).real == pytest.approx(
+        numpy.exp(-2*step["mu"]*step["T"]), rel=1e-3)
+
+    # ... and the converted point was rewritten on disk, not left holding its old cycle.
+    assert res["reloaded_mode"] == "collocation"
+    assert res["reloaded_nT"] == coll["nT"]
+
+
+@pytest.mark.parametrize("unstable", ["real", "hopf", "stable"])
+@pytest.mark.parametrize("kind", ["pitchfork", "transcritical"])
+def test_branch_switching_at_a_recomputed_real_bifurcation(kind, unstable, tmp_path):
+    """Switching at a pitchfork/transcritical whose classification is recomputed after the fact.
+
+    Two defects met on this path, and both had to go before any of the six combinations worked. The
+    normal form was built from eigenpair 0 of the last eigensolve, which on an already-unstable
+    branch is the mode that went unstable earlier; and that eigensolve was taken at shift 0, which is
+    exactly where a located REAL bifurcation's Jacobian is singular - so the critical eigenvalue came
+    back as +0.36787944, or -1.2e18, or not at all. The "stable" case is the control: it has no
+    unstable mode at all and still failed, on the second defect alone.
+
+    The landings are checked against the closed form: a pitchfork's arms are at x = +-sqrt(mu) and a
+    transcritical's second branch at x = mu.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    worker = os.path.join(here, "secondary_real_bifurcation_worker.py")
+    proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out"), kind, unstable],
+                          cwd=here, capture_output=True, text=True, timeout=900)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    line = [l for l in out.splitlines() if l.startswith("PYOOMPH_REALBIF_RESULT ")]
+    assert line, "worker produced no result:\n" + out[-3000:]
+    res = json.loads(line[-1][len("PYOOMPH_REALBIF_RESULT "):])
+
+    assert res["type_while_tracking"] == kind
+    # The eigensolve at the bifurcation has to RESOLVE the critical mode - at shift 0 it did not.
+    assert abs(res["located_eigenvalue"][0]) < 1e-8, res["fresh_spectrum"]
+    assert abs(res["located_eigenvalue"][1]) < 1e-8, res["fresh_spectrum"]
+    if unstable != "stable":
+        assert any(re > 0.1 for re, _im in res["spectrum"]), "the branch is not unstable here"
+
+    assert res["switched"], res.get("error")
+    assert res["type_after"] == kind, res["type_after"]
+    assert res["new_branches"] == 1
+    mu = res["landed_mu"]
+    expected = numpy.sqrt(mu) if kind == "pitchfork" else mu
+    assert abs(res["landed_x"]) == pytest.approx(expected, rel=1e-6), res
+
+
+def test_a_hopf_on_an_unstable_branch_is_classified_from_its_own_mode(tmp_path):
+    """A secondary bifurcation must be classified from the mode that is critical THERE.
+
+    get_normal_form builds the normal form out of eigenpair `eigenindex` of the last eigensolve, and
+    every caller left that at 0. With a tracker installed that is the tracked pair, so it is right;
+    classifying after the fact solves the whole spectrum, which is sorted by DESCENDING REAL PART -
+    so index 0 is whatever went unstable earlier, which is not bifurcating here at all.
+
+    The system has a Hopf at omega = 1.7 on a branch carrying a constant real unstable eigenvalue at
+    +0.3. Before the fix that Hopf was classified as a "pitchfork" from the +0.3 mode, and switching
+    onto its orbit refused it with "this one is pitchfork"; reloaded, the wrong classification then
+    reported its recovered eigenvector as "not real up to a phase", since it is the Hopf pair.
+    """
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    libdir = _complex_petsc_pythonpath()
+    if libdir is None:
+        pytest.skip("no complex PETSc build found; the Hopf-to-orbit switch needs one (see CLAUDE.md)")
+    worker = os.path.join(here, "secondary_hopf_worker.py")
+    proc = subprocess.run([sys.executable, worker, os.path.join(str(tmp_path), "out")],
+                          cwd=here, capture_output=True, text=True, timeout=900,
+                          env={**os.environ, "PYTHONPATH": libdir})
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, "worker failed:\n" + out[-3000:]
+    line = [l for l in out.splitlines() if l.startswith("PYOOMPH_SECHOPF_RESULT ")]
+    assert line, "worker produced no result:\n" + out[-3000:]
+    res = json.loads(line[-1][len("PYOOMPH_SECHOPF_RESULT "):])
+
+    # The branch really is unstable before the Hopf, or there is no secondary bifurcation to test.
+    assert any(re > 0.1 and abs(im) < 1e-8 for re, im in res["spectrum"]), res["spectrum"]
+    assert res["type_while_tracking"] == "hopf"
+
+    # Not index 0: that is the real +0.3, and the located mode is the pair on the axis.
+    assert res["located_eigenindex"] != 0, res["fresh_spectrum"]
+    assert abs(res["located_eigenvalue"][0]) < 1e-6
+    assert abs(abs(res["located_eigenvalue"][1]) - 1.7) < 1e-6
+
+    # ... so classifying after the fact still says Hopf, and the orbit can be started.
+    assert res["switched"], res.get("error")
+    assert res["type_after"] == "hopf", res["type_after"]
+    assert res["omega_after"] == pytest.approx(1.7, rel=1e-6)
+    assert res["kind"] == "orbit"
+    assert res["T"] == pytest.approx(res["T_exact"], rel=1e-4)
+
+
+def test_going_back_to_an_earlier_orbit_point_keeps_the_continuation_tangent(tmp_path):
+    """Load an earlier point of an orbit branch and step on from it.
+
+    Two things have to hold. A point reached by a step keeps its arclength tangent in the orbit's
+    sidecar - the state dump of an augmented system cannot carry one - and it has to come back
+    exactly, or the branch continues in a direction it was not going. And a point that never had one,
+    the point the Hopf switch created, has to be given one: oomph's FIRST arclength step after a reset
+    increments the parameter by the whole of ds and only then builds the derivatives, so without a
+    tangent the step is a plain parameter jump. Measured before the fix, with ds grown from 0.02 to
+    0.63 over three steps, that jump took mu from 0.02 to 0.647 - exactly ds - straight off a branch
+    whose next point is at 0.064.
+    """
+    res = _run_orbit_worker(tmp_path, "goback")
+    assert res["npoints"] == 4
+
+    # (a) the point with no stored tangent gets one, and the step follows the branch.
+    first = res["first"]
+    assert first["tangent_len"] == first["ndof"], "no tangent at the reloaded first point"
+    assert 0 < first["dparam_ds"] < 0.5, first["dparam_ds"]
+    jumped_by_ds = first["mu_before"] + first["ds_used"]
+    assert abs(first["mu_after"] - jumped_by_ds) > 0.4, \
+        "the step marched the parameter by the whole of ds instead of stepping along the branch"
+    assert first["mu_after"] < 0.2, first["mu_after"]
+
+    # (b) a point that HAS one gets it back unchanged, and reproduces the forward step.
+    r = res["restored"]
+    assert r["same_length"] and r["max_abs_diff"] == 0.0, r
+    assert r["dparam_ds"] == r["dparam_ds_stored"]
+    assert r["theta_sqr"] == r["theta_sqr_stored"]
+    assert r["mu_after"] == pytest.approx(r["mu_forward"], rel=1e-9), r
 
 
 def test_an_orbit_stored_for_another_numbering_is_refused(tmp_path):

@@ -23,7 +23,7 @@
 #
 # ========================================================================
 
-# Outputting a tagged point writes its FIELDS, not just its state dump - and puts everything back.
+# Outputting a tagged point writes its FIELDS plus its state dump - and puts everything back.
 #
 # The redirection is the interesting part. Problem._change_output_directory tells each output where to
 # write by storing the new location RELATIVE to the problem's base directory; _MeshFileOutput was the
@@ -100,6 +100,10 @@ def main():
         print("tag01 dir:",os.path.isdir(odir)," files:",sorted(files)[:6])
         assert files, "the tag directory must contain the problem's output"
         assert any(f.endswith(".png") for f in files), "the plotter's image must land there too: "+str(files)
+        # The fields alone cannot be continued from, so the point's own dump goes in beside them.
+        dump=os.path.join(odir,"state.dump")
+        print("state.dump written:",os.path.isfile(dump) and os.path.getsize(dump)>0)
+        assert os.path.isfile(dump) and os.path.getsize(dump)>0, "the tagged point's state dump is missing"
         print("outdir restored :",problem.get_output_directory()==before_dir)
         print("outstep restored:",problem._output_step==before_step)
         print("point restored  :",c.current_point is before_point)

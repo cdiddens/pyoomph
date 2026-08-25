@@ -222,6 +222,81 @@ So the recorded stability of the last two points decides: where the step just ma
 unstable, take the least unstable of the modes now on the wrong side - its crossing is the one between
 those two points. Where the count did not change, the old rule stands.
 
+## Classifying a bifurcation AFTER the fact
+
+The section above is about which eigenvalue to *track*. This one is about which eigenpair the normal
+form is then built from, which is a different question and was answered wrongly in two ways at once.
+Both only bite when the classification is recomputed with the tracker OFF - a point loaded from a
+diagram, or one that was never classified and is now being switched at. While a tracker is installed
+the last eigensolve holds the tracked pair and nothing else, which is why this went unnoticed.
+
+**The index.** `NormalFormCalculator.get_normal_form(..., eigenindex=0)` reads eigenpair `eigenindex`
+of the last eigensolve, and every caller left it at 0. A plain `solve_eigenproblem` sorts by
+**descending real part**, so on a branch that is already unstable index 0 is whatever went unstable
+earlier - a mode that is not bifurcating here at all. Measured on a Hopf at `omega = 1.7` sitting on a
+branch with a real unstable eigenvalue at `+0.3`: the normal form was built from the `+0.3` mode, came
+back `"pitchfork"`, and `switch_to_orbit` then refused the Hopf with *"Only a Hopf bifurcation sheds a
+periodic orbit; this one is pitchfork"*. Saved and reloaded, that wrong classification reported its
+recovered eigenvector as *"not real up to a phase"* - because the eigenvector belonging to the point
+is the Hopf pair. `BifurcationController._located_eigenindex` answers it instead: the eigenvalue
+matching the one the point recorded (0 or `+-i*omega`, which is what makes it a bifurcation), falling
+back to nearest the axis by real part. Matching the recorded value, rather than taking the nearest to
+the axis, is what keeps a Hopf's `+-i*omega` apart from a real zero at a codim-2 point.
+
+**The shift.** That eigensolve was taken at `controller.shift`, which defaults to 0 - and a located
+REAL bifurcation has an exactly singular Jacobian, so a shift-invert at `sigma = 0` factorises it. The
+critical eigenvalue then came back as `+0.36787944` on one problem, `-1.2e18` on another, and was
+absent from the spectrum on a third. This one is not about unstable branches at all: the plain
+pitchfork on a stable branch failed too, with *"the left eigenvector solve landed on the eigenvalue
+1.3e-23 instead of the requested 0.368"*. `_shift_for_an_eigensolve_at_a_bifurcation` reuses
+`tracked_eigen_shift` (0.1 by default) when `shift` is zero - the same hazard that setting exists for,
+one step later - and leaves a shift the user set deliberately alone.
+
+Both had to go before any of pitchfork/transcritical x {unstable via a real eigenvalue, unstable via a
+Hopf pair, stable} switched at all; `tests/secondary_real_bifurcation_worker.py` runs the six, and
+`tests/secondary_hopf_worker.py` the Hopf-on-an-unstable-branch case. The same "not eigenvector 0" rule
+now also picks the tracker's starting guess in `start_locus` and `_sync_tracking_to`, and the direction
+`leave_locus` steps off with.
+
+## Going back to an earlier point, and the arclength tangent
+
+oomph's **first** arclength step after a reset is not an arclength step: `arc_length_step_solve`
+increments the parameter by the whole of `ds` and only then builds the derivatives from where it
+landed. That is the right thing at the start of a diagram, where `ds` is small and deliberately
+chosen. It is the wrong thing at a point *loaded* later, after `ds` has grown.
+
+A loaded point has no tangent unless one is put back, and on an augmented branch it cannot come out of
+the state dump: `Problem._define_state_file` refuses to write a tangent of the augmented length
+(it is meaningless on the plain system, and writing it made every reload throw "Mismatching size in
+the dof direction vector"). Orbits carry theirs in the sidecar instead and get it back exactly; a
+locus carries none at all; and the first point of an orbit branch - the one `switch_to_orbit` created -
+never had one to store.
+
+So the step from such a point degenerated into a plain parameter jump of the current `ds`. Measured on
+the Hopf normal form, `ds` grown from 0.02 to 0.63 over three steps:
+
+| from | `ds` | stepped to | should be |
+|---|---|---|---|
+| orbit point 0 (reloaded) | 0.627 | mu = 0.647 (= 0.02 + ds) | 0.064 |
+| fold locus point 1 (reloaded) | −2.94 | b = −3.310 (= −0.369 + ds) | −2.759 |
+
+`BifurcationController._ensure_continuation_tangent` fills one in when the solver holds none, and it
+now runs at the TOP of `_update_tangents`, before the early returns for a locus and for an orbit -
+those are about the finite-difference probe for the drawn arrow, and they used to take the arclength
+tangent with them. `_compute_continuation_tangent`'s refusal at a zero real part was relaxed to
+"a bifurcation on an ordinary branch": on a locus every point has one, and the system installed there
+is the augmented tracker, whose Jacobian is regular at the bifurcation - that is what a tracker is for.
+On the fold locus the tangent computed at a reloaded point agrees with the one that was in force to
+every digit (dparameter/ds = 0.8824974819149789 either way).
+
+The refusal at a bifurcation on an ordinary branch stays: the plain Jacobian IS singular there, the
+arrows are emptied on purpose (see above), and `_prime_fold_continuation_tangent` recognises a fold by
+the tangent being absent.
+
+Covered by `tests/test_bifurcation_gui.py::test_going_back_to_an_earlier_orbit_point_keeps_the_continuation_tangent`
+(both halves: the point that never had a tangent, and the one whose sidecar tangent must come back
+byte-identical) and by the locus half of `tests/command_rollback_worker.py`.
+
 ## Leaving a branch transiently
 
 `transient_leave_branch` perturbs along an eigenfunction and integrates until the solution settles
