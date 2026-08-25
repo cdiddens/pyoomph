@@ -75,7 +75,7 @@ We can also generate a movie of the instability. Please refer to :numref:`secplo
 
 	.. raw:: html 
 
-		<figure class="align-center" id="vidrisingbubble"><video autoplay="True" preload="auto" width="60%" loop=""><source src="../../../_static/rising_bubble.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Eigendynamics at <span class="math notranslate nohighlight">\(Bo=4\)</span> </span></p></figcaption></figure>
+		<figure class="align-center" id="vidrisingbubble"><video autoplay="True" muted="" playsinline="" controls="" preload="auto" width="60%" loop=""><source src="../../../_static/rising_bubble.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Eigendynamics at <span class="math notranslate nohighlight">\(Bo=4\)</span> </span></p></figcaption></figure>
 	
 	
 .. only:: html

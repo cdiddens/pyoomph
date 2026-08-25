@@ -23,7 +23,7 @@ Note that spatial adaptivity is driven here by a :py:class:`~pyoomph.equations.g
 
 	.. raw:: html 
 
-		<figure class="align-center" id="vidsimplefsi"><video autoplay="True" preload="auto" width="80%" loop=""><source src="../../_static/simple_fsi.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Fluid-Structure Interaction</span></p></figcaption></figure>
+		<figure class="align-center" id="vidsimplefsi"><video autoplay="True" muted="" playsinline="" controls="" preload="auto" width="80%" loop=""><source src="../../_static/simple_fsi.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Fluid-Structure Interaction</span></p></figcaption></figure>
 	
 	
 .. only:: latex
