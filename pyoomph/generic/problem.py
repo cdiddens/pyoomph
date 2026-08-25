@@ -9802,6 +9802,21 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                 
 
         
+    def backup_state(self, quiet:bool=True)->IO[bytes]:
+        """Write the full state of the problem to a memory buffer, so that it can be restored with load_state. 
+        This is a convenience wrapper around save_state that uses an in-memory stream instead
+        
+        
+        Args:
+            quiet (bool): If True, suppresses output messages during the backup process. Default is True.
+        
+        Returns:
+            IO[bytes]: A binary stream containing the serialized state of the problem.
+        """
+        buf=io.BytesIO()
+        self.save_state(buf,quiet=quiet)
+        buf.seek(0)
+        return buf
 
 
     def save_state(self, fname:str | IO[bytes],relative_to_output:bool=False,quiet:bool=False)->None:

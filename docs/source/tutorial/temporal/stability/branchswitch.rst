@@ -3,14 +3,9 @@
 Branch switching
 ~~~~~~~~~~~~~~~~
 
-Arclength continuation follows one branch of solutions. At a bifurcation, however, a second branch passes through the very same point, and the continuation will happily walk past it without ever noticing that there was a turn-off. Stepping over onto that second branch is called *branch switching* and is done by :py:meth:`~pyoomph.generic.problem.Problem.switch_branch`, which is available directly on the :py:class:`~pyoomph.generic.problem.Problem` level, i.e. without any of the graphical tools.
+Arclength continuation follows one branch of solutions. At a bifurcation, however, another branch passes through the very same point, and the continuation will just walk past it without ever noticing that there was a turn-off. Stepping over onto that second branch is called *branch switching* and is done by :py:meth:`~pyoomph.generic.problem.Problem.switch_branch`.
 
-Not every bifurcation has a second branch, though. At a fold, the single branch merely turns around, and the arclength continuation gets around it by itself - there is nothing to switch to. At a *transcritical* and at a *pitchfork* bifurcation there is, and these are the two cases considered here.
-
-A system with all three
-^^^^^^^^^^^^^^^^^^^^^^^
-
-To see all three in one bifurcation diagram, we use the two-dimensional ODE system
+Not all bifurcations have a second branch, though. At a fold, the single branch merely turns around, and the arclength continuation gets around it by itself. At a *transcritical* and at a *pitchfork* bifurcation, however, there is, so we consider these with a specifically made-up ODE system
 
 .. math:: :label: eqodebranchswitchsys
 
@@ -19,35 +14,15 @@ To see all three in one bifurcation diagram, we use the two-dimensional ODE syst
    \partial_t y&=\left(x-\frac{3}{2}\right)y-y^3
    \end{aligned}
 
-with the single parameter :math:`r`. Its stationary solutions can be written down by hand, which is what makes it a good test case. Since :math:`\partial_t x` does not involve :math:`y` at all, the :math:`x`-equation can be solved on its own: it has the *trivial branch* :math:`x=0` for every :math:`r` and, factoring out :math:`x`, the second branch
+with the single parameter :math:`r`. Its stationary solutions can be written down by hand, which is what makes it a good test case. Since :math:`\partial_t x` does not involve :math:`y` at all, the :math:`x`-equation can be solved on its own. It is easy to see that :math:`x` has the trivial solution :math:`x=0` and a nontrivial one, :math:`x^2-x-r=0`. This gives a transcritical bifurcation at :math:`r=0` and a fold at :math:`r=-1/4`. For the :math:`y`-equation, the parameter :math:`r` does not enter, but :math:`x` does, and it forms a pitchfork normal form, where :math:`x` takes the function of a parameter (shifted  by :math:`x=3/2`), i.e. we expect a pitchfork bifurcation once :math:`x` passes :math:`3/2`.
 
-.. math:: :label: eqodebranchswitchbranch
-
-   r=x^2-x\,,
-
-i.e. a parabola in the :math:`(r,x)`-plane. The two cross at :math:`r=0`, and the parabola turns around at its vertex :math:`x=1/2`, i.e. at :math:`r=-1/4`. On :math:`y=0` the Jacobian of :math:numref:`eqodebranchswitchsys` is triangular, so its eigenvalues are exactly
-
-.. math:: :label: eqodebranchswitcheigen
-
-   \lambda_1=r+2x-3x^2=x(1-2x)\,,\qquad \lambda_2=x-\frac{3}{2}
-
-on the branch :math:numref:`eqodebranchswitchbranch`. The first vanishes at :math:`x=0`, i.e. at the crossing of the two branches, which is hence a **transcritical** bifurcation, and at :math:`x=1/2`, i.e. at the vertex, which is hence a **fold**. The second vanishes at :math:`x=3/2`, i.e. at :math:`r=3/4`. There, the :math:`y`-equation loses the stability of :math:`y=0`, and since it is odd in :math:`y`, i.e. the system is invariant under :math:`y\to-y`, this is a **pitchfork** giving birth to the two branches
-
-.. math:: :label: eqodebranchswitchpf
-
-   y=\pm\sqrt{x-\frac{3}{2}}\,.
-
-Note that both eigenvalues in :math:numref:`eqodebranchswitcheigen` are real for any :math:`r`, so no Hopf bifurcation can occur anywhere in this system.
-
-The implementation is straightforward:
+The numerical implementation is straightforward:
 
 .. literalinclude:: bifurcation_branch_switching.py
    :language: python
    :start-at: class BranchSwitchODE(ODEEquations):
    :end-at: self.add_equations(eqs@"ode")
 
-Walking the diagram
-^^^^^^^^^^^^^^^^^^^
 
 Branch switching requires the analytically derived Hessian, since the normal form of the bifurcation, from which the position of the second branch is predicted, is built from it. It is therefore mandatory to call :py:meth:`~pyoomph.generic.problem.Problem.setup_for_stability_analysis` with ``analytic_hessian=True``. We furthermore let the state files also store the arclength tangent, which we will need further below:
 
@@ -63,15 +38,13 @@ Then, a few helper functions are defined, in particular one that performs arclen
    :start-at: def continue_to_bifurcation(ds
    :end-before: # Start on the trivial branch
 
-The transcritical bifurcation
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-We start on the trivial branch :math:`x=y=0` at :math:`r=-1`, where it is stable, and continue upwards until the sign change announces the bifurcation at :math:`r=0`. The trivial branch does not stop there, though - it merely becomes unstable - and it is usually worth having it in the diagram as well. We therefore scan it out first and only then turn to the bifurcation. To be able to return to it, the state is stored before continuing, which is what ``continuation_data_in_states=True`` above was set for: a reloaded state must also know in which direction along the branch it was travelling, or the resumed continuation picks the wrong one and drops off the branch. The very same pattern will be used at the fold and at the pitchfork below:
+We start on the trivial branch :math:`x=y=0` at :math:`r=-1`, where it is stable, and continue upwards until the sign change announces the bifurcation at :math:`r=0`. The trivial branch does not stop there, though - it merely becomes unstable. For a complete diagram, we therefore scan it out first and only then turn to the bifurcation. To be able to return to it, the state is stored before continuing, which is what ``continuation_data_in_states=True`` above was set for: a reloaded state must also know in which direction along the branch it was travelling, or the resumed continuation picks the wrong one and might drop off the branch. The very same pattern will be used at the fold and at the pitchfork below:
 
 .. literalinclude:: bifurcation_branch_switching.py
    :language: python
    :start-at: # Start on the trivial branch
-   :end-at: problem.load_state(near_transcritical,quiet=True)
+   :end-at: problem.load_state(near_transcritical,quiet=False) # go back to the bifurcation
 
 Back at the bifurcation, we converge exactly onto it with :py:meth:`~pyoomph.generic.problem.Problem.activate_bifurcation_tracking`, as discussed in :numref:`sectemporalbiftrack`. What is new here is :py:meth:`~pyoomph.generic.problem.Problem.classify_bifurcation`, which calculates the normal form of the bifurcation we are sitting on and thereby tells us which kind it is:
 
@@ -89,10 +62,6 @@ It reports ``transcritical``, so there is a second branch, and :py:meth:`~pyoomp
 
 The ``direction`` argument selects which of the two sides of the bifurcation is taken, here the one towards decreasing :math:`r`. The returned step size is deliberately small: right next to a bifurcation the branch is still badly conditioned, and :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation` will grow it again by itself. The bifurcation point itself is written to the output file before switching, so that the new branch is connected to it when it is plotted.
 
-Note that :py:meth:`~pyoomph.generic.problem.Problem.switch_branch` does *not* seed the arclength state of oomph-lib with the tangent of the new branch. Instead, it predicts a point a short distance away from the bifurcation from the normal form and performs an ordinary stationary Newton solve there. A short way off the bifurcation, the Jacobian is regular again, so this solve converges, and it is the prediction which decides on which of the two branches it lands.
-
-The fold
-^^^^^^^^
 
 The next sign change along the new branch is the fold at :math:`r=-1/4`. Before converging onto it, we store the current state again, so that the continuation can be resumed exactly here afterwards:
 
@@ -108,8 +77,6 @@ This time, :py:meth:`~pyoomph.generic.problem.Problem.classify_bifurcation` repo
    :start-at: # Back to just past the fold
    :end-at: ds=continue_to_bifurcation(ds)
 
-The pitchfork
-^^^^^^^^^^^^^
 
 Beyond the fold, the branch runs upwards in :math:`x` again and the next sign change is the pitchfork at :math:`r=3/4`, :math:`x=3/2`. As on the trivial branch, we first scan out the part of :math:`y=0` beyond it, which has just become unstable, and then come back:
 
@@ -144,7 +111,7 @@ The printed values agree with :math:numref:`eqodebranchswitchpf` to all digits s
 	:class: with-shadow
 	:width: 100%
 
-	Bifurcation diagram of :math:numref:`eqodebranchswitchsys`, obtained by branch switching. Solid lines are stable, dashed lines unstable. Since :math:`x` does not depend on :math:`y`, the two branches emanating from the pitchfork coincide with the second branch in the left plot.
+	Bifurcation diagram of :math:numref:`eqodebranchswitchsys`, obtained by branch switching. Solid lines are stable, dashed lines unstable. Since :math:`x` does not depend on :math:`y`, the two branches emerging from the pitchfork coincide with the second branch in the left plot.
 
 The very same three methods, :py:meth:`~pyoomph.generic.problem.Problem.classify_bifurcation`, :py:meth:`~pyoomph.generic.problem.Problem.switch_branch` and the state files that let one revisit a bifurcation, also work for spatio-temporal problems, where the branches are not known beforehand and the diagram must be explored step by step.
 
