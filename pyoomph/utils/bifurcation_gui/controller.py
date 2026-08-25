@@ -4468,14 +4468,21 @@ class BifurcationController:
         self._last_ds=(-1 if self._last_ds<0 else 1)*min(abs(self._last_ds),abs(ds_backup))
 
     def _mode_of_eigenvalue(self,index:int)->"tuple[str,float]":
-        """(kind, mode) of one eigenvalue of the spectrum the problem still holds; mode 0 for the base."""
+        """(kind, mode) of one eigenvalue of the spectrum the problem still holds; mode 0 for the base.
+
+        Through _last_solved_modes, so the array has to be as long as the spectrum it is read against:
+        this decides which TRACKER locate_bifurcation installs, and an array of the wrong length would
+        answer with a mode belonging to some earlier solve - an azimuthal tracker for what is a
+        base-state fold.
+        """
         kind=self.normal_mode_kind()
         if not kind:
             return "",0.0
-        raw=self.problem.get_last_eigenmodes_m() if kind=="m" else self.problem.get_last_eigenmodes_k()
-        if raw is None or index>=len(raw):
+        evs=self.problem.get_last_eigenvalues()
+        modes=self._last_solved_modes(0 if evs is None else len(evs))
+        if modes is None or index>=len(modes):
             return kind,0.0
-        return kind,float(raw[index])
+        return kind,float(modes[index])
 
     def normal_mode_kind(self)->str:
         """"m" for azimuthal, "k" for a Cartesian normal mode, "" when the problem has neither.

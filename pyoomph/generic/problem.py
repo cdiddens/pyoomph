@@ -5961,6 +5961,18 @@ class Problem(_pyoomph.Problem):
             self._last_eigenvalues=self._last_eigenvalues[filtered_indices]
             self._last_eigenvectors=self._last_eigenvectors[filtered_indices]        
 
+        # This is the BASE mode (or, while a normal-mode tracker is installed, the tracked one - see
+        # the docstring), and either way the per-eigenvalue mode arrays of whatever ran before belong
+        # to eigenvalues that are no longer here. They are read POSITIONALLY, so leaving them in place
+        # labelled these ones with somebody else's modes: after solve_eigenproblem(3, azimuthal_m=5),
+        # a plain solve_eigenproblem(3) reported its base-state eigenvalues as m=5 and
+        # _critical_normal_mode() answered ("m", 5) for them; with a matching length (a scan of 2
+        # modes, then a plain solve of twice the count) the bifurcation GUI showed half of a
+        # base-state spectrum under m=5. The mode-scan branch below fills them in again for its own
+        # spectrum, and solve()/arclength_continuation() already clear them for the same reason.
+        self._last_eigenvalues_m=None
+        self._last_eigenvalues_k=None
+
         #self._last_eigenvectors=numpy.transpose(self._last_eigenvectors)
         if (not self.is_quiet()) and (not quiet) :
             if report_accuracy:
