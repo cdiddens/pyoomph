@@ -71,11 +71,26 @@ PeriodicBSplineBasis::PeriodicBSplineBasis(const std::vector<double> &knots, uns
 		if (knots.size() < 4)
 		{
 				throw_runtime_error("Not enough knots. Need at least 4");
-		}    
+		}
 		if (knots.size() < 2*k)
 		{
 				throw_runtime_error("Not enough knots for the order of the B-spline");
-		}    
+		}
+		// The augmentation below reads knots[knots.size()-i-2] and knots[i+1] for i up to k+2, i.e.
+		// k+3 knots from each side. knots.size()>=max(4,2k) alone does NOT cover that (order 1 with
+		// 3 knots, order 2 with 3 or 4, order 3 with 5 all read out of bounds), which was plain
+		// undefined behaviour rather than an error.
+		if (knots.size() < k+4)
+		{
+				throw_runtime_error("Not enough knots for the order of the B-spline: the periodic augmentation reads "+std::to_string(k+3)+" knots from each end, so at least "+std::to_string(k+4)+" knots are required for order "+std::to_string(k)+", but only "+std::to_string(knots.size())+" were given");
+		}
+		// The periodic wrap in get_shape/get_dshape indexes augknots at knots.size()+zero_offset+i-1
+		// with zero_offset=(k-1)/2+3, which runs past the end of augknots from order 8 on. Orders up
+		// to 7 are verified exact by sanity_check(); beyond that the recursion would read garbage.
+		if (k > 7)
+		{
+				throw_runtime_error("B-spline order "+std::to_string(k)+" is not supported: the periodic wrap recursion overruns the augmented knot vector beyond order 7");
+		}
 
 		zero_offset=(k-1)/2+3;
 		for (int i = 0; i < (int)k+3; i++)
@@ -122,6 +137,7 @@ PeriodicBSplineBasis::PeriodicBSplineBasis(const std::vector<double> &knots, uns
 		shape_values.resize(knots.size()-1);
 		dshape_values.resize(knots.size()-1);
 		gl_weights.resize(knots.size()-1);
+		gl_positions.resize(knots.size()-1);
 		for (unsigned i=0;i<knots.size()-1;i++) // Element loop
 		{
 				shape_indices[i].resize(k+1);
@@ -139,10 +155,12 @@ PeriodicBSplineBasis::PeriodicBSplineBasis(const std::vector<double> &knots, uns
 				shape_values[i].resize(GL_x[gl_order].size());
 				dshape_values[i].resize(GL_x[gl_order].size());
 				gl_weights[i].resize(GL_x[gl_order].size());
+				gl_positions[i].resize(GL_x[gl_order].size());
 				//std::cout << "INTEGRATING OVER " << augknots[start] << " to " << augknots[start+1] << std::endl;
 				for (size_t j = 0; j < GL_x[gl_order].size(); j++)
 				{
 						double x=0.5*(augknots[start]+augknots[start+1])+0.5*(augknots[start+1]-augknots[start])*GL_x[gl_order][j];
+						gl_positions[i][j]=x; // kept so that callers can integrate f(s) itself, not just the shape functions
 						gl_weights[i][j]=GL_w[gl_order][j]*0.5*(augknots[start+1]-augknots[start]);
 						shape_values[i][j].resize(k+1);
 						dshape_values[i][j].resize(k+1);

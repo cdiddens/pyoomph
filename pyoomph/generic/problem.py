@@ -249,11 +249,17 @@ class PeriodicOrbit:
             self.problem.time_pt().set_dt(i,dt)            
             self.problem.set_history_dofs(i,h)
         self.problem.time_stepper_pt().set_weights()
-        self.problem.shift_time_values()
-        self.problem.shift_time_values()
-        self.problem.shift_time_values()
+        # No shift_time_values() here. The history above is already in shift-before-solve form
+        # ([u(0), u(-dt), u(-2dt)]), which the shift the next solve does itself turns into
+        # levels 1=u(0), 2=u(-dt). Shifting three times here collapsed the value history to
+        # [u0,u0,u0] and refilled the Newmark velocity/acceleration slots from that, so the first
+        # step of the continuation was an impulsive restart -- exactly what sampling the orbit
+        # history was meant to avoid.
         self.problem.time_stepper_pt().undo_make_steady()
         self.problem._taken_already_an_unsteady_step=True
+        # ...and a nonzero counter, or the very first step is degraded to BDF1 (see
+        # elements_shapeinfo.cpp), which throws away the second-order history just written.
+        self.problem.timestepper.set_num_unsteady_steps_done(2)
         self.problem._last_step_was_stationary=False
         self.problem.actions_before_transient_solve()
         
@@ -391,12 +397,16 @@ class PeriodicOrbit:
         if NT is None:
             NT=self.get_num_time_steps()
         history_dofs=[]
-        for T in self.iterate_over_samples(N=NT):
+        # endpoint=False: the orbit is periodic, so s=1 is s=0 again. Sampling with the endpoint
+        # included and then popping the last entry as the current dofs handed u(0) in TWICE (once as
+        # x0 and once as the first extra time point) and dropped u((NT-1)/NT) entirely, which
+        # phase-lagged every knot of the new discretization against the state it holds.
+        for T in self.iterate_over_samples(N=NT,endpoint=False):
             history_dofs.append(self._current_base_dofs())
         T=self.get_T()
         self.problem.deactivate_bifurcation_tracking()
-        self.problem.set_current_dofs(history_dofs.pop())
-        self.problem.activate_periodic_orbit_handler(T,history_dofs,mode=mode,T_constraint=T_constraint,order=order,GL_order=GL_order)
+        self.problem.set_current_dofs(history_dofs[0])
+        self.problem.activate_periodic_orbit_handler(T,history_dofs[1:],mode=mode,T_constraint=T_constraint,order=order,GL_order=GL_order)
         self.mode=mode
         self.order=order
         self.GL_order=GL_order
@@ -7646,6 +7656,14 @@ class Problem(_pyoomph.Problem):
         elif mode=="bspline":
             if order<1:
                 raise ValueError("Invalid bspline order: "+str(order))
+            # Mirror PeriodicBSplineBasis's own requirements here, so that a too-coarse orbit is a
+            # ValueError mentioning the number of time steps rather than a C++ throw about knots.
+            if order>7:
+                raise ValueError("Invalid bspline order: "+str(order)+". At most 7 is supported, since the periodic wrap of the B-spline recursion overruns the augmented knot vector beyond that")
+            nknots=len(history_dofs)+2 # what the handler builds for a non-floquet mode
+            min_knots=max(4,2*order,order+4) # >=order+4 because the periodic augmentation reads order+3 knots from each end
+            if nknots<min_knots:
+                raise ValueError("Too few time steps for a bspline orbit of order "+str(order)+": "+str(len(history_dofs)+1)+" time steps give "+str(nknots)+" knots, but at least "+str(min_knots)+" are needed (i.e. at least "+str(min_knots-1)+" time steps)")
             self._start_orbit_tracking(history_dofs,T_nd,order,GL_order,knots,T_constraint_mode)
         elif mode=="central":
             self._start_orbit_tracking(history_dofs,T_nd,-1,-1,knots,T_constraint_mode)
@@ -7728,13 +7746,26 @@ class Problem(_pyoomph.Problem):
             sign=1 if dparam>0 else -1
             al=orbit_amplitude
             qR,qI=numpy.real(q),numpy.imag(q)
+            # Normalized to unit length, exactly as get_hopf_lyapunov_coefficient() does in the other
+            # branch; otherwise "orbit_amplitude" is measured in whatever norm the Hopf tracker's
+            # eigenfunction happened to come out with, and means something different in each branch.
+            qnorm=numpy.sqrt(numpy.dot(qR,qR)+numpy.dot(qI,qI))
+            if qnorm<=0:
+                raise ValueError("The Hopf eigenfunction is zero; cannot build an orbit guess from it")
+            qR,qI=qR/qnorm,qI/qnorm
             lyap_coeff=0
+            # eps is documented as ignored here (the docstring says so twice), but it still scaled
+            # the guess: with its default 0.01 a requested orbit_amplitude came out at 2% of itself.
+            amplitude=2*orbit_amplitude*amplitude_factor
+            param_step=dparam
         else:
             lyap_coeff,sign,al,qR,qI=get_hopf_lyapunov_coefficient(self,param,omega=omega,q=q,FD_delta=FD_delta,FD_param_delta=FD_param_delta)
             print("AL",al,"QR MAGNITUDE",numpy.linalg.norm(qR+1j*qI))
             if dparam:
-                eps=numpy.sqrt(abs(dparam))        
+                eps=numpy.sqrt(abs(dparam))
             parameter.value+=-eps**2*sign
+            amplitude=2*eps*al*amplitude_factor
+            param_step=-eps**2*sign
         u0=self.get_current_dofs()[0]
         
         if patch_number_of_nodes and mode=="collocation":            
@@ -7746,9 +7777,9 @@ class Problem(_pyoomph.Problem):
             
         
         T=2*numpy.pi/omega*self.get_scaling("temporal")
-        upert=lambda t: u0+2*eps*al*amplitude_factor*numpy.real(numpy.exp(1j*omega*t)*(qR+1j*qI))
-        print("Amplitude perturbation factor:",2*eps*al*amplitude_factor)
-        print("Parameter step",-eps**2*sign)
+        upert=lambda t: u0+amplitude*numpy.real(numpy.exp(1j*omega*t)*(qR+1j*qI))
+        print("Amplitude perturbation factor:",amplitude)
+        print("Parameter step",param_step)
         history_dofs=[]
         for t in numpy.linspace(0,2*numpy.pi/omega,NT,endpoint=False):
             history_dofs.append(upert(t))        
@@ -7853,18 +7884,32 @@ class Problem(_pyoomph.Problem):
         if n is None:
             n=nbase
 
+        # This formulation slices "the last row/column" as the T equation and puts the identity mass
+        # block on the last nbase rows, i.e. it assumes the naive time-major [u_0|...|u_{nT-1}|T]
+        # ordering. Under --distribute the gathered augmented matrix is interleaved per rank instead
+        # (see _to_time_major() in floquet.py), so every block sliced here would be the wrong one --
+        # and it would return plausible-looking multipliers rather than fail.
+        if len(orbit_handler.get_naive_equation_order()):
+            raise NotImplementedError("method='eigenproblem' does not support a distributed problem: the gathered augmented matrix is rank-interleaved, not time-major. Use the default method='condensed' (or 'periodic_schur'), which reorders it.")
+
         Jfull=self.assemble_jacobian(with_residual=False)
         nMat=Jfull.shape[0]-1
-        Jfull=Jfull[:nMat,:nMat] # Remove the T equation        
+        Jfull=Jfull[:nMat,:nMat] # Remove the T equation
         Mdiag=numpy.zeros(nMat)
-        Mdiag[nMat-nbase:]=1.0 
-        Mfull=scipy.sparse.csr_matrix(scipy.sparse.diags_array(Mdiag).tocsr()) # Make the mass matrix         
+        Mdiag[nMat-nbase:]=1.0
+        Mfull=scipy.sparse.csr_matrix(scipy.sparse.diags_array(Mdiag).tocsr()) # Make the mass matrix
         eigs,eigv,_,_=self.get_eigen_solver().solve(neval=n,custom_J_and_M=(Jfull,Mfull),shift=shift,quiet=quiet) # Solve the eigenproblem
-        valid_eigs=numpy.array([e for e in eigs if numpy.isfinite(e) and not numpy.isnan(e)])
+        # The non-finite filter must be applied to the eigenVECTORS as well. It used to compact only
+        # the eigenvalues, after which the valid_threshold indices - which index the compacted array -
+        # were used to slice the uncompacted eigv, pairing every multiplier with the wrong vector as
+        # soon as the solver returned a single inf/nan.
+        finite_inds=numpy.argwhere(numpy.isfinite(eigs)).flatten()
+        valid_eigs=numpy.asarray(eigs)[finite_inds]
+        eigv=eigv[finite_inds,:]
         if valid_threshold is not None:
-            valid_inds=numpy.argwhere(numpy.abs(valid_eigs)<valid_threshold).flatten()            
+            valid_inds=numpy.argwhere(numpy.abs(valid_eigs)<valid_threshold).flatten()
             eigv=eigv[valid_inds,:]
-            valid_eigs=valid_eigs[valid_inds]        
+            valid_eigs=valid_eigs[valid_inds]
         gamms:NPComplexArray=1/(1-valid_eigs) #type:ignore
 
         # BEFORE the unity filter: the even-interval half of this looks at the +1 multipliers, which

@@ -785,7 +785,8 @@ namespace pyoomph
     oomph::DoubleVectorWithHaloEntries n0;  // Start normal for the periodic orbit
     double d_plane;                         // Plane offset for the Poincare section
     double T;                               // Period of the periodic orbit
-    unsigned T_global_eqn, n_element;
+    unsigned T_global_eqn;                  // Equation number of the period T in the naive [u_0|...|T] ordering
+    unsigned n_element;                     // Non-halo element count, summed over all ranks; the constant of the plane constraint is divided by it, since every element adds into the same shared T row
     oomph::DoubleVectorWithHaloEntries Count;
     PeriodicBSplineBasis *basis = NULL;     // If nonzero, we use a B-spline basis, otherwise BDF2, central FD between the nodes or
     bool floquet_mode;                      // if this is true (and basis==NULL), we use the Floquet mode, where we explictly have dofs for the periodic time point at s=1

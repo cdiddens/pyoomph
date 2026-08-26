@@ -4310,8 +4310,12 @@ namespace pyoomph
     }
     else
     {
-      if (knots.size()!=Tadd.size()+2) throw_runtime_error("The number of knots must be the same as the number of time steps");
-      if (std::fabs(knots.front())>1e-10 || std::fabs(knots.back())-1>1e-10) throw_runtime_error("The first and last knot must be 0 and 1");
+      // Tadd has already been extended by the floquet slot above, so the expected count must follow
+      // the same mode split as the automatic branch (+1 in floquet mode, +2 otherwise); the check
+      // used to demand +2 in both and thus rejected every valid floquet-mode knot vector.
+      const unsigned expected_nknots=Tadd.size()+(floquet_mode ? 1 : 2);
+      if (knots.size()!=expected_nknots) throw_runtime_error("The number of knots must be "+std::to_string(expected_nknots)+" for this number of time steps, but "+std::to_string(knots.size())+" were given");
+      if (std::fabs(knots.front())>1e-10 || std::fabs(knots.back()-1.0)>1e-10) throw_runtime_error("The first and last knot must be 0 and 1");
     }
     if (bspline_order>=1)
     {
@@ -5045,7 +5049,11 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       if (!parameter_pt && T_constraint_mode==0)
       {
-        double plane_eq=-d_plane;
+        // The constant is split over the elements: every element adds its share to the SAME
+        // shared T row and oomph sums the element contributions, so an undivided -d_plane
+        // assembles the plane constraint as n0.x - n_element*d_plane instead of n0.x - d_plane.
+        // The sibling handlers divide their normalization constant by Nelement for the same reason.
+        double plane_eq=-d_plane/(double)n_element;
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=elem_pt->eqn_number(i);
@@ -5140,7 +5148,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       if (!parameter_pt && T_constraint_mode==0)
         {
-          double plane_eq=-d_plane;
+          // Split over the elements, see get_residuals_collocation_mode().
+          double plane_eq=-d_plane/(double)n_element;
           for (unsigned int i=0;i<raw_ndof;i++)
           {
             unsigned glob_eq=elem_pt->eqn_number(i);
@@ -5275,7 +5284,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       if (T_constraint_mode==0)
       {
-        double plane_eq=-d_plane;
+        // Split over the elements, see get_residuals_collocation_mode().
+        double plane_eq=-d_plane/(double)n_element;
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=glob_eqs[i];
@@ -5381,7 +5391,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       if (!parameter_pt && T_constraint_mode==0)
       {
-        double plane_eq=-d_plane;
+        // Split over the elements, see get_residuals_collocation_mode().
+        double plane_eq=-d_plane/(double)n_element;
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=elem_pt->eqn_number(i);
@@ -5506,7 +5517,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
       }
       if (!parameter_pt && T_constraint_mode==0)
       {
-        double plane_eq=-d_plane;
+        // Split over the elements, see get_residuals_collocation_mode().
+        double plane_eq=-d_plane/(double)n_element;
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=elem_pt->eqn_number(i);
@@ -5908,12 +5920,17 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
                   unsigned index2=dynamic_cast<TimeNode*>(el->node_pt(nn2))->get_index();
                   for (unsigned j=0;j<raw_ndof;j++)
                   {
-                    jacobian(index*raw_ndof + i,index2*raw_ndof+j) += J(i,j)*psi[nn2]*w;              
-                    jacobian(index*raw_ndof+i,index2*raw_ndof+j)+=M(i,j)/T*dpsi(nn2,0)*w;                  
+                    jacobian(index*raw_ndof + i,index2*raw_ndof+j) += J(i,j)*psi[nn2]*w;
+                    jacobian(index*raw_ndof+i,index2*raw_ndof+j)+=M(i,j)/T*dpsi(nn2,0)*w;
                     if (!has_constant_mass_matrix)
                     {
-                      jacobian(index*raw_ndof+i,index2*raw_ndof+j)+=dMdU_dUdsterm(i,j)/T*dpsi(nn2,0)*w;
-                    }        
+                      // psi, not dpsi: this is the (dM/dU . dUds) * dU/du_{nn2} half of d/du of
+                      // (M(U).dUds)/T, and U is interpolated with psi (the M . d(dUds)/du half is
+                      // the dpsi term above). It read dpsi here, which made the state-dependent
+                      // mass-matrix Jacobian inconsistent with the residual; the bspline and
+                      // time-nodal modes always weighted it with psi.
+                      jacobian(index*raw_ndof+i,index2*raw_ndof+j)+=dMdU_dUdsterm(i,j)/T*psi[nn2]*w;
+                    }
                   }                  
                 }
                 
@@ -5960,7 +5977,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       if (T_constraint_mode==0)
       {
-        double plane_eq=-d_plane;
+        // Split over the elements, see get_residuals_collocation_mode().
+        double plane_eq=-d_plane/(double)n_element;
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=elem_pt->eqn_number(i);
@@ -6150,7 +6168,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       if (this->T_constraint_mode==0)
       {
-        double plane_eq=-d_plane;
+        // Split over the elements, see get_residuals_collocation_mode().
+        double plane_eq=-d_plane/(double)n_element;
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=glob_eqs[i];
@@ -6429,7 +6448,8 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
 
       if (T_constraint_mode==0)
       {
-        double plane_eq=-d_plane;
+        // Split over the elements, see get_residuals_collocation_mode().
+        double plane_eq=-d_plane/(double)n_element;
         for (unsigned int i=0;i<raw_ndof;i++)
         {
           unsigned glob_eq=glob_eqs[i];
@@ -6753,13 +6773,16 @@ void PeriodicOrbitHandler::get_residuals_collocation_mode(oomph::GeneralisedElem
         std::vector<std::vector<double>> psi_s;
         std::vector<std::vector<double>> dpsi_ds;
         unsigned nGL=this->basis->get_integration_info(ie,w,indices,psi_s,dpsi_ds);
+        // The element's own Gauss-Legendre abscissae, wrapped into [0,1). Interpolating s as
+        // sum_l psi_l*s_knots[indices[l]] instead (what this did) is wrong on the elements that
+        // straddle the seam: `indices` are the PERIODICALLY WRAPPED basis indices, so the knot
+        // values being blended jump by a period there and the sample lands up to half a period
+        // away from the point the weight belongs to.
+        const std::vector<double> &xGL=this->basis->get_gl_positions(ie);
         for (unsigned int iGL=0;iGL<nGL;iGL++)
         {
-          double s=0;
-          for (unsigned int is=0;is<indices.size();is++)
-          {
-            s+=psi_s[iGL][is]*s_knots[indices[is]];
-          }
+          double s=xGL[iGL];
+          s-=std::floor(s);
           samples.push_back(std::make_tuple(s,w[iGL]));
         }
       }    
