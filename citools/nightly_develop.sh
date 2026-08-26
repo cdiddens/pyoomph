@@ -1149,7 +1149,7 @@ if [ "$VERDICT" = "PASS" ]; then
     if [ -z "$DOCS_SKIPPED" ]; then
         say "Documentation: built from docs/requirements.txt in a clean virtualenv, no new warnings."
     fi
-    say "(preCICE runs still need a manual check.)"
+    say "(preCICE runs and the interactive GUI tutorial scripts still need a manual check.)"
 else
     if [ "$BUILD_RC" -ne 0 ]; then
         say ""

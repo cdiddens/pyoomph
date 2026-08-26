@@ -152,6 +152,7 @@ class LubricationProblem(Problem):
         self.plotter=LubricationPlotter(self)
 
 
+
 if __name__=="__main__":
     # Create the problem
     problem=LubricationProblem()
