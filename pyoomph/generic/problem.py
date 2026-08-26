@@ -6199,6 +6199,30 @@ class Problem(_pyoomph.Problem):
         volume=float(M.sum())
         if not (volume>0):
             return float("nan"),len(v)
+        handler=self.assembly_handler_pt()
+        if isinstance(handler,_pyoomph.PeriodicOrbitHandler):
+            # A periodic orbit's unknown is a whole cycle: nT copies of the base dofs, then the period.
+            # Its natural norm is the base one AVERAGED OVER THE CYCLE - which is what makes ds on an
+            # orbit branch buy the same physical step as ds on the stationary branch it came off.
+            # Taking the augmented vector as one long dof list instead (which is what leaving theta^2
+            # at 1 does) charges the sum over all nT blocks, so dparam/ds falls off as 1/sqrt(nT*Ndof):
+            # measured on the Hopf normal form, 0.164 at nT=12, 0.107 at nT=30, 0.0766 at nT=60, i.e.
+            # exactly the ratio of the square roots. Doubling the time resolution then halved the
+            # parameter movement per step for the same ds and the same orbit.
+            #
+            # ONE assembly of M for every block. On a nonlinear mass matrix that is the base state's,
+            # not each phase's; a metric is a weighting rather than a measurement, and paying nT
+            # assemblies per step to refine it would cost more than the whole step.
+            #
+            # The blocks are the leading nT*n entries, in that order: PeriodicOrbitHandler numbers
+            # time-major and get_naive_equation_order() is a permutation only when DISTRIBUTED, which
+            # the caller refuses outright.
+            nT=int(handler.get_num_time_steps())
+            m=nT*n
+            if nT<1 or len(v)!=m+1:
+                return float("nan"),len(v)
+            blocks=numpy.asarray(v[:m],dtype=float).reshape(nT,n).T   # (n, nT), one column per time
+            return float(numpy.einsum("ij,ij->",blocks,M.dot(blocks)))/(nT*volume),m
         if len(v)<n:
             return float("nan"),len(v)   # fewer dofs than mass-matrix rows: nothing sensible to form
         vb=v[:n] if len(v)>n else v
@@ -6222,10 +6246,17 @@ class Problem(_pyoomph.Problem):
             return 1.0   # bifurcation tracking: the dof vector is the augmented one, M would not match
         # A periodic orbit is augmented too, but does not say so through the count above:
         # start_orbit_tracking() only swaps the assembly handler and never runs the augmentation
-        # bookkeeping, so n_unaugmented_dofs stays 0. Without this the mass matrix would be assembled
-        # on the nT*Ndof+1 orbit distribution - the very thing solve_eigenproblem refuses there - and
-        # any arclength continuation of an orbit with an inner product set would die on the first step.
-        if isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler):
+        # bookkeeping, so n_unaugmented_dofs stays 0. It used to be refused here, on the grounds that
+        # the mass matrix would be assembled on the nT*Ndof+1 orbit distribution - which is not what
+        # happens: assemble_eigenproblem_matrices restricts to the BASE rows under the orbit handler
+        # exactly as it does under a bifurcation tracker (measured: n = 2 on a two-dof ODE with nT = 31
+        # installed). What the refusal cost was theta^2 = 1 on every orbit, i.e. oomph's raw dof sum
+        # over the whole cycle - see the orbit branch of _arclength_weighted_square_norm.
+        #
+        # A CALLABLE weighting is still refused: it was written against the base dof vector and handing
+        # it an augmented one would quietly weight something else.
+        if (isinstance(self.assembly_handler_pt(),_pyoomph.PeriodicOrbitHandler)
+                and callable(self._arclength_inner_product)):
             return 1.0
         v=self.get_arclength_dof_derivative_vector()
         current=self.get_arclength_dof_current_vector()

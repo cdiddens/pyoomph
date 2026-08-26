@@ -319,9 +319,14 @@ def run_go_back(args):
         res["npoints"] = len(b)
         res["ds_after_three_steps"] = float(c._last_ds)
         res["mu"] = [float(p.param_value) for p in b]
+        # By reference, not by index: each reload below is followed by a step, and a step that lands
+        # BETWEEN two existing points is inserted between them - so b[1] afterwards is not the point
+        # b[1] was. (Which is how this test first passed for the wrong reason: before the arclength
+        # metric applied to orbits, that step landed far past the end of the branch and was appended.)
+        original = list(b)
 
         # (a) the FIRST point of the branch - the one the switch made, which never had a tangent.
-        c.load_pt(b[0])
+        c.load_pt(original[0])
         d, dp, th, _ds = arclength()
         res["first"] = {"tangent_len": len(d), "ndof": int(problem.ndof()),
                         "dparam_ds": dp, "mu_before": float(problem.mu.value)}
@@ -333,8 +338,8 @@ def run_go_back(args):
         # that was in force must land where the forward sweep landed.
         k = 1
         d0, dp0, th0, ds0 = recorded[k]
-        mu_forward = float(b[k+1].param_value)
-        c.load_pt(b[k])
+        mu_forward = float(original[k+1].param_value)
+        c.load_pt(original[k])
         d, dp, th, _ds = arclength()
         res["restored"] = {
             "tangent_len": len(d), "same_length": len(d) == len(d0),
@@ -345,6 +350,40 @@ def run_go_back(args):
         c.step()
         res["restored"]["mu_after"] = float(problem.mu.value)
         res["restored"]["mu_forward"] = mu_forward
+        return res
+
+
+def run_arclength_metric(args):
+    """What one arclength step buys on an orbit must not depend on how finely time is resolved.
+
+    The arclength constraint is (dparameter/ds)^2 + theta^2*|dU/ds|^2 = 1, and on an orbit dU is the
+    WHOLE CYCLE - nT copies of the base dofs. Left at theta^2 = 1 that charges the sum over all of
+    them, so dparameter/ds falls off as 1/sqrt(nT*Ndof) and the parameter creeps: measured before the
+    fix, 0.164 at nT=12, 0.107 at nT=30, 0.0766 at nT=60, exactly the ratio of the square roots.
+    Doubling the time resolution halved the parameter movement per step, for the same ds and the same
+    orbit. (The FIRST step after switching hid it: oomph's first step is a plain parameter increment
+    of ds, which is why it always looked fine and every one after it did not.)
+
+    The mass-matrix metric now applies to an orbit as the base norm AVERAGED over the cycle, so this
+    reports the same numbers whatever --NT is.
+    """
+    problem, gui, c = build(args)
+    with problem:
+        res = {"phase": "metric", "NT": int(args.NT)}
+        c.start(0.02)
+        c.locate_bifurcation()
+        assert c.branch_switch(), "the branch switch at the Hopf did not take"
+        res["nT"] = int(c._orbit_handler().get_num_time_steps())
+        res["ndof"] = int(problem.ndof())
+        steps = []
+        for _ in range(4):
+            before = float(problem.mu.value)
+            c.step()
+            steps.append({"dmu": float(problem.mu.value) - before,
+                          "dparam_ds": float(problem.get_arc_length_parameter_derivative()),
+                          "theta_sqr": float(problem.get_arc_length_theta_sqr()),
+                          "T": float(c.orbit_period())})
+        res["steps"] = steps
         return res
 
 
@@ -390,7 +429,8 @@ def run_no_hessian(args):
 
 PHASES = {"switch": run_switch, "reload": run_reload, "fingerprint": run_bad_fingerprint,
           "nohessian": run_no_hessian, "nearhopf": run_near_hopf,
-          "rediscretize": run_rediscretize, "goback": run_go_back}
+          "rediscretize": run_rediscretize, "goback": run_go_back,
+          "metric": run_arclength_metric}
 
 
 def main():

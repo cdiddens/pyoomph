@@ -3066,6 +3066,41 @@ def test_a_hopf_on_an_unstable_branch_is_classified_from_its_own_mode(tmp_path):
     assert res["T"] == pytest.approx(res["T_exact"], rel=1e-4)
 
 
+def test_an_orbit_step_does_not_depend_on_the_time_resolution(tmp_path):
+    """One arclength step on an orbit must buy the same physical step whatever nT is.
+
+    The constraint is (dparameter/ds)^2 + theta^2*|dU/ds|^2 = 1, and on an orbit dU is the whole cycle
+    - nT copies of the base dofs. theta^2 was left at 1 there (the mass-matrix metric refused to apply
+    to an orbit), so the sum ran over all nT blocks and dparameter/ds fell off as 1/sqrt(nT*Ndof):
+    0.164 at nT=12, 0.107 at nT=30, 0.0766 at nT=60 - the ratio of the square roots. Doubling the time
+    resolution halved the parameter movement per step for the same ds and the same orbit, and the
+    first step after switching hid it, being a plain parameter increment of ds.
+
+    Same orbit at three resolutions, so the steps can be compared directly.
+    """
+    runs = {nt: _run_orbit_worker(tmp_path, "metric", ["--NT", str(nt)],
+                                  outdir=os.path.join(str(tmp_path), "metric{:d}".format(nt)))
+            for nt in (12, 30, 60)}
+    for nt, res in runs.items():
+        assert res["nT"] >= nt, res
+        # The first step is oomph's own: a plain parameter increment of ds, before any tangent exists.
+        assert res["steps"][0]["dmu"] == pytest.approx(0.02, rel=1e-9)
+        # From the second on, theta^2 is the metric's - inversely proportional to the augmented size.
+        assert res["steps"][1]["theta_sqr"] == pytest.approx(1.0/res["ndof"], rel=0.2), res
+        # ... and the parameter takes a real share of the step rather than a vanishing one.
+        assert res["steps"][-1]["dparam_ds"] > 0.5, res
+
+    fine, coarse = runs[60], runs[30]
+    for i in range(1, 4):
+        assert fine["steps"][i]["dmu"] == pytest.approx(coarse["steps"][i]["dmu"], rel=1e-4), \
+            "step {:d} differs between nT={:d} and nT={:d}: {:g} vs {:g}".format(
+                i, coarse["nT"], fine["nT"], coarse["steps"][i]["dmu"], fine["steps"][i]["dmu"])
+    # The period is the same orbit's either way - 2*pi for this normal form, whatever nT. The
+    # tolerance is the coarse orbit's own discretization error (1.4e-4 at nT=12), not slack.
+    for res in runs.values():
+        assert res["steps"][-1]["T"] == pytest.approx(2*numpy.pi, rel=1e-3)
+
+
 def test_going_back_to_an_earlier_orbit_point_keeps_the_continuation_tangent(tmp_path):
     """Load an earlier point of an orbit branch and step on from it.
 
@@ -3085,10 +3120,14 @@ def test_going_back_to_an_earlier_orbit_point_keeps_the_continuation_tangent(tmp
     first = res["first"]
     assert first["tangent_len"] == first["ndof"], "no tangent at the reloaded first point"
     assert 0 < first["dparam_ds"] < 0.5, first["dparam_ds"]
-    jumped_by_ds = first["mu_before"] + first["ds_used"]
-    assert abs(first["mu_after"] - jumped_by_ds) > 0.4, \
-        "the step marched the parameter by the whole of ds instead of stepping along the branch"
-    assert first["mu_after"] < 0.2, first["mu_after"]
+    # Relative to ds, not an absolute number: the arclength metric rescales ds (see
+    # Problem._retune_arclength_theta), so what says "this was not a plain parameter march" is that
+    # the parameter moved a small FRACTION of ds, in the direction the branch goes.
+    ds = abs(first["ds_used"])
+    moved = first["mu_after"] - first["mu_before"]
+    assert 0 < moved < 0.6 * ds, \
+        "the step marched the parameter by the whole of ds instead of stepping along the branch: " \
+        + str((first["mu_before"], first["mu_after"], ds))
 
     # (b) a point that HAS one gets it back unchanged, and reproduces the forward step.
     r = res["restored"]

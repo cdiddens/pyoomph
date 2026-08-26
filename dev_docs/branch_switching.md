@@ -297,6 +297,75 @@ Covered by `tests/test_bifurcation_gui.py::test_going_back_to_an_earlier_orbit_p
 (both halves: the point that never had a tangent, and the one whose sidecar tangent must come back
 byte-identical) and by the locus half of `tests/command_rollback_worker.py`.
 
+## The arclength metric on a periodic orbit
+
+`set_arclength_inner_product` exists because oomph's constraint
+
+    (dparameter/ds)^2 + theta^2 * |dU/ds|^2 = 1
+
+measures the solution by a plain SUM over degrees of freedom, which has no continuum limit - so
+`theta^2 = 1` is not a neutral choice but a mesh-dependent one, and the bifurcation GUI sets the
+mass-matrix metric at construction to get rid of that.
+
+`_retune_arclength_theta` refused to do it on a periodic orbit, on the grounds that the mass matrix
+would be assembled on the `nT*Ndof+1` orbit distribution. That is not what happens:
+`assemble_eigenproblem_matrices` restricts to the BASE rows under the orbit handler exactly as it does
+under a bifurcation tracker (measured: `n = 2` on a two-dof ODE with `nT = 31` installed). So the
+refusal bought nothing and cost `theta^2 = 1` on every orbit - the raw dof sum over the entire cycle.
+
+What that looks like from the outside is the report that brought it up: *the first arclength step
+after switching onto an orbit works perfectly and can be quite huge, every step after it is tiny*.
+The first step is oomph's own - a plain parameter increment of the whole `ds`, before any tangent
+exists - and the ones after it are real arclength steps against a constraint that charges the sum over
+all `nT` blocks. Measured on the Hopf normal form:
+
+| nT | ndof | dparameter/ds |
+|---|---|---|
+| 12 | 27 | 0.1642 |
+| 30 | 63 | 0.1071 |
+| 60 | 123 | 0.0766 |
+
+exactly the ratio of the square roots (0.1642/0.1071 = 1.533, sqrt(63/27) = 1.528). Doubling the time
+resolution halved the parameter movement per step, for the same `ds` and the same orbit.
+
+The orbit branch of `_arclength_weighted_square_norm` takes the base norm AVERAGED OVER THE CYCLE
+instead - `(1/nT) * sum_t (v_t^T M v_t)/volume` - which is the norm that makes `ds` on an orbit branch
+buy the same physical step as `ds` on the stationary branch it came off. One assembly of `M` serves
+every block: on a nonlinear mass matrix that is the base state's rather than each phase's, and a
+metric is a weighting, not a measurement. The blocks are the leading `nT*n` entries in that order,
+since `PeriodicOrbitHandler` numbers time-major and `get_naive_equation_order()` returns a permutation
+only when DISTRIBUTED - which the retune refuses outright anyway. The period is excluded from both
+norms, as the eigenvector rows are under a tracker. A CALLABLE weighting is still refused on an orbit:
+it was written against the base dof vector.
+
+After it, the same three runs report `dparameter/ds = 0.702` whatever `nT` is, and the parameter
+movement per step agrees to five digits between `nT = 31` and `nT = 61`
+(`tests/test_bifurcation_gui.py::test_an_orbit_step_does_not_depend_on_the_time_resolution`).
+
+## What ds means, and why the tab used to disagree with the step
+
+Two more things about `ds` on an orbit, both from the same report ("the first step after switching
+works perfectly and can be quite huge, the ones after it are very small").
+
+**The number in the tab was not the number stepped with.** `arclength_continuation` re-derives
+`theta^2` from the metric at its start and rescales the step it takes by the same factor - so
+whenever the metric moved, the step was `ds*factor` while the tab still said `ds`. Measured on an
+orbit: the tab said 0.2788 and the step taken was 0.0348. `BifurcationController.step` now retunes
+FIRST and carries the factor into `ds`, so the two agree; the retune inside is then a no-op, being
+idempotent once `theta^2` matches the metric. A settled metric still returns a factor a few ulps from
+one every step, hence the 1e-3 threshold on the log line.
+
+**The first step of any branch is not an arclength step.** oomph increments the parameter by the whole
+of `ds` and derives the tangent from where it lands (`!Arc_length_step_taken`), then redefines
+`Ds_current = dparameter/(dparameter/ds)` - which is why `ds` jumps by a factor of `1/(dp/ds)` right
+after a switch (measured 0.02 -> 0.2788) and why that first step feels so much bigger than the ones
+after it. That is oomph's documented behaviour and every pyoomph script relies on it, so it is left
+alone: filling the tangent in beforehand was tried and does make every step an arclength step, but it
+changes the first step of EVERY branch (`tests/extremum_observable_worker.py` covers three steps of a
+sweep and stopped travelling far enough). With the metric applied to orbits the discontinuity is small
+anyway - `dparameter/ds` is around 0.5 rather than 0.05 - so the first step and the second are now
+comparable.
+
 ## Leaving a branch transiently
 
 `transient_leave_branch` perturbs along an eigenfunction and integrates until the solution settles

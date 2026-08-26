@@ -3732,8 +3732,29 @@ class BifurcationController:
                     "Solve the eigenproblem at this point first, or leave the branch transiently.")
         theta_before=self.problem.get_arc_length_theta_sqr()
         dparam_ds_before=self.problem.get_arc_length_parameter_derivative()
+        # theta^2 is re-derived from the arclength metric at the START of arclength_continuation, and
+        # the step it takes is rescaled by the same factor - so the ds in the tab was NOT the ds
+        # stepped with whenever the metric moved, which is every step until it settles. Measured on an
+        # orbit: the tab said 0.2788 and the step taken was 0.0348. Retuning here first and carrying
+        # the factor into ds makes the two agree, and the call inside is then a no-op, the retune
+        # being idempotent once theta matches the metric.
+        retune=self.problem._retune_arclength_theta()
+        if numpy.isfinite(retune) and retune>0 and retune!=1.0:
+            ds=ds*retune
+            self._last_ds=ds
+            theta_before=self.problem.get_arc_length_theta_sqr()
+            dparam_ds_before=self.problem.get_arc_length_parameter_derivative()
+            # Only when it is worth reading. A settled metric still returns a factor a few ulps from
+            # one every step, and a line of log per step saying ds went from 0.0608774 to 0.0608774
+            # is noise that hides the step where it really moved.
+            if abs(retune-1.0)>1e-3:
+                self.log("The arclength metric put theta^2 at {:.4g}, so ds is recast to {:.4g} for "
+                         "the same step".format(theta_before,ds))
+        param_before=float(self.get_bifurcation_parameter().value)
+        dparam_ds_at_start=self.problem.get_arc_length_parameter_derivative()
         ds=self.problem.arclength_continuation(self.get_bifurcation_parameter(),ds)
         ds=self._recast_ds_after_metric_change(ds,theta_before,dparam_ds_before)
+        self._report_direction_reversal(param_before,dparam_ds_at_start)
         if quick:
             # The whole point: no eigensolve. Two test functions are recorded instead, read from work
             # the step has already done - the factorisation the Newton solve produced, and the
@@ -3910,8 +3931,8 @@ class BifurcationController:
         """The orbit's own unknowns as ``(nT, nbase)`` time blocks, plus the period.
 
         Read straight out of the augmented dof vector in its naive time-major order rather than by
-        re-sampling the orbit: a resample interpolates, and PeriodicOrbit.change_sampling - the
-        obvious thing to copy - also duplicates the first time point and drops the last.
+        re-sampling the orbit the way PeriodicOrbit.change_sampling does: a resample interpolates,
+        and these blocks are meant to reproduce the stored orbit exactly.
         """
         handler=self._orbit_handler()
         assert handler is not None
@@ -5282,6 +5303,31 @@ class BifurcationController:
         self.problem.set_arc_length_parameter(desired_proportion_of_arc_length=proportion)
         self.log("The parameter now takes {:.3g} of the arclength".format(proportion),
                  "" if self.scale_arc_length else "(no effect until arclength scaling is switched on)")
+
+    def _report_direction_reversal(self,param_before:float,dparam_ds_before:float):
+        """Say so when the step just taken reversed the direction of travel.
+
+        oomph fixes the sign of the new tangent by continuity - `calculate_continuation_derivatives_
+        helper` flips dparameter/ds whenever ``(dU/ds)_old . (dU/ds)_new < 0`` - which is exactly right
+        at a fold, where the branch really does turn the parameter around, and is how a sweep gets
+        round one without being told. Away from a fold the same test can flip on a tangent that merely
+        moved a lot in one step, and the sweep then walks back over the branch it just computed.
+
+        Not corrected here, because a reversal at a fold is the machinery working and there is no way
+        to tell the two apart from this side. Reported instead: "the direction changed and I do not
+        know why" is a much better position to be in than watching a sweep quietly retrace itself.
+        """
+        dparam_ds_after=self.problem.get_arc_length_parameter_derivative()
+        if dparam_ds_before==0.0 or dparam_ds_after==0.0:
+            return
+        if dparam_ds_before*dparam_ds_after>=0.0:
+            return
+        moved=float(self.get_bifurcation_parameter().value)-param_before
+        self.log("The direction of travel reversed in this step: dparameter/ds went {:.4g} -> {:.4g}, "
+                 "and {:s} moved by {:+.4g}. oomph flips it to keep the tangent continuous, which is "
+                 "what carries a sweep round a fold - if there is no fold here, the step was too big "
+                 "for the tangent to be followed and a smaller ds will stay on course.".format(
+                     dparam_ds_before,dparam_ds_after,self._get_paramname_str(),moved))
 
     def _recast_ds_after_metric_change(self,ds:float,theta_before:float,dparam_ds_before:float)->float:
         """Keep ds meaning the same physical step when theta^2 changed underneath it.
