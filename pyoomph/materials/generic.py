@@ -699,14 +699,18 @@ class MixtureDefinitionComponents():
         return "%s(%r%s)" % (self.__class__, self.lst,
                              ", dissolved=%r" % self.dissolved if self.dissolved else "")
 
-    def finalise(self,quantity:MixQuantityDefinition="mass_fraction",temperature:ExpressionNumOrNone=None,pressure:ExpressionNumOrNone=1*atm,concentration_basis:"ConcentrationBasis"="base_mixture") -> tuple[set[MaterialProperties], dict[str, ExpressionOrNum]]:
+    def finalise(self,quantity:MixQuantityDefinition="mass_fraction",temperature:ExpressionNumOrNone=None,pressure:ExpressionNumOrNone=1*atm,concentration_basis:"ConcentrationBasis"="base_mixture") -> tuple[list[MaterialProperties], dict[str, ExpressionOrNum]]:
         #if len(self.lst)==1:
         #    return {self.lst[0].compo},1
         if quantity=="RH":
             quantity="relative_humidity"
         elif quantity=="wt":
             quantity="mass_fraction"
-        comps = set([e.compo for e in self.lst])
+        # dict.fromkeys, not set(): a set of MaterialProperties objects iterates by id(), i.e. by
+        # allocation address, and comps is what fixes the key order of the composition dict init
+        # below. That order reached the mass-fraction fields, so it must follow the order the
+        # components were written down rather than the heap.
+        comps = list(dict.fromkeys(e.compo for e in self.lst))
 
         # A component given by a concentration stays in comps -- unlike a DissolvedSpeciesComponent it
         # is a real component and has to reach get_mixture_properties -- but it takes no part in the
@@ -1905,7 +1909,7 @@ class PureLiquidProperties(BaseLiquidProperties):
             only_for={"AIOMFAC","Original","Dortmund"}
         elif isinstance(only_for,str):
             only_for={only_for}
-        for g in only_for:
+        for g in sorted(only_for):   # a set of model names, so sorted for a reproducible fill order
             if not (g in self._UNIFAC_groups.keys()):
                 self._UNIFAC_groups[g]={}
             for grp,amount in grps.items():
@@ -2239,7 +2243,7 @@ def _mass_density_as_number(props:"MaterialProperties",cond:dict[str,ExpressionO
 
 
 def _solve_concentration_mass_fractions(solvent:dict[str,float],target:dict[str,float],
-                                        comps:set["MaterialProperties"],cond:dict[str,ExpressionOrNum],
+                                        comps:Sequence["MaterialProperties"],cond:dict[str,ExpressionOrNum],
                                         temperature:ExpressionNumOrNone)->dict[str,float]:
     r"""``concentration_basis="solution"``: solve :math:`w_i=c_iM_i/\rho(w)`.
 
@@ -2280,7 +2284,7 @@ def _apply_concentration_components(init:dict[str,ExpressionOrNum],
                                     solvent_props:"MaterialProperties",
                                     fracs:list["MixtureDefinitionComponent"],
                                     concs:list["ConcentrationMixtureDefinitionComponent"],
-                                    comps:set["MaterialProperties"],basis:ConcentrationBasis,
+                                    comps:Sequence["MaterialProperties"],basis:ConcentrationBasis,
                                     temperature:ExpressionNumOrNone,
                                     pressure:ExpressionNumOrNone)->dict[str,ExpressionOrNum]:
     r"""Mass fractions for the components given by concentration, with the rest squeezed into what is
@@ -2293,7 +2297,7 @@ def _apply_concentration_components(init:dict[str,ExpressionOrNum],
     """
     if basis not in ("base_mixture","solution"):
         raise ValueError("concentration_basis must be 'base_mixture' or 'solution', not "+str(basis))
-    solvent={c.name:float(init[c.name]) for c in {e.compo for e in fracs}}   # sums to unity
+    solvent={c.name:float(init[c.name]) for c in dict.fromkeys(e.compo for e in fracs)}   # sums to unity, in the order the fractions were given (a set of components would be in address order)
     # kg of species per m^3 of whichever volume the basis names: a mass concentration directly, a molar
     # one through the molar mass.
     target={e.compo.name:(e.value if e.by_mass

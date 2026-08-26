@@ -134,6 +134,10 @@ class _PyoomphPreciceAdapater:
         mesh_write_data:dict[str,list[str]]={}
         precice_read_data:dict[str,list[str]]={}
         precice_write_data:dict[str,list[str]]={}
+        # Sets here, but never iterated as such: everything written into the XML below is emitted in
+        # sorted order. A set of strings iterates in an order randomized per process by
+        # PYTHONHASHSEED, which would make each rank - and each run - write a differently ordered
+        # precice config for the same problem.
         provided_meshes:set[str]=set()
         received_meshes:set[tuple[str,str,str]]=set() # (preCICE name, participant it comes from, pyoomph domain)
         pyoomph_mesh_name_to_provide_name:dict[str,str]={}
@@ -191,7 +195,9 @@ class _PyoomphPreciceAdapater:
                     if len(use_data)==0:
                         raise RuntimeError("Provided Mesh "+meshname+" (preCICE name '"+str(mesh_provide.name)+"') has no data to read or write")
                     else:
-                        for ud in set(use_data):
+                        # dict.fromkeys, not set(): deduplicates but keeps the order the data was
+                        # declared in, which a set would randomize per process.
+                        for ud in dict.fromkeys(use_data):
                             ET.SubElement(meshentry,"use-data",name=ud)
                     provided_meshes.add(mesh_provide.name)
                     if meshname in pyoomph_mesh_name_to_provide_name.keys():
@@ -220,7 +226,9 @@ class _PyoomphPreciceAdapater:
                     if len(use_data)==0:
                         raise RuntimeError("Received Mesh "+meshname+" (preCICE name '"+str(mesh_receive.name)+"') has no data to read or write")
                     else:
-                        for ud in set(use_data):
+                        # dict.fromkeys, not set(): deduplicates but keeps the order the data was
+                        # declared in, which a set would randomize per process.
+                        for ud in dict.fromkeys(use_data):
                             ET.SubElement(meshentry,"use-data",name=ud)
                     received_meshes.add((mesh_receive.name,mesh_receive.from_participant,meshname))
                     
@@ -233,16 +241,16 @@ class _PyoomphPreciceAdapater:
             raise RuntimeError("Please set a preCICE participant name by the Problem property precice_participant")
         
         participant=ET.SubElement(root,"participant",name=problem.precice_participant)
-        for meshname in provided_meshes:
+        for meshname in sorted(provided_meshes):
             ET.SubElement(participant,"provide-mesh",name=meshname)
-        for entry in received_meshes:
+        for entry in sorted(received_meshes):
             ET.SubElement(participant,"receive-mesh",{"from":entry[1]},name=entry[0]) # "from" is a keyword, so it can only go in through the attribute dict
-        for meshname in provided_meshes:
+        for meshname in sorted(provided_meshes):
             for data in precice_write_data.get(meshname,[]):
                 ET.SubElement(participant,"write-data",name=data,mesh=meshname)
             for data in precice_read_data.get(meshname,[]):
                 ET.SubElement(participant,"read-data",name=data,mesh=meshname)
-        for entry in received_meshes:
+        for entry in sorted(received_meshes):
             if entry[2] not in pyoomph_mesh_name_to_provide_name.keys():
                 print("WARNING: Received mesh "+str(entry[0])+" is not provided by this participant")
                 #raise RuntimeError("Received mesh "+str(entry[0])+" is not provided by this participant")

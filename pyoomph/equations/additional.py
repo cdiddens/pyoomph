@@ -47,6 +47,7 @@ from __future__ import annotations
 from ..generic.codegen import Equations, BaseEquations, InterfaceEquations, FiniteElementCodeGenerator
 from .generic import DirichletBC, PinWhere
 from ..utils.smallest_circle import make_circle
+from ..generic.mpi import get_mpi_nproc, get_mpi_world_comm
 from ..expressions.generic import Expression, ExpressionOrNum, FiniteElementSpaceEnum, weak, var
 
 from ..typings import *
@@ -387,28 +388,55 @@ class PinMeshAtDistanceToInterface(PinWhere):
     i.e. lets the mesh move only in a band around them. The distance is measured against the smallest
     circle enclosing the interfaces, re-fitted whenever the conditions are applied.
 
+    Collective on a distributed mesh: see :py:meth:`_build_where_func`.
+
     Args:
         interface_names: Name(s) of the interfaces to measure the distance from.
         distance: Beyond this distance the mesh is frozen.
         mode: How the interface is approximated. Only ``"smallest_circle"`` is implemented.
     """
-    def __init__(self, interface_names:str | set[str], distance:ExpressionOrNum, mode:str="smallest_circle"):
+    def __init__(self, interface_names:"str | Iterable[str]", distance:ExpressionOrNum, mode:str="smallest_circle"):
         super(PinMeshAtDistanceToInterface, self).__init__(where=lambda : False, mesh_x=True, mesh_y=True)
+        # A sorted list, not a set: the point order below decides the smallest enclosing circle at
+        # round-off, and a set of names iterates in an order randomized per process by
+        # PYTHONHASHSEED. Two MPI ranks then pinned slightly different mesh nodes. (It also used to
+        # read set(self.interface_names) here, i.e. an attribute that does not exist yet.)
         if isinstance(interface_names, str):
-            self.interface_names = {interface_names}
+            self.interface_names = [interface_names]
         else:
-            self.interface_names = set(self.interface_names)
+            self.interface_names = sorted(interface_names)
         self.distance = distance
         self._circle_x = 0
         self._circle_y = 0
         self._circle_radius = 0
 
     def _build_where_func(self):
+        """Re-fit the enclosing circle and turn it into the ``where`` predicate.
+
+        Collective on a distributed mesh, and a plain local computation otherwise. Under
+        ``--distribute`` each rank holds only its share of the interface, so a circle fitted from
+        the local points alone is a different - and always too small - circle on every rank. The
+        pinning that follows is a geometric statement about the whole mesh, not about a partition:
+        every rank has to reach the same verdict for a node it shares with another one, or a halo
+        node ends up pinned on its owner and free on its copy. One allgather of the interface
+        coordinates gives that; it arrives in rank order, so every rank feeds make_circle the very
+        same list. Without MPI, or with a replicated mesh, every rank already sees all the points
+        and no collective is needed - which also keeps a rank that never reaches this method (the
+        equation is not on its domains at all) from being waited for.
+        """
         assert self.mesh is not None
         pts:list[tuple[float,float]] = []
         for inter in self.interface_names:
             for n in self.mesh.boundary_nodes(inter):
                 pts.append((n.x(0), n.x(1),))
+        if get_mpi_nproc()>1 and self.mesh.is_mesh_distributed():
+            comm=get_mpi_world_comm()
+            assert comm is not None  # more than one process means mpi4py is there
+            pts=[p for share in comm.allgather(pts) for p in share]   # duplicated halo points do not bother a circle fit
+        if not pts:
+            raise RuntimeError("PinMeshAtDistanceToInterface found no node at all on the interface(s) "+
+                               ", ".join(self.interface_names)+" of the domain '"+self.mesh.get_full_name()+
+                               "', so there is nothing to measure a distance from.")
         self._circle_x, self._circle_y, self._circle_radius = make_circle(pts)
         self._circle_radius += float(self.distance / self.mesh.get_problem().get_scaling("spatial"))
         self.where:Callable[[float,float],bool] = lambda x, y: (x - self._circle_x) ** 2 + (y - self._circle_y) ** 2 > self._circle_radius ** 2

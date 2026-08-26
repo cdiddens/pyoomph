@@ -3900,6 +3900,23 @@ class Problem(_pyoomph.Problem):
             self.release()
             sys.exit(0)
 
+    def _rank_independent_template_order(self)->"list[MeshTemplate]":
+        """Every mesh template in use, in an order that is the same on every MPI rank.
+
+        _meshtemplate_list is built by define_problem() and _meshdict by _link_geometry_and_equations,
+        i.e. both in the same order everywhere. A set of templates is not: it iterates by id(), so
+        the order in which the domains would be remeshed - and hence the node and element numbering
+        of the rebuilt meshes - differed from rank to rank. The templates a remesher created later
+        (GmshRemesher2d.get_new_template()) are in _meshdict but not in _meshtemplate_list, so both
+        have to be walked.
+        """
+        templates=list(self._meshtemplate_list)
+        for _mn,_msh in self._meshdict.items():
+            t=getattr(_msh,"_templatemesh",None)
+            if t is not None and t not in templates:
+                templates.append(t)
+        return templates
+
     def _agree_on_domains_to_remesh(self):
         """Make the pending remeshing requests unanimous over the MPI processes.
 
@@ -3922,11 +3939,7 @@ class Problem(_pyoomph.Problem):
         # the other went on, and the next collective paired a boundary merge with a file output.
         # _meshdict is built in the same order everywhere too, so adding the templates in use keeps
         # the list rank-independent.
-        templates=list(self._meshtemplate_list)
-        for _mn,_msh in self._meshdict.items():
-            t=getattr(_msh,"_templatemesh",None)
-            if t is not None and t not in templates:
-                templates.append(t)
+        templates=self._rank_independent_template_order()
         if not any(t.remesher is not None for t in templates):
             return  # nothing can ever ask, so do not pay for a collective after every solve
         agreed=get_mpi_any_list([t in self._domains_to_remesh for t in templates])
@@ -9757,7 +9770,13 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             self.output()
         remeshers:list["RemesherBase"] = []
         if only_domains is not None:
-            for t in only_domains:
+            # In the problem's own template order, never in the order of the given set: see
+            # _rank_independent_template_order(). A template the problem does not know about at all
+            # can only be appended in the caller's order, but _agree_on_domains_to_remesh() already
+            # warns that such a request cannot be made unanimous.
+            ordered=[t for t in self._rank_independent_template_order() if t in only_domains]
+            ordered+=[t for t in only_domains if t not in ordered]
+            for t in ordered:
                 if t.remesher is not None:
                     remeshers.append(t.remesher)
         else:

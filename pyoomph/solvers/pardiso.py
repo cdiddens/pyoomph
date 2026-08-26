@@ -67,7 +67,10 @@ def _mkl_rt_from_package()->CDLL | None:
     def _rank(path:str)->tuple[int,str]:
         b=os.path.basename(path)
         return (0 if b in ("libmkl_rt.so","libmkl_rt.dylib","mkl_rt.dll") else 1, b)
-    for loc in sorted(set(cands),key=_rank):
+    # sorted on the full path, not only on _rank: the sort is stable, so two candidates with the
+    # same basename in different directories used to tie and fall back on the order of the set,
+    # which is randomized per process - two MPI ranks could load two different MKL runtimes.
+    for loc in sorted(set(cands),key=lambda p:(_rank(p),p)):
         try:
             return CDLL(loc)
         except OSError:

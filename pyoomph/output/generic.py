@@ -1205,7 +1205,11 @@ class _IntegralObservableOutput(_BaseOutputter):
         args:dict[str,Expression]={k:v for k,v in intres.items()}
         res:dict[str,Expression] = {k: v for k, v in intres.items()}
         args["time"]=self._mesh.get_problem().get_current_time(dimensional=True,as_float=False)
-        remaining=set(deps.keys())
+        # A list in the order the observables were declared, not a set: res is written out column by
+        # column below in its insertion order, and resolving the dependencies in the order of a set
+        # of names - randomized per process by PYTHONHASHSEED - reshuffled the columns of the output
+        # file from one run to the next.
+        remaining=list(deps.keys())
         while len(remaining)>0:
             torem:set[str]=set()
             for r in remaining:
@@ -1234,8 +1238,8 @@ class _IntegralObservableOutput(_BaseOutputter):
                     args[r]=depres
                     res[r]=depres
             if len(torem)==0:
-                raise RuntimeError("Cannot evaluate the dependent integral functions, probably due to unknown or circular arguments : "+str(remaining))
-            remaining = remaining-torem
+                raise RuntimeError("Cannot evaluate the dependent integral functions, probably due to unknown or circular arguments : "+str(sorted(remaining)))
+            remaining = [r for r in remaining if r not in torem]
 
 
         for n,v in res.items():

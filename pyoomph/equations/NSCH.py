@@ -288,8 +288,13 @@ class DisjunctDomainMarkerNSCH(Equations):
         if mesh.nelement()==0:
             return
         marker_index=mesh.element_pt(0).get_jit_code().get_discontinuous_field_index(self.name)
+        # unhandled_nodes is an insertion-ordered dict rather than a set, and checknodes a stack
+        # rather than a set: both hold Node objects, and a set of those iterates by id(), i.e. by
+        # allocation address. Which connected component became droplet 0 - and which node seeded it
+        # when several share the extremal y - was therefore not reproducible between two runs, let
+        # alone between two MPI ranks marking the same geometry. The dict is only used as a set.
         # Reset all markers
-        unhandled_nodes:set[Node]=set()
+        unhandled_nodes:dict[Node,None]={}
         unhandled_elems:set[Element]=set()
         nodes2elem:dict[Node,list[Element]]={}
         # Create the look-up tables for unhandles nodes and node->elements map
@@ -299,7 +304,7 @@ class DisjunctDomainMarkerNSCH(Equations):
             for ni in range(e.nnode()):
                 n=e.node_pt(ni)
                 if n.value(phase_ind)>self.mark_threshold:
-                    unhandled_nodes.add(n)
+                    unhandled_nodes[n]=None
                     if n not in nodes2elem.keys():
                         nodes2elem[n]=[]
                     nodes2elem[n].append(e)
@@ -319,11 +324,11 @@ class DisjunctDomainMarkerNSCH(Equations):
                 break
 
             # Flood-fill like algorithm
-            checknodes:set[Node]=set([startnode]) # seed the start node
+            checknodes:list[Node]=[startnode] # seed the start node
             while len(checknodes)>0:
                 nn=checknodes.pop() # get one node out of the bucket
                 if nn in unhandled_nodes: # only check further if the node was not handled before
-                    unhandled_nodes.remove(nn)
+                    unhandled_nodes.pop(nn)
                     for e in nodes2elem[nn]: # go over all elements the node is part of
                         if e in unhandled_elems:
                             e.internal_data_pt(marker_index).set_value(0,domain_index) # mark the element
@@ -332,7 +337,7 @@ class DisjunctDomainMarkerNSCH(Equations):
                             for ni in range(e.nnode()):
                                 n=e.node_pt(ni)
                                 if n in unhandled_nodes:
-                                    checknodes.add(n)
+                                    checknodes.append(n)
             domain_index+=1
 
     def after_newton_solve(self):

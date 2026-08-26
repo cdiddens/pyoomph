@@ -1184,8 +1184,10 @@ class BaseEquations(_pyoomph.Equations):
 
 
     def _check_scalings(self):
-        # Check all scalings and test scalings
-        for n in self._scales_to_check_for_fields:
+        # Check all scalings and test scalings. sorted, so that a problem with more than one bad
+        # scaling reports the same one on every MPI rank rather than whichever the hash seed put
+        # first - the ranks then abort with different messages about the same problem.
+        for n in sorted(self._scales_to_check_for_fields):
             scal=self.get_scaling(n)
             if scal is not None:
                 scal_expa=self.expand_expression_for_debugging(scal)
@@ -1194,7 +1196,7 @@ class BaseEquations(_pyoomph.Equations):
                 except Exception as e:
                     cg=self._assert_codegen()
                     raise RuntimeError("The scale for '"+str(n)+"' on domain '"+self._assert_codegen().get_full_name()+"' is not a simple dimensional number, but:\n    "+str(scal)+"\n   expands to: "+str(scal_expa)+"\n.")
-        for n in self._test_scales_to_check_for_fields:
+        for n in sorted(self._test_scales_to_check_for_fields):
             scal=self.get_scaling(n,testscale=True)
             if scal is not None:
                 scal_expa=self.expand_expression_for_debugging(scal)

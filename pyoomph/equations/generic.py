@@ -1742,11 +1742,17 @@ class AxisymmetryBC(InterfaceEquations):
             assert eqtree_parent is not None
             trunk=eqtree_parent.get_full_path().lstrip("/")
             myname=eqtree.get_my_path_name()
-            for conn in interinter:
+            for conn in sorted(interinter):
                 rest=conn[len(eqtree.get_full_path().lstrip("/")):].lstrip("/")
                 path=trunk+"/"+rest+"/"+myname
                 revconns.append(path)
-            revconns.sort(key=lambda x: x.count("/")) # Sort by number of slashes to get it in good order
+            # By depth first, so that a parent interface is created before the one nested in it, and
+            # then alphabetically. The tie-break is not cosmetic: the sort is stable, so with the
+            # slash count alone the paths of equal depth kept the order of the interinter SET they
+            # came from - randomized per process by PYTHONHASHSEED - and that order is the insertion
+            # order of the _children created below, which decides which condition on a shared
+            # boundary is applied last.
+            revconns.sort(key=lambda x: (x.count("/"),x))
             root=eqtree
             while True:
                 root_parent=root.get_parent()
@@ -1975,7 +1981,17 @@ class PythonDirichletBC(Equations):
         self.additional_vals:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
         self.pinnedpositions:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
         self.internal_vals:dict[int,float | Literal[True] | tuple[Callable[..., ExpressionOrNum], list[int], Expression]] = {}
-        jitcode = self.mesh.element_pt(0).get_jit_code()
+        # The JIT code off the code generator, not off element 0. It is the same DynamicJITCode
+        # object either way - every element of a domain carries the one its generator compiled -
+        # but this one does not need the domain to own an element on this rank. Under --distribute
+        # it need not: with 4 ranks on a unit square, "domain/top" comes out with nelement()==0 on
+        # two of them, and element_pt(0) is then an out-of-range access, not an error. That has not
+        # bitten yet only because setup() happens to run before the mesh is distributed and is not
+        # repeated across adaptation - an accident of when the mesh object is replaced, not a
+        # guarantee. Reading it off the generator also makes the "unknown field" errors below
+        # rank-independent: raised by every rank or by none, rather than by whoever owns an element.
+        assert self.mesh._codegen is not None
+        jitcode = self.mesh._codegen.get_code()
 
         currcodegen = self.get_current_code_generator()
 
@@ -2036,7 +2052,6 @@ class PythonDirichletBC(Equations):
             else:
                 vals[k] = val
 
-        assert self.mesh._codegen is not None 
         for k, val in vals.items():
             if k == "mesh_x" or k == "mesh_y" or k == "mesh_z":
                 

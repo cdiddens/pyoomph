@@ -601,7 +601,10 @@ class ViscoelasticEquations(Equations):
                 grid[2][2] = name + "_zz"
         mst._tensorfields[name] = grid
         if self.formulation == "conformation":
-            for comp in set(self._component_map().values()):
+            # sorted, like define_scaling() below: a set of the component names iterates in an
+            # order randomized per process by PYTHONHASHSEED, and that is the order the initial
+            # conditions are registered - and generated - in.
+            for comp in sorted(set(self._component_map().values())):
                 # C=identity at rest. In the log-conformation formulation the corresponding
                 # Psi=0 is already the default, so nothing has to be set there.
                 self.set_initial_condition(name + "_" + comp, 0 if comp == "xy" else 1)

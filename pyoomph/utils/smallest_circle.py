@@ -41,9 +41,14 @@ _Point2dList=list[_Point2d]
 # 
 # Initially: No boundary points known
 def make_circle(points:_Point2dList):
-	# Convert to float and randomize order
+	# Convert to float and randomize order. The shuffle is what makes the incremental construction
+	# expected-linear, but it must not make the RESULT unpredictable: the caller
+	# (PinMeshAtDistanceToInterface) turns the circle into a pin region, so a circle differing at
+	# round-off pins a different set of mesh nodes. With the global random module that happened on
+	# every re-application and, worse, differently on every MPI rank. A private, fixed-seed
+	# generator keeps the complexity and makes the answer reproducible.
 	shuffled = [(float(x), float(y)) for (x, y) in points]
-	random.shuffle(shuffled)
+	random.Random(20240607).shuffle(shuffled)
 	
 	# Progressively add points to circle or recompute circle
 	c = None

@@ -151,11 +151,17 @@ class PressureFixationTaylorHood(_PressureFixation):
 
     def setup(self):
         assert self.mesh is not None
-        self.pindex = self.mesh.element_pt(0).get_jit_code().get_nodal_field_index(self.pname)
+        # Off the code generator, not off element 0: a rank need not own an element of this domain
+        # under --distribute, and the error below has to be raised by all ranks or by none. Same
+        # DynamicJITCode object, one that does not depend on the partition - the reasoning is spelled
+        # out at PythonDirichletBC.setup().
+        assert self.mesh._codegen is not None
+        jitcode = self.mesh._codegen.get_code()
+        self.pindex = jitcode.get_nodal_field_index(self.pname)
         if self.pindex < 0:
-            allfields = self.mesh.element_pt(0).get_jit_code().get_nodal_field_indices()
+            allfields = jitcode.get_nodal_field_indices()
             for k,v in allfields.items():
-                print(k,v,self.mesh.element_pt(0).get_jit_code().get_nodal_field_index(k))
+                print(k,v,jitcode.get_nodal_field_index(k))
             raise RuntimeError("Missing nodal data for 'pressure'. Found only: "+str(allfields))
 
     def _select_node(self)->"Node | None":
@@ -236,7 +242,8 @@ class PressureFixationCrouzeixRaviart(_PressureFixation):
 
     def setup(self):
         assert self.mesh is not None
-        self.pindex = self.mesh.element_pt(0).get_jit_code().get_discontinuous_field_index(self.pname)
+        assert self.mesh._codegen is not None   # off the generator, not element 0: see the Taylor-Hood one above
+        self.pindex = self.mesh._codegen.get_code().get_discontinuous_field_index(self.pname)
         if self.pindex < 0:
             raise RuntimeError("Missing internal data for 'pressure'")
 

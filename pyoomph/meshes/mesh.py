@@ -158,15 +158,19 @@ class BaseMesh(abc.ABC):
         assert isinstance(self, _pyoomph.Mesh)
         imesh = self.get_mesh(bname1)
         assert imesh is not None
-        res: set[Node] = set()
+        # First-encounter order, not the order of a set of nodes: a set of Node objects iterates by
+        # id(), i.e. by allocation address, which differs from process to process. Anything derived
+        # from that order - a list index, a preCICE vertex numbering, the seed of a flood fill -
+        # then differs between the MPI ranks. The dict is only used to deduplicate.
+        res: dict[Node, None] = {}
         i2 = self.get_boundary_index(bname2)
         for e in imesh.boundary_elements(bname2):
             nn = e.nnode()
             for i in range(nn):
                 n = e.node_pt(i)
                 if n.is_on_boundary(i2):
-                    res.add(n)
-        return list(res)
+                    res[n] = None
+        return list(res.keys())
 
     def nodes(self) -> Iterator[_pyoomph.Node]:
         assert isinstance(self, _pyoomph.Mesh)
@@ -1265,7 +1269,10 @@ class MeshFromTemplateBase(BaseMesh):
 
         self.setup_boundary_element_info()
 
-        for interior_bound in self._templatemesh._get_template()._interior_boundaries:
+        # sorted: _interior_boundaries is a set of names, whose iteration order is randomized per
+        # process by PYTHONHASHSEED. It decides in which order the interior boundary elements are
+        # created, and with them the element and equation numbering.
+        for interior_bound in sorted(self._templatemesh._get_template()._interior_boundaries):
             try:
                 bindex = self.get_boundary_index(interior_bound)
                 self.setup_interior_boundary_elements(bindex)
@@ -1302,7 +1309,8 @@ class MeshFromTemplateBase(BaseMesh):
 
         self.setup_boundary_element_info()
 
-        for interior_bound in self._templatemesh._get_template()._interior_boundaries:
+        # sorted, for the reason given in recreate_boundary_information() above.
+        for interior_bound in sorted(self._templatemesh._get_template()._interior_boundaries):
             try:
                 bindex = self.get_boundary_index(interior_bound)
                 self.setup_interior_boundary_elements(bindex)
@@ -1998,25 +2006,36 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         mpi_barrier()
 
     def nodes(self) -> Iterator[_pyoomph.Node]:
-        uniqnods: set[Node] = set()
+        """The nodes of this interface, each once, in the order the elements first reach them.
+
+        An interface mesh has no Node_pt array of its own, so the nodes have to be collected from
+        the elements. Collecting them in a *set* made the yielded order the id() order of the Node
+        objects, i.e. their allocation addresses: reproducible within one process, but different on
+        every MPI rank and between two runs. Callers that pair this order with anything else broke
+        silently - update_history() indexes evaluate_local_expression_at_nodes(), which is in the
+        C++ node order, and the preCICE adapter numbers its coupling vertices by it. The dict is
+        only a set that keeps insertion order.
+        """
+        uniqnods: dict[Node, None] = {}
         for e in self.elements():
             nn = e.nnode()
             for ni in range(nn):
                 n = e.node_pt(ni)
-                uniqnods.add(n)
-        for n in uniqnods:
+                uniqnods[n] = None
+        for n in uniqnods.keys():
             yield n
 
     def boundary_nodes(self, b: str) -> Iterable[_pyoomph.Node]:
-        uniqnods: set[Node] = set()
+        # Element order rather than set order, for the reason given in nodes() above.
+        uniqnods: dict[Node, None] = {}
         bind = self.get_boundary_index(b)
         for e in self.boundary_elements(b):
             nn = e.nnode()
             for ni in range(nn):
                 n = e.node_pt(ni)
                 if n.is_on_boundary(bind):
-                    uniqnods.add(n)
-        return uniqnods
+                    uniqnods[n] = None
+        return list(uniqnods.keys())
 
     def nodes_on_both_sides(self) -> Generator[tuple[_pyoomph.Node, _pyoomph.Node], None, None]:
         nodemap: dict[Node, Node] = {}
