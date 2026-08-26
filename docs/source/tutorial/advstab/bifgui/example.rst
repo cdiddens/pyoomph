@@ -7,13 +7,13 @@ A rather complicated bifurcation diagram showing versatile bifurcation and perio
 This paper deals thin-film hydrodynamics with two species of reactive surfactants. The corresponding equations for the film height :math:`h` and the surfactants :math:`\Gamma_1` and :math:`\Gamma_2` reads:
 
 .. math::
-	\begin{align}
+	\begin{aligned}
 		\partial_t h = & \nabla\cdot \left[\frac{h^3}{3} \vec{J}_p +\frac{h^2}{2}\nabla \left(\Gamma_1+\Gamma_2\right)  \right] \\
 		\partial_t \Gamma_1 =& \nabla \cdot \left[ \frac{h^2\Gamma_1}{2}\vec{J}_p+\left(h\Gamma_1+D_1\right)\nabla\Gamma_1+h\Gamma_1\nabla\Gamma_2 \right] +j_r-\beta_1 \ln(\Gamma_1\delta)-\beta\mu  \\
 		\partial_t \Gamma_2 = & \nabla \cdot \left[ \frac{h^2\Gamma_2}{2}\vec{J}_p+h\Gamma_2\nabla\Gamma_1+\left(h\Gamma_2+D_2\right)\nabla\Gamma_2 \right] -j_r-\beta_2 \ln(\Gamma_2\delta^{-1})+\beta\mu \\
 		\text{with} \quad & \vec{J}_p=\nabla\left[W\left(\frac{1}{h^3}-\frac{1}{h^6}\right)-\nabla^2 h\right] \\
 		& j_r=r(\delta\Gamma_1^2\Gamma_2-\delta^3\Gamma_1^3)
-	\end{align}
+	\end{aligned}
 	
 As in the paper, we keep all parameters fixed and vary the chemostat driving strength :math:`\beta\mu` (to be read as single parameter).
 The implementation of the equations is straightforward, one just has to introduce an auxiallary variable for :math:`\nabla^2h` to incorporate the fourth order derivative, as usual:
@@ -64,7 +64,24 @@ Once the translational motion branch is disentangled and fully captured, we can 
 
 	In the following, we will continue periodic orbits and calculate Floquet multipliers. Even for this simple 1d problem, it gets quite expensive at the default resolution. Therefore, make sure to first backup your fine diagram (just rename the output folder), then reduce the resolution (change the commented lines in the problem constructor again) and create the entire diagram again on the coarse scale. 
 	
-	
+
+.. only:: html
+
+	.. raw:: html 
+
+		<figure class="align-center" id="vidbifgui2"><video autoplay="True" muted="" playsinline="" controls="" preload="auto" width="90%"><source src="../../../_static/bifurcationGUI2.mp4" type="video/mp4"></video><figcaption><p><span class="caption-text">Tracking periodic orbits in the bifurcation GUI</span> </span></p></figcaption></figure>
+		
+For tracking of periodic orbits, the PETSc/MUMPS linear solver backend (real-valued) has been proven to be more stable. So after taking a backup of the diagram on the fine mesh and adjusting it for the coarse settings, start the script again, but this time with ``--petsc_mumps``, provided you have set up your ``PYTHONPATH`` accordingly (see :numref:`petscslepc`).
+
+At a Hopf bifurcation, you can switch to the emergent orbit, but for this particular case, it is suitable to go to the **Orbit** tab and set the **Mode** to **bspline**. The periodic orbit will be then calculated based on a *B-spline interpolation* in time, which is usually more stable during continuation. However, for Floquet multipliers, it will implicitly switch back to a *collocation* represatation of the orbit implicitly.
+
+After selecting a Hopf point, press **Switch** to jump on the orbit (:vidtime:`vidbifgui2#0:00`). Again, the chosen arclength step will determine the initial step, so you might have to reduce it in case of failure.
+Then you can continue the orbit and a shaded region will indicate the range of the selected observable (:vidtime:`vidbifgui2#0:03`).
+
+You can also switch again the :math:`y`-axis to plot e.g. the orbit time (:vidtime:`vidbifgui2#0:17`).
+
+Once you are done with the diagram, you can mark several interesting points by pressing :kbd:`1`-:kbd:`9`. In the **File** menu, you can then **Export curves** and/or **Output the tagged** points. This allows to either use the state files of tagged points in be used with :py:meth:`~pyoomph.generic.problem.Problem.load_state` in another script (e.g. for manual continuation, replotting, further transient integration, etc.) or plot the bifurcation curves with a plotting backend of your choice.
+			
 
 .. only:: html
 

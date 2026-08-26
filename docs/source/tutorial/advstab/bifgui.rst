@@ -48,6 +48,14 @@ To restart the diagram from scratch, just wipe the output directory.
 ``analytic_hessian=True`` is required if you intend to classify bifurcations, switch branches or
 step onto a periodic orbit - all three need the second derivative.
 
+..  figure:: bifgui.png
+	:name: figbifgui
+	:align: center
+	:alt: Bifurcation GUI in action
+	:class: with-shadow
+	:width: 100%
+
+
 The window that opens has five parts:
 
 * the **bifurcation diagram** itself, an ordinary matplotlib canvas with its navigation toolbar, in
