@@ -3,249 +3,1146 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
- 
-from scipy import optimize
-from ..expressions.generic import ExpressionNumOrNone,var,partial_t
-from ..generic.codegen import InterfaceEquations,Equations,FiniteElementCodeGenerator
-from ..meshes.mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate2d,MeshFromTemplateBase,Node,Element,AnyMesh
-from ..meshes.meshdatacache import MeshDataCache, MeshDataCacheEntry
-from ..meshes.remesher import Remesher2d,RemesherBase, RemesherPointEntry
-from ..meshes.interpolator import BaseMeshToMeshInterpolator,InternalInterpolator
-from ..meshes.ordering import sort_line_segments
-from scipy.interpolate import InterpolatedUnivariateSpline,UnivariateSpline #type:ignore
+
+"""Topological changes of an axisymmetric free surface: pinch-off and coalescence.
+
+The two pieces here work as a pair.
+
+* :py:class:`AxisymmetricReconnection` is an :py:class:`~pyoomph.generic.codegen.InterfaceEquations`
+  attached to the free interface. After each successful Newton solve it hands the current interface
+  polylines to :py:func:`pyoomph.meshes.axisymm_topology.detect_and_plan`, which decides -
+  morphologically, on the mirrored cross section - whether a neck has thinned below ``rmin`` or two
+  fragments have approached to within ``distmin``, and returns a
+  :py:class:`~pyoomph.meshes.axisymm_topology.SurgeryPlan` describing the interface *after* the
+  event. The plan is parked on the mesh template and a remesh is requested.
+
+* :py:class:`TopologicalChangesGmshTemplate` is the mesh template that consumes the plan. The
+  surgery is delivered through the ordinary remeshing-by-recreation path: pyoomph calls
+  ``define_geometry`` again, and there :py:meth:`~TopologicalChangesGmshTemplate.get_reconnected_boundaries`
+  returns the interface chains and axis spans that the new geometry has to be built from - the
+  reconnected ones if an event was planned, the current ones if this is a plain quality remesh. The
+  user code that turns them into splines and lines is the same in both cases.
+
+This replaces the previous ``AxisymmetricPinchoffAndCoalescence``, which edited a
+:py:class:`~pyoomph.meshes.remesher.Remesher2d`'s point and line entries in place. The reasons for
+the clean break, rather than a port:
+
+* the detection was a spline fit of ``r(arclength)`` per interface segment, so it could only see a
+  waist *within one* segment and never the merging of two, and it depended on the knot placement of
+  the fit;
+* the surgery inserted two hand-placed points per new tip and left the volume to chance;
+* it needed a ``Remesher2d``, i.e. a geometry reconstructed from the deformed mesh, which is the one
+  remeshing path that cannot use the user's own ``define_geometry``.
+
+Coordinate convention throughout: ``x`` is the radial coordinate with the symmetry axis at ``x = 0``,
+``y`` is the axial coordinate.
+"""
+
+from dataclasses import dataclass, field
+
 import numpy
+
+from ..expressions.generic import Expression, ExpressionNumOrNone, ExpressionOrNum, var, partial_t
+from ..generic.codegen import InterfaceEquations, Equations, FiniteElementCodeGenerator
+from ..generic.mpi import (get_mpi_any, get_mpi_max, get_mpi_nproc, get_mpi_rank, get_mpi_sum,
+                           get_mpi_world_comm, mpi_share_root_failure)
+from ..meshes.axisymm_topology import (InterfaceChain, ReconnectionEvent, SurgeryPlan,
+                                       detect_and_plan, revolved_volume)
+from ..meshes.gmsh import GmshTemplate
+from ..meshes.mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate2d, MeshFromTemplateBase, Node, Element, AnyMesh
+from ..meshes.meshdatacache import MeshDataCache, MeshDataCacheEntry
 from ..typings import *
 
 if TYPE_CHECKING:
+    from ..meshes.ordering import SortAlongAxis
+    from pygmsh.common.line import Line  # type:ignore
+    from pygmsh.common.point import Point  # type:ignore
+    from pygmsh.common.spline import Spline  # type:ignore
     from ..generic.problem import Problem
     from ..generic.codegen import EquationTree
+    from ..meshes.interpolator import BaseMeshToMeshInterpolator
 
 
-# Basic class to handle pinch-off and coalescence. Can be customized
-class BaseAxisymmetricPinchoffAndCoalescence(InterfaceEquations):
-    def __init__(self) -> None:
-        super(BaseAxisymmetricPinchoffAndCoalescence, self).__init__()
-        self._datacache=MeshDataCache(tesselate_tri=False,nondimensional=True) # access to the interface segements of the mesh
-        self._has_coalescence:bool=False
-        self._has_pinch_off:bool=False
-        self._interface_segment_overlap_factor:float=0
-        
+# --------------------------------------------------------------------------------------
+# What define_geometry gets to see
+# --------------------------------------------------------------------------------------
 
-    # This function can be overriden to nondimensionalize any spatial control parameters
-    def ensure_nondimensional_distance_parameters(self,problem:"Problem")->None:
-        pass
+@dataclass
+class ReconnectedChain:
+    """One interface polyline of the geometry that is about to be built.
 
-    # This function must be overridden to remove and add line segments to complete the pinch-off and coalescence events
-    def handle_pinch_off_and_coalescence_during_remeshing(self,remesher:Remesher2d)->None:
-        pass
-
-    # This function must be overridden to identify any pinch-off events. It is called after each sucessfull solve
-    # If we find a pinch-off, we must return True, else False
-    def check_for_pinch_offs(self,segments:list[list[int]],coords:NPFloatArray,interface_data:MeshDataCacheEntry)->bool:
-        return False
-
-    # This function must be overridden to identify any coalescence events. It is called after each sucessfull solve
-    # If we find a coalescence, we must return True, else False
-    def check_for_coalescence(self,segments:list[list[int]],coords:NPFloatArray,interface_data:MeshDataCacheEntry,distfactor:float=1.0)->bool:
-        return False        
+    ``points`` carry the spatial scaling unless ``nondimensional=True`` was requested, so they can be
+    fed straight to :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.point`. ``suggested_sizes`` are
+    *always* plain nondimensional floats, because that is what Gmsh's ``size`` argument is.
+    """
+    points: list[tuple[ExpressionOrNum, ExpressionOrNum]]
+    suggested_sizes: list[float]
+    end_types: tuple[str, str] = ("axis", "axis")
+    #: Old interface chart of each point, or ``None`` for a plain remesh. Handed out for user code;
+    #: the transfer itself reads the plan's ``NewChain.zeta`` directly, in
+    #: :py:meth:`AxisymmetricReconnection._before_mesh_to_mesh_interpolation`.
+    zeta: NPFloatArray | None = None
+    #: ``>= 0``: index of the old interface point this point *is*; ``-1``: freshly created by the
+    #: surgery. ``None`` for a plain remesh, where every point is an old one.
+    origin: NPIntArray | None = None
+    #: Whether :py:attr:`points` are plain numbers rather than dimensional expressions.
+    nondimensional: bool = False
 
 
-    def get_segments_and_coords(self,mesh:InterfaceMesh,datacache:MeshDataCache | None=None)->tuple[list[list[int]],NPFloatArray,MeshDataCacheEntry]:        
-        if datacache is None:
-            datacache=self._datacache
-        data=datacache.get_data(mesh)
-        assert data is not None # only a global-mesh cache returns None (off rank 0), and this one is local
-        segments,_=data.get_interface_line_segments()        
-        coords=data.get_coordinates()
-        both_at_axis=[] # Segments which starts and ends on the axis of symmetry
-        one_at_axis=[] # Segments which either start or end on the axis of symmetry
-        for s in segments:
-            if coords[0,s[0]]<1e-7 and coords[0,s[-1]]<1e-7:
-                if coords[1,s[0]]>coords[1,s[-1]]:
-                    both_at_axis.append(list(reversed(s)))
+@dataclass
+class ReconnectedBoundaries:
+    """The result of :py:meth:`TopologicalChangesGmshTemplate.get_reconnected_boundaries`."""
+    #: The free interface, one entry per connected fluid fragment, ordered by ascending ``y``.
+    interface_chains: list[ReconnectedChain] = field(default_factory=list)
+    #: Axis pieces that belong to the domain the interface bounds, as ``((x0,y0),(x1,y1))`` pairs.
+    axis_segments: list[tuple[tuple[ExpressionOrNum, ExpressionOrNum], tuple[ExpressionOrNum, ExpressionOrNum]]] = field(default_factory=list)
+    #: Axis pieces that belong to the *other* side of the interface, i.e. the gaps between fragments
+    #: plus whatever the opposite phase covered before. Empty unless ``opposite_axis_name`` was given.
+    opposite_axis_segments: list[tuple[tuple[ExpressionOrNum, ExpressionOrNum], tuple[ExpressionOrNum, ExpressionOrNum]]] = field(default_factory=list)
+    #: The reconnection events behind this geometry; empty for a plain quality remesh.
+    events: list[ReconnectionEvent] = field(default_factory=list)
+    #: Target volume of each fragment, in the same units as ``points``. Meant for verification.
+    fragment_volumes: list[float | ExpressionOrNum] = field(default_factory=list)
+    #: Whether a surgery plan was consumed, i.e. whether this is a reconnection or a quality remesh.
+    has_plan: bool = False
+    #: Whether ``points``/``fragment_volumes`` are nondimensional.
+    nondimensional: bool = False
+
+
+# --------------------------------------------------------------------------------------
+# The mesh template
+# --------------------------------------------------------------------------------------
+
+class TopologicalChangesGmshTemplate(GmshTemplate):
+    """A :py:class:`~pyoomph.meshes.gmsh.GmshTemplate` that can rebuild itself after a pinch-off or
+    a coalescence.
+
+    Write ``define_geometry`` so that the remeshing branch takes its interface and axis from
+    :py:meth:`get_reconnected_boundaries` instead of from
+    :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates`::
+
+        class MyMesh(TopologicalChangesGmshTemplate):
+            def define_geometry(self):
+                if self.is_first_time():
+                    ...                                  # the initial geometry
                 else:
-                    both_at_axis.append(s)
-            elif coords[0,s[0]]<1e-7:
-                one_at_axis.append(s)
-            elif  coords[0,s[-1]]<1e-7: 
-                one_at_axis.append(list(reversed(s)))
-            else:
-                raise RuntimeError("Found a free interface segment that does not hit the axis of symmetry")
-        if len(one_at_axis)>2:
-            raise RuntimeError("Found more than two segments that are only once connected to the axis of symmetry")
-        both_at_axis=list(sorted(both_at_axis,key=lambda l:coords[1,l[0]])) # Sort lines by ascending y start
-        # Insert the missing segments
-        if len(both_at_axis)>0:
-            for s in one_at_axis:
-                if coords[1,s[0]]-self._interface_segment_overlap_factor<coords[1,both_at_axis[0][0]]:
-                    both_at_axis.insert(0,list(reversed(s)))
-                elif coords[1,s[0]]+self._interface_segment_overlap_factor>coords[1,both_at_axis[-1][-1]]:
-                    both_at_axis.append(s)
-                else: 
-                    print("#x,y of segment only one time attached to the axis:")
-                    for p in s:
-                        print(coords[0,p],coords[1,p])
-                    print()
-                    print("#x,y of segment attached two times to the axis:")
-                    for p in both_at_axis[0]:
-                        print(coords[0,p],coords[1,p])
-                    print()
-                    raise RuntimeError("Segments that are only attached to the axis once are only allowed at the top or bottom")
+                    rb = self.get_reconnected_boundaries("liquid/interface", "liquid/axis")
+                    for k, chain in enumerate(rb.interface_chains):
+                        self.spline_from_chain(chain, "interface")
+                    self.lines_from_axis_segments(rb.axis_segments, "axis")
+                    ...                                  # plane_surface per fragment
+
+    That branch is entered for a reconnection *and* for an ordinary quality remesh - there is only
+    one code path, and :py:meth:`get_reconnected_boundaries` fills in the same structure either way.
+    """
+
+    def __init__(self, loaded_from_mesh_file: str | None = None):
+        super().__init__(loaded_from_mesh_file)
+        # interface mesh name (e.g. "liquid/interface") -> (plan, extra info of the equation)
+        self._pending_surgery_plans: dict[str, tuple[SurgeryPlan, dict[str, Any]]] = {}
+        #: Two points closer than this *nondimensional* distance are the same Gmsh point. See
+        #: :py:meth:`point`. Nondimensional geometries are O(1) by construction, so an absolute
+        #: value works here and keeps the lookup independent of the order the points arrive in.
+        self.point_snap_tolerance: float = 1e-9
+        # Quantised coordinates -> point, so that the tolerant lookup in point() stays O(1). A plain
+        # scan over _pointhash would be O(N^2) over an interface of a few thousand points.
+        self._snap_buckets: dict[tuple[int, int, int], list["Point"]] = {}
+        # Whether the last get_reconnected_boundaries() returned nondimensional coordinates; the
+        # convenience builders need to know, since GmshTemplate.point() divides by the spatial scale.
+        self._recon_nondimensional: bool = False
+
+    # -- pending plans ---------------------------------------------------------------------------
+
+    def _set_pending_surgery_plan(self, interface_name: str, plan: SurgeryPlan, extra: dict[str, Any]) -> None:
+        self._pending_surgery_plans[interface_name] = (plan, extra)
+
+    def _clear_pending_surgery_plan(self, interface_name: str) -> None:
+        self._pending_surgery_plans.pop(interface_name, None)
+
+    def has_pending_surgery_plan(self, interface_name: str | None = None) -> bool:
+        """Whether a reconnection is waiting to be built into the next mesh."""
+        if interface_name is None:
+            return len(self._pending_surgery_plans) > 0
+        return interface_name in self._pending_surgery_plans
+
+    # -- point deduplication ---------------------------------------------------------------------
+
+    def point(self, x: ExpressionOrNum, y: ExpressionOrNum = 0.0, z: ExpressionOrNum = 0.0, size: ExpressionNumOrNone = None, *, name: str | None = None, consider_spatial_scale: bool | None = None) -> "Point":
+        """As :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.point`, but merges *nearly* coincident points.
+
+        The base class keys its point cache on the exact ``(x,y,z)`` doubles, which is enough as long
+        as every point comes out of the same arithmetic. Here they do not: the interface tip of a
+        surgered chain is computed by :py:mod:`pyoomph.meshes.axisymm_topology` and then dimensionalised
+        and divided by the spatial scale again on the way in, while the very same corner may be
+        written out by hand in ``define_geometry`` as a literal. Two doubles that differ in the last
+        bit become two Gmsh points, and a curve loop through both of them is not closed - Gmsh then
+        fails with a message about a non-manifold or unbounded surface, far from the cause. Hence a
+        tolerant lookup, at a tolerance far below any mesh size and far above the round-off.
+        """
+        if self._geom is None:
+            # Outside define_geometry the base class raises; let it produce that message.
+            return super().point(x, y, z, size, name=name, consider_spatial_scale=consider_spatial_scale)
+        if consider_spatial_scale is None:
+            consider_spatial_scale = self.consider_spatial_scale
+        nd: list[float] = []
+        for c in (x, y, z):
+            if consider_spatial_scale:
+                c = c / self.get_problem().get_scaling("spatial")
+            if isinstance(c, Expression):
+                c = c.float_value()
+            nd.append(float(c))
+        key = (nd[0], nd[1], nd[2])
+        existing = self._pointhash.get(key)
+        if existing is not None:
+            return existing
+        q = self.point_snap_tolerance
+        bucket: tuple[int, int, int] | None = None
+        if q > 0.0:
+            bx, by, bz = (int(numpy.floor(v / q)) for v in nd)
+            bucket = (bx, by, bz)
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        for p in self._snap_buckets.get((bx + dx, by + dy, bz + dz), ()):
+                            if abs(p.x[0] - nd[0]) <= q and abs(p.x[1] - nd[1]) <= q \
+                                    and abs(p.x[2] - nd[2]) <= q:
+                                return p
+        res = super().point(nd[0], nd[1], nd[2], size, name=name, consider_spatial_scale=False)
+        if bucket is not None:
+            self._snap_buckets.setdefault(bucket, []).append(res)
+        return res
+
+    def _reset(self):
+        super()._reset()
+        self._snap_buckets = {}
+
+    # -- the boundaries of the next mesh ---------------------------------------------------------
+
+    def get_reconnected_boundaries(self, interface_name: str, axis_name: str, opposite_axis_name: str | None = None, nondimensional: bool = False) -> ReconnectedBoundaries:
+        """The interface and axis of the mesh that is about to be created.
+
+        May only be called from ``define_geometry`` while remeshing. If an
+        :py:class:`AxisymmetricReconnection` has planned a pinch-off or coalescence, the returned
+        chains and axis spans describe the *reconnected* geometry; otherwise they describe the
+        current one, so that the same ``define_geometry`` branch also serves a plain quality remesh.
+
+        Args:
+            interface_name: The free interface, as ``"domain/boundary"``, e.g. ``"liquid/interface"``.
+                This is also the key the surgery plan was filed under.
+            axis_name: The symmetry axis on the side of ``interface_name``, as ``"domain/boundary"``.
+            opposite_axis_name: The symmetry axis of the opposite phase, if there is one. Only then
+                is :py:attr:`~ReconnectedBoundaries.opposite_axis_segments` filled.
+            nondimensional: Return plain numbers instead of coordinates carrying the spatial scale.
+        """
+        self._assert_within_define_geometry("get_reconnected_boundaries()")
+        if not self.is_remeshing():
+            raise RuntimeError("get_reconnected_boundaries() describes the mesh that REPLACES the "
+                               "current one, so it only means something while remeshing. Guard it "
+                               "with 'if self.is_first_time(): ... else: ...'.")
+
+        # Unconditional, and in the same order on every rank: get_boundary_coordinates() is
+        # collective on a distributed mesh (see MeshedMeshTemplate).
+        old_interface = self.get_boundary_coordinates(interface_name, sort_along_axis="y+", nondimensional=True)
+        old_axis = self.get_boundary_coordinates(axis_name, sort_along_axis="y+", nondimensional=True)
+        old_opposite_axis = None
+        if opposite_axis_name is not None:
+            old_opposite_axis = self.get_boundary_coordinates(opposite_axis_name, sort_along_axis="y+", nondimensional=True)
+
+        SS: ExpressionOrNum = 1 if nondimensional else self.get_problem().get_scaling("spatial")
+        self._recon_nondimensional = nondimensional
+        entry = self._pending_surgery_plans.get(interface_name)
+        res = ReconnectedBoundaries(has_plan=entry is not None, nondimensional=nondimensional)
+
+        if entry is not None:
+            plan = entry[0]
+            for nc in plan.new_chains:
+                res.interface_chains.append(ReconnectedChain(
+                    points=[(float(p[0]) * SS, float(p[1]) * SS) for p in nc.points],
+                    suggested_sizes=[float(s) for s in nc.sizes],
+                    end_types=tuple(nc.end_types), zeta=nc.zeta, origin=nc.origin,  # type:ignore[arg-type]
+                    nondimensional=nondimensional))
+            inside = [(float(a), float(b)) for a, b in numpy.asarray(plan.axis_spans_inside).reshape(-1, 2)]
+            res.events = list(plan.events)
+            res.fragment_volumes = [float(v) * SS ** 3 for v in plan.fragment_volumes_after]
         else:
-            both_at_axis=list(sorted(one_at_axis,key=lambda s:coords[1,s[0]]))
-            if len(both_at_axis)>1:
-                both_at_axis[0]=list(reversed(both_at_axis[0]))
-            
-        return both_at_axis,coords,data
-        
+            size_factor = self._interface_element_size_factor(interface_name)
+            for seg in old_interface:
+                pts = numpy.array([[float(x), float(y)] for x, y in seg], dtype=float)
+                res.interface_chains.append(ReconnectedChain(
+                    points=[(float(p[0]) * SS, float(p[1]) * SS) for p in pts],
+                    suggested_sizes=[float(s) for s in size_factor * _polyline_spacing(pts)],
+                    end_types=_end_types_of(pts, _interface_extent(old_interface), _AXIS_TOL_FALLBACK),
+                    nondimensional=nondimensional))
+            # The axis segments are straight, so their two extreme points carry all the information.
+            inside = _merge_spans([(float(seg[0][1]), float(seg[-1][1])) for seg in old_axis])
+            res.fragment_volumes = [float(revolved_volume(_closed_half_section(
+                numpy.array([[float(x), float(y)] for x, y in seg], dtype=float)))) * SS ** 3
+                for seg in old_interface]
 
-    def after_newton_solve(self)->None:
-        mesh=self.get_my_domain()._mesh #type:ignore
-        if not isinstance(mesh,InterfaceMesh):
-            raise RuntimeError("Please attach the pinch-off and coalescence handler on an interface, not on a bulk domain")
+        res.axis_segments = [((0.0 * SS, a * SS), (0.0 * SS, b * SS)) for a, b in inside]
 
-        self.ensure_nondimensional_distance_parameters(mesh.get_problem())
+        if old_opposite_axis is not None:
+            # What the opposite phase covers afterwards is everything the axis was covered by before
+            # - by either phase - minus what this phase covers now. Building it as a complement
+            # rather than reading the old opposite axis is what makes the freshly opened gap of a
+            # pinch-off appear on the opposite side without the caller having to special-case it.
+            covered = _merge_spans([(float(seg[0][1]), float(seg[-1][1])) for seg in old_opposite_axis]
+                                   + [(float(seg[0][1]), float(seg[-1][1])) for seg in old_axis])
+            res.opposite_axis_segments = [((0.0 * SS, a * SS), (0.0 * SS, b * SS))
+                                          for a, b in _subtract_spans(covered, inside)]
+        return res
 
-        if mesh.get_element_dimension()!=1:
-            raise RuntimeError("Axisymmetric pinch-off and coalescence only works on an InterfaceMesh of elemental dimension 1")
-        if not isinstance(mesh.get_bulk_mesh(),MeshFromTemplateBase):
-            raise RuntimeError("pinch-off and coalescence only works when attached to a 2d bulk mesh")
+    def _interface_element_size_factor(self, interface_name: str) -> float:
+        """How many polyline points one interface element spans - 2 for C2, 1 for C1.
+
+        ``get_boundary_coordinates`` walks the interface *nodes*, so on a second-order interface the
+        spacing between consecutive points is half an element. Without this the suggested sizes halve
+        at every remesh and the mesh grows geometrically.
+
+        Collective on a distributed mesh, and it has to be: the answer is read off this rank's first
+        interface element, and a rank whose partition holds none of that interface has no element to
+        ask. It would then report 1 while the others report 2 - and since only rank 0's ``.msh`` file
+        becomes the mesh, a rank 0 without interface elements would halve the mesh size of the whole
+        problem at every remesh. Reached by every rank because the branch it sits in is decided by
+        the pending plan, which stage 7 makes unanimous.
+        """
+        local = 0
+        try:
+            mesh = self.get_problem().get_mesh(interface_name)
+            if mesh.nelement() > 0:
+                local = max(1, mesh.element_pt(0).nnode() - 1)
+        except Exception:
+            local = 0
+        if get_mpi_nproc() > 1 and bool(self.get_problem().is_distributed()):
+            local = int(get_mpi_max(local))
+        return float(max(1, local))
+
+    # -- convenience builders --------------------------------------------------------------------
+
+    def spline_from_chain(self, chain: ReconnectedChain, name: str, size: float | Callable[[ExpressionOrNum, ExpressionOrNum, float], float] | None = None) -> "Spline | Line":
+        """Turn one :py:class:`ReconnectedChain` into a named spline (a line if it has two points).
+
+        Args:
+            chain: One entry of :py:attr:`ReconnectedBoundaries.interface_chains`.
+            name: Boundary name of the created curve.
+            size: ``None`` uses the chain's own :py:attr:`~ReconnectedChain.suggested_sizes`, a float
+                a uniform size, and a callable is asked ``(x, y, suggested) -> size`` per point.
+        """
+        pts: list["Point"] = []
+        for (x, y), suggested in zip(chain.points, chain.suggested_sizes):
+            if size is None:
+                sz: float | None = suggested
+            elif callable(size):
+                sz = float(size(x, y, suggested))
+            else:
+                sz = float(size)
+            pts.append(self.point(x, y, size=sz, consider_spatial_scale=not chain.nondimensional))
+        if len(pts) < 2:
+            raise RuntimeError("An interface chain of " + str(len(pts)) + " point(s) cannot become a curve")
+        if len(pts) == 2:
+            # A two-point spline would be handed to CurvedEntityCatmullRomSpline, which needs more
+            # than its two endpoints to mean anything; a straight line is what it would describe.
+            res = self.line(pts[0], pts[1], name=name)
+            assert res is not None
+            return res
+        return self.spline(pts, name=name)
+
+    def lines_from_axis_segments(self, segments: Sequence[tuple[tuple[ExpressionOrNum, ExpressionOrNum], tuple[ExpressionOrNum, ExpressionOrNum]]], name: str, size: float | None = None) -> list["Line"]:
+        """Turn axis spans into named two-point lines. An empty list of segments is not an error:
+        after a coalescence a phase can lose its share of the axis entirely."""
+        res: list["Line"] = []
+        css = not self._recon_nondimensional
+        for p0, p1 in segments:
+            a = self.point(p0[0], p0[1], size=size, consider_spatial_scale=css)
+            b = self.point(p1[0], p1[1], size=size, consider_spatial_scale=css)
+            if a is b:
+                raise RuntimeError("An axis segment of zero length was requested for boundary '" + name + "'")
+            ln = self.line(a, b, name=name)
+            assert ln is not None
+            res.append(ln)
+        return res
+
+
+# --------------------------------------------------------------------------------------
+# The interface equations
+# --------------------------------------------------------------------------------------
+
+#: Fallback relative on-axis tolerance where no :py:class:`AxisymmetricReconnection` supplies one.
+_AXIS_TOL_FALLBACK = 1e-7
+
+
+class AxisymmetricReconnection(InterfaceEquations):
+    """Detects axisymmetric pinch-off and coalescence and requests the corresponding remesh.
+
+    Attach it to the free interface of an axisymmetric problem whose bulk mesh comes from a
+    :py:class:`TopologicalChangesGmshTemplate`::
+
+        eqs += AxisymmetricReconnection(rmin=5*micro*meter, distmin=5*micro*meter) @ "interface"
+
+    Both thresholds are *physical* lengths (they may carry units) and either may be ``None`` to
+    switch off that kind of event:
+
+    * a neck whose minimal interface radius drops below ``rmin`` pinches off;
+    * two fragments whose axial tip-to-tip gap drops below ``distmin`` coalesce.
+
+    The event itself is not applied here. It is handed to the mesh template as a
+    :py:class:`~pyoomph.meshes.axisymm_topology.SurgeryPlan` and built into the next mesh by
+    ``define_geometry``, i.e. by the ordinary remeshing-by-recreation path.
+    """
+
+    def __init__(self, rmin: ExpressionNumOrNone = None, distmin: ExpressionNumOrNone = None, *,
+                 volume_conservation: bool = True, volume_tolerance: float = 1e-9,
+                 cap_window_factor: float = 6.0, buffer_resolution: int = 8,
+                 cap_spacing_factor: float = 0.7,
+                 check_mesh_motion_direction: bool = True, overlap_reject_factor: float | None = 0.2,
+                 coalescence_arm_factor: float = 3.0, axis_tolerance: float = 1e-7,
+                 allow_fragment_removal: bool = True, segment_jump_offset: float = 1.0,
+                 handle_zeta: bool = True) -> None:
+        super().__init__()
+        #: Minimal interface radius below which a neck pinches off. ``None`` disables pinch-off.
+        self.rmin = rmin
+        #: Axial tip-to-tip gap below which two fragments coalesce. ``None`` disables coalescence.
+        self.distmin = distmin
+        self.volume_conservation = volume_conservation
+        self.volume_tolerance = volume_tolerance
+        self.cap_window_factor = cap_window_factor
+        self.buffer_resolution = buffer_resolution
+        self.cap_spacing_factor = cap_spacing_factor
+        #: Refuse to coalesce a gap whose two tips are moving apart.
+        self.check_mesh_motion_direction = check_mesh_motion_direction
+        #: Reject a Newton step that brings two tips closer than this multiple of ``distmin``, so
+        #: that an adaptive time stepper cuts ``dt`` instead of letting them pass through each
+        #: other. ``None`` switches the guard off.
+        self.overlap_reject_factor = overlap_reject_factor
+        #: The guard above is only armed once some gap is below this multiple of ``distmin``.
+        self.coalescence_arm_factor = coalescence_arm_factor
+        #: A point counts as sitting on the axis if ``|x|`` is below this times the size of the interface.
+        self.axis_tolerance = axis_tolerance
+        self.allow_fragment_removal = allow_fragment_removal
+        self.segment_jump_offset = segment_jump_offset
+        #: Carry the interface fields across the event by writing the plan's zeta chart onto both the
+        #: old and the new interface (see :py:meth:`_before_mesh_to_mesh_interpolation`). Switch off
+        #: to leave the transfer to whatever the geometry alone can match.
+        self.handle_zeta = handle_zeta
+
+        self._datacache = MeshDataCache(tesselate_tri=False, nondimensional=True)
+        self._rmin_nd: float | None = None
+        self._distmin_nd: float | None = None
+        self._nondim_done: bool = False
+        # Whether the last after_newton_solve saw a gap close enough for the overlap guard to be
+        # worth its (cheap, but per-Newton-step) cost.
+        self._armed: bool = False
+        self._warned_about_distmin: bool = False
+        self._last_plan: SurgeryPlan | None = None
+        # (template, interface name) of the plan that is waiting to be built, so that
+        # after_remeshing can clear it without having to resolve the tree again.
+        self._pending_on: tuple["TopologicalChangesGmshTemplate", str] | None = None
+        # (bulk mesh, boundary index) pairs on the NEW meshes whose boundary-coordinate flag this
+        # handler raised, so that after_remeshing can put it back. See _install_zeta_chart.
+        self._zeta_flags_to_restore: list[tuple[Any, int]] = []
+        # The NEW interface meshes this handler has claimed the zeta chart of for the duration of one
+        # remesh, likewise released by after_remeshing.
+        self._zeta_override_meshes: list[InterfaceMesh] = []
+
+    # -- local functions -------------------------------------------------------------------------
+
+    def define_additional_functions(self):
+        if self.check_mesh_motion_direction:
+            # ALE=False is essential and is what the legacy handler got wrong. With the default
+            # ALE="auto", partial_t(var("mesh_y")) on a moving mesh is
+            #     d(mesh_y)/dt - u_mesh . grad(mesh_y) = u_y - u_y = 0,
+            # identically, so the old gate compared 0 > 0 and never fired: it silently blocked every
+            # pinch-off (which required v_r < 0) and never suppressed a coalescence. partial_t(...,
+            # ALE=False) is the raw nodal time derivative, i.e. the mesh velocity - the same thing
+            # mesh_velocity() is a shorthand for.
+            #
+            # Both components, although only the axial one is read: the radial one is what a user
+            # looking at the interface output would expect next to it, and it costs nothing.
+            self.add_local_function("_topo_mesh_v_r", partial_t(var("mesh_x"), ALE=False))
+            self.add_local_function("_topo_mesh_v_z", partial_t(var("mesh_y"), ALE=False))
+        return super().define_additional_functions()
+
+    # -- parameters ------------------------------------------------------------------------------
+
+    def ensure_nondimensional_distance_parameters(self, problem: "Problem") -> None:
+        """Convert ``rmin``/``distmin`` to the problem's spatial scale, once."""
+        if self._nondim_done:
+            return
+        SS = problem.get_scaling("spatial")
+        self._rmin_nd = None if self.rmin is None else float(self.rmin / SS)
+        self._distmin_nd = None if self.distmin is None else float(self.distmin / SS)
+        self._nondim_done = True
+        if self._rmin_nd is not None and self._distmin_nd is not None and self._distmin_nd > self._rmin_nd \
+                and not self._warned_about_distmin:
+            self._warned_about_distmin = True
+            if get_mpi_rank() == 0:
+                print("WARNING: AxisymmetricReconnection has distmin > rmin. A neck thinner than distmin "
+                  "is bridged by the coalescence criterion before the pinch-off criterion can open "
+                  "it, so pinch-off will not be reported there. Choose distmin < rmin.")
+
+    # -- helpers ---------------------------------------------------------------------------------
+
+    def get_boundary_line_segments(self, name: str, sort_along_axis: "SortAlongAxis | None" = "y+") -> list[NPFloatArray]:
+        """The nondimensional polylines of a boundary of the *parent* domain, ordered and oriented.
+
+        The mesh-based replacement of the old helper of the same name, which read the point entries
+        of a :py:class:`~pyoomph.meshes.remesher.Remesher2d`. There is no such remesher on the
+        recreation path, and the mesh is the more direct source anyway.
+
+        Local: on a distributed mesh this describes *this rank's* partition of the boundary, not the
+        whole of it. The detection does not go through here - it merges, see
+        :py:meth:`_needs_merged_interface`; use
+        :py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates` if the whole
+        boundary is what is wanted.
+        """
+        from ..meshes.ordering import sort_line_segments
+        domain = self.get_current_code_generator().get_full_name().split("/")[0]
+        mesh = self.get_current_code_generator().get_problem().get_mesh(domain + "/" + name)
+        data = self._datacache.get_data(mesh)  # type:ignore[arg-type]
+        assert data is not None  # a local (non-global) cache always returns data
+        segs, _ = data.get_interface_line_segments()
+        pts = data.get_coordinates()
+        segs = sort_line_segments(pts, segs, sort_along_axis=sort_along_axis, whom="get_boundary_line_segments()")
+        return [numpy.array([[pts[0, i], pts[1, i]] for i in seg], dtype=float) for seg in segs]
+
+    def get_interface_and_axisymm_name(self) -> tuple[str, str]:
+        """The short names of this interface and of the symmetry axis of the same domain.
+
+        The axis is found the way the legacy handler found it - it is the boundary all of whose
+        points sit at ``r = 0`` - but from the bulk mesh rather than from a remesher's line entries,
+        and with a tolerance relative to the size of the domain instead of a hard-coded ``1e-7``.
+
+        Collective on a distributed problem: see :py:meth:`_interface_and_axis_name`.
+        """
+        return self._interface_and_axis_name(self.get_current_code_generator())
+
+    def get_opposite_and_opposite_axisymm_name(self) -> tuple[str | None, str | None]:
+        """The same, but for the domain on the other side of this interface (``None`` if there is none)."""
+        opp = self.get_current_code_generator()._get_opposite_interface()
+        if opp is None:
+            return None, None
+        assert isinstance(opp, FiniteElementCodeGenerator)
+        return self._interface_and_axis_name(opp)
+
+    def _interface_and_axis_name(self, cg: FiniteElementCodeGenerator) -> tuple[str, str]:
+        """Which boundary of ``cg``'s domain is the symmetry axis, decided over the whole mesh.
+
+        Collective on a distributed problem, and it has to be. Both halves of the test are about the
+        boundary as a whole: the extent it is measured against, and "every node of it sits at r=0".
+        A partition holding no node of the axis answers "not a candidate" and one holding only the
+        stretch of some other boundary that happens to run along r=0 answers "candidate" - so the
+        ranks would name different boundaries (or none), and the axis name travels into the transfer
+        configuration of the remesh. The reductions are unconditional, so every rank runs the same
+        number of them and a disagreement becomes an error on all of them rather than a hang.
+
+        ``get_boundary_names()`` is ordered by boundary index, which is assigned per mesh from the
+        template, i.e. identically everywhere.
+        """
+        splt = cg.get_full_name().split("/")
+        bulk = cg.get_problem().get_mesh(splt[0])
+        assert isinstance(bulk, MeshFromTemplateBase)
+        collective = get_mpi_nproc() > 1 and bool(cg.get_problem().is_distributed())
+        extent = 0.0
+        for n in bulk.nodes():
+            extent = max(extent, abs(n.x(0)), abs(n.x(1)))
+        if collective:
+            extent = float(get_mpi_max(extent))
+        tol = max(self.axis_tolerance * extent, 1e-300)
+        candidates: list[str] = []
+        for bname in bulk.get_boundary_names():
+            if not bname or bname == splt[-1]:
+                continue
+            bi = bulk.get_boundary_index(bname)
+            nodes = [bulk.boundary_node_pt(bi, i) for i in range(bulk.nboundary_node(bi))]
+            non_axis, total = sum(1 for n in nodes if abs(n.x(0)) >= tol), len(nodes)
+            if collective:
+                # A ratio test, so the halo copies a node may have on several ranks cannot change the
+                # verdict - a node is on the axis or it is not, wherever it is counted.
+                non_axis, total = int(get_mpi_sum(non_axis)), int(get_mpi_sum(total))
+            if total > 0 and non_axis == 0:
+                candidates.append(bname)
+        if len(candidates) == 0:
+            raise RuntimeError("Cannot find the axis of symmetry of domain '" + splt[0] + "': no "
+                               "boundary of it has all its nodes at r=0")
+        if len(candidates) > 1:
+            raise RuntimeError("Cannot identify the axis of symmetry of domain '" + splt[0] +
+                               "'. It could be any of " + ", ".join(sorted(candidates)))
+        return splt[-1], candidates[0]
+
+    # -- detection -------------------------------------------------------------------------------
+
+    def _validate_and_get_template(self) -> tuple[InterfaceMesh, "TopologicalChangesGmshTemplate"]:
+        mesh = self.get_my_domain()._mesh  # type:ignore[attr-defined]
+        if not isinstance(mesh, InterfaceMesh):
+            raise RuntimeError("Please attach AxisymmetricReconnection to an interface, not to a bulk domain")
+        if mesh.get_element_dimension() != 1:
+            raise RuntimeError("AxisymmetricReconnection only works on an InterfaceMesh of elemental dimension 1")
+        bulk = mesh.get_bulk_mesh()
+        if not isinstance(bulk, MeshFromTemplateBase):
+            raise RuntimeError("AxisymmetricReconnection only works when attached to a 2d bulk mesh "
+                               "generated from a mesh template")
+        template = bulk._templatemesh  # type:ignore[attr-defined]
+        if not isinstance(template, TopologicalChangesGmshTemplate):
+            raise RuntimeError(
+                "The bulk mesh of an AxisymmetricReconnection must come from a "
+                "TopologicalChangesGmshTemplate, not from a " + type(template).__name__ + ". The "
+                "surgery is delivered by re-running define_geometry, which needs that class's "
+                "get_reconnected_boundaries() to describe the reconnected geometry.")
+        return mesh, template
+
+    def _needs_merged_interface(self, mesh: InterfaceMesh) -> bool:
+        """Whether the detection has to run on the globally merged interface rather than this rank's.
+
+        The morphology is a statement about the WHOLE interface - where its thinnest waist is, which
+        fragments face each other across which gap - so a rank's partition of it is not a piece of
+        the answer but a different, truncated geometry, cut wherever the partition happens to run.
+
+        Collective, and answered identically on every rank, exactly as in
+        :py:meth:`pyoomph.meshes.zeta.AssignZetaCoordinatesBase._needs_merged_interface`: the gate
+        decides whether this rank enters the merge, so it is agreed rather than trusted locally.
+        Serial and ``mpirun`` without ``--distribute`` answer False without any communication at all,
+        and take the local path unchanged.
+        """
+        problem = self.get_current_code_generator().get_problem()
+        if problem is None or not problem.is_distributed() or get_mpi_nproc() <= 1:
+            return False
+        from ..meshes.meshdatamerge import needs_merging
+        return get_mpi_any(needs_merging(mesh))
+
+    def _merged_interface_data(self, mesh: InterfaceMesh) -> "MeshDataCacheEntry | None":
+        """The whole interface, merged onto rank 0 (``None`` elsewhere). Collective.
+
+        The problem-wide cache is flushed first because the merge reads each rank's LOCAL entry out
+        of it, and nothing invalidates that between Newton steps - ``actions_after_newton_solve``
+        clears it only after the equations' hooks have run. A stale entry would describe the
+        interface as it was before the step, which is precisely what both callers must not see.
+        """
+        problem = self.get_current_code_generator().get_problem()
+        problem.invalidate_cached_mesh_data()
+        return problem.get_cached_mesh_data(mesh, nondimensional=True, tesselate_tri=False,
+                                            global_mesh=True)
+
+    def _chains_and_tips(self, mesh: InterfaceMesh, with_velocities: bool = True) -> tuple[list[InterfaceChain], list[dict[str, float]]]:
+        """Interface polylines for :py:func:`detect_and_plan`, plus the axial tip data for the gate,
+        read from this rank's own mesh data."""
+        data = self._datacache.get_data(mesh)
+        assert data is not None  # only a global-mesh cache returns None, and this one is local
+        return self._chains_and_tips_from_data(data, with_velocities)
+
+    def _chains_and_tips_from_data(self, data: "MeshDataCacheEntry", with_velocities: bool = True) -> tuple[list[InterfaceChain], list[dict[str, float]]]:
+        """The same, from a given mesh-data entry - the local one, or the merged one on rank 0.
+
+        Touches no node, so it serves both: the merged entry's point indices address the nodes of the
+        whole interface and no rank's own node numbering.
+
+        ``with_velocities=False`` skips evaluating the mesh velocity, which the overlap guard does not
+        need and would otherwise pay for on every Newton step."""
+        segments, ninter = data.get_interface_line_segments()
+        coords = data.get_coordinates()
+        if len(segments) == 0:
+            return [], []
+        # The polylines run over the interface *nodes*, so on a C2 interface consecutive points are
+        # half an element apart. The size a mesh generator wants is the element size, hence the
+        # factor - without it every remesh halves the mesh size and the mesh grows without bound.
+        size_factor = float(ninter + 1)
+        allidx = [i for seg in segments for i in seg]
+        extent = float(numpy.hypot(numpy.ptp(coords[0, allidx]), numpy.ptp(coords[1, allidx])))
+        tol = max(self.axis_tolerance * extent, 1e-300)
+
+        vz: NPFloatArray | None = None
+        if self.check_mesh_motion_direction and with_velocities:
+            vz = data.get_data("_topo_mesh_v_z")
+            if vz is None:
+                raise RuntimeError("AxisymmetricReconnection: the local function '_topo_mesh_v_z' is "
+                                   "not available although check_mesh_motion_direction is on")
+
+        chains: list[InterfaceChain] = []
+        tips: list[dict[str, float]] = []
+        for seg in segments:
+            idx = list(seg)
+            if coords[1, idx[0]] > coords[1, idx[-1]]:
+                idx = list(reversed(idx))
+            pts = numpy.array([[coords[0, i], coords[1, i]] for i in idx], dtype=float)
+            ends = ("axis" if abs(pts[0, 0]) < tol else "fixed",
+                    "axis" if abs(pts[-1, 0]) < tol else "fixed")
+            chains.append(InterfaceChain(points=pts, sizes=size_factor * _polyline_spacing(pts),
+                                         end_types=ends))
+            tips.append({"z_lo": float(pts[0, 1]), "z_hi": float(pts[-1, 1]),
+                         "axis_lo": 1.0 if ends[0] == "axis" else 0.0,
+                         "axis_hi": 1.0 if ends[1] == "axis" else 0.0,
+                         "vz_lo": float(vz[idx[0]]) if vz is not None else 0.0,
+                         "vz_hi": float(vz[idx[-1]]) if vz is not None else 0.0})
+        order = sorted(range(len(chains)), key=lambda k: tips[k]["z_lo"])
+        return [chains[k] for k in order], [tips[k] for k in order]
+
+    @staticmethod
+    def _gaps(tips: list[dict[str, float]]) -> list[tuple[float, float, bool]]:
+        """``(gap, z_center, separating)`` for each consecutive pair of axial tips."""
+        res: list[tuple[float, float, bool]] = []
+        for lo, hi in zip(tips, tips[1:]):
+            if lo["axis_hi"] < 0.5 or hi["axis_lo"] < 0.5:
+                continue  # not two free axial tips facing each other
+            res.append((hi["z_lo"] - lo["z_hi"], 0.5 * (hi["z_lo"] + lo["z_hi"]),
+                        hi["vz_lo"] - lo["vz_hi"] > 0.0))
+        return res
+
+    def _detect_from_data(self, data: "MeshDataCacheEntry") -> dict[str, Any]:
+        """Run the whole detection on one mesh-data entry and return the broadcastable result.
+
+        Everything in the returned dictionary is numpy or builtins - a
+        :py:class:`~pyoomph.meshes.axisymm_topology.SurgeryPlan` is plain arrays and dataclasses -
+        so on a distributed mesh this runs on rank 0 alone and the result is broadcast verbatim.
+        Nothing here touches a node or a mesh, which is what makes that possible.
+        """
+        none_found: dict[str, Any] = {"armed": False, "plan": None, "table": None,
+                                      "distmin_nd": self._distmin_nd}
+        chains, tips = self._chains_and_tips_from_data(data)
+        if not chains:
+            return none_found
+        gaps = self._gaps(tips)
+
+        distmin_for_call = self._distmin_nd
+        armed = False
+        if self._distmin_nd is not None:
+            armed = any(g < self.coalescence_arm_factor * self._distmin_nd for g, _, _ in gaps)
+            if self.check_mesh_motion_direction:
+                closing = [g for g in gaps if g[0] < self._distmin_nd]
+                if closing and all(sep for _, _, sep in closing):
+                    # Every candidate gap is opening, so there is nothing to detect: skip the
+                    # coalescence criterion outright rather than let the closing operation bridge it.
+                    distmin_for_call = None
+        nothing: dict[str, Any] = {"armed": armed, "plan": None, "table": None,
+                                   "distmin_nd": distmin_for_call}
+        if self._rmin_nd is None and distmin_for_call is None:
+            return nothing
+
+        plan = detect_and_plan(chains, self._rmin_nd, distmin_for_call,
+                               buffer_resolution=self.buffer_resolution,
+                               cap_window_factor=self.cap_window_factor,
+                               cap_spacing_factor=self.cap_spacing_factor,
+                               volume_conservation=self.volume_conservation,
+                               volume_tolerance=self.volume_tolerance,
+                               allow_fragment_removal=self.allow_fragment_removal,
+                               segment_jump_offset=self.segment_jump_offset)
+        if plan is None:
+            return nothing
+
+        if self.check_mesh_motion_direction and gaps:
+            # Conservative on purpose: a plan is a single consistent description of the WHOLE new
+            # interface - fragments, spliced points, volume targets - so a coalescence that should
+            # not have happened cannot be edited out of it. Dropping the plan costs at most a delay
+            # of one step for any other event it contained, since the next solve re-detects it.
+            for ev in plan.events:
+                if ev.kind != "coalescence":
+                    continue
+                g, _, sep = min(gaps, key=lambda t: abs(t[1] - ev.z_center))
+                if sep:
+                    print("Discarding a reconnection plan: its coalescence at z=" + repr(ev.z_center) +
+                          " joins two tips that are moving apart.")
+                    return nothing
+
+        # detect_and_plan() normalised the chains in place and filled their zeta, and those points
+        # ARE the nondimensional positions of the current interface nodes - the chains were built
+        # from this very mesh (or, distributed, from the merged copy of it, which carries the very
+        # same coordinates). So this is the old chart, addressable by position, and it is what
+        # _before_mesh_to_mesh_interpolation writes back onto the old interface. Plain numpy, so that
+        # it can be broadcast along with the plan.
+        table = numpy.column_stack([
+            numpy.vstack([c.points for c in chains]),
+            numpy.concatenate([numpy.asarray(c.zeta, dtype=float) for c in chains])])
+        return {"armed": armed, "plan": plan, "table": table, "distmin_nd": distmin_for_call}
+
+    def after_newton_solve(self) -> None:
+        mesh, template = self._validate_and_get_template()
+        problem = self.get_current_code_generator().get_problem()
+        self.ensure_nondimensional_distance_parameters(problem)
+        iname = self.get_current_code_generator().get_full_name()
+        # A plan that was never built (a remesh suppressed during arclength continuation, say) refers
+        # to interface coordinates that have since moved on, so it must not survive this solve.
+        template._clear_pending_surgery_plan(iname)
+        self._pending_on = None
+        # Disarmed before any early return below. The flag gates a COLLECTIVE guard on every Newton
+        # step (see before_newton_convergence_check), so a rank that kept a stale True while the
+        # others went False would walk into a broadcast alone and hang the run. It used to survive a
+        # solve that found no interface at all, which is that same asymmetry serially.
+        self._armed = False
+        if self._rmin_nd is None and self._distmin_nd is None:
+            return
 
         self._datacache.clear()
-        segments,coords,data=self.get_segments_and_coords(mesh)
-        
-
-        self._has_pinch_off=self.check_for_pinch_offs(segments,coords,data)
-        self._has_coalescence=self.check_for_coalescence(segments,coords,data)                
-
-        if self._has_pinch_off or self._has_coalescence:
-            parent_domain=self.get_parent_domain()
-            assert parent_domain is not None
-            parent_mesh=parent_domain._mesh #type:ignore
-            assert isinstance(parent_mesh,MeshFromTemplate2d)
-            self.get_current_code_generator().get_problem()._domains_to_remesh.add(parent_mesh._templatemesh) #type:ignore
-
-
-
-    # Return the boundary segments (i.e. separated lines)
-    # These can be sorted, i.e. segments [index 0] and the orientation of the segment (i.e. the points  [index 1]) by ascending y
-    def get_boundary_line_segments(self,remesher:Remesher2d,name:str,sort_segments_by_y:bool=True,sort_orientation_by_y:bool=True) -> list[list[RemesherPointEntry]]:
-        my_name=self.get_current_code_generator().get_full_name() # full name (e.g. "liquid/interface")
-        full_name=my_name.split("/")[0]+"/"+name
-        lns=remesher._get_points_by_phys_name(full_name)
-        if sort_segments_by_y:
-            lns=list(sorted(lns,key=lambda l:min(l[0].y,l[-1].y)))
+        if not self._needs_merged_interface(mesh):
+            local = self._datacache.get_data(mesh)
+            assert local is not None  # only a global-mesh cache returns None, and this one is local
+            result = self._detect_from_data(local)
         else:
-            return list(lns)
-        if sort_orientation_by_y:
-            return [list(line) if line[0].y<line[-1].y else list(reversed(line)) for line in lns]
-        else:
-            return lns
+            # Distributed: the morphology has to be read off the whole interface, so merge it
+            # (collective, result on rank 0), detect there, and hand the plan to everybody. The plan
+            # rather than the merged entry, both because it is the smaller payload and because every
+            # rank must end up with the IDENTICAL plan - define_geometry then rebuilds the same
+            # geometry everywhere without any further communication.
+            comm = get_mpi_world_comm()
+            assert comm is not None  # needs_merging implies more than one process
+            data = self._merged_interface_data(mesh)
+            payload: dict[str, Any] | None = None
+            error: BaseException | None = None
+            if get_mpi_rank() == 0:
+                # Everything from here to the broadcast happens on rank 0 alone, so it has to end for
+                # all ranks or for none: detect_and_plan refuses several topologies by raising.
+                try:
+                    assert data is not None
+                    payload = self._detect_from_data(data)
+                except BaseException as e:  # noqa: BLE001
+                    error = e
+            payload = comm.bcast(payload, root=0)
+            mpi_share_root_failure(error, context="detecting a topological change on the merged "
+                                                  "interface '" + iname + "'")
+            assert payload is not None
+            result = payload
 
-
-    # Obtain the name of the interface (e.g "interface"), the name of the axis (e.g. "axis") of symmetry
-    def get_interface_and_axisymm_name(self,remesher:Remesher2d,cg:"FiniteElementCodeGenerator | None"=None)->tuple[str,str]:
-        if cg is None:
-            cg=self.get_current_code_generator()
-        my_name=cg.get_full_name()
-        splt=my_name.split("/")
-        other_interfaces = set([le.bname for le in remesher._line_entries if le.bname != splt[1]])
-
-        cornerpts:dict[str,list[list[RemesherPointEntry]]]={} # find all corners, i.e. points where we meet other interfaces
-        for on in other_interfaces:        
-            cornerpts[on] = remesher._get_points_by_phys_name("/".join(splt) + "/" + on)
-        
-        
-
-        # Identify the axisymmetry boundary:
-        axisymm_name=None
-        for k,b in cornerpts.items():
-            try:
-                olines = remesher._get_points_by_phys_name(splt[0]+"/"+k)
-            except:
-                continue
-            if all([abs(p.x)<1e-7  for l in olines for p in l]): # The axis of symmetry can be found, since all points have r=0
-                if axisymm_name is None:
-                    axisymm_name=k
-                else:
-                    raise RuntimeError("Cannot identify the axis of symmetry. It could be either "+axisymm_name+" or "+k) # Multiple candidates... Not good
-        if axisymm_name is None:
-            raise RuntimeError("Cannot find the axisymmetry line") # No axis of symmetry could be found
-
-        return splt[-1],axisymm_name
-    
-    def get_opposite_and_opposite_axisymm_name(self,remesher:Remesher2d):
-        if self.get_current_code_generator()._get_opposite_interface() is None:
-            return None,None
-        opp=self.get_current_code_generator()._get_opposite_interface()
-        assert isinstance(opp,FiniteElementCodeGenerator)
-        return self.get_interface_and_axisymm_name(remesher,opp)
-
-
-
-    def remove_boundary_segment(self,remesher:Remesher2d,name:str,segment:list[RemesherPointEntry]) -> None:
-        remesher._line_entries=list(filter(lambda le : le.bname!=name or not ((le.ptlist[0]==segment[0] and le.ptlist[-1]==segment[-1]) or (le.ptlist[0]==segment[-1] and le.ptlist[-1]==segment[0])) ,remesher._line_entries))
-
-    def add_boundary_segment(self,remesher:Remesher2d,name:str,segment:list[RemesherPointEntry]):
-        remesher.add_line_entry(segment,"spline" if len(segment)>3 else "line",name)
-
-    def get_arclength_along_curve(self,lx:NPFloatArray,ly:NPFloatArray)->NPFloatArray:
-            # reparametrize by the arclength
-            arclength:float=0.0
-            arclengths:list[float]=[]
-            lastx:float=lx[0]
-            lasty:float=ly[0]
-            for x,y in zip(lx,ly):
-                arclength+=numpy.sqrt((x-lastx)**2+(y-lasty)**2)
-                lastx,lasty=x,y
-                arclengths.append(arclength)            
-            return numpy.array(arclengths)
-
-    def quadratic_spline_roots(self,spl:UnivariateSpline)->NPFloatArray:
-        roots = []
-        knots = spl.get_knots()
-        for a, b in zip(knots[:-1], knots[1:]):
-            u, v, w = spl(a), spl((a + b) / 2), spl(b) #type:ignore
-            t = numpy.roots([u + w - 2 * v, w - u, 2 * v]) #type:ignore
-            t = t[numpy.isreal(t) & (numpy.abs(t) <= 1)] #type:ignore
-            roots.extend(t * (b - a) / 2 + (b + a) / 2) #type:ignore
-        return numpy.array(roots) #type:ignore            
-
-    def setup_remeshing_size(self,remesher:RemesherBase,preorder:bool)->None:
-        if not isinstance(remesher, Remesher2d):
-            raise RuntimeError("Only works with Remesher2d at the moment")
-
-        if preorder:
+        self._armed = bool(result["armed"])
+        plan = result["plan"]
+        if plan is None:
             return
-        
-        self.handle_pinch_off_and_coalescence_during_remeshing(remesher)
+        distmin_for_call = result["distmin_nd"]
+
+        self._last_plan = plan
+        # Only informational: the user names the boundaries in get_reconnected_boundaries() anyway,
+        # so a geometry whose axis cannot be identified automatically must not fail the detection.
+        # Reached by every rank, since the plan they got is the same one - and the lookups are
+        # collective on a distributed mesh, so the names come out the same everywhere too.
+        try:
+            _, axis_name = self.get_interface_and_axisymm_name()
+        except RuntimeError:
+            axis_name = None
+        try:
+            _, opp_axis_name = self.get_opposite_and_opposite_axisymm_name()
+        except RuntimeError:
+            opp_axis_name = None
+        try:
+            opp_cg = self.get_current_code_generator()._get_opposite_interface()
+            opp_interface_name = None if opp_cg is None else opp_cg.get_full_name()
+        except RuntimeError:
+            opp_interface_name = None
+        self._pending_on = (template, iname)
+        template._set_pending_surgery_plan(iname, plan, {
+            "spatial_scale": problem.get_scaling("spatial"),
+            "interface_name": iname, "axis_name": axis_name, "opposite_axis_name": opp_axis_name,
+            "opposite_interface_name": opp_interface_name,
+            "old_zeta_table": result["table"],
+            "rmin_nd": self._rmin_nd, "distmin_nd": distmin_for_call})
+
+        if get_mpi_rank() == 0:
+            for ev in plan.events:
+                print("Topological change: " + ev.kind + " at nondimensional z=" + repr(ev.z_center))
+            print("  fragment volumes (nondimensional): " + repr([float(v) for v in plan.fragment_volumes_before]) +
+                  " -> " + repr([float(v) for v in plan.fragment_volumes_after]) +
+                  (" (removed " + repr(float(plan.volume_lost_by_removal)) + ")" if plan.volume_lost_by_removal > 0 else ""))
+
+        # This is the template of the parent (bulk) domain: _validate_and_get_template() took it off
+        # mesh.get_bulk_mesh(), which is the same mesh the parent code generator points at.
+        problem._domains_to_remesh.add(template)
+
+    # -- the overlap guard -----------------------------------------------------------------------
+
+    def _overlap_verdict(self, data: "MeshDataCacheEntry") -> tuple[float, float] | None:
+        """The offending ``(gap, z_center)``, or ``None`` if the step is acceptable."""
+        _chains, tips = self._chains_and_tips_from_data(data, with_velocities=False)
+        limit = self.overlap_reject_factor * self._distmin_nd  # type:ignore[operator]
+        for gap, zc, _sep in self._gaps(tips):
+            if gap < limit:
+                return float(gap), float(zc)
+        return None
+
+    def before_newton_convergence_check(self, eqtree: "EquationTree") -> bool:
+        """Reject a step that would push two approaching tips through each other.
+
+        Only worth doing once something is actually close (see ``coalescence_arm_factor``): it runs
+        per Newton step, so it recomputes the tip positions from the mesh data and does no morphology.
+
+        On a distributed mesh the verdict is a statement about the whole interface - the two tips
+        approaching each other are routinely on different ranks - so the armed case merges, decides on
+        rank 0 and broadcasts. Every rank therefore returns the same answer *and* enters the same
+        collectives. ``_armed`` is what keeps that off the per-Newton-step path away from an event,
+        and it is itself broadcast (see :py:meth:`after_newton_solve`), so the ranks cannot disagree
+        about whether to enter the merge.
+        """
+        if self._distmin_nd is None or self.overlap_reject_factor is None or not self._armed:
+            return super().before_newton_convergence_check(eqtree)
+        mesh = eqtree.get_mesh()
+        assert isinstance(mesh, InterfaceMesh)
+        self._datacache.clear()  # the positions changed with the Newton step
+        if not self._needs_merged_interface(mesh):
+            local = self._datacache.get_data(mesh)
+            assert local is not None
+            offender = self._overlap_verdict(local)
+        else:
+            comm = get_mpi_world_comm()
+            assert comm is not None
+            data = self._merged_interface_data(mesh)
+            payload: tuple[bool, tuple[float, float] | None] | None = None
+            error: BaseException | None = None
+            if get_mpi_rank() == 0:
+                try:
+                    assert data is not None
+                    payload = (True, self._overlap_verdict(data))
+                except BaseException as e:  # noqa: BLE001
+                    error = e
+            payload = comm.bcast(payload, root=0)
+            mpi_share_root_failure(error, context="checking the interface tip gaps of '"
+                                                  + mesh.get_full_name() + "' on the merged interface")
+            assert payload is not None
+            offender = payload[1]
+        if offender is not None:
+            if get_mpi_rank() == 0:
+                print("Rejecting this step: two interface tips would come within " + repr(offender[0]) +
+                      " of each other near z=" + repr(offender[1]) + ", below " +
+                      repr(self.overlap_reject_factor * self._distmin_nd) + ".")
+            return False
+        return super().before_newton_convergence_check(eqtree)
+
+    # -- after the remesh ------------------------------------------------------------------------
+
+    def after_remeshing(self, eqtree: "EquationTree"):
+        if self._pending_on is not None:
+            self._pending_on[0]._clear_pending_surgery_plan(self._pending_on[1])
+            self._pending_on = None
+        # The transfer is over, so the one-off chart of _install_zeta_chart has done its job.
+        for bulk, bind in self._zeta_flags_to_restore:
+            bulk.boundary_coordinate_bool(bind, False)
+        self._zeta_flags_to_restore = []
+        for imesh in self._zeta_override_meshes:
+            imesh._zeta_chart_overridden = False
+        self._zeta_override_meshes = []
+        # The interface it was armed on no longer exists; the next solve arms it again if it must.
+        self._armed = False
+        self._datacache.clear()
+        return super().after_remeshing(eqtree)
+
+    # -- carrying the interface fields across the event -------------------------------------------
+
+    def _install_zeta_chart(self, old_iface: InterfaceMesh, new_iface: InterfaceMesh,
+                            table: NPFloatArray, chains: list[tuple[NPFloatArray, NPFloatArray]]) -> None:
+        """Write the surgery's chart onto one interface, old side and new side.
+
+        The two sides are matched differently on purpose. The OLD interface nodes *are* the points the
+        detection ran on, so their zeta is looked up exactly. The NEW ones are not: they were produced
+        by the mesh generator from a spline through the plan's polyline, so they sag off it by
+        O(h^2 * curvature) and only a projection can place them.
+        """
+        from ..meshes.zeta import (_check_zeta_is_invertible, assign_zetas_by_polyline_projection,
+                                   assign_zetas_from_position_table)
+        old_bulk = old_iface.get_bulk_mesh()
+        assert old_bulk is not None
+        # Whether a permanent chart on this interface already exists, i.e. whether the user has a zeta
+        # assigner on it: such an assigner charted the OLD mesh long before this remesh, so the answer
+        # does not depend on which hook of this remesh ran first. It decides whether the flag raised
+        # on the new mesh below has to be taken back again - see below.
+        charted_by_someone_else = old_bulk.is_boundary_coordinate_defined(
+            old_bulk.get_boundary_index(old_iface.get_name()))
+        for mesh, side in ((old_iface, "old"), (new_iface, "new")):
+            bulk = mesh.get_bulk_mesh()
+            assert bulk is not None
+            bind = bulk.get_boundary_index(mesh.get_name())
+            if side == "old":
+                assign_zetas_from_position_table(mesh, bind, table)
+            else:
+                assign_zetas_by_polyline_projection(mesh, bind, chains)
+                # A user's zeta assigner would otherwise re-chart this mesh from the geometry in
+                # after_mapping_on_macro_elements, which runs after this hook and before the transfer
+                # - and only on the NEW mesh, so old and new would be read through different
+                # parameterisations. Released again in after_remeshing.
+                mesh._zeta_chart_overridden = True
+                self._zeta_override_meshes.append(mesh)
+                if not charted_by_someone_else:
+                    # A ONE-OFF chart: the next, ordinary remesh produces none, and the transfer
+                    # refuses to run when the old mesh claims a chart the new one does not have
+                    # ("Boundary coordinate along ... is defined on the old, but not the new mesh").
+                    # So the flag goes back down once this transfer is over.
+                    self._zeta_flags_to_restore.append((bulk, bind))
+            bulk.boundary_coordinate_bool(bind)
+            # The chart is open on every fragment. A period left over from an earlier assignment
+            # would make locate_zeta wrap a fresh cap back onto the far end of the interface.
+            bulk.set_boundary_zeta_period(bind, 0.0)
+            mesh.update_zeta_in_buffer()
+            _check_zeta_is_invertible(mesh, bind, "AxisymmetricReconnection (" + side + " interface '"
+                                      + mesh.get_full_name() + "')")
+
+    @staticmethod
+    def _configure_axis_transfer(interpolator: "BaseMeshToMeshInterpolator", iface_name: str,
+                                 axis_name: str | None, extra: dict[str, Any]) -> None:
+        """Tell one domain's interpolator how to treat its symmetry axis across the event."""
+        if axis_name is None:
+            return
+        reach = 2.0 * max(extra.get("rmin_nd") or 0.0, extra.get("distmin_nd") or 0.0)
+        if reach > 0.0:
+            # Nondimensional: boundary_max_dist is compared against distances between nodal
+            # positions, which pyoomph stores nondimensionally (src/mesh.cpp, sqrt(mindist) >
+            # boundary_max_dist). Both key orders, since the codim-2 pass accepts either.
+            interpolator.boundary_max_distances[iface_name + "/" + axis_name] = reach
+            interpolator.boundary_max_distances[axis_name + "/" + iface_name] = reach
+        # A pinch-off opens a gap in this axis and a coalescence closes one, so the fresh axis nodes
+        # have no counterpart on the old axis at all - the old boundary either did not reach there or
+        # ran through material that now belongs to the other phase. They do lie in the old BULK of
+        # the correct phase, which is the question worth asking. Note this gives up whatever
+        # interface-only dofs the axis carries; symmetry boundaries normally carry none.
+        interpolator.bulk_locate_boundaries.add(axis_name)
+
+    def _before_mesh_to_mesh_interpolation(self, eqtree: "EquationTree", interpolator: "BaseMeshToMeshInterpolator"):
+        """Continue the interface chart across the topological change.
+
+        The old and the new interface are not the same curve near the event, so nothing derived from
+        the geometry alone can map one onto the other there: an arclength chart restarts at a fresh
+        cap, and a projection would happily pair a point just below a pinch with the interface just
+        above it. The plan, on the other hand, knows which new points *are* old ones and where the
+        fresh ones came from, and it expresses that as a zeta chart. Writing that chart onto both
+        sides turns the transfer of the interface fields into the ordinary zeta-based one.
+
+        Nothing happens on a plain quality remesh - there is no plan then, and the existing machinery
+        is right.
+        """
+        if not self.handle_zeta or self._pending_on is None:
+            return super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
+        template, iname = self._pending_on
+        entry = template._pending_surgery_plans.get(iname)
+        if entry is None:
+            return super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
+        plan, extra = entry
+        table = extra.get("old_zeta_table")
+        if table is None:
+            return super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
+        chains = [(nc.points, nc.zeta) for nc in plan.new_chains]
+
+        new_iface = eqtree.get_mesh()
+        assert isinstance(new_iface, InterfaceMesh)
+        old_iface = interpolator.old.get_mesh(new_iface.get_name())  # type:ignore[union-attr]
+        assert isinstance(old_iface, InterfaceMesh)
+        self._install_zeta_chart(old_iface, new_iface, table, chains)
+        interpolator.zeta_overridden_boundaries.add(new_iface.get_full_name())
+        interpolator.zeta_for_interface_fields_only.add(new_iface.get_name())
+        self._configure_axis_transfer(interpolator, new_iface.get_name(), extra.get("axis_name"), extra)
+
+        # The other phase, if there is one. The interface is a boundary of BOTH domains, so the gas
+        # side of it has its own interface mesh, its own boundary index and its own zeta - and it is
+        # transferred by the gas domain's interpolator, which this equation is never dispatched with
+        # (one interpolator per domain, the hook called on each domain's own eqtree). remesh_group is
+        # how it is reached.
+        opp_name = extra.get("opposite_interface_name")
+        if opp_name:
+            opp_domain, opp_iface_name = opp_name.split("/")[0], opp_name.split("/")[-1]
+            opp_interp = interpolator.remesh_group.get(opp_domain)
+            if opp_interp is None:
+                if get_mpi_rank() == 0:
+                    print("WARNING: AxisymmetricReconnection cannot reach the interpolator of the "
+                          "opposite domain '" + opp_domain + "', so its side of the interface is "
+                          "transferred without the reconnected zeta chart.")
+            else:
+                opp_new = opp_interp.new.get_mesh(opp_iface_name, return_None_if_not_found=True)  # type:ignore[union-attr]
+                opp_old = opp_interp.old.get_mesh(opp_iface_name, return_None_if_not_found=True)  # type:ignore[union-attr]
+                if isinstance(opp_new, InterfaceMesh) and isinstance(opp_old, InterfaceMesh):
+                    self._install_zeta_chart(opp_old, opp_new, table, chains)
+                    opp_interp.zeta_overridden_boundaries.add(opp_new.get_full_name())
+                    opp_interp.zeta_for_interface_fields_only.add(opp_iface_name)
+                self._configure_axis_transfer(opp_interp, opp_iface_name,
+                                              extra.get("opposite_axis_name"), extra)
+        return super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
 
 
+# --------------------------------------------------------------------------------------
+# Small geometric helpers
+# --------------------------------------------------------------------------------------
 
+def _polyline_spacing(pts: NPFloatArray) -> NPFloatArray:
+    """Mean distance of each polyline point to its neighbours - a robust local element size proxy."""
+    if len(pts) < 2:
+        return numpy.ones(len(pts), dtype=float)
+    d = numpy.linalg.norm(numpy.diff(pts, axis=0), axis=1)
+    out = numpy.empty(len(pts), dtype=float)
+    out[0] = d[0]
+    out[-1] = d[-1]
+    if len(pts) > 2:
+        out[1:-1] = 0.5 * (d[:-1] + d[1:])
+    return out
+
+
+def _interface_extent(segments: Sequence[Sequence[tuple[float, float]]]) -> float:
+    xs = [float(p[0]) for seg in segments for p in seg]
+    ys = [float(p[1]) for seg in segments for p in seg]
+    if not xs:
+        return 1.0
+    return float(numpy.hypot(max(xs) - min(xs), max(ys) - min(ys)))
+
+
+def _end_types_of(pts: NPFloatArray, extent: float, rel_tol: float) -> tuple[str, str]:
+    tol = max(rel_tol * extent, 1e-300)
+    return ("axis" if abs(pts[0, 0]) < tol else "fixed",
+            "axis" if abs(pts[-1, 0]) < tol else "fixed")
+
+
+def _closed_half_section(pts: NPFloatArray) -> NPFloatArray:
+    """Close an interface polyline onto the axis, so that its revolved volume is defined."""
+    extra: list[list[float]] = []
+    if abs(pts[-1, 0]) > 0.0:
+        extra.append([0.0, float(pts[-1, 1])])
+    if abs(pts[0, 0]) > 0.0:
+        extra.append([0.0, float(pts[0, 1])])
+    if not extra:
+        return pts
+    return numpy.vstack([pts, numpy.array(extra, dtype=float)])
+
+
+def _merge_spans(spans: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    for a, b in sorted((min(a, b), max(a, b)) for a, b in spans):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _subtract_spans(spans: Sequence[tuple[float, float]], holes: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    merged_holes = _merge_spans(holes)
+    for a, b in spans:
+        cur = a
+        for ha, hb in merged_holes:
+            if hb <= cur or ha >= b:
+                continue
+            if ha > cur:
+                out.append((cur, ha))
+            cur = max(cur, hb)
+        if cur < b:
+            out.append((cur, b))
+    return out
+
+
+# --------------------------------------------------------------------------------------
 # Marking disjunct domains by an integer D0 field
 # Can be used e.g. in integral expressions or similar
+# --------------------------------------------------------------------------------------
+
 class DisjunctDomainMarker(Equations):
     def __init__(self,name:str,direction:Literal["up","down"]="up") -> None:
         super().__init__()
@@ -276,7 +1173,7 @@ class DisjunctDomainMarker(Equations):
                 if n not in nodes2elem.keys():
                     nodes2elem[n]=[]
                 nodes2elem[n].append(e)
-        
+
         # Start over numbering the droplets
         domain_index=0
         self._max_droplet_index=0
@@ -312,479 +1209,7 @@ class DisjunctDomainMarker(Equations):
     def on_apply_boundary_conditions(self, mesh: "AnyMesh"):
         assert isinstance(mesh,MeshFromTemplate2d)
         self._update_marker(mesh)
-        #self.ensure_nondimensional_distance_parameters(mesh.get_problem())
         return super().on_apply_boundary_conditions(mesh)
-        
-    
-
-        
-# This is the specific class
-class AxisymmetricPinchoffAndCoalescence(BaseAxisymmetricPinchoffAndCoalescence):
-    def __init__(self,rmin:ExpressionNumOrNone,distmin:ExpressionNumOrNone,arclength_pinchoff_separation_factor:float=4,coalescence_distance_factor:float=1.5,coalescence_overlap_factor:float | None=0.2,check_mesh_motion_direction:bool=True,assign_zeta_coordinates:bool=True) -> None:
-        super().__init__()
-        self.rmin=rmin # minimum radial distance (dimensional) for pinch-off
-        self._rmin_nd:float | None=None # nondimensional radial distance for pinch-off
-        self.distmin=distmin # if None, no coalescence
-        self._distmin_nd:float | None=None # nondimensional distance for coalescence
-        self.arclength_pinchoff_separation_factor=arclength_pinchoff_separation_factor # min distance along the interface between two pinch-off points
-        self.coalescence_distance_factor=coalescence_distance_factor # factor to remove points when coalescing
-        if coalescence_overlap_factor is not None:
-            if coalescence_overlap_factor<0 or coalescence_overlap_factor>=1:
-                raise RuntimeError("coalescence_overlap_factor must be >0 and <1")
-        # when two ends are approaching, we make sure that no overlap can happen. If so, we reject the time step
-        # close to 0 allows to almost overlap
-        # close to 1 rejects time steps very close to the coalescence distance
-        self.coalescence_overlap_factor=coalescence_overlap_factor # TODO
-        self.assign_zeta_coordinates:bool=assign_zeta_coordinates
-
-        # If set, we check whether the mesh is actually moving radially inward at a potential pinch-off
-        # and whether two ends are actually moving towards each other for coalescence
-        self.check_mesh_motion_direction=check_mesh_motion_direction
-        
-        # identified pinch-off points in (normalized arclength coordinate,y coordinate) per interface segment (sorted by ascending y-start)
-        self._pinch_off_points:list[list[tuple[float,float]]]=[]
-        self._coalsecence_points:list[tuple[float,float]]=[] # List of identified coalescence points (coordinate_y(lower_segment),coordinate_y(higher_segment))
-
-
-
-    def define_additional_functions(self):
-        if self.check_mesh_motion_direction:
-            self.add_local_function("_topo_mesh_v_r", partial_t(var("mesh_x")) )
-            self.add_local_function("_topo_mesh_v_z", partial_t(var("mesh_y")) )
-        return super().define_additional_functions()
-
-
-    # Nondimensionalize the distance parameters
-    def ensure_nondimensional_distance_parameters(self,problem:"Problem")->None:
-        if self.rmin is None:
-            self._rmin_nd=None # Do not check for pinch-offs
-        elif self._rmin_nd is None:
-            self._rmin_nd=float(self.rmin/problem.get_scaling("spatial")) # nondim pinch-off radius
-
-        if self.distmin is None:
-            self._distmin_nd=None # do not check for coalescence
-        elif self._distmin_nd is None:                
-            self._distmin_nd=float(self.distmin/problem.get_scaling("spatial")) # nondim coalescence distance
-
-        if self._distmin_nd is not None:
-            self._interface_segment_overlap_factor=self._distmin_nd
-
-
-
-    # Find pinch-off points for all interface segments
-    def check_for_pinch_offs(self,segments:list[list[int]],coords:NPFloatArray,interface_data:MeshDataCacheEntry)->bool:
-
-        # Clear the pinch-offs
-        self._pinch_off_points=[[] for _i in range(len(segments))]
-
-        if self._rmin_nd is None: # Should not check for pinch-offs
-            return False 
-
-        has_pinch_off:bool=False
-        for linenum,l in enumerate(segments):           
-            # reparametrize by the arclength
-            arclengths=self.get_arclength_along_curve(coords[0,l],coords[1,l])
-            arclength:float=arclengths[-1]
-            arclengths/=arclength # Normalized arclength            
-
-            intr=InterpolatedUnivariateSpline(arclengths,coords[0,l],k=3) # radius as function of the normalized arclength
-            inty=InterpolatedUnivariateSpline(arclengths,coords[1,l],k=3) # axial coordinate
-            dinter=intr.derivative() # first and second derivative of the radial position
-            ddinter=dinter.derivative()
-
-            roots=self.quadratic_spline_roots(dinter) # Find zeros of r'(arclength) -> extrema of r(arclength)
-            distf=self.arclength_pinchoff_separation_factor*self._rmin_nd/arclength # Required distance
-
-            if self.check_mesh_motion_direction:
-                mesh_velo_r=interface_data.get_data("_topo_mesh_v_r")
-                assert mesh_velo_r is not None
-                int_mesh_velo_r=InterpolatedUnivariateSpline(arclengths,mesh_velo_r[l])
-            else:
-                int_mesh_velo_r=None
-
-            # Go over all exterma of r(arclength)
-            for ndarclength in sorted(roots):
-                # if r<pinch_off distance and positive curvature (i.e. r(arclength) has a minimum)
-                # and we are sufficiently away from the ends of the segment
-                if intr(ndarclength)<self._rmin_nd and ddinter(ndarclength)>0 and ndarclength>distf and ndarclength<1-distf: #type:ignore
-                    # Check if we are close to a previous point
-                    if len(self._pinch_off_points[linenum])==0 or ndarclength-self._pinch_off_points[linenum][-1][0]>distf:
-                        # checking radial mesh velocity if desired
-                        mesh_velo_ok=True
-                        if self.check_mesh_motion_direction:
-                            assert int_mesh_velo_r is not None
-                            mesh_velo_ok=int_mesh_velo_r(ndarclength)<0 #type:ignore
-                        if mesh_velo_ok:
-                            # Found a pinch-off. Add it to the list
-                            self._pinch_off_points[linenum].append((ndarclength,float(inty(ndarclength)))) #type:ignore
-                            has_pinch_off=True 
-        if has_pinch_off:
-            print("Must remesh due to pinch-off at non-dimensional (arclength,y) values ",self._pinch_off_points)
-            
-        return has_pinch_off
-
-
-
-    def before_newton_convergence_check(self,eqtree:"EquationTree") -> bool:
-        # Check and prevent overlap by rejecting time steps
-        if self._distmin_nd is None or self.coalescence_overlap_factor is None:
-            return super().before_newton_convergence_check(eqtree)
-        
-        self._datacache.clear()
-        mesh=eqtree.get_mesh()
-        assert isinstance(mesh,InterfaceMesh)
-        data=self._datacache.get_data(mesh)
-        assert data is not None # see get_segments_and_coords
-        segments,_=data.get_interface_line_segments()        
-        coords=data.get_coordinates()
-        segments=sort_line_segments(coords,segments,sort_along_axis="y+",whom="check_for_coalescence") # Sort lines by ascending y start
-        has_coalescence=self.check_for_coalescence(segments,coords,data,self.coalescence_overlap_factor)
-        if has_coalescence:
-            print("This step would invoke overlap! Rejecting")            
-            return False
-        return super().before_newton_convergence_check(eqtree)
-
-    # Check if we have coalescence
-    def check_for_coalescence(self, segments: list[list[int]], coords: NPFloatArray, interface_data: MeshDataCacheEntry,distfactor:float=1.0) -> bool:
-        self._coalsecence_points=[]
-        if self._distmin_nd is None:
-            return False
-       
-        
-        mesh_velo_z:NPFloatArray | None=None
-        if self.check_mesh_motion_direction:
-            mesh_velo_z=interface_data.get_data("_topo_mesh_v_r")
-            assert mesh_velo_z is not None
-
-        has_coalescence:bool=False
-        for l1,l2 in zip(segments,segments[1:]):
-            e1=coords[1,l1[-1]]
-            s2=coords[1,l2[0]]
-            dy=s2-e1 # distance of the end of the lower segment and the start of the upper segment
-            if self.check_mesh_motion_direction:
-                assert mesh_velo_z is not None
-                uz_e1=mesh_velo_z[l1[-1]] # mesh z-velocity of the upper point of the lower segment
-                uz_s2=mesh_velo_z[l2[0]] # mesh z-velocity of the lower point of the upper segment
-                if uz_s2-uz_e1>0:
-                    continue # No need to coalesce here, if they are moving appart
-            if dy<self._distmin_nd*distfactor:
-                has_coalescence=True
-                self._coalsecence_points.append((s2,e1))
-                print("Must remesh due to coalescence at non-dimensional y",0.5*(s2+e1))
-        
-        return has_coalescence
-        
-
-
-    def _before_mesh_to_mesh_interpolation(self, eqtree: "EquationTree", interpolator: "BaseMeshToMeshInterpolator"):
-        mesh=eqtree.get_mesh()
-        assert isinstance(mesh,InterfaceMesh)
-        self.ensure_nondimensional_distance_parameters(mesh.get_problem())
-        assert isinstance(interpolator,InternalInterpolator)
-        bulk_mesh=mesh.get_bulk_mesh()
-        assert isinstance(bulk_mesh,MeshFromTemplateBase)
-        remesher=bulk_mesh._templatemesh.remesher
-        assert isinstance(remesher,Remesher2d)
-        interface_name,axisymm_name=self.get_interface_and_axisymm_name(remesher)
-        # Tell the remesher to ignore points at the intersection of the axis of symmetry and the free interface from interpolation
-        # if there is no point on the old intersection of these interfaces within the range. Will happen at pinch-offs
-        # In that case, we just take the values from the closes point on the old interface or axis itself, not on the mutual point
-        # (only meaningful if pinch-off checking is actually enabled; self._rmin_nd stays None otherwise)
-        rmin_nd=self._rmin_nd
-        if rmin_nd is not None:
-            interpolator.boundary_max_distances[interface_name+'/'+axisymm_name]=rmin_nd*2
-            interpolator.boundary_max_distances[axisymm_name+'/'+interface_name]=rmin_nd*2
-    #    print("IMDIST_EE",interpolator.boundary_max_distances)
-        if self.assign_zeta_coordinates:
-            new_mesh=self.get_mesh()
-            old_mesh=interpolator.old.get_mesh(new_mesh.get_name())
-            assert isinstance(old_mesh,InterfaceMesh)
-            old_data=self.assign_zetas(old_mesh)
-            if self._has_pinch_off or self._has_coalescence:
-                #for d in old_data:
-                #    print(d)
-                print("Zeta assignment is different due to either pinchoff or coalescence:",self._has_pinch_off,self._has_coalescence)
-                #print(old_data[:,0])
-                x_of_zeta=InterpolatedUnivariateSpline(old_data[:,0],old_data[:,1],k=min(len(old_data),3))
-                y_of_zeta=InterpolatedUnivariateSpline(old_data[:,0],old_data[:,2],k=min(len(old_data),3))
-                bmesh=new_mesh.get_bulk_mesh()
-                bind=bmesh.get_boundary_index(new_mesh.get_name())
-                def minifunc(zeta,x,y):
-                    return (x_of_zeta(zeta[0])-x)**2+(y_of_zeta(zeta[0])-y)**2
-                for n in new_mesh.nodes():
-                    x,y=n.x(0),n.x(1)
-                    guess_zeta=0
-                    guess_dist=1e20
-                    for d in old_data:
-                        dz=minifunc([d[0]],x,y)
-                        if dz<guess_dist:
-                            guess_dist=dz
-                            guess_zeta=d[0]                    
-                    optzeta=optimize.minimize(minifunc,[guess_zeta],args=(x,y))
-                    n.set_coordinates_on_boundary(bind,[optzeta.x[0]])
-                bmesh.boundary_coordinate_bool(bind)
-                
-            else:
-                self.assign_zetas(new_mesh)            
-
-        return super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
-
-    def assign_zetas(self,mesh:InterfaceMesh):
-        bmesh=mesh.get_bulk_mesh()
-        bind=bmesh.get_boundary_index(mesh.get_name())
-        cache=MeshDataCache(True,True)
-        segs,pts,data=self.get_segments_and_coords(mesh,cache)        
-
-        nodemap=mesh.fill_node_index_to_node_map()
-        if len(nodemap)!=sum(len(seg) for seg in segs):
-            print("NODEMAP",nodemap)
-            print("SEGS",segs)
-            raise RuntimeError("NODEMAP AND SEGMENT LENGTH MISMATCH")
-
-
-        ptinds:list[int]=[]
-        aleng=0.0
-
-        aleng_segs:list[NPFloatArray]=[]
-        for seg in segs:
-            alength_seg:list[float]=[]
-            aleng=0.0
-            oldx,oldy=pts[0,seg[0]],pts[1,seg[0]]
-            for ptind in seg:
-                x,y=pts[0,ptind],pts[1,ptind]
-                dl=numpy.sqrt((x-oldx)**2+(y-oldy)**2)
-                aleng+=dl
-                alength_seg.append(aleng)
-                ptinds.append(ptind)
-                oldx,oldy=x,y
-            alength_seg_arr=numpy.array(alength_seg)/alength_seg[-1]
-            aleng_segs.append(alength_seg_arr)
-        offs=0.0
-        for i in range(len(aleng_segs)):
-            aleng_segs[i]+=offs
-            offs=aleng_segs[i][-1]+1 # Here the pinch-off and coalescence dynamics has to go
-        alengths:NPFloatArray=numpy.concatenate(aleng_segs)
-
-        res:list[tuple[float,float,float]]=[]
-        for al,pti in zip(alengths,ptinds):
-            n=nodemap[pti]
-            n.set_coordinates_on_boundary(bind,[al])
-            res.append((al,n.x(0),n.x(1),))
-            
-        bmesh.boundary_coordinate_bool(bind)
-        return numpy.array(res)
-
-
-    def after_mapping_on_macro_elements(self):
-        if self.assign_zeta_coordinates:
-            if not (self._has_coalescence or self._has_pinch_off):
-                self.assign_zetas(self.get_mesh())
-        return super().after_mapping_on_macro_elements()    
-    
-    def after_remeshing(self, eqtree: "EquationTree"):
-        if self.assign_zeta_coordinates:
-            if not (self._has_coalescence or self._has_pinch_off):
-                self.assign_zetas(self.get_mesh())
-        return super().after_remeshing(eqtree)
-
-    def handle_pinch_off_and_coalescence_during_remeshing(self,remesher:Remesher2d)->None:
-        if not self._has_pinch_off and not self._has_coalescence:
-            return 
-
-        interface_name,axisymm_name=self.get_interface_and_axisymm_name(remesher)
-        opp_interface_name,opp_axisymm_name=self.get_opposite_and_opposite_axisymm_name(remesher)
-        
-
-        interface_segments=self.get_boundary_line_segments(remesher,interface_name)
-        axisymm_lines=self.get_boundary_line_segments(remesher,axisymm_name)
-        if opp_interface_name:
-            opp_axisymm_lines=self.get_boundary_line_segments(remesher,opp_interface_name)
-
-        if len(axisymm_lines)!=len(interface_segments):
-            # This is required to match for the connection of the axisymmetric lines later on
-            raise RuntimeError("Strange: Mismatch in axisymmetric line segments and interface line segments: "+str(len(axisymm_lines))+" vs. "+str(len(interface_segments)))
-
-        # Freshly pinched-off points should never coalesce in the same step
-        ignore_coalescence_at_points:set[RemesherPointEntry]=set()
-        axi_points:list[RemesherPointEntry]=[]
-
-        # Do the pinch-off
-        if self._has_pinch_off:
-            if len(self._pinch_off_points)!=len(interface_segments):
-                print("PINCH-OFF INFORMATION: ",self._pinch_off_points)
-                print("LINE SEGMENTS:")
-                for l in interface_segments:
-                    for p in l:
-                        print("",p.x,p.y)
-                    print()
-                raise RuntimeError("Strange: Mismatch in interface segments between pinch-off information and actual segments: "+str(len(self._pinch_off_points))+" vs. "+str(len(interface_segments)))
-
-            assert self._rmin_nd is not None
-
-            for lineind,l in enumerate(interface_segments): # iterate over all interface lines               
-
-                # reparametrize by the arclength
-                arclengths=self.get_arclength_along_curve(numpy.array([p.x for p in l]),numpy.array([p.y for p in l]))
-                arclength:float=arclengths[-1]
-                arclengths=arclengths/arclength # Normalized arclength
-
-                # identified arclengths and y values of pinch-offs at this segment
-                pinch_off_arclengths=self._pinch_off_points[lineind]
-
-                if len(pinch_off_arclengths)==0:
-                    continue # No pinch-off happening within this interface segment
-
-                # Some distance factors to remove points
-                distf0=0.5*self._rmin_nd
-                distf1=0.8*self._rmin_nd
-                distf_al=(distf1+2*self._rmin_nd)/arclength
-
-                # New interface segments to create
-                new_interface_segments:list[list[RemesherPointEntry]] = [[] for _i in range(len(pinch_off_arclengths)+1)]
-                
-                currind=0 # Current index to the handled pinch-off position
-                # Iterate over all points
-                
-                for p,al in zip(l,arclengths):
-                    if currind<len(pinch_off_arclengths):
-                        if al<pinch_off_arclengths[currind][0]-distf_al:
-                            new_interface_segments[currind].append(p)
-                        elif al>=pinch_off_arclengths[currind][0]+distf_al:
-                            currind+=1
-                            new_interface_segments[currind].append(p)
-                    else:
-                        new_interface_segments[currind].append(p)
-                
-                # Complete the curves by adding new points
-                for i in range(len(new_interface_segments)):
-                    if i>0:
-                        #Add a start interpolation point
-                        new_interface_segments[i].insert(0, remesher.add_point_entry(self._rmin_nd, pinch_off_arclengths[i - 1][1] + distf1, 0,size=new_interface_segments[i][0].size))
-                        new_interface_segments[i].insert(0,remesher.add_point_entry(0, pinch_off_arclengths[i - 1][1] +distf0, 0, size=new_interface_segments[i][0].size))
-                        ignore_coalescence_at_points.add(new_interface_segments[i][0])
-                        axi_points.append(new_interface_segments[i][0])
-                    if i+1<len(new_interface_segments):
-                        #adding end interpolation points
-                        new_interface_segments[i].append(remesher.add_point_entry(self._rmin_nd, pinch_off_arclengths[i][1] - distf1, 0, size=new_interface_segments[i][-1].size))
-                        new_interface_segments[i].append(remesher.add_point_entry(0, pinch_off_arclengths[i][1] - distf0,0,size=new_interface_segments[i][-1].size))
-                        ignore_coalescence_at_points.add(new_interface_segments[i][-1])
-                        axi_points.append(new_interface_segments[i][-1])
-
-
-                # Remove the old part from the line entries
-                self.remove_boundary_segment(remesher,interface_name,l)
-                
-                # Add the new line entries
-                for r in new_interface_segments:
-                    self.add_boundary_segment(remesher,interface_name,r)
-                    
-
-
-                # Patch the axisymmetric line segments
-                lax=axisymm_lines[lineind]
-                self.remove_boundary_segment(remesher,axisymm_name,lax)
-                startpt,endpt=lax[0],lax[-1]
-                for axisegind in range(len(new_interface_segments)):
-                    stp=new_interface_segments[axisegind][0] if axisegind>0 else startpt
-                    ept=new_interface_segments[axisegind][-1] if axisegind+1<len(new_interface_segments) else endpt
-                    self.add_boundary_segment(remesher,axisymm_name,[stp,ept])
-                    if opp_axisymm_name is not None:
-                        if axisegind+1<len(axi_points):
-                            self.add_boundary_segment(remesher,opp_axisymm_name,[axi_points[axisegind],axi_points[axisegind+1]])
-
-
-
-
-        # Handle coalescence
-        if self._has_coalescence and self._distmin_nd is not None:
-
-            def update_segments() -> tuple[list[list[RemesherPointEntry]], list[list[RemesherPointEntry]]]:
-                axisymm_lines=self.get_boundary_line_segments(remesher,axisymm_name)
-                interface_segments=self.get_boundary_line_segments(remesher,interface_name)
-                if len(axisymm_lines)!=len(interface_segments):
-                    raise RuntimeError("Strange: Expected axisymmetric segments and interface segments to have the same length, but got "+str(len(axisymm_lines))+" vs. "+str(len(interface_segments)))
-                return axisymm_lines,interface_segments
-
-            # get the lines once more        
-            axisymm_lines,interface_segments=update_segments()
-            currind=0
-            while currind+1<len(axisymm_lines):
-                # Get the current and next part of the interfaces
-                l1=axisymm_lines[currind]
-                l2=axisymm_lines[currind+1]
-                s1=interface_segments[currind]
-                s2=interface_segments[currind+1]
-
-                # Distance betweem them
-                dy=l2[0].y-l1[-1].y
-                if dy<self._distmin_nd and not (s2[0] in ignore_coalescence_at_points and s1[-1] in ignore_coalescence_at_points):
-                    center_y=0.5*(l2[0].y+l1[-1].y)
-                    print("Handle coalescence at non-dimensional y  ",center_y,"NEWPT",s2[0].y,s1[-1].y,s2[0] in ignore_coalescence_at_points ,s1[-1] in ignore_coalescence_at_points)
-
-                    # Remove the two axisymmetric lines
-                    self.remove_boundary_segment(remesher,axisymm_name,l1)
-                    self.remove_boundary_segment(remesher,axisymm_name,l2)
-                    # and make one out of it
-                    self.add_boundary_segment(remesher,axisymm_name,[l1[0],l2[-1]])
-                    
-                    # Remove the two interface segments
-                    self.remove_boundary_segment(remesher,interface_name,s1)
-                    self.remove_boundary_segment(remesher,interface_name,s2)                   
-                    
-                    if self._rmin_nd is None:
-                        remdist_r=2*self._distmin_nd*self.coalescence_distance_factor
-                        remdist_y=2*self._distmin_nd*self.coalescence_distance_factor
-                    else:
-                        remdist_r=2*self._rmin_nd*self.coalescence_distance_factor
-                        remdist_y=2*self._rmin_nd*self.coalescence_distance_factor
-
-                    # Make to arclength parameterized splines. Check the distance
-                    s1rev=list(reversed(s1))
-                    s1rx=numpy.array([p.x for p in s1rev])
-                    s1ry=numpy.array([p.y for p in s1rev])
-                    s2x=numpy.array([p.x for p in s2])
-                    s2y=numpy.array([p.y for p in s2])
-                    als1=self.get_arclength_along_curve(s1rx,s1ry)
-                    als2=self.get_arclength_along_curve(s2x,s2y)
-                    maxal=min(als1[-1],als2[-1])*0.5 # arclength range to sample
-                    int_s1_x=InterpolatedUnivariateSpline(als1,s1rx,k=min(3,len(als1)))
-                    int_s1_y=InterpolatedUnivariateSpline(als1,s1ry,k=min(3,len(als1)))
-                    int_s2_x=InterpolatedUnivariateSpline(als2,s2x,k=min(3,len(als2)))
-                    int_s2_y=InterpolatedUnivariateSpline(als2,s2y,k=min(3,len(als2)))
-                    numsampls=1000
-                    alsampls=numpy.linspace(0,maxal,numsampls)
-                    dists=numpy.sqrt((int_s1_x(alsampls)-int_s2_x(alsampls))**2+(int_s1_y(alsampls)-int_s2_y(alsampls))**2) #type:ignore
-                    # Find the last index that is sufficiently away
-                    maxind=len(dists)-1
-                    while dists[maxind-1]>remdist_r and maxind>1:
-                        maxind-=1
-                    alcrop=alsampls[maxind]
-                    lastind_i1=len(s1)-numpy.argwhere(als1>alcrop)[0][0]
-                    lastind_i2=numpy.argwhere(als2>alcrop)[0][0]
-                    
-            
-                    if False:
-                        lastind_i1=len(s1)-1
-                        while (s1[lastind_i1].x<remdist_r or s1[lastind_i1].y>center_y-remdist_y)  and lastind_i1>1:
-                            lastind_i1-=1
-                        lastind_i2=0
-                        while (s2[lastind_i2].x<remdist_r or s2[lastind_i2].y<center_y+remdist_y) and lastind_i2+1<len(s2):
-                            lastind_i2+=1
-
-                    #print("LASTINDS VS LENG",lastind_i1,len(s1),lastind_i2,len(s2))
-                    new_seg:list[RemesherPointEntry]=[]
-                    for i in range(lastind_i1+1):
-                        new_seg.append(s1[i])
-                    for i in range(min(max(1,lastind_i2-1),len(s2)-1),len(s2)):
-                        new_seg.append(s2[i])
-
-                    print("NEWSEG",new_seg,[(p.x,p.y) for p in new_seg])                    
-                    
-                    self.add_boundary_segment(remesher,interface_name,new_seg)                    
-
-                    axisymm_lines,interface_segments=update_segments() # Update the segments, but do not increase the index
-                else:
-                    currind=currind+1 # increase the index if there is no coalescence
 
 
 from ..typings import _set_public_api

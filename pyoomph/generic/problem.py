@@ -4081,7 +4081,12 @@ class Problem(_pyoomph.Problem):
                     interpolators[name]=interpolator(omesh,newmesh)
                 elif isinstance(newmesh,ODEStorageMesh) and isinstance(omesh,ODEStorageMesh):
                     interpolators[name]=ODEInterpolator(omesh,newmesh)
-                omesh.get_eqtree()._before_mesh_to_mesh_interpolation(interpolators[name])
+        # As in force_remesh(): every hook sees the whole set, since one of them may have to
+        # configure a neighbouring domain's transfer.
+        for _, interp in interpolators.items():
+            interp.remesh_group=interpolators
+        for name in interpolators.keys():
+            old_mesh_dict[name].get_eqtree()._before_mesh_to_mesh_interpolation(interpolators[name])
 
         if num_adapt > 0:
             no_need_to_reassign = False
@@ -9551,11 +9556,17 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
 
 
         for name, newmesh in new_meshes.items():
-            
             oldmesh = old_meshes[name]
             #oldmesh.prepare_interpolation() # This one will change the Lagrangian coordinates!
             interpolators[name]=interpolator(oldmesh,newmesh)
-            oldmesh.get_eqtree()._before_mesh_to_mesh_interpolation(interpolators[name])
+        # All of them first, and only then the hooks: an equation on a boundary that two domains
+        # SHARE (a free surface between two phases) is dispatched with its own domain's interpolator
+        # only, yet has to configure the transfer on both sides of that boundary. See
+        # BaseMeshToMeshInterpolator.remesh_group.
+        for _, interp in interpolators.items():
+            interp.remesh_group=interpolators
+        for name in new_meshes.keys():
+            old_meshes[name].get_eqtree()._before_mesh_to_mesh_interpolation(interpolators[name])
 
         if num_adapt > 0:
             no_need_to_reassign = False

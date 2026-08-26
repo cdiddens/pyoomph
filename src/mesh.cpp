@@ -764,9 +764,9 @@ namespace pyoomph
     }
   }
 
-  void Mesh::boundary_coordinates_bool(unsigned boundary_index)
+  void Mesh::boundary_coordinates_bool(unsigned boundary_index, bool value)
   {
-    Boundary_coordinate_exists[boundary_index] = true;
+    Boundary_coordinate_exists[boundary_index] = value;
   }
 
   void Mesh::set_boundary_zeta_period(unsigned boundary_index, double period)
@@ -3143,6 +3143,26 @@ namespace pyoomph
     if (!this->interpolated_lagrangian_coordinates_at_remeshing) this->set_lagrangian_nodal_coordinates();
   }
 
+  // Look up the value slot an interface dof id occupies on a node, without creating one.
+  //
+  // index_of_first_value_assigned_by_face_element() reads the map with std::map::operator[], which
+  // INSERTS a zero for an id the node does not carry - so a field the node knows nothing about is
+  // silently written into value slot 0, i.e. over a bulk field. Every node reached by the transfer
+  // below should have the dof, but "should" is what produced the defects that transfer already had.
+  static bool face_value_index(oomph::BoundaryNodeBase *bn, unsigned interface_dof_id, int &index)
+  {
+    if (!bn)
+      return false;
+    std::map<unsigned, unsigned> *m = bn->index_of_first_value_assigned_by_face_element_pt();
+    if (!m)
+      return false;
+    auto entry = m->find(interface_dof_id);
+    if (entry == m->end())
+      return false;
+    index = (int)entry->second;
+    return true;
+  }
+
   // This only works in max. 2d well
   //
   // Transfer nodal field values from an old mesh's boundary (old, boundary index oldbind) to this
@@ -3160,7 +3180,9 @@ namespace pyoomph
   //     giving a cheap 1d ("along the boundary") linear interpolation without needing explicit
   //     boundary-arclength bookkeeping. Interface-only additional dofs are transferred analogously via
   //     imesh/oldimesh (the corresponding interface meshes), using inter_field_map.
-  void Mesh::nodal_interpolate_along_boundary(Mesh *old, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist)
+  //  4. only_interface_fields=true does step 3 for the interface-only dofs alone and leaves the bulk
+  //     fields as they are; see the declaration in mesh.hpp for why the codim-2 pass needs that.
+  void Mesh::nodal_interpolate_along_boundary(Mesh *old, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist, bool only_interface_fields)
   {
     // Asked before anything else, because it is collective: every rank has to reach it, including
     // the ones whose share of the OLD boundary is empty and which therefore have nothing to match
@@ -3295,21 +3317,32 @@ namespace pyoomph
       }
     }
 
-    if (has_dg || my_fft->info_DL.numfields || my_fft->info_D0.numfields)
+    // my_fft is NULL whenever imesh is empty (a boundary that carries no interface elements on this
+    // rank), and this used to dereference it unconditionally.
+    if (has_dg || (my_fft && (my_fft->info_DL.numfields || my_fft->info_D0.numfields)))
     {
       std::ostringstream oss;
       oss << "At interface: " << this->domainname ;
       throw_runtime_error("Cannot interpolate discontinuous fields at interfaces yet: " + oss.str());
     }
 
+    // The dofs the interface adds on top of the bulk, matched by name between the two interfaces.
+    //
+    // Built from my_fft/from_fft - the tables of imesh/oldimesh - not from the BULK tables my_ft and
+    // from_ft, which is what this did before: on a bulk mesh a bulk code has numfields ==
+    // numfields_basebulk, so the loop found nothing at all and every interface-only field (a
+    // surfactant concentration, a Lagrange multiplier) was silently dropped by this transfer. On the
+    // codim-2 call the bulk table is the codim-1 interface's, so the codim-2 mesh's own dofs were
+    // missed in the same way. Same construction as nodal_interpolate_from further down.
     std::map<unsigned, unsigned> inter_field_map;
 
     if (my_fft && from_fft)
     {
       std::map<unsigned, std::string> my_interface_dofs;
-      for (unsigned int si=0;si<my_ft->num_present_continuous_spaces;si++)
+      for (unsigned int si=0;si<my_fft->num_present_continuous_spaces;si++)
       {
-        auto * space_info=my_ft->present_continuous_spaces[si];
+        auto * space_info=my_fft->present_continuous_spaces[si];
+        if (!space_info->interface_dof_indices) continue; // never resolved: no interface dofs here
         for (unsigned int i = 0; i < space_info->numfields-space_info->numfields_basebulk; i++)
         {
           std::string name2find = space_info->fieldnames[i+space_info->numfields_basebulk];
@@ -3320,9 +3353,10 @@ namespace pyoomph
 
       std::map<std::string, unsigned> from_interface_dofs;
 
-      for (unsigned int si=0;si<from_ft->num_present_continuous_spaces;si++)
+      for (unsigned int si=0;si<from_fft->num_present_continuous_spaces;si++)
       {
-        auto * space_info=from_ft->present_continuous_spaces[si];
+        auto * space_info=from_fft->present_continuous_spaces[si];
+        if (!space_info->interface_dof_indices) continue;
         for (unsigned int i = 0; i < space_info->numfields-space_info->numfields_basebulk; i++)
         {
           std::string name2find = space_info->fieldnames[i+space_info->numfields_basebulk];
@@ -3506,23 +3540,25 @@ namespace pyoomph
       //   oomph::Vector<double> xm=bestnode->position();
       for (unsigned int time_ind = 0; time_ind < n->time_stepper_pt()->ntstorage(); time_ind++)
       {
-        for (unsigned vi = 0; vi < field_map.size(); vi++)
-        { // Do not interpolate lagrange multipiers
-          //          std::cerr << "SETTING VALUE " << xm[0] << "," << xm[1]  << " :  " << time_ind << "  " << vi <<"  -> " << bestnode->value(time_ind,vi) << std::endl;
-          if (field_map[vi] >= 0)
-          {
-            n->set_value(time_ind, vi, bestnode->value(time_ind, field_map[vi]) * lambda1 + bestnode2->value(time_ind, field_map[vi]) * lambda2);
+        // Skipped on the codim-2 pass: the per-boundary pass has already put properly interpolated
+        // bulk values on this very node, and the blend below is not an interpolation.
+        if (!only_interface_fields)
+        {
+          for (unsigned vi = 0; vi < field_map.size(); vi++)
+          { // Do not interpolate lagrange multipiers
+            //          std::cerr << "SETTING VALUE " << xm[0] << "," << xm[1]  << " :  " << time_ind << "  " << vi <<"  -> " << bestnode->value(time_ind,vi) << std::endl;
+            if (field_map[vi] >= 0)
+            {
+              n->set_value(time_ind, vi, bestnode->value(time_ind, field_map[vi]) * lambda1 + bestnode2->value(time_ind, field_map[vi]) * lambda2);
+            }
           }
         }
         for (auto interfield : inter_field_map)
         {
-          // std::cout << "SIZES  " <<newnodes.size() << " OLD "<< oldnodes.size() << std::endl << std::flush ;
-          // std::cout << "DEST  " <<bnode << " @ "<< interfield.first << " NV " << n->nvalue() << " X " << n->x(0) << ", " << n->x(1)<< std::endl << std::flush ;
-          int dest_i = bnode->index_of_first_value_assigned_by_face_element(interfield.first);
-          // std::cout << "SRC1  " <<bestbnode << " @ "<< interfield.second << " NV " << bestnode->nvalue() << " X " << bestnode->x(0) << ", " << bestnode->x(1) <<std::endl << std::flush ;
-          int src_i1 = bestbnode->index_of_first_value_assigned_by_face_element(interfield.second);
-          // std::cout << "SRC2  " <<bestbnode2 << " @ "<< interfield.second << std::endl << std::flush ;
-          int src_i2 = bestbnode2->index_of_first_value_assigned_by_face_element(interfield.second);
+          int dest_i, src_i1, src_i2;
+          if (!face_value_index(bnode, interfield.first, dest_i)) continue;
+          if (!face_value_index(bestbnode, interfield.second, src_i1)) continue;
+          if (!face_value_index(bestbnode2, interfield.second, src_i2)) continue;
           n->set_value(time_ind, dest_i, bestnode->value(time_ind, src_i1) * lambda1 + bestnode2->value(time_ind, src_i2) * lambda2);
         }
       }
@@ -3913,7 +3949,7 @@ namespace pyoomph
 #endif
   }
 
-  void Mesh::nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate)
+  void Mesh::nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate, bool only_interface_fields)
   {
     this->interpolated_lagrangian_coordinates_at_remeshing=from->interpolated_lagrangian_coordinates_at_remeshing;
     auto old_setting=BulkElementBase::zeta_coordinate_type;
@@ -4291,12 +4327,12 @@ namespace pyoomph
         }
 
         std::vector<double> shift(deste->nodal_dimension(), 0.0);
-        for (unsigned int i = 0; i < deste->nodal_dimension(); i++)
+        for (unsigned int i = 0; i < deste->nodal_dimension() && !only_interface_fields; i++)
         {
           shift[i] = n->x(i) - srcelem->interpolated_x(s, i);
           //         std::cout << "SHIFT " << i << "  " << shift[i] << " WITH BOUND IND " << boundary_index << std::endl;
         }
-        for (unsigned int i = 0; i < deste->nodal_dimension(); i++)
+        for (unsigned int i = 0; i < deste->nodal_dimension() && !only_interface_fields; i++)
         {
           for (unsigned int time_ind = 1; time_ind < n->position_time_stepper_pt()->ntstorage(); time_ind++)
           {
@@ -4304,7 +4340,7 @@ namespace pyoomph
           }
         }
 
-        if (this->interpolated_lagrangian_coordinates_at_remeshing) // Interpolate also the Lagrangian coordinates
+        if (this->interpolated_lagrangian_coordinates_at_remeshing && !only_interface_fields) // Interpolate also the Lagrangian coordinates
         {
           if (srcelem->nlagrangian()!=deste->nlagrangian())
           {
@@ -4321,7 +4357,10 @@ namespace pyoomph
         for (unsigned int time_ind = 0; time_ind < n->time_stepper_pt()->ntstorage(); time_ind++)
         {
           oomph::Vector<double> vals;
-          srcelem->get_interpolated_values(time_ind, s, vals);
+          if (!only_interface_fields)
+          {
+            srcelem->get_interpolated_values(time_ind, s, vals);
+          }
           for (unsigned int vi = 0; vi < vals.size(); vi++)
           {
             if (field_map[vi] >= 0)
@@ -4341,7 +4380,7 @@ namespace pyoomph
         completed_nodes.insert(n);
       }
       // TODO: Internal data
-      if (my_ft->info_DL.numfields || my_ft->info_D0.numfields)
+      if ((my_ft->info_DL.numfields || my_ft->info_D0.numfields) && !only_interface_fields)
       {
         auto *ts = deste->internal_data_pt(0)->time_stepper_pt();
         // Find the elem in the center
@@ -4525,7 +4564,7 @@ namespace pyoomph
         double lambda1 = (mindist > 1e-20 ? mindist2 / (mindist + mindist2) : 1);
         double lambda2 = (mindist > 1e-20 ? mindist / (mindist + mindist2) : 0);
         oomph::Vector<double> xm = bestnode->position();
-        for (unsigned int time_ind = 0; time_ind < n->time_stepper_pt()->ntstorage(); time_ind++)
+        for (unsigned int time_ind = 0; time_ind < n->time_stepper_pt()->ntstorage() && !only_interface_fields; time_ind++)
         {
           for (unsigned vi = 0; vi < std::min((unsigned int)field_map.size(),n->nvalue()); vi++)
           {
@@ -4563,13 +4602,13 @@ namespace pyoomph
           }
         }
 
-        for (unsigned int time_ind = 1; time_ind < n->position_time_stepper_pt()->ntstorage(); time_ind++)
+        for (unsigned int time_ind = 1; time_ind < n->position_time_stepper_pt()->ntstorage() && !only_interface_fields; time_ind++)
         {
           for (unsigned i = 0; i < xm.size(); i++)
             n->x(time_ind, i) = bestnode->x(time_ind, i) * lambda1 + bestnode2->x(time_ind, i) * lambda2;
         }
 
-        if (this->interpolated_lagrangian_coordinates_at_remeshing) // Interpolate also the Lagrangian coordinates
+        if (this->interpolated_lagrangian_coordinates_at_remeshing && !only_interface_fields) // Interpolate also the Lagrangian coordinates
         {
           if (static_cast<pyoomph::Node*>(n)->nlagrangian()!=static_cast<pyoomph::Node*>(bestnode)->nlagrangian())
           {

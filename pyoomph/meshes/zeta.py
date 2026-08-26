@@ -201,6 +201,111 @@ def _check_zeta_is_invertible(mesh:InterfaceMesh,bind:int,context:str,period:flo
         raise RuntimeError("The zeta coordinates assigned by "+context+" on '"+mesh.get_name()+"' are not invertible: the "+str(len(ranges))+" elements cover a total zeta length of "+str(covered)+" while spanning only "+str(span)+", so they overlap. This is what a closed loop (the seam element wrapping from the last zeta back to the first, covering the whole range on its own) or an interface folding back along the chosen axis looks like. Interpolation through such a zeta silently takes values from the wrong part of the interface.")
 
 
+def assign_zetas_from_position_table(mesh:InterfaceMesh,bind:int,table:"NPFloatArray | Sequence[tuple[float,float,float]]",tol:float=1e-8)->None:
+    """Set zeta on this rank's nodes of ``mesh`` from an ``(N,3)`` table of ``(x, y, zeta)``.
+
+    The table is addressed by position rather than by index because whoever built it numbers the
+    points of the *whole* interface, which says nothing about this rank's node order: the merged data
+    of a distributed run, or - see :py:mod:`pyoomph.meshes.axisymm_topology` - the polylines a
+    topological surgery was planned on. Every local node is one of those points, so the match is exact
+    up to the last bits; ``tol`` is relative to the extent of the table, and anything further away
+    means the table does not describe this interface and is an error rather than a nearest neighbour
+    worth taking.
+
+    Only this rank's nodes are touched, so this is MPI-safe by construction.
+    """
+    from scipy.spatial import cKDTree
+    tab=numpy.asarray(table,dtype=float).reshape(-1,3)
+    coords=tab[:,0:2]
+    zetas=tab[:,2]
+    nodes=[e.node_pt(ni) for e in mesh.elements() for ni in range(e.nnode())]
+    if not len(coords) or not nodes:
+        return
+    dist,idx=cKDTree(coords).query(numpy.array([[n.x(0),n.x(1)] for n in nodes]))
+    extent=max(float(numpy.amax(numpy.abs(coords))),1.0)
+    if float(numpy.amax(dist))>tol*extent:
+        raise RuntimeError("Assigning zeta on '"+mesh.get_name()+"' from a position table: a node of this rank is "+str(float(numpy.amax(dist)))+" away from the nearest point of the table, which should be zero. The table does not describe the same interface.")
+    for n,i in zip(nodes,idx):
+        n.set_coordinates_on_boundary(bind,[float(zetas[i])])
+
+
+def assign_zetas_by_polyline_projection(mesh:InterfaceMesh,bind:int,chains:Sequence[tuple["NPFloatArray","NPFloatArray"]],tol_factor:float=0.5,jump_factor:float=10.0)->None:
+    """Set zeta on this rank's nodes of ``mesh`` by projecting them onto zeta-carrying polylines.
+
+    ``chains`` are ``(points (M,2), zeta (M,))`` pairs, one per connected piece. Each node is matched
+    to the closest point of the closest segment over all chains and gets the zeta interpolated
+    linearly along that segment.
+
+    Unlike :py:func:`assign_zetas_from_position_table` this cannot match exactly, and must not try to:
+    the polylines are a *plan* that a mesh generator then meshed, so a new node sits on the curve
+    through them and sags off the chords by O(h^2 * curvature). The tolerance is therefore a fraction
+    of the length of the segment that was hit - the only length scale available locally - rather than
+    an absolute number.
+
+    ``jump_factor``: a segment whose zeta span exceeds this multiple of the median is a DISCONTINUITY
+    of the chart rather than a stretch of it - the offset between two formerly separate pieces of
+    interface that a coalescence bridged. Interpolating across it would hand a node a zeta no source
+    point has, so a node landing there takes the value of the nearer end instead.
+
+    Only this rank's nodes are touched, so this is MPI-safe by construction.
+    """
+    starts:list[NPFloatArray]=[]
+    ends:list[NPFloatArray]=[]
+    zst:list[NPFloatArray]=[]
+    zen:list[NPFloatArray]=[]
+    for pts,zet in chains:
+        p=numpy.asarray(pts,dtype=float).reshape(-1,2)
+        z=numpy.asarray(zet,dtype=float).reshape(-1)
+        if len(p)!=len(z):
+            raise RuntimeError("assign_zetas_by_polyline_projection got a polyline of "+str(len(p))+" points with "+str(len(z))+" zeta values")
+        if len(p)<2:
+            continue
+        starts.append(p[:-1])
+        ends.append(p[1:])
+        zst.append(z[:-1])
+        zen.append(z[1:])
+    if not starts:
+        raise RuntimeError("assign_zetas_by_polyline_projection got no polyline with at least two points")
+    A=numpy.vstack(starts)
+    E=numpy.vstack(ends)-A
+    za=numpy.concatenate(zst)
+    zb=numpy.concatenate(zen)
+    L2=numpy.einsum("ij,ij->i",E,E)
+    L=numpy.sqrt(L2)
+    L2safe=numpy.maximum(L2,1e-300)
+    dz=numpy.abs(zb-za)
+    is_jump=dz>jump_factor*max(float(numpy.median(dz)),1e-300)
+
+    # Nodes shared by two elements are visited twice and simply written twice; deduplicating them
+    # would mean identity-comparing the Python wrappers, which are not the same object for the same
+    # node on every access.
+    nodes=[e.node_pt(ni) for e in mesh.elements() for ni in range(e.nnode())]
+    if not nodes:
+        return
+    P=numpy.array([[n.x(0),n.x(1)] for n in nodes],dtype=float)
+    # Blocked, because the full node x segment distance matrix is the one thing here that can grow
+    # quadratically on a well resolved interface.
+    for beg in range(0,len(P),256):
+        blk=P[beg:beg+256]
+        d=blk[:,None,:]-A[None,:,:]
+        t=numpy.einsum("nsj,sj->ns",d,E)/L2safe[None,:]
+        numpy.clip(t,0.0,1.0,out=t)
+        diff=d-t[:,:,None]*E[None,:,:]
+        dist2=numpy.einsum("nsj,nsj->ns",diff,diff)
+        j=numpy.argmin(dist2,axis=1)
+        rows=numpy.arange(len(blk))
+        dist=numpy.sqrt(dist2[rows,j])
+        tt=t[rows,j]
+        allowed=tol_factor*L[j]
+        bad=numpy.nonzero(dist>allowed)[0]
+        if len(bad):
+            k=int(bad[int(numpy.argmax(dist[bad]-allowed[bad]))])
+            raise RuntimeError("Assigning zeta on '"+mesh.get_name()+"' by projection: the node at ("+str(float(blk[k,0]))+", "+str(float(blk[k,1]))+") is "+str(float(dist[k]))+" away from the nearest of the given polylines, more than the "+str(float(allowed[k]))+" allowed there ("+str(tol_factor)+" of the segment it hit). The polylines do not describe this interface.")
+        zz=numpy.where(is_jump[j],numpy.where(tt<0.5,za[j],zb[j]),za[j]+tt*(zb[j]-za[j]))
+        for k,n in enumerate(nodes[beg:beg+256]):
+            n.set_coordinates_on_boundary(bind,[float(zz[k])])
+
+
 class AssignZetaCoordinatesBase(InterfaceEquations):
     #: Validate after each assignment that zeta is actually invertible. Only turn this off if you
     #: know the interpolation cannot be misled by the overlap it complains about.
@@ -229,7 +334,14 @@ class AssignZetaCoordinatesBase(InterfaceEquations):
         return get_mpi_any(needs_merging(mesh))
 
     def after_mapping_on_macro_elements(self):
-        self.assign_zetas(self.get_mesh())
+        mesh=self.get_mesh()
+        # Between the interpolation hooks and the transfer itself, which is exactly the window in
+        # which a topological-change handler's chart has to survive. Without this test the assigner
+        # re-charted the NEW mesh here while the OLD one kept the handler's chart, and the transfer
+        # then read the two through different parameterisations.
+        if isinstance(mesh,InterfaceMesh) and mesh._zeta_chart_overridden:
+            return super().after_mapping_on_macro_elements()
+        self.assign_zetas(mesh)
         return super().after_mapping_on_macro_elements()
 
     def _before_mesh_to_mesh_interpolation(self, eqtree: "EquationTree", interpolator: "BaseMeshToMeshInterpolator"):
@@ -237,6 +349,14 @@ class AssignZetaCoordinatesBase(InterfaceEquations):
         # This is only ever attached to InterfaceEquations, so the eqtree/interpolator here
         # always belong to a spatial interface mesh, never an ODEStorageMesh.
         assert isinstance(new_mesh,InterfaceMesh)
+        if new_mesh._zeta_chart_overridden or new_mesh.get_full_name() in interpolator.zeta_overridden_boundaries:
+            # Somebody else - a topological-change handler - has taken this boundary's chart over,
+            # because it has to span an event that the geometry alone cannot describe (the old and
+            # the new interface are not the same curve there). Whoever runs second wins, so the one
+            # that cannot be reconstructed has to be the one left standing. Both tests, because this
+            # hook can run before the handler's (which is what the interpolator registry is for) or
+            # after it (the mesh flag, which also covers after_mapping_on_macro_elements).
+            return super()._before_mesh_to_mesh_interpolation(eqtree,interpolator)
         old_base=interpolator.old
         assert not isinstance(old_base,ODEStorageMesh)
         old_mesh=old_base.get_mesh(new_mesh.get_name())
@@ -246,6 +366,9 @@ class AssignZetaCoordinatesBase(InterfaceEquations):
         return super()._before_mesh_to_mesh_interpolation(eqtree,interpolator)
 
     def after_remeshing(self, eqtree: "EquationTree"):
+        # Deliberately NOT gated on _zeta_chart_overridden: the transfer is over by now, and this is
+        # where the assigner takes its own chart back. Order-independent, since it does not matter
+        # whether the handler has already cleared the flag.
         self.assign_zetas(self.get_mesh())
         return super().after_remeshing(eqtree)
 
@@ -478,25 +601,11 @@ class AssignZetaCoordinatesByArclength(AssignZetaCoordinatesBase):
         return 0.0,[(pti,float(al)) for al,pti in zip(alengths,ptinds)]
 
     def _assign_zetas_by_position(self,mesh:InterfaceMesh,bind:int,table:list[tuple[float,float,float]])->None:
-        """Set zeta on this rank's nodes from a (position, zeta) table built on the whole interface.
-
-        The table is addressed by position rather than by index because the merged data numbers the
-        points of the *whole* interface, which says nothing about this rank's node order. Every local
-        node is one of the merged points, so the match is exact up to the last bits; anything further
-        away means the table does not describe this interface and is an error rather than a nearest
-        neighbour worth taking."""
-        from scipy.spatial import cKDTree
-        coords=numpy.array([[t[0],t[1]] for t in table])
-        zetas=numpy.array([t[2] for t in table])
-        nodes=[e.node_pt(ni) for e in mesh.elements() for ni in range(e.nnode())]
-        if not len(coords) or not nodes:
-            return
-        dist,idx=cKDTree(coords).query(numpy.array([[n.x(0),n.x(1)] for n in nodes]))
-        extent=max(float(numpy.amax(numpy.abs(coords))),1.0)
-        if float(numpy.amax(dist))>1e-8*extent:
-            raise self._add_exception_info(RuntimeError("Assigning zeta on '"+mesh.get_name()+"' from the merged interface: a node of this rank is "+str(float(numpy.amax(dist)))+" away from the nearest point of the merged boundary, which should be zero. The merged data does not describe the same interface."))
-        for n,i in zip(nodes,idx):
-            n.set_coordinates_on_boundary(bind,[float(zetas[i])])
+        """The shared table assignment, with this equation's context attached to any failure."""
+        try:
+            assign_zetas_from_position_table(mesh,bind,table)
+        except RuntimeError as e:
+            raise self._add_exception_info(e)
 
     def assign_zetas(self,mesh:InterfaceMesh)->None:
         if mesh.get_dimension()!=1:

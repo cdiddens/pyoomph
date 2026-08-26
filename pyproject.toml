@@ -39,6 +39,13 @@ classifiers=[
     ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+# shapely is only needed by pyoomph.meshes.axisymm_topology, which detects and plans
+# axisymmetric pinch-off/coalescence surgery via morphological opening/closing of the
+# mirrored cross section. Everything else runs without it, so it is not a hard dependency;
+# the module raises a RuntimeError naming this extra when it is missing.
+topology = ["shapely>=2.0"]
+
 [project.urls]
 homepage = "https://pyoomph.github.io"
 documentation = "https://pyoomph.readthedocs.io/en/latest/index.html"

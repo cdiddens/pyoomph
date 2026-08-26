@@ -1751,6 +1751,13 @@ class InterfaceMesh(_InterfaceMeshTypingBase):
         self._error_estimator = _pyoomph.Z2ErrorEstimator()
         self._error_estimator.use_Lagrangian = False
         self.ignore_initial_condition = False
+        #: Set while somebody else owns this interface's zeta chart for the duration of one remesh -
+        #: a topological-change handler, whose chart spans an event that no assignment derived from
+        #: the geometry could reproduce. A zeta assigner then leaves the mesh alone until the
+        #: transfer is over (see pyoomph.meshes.zeta.AssignZetaCoordinatesBase). It lives here rather
+        #: than on the interpolator because the assignment that would clobber it happens in
+        #: after_mapping_on_macro_elements, which sees no interpolator at all.
+        self._zeta_chart_overridden: bool = False
         self.set_spatial_error_estimator_pt(self._error_estimator)
         # Inherit the refinement thresholds from the bulk mesh this interface hangs off (which in
         # turn got them from the template or the Problem). Only MeshFromTemplate* used to set them,

@@ -253,7 +253,12 @@ namespace pyoomph
 		// the intrinsic boundary coordinate (zeta) when one is defined, or - when it is not - by
 		// projecting each node onto the old interface geometry, which needs no chart and is therefore
 		// the only option for a 2d interface in 3d. See dev_docs/mesh_point_locator.md.
-		virtual void nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate = true);
+		// only_interface_fields transfers just the dofs an interface adds on top of the bulk (the
+		// inter_field_map ones), leaving the bulk fields, the position history and the Lagrangian
+		// coordinates as they are. That is what lets a chart that deliberately does NOT follow the
+		// geometry - the zeta of a pinch-off, which maps a fresh cap onto the old interface near the
+		// waist - govern the surface fields alone, while the geometry keeps governing everything else.
+		virtual void nodal_interpolate_from(Mesh *from, int boundary_index, bool use_boundary_coordinate = true, bool only_interface_fields = false);
 		// Whether nodal_interpolate_from(from) is a transfer OUT of a distributed mesh INTO a replicated
 		// one, which is what remeshing a distributed problem does: the new mesh is rebuilt in full on
 		// every rank (see Problem._redistribute_after_remeshing), while the old one is still partitioned.
@@ -280,7 +285,11 @@ namespace pyoomph
 												  std::set<oomph::Node *> &missing_nodes);
 		// Interpolate nodal values along a boundary from an old mesh, using the arclength-like boundary coordinate
 		// to find the closest correspondence; boundary_max_dist limits how far a match may be to still be accepted.
-		virtual void nodal_interpolate_along_boundary(Mesh *from, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist);
+		// only_interface_fields transfers just the dofs that imesh adds on top of the bulk (the inter_field_map
+		// below) and leaves the bulk fields alone. That is what the codim-2 pass needs: the per-boundary passes
+		// have already put interpolated - not nearest-node-blended - bulk values on those very nodes, and this
+		// routine would overwrite them with the two-nearest-node blend. See meshes/interpolator.py.
+		virtual void nodal_interpolate_along_boundary(Mesh *from, int bind, int oldbind, Mesh *imesh, Mesh *oldimesh, double boundary_max_dist, bool only_interface_fields = false);
 		// Settle the boundary matching above across the ranks. Every rank produces a match for every
 		// destination node here - the nearest of ITS old nodes, however far away - so unlike the
 		// point-located transfer this is not "who found it" but "who found it closest": one MPI_MINLOC
@@ -389,8 +398,12 @@ namespace pyoomph
 		// Whole-vector snapshot/restore of the activation flags, see mesh.cpp for why it exists.
 		std::vector<bool> get_dirichlet_active_flags() const;
 		void set_dirichlet_active_flags(const std::vector<bool> &flags);
-		// Ensure the intrinsic boundary coordinate (arclength/zeta along boundary_index) has been set up on all its nodes.
-		virtual void boundary_coordinates_bool(unsigned boundary_index);
+		// Declare that the intrinsic boundary coordinate (arclength/zeta along boundary_index) has been
+		// set up on all its nodes. value=false takes the declaration back, which is what a one-off
+		// assignment (see AxisymmetricReconnection) needs: a mesh that keeps claiming a chart nobody
+		// re-establishes makes the NEXT remesh fail, since the transfer then insists on finding one on
+		// the new mesh too.
+		virtual void boundary_coordinates_bool(unsigned boundary_index, bool value = true);
 		virtual bool is_boundary_coordinate_defined(unsigned boundary_index);
 		// Period of the intrinsic boundary coordinate along a boundary, or 0 for a non-periodic one.
 		//
