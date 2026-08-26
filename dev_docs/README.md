@@ -28,6 +28,7 @@ the useful part. Code examples in `examples/` are runnable companions, not snipp
 | [mesh_point_locator.md](mesh_point_locator.md) | Point location and mesh-to-mesh transfer: zeta, closest-point projection, and the L2 projection solve. |
 | [internal_facet_fields.md](internal_facet_fields.md) | Unknowns on the interior-facet skeleton (HDG traces, mortar multipliers): per-facet storage, the pinned opposite dummy, 3d enumeration, and how the fields survive adaptation, remeshing, `--distribute` and a state file. |
 | [mesh_data_cache.md](mesh_data_cache.md) | Typed cache keys, and merging a distributed mesh's data into one global view. |
+| [axisymmetric_topological_changes.md](axisymmetric_topological_changes.md) | Pinch-off and coalescence of an axisymmetric free surface: morphological detection, the volume-matched surgery, the zeta chart that carries the fields across, and what the thresholds may be set to. |
 
 ## MPI
 

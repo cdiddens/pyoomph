@@ -4522,6 +4522,9 @@ namespace pyoomph
       }
       oomph::Vector<double> xnode = n->position();
       if (boundary_index<0) std::cerr << "FOUND UNTREATED BULK NODE AT\t" << xnode[0] << "\t" << xnode[1] << std::endl;
+      // These are the nodes no element of the old mesh contains, which for a COALESCENCE is exactly
+      // the fresh bridge: it is built where there was no liquid at all, so it cannot be located and
+      // the located-node branch above never sees it. All they can get is the blend below.
       double mindist = 1e40;
       oomph::Node *bestnode = NULL;
       for (oomph::Node *m : source_nodes)

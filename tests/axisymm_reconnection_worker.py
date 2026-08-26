@@ -51,7 +51,7 @@ import traceback
 import numpy
 
 from pyoomph import Problem, Equations, DirichletBC, ElementSpace, InterfaceEquations, var
-from pyoomph.expressions import signum, scale_factor, vector, var_and_test, weak
+from pyoomph.expressions import cos, grad, partial_t, signum, scale_factor, vector, var_and_test, weak
 from pyoomph.expressions.units import meter
 from pyoomph.equations.ALE import PrescribedMovingMesh
 from pyoomph.equations.generic import ProjectExpression
@@ -215,12 +215,34 @@ class SurfaceField(InterfaceEquations):
         self.add_residual(weak(f - var("coordinate_y") / scale_factor("spatial"), ft))
 
 
+class TransportedField(Equations):
+    """A diffusing scalar on the moving mesh: something with a genuine TIME HISTORY.
+
+    ProjectExpression would not do - a field with no time derivative in its residual is never given
+    history slots, so all of its past levels stay at zero and there is nothing for the transfer to
+    get right or wrong.
+    """
+
+    def define_fields(self):
+        self.define_scalar_field("u", "C2")
+
+    def define_residuals(self):
+        u, ut = var_and_test("u")
+        self.add_weak(partial_t(u, ALE=True), ut).add_weak(0.05 * grad(u), grad(ut))
+        # Curved, so that diffusion actually changes it: a profile that merely translates with the
+        # mesh has du/dt = 0 at every node and, again, nothing to measure.
+        self.set_initial_condition("u", 1 + cos(2 * var("coordinate_y") / scale_factor("spatial")))
+
+
 class ReconnectionProblem(Problem):
     def __init__(self, profiles, *, resolution=0.06, rmin=None, distmin=None, scale=None,
                  moving_mesh=False, check_motion=False, gas_box=None, volume_conservation=True,
                  overlap_reject_factor=0.2, size_via_callable=False, surface_field=False,
-                 handle_zeta=True, user_zeta=False):
+                 handle_zeta=True, user_zeta=False, with_field=False):
         super().__init__()
+        #: Carry a projected bulk field alongside the moving mesh, so that the VALUE history can be
+        #: inspected as well as the position history.
+        self.with_field = with_field
         self.surface_field = surface_field
         self.handle_zeta = handle_zeta
         #: Attach a user's own AssignZetaCoordinatesByArclength next to the handler. Its chart cannot
@@ -271,6 +293,8 @@ class ReconnectionProblem(Problem):
             umesh = vector(0, -Vz * signum(var("lagrangian_y")))
             for dom in (["liquid", "gas"] if self.gas_box is not None else ["liquid"]):
                 eqs = ElementSpace("C2") + PrescribedMovingMesh(umesh)
+                if self.with_field:
+                    eqs += TransportedField()
                 eqs += Equations() @ ("axis" if dom == "liquid" else "gas_axis")
                 if dom == "gas":
                     eqs += Equations() @ "outer"
@@ -705,13 +729,110 @@ def case_transfer_twophase(outdir, args):
     p.solve()
 
 
+def case_fresh_node_history(outdir, args):
+    """What history the ordinary transfer gives the nodes the surgery created.
+
+    Two blobs driven together by a prescribed mesh velocity until they coalesce. A coalescence is the
+    sharper of the two events for this: the bridge the surgery builds is genuinely OUTSIDE the old
+    liquid, so the nodes on it have no old material point of their own at all, and what the ordinary
+    transfer gives them is whichever old point the locator fell back on - together with its motion.
+    Measured right after the transfer and before any further solve, so what is reported is what the
+    transfer wrote: per node, how far the position and the value history are from the current state,
+    split into the nodes within reach of the surgery's fresh points and all the others.
+    """
+    distmin = 0.12
+    p = ReconnectionProblem(two_blobs(0.8 * distmin), rmin=None, distmin=distmin,
+                            resolution=args.resolution, moving_mesh=True, check_motion=False,
+                            overlap_reject_factor=None, with_field=True)
+    setup(p, outdir)
+    p.get_global_parameter("Vz").value = 0.05
+    for _ in range(20):
+        p.solve(timestep=0.1)
+        if p.mesh_template.last_report.get("n_chains", 2) < 2:
+            break
+    else:
+        emit("HISTORY", coalesced=False)
+        return
+    # "Within reach" is a ball of a couple of distmin around each fresh point of the plan, which is
+    # about the size of the region the surgery rebuilt: the plan names the fresh interface POINTS,
+    # while the mesh generator puts nodes of its own inside the bridge that are named nowhere.
+    reach = 2.0 * p.reconnection._distmin_nd
+    plan = p.reconnection._last_plan
+    fresh = numpy.concatenate([numpy.asarray(nc.points)[numpy.asarray(nc.origin) < 0]
+                               for nc in plan.new_chains])
+    mesh = p.get_mesh("liquid")
+    inside = {"dx": 0.0, "du": 0.0, "n": 0}
+    outside = {"dx": 0.0, "du": 0.0, "n": 0}
+    for n in mesh.nodes():
+        x = numpy.array([n.x(0), n.x(1)])
+        b = inside if numpy.min(numpy.linalg.norm(fresh - x, axis=1)) <= reach else outside
+        b["n"] += 1
+        b["dx"] = max(b["dx"], max(abs(n.x_at_t(t, i) - n.x(i)) for t in (1, 2) for i in (0, 1)))
+        b["du"] = max(b["du"], max(abs(n.value_at_t(t, 0) - n.value(0)) for t in (1, 2)))
+    emit("HISTORY", coalesced=True, reach=float(reach),
+         n_fresh_points=int(len(fresh)), inside=inside, outside=outside)
+
+
+def case_history_bdf1(outdir, args):
+    """Whether ONE BDF1 step after the event makes the transferred history irrelevant.
+
+    It should, and for a reason that has nothing to do with the surgery: oomph shifts the history
+    slots at the start of every step (``BDF::shift_time_values``: value(2) := value(1),
+    value(1) := value(0)), so the first post-event step reads the transferred level-0 state as its
+    level 1 and the transferred level 1 as its level 2, and the second step has shifted both of the
+    transferred history levels out again. BDF1 weights ignore level 2. So a first step taken with
+    BDF1 weights uses nothing the surgery could have got wrong, and everything after it is built on
+    post-event states alone.
+
+    The case runs two steps past the event and digests the result, so that two runs differing ONLY in
+    the transferred history can be compared: with ``--degrade-bdf1`` they must agree exactly, without
+    it they must not. ``--flatten-history`` is what makes the two runs differ - it overwrites the
+    history levels the transfer just wrote, and only those, leaving the current state (level 0)
+    untouched. A test instrument, not a strategy: the point is that the answer does not depend on it.
+    """
+    distmin = 0.12
+    p = ReconnectionProblem(two_blobs(0.8 * distmin), rmin=None, distmin=distmin,
+                            resolution=args.resolution, moving_mesh=True, check_motion=False,
+                            overlap_reject_factor=None, with_field=True)
+    setup(p, outdir)
+    p.get_global_parameter("Vz").value = 0.05
+    for _ in range(20):
+        p.solve(timestep=0.1)
+        if p.mesh_template.last_report.get("n_chains", 2) < 2:
+            break
+    else:
+        emit("DIGEST", coalesced=False)
+        return
+    p.do_call_remeshing_when_necessary = False   # keep the mesh fixed, so only the history varies
+    if args.flatten_history:
+        for n in p.get_mesh("liquid").nodes():
+            for t in range(1, 3):
+                for i in range(2):
+                    n.set_x_at_t(t, i, n.x(i))
+                for vi in range(n.nvalue()):
+                    n.set_value_at_t(t, vi, n.value(vi))
+    if args.degrade_bdf1:
+        p.timestepper.set_num_unsteady_steps_done(0)
+    for _ in range(2):
+        p.solve(timestep=0.1)
+    ns = list(p.get_mesh("liquid").nodes())
+    emit("DIGEST", coalesced=True, flatten_history=bool(args.flatten_history),
+         degrade_bdf1=bool(args.degrade_bdf1),
+         n_nodes=len(ns),
+         u_sum=sum(n.value(0) for n in ns), u_min=min(n.value(0) for n in ns),
+         u_max=max(n.value(0) for n in ns),
+         x_sum=sum(n.x(0) + n.x(1) for n in ns))
+
+
 CASES = {"detect_pinch": case_detect_pinch, "overlap_guard": case_overlap_guard,
          "separating_tips": case_separating_tips, "pinch_remesh": case_pinch_remesh,
          "coalescence_remesh": case_coalescence_remesh, "twophase_remesh": case_twophase_remesh,
          "transfer_quality": case_transfer_quality, "transfer_pinch": case_transfer_pinch,
          "transfer_user_zeta": case_transfer_user_zeta,
          "transfer_coalescence": case_transfer_coalescence,
-         "transfer_twophase": case_transfer_twophase}
+         "transfer_twophase": case_transfer_twophase,
+         "fresh_node_history": case_fresh_node_history,
+         "history_bdf1": case_history_bdf1}
 
 
 def main():
@@ -723,6 +844,8 @@ def main():
     parser.add_argument("--check-motion", dest="check_motion", action="store_true")
     parser.add_argument("--no-volume-conservation", action="store_true")
     parser.add_argument("--no-handle-zeta", action="store_true")
+    parser.add_argument("--flatten-history", dest="flatten_history", action="store_true")
+    parser.add_argument("--degrade-bdf1", dest="degrade_bdf1", action="store_true")
     args, rest = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + rest
     try:

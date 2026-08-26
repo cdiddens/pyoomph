@@ -91,7 +91,17 @@ def simulation_seconds(started_at):
 # reported as a skip instead, by name, and listed again at the end where the nightly picks it up.
 # Nothing else is forgiven: a ModuleNotFoundError for anything not on this list is a real failure.
 _OPTIONAL_MODULES={"precice":"preCICE (pip install pyprecice, plus a libprecice built for this "
-                             "distribution's release)"}
+                             "distribution's release)",
+                   "shapely":"shapely (pip install pyoomph[topology]), which plans the axisymmetric "
+                             "pinch-off and coalescence surgery"}
+# Scripts that open a window and wait for the user. tkinter's mainloop never returns on its own, so
+# under this harness they would either hang forever or - on a headless nightly - die on "no display
+# name and no $DISPLAY environment variable", neither of which says anything about pyoomph. They are
+# skipped here and listed again at the end, alongside the preCICE reminder, because they still have
+# to be run by hand before a release. The GUI's own logic is covered headlessly by the worker scripts
+# in tests/ (tests/*_worker.py drive the model without ever mapping a window).
+_MANUAL_GUI_SCRIPTS={"thin_film_bifurcation_gui.py":"opens the interactive bifurcation GUI"}
+
 _MISSING_MODULE=re.compile(rb"ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'")
 _BROKEN_IMPORT=re.compile(rb"^ImportError: (.*)$")
 _TRACEBACK_FRAME=re.compile(rb'^  File "([^"]+)"')
@@ -263,6 +273,7 @@ all_okay=not problems # inconsistent duplicated scripts already count as a failu
 
 skips=args.skips
 skipped_for_missing=[]
+manual_gui=[]      # (folder, script) of the GUI scripts nobody can test unattended
 timings=[]  # (folder, script, seconds, number of log files, whether the script failed)
 untimed=[]  # ran, but left no "Elapsed time" footer anywhere
 
@@ -278,6 +289,10 @@ for d in glob.glob("./*/"):
   for f in glob.glob("*.py"):
     if f=="bifurcation_fold_param_change.py":
       # This is meant to crash when the parameter is changed, so it is not a regression test.
+      continue
+    if f in _MANUAL_GUI_SCRIPTS:
+      print("   SKIPPING",f,"--",_MANUAL_GUI_SCRIPTS[f],"and must be checked manually")
+      manual_gui.append((d.strip("/").strip("./"),f))
       continue
     if args.mpirun>0 and f=="parallel_running.py":
       # This one spawns its own mpirun, so launching it under one already gives nested MPI.
@@ -347,6 +362,13 @@ if skipped_for_missing:
     print("   %s/%s needs %s, which %s"%(folder,script,_OPTIONAL_MODULES[mod],why))
   print()
 
+if manual_gui:
+  print()
+  print("NOT RUN, CHECK MANUALLY (interactive GUI scripts):")
+  for folder,script in manual_gui:
+    print("   %s/%s %s"%(folder,script,_MANUAL_GUI_SCRIPTS[script]))
+  print()
+
 # Slowest first, since that is the end of the list one reads. The fixed "TIME" prefix is what the
 # nightly greps for (see citools/nightly_develop.sh), so keep the column layout if you touch this.
 if timings:
@@ -361,7 +383,7 @@ if timings:
   print()
 
 if all_okay:
-  print("ALL TESTS PASSED -- But please check e.g. preCICE runs manually")
+  print("ALL TESTS PASSED -- But please check e.g. preCICE and the interactive GUI scripts manually")
 else:
   print("SOME TESTS FAILED")
   

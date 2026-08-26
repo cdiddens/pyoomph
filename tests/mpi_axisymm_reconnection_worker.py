@@ -283,6 +283,33 @@ def case_transfer_pinch(outdir, args):
     return per_rank, {"before": before, "after": after, "after_second_remesh": second}
 
 
+def case_twophase(outdir, args):
+    """A pinch with a gas phase on the other side of the same interface.
+
+    The one configuration where the handler has to reach *another domain's* interpolator (through
+    ``BaseMeshToMeshInterpolator.remesh_group``) to write the surgery's chart onto the gas side too,
+    and where the pinch hands the gas a stretch of axis that used to be liquid. Both domains come out
+    of one template, so remeshing it covers all of them - which is what the distributed remesh
+    insists on.
+    """
+    p = ReconnectionProblem([dumbbell(0.04)], rmin=0.12, distmin=None, resolution=0.09,
+                            moving_mesh=False, check_motion=False, gas_box=(0.6, 1.3))
+    _setup(p, outdir)
+    p.do_call_remeshing_when_necessary = False
+    p.solve()
+    p.force_remesh({p.mesh_template})
+    per_rank = {"ndof": int(p.ndof()),
+                "distributed": bool(p.get_mesh("liquid").is_mesh_distributed()),
+                "zeta_liquid": zeta_ok(p, "liquid/interface"),
+                "zeta_gas": zeta_ok(p, "gas/interface")}
+    digest = {"interface": interface_digest(p, "liquid/interface"),
+              "gas_interface": interface_digest(p, "gas/interface"),
+              "bulk": bulk_digest(p, "liquid"), "gas": bulk_digest(p, "gas"),
+              "axis": axis_digest(p, "liquid/axis"), "gas_axis": axis_digest(p, "gas/gas_axis")}
+    p.solve()
+    return per_rank, digest
+
+
 def case_guard(outdir, args):
     """The overlap guard: armed by a close gap, then asked to take a step straight through it.
 
@@ -322,7 +349,7 @@ def case_guard(outdir, args):
 
 
 CASES = {"detect": case_detect, "pinch": case_pinch, "coalescence": case_coalescence,
-         "transfer_pinch": case_transfer_pinch, "guard": case_guard}
+         "transfer_pinch": case_transfer_pinch, "twophase": case_twophase, "guard": case_guard}
 
 
 def main():

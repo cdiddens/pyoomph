@@ -9553,6 +9553,23 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             print("REDISTRIBUTING THE REMESHED PROBLEM")
         self.actions_before_distribute()
         self.distribute()
+        # Put the nodes back where the macro elements say they are. distribute() builds the halo
+        # copies of the elements a rank does not own, and oomph-lib places their nodes itself rather
+        # than taking the positions the mesh already has; on a strongly curved boundary that lands
+        # somewhere else. Measured on a coalesced axisymmetric drop (a spline with a thin bridge in
+        # it): three nodes came out up to 1.4e-2 away from where the owning rank has them, so the two
+        # ranks held the same node at two positions. check_halo_consistency() reports six mismatches,
+        # merging the mesh data refuses ("Nodes identified across processes disagree on their
+        # position"), and oomph's own warning about that state is that adaptation and equation
+        # numbering diverge between the processes.
+        #
+        # Idempotent for every other node: force_remesh() maps the nodes onto the macro elements just
+        # before the interpolation, and the interpolation only writes position HISTORY, never the
+        # current position. A no-op where there are no macro elements left, i.e. on a moving mesh,
+        # whose macro elements remove_macro_elements() has already stripped.
+        for _m in self._meshdict.values():
+            if not isinstance(_m,ODEStorageMesh):
+                _m.map_nodes_on_macro_elements()
         self.actions_after_distribute()
 
     def _is_uniformly_refined(self,mesh:"AnySpatialMesh")->bool:

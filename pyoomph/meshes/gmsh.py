@@ -352,7 +352,7 @@ class GmshTemplate(MeshedMeshTemplate):
         self.mirror_mesh:Literal["mirror_x", "mirror_y"] | list[Literal["mirror_x", "mirror_y"]] | None=None
         #: If set, the entire mesh will be extruded in the next dimension. The first entry in the tuple is the dimensional distance, the second the number of layers. 
         self.extrude_generated_mesh:tuple[ExpressionOrNum, int] | None=None 
-        self.gmsh_options:dict[str,int] = {}
+        self.gmsh_options:dict[str,int|float] = {}
         #self.gmsh_options["algorithm"] = 8
         #self.gmsh_options["recombine_algo"] = 2
         #self.gmsh_options["recombine_algo"] = None

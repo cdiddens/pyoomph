@@ -60,7 +60,21 @@ __all__ = [
     "SurgeryPlan",
     "detect_and_plan",
     "revolved_volume",
+    "WaistNotYetSeparable",
 ]
+
+
+class WaistNotYetSeparable(RuntimeError):
+    """A waist is thinner than ``rmin_nd``, but too short axially for the opening to keep it apart.
+
+    Raised by :func:`detect_and_plan` and, unlike every other refusal in this module, it is a
+    *timing* statement rather than a verdict on the parameters: the waist of a collapsing neck is
+    still growing in axial extent while it thins, so the very step at which the minimum radius first
+    crosses ``rmin_nd`` is essentially always too early (measured on the Rayleigh-Plateau test:
+    exactly one step too early, at every ``rmin_nd`` tried). Its own type is what lets
+    :py:class:`~pyoomph.equations.topological_changes.AxisymmetricReconnection` retry on the next
+    solve instead of ending the run - see its ``max_deferred_events``.
+    """
 
 
 # --------------------------------------------------------------------------------------
@@ -218,6 +232,15 @@ def _poly_volume(poly: Any) -> float:
 #     of the opening are compared and a mismatch raises rather than silently reporting no
 #     event.  With that guarded, the pinch threshold is exactly "minimum interface radius
 #     below rmin_nd".
+#
+#     It raises as `WaistNotYetSeparable`, a type of its own, because a *collapsing* neck
+#     always hits it once: at the step where the minimum radius first drops below rmin_nd
+#     the waist is thinner than the structuring element over an axial stretch that has only
+#     just opened, and it is the next step or two of thinning that makes it long enough.
+#     Measured on the Rayleigh-Plateau physics test, over eps_p from 0.02 to 0.15 R0, it was
+#     exactly one step every time.  The caller retries rather than ending the run; only a
+#     genuinely too-coarse rmin_nd keeps failing, and then it fails differently (the caps
+#     overlap, or a child fragment retains no old point).
 #
 # (ii) If the axial gap that the opening carves out at a waist is itself shorter than
 #      `distmin_nd`, the subsequent closing would immediately re-merge the two pinch
@@ -447,10 +470,11 @@ def detect_and_plan(chains: List[InterfaceChain],
                 continue
             if pi in seen_e:
                 b = eroded[ei].bounds
-                raise RuntimeError(
+                raise WaistNotYetSeparable(
                     "axisymmetric topology: a neck near z={:g} is thinner than "
                     "rmin_nd={} but axially shorter than 2*rmin_nd, so the opening "
-                    "re-bridges it; reduce rmin_nd below half the axial extent of the "
+                    "re-bridges it. On a collapsing neck this resolves itself within a step or "
+                    "two; if it does not, reduce rmin_nd below half the axial extent of the "
                     "waist".format(0.5 * (b[1] + b[3]), rmin_nd))
             seen_e[pi] = ei
     else:

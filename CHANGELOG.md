@@ -12,6 +12,49 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Added
 
+- **Axisymmetric pinch-off and coalescence, rewritten.** A free surface may now change its topology:
+  attach `AxisymmetricReconnection(rmin=..., distmin=...)` to it and a neck thinner than `rmin` pinches
+  off, two fragments closer than `distmin` merge. Both thresholds are physical lengths and either may
+  be `None` to switch that kind of event off.
+  - **Detection is morphological**, on the cross section mirrored about the symmetry axis: an opening
+    with structuring radius `rmin` for a pinch, a closing with `distmin/2` for a merge, so the two
+    thresholds come out at exactly "minimum interface radius below `rmin`" and "tip-to-tip gap below
+    `distmin`". Needs the new optional dependency shapely (`pip install pyoomph[topology]`).
+  - **The surgery is delivered through the ordinary remeshing-by-recreation path**, not by editing a
+    `Remesher2d`. Derive the bulk mesh from the new `TopologicalChangesGmshTemplate` and write
+    `define_geometry` so that its remeshing branch takes the interface and axis from
+    `get_reconnected_boundaries(...)` instead of from `get_boundary_coordinates(...)`. That branch is
+    entered for a reconnection *and* for a plain quality remesh, and is not told which -- so the
+    resolution after an event is the resolution the user asked for, everywhere.
+  - **Nearly volume conserving**: the fresh cap or bridge points are displaced along their normals
+    until the revolved volume matches, exactly on the plan polyline. What is left is the O(h^2) sag of
+    the spline the mesh generator draws through those points, i.e. the same error an ordinary quality
+    remesh has. Measured on the physics tests: the event step costs 1e-5 of the volume in a
+    Rayleigh-Plateau pinch-off and 4e-4 in a coalescence, against 1e-5 to 9e-5 for an ordinary remesh
+    of the same mesh.
+  - **Restart the time stepper at every event.** A node the surgery created has no time history, and
+    the one the transfer gives it is whatever the old mesh held at that place - for a fresh cap, the
+    middle of a neck that was collapsing at the largest velocity in the domain. BDF2 extrapolates
+    through it on the first step past the event and the Newton solve diverges there. A single
+    `assign_initial_values_impulsive()` per event fixes that. The accurate alternative, one step with
+    BDF1 weights (`timestepper.set_num_unsteady_steps_done(0)`), measures about 270 times better at
+    the same step size, because the transferred history only ever reaches the scheme as its second
+    level and BDF1 ignores that level - but it is less robust on a marginally resolved cap retraction,
+    so it is not the default. Section 8.4 of the dev doc has the convergence study, including four
+    per-node restart strategies that were measured, all came out worse than doing nothing on
+    accuracy, and were therefore not kept.
+  - **Interface fields survive the event.** The plan carries a zeta chart that knows which new points
+    are old ones and where the fresh ones came from, so a cap's values come from its own side of the
+    removed neck and a bridge's from the two tips it grew between.
+  - Works under `mpirun` and `--distribute`: the interface is merged, the plan is made on rank 0 and
+    broadcast, so every rank builds the identical geometry.
+  - The previous `AxisymmetricPinchoffAndCoalescence` is **removed** rather than deprecated. It had no
+    tests, no tutorial, an unimplemented zeta continuation, no volume conservation, and a mesh-velocity
+    gate that was identically zero (it read `partial_t(var("mesh_y"))` under `ALE="auto"`, which on a
+    moving mesh is `u_y - u_y`). `DisjunctDomainMarker` is unchanged.
+  - Reference: `dev_docs/axisymmetric_topological_changes.md`, with a runnable minimal example in
+    `dev_docs/examples/axisymm_reconnection_minimal.py`.
+
 - **Any liquid can be given by concentration.**
   `Mixture(water + 1*milli*molar*get_pure_liquid("my_surfactant"), temperature=20*celsius)` -- and
   `5*gram/litre*...` for a mass concentration -- instead of a mass fraction worked out by hand. The

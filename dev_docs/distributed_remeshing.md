@@ -202,6 +202,40 @@ Running the interpolation replicated is redundant work, but it is correct, it ma
 flow, and peak memory is no worse than at startup, where the whole mesh exists on every rank anyway.
 Making it scalable, and lifting the adaption refusal, belongs to §3.6.
 
+#### 3.2a The nodes `distribute()` moves
+
+`_redistribute_after_remeshing()` maps the nodes back onto their macro elements once `distribute()`
+has returned, before `actions_after_distribute()`.
+
+`distribute()` builds the halo copies of the elements a rank does not own, and oomph-lib places
+*their* nodes itself rather than taking the positions the mesh already carries. Where the boundary is
+strongly curved, that is not the same point. Found on a coalesced axisymmetric drop — a
+`CurvedEntityCatmullRomSpline` with a thin bridge in it, from
+`pyoomph/equations/topological_changes.py` — where three nodes came out up to **1.4e-2** away from
+where the owning rank has them. The consequences are not subtle once you look:
+`check_halo_consistency()` reports six mismatches, merging the mesh data refuses outright ("Nodes
+identified across processes disagree on their position"), and oomph's own warning about that state is
+that adaptation and equation numbering diverge between the processes. It reproduced at 2 and 4 ranks
+and at three of the four mesh resolutions tried, so it is not a partition accident.
+
+Re-mapping rather than dropping the macro elements, and re-mapping rather than broadcasting the
+positions:
+
+* it is **idempotent for every other node**. `force_remesh()` maps the nodes onto the macro elements
+  just before the interpolation, and the interpolation only ever writes position *history*, never the
+  current position - so the macro mapping IS where every node already is, except the ones
+  `distribute()` moved.
+* dropping the macro elements (`remove_macro_elements(True)` before the distribution) repairs it just
+  as well - measured - but it also gives up placing the nodes of any later adaptation on the curved
+  boundary, which is exactly what `remove_macro_elements()`'s `"auto"` mode keeps them for on a mesh
+  whose coordinates are not dofs.
+* a no-op where there are no macro elements left, i.e. on a moving mesh, whose macro elements
+  `remove_macro_elements()` has already stripped.
+
+Why this was not seen before: the geometry has to bend enough within one element for the two
+placements to differ measurably. Every mesh the campaign was built on (a quarter disc, the tutorials'
+droplets) is far too gentle.
+
 ### 3.3 Cross-rank value transfer
 
 The old mesh is distributed; the new one is replicated and **identically numbered on every rank**,

@@ -58,6 +58,18 @@ the clean break, rather than a port:
 
 Coordinate convention throughout: ``x`` is the radial coordinate with the symmetry axis at ``x = 0``,
 ``y`` is the axial coordinate.
+
+**Under** ``--distribute``. The detection is a statement about the whole interface - where its
+thinnest waist is, which fragments face each other across which gap - and a rank's partition of it is
+not a piece of that answer but a different, truncated shape, cut wherever the partition happens to
+run. So the interface is merged (collective), the plan is made on rank 0 and broadcast, and every
+rank parks the identical plan on the template. Everything after that needs no communication of its
+own: ``define_geometry`` is already a collective region, ``get_reconnected_boundaries`` reads the
+parked plan (or the equally collective
+:py:meth:`~pyoomph.meshes.mesh.MeshedMeshTemplate.get_boundary_coordinates`), and the zeta chart is
+written by each rank onto the nodes it holds. The overlap guard takes the same route, because it too
+compares two tips that are routinely on different ranks. Serial and ``mpirun`` without
+``--distribute`` take the local path unchanged and communicate nothing at all.
 """
 
 from dataclasses import dataclass, field
@@ -69,7 +81,7 @@ from ..generic.codegen import InterfaceEquations, Equations, FiniteElementCodeGe
 from ..generic.mpi import (get_mpi_any, get_mpi_max, get_mpi_nproc, get_mpi_rank, get_mpi_sum,
                            get_mpi_world_comm, mpi_share_root_failure)
 from ..meshes.axisymm_topology import (InterfaceChain, ReconnectionEvent, SurgeryPlan,
-                                       detect_and_plan, revolved_volume)
+                                       WaistNotYetSeparable, detect_and_plan, revolved_volume)
 from ..meshes.gmsh import GmshTemplate
 from ..meshes.mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate2d, MeshFromTemplateBase, Node, Element, AnyMesh
 from ..meshes.meshdatacache import MeshDataCache, MeshDataCacheEntry
@@ -419,7 +431,7 @@ class AxisymmetricReconnection(InterfaceEquations):
                  check_mesh_motion_direction: bool = True, overlap_reject_factor: float | None = 0.2,
                  coalescence_arm_factor: float = 3.0, axis_tolerance: float = 1e-7,
                  allow_fragment_removal: bool = True, segment_jump_offset: float = 1.0,
-                 handle_zeta: bool = True) -> None:
+                 handle_zeta: bool = True, max_deferred_events: int = 25) -> None:
         super().__init__()
         #: Minimal interface radius below which a neck pinches off. ``None`` disables pinch-off.
         self.rmin = rmin
@@ -442,6 +454,11 @@ class AxisymmetricReconnection(InterfaceEquations):
         self.axis_tolerance = axis_tolerance
         self.allow_fragment_removal = allow_fragment_removal
         self.segment_jump_offset = segment_jump_offset
+        #: How many consecutive solves may end in a
+        #: :py:class:`~pyoomph.meshes.axisymm_topology.WaistNotYetSeparable` before it is treated as
+        #: a wrong ``rmin`` and raised. A collapsing neck needs one, occasionally two; a neck that is
+        #: not collapsing at all would otherwise defer for ever while the mesh degenerates.
+        self.max_deferred_events = max_deferred_events
         #: Carry the interface fields across the event by writing the plan's zeta chart onto both the
         #: old and the new interface (see :py:meth:`_before_mesh_to_mesh_interpolation`). Switch off
         #: to leave the transfer to whatever the geometry alone can match.
@@ -456,6 +473,8 @@ class AxisymmetricReconnection(InterfaceEquations):
         self._armed: bool = False
         self._warned_about_distmin: bool = False
         self._last_plan: SurgeryPlan | None = None
+        # Consecutive solves whose detection was postponed by WaistNotYetSeparable.
+        self._deferred_events: int = 0
         # (template, interface name) of the plan that is waiting to be built, so that
         # after_remeshing can clear it without having to resolve the tree again.
         self._pending_on: tuple["TopologicalChangesGmshTemplate", str] | None = None
@@ -685,9 +704,11 @@ class AxisymmetricReconnection(InterfaceEquations):
             if coords[1, idx[0]] > coords[1, idx[-1]]:
                 idx = list(reversed(idx))
             pts = numpy.array([[coords[0, i], coords[1, i]] for i in idx], dtype=float)
+            spacing = _polyline_spacing(pts)
+            _snap_negative_radii_to_axis(pts, spacing)
             ends = ("axis" if abs(pts[0, 0]) < tol else "fixed",
                     "axis" if abs(pts[-1, 0]) < tol else "fixed")
-            chains.append(InterfaceChain(points=pts, sizes=size_factor * _polyline_spacing(pts),
+            chains.append(InterfaceChain(points=pts, sizes=size_factor * spacing,
                                          end_types=ends))
             tips.append({"z_lo": float(pts[0, 1]), "z_hi": float(pts[-1, 1]),
                          "axis_lo": 1.0 if ends[0] == "axis" else 0.0,
@@ -738,14 +759,35 @@ class AxisymmetricReconnection(InterfaceEquations):
         if self._rmin_nd is None and distmin_for_call is None:
             return nothing
 
-        plan = detect_and_plan(chains, self._rmin_nd, distmin_for_call,
-                               buffer_resolution=self.buffer_resolution,
-                               cap_window_factor=self.cap_window_factor,
-                               cap_spacing_factor=self.cap_spacing_factor,
-                               volume_conservation=self.volume_conservation,
-                               volume_tolerance=self.volume_tolerance,
-                               allow_fragment_removal=self.allow_fragment_removal,
-                               segment_jump_offset=self.segment_jump_offset)
+        try:
+            plan = detect_and_plan(chains, self._rmin_nd, distmin_for_call,
+                                   buffer_resolution=self.buffer_resolution,
+                                   cap_window_factor=self.cap_window_factor,
+                                   cap_spacing_factor=self.cap_spacing_factor,
+                                   volume_conservation=self.volume_conservation,
+                                   volume_tolerance=self.volume_tolerance,
+                                   allow_fragment_removal=self.allow_fragment_removal,
+                                   segment_jump_offset=self.segment_jump_offset)
+        except WaistNotYetSeparable:
+            # The waist IS below rmin, but it has not yet grown long enough axially for the opening
+            # to keep the two halves apart - which is the normal state of affairs at the step where a
+            # collapsing neck first crosses rmin, since the axial extent of the sub-rmin stretch
+            # starts at zero there. Waiting one step costs nothing (nothing has been changed yet) and
+            # is what the physics does anyway; ending the run instead is what stage 8 found the
+            # Rayleigh-Plateau test doing on every single pinch, whatever rmin it was given.
+            #
+            # Not for ever, though: a neck held at just below rmin by something other than capillary
+            # collapse would defer indefinitely while the mesh around it degenerates, and a genuinely
+            # too-coarse rmin is a parameter error the user has to hear about.
+            self._deferred_events += 1
+            if self._deferred_events > self.max_deferred_events:
+                raise
+            if get_mpi_rank() == 0:
+                print("Postponing a pinch-off: the waist is below rmin but still too short axially "
+                      "for the morphological opening (attempt " + str(self._deferred_events) + " of "
+                      + str(self.max_deferred_events) + ").")
+            return nothing
+        self._deferred_events = 0
         if plan is None:
             return nothing
 
@@ -906,6 +948,8 @@ class AxisymmetricReconnection(InterfaceEquations):
             if get_mpi_rank() == 0:
                 try:
                     assert data is not None
+                    # Wrapped in a tuple because the verdict itself may legitimately be None, and
+                    # None is also what "rank 0 never got here" looks like after the broadcast.
                     payload = (True, self._overlap_verdict(data))
                 except BaseException as e:  # noqa: BLE001
                     error = e
@@ -1022,7 +1066,7 @@ class AxisymmetricReconnection(InterfaceEquations):
         Nothing happens on a plain quality remesh - there is no plan then, and the existing machinery
         is right.
         """
-        if not self.handle_zeta or self._pending_on is None:
+        if self._pending_on is None:
             return super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
         template, iname = self._pending_on
         entry = template._pending_surgery_plans.get(iname)
@@ -1030,7 +1074,7 @@ class AxisymmetricReconnection(InterfaceEquations):
             return super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
         plan, extra = entry
         table = extra.get("old_zeta_table")
-        if table is None:
+        if not self.handle_zeta or table is None:
             return super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
         chains = [(nc.points, nc.zeta) for nc in plan.new_chains]
 
@@ -1072,6 +1116,43 @@ class AxisymmetricReconnection(InterfaceEquations):
 # --------------------------------------------------------------------------------------
 # Small geometric helpers
 # --------------------------------------------------------------------------------------
+
+#: How far past the axis an interface node may sit, as a fraction of the local point spacing, before
+#: it is a broken mesh rather than a mesh artefact. See :py:func:`_snap_negative_radii_to_axis`.
+_NEGATIVE_RADIUS_ALLOWANCE = 0.25
+
+
+def _snap_negative_radii_to_axis(pts: NPFloatArray, spacing: NPFloatArray) -> None:
+    """Pull interface points that sit a hair past the symmetry axis back onto it, in place.
+
+    A free surface that has just retracted into a fresh cap can leave a node at ``r`` a small negative
+    fraction of an element size: the tip node itself is pinned at ``r=0`` by the axisymmetry
+    condition, but its neighbours are not, and one Newton step of a strongly curved cap is enough.
+    The cross section is then built by mirroring the chain about the axis
+    (:py:func:`pyoomph.meshes.axisymm_topology._ring_coords`), and a point at ``r < 0`` puts the
+    forward run of the ring on the far side of its own mirror image - shapely calls the result
+    self-intersecting and the whole detection ends the run. That was observed in one of three
+    Rayleigh-Plateau runs at the coarse resolution, i.e. as an intermittent failure some way after
+    the event that caused it.
+
+    The axis is at ``r = 0`` by construction, so a negative radius carries no information to keep: it
+    is snapped. Only up to a fraction of the local spacing, though - a node further out than that is
+    an inverted or folded mesh, and turning that into a valid polygon would hand the surgery a
+    geometry that does not exist.
+    """
+    neg = pts[:, 0] < 0.0
+    if not bool(numpy.any(neg)):
+        return
+    worst = float(numpy.min(pts[:, 0]))
+    allowance = _NEGATIVE_RADIUS_ALLOWANCE * float(numpy.min(spacing))
+    if -worst > allowance:
+        raise RuntimeError(
+            "AxisymmetricReconnection: an interface node sits at r=" + repr(worst) + ", i.e. "
+            + repr(-worst / max(allowance, 1e-300) * _NEGATIVE_RADIUS_ALLOWANCE) + " local element "
+            "sizes on the far side of the symmetry axis, near z=" + repr(float(pts[int(numpy.argmin(pts[:, 0])), 1]))
+            + ". That is a folded mesh, not a mesh artefact; refine there or take smaller steps.")
+    pts[neg, 0] = 0.0
+
 
 def _polyline_spacing(pts: NPFloatArray) -> NPFloatArray:
     """Mean distance of each polyline point to its neighbours - a robust local element size proxy."""
@@ -1144,6 +1225,16 @@ def _subtract_spans(spans: Sequence[tuple[float, float]], holes: Sequence[tuple[
 # --------------------------------------------------------------------------------------
 
 class DisjunctDomainMarker(Equations):
+    """Number the connected components of a mesh into a ``D0`` field, ordered along ``y``.
+
+    .. warning::
+        Not usable on a mesh distributed with ``--distribute``: the flood fill below walks the
+        elements this rank holds, so each rank numbers the components of its own partition from zero.
+        Unlike the detection of :py:class:`AxisymmetricReconnection` this cannot be fixed by merging -
+        the marker is written back onto the local elements - and it would need the component labels
+        to be reconciled across the partition boundaries instead.
+    """
+
     def __init__(self,name:str,direction:Literal["up","down"]="up") -> None:
         super().__init__()
         self.name=name
