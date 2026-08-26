@@ -173,9 +173,13 @@ why not.
    * - Mode
      - The time discretization: ``collocation`` (the default), ``floquet``, ``central``, ``BDF2`` or
        ``bspline``. Only ``collocation`` and ``floquet`` carry a degree of freedom at the end of the
-       period, which is what the Floquet multipliers are computed from; the others can be continued but
-       have no stability. B-splines often converge more readily on the step off a Hopf, which is what
-       *Apply to this orbit* is for.
+       period, which is what the Floquet multipliers are computed from. A ``bspline`` orbit is
+       periodic by construction and has none of its own, but it still reports multipliers: they are
+       computed on a collocation sampling of the orbit, which leaves the orbit itself untouched and
+       gives the same numbers a converted orbit would, to ten digits. ``central`` and ``BDF2`` can be
+       continued but have no stability at all. B-splines often converge more readily on the step off a
+       Hopf, which is why they are worth having - and why *Apply to this orbit* exists, for when you
+       want the branch itself converted rather than only read.
    * - Order
      - Order of the discretization.
    * - Phase constraint
@@ -200,5 +204,5 @@ why not.
    * - Shift-invert
      - Whether the multiplier solve is shift-inverted.
 
-The line at the bottom reports the multipliers found, or says why there are none - and, when the
-installed orbit is in a mode that has none, points at *Apply to this orbit*.
+The line at the bottom reports the multipliers found, or says why there are none - and, for a
+``bspline`` orbit, that they were computed on a collocation sampling of it.

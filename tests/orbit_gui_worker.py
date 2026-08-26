@@ -387,6 +387,48 @@ def run_arclength_metric(args):
         return res
 
 
+def run_bspline_floquet(args):
+    """A B-spline orbit branch, continued with its Floquet multipliers.
+
+    A periodic B-spline basis has no end-of-period degree of freedom, so the orbit Jacobian has no
+    seam for the condensation to cut and the orbit has no multipliers of its own. The GUI asks the
+    ORBIT rather than the problem, and the orbit answers on a collocation sampling of itself - so
+    every point of a bspline branch gets its stability without the branch ever being converted.
+    """
+    problem, gui, c = build(args)
+    with problem:
+        res = {"phase": "bsplinefloquet"}
+        c.orbit_mode = "bspline"
+        c.orbit_order = 3
+        c.start(0.02)
+        c.locate_bifurcation()
+        assert c.branch_switch(), "the branch switch at the Hopf did not take"
+        res["kind"] = c.current_branch.kind
+        res["installed_mode"] = str(c._orbit.mode)
+        res["is_floquet_mode"] = bool(c._orbit_handler().is_floquet_mode())
+
+        pts = []
+        for _ in range(3):
+            p = c.current_point
+            pts.append({"mu": float(p.param_value),
+                        "mode": str((p.orbit_info or {}).get("mode")),
+                        "nT": int((p.orbit_info or {}).get("nT", 0)),
+                        "T": float(p.obs_values[ORBIT_T_KEY]),
+                        "floquet": [[float(numpy.real(m)), float(numpy.imag(m))] for m in p.floquet],
+                        "unstable_count": p.unstable_count,
+                        "exponent": float(p.eig_value_Re)})
+            c.step()
+        res["points"] = pts
+        # Still a B-spline branch afterwards, and still one after a reload.
+        res["mode_after"] = str(c._orbit.mode)
+        res["ndof_after"] = int(problem.ndof())
+        c.save_all()
+        c.load_pt(c.current_branch[0])
+        res["mode_after_reload"] = str(c._orbit.mode)
+        res["nT_after_reload"] = int(c._orbit_handler().get_num_time_steps())
+        return res
+
+
 def run_bad_fingerprint(args):
     """A stored orbit that no longer matches the problem must be refused, not loaded."""
     problem, gui, c = build(args)
@@ -430,7 +472,7 @@ def run_no_hessian(args):
 PHASES = {"switch": run_switch, "reload": run_reload, "fingerprint": run_bad_fingerprint,
           "nohessian": run_no_hessian, "nearhopf": run_near_hopf,
           "rediscretize": run_rediscretize, "goback": run_go_back,
-          "metric": run_arclength_metric}
+          "metric": run_arclength_metric, "bsplinefloquet": run_bspline_floquet}
 
 
 def main():

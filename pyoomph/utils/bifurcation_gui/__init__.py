@@ -134,12 +134,13 @@ class BifurcationGUI:
     # needs the problem to have been built with setup_for_stability_analysis(analytic_hessian=True):
     # the orbit handler's own Jacobian refuses without it.
     orbit_NT=_fwd("orbit_NT","Number of time steps the orbit is discretized with. Raised at use time to a multiple of the order and to an even number, so that a DAE's algebraic directions do not land on the -1 a period doubling would sit at.")
-    orbit_mode=_fwd("orbit_mode","Discretization of the orbit: 'collocation' (default), 'floquet', 'central', 'BDF2' or 'bspline'. Only the first two carry a degree of freedom at the end of the period, which is what the Floquet multipliers need.")
+    orbit_mode=_fwd("orbit_mode","Discretization of the orbit: 'collocation' (default), 'floquet', 'central', 'BDF2' or 'bspline'. Only the first two carry a degree of freedom at the end of the period, which is what the Floquet multipliers are computed from; a 'bspline' orbit gets them on a collocation sampling of itself, which leaves it untouched, while 'central' and 'BDF2' have no stability at all.")
     orbit_order=_fwd("orbit_order","Order of the collocation or B-spline discretization.")
     orbit_GL_order=_fwd("orbit_GL_order","Gauss-Legendre integration order, or -1 for the default.")
     orbit_T_constraint=_fwd("orbit_T_constraint","How the phase of the orbit is pinned: 'phase' or 'plane'.")
     orbit_amplitude_factor=_fwd("orbit_amplitude_factor","Extra factor on the amplitude of the starting guess at the Hopf.")
     orbit_check_collapse=_fwd("orbit_check_collapse","Verify the solved orbit did not collapse back onto the stationary branch.")
+    orbit_floquet_sampling_order=_fwd("orbit_floquet_sampling_order","Collocation order of the sampling a B-spline orbit's Floquet multipliers are computed on.")
     orbit_eps=_fwd("orbit_eps","Parameter step off the Hopf, or None to take what the current ds buys. The offset IS eps**2, so this is the epsilon of the switch, squared.")
     orbit_observable_samples=_fwd("orbit_observable_samples","Samples per period for the minimum, average and maximum of each observable, or None for one per time step.")
     orbit_portable=_fwd("orbit_portable","Store an orbit as one state dump per time point instead of as a raw dof vector: partition- and mesh-independent, at nT times the disk. Forced on a distributed problem.")

@@ -248,7 +248,41 @@ def run(args):
                     kwargs["n"] = args.n
                 kwargs["dense_threshold"] = args.dense_threshold
                 kwargs["shift_invert"] = bool(args.shift_invert)
+            # A B-spline orbit has no end-of-period degree of freedom, so its multipliers are taken
+            # on a collocation SAMPLING of it and the B-spline orbit is put back afterwards. The
+            # blocks either side of the call are what says the restore was exact rather than close.
+            sampled = not orbit._get_handler().is_floquet_mode()
+            res["sampled"] = bool(sampled)
+            before, Tbefore = orbit._blocks()
+            if args.fail_resolve:
+                def _diverge(*a, **kw):
+                    raise RuntimeError("pretend the re-solve of the sampling diverged")
+                problem.solve = _diverge
+                try:
+                    orbit.get_floquet_multipliers(**kwargs)
+                except RuntimeError as e:
+                    res["resolve_failed_with"] = str(e)
+                else:
+                    res["resolve_failed_with"] = None
+                del problem.solve
+                after, Tafter = orbit._blocks()
+                res["mode_after"] = str(orbit.mode)
+                res["nT_after"] = int(orbit.get_num_time_steps())
+                res["floquet_mode_after"] = bool(orbit._get_handler().is_floquet_mode())
+                res["restore_shape_ok"] = bool(before.shape == after.shape)
+                res["restore_max_diff"] = (float(numpy.max(numpy.abs(before - after)))
+                                           if before.shape == after.shape else None)
+                res["restore_T_diff"] = float(abs(Tafter - Tbefore))
+                return res
             F = orbit.get_floquet_multipliers(**kwargs)
+            after, Tafter = orbit._blocks()
+            res["mode_after"] = str(orbit.mode)
+            res["nT_after"] = int(orbit.get_num_time_steps())
+            res["floquet_mode_after"] = bool(orbit._get_handler().is_floquet_mode())
+            res["restore_shape_ok"] = bool(before.shape == after.shape)
+            res["restore_max_diff"] = (float(numpy.max(numpy.abs(before - after)))
+                                       if before.shape == after.shape else None)
+            res["restore_T_diff"] = float(abs(Tafter - Tbefore))
             res["mult_re"] = [float(numpy.real(z)) for z in F]
             res["mult_im"] = [float(numpy.imag(z)) for z in F]
             ev = problem.get_last_eigenvectors()
@@ -257,14 +291,16 @@ def run(args):
             # one pushed once round, i.e. lambda times it. Anything wrong in the reconstruction --
             # the batching above all -- shows up here and nowhere else.
             nb, nTb = res["nbase"], res["nT"]
-            if numpy.size(ev):
+            # Skipped when sampled: the eigenfunctions are laid out over the COLLOCATION sampling,
+            # not over this orbit's own time blocks, so nT here is the wrong stride for them.
+            if numpy.size(ev) and not sampled:
                 first = ev[:, :nb]
                 last = ev[:, (nTb - 1) * nb:nTb * nb]
                 lam = numpy.array(res["mult_re"]) + 1j * numpy.array(res["mult_im"])
                 scale = numpy.maximum(numpy.max(numpy.abs(first), axis=1), 1e-300)
                 res["closure_residual"] = float(numpy.max(
                     numpy.abs(last - lam[:, None] * first).max(axis=1) / scale))
-            if args.reference:
+            if args.reference and not sampled:
                 from pyoomph.generic.floquet import time_elements
                 elems = time_elements(orbit._get_handler())
                 J = problem.assemble_jacobian(with_residual=False)
@@ -292,6 +328,10 @@ def main():
     p.add_argument("--dense-threshold", dest="dense_threshold", type=int, default=2000)
     p.add_argument("--shift-invert", dest="shift_invert", type=int, default=1)
     p.add_argument("--expect-refusal", action="store_true")
+    # Makes the re-solve of the collocation sampling diverge, to pin that the B-spline orbit comes
+    # back anyway - the restore is in a finally precisely so a failed re-solve costs the attempt and
+    # not the orbit.
+    p.add_argument("--fail-resolve", action="store_true")
     # parse_known_args, not parse_args: pyoomph reads its own flags (--distribute above all) straight
     # off sys.argv, and argparse would reject them here first.
     args, _ = p.parse_known_args()

@@ -25,18 +25,72 @@ actually goes and what parallelizes; §10 the open issues.
 `floquet_mode` is on for `bspline_order == 0` (`mode="floquet"`) **and** for `bspline_order < -2`
 (`mode="collocation"`, any order) — the constructor sets both. So the default collocation orbits
 already have the explicit end-of-period block and always did; only `central`, `BDF2` and `bspline`
-do not, and `is_floquet_mode()` refuses those.
+do not, and `is_floquet_mode()` reports so. `central` and `BDF2` are refused outright; `bspline` is
+answered on a collocation sampling of the orbit, which is what the next subsection is about.
 
-That refusal is not the end of the road for a `bspline` orbit, which is worth having: bsplines
-converge more readily on the step off a Hopf than collocation does. `PeriodicOrbit.change_sampling()`
-resamples the installed orbit and reinstalls the handler in another mode, so the orbit can be FOUND
-with bsplines and then converted to collocation to be read. The bifurcation GUI exposes it as
+### The B-spline case
+
+`bspline` is worth having - bsplines converge more readily on the step off a Hopf than collocation
+does - and the refusal above is not the end of the road for it.
+
+**Why it has no structure of its own.** In b-spline mode the assembly is *Galerkin*: rows and columns
+run over the same index set, `indices(ie) = {ie+1-k … ie+1} mod nT` (`get_jacobian_bspline_mode`,
+`src/bifurcation.cpp`, and independently `get_sparsity_pattern`). The augmented Jacobian is therefore
+**block-circulant-banded**, half-bandwidth `k` = the spline order, wrapping at the seam - not the
+block-bidiagonal chain of §1. `floquet_mode` is false, so `Tadd` is not grown by the extra
+end-of-period block, there is no `v_{nT-1} - v_0 = 0` row to key off, and
+`get_time_element_node_indices()` returns empty by design. The condensation's `C_ie` needs rows of the
+first `n-1` blocks and columns of all `n`; with equal row and column support there is no `E0` to
+separate.
+
+**What is done instead.** The orbit is a *curve*, not a discretization of one, so it can be handed to
+a discretization that does have the structure. `PeriodicOrbit.get_floquet_multipliers()` samples a
+B-spline orbit onto a collocation one (`_sampled_onto_collocation`), runs the ordinary condensation on
+that, and puts the B-spline orbit back - `_blocks()` / `_install_blocks()` read and write the
+augmented dof vector directly rather than re-sampling, so the restore is exact. The restore is in a
+`finally`: a re-solve that diverges costs the attempt and not the orbit.
+
+`Problem.get_floquet_multipliers()` still refuses, deliberately - it acts on whatever handler is
+installed, and this one has no structure. Only `PeriodicOrbit` knows its own discretization.
+
+**It costs nothing in accuracy.** Measured on the Stuart-Landau oscillator, whose non-trivial
+multiplier is exactly `exp(-4*pi)` (`test_a_bspline_orbit_reports_the_collocation_multipliers`):
+
+| `NT` | via a B-spline orbit | native collocation | relative error of both |
+|---|---|---|---|
+| 24 | 3.5016236022e-06 | 3.5016236023e-06 | 4.095e-03 |
+| 48 | 3.4875630140e-06 | 3.4875630148e-06 | 6.327e-05 |
+| 96 | 3.4873457966e-06 | 3.4873457965e-06 | 9.865e-07 |
+
+i.e. the two agree to ten significant digits and converge identically; what is left is the collocation
+discretization error, not the sampling.
+
+`central` and `BDF2` are left refused. They could be sampled by the same mechanism, but they are
+finite-difference stencils with no accuracy to speak of and nobody continues an orbit with them, so
+the refusal stays a refusal rather than becoming a list of exceptions.
+
+**Two alternatives were considered and rejected**, recorded so they are not re-derived:
+
+* *A companion transfer chain on the band.* The recurrence `sum_j A_j^(i) v_{i+j} = 0` over
+  `j = -k..k` becomes `x_{i+1} = T_i x_i` on the extended state `x_i = [v_{i-k}; …; v_{i+k-1}]`,
+  and the product over `nT` is a monodromy of size `2k*nbase`. It needs `A_{+k}` invertible, costs
+  `(2k)^3` = 216x the eigendecomposition at order 3, and returns `nbase` physical multipliers
+  together with `(2k-1)*nbase` parasitic ones - with no cheap rigorous way to tell them apart.
+* *Assembling the variational problem on a clamped, non-periodic basis.* Mathematically the cleanest:
+  a genuine `v(0) -> v(T)` map, no parasitic roots, and the cost profile of today's route. But it is a
+  new C++ assembly routine, which the sampling makes unnecessary.
+
+The other way round is still available and is a different operation: `PeriodicOrbit.change_sampling()`
+CONVERTS the installed orbit, replacing it. It resamples the installed orbit and reinstalls
+the handler in another mode; the bifurcation GUI exposes it as
 `BifurcationController.change_orbit_discretisation()` ("Apply to this orbit" in the Orbit tab), which
 also rewrites the point's stored cycle and recomputes its multipliers. Measured on the Hopf normal
 form (`tests/test_bifurcation_gui.py::test_an_orbit_can_be_re_discretized_in_place`): the converted
 orbit lands on the same multiplier as one switched onto in collocation from the start, to nine
 digits. Note that the count of time points goes UP by one in the conversion - `NT` is the number of
 samples taken, and collocation/floquet then add the explicit end-of-period block.
+
+### Per element, in the modes that do have the structure
 
 Per element `ie` of the time discretization (Lagrange order `m`; `m = 1` for the plain midpoint
 `mode="floquet"`), `get_jacobian_collocation_mode()` loops `inode < el->nnode()-1` for the

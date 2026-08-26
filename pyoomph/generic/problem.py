@@ -26,6 +26,7 @@ from __future__ import annotations
 #
 # ========================================================================
  
+import contextlib
 import glob
 import sys
 import warnings
@@ -197,8 +198,27 @@ class GenericProblemHooks:
 
 
         
+def _collocation_time_steps(NT:int,order:int)->int:
+    """``NT`` raised to what a collocation orbit of this order actually needs.
+
+    A multiple of the order, because the time mesh is built from elements of that many intervals
+    (``(nknots-1)%order`` is refused outright), and EVEN, because with an odd number of time
+    intervals a differential-algebraic problem puts a spurious Floquet multiplier on exactly ``-1``,
+    which is where a period doubling would be - see dev_docs/floquet_multipliers.md section 6.
+
+    The bifurcation GUI applies the same rule to what the user types
+    (``BifurcationController._orbit_NT``); this is the one copy of the arithmetic.
+    """
+    NT=max(2,int(NT))
+    order=max(1,int(order))
+    step=order if order%2==0 else 2*order
+    if NT%step:
+        NT=((NT//step)+1)*step
+    return NT
+
+
 class PeriodicOrbit:
-    """ 
+    """
     A class representing a periodic orbit.
     """
     def __init__(self,problem:"Problem",mode:Literal["collocation","central","bspline","BDF2","floquet"],lyap_coeff,param,omega,pvalue,pdvalue,al,order:int,GL_order:int,T_constraint:Literal["plane", "phase"]):
@@ -294,7 +314,92 @@ class PeriodicOrbit:
         Returns the number of time steps of the discretized orbit
         """
         return self._get_handler().get_num_time_steps()
-    
+
+    def _blocks(self)->"tuple[NPFloatArray,float]":
+        """The orbit's own unknowns as ``(nT, nbase)`` time blocks, plus the nondimensional period.
+
+        Read straight out of the augmented dof vector in its naive time-major order rather than by
+        re-sampling: :py:meth:`iterate_over_samples` INTERPOLATES, and these blocks are meant to
+        reproduce the installed orbit exactly, so that it can be put back bit for bit.
+        """
+        handler=self._get_handler()
+        nbase=handler.get_base_ndof()
+        nT=handler.get_num_time_steps()
+        dofs=numpy.asarray(self.problem.get_current_dofs()[0],dtype=float)
+        order=handler.get_naive_equation_order()
+        if len(order):
+            dofs=dofs[numpy.asarray(order,dtype=numpy.int64)]
+        return dofs[:nbase*nT].reshape(nT,nbase).copy(),float(dofs[nbase*nT])
+
+    def _install_blocks(self,blocks:"NPFloatArray",T_nondim:float,mode:str,order:int,GL_order:int,
+                        T_constraint:str):
+        """Re-create the handler from stored time blocks and write them back exactly.
+
+        The counterpart of :py:meth:`_blocks`. In floquet/collocation mode the handler appends the
+        end-of-period block itself, from the current state, so handing it over as history as well
+        would make the orbit one block longer on every round trip; the other modes carry no such
+        block and hand over all of them.
+
+        activate_periodic_orbit_handler rebuilds that end-of-period block and re-nondimensionalises
+        T, so the whole augmented vector is written back afterwards - that is what makes this exact
+        rather than approximately right.
+        """
+        nT=int(blocks.shape[0])
+        if nT<2:
+            raise ValueError("A stored orbit needs at least two time points")
+        floquet_mode=mode in ("collocation","floquet")
+        history=[blocks[i] for i in range(1,nT-1 if floquet_mode else nT)]
+        self.problem.deactivate_bifurcation_tracking()
+        self.problem.set_current_dofs(blocks[0])
+        self.problem.activate_periodic_orbit_handler(
+            T_nondim*self.problem.get_scaling("temporal"),history_dofs=history,mode=mode, #type:ignore
+            order=order,GL_order=GL_order,T_constraint=T_constraint) #type:ignore
+        handler=self._get_handler()
+        if handler.get_num_time_steps()!=nT:
+            self.problem.deactivate_bifurcation_tracking()
+            raise RuntimeError("The restored orbit has {:d} time points instead of {:d}".format(
+                handler.get_num_time_steps(),nT))
+        aug=numpy.concatenate([blocks.reshape(-1),[T_nondim]])
+        naive=handler.get_naive_equation_order()
+        if len(naive):
+            full=numpy.empty_like(aug)
+            full[numpy.asarray(naive,dtype=numpy.int64)]=aug
+            aug=full
+        self.problem.set_current_dofs(aug)
+        self.mode=mode #type:ignore
+        self.order,self.GL_order=order,GL_order
+        self.T_constraint=T_constraint #type:ignore
+
+    @contextlib.contextmanager
+    def _sampled_onto_collocation(self,NT:int | None=None,order:int=3,resolve:bool=True):
+        """Temporarily replace this orbit by a collocation sampling of it, then put it back.
+
+        Why this exists: a periodic B-spline basis is periodic BY CONSTRUCTION, so its orbit Jacobian
+        is block-circulant-banded (half-bandwidth = the spline order, wrapping at the seam) rather
+        than the block-bidiagonal chain the Floquet condensation slices. There is no end-of-period
+        degree of freedom and no wrap-around row `v_{nT-1} - v_0 = 0` to key off, which is what
+        `is_floquet_mode()` reports and why every Floquet route refuses such an orbit. See
+        dev_docs/floquet_multipliers.md.
+
+        The orbit itself is a curve, not a discretization of one, so it can be handed to a
+        discretization that DOES have that structure. What comes back is then the spectrum of the
+        collocation discretization of this orbit - the same thing change_sampling() to collocation
+        computes, which agrees with a natively-collocation orbit to nine digits on the Hopf normal
+        form (tests/test_bifurcation_gui.py::test_an_orbit_can_be_re_discretized_in_place).
+
+        The restore is in a `finally` and is deliberate: a re-solve that diverges must cost the
+        attempt and not the orbit.
+        """
+        blocks,T=self._blocks()
+        was=(self.mode,self.order,self.GL_order,self.T_constraint)
+        if NT is None:
+            NT=_collocation_time_steps(int(blocks.shape[0]),order)
+        try:
+            self.change_sampling(mode="collocation",NT=NT,order=order,do_solve=resolve)
+            yield self
+        finally:
+            self._install_blocks(blocks,T,was[0],was[1],was[2],was[3])
+
     def update_phase_constraint(self):
         """
         Updates the phase constraint history (u0) for the orbit
@@ -346,9 +451,46 @@ class PeriodicOrbit:
             self._get_handler().restore_dofs()
             self.problem.set_current_time(tbackup,dimensional=False,as_float=True)
         
-    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000,shift_invert:bool=True,sigma:complex | None=None):
-        """See :py:meth:`~pyoomph.generic.problem.Problem.get_floquet_multipliers`."""
-        return self.problem.get_floquet_multipliers(n=n,valid_threshold=valid_threshold,shift=shift,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet,method=method,dense_threshold=dense_threshold,shift_invert=shift_invert,sigma=sigma)
+    def get_floquet_multipliers(self,n:int | None=None,valid_threshold:float | None=10000,shift:float | None=None,ignore_periodic_unity:bool | float=False,quiet:bool=True,method:Literal["condensed","periodic_schur","eigenproblem"]="condensed",dense_threshold:int=2000,shift_invert:bool=True,sigma:complex | None=None,sampling_NT:int | None=None,sampling_order:int=3,resolve:bool=True):
+        """See :py:meth:`~pyoomph.generic.problem.Problem.get_floquet_multipliers`.
+
+        Unlike that one, this also answers for an orbit discretized with ``mode="bspline"``, which
+        carries no explicit end-of-period degree of freedom and therefore has no structure for any of
+        the Floquet routes to key off (see :py:meth:`_sampled_onto_collocation`). Such an orbit is
+        SAMPLED onto a collocation discretization for the computation and put back afterwards,
+        unchanged - so what comes back is the spectrum of the collocation discretization of this
+        orbit, to that discretization's accuracy.
+
+        Args:
+            sampling_NT: Time points of the sampling, or None for this orbit's own count raised to
+                what collocation needs (a multiple of the order, and even - see
+                :py:func:`_collocation_time_steps`). Only used when a sampling is taken.
+            sampling_order: Collocation order of the sampling.
+            resolve: Re-solve the sampled orbit before taking the multipliers. On, because a B-spline
+                orbit satisfies the B-spline equations and not the collocation ones, so without it
+                the variational operator is evaluated at a state that is not a collocation orbit and
+                the multipliers carry an extra error of the size of that residual.
+
+        Note that after a SAMPLED call the problem's last eigenvectors are laid out over the
+        collocation discretization (``sampling_NT*nbase+1`` entries), not over this orbit's.
+        """
+        kwargs=dict(n=n,valid_threshold=valid_threshold,shift=shift,ignore_periodic_unity=ignore_periodic_unity,quiet=quiet,method=method,dense_threshold=dense_threshold,shift_invert=shift_invert,sigma=sigma)
+        if self._get_handler().is_floquet_mode():
+            return self.problem.get_floquet_multipliers(**kwargs) #type:ignore
+        if self.mode!="bspline":
+            # central/BDF2 could be sampled just as well, but they are finite-difference schemes with
+            # no accuracy to speak of and nobody continues an orbit with them; leaving them refused
+            # keeps the refusal a real statement rather than a list of exceptions.
+            raise RuntimeError("An orbit discretized with '"+str(self.mode)+"' has no Floquet "
+                               "multipliers, and cannot be sampled onto one that has. Use "
+                               "mode='collocation', 'floquet' or 'bspline'.")
+        was_mode=str(self.mode)   # change_sampling rewrites it; the message is about the orbit we own
+        with self._sampled_onto_collocation(NT=sampling_NT,order=sampling_order,resolve=resolve):
+            if not quiet:
+                print("Floquet multipliers of a '"+was_mode+"' orbit, computed on a collocation "
+                      "sampling of it with {:d} time points and order {:d}".format(
+                          self.get_num_time_steps(),sampling_order))
+            return self.problem.get_floquet_multipliers(**kwargs) #type:ignore
     
     def starts_supercritically(self):
         """
@@ -7875,7 +8017,10 @@ class Problem(_pyoomph.Problem):
         if not isinstance(orbit_handler,_pyoomph.PeriodicOrbitHandler):
             raise RuntimeError("Periodic orbit handler not active. Call activate_periodic_orbit_handler first, then solve the orbit, then call this function")
         if not orbit_handler.is_floquet_mode():
-            raise RuntimeError("Floquet mode not active. Call activate_periodic_orbit_handler with mode='floquet' first, then solve the orbit, then call this function")
+            # This method works on whatever handler is installed, and this one carries no explicit
+            # end-of-period degree of freedom for any of the routes to key off. PeriodicOrbit knows
+            # its own discretization and can sample a B-spline orbit onto one that does.
+            raise RuntimeError("Floquet mode not active. Call activate_periodic_orbit_handler with mode='floquet' first, then solve the orbit, then call this function. For a mode='bspline' orbit, call get_floquet_multipliers() on the PeriodicOrbit object instead: it samples the orbit onto a collocation discretization for the computation and puts this one back.")
         nbase=orbit_handler.get_base_ndof()
         if n is not None and n<=0:
             raise ValueError("Invalid number of Floquet multipliers requested: "+str(n))

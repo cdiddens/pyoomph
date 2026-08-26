@@ -1655,7 +1655,9 @@ class BifurcationTkApp:
 
         # Multipliers can only be had from a discretization that carries a degree of freedom at the
         # end of the period. Greyed out rather than left to fail once per continuation step.
-        can_floquet=str(c.orbit_mode) in ("collocation","floquet")
+        # bspline included: it has no multipliers of its own, but they are computed for it on a
+        # collocation sampling (BifurcationController._orbit_floquet), so the settings do apply.
+        can_floquet=str(c.orbit_mode) in ("collocation","floquet","bspline")
         try:
             self.floquet_method_combo.configure(state="readonly" if can_floquet else "disabled")
             self.floquet_n_entry.configure(state="normal" if can_floquet else "disabled")
@@ -1708,14 +1710,19 @@ class BifurcationTkApp:
             nun=c.orbit_unstable_count(point.floquet)
             self.floquet_info_var.set("{:d} multiplier{:s}, {:d} outside the unit circle".format(
                 len(point.floquet),"" if len(point.floquet)==1 else "s",nun))
+        elif installed=="bspline":
+            self.floquet_info_var.set(
+                "A periodic B-spline basis has no degree of freedom at the end of the period and so "
+                "no multipliers of its own; they are computed on a collocation sampling of this "
+                "orbit, which leaves the orbit itself untouched.")
         elif installed and installed not in ("collocation","floquet"):
             self.floquet_info_var.set(
                 "This orbit is discretized with '{:s}', which carries no degree of freedom at the end "
-                "of the period, so it has no Floquet multipliers. Set the mode to collocation and "
-                "press 'Apply to this orbit'.".format(installed))
+                "of the period and cannot be sampled onto one that has. Set the mode to collocation "
+                "and press 'Apply to this orbit'.".format(installed))
         elif not can_floquet:
             self.floquet_info_var.set("'{:s}' carries no degree of freedom at the end of the period, "
-                                      "so it has no Floquet multipliers.".format(str(c.orbit_mode)))
+                                      "so it has no Floquet multipliers of its own.".format(str(c.orbit_mode)))
         else:
             self.floquet_info_var.set("")
 

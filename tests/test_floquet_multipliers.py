@@ -269,8 +269,83 @@ def test_matrix_free_agrees_with_dense(tmp_path):
 
 @pytest.mark.parametrize("mode", ["central", "BDF2"])
 def test_non_floquet_modes_are_refused(tmp_path, mode):
+    """central/BDF2 have no end-of-period dof and, unlike bspline, are not worth sampling.
+
+    They are finite-difference stencils with no accuracy to speak of and nobody continues an orbit
+    with them, so the refusal is left as a refusal rather than becoming a list of exceptions.
+    """
     res = _run(tmp_path, mode=mode, expect_refusal=True)
-    assert res["refused"] is not None and "Floquet mode not active" in res["refused"], res
+    assert res["refused"] is not None, res
+    assert "has no Floquet multipliers" in res["refused"], res
+    assert "cannot be sampled" in res["refused"], res
+
+
+@pytest.mark.parametrize("NT", [24, 48, 96])
+def test_a_bspline_orbit_reports_the_collocation_multipliers(tmp_path, NT):
+    """A B-spline orbit has no multipliers of its own, and answers with a sampling's.
+
+    Its basis is periodic BY CONSTRUCTION, so the orbit Jacobian is block-circulant-banded (half
+    bandwidth = the spline order, wrapping at the seam) rather than the block-bidiagonal chain the
+    condensation slices: there is no end-of-period degree of freedom and no wrap-around row
+    `v_{nT-1} - v_0 = 0` to key off. The orbit is a curve all the same, so it is sampled onto a
+    collocation discretization for the computation.
+
+    What has to hold is that this costs nothing in accuracy: the answer must be the one a
+    natively-collocation orbit of the same resolution gives, and it must converge with NT the same
+    way. Judged against exp(-4*pi), which is exact for this oscillator.
+    """
+    bspl = _multipliers(_run(tmp_path / "bspl", mode="bspline", order=3, NT=NT))
+    coll = _multipliers(_run(tmp_path / "coll", mode="collocation", order=3, NT=NT))
+    assert len(bspl) == 2 and len(coll) == 2, (bspl, coll)
+    assert _trivial_error(bspl) < 1e-8, bspl
+
+    radial_b = bspl[numpy.argmin(numpy.abs(bspl))].real
+    radial_c = coll[numpy.argmin(numpy.abs(coll))].real
+    assert radial_b == pytest.approx(radial_c, rel=1e-9), \
+        "the sampled route must agree with a native collocation orbit"
+    # ... and both are the same distance from the exact value, i.e. the sampling adds no error of
+    # its own - only the collocation discretization's, which is what converges with NT.
+    err_b = abs(radial_b - _EXACT_RADIAL) / _EXACT_RADIAL
+    err_c = abs(radial_c - _EXACT_RADIAL) / _EXACT_RADIAL
+    assert err_b == pytest.approx(err_c, rel=1e-3), (err_b, err_c)
+    assert err_b < {24: 1e-2, 48: 1e-3, 96: 1e-5}[NT], err_b
+
+
+def test_the_bspline_orbit_survives_its_multipliers(tmp_path):
+    """The sampling is temporary: the orbit that was installed must come back, bit for bit.
+
+    This is the whole risk of computing them this way. The blocks are read out of the augmented dof
+    vector either side of the call (PeriodicOrbit._blocks) rather than re-sampled, because a resample
+    interpolates and would hide exactly the error this is looking for.
+    """
+    res = _run(tmp_path, mode="bspline", order=3, NT=48)
+    assert res["sampled"] is True, res
+    assert res["mode_after"] == "bspline", res
+    assert res["nT_after"] == res["nT"], res
+    assert res["floquet_mode_after"] is False, res
+    assert res["restore_shape_ok"], res
+    assert res["restore_max_diff"] == 0.0, res["restore_max_diff"]
+    assert res["restore_T_diff"] == 0.0, res["restore_T_diff"]
+
+
+def test_the_bspline_orbit_survives_a_failed_resolve(tmp_path):
+    """And it comes back even when the sampled orbit's re-solve diverges.
+
+    The restore is in a `finally` for this reason: a re-solve that fails must cost the attempt and
+    not the orbit the user is continuing.
+    """
+    res = _run(tmp_path, mode="bspline", order=3, NT=48, fail_resolve=True)
+    assert res["resolve_failed_with"] is not None, "the substituted solve must have made this fail"
+    assert res["mode_after"] == "bspline" and res["floquet_mode_after"] is False, res
+    assert res["restore_max_diff"] == 0.0 and res["restore_T_diff"] == 0.0, res
+
+
+def test_a_collocation_orbit_is_not_sampled(tmp_path):
+    """The control: nothing about the ordinary path changed, and no sampling is taken for it."""
+    res = _run(tmp_path, mode="collocation", order=3, NT=48)
+    assert res["sampled"] is False, res
+    assert res["mode_after"] == "collocation" and res["floquet_mode_after"] is True, res
+    assert res["restore_max_diff"] == 0.0, res
 
 
 def _sorted(F):

@@ -2938,22 +2938,60 @@ def test_a_hopf_switches_onto_its_periodic_orbit(tmp_path, portable):
         numpy.exp(-2*step["mu"]*step["T"]), rel=1e-3)
 
 
+def test_a_bspline_orbit_branch_gets_its_floquet_multipliers(tmp_path):
+    """Continue a B-spline orbit branch WITH its stability, without ever converting it.
+
+    A periodic B-spline basis is periodic by construction, so the orbit Jacobian is
+    block-circulant-banded and has no seam for the condensation to cut - the orbit has no multipliers
+    of its own, which is why the GUI used to grey the whole Floquet section out and send the user to
+    "Apply to this orbit". It now asks the ORBIT rather than the problem, and the orbit answers on a
+    collocation sampling of itself, so every point of the branch gets its stability and the branch
+    stays B-spline.
+
+    Judged against the closed form: the non-trivial multiplier of this normal form is exp(-2*mu*T)
+    and its Floquet exponent is -2*mu, at every point.
+    """
+    res = _run_orbit_worker(tmp_path, "bsplinefloquet")
+    assert res["kind"] == "orbit"
+    assert res["installed_mode"] == "bspline"
+    assert res["is_floquet_mode"] is False, "the orbit is supposed to have no structure of its own"
+
+    for p in res["points"]:
+        assert p["mode"] == "bspline", p
+        assert p["T"] == pytest.approx(2*numpy.pi, rel=1e-4)
+        assert len(p["floquet"]) == 1, p          # the trivial one is removed, as on any orbit point
+        assert complex(*p["floquet"][0]).real == pytest.approx(
+            numpy.exp(-2*p["mu"]*p["T"]), rel=1e-4), p
+        assert p["exponent"] == pytest.approx(-2*p["mu"], rel=1e-4), p
+        assert p["unstable_count"] == 0, p
+    assert res["points"][-1]["mu"] > res["points"][0]["mu"], "the branch did not continue"
+
+    # The branch is still B-spline afterwards, and comes back as one from disk.
+    assert res["mode_after"] == "bspline"
+    assert res["mode_after_reload"] == "bspline"
+    assert res["nT_after_reload"] == res["points"][0]["nT"]
+
+
 def test_an_orbit_can_be_re_discretized_in_place(tmp_path):
-    """Find the orbit with bsplines, read its stability off in collocation.
+    """Convert an orbit found with bsplines into a collocation one, in place.
 
     The two discretizations are good at different things: bsplines converge more readily on the step
-    off a Hopf, but carry no degree of freedom at the end of the period and therefore have no Floquet
-    multipliers at all. "Apply to this orbit" converts the one that is installed, and the point of
-    the test is that what comes out is the SAME orbit - which the normal form pins exactly: period
-    2*pi, amplitude sqrt(mu), and one non-trivial multiplier exp(-2*mu*T).
+    off a Hopf. "Apply to this orbit" converts the one that is installed, and the point of the test
+    is that what comes out is the SAME orbit - which the normal form pins exactly: period 2*pi,
+    amplitude sqrt(mu), and one non-trivial multiplier exp(-2*mu*T).
     """
     res = _run_orbit_worker(tmp_path, "rediscretize")
     assert res["kind"] == "orbit"
     bspl, coll = res["bspline"], res["collocation"]
 
-    # The reason for the exercise: bsplines have no multipliers, whatever else they are good for.
-    assert bspl["mode"] == "bspline" and bspl["nfloquet"] == 0
+    # A B-spline orbit has no multipliers OF ITS OWN - the basis is periodic by construction, so its
+    # Jacobian has no seam to cut - but it reports them all the same, computed on a collocation
+    # sampling of itself. Converting it should therefore not change the answer, only the orbit.
+    assert bspl["mode"] == "bspline" and bspl["nfloquet"] == 1
     assert coll["mode"] == "collocation" and coll["nfloquet"] == 1
+    assert complex(*bspl["floquet"][0]).real == pytest.approx(
+        complex(*coll["floquet"][0]).real, rel=1e-6), \
+        "sampling the bspline orbit and converting it should give the same multiplier"
 
     # The same orbit, before and after, and the closed form judges both.
     mu = res["mu"]
@@ -2961,6 +2999,8 @@ def test_an_orbit_can_be_re_discretized_in_place(tmp_path):
     assert res["points_unchanged"], "the conversion recorded a second point instead of updating one"
     for facts in (bspl, coll):
         assert facts["T"] == pytest.approx(2*numpy.pi, rel=1e-4)
+        assert complex(*facts["floquet"][0]).real == pytest.approx(
+            numpy.exp(-2*mu*facts["T"]), rel=1e-3)
         assert facts["max_x"] == pytest.approx(numpy.sqrt(mu), rel=2e-2)
         assert facts["min_x"] == pytest.approx(-numpy.sqrt(mu), rel=2e-2)
     assert complex(*coll["floquet"][0]).real == pytest.approx(

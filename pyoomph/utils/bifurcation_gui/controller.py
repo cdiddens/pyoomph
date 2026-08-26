@@ -37,6 +37,7 @@ through the observer hooks installed by :py:meth:`BifurcationController.set_obse
 from ...generic.bifurcation_tools import attach_normal_form_predictors, _as_real_eigenvector
 from ...generic.codegen import EquationTree
 from ...generic import Problem
+from ...generic.problem import PeriodicOrbit
 from ... import _pyoomph_core as _pyoomph
 from ...typings import *
 from ...expressions.units import unit_to_string
@@ -398,6 +399,10 @@ class BifurcationController:
         #: of the raw dof vector. Partition- and mesh-independent, at nT times the disk; forced on a
         #: distributed problem, where the raw vector means nothing outside its own partitioning.
         self.orbit_portable=False
+        #: Collocation order of the sampling a B-spline orbit's multipliers are computed on. A
+        #: periodic B-spline basis has no end-of-period degree of freedom and therefore no
+        #: multipliers of its own; see PeriodicOrbit._sampled_onto_collocation.
+        self.orbit_floquet_sampling_order=3
         #: Compute the Floquet multipliers at every continuation point, like the eigensolve on an
         #: ordinary branch. Off means the orbit branch is drawn with unknown stability until they are
         #: asked for.
@@ -3854,11 +3859,19 @@ class BifurcationController:
             return [],[]
         handler=self._orbit_handler()
         assert handler is not None
+        sampled=False
         if not handler.is_floquet_mode():
-            self.log("No Floquet multipliers in '{:s}' mode: it carries no degree of freedom at the "
-                     "end of the period. Use collocation or floquet for the stability of an orbit."
-                     .format(str(orbit.mode)))
-            return [],[]
+            if str(orbit.mode)!="bspline":
+                self.log("No Floquet multipliers in '{:s}' mode: it carries no degree of freedom at "
+                         "the end of the period, and it cannot be sampled onto a discretization that "
+                         "has one. Use collocation, floquet or bspline for the stability of an orbit."
+                         .format(str(orbit.mode)))
+                return [],[]
+            # A periodic B-spline basis is periodic by construction, so its orbit Jacobian is
+            # block-circulant-banded and there is no seam for the condensation to cut. The ORBIT is
+            # still a curve, though, so PeriodicOrbit.get_floquet_multipliers samples it onto a
+            # collocation discretization for the computation and puts this one back untouched.
+            sampled=True
         # get_floquet_multipliers OVERWRITES the problem's last eigenvalues and eigenvectors with the
         # multipliers. Everything that reads them afterwards - _add_current_state's own branch,
         # critical_eigenindex, _sync_tracking_to, the eigenfunction panes - would take multipliers for
@@ -3873,11 +3886,18 @@ class BifurcationController:
             # at 1+2.1e-9 and the physical one at 1+3.9e-6, and a tolerance of 1e-5 deleted both, i.e.
             # exactly the number that answers whether the orbit is unstable. Every orbit has EXACTLY
             # ONE trivial multiplier, so the one nearest 1 is removed below and nothing else is.
-            mults=self.problem.get_floquet_multipliers(
+            # Through the ORBIT, not the problem: only the orbit knows its own discretization, and
+            # only it can sample a B-spline one onto collocation and restore it afterwards.
+            mults=orbit.get_floquet_multipliers(
                 n=self.floquet_n,method=self.floquet_method,
                 ignore_periodic_unity=False,quiet=True,
                 dense_threshold=self.floquet_dense_threshold,
-                shift_invert=self.floquet_shift_invert,sigma=self.floquet_sigma)
+                shift_invert=self.floquet_shift_invert,sigma=self.floquet_sigma,
+                sampling_order=int(self.orbit_floquet_sampling_order))
+            if sampled:
+                self.log("This orbit is discretized with bsplines, which have no multipliers of their "
+                         "own; these were computed on a collocation sampling of it (order {:d}). The "
+                         "orbit itself is unchanged.".format(int(self.orbit_floquet_sampling_order)))
         except Exception as e:
             self.log("Could not compute the Floquet multipliers here ("+str(e).split("\n")[0]+
                      "); this point's stability stays unknown")
@@ -3930,19 +3950,12 @@ class BifurcationController:
     def _orbit_blocks(self)->"tuple[NPFloatArray,float]":
         """The orbit's own unknowns as ``(nT, nbase)`` time blocks, plus the period.
 
-        Read straight out of the augmented dof vector in its naive time-major order rather than by
-        re-sampling the orbit the way PeriodicOrbit.change_sampling does: a resample interpolates,
-        and these blocks are meant to reproduce the stored orbit exactly.
+        PeriodicOrbit._blocks does the reading; this is where the diagram asks for it. Read straight
+        out of the augmented dof vector in its naive time-major order rather than by re-sampling the
+        orbit the way PeriodicOrbit.change_sampling does: a resample interpolates, and these blocks
+        are meant to reproduce the stored orbit exactly.
         """
-        handler=self._orbit_handler()
-        assert handler is not None
-        nbase=handler.get_base_ndof()
-        nT=handler.get_num_time_steps()
-        dofs=numpy.asarray(self.problem.get_current_dofs()[0],dtype=float)
-        order=handler.get_naive_equation_order()
-        if len(order):
-            dofs=dofs[numpy.asarray(order,dtype=numpy.int64)]
-        return dofs[:nbase*nT].reshape(nT,nbase).copy(),float(dofs[nbase*nT])
+        return self._require_orbit()._blocks()
 
     def _capture_dof_fingerprint(self)->str:
         """What the raw dof blocks are only meaningful for: this equation numbering.
@@ -4067,38 +4080,25 @@ class BifurcationController:
         return numpy.array(blocks),extra
 
     def _install_orbit(self,info:dict,blocks:"NPFloatArray",T_nondim:float):
-        """Re-create the handler from stored time blocks and write them back exactly."""
+        """Re-create the handler from stored time blocks and write them back exactly.
+
+        PeriodicOrbit._install_blocks does the work - the same routine that puts a B-spline orbit
+        back after its multipliers have been taken on a collocation sampling of it - so there is one
+        copy of the block/history/permutation rules. What is here is the diagram's part: the stored
+        info dict is what says which discretization to rebuild.
+        """
         nT=int(blocks.shape[0])
         if nT<2:
             raise RuntimeError("A stored orbit needs at least two time points")
         mode=str(info.get("mode","collocation"))
-        # In floquet/collocation mode the handler appends the end-of-period block itself, from the
-        # current state; handing it over as history as well would make the orbit one block longer on
-        # every reload.
-        floquet_mode=mode in ("collocation","floquet")
-        history=[blocks[i] for i in range(1,nT-1 if floquet_mode else nT)]
         self._deactivate_any_augmentation()
-        self.problem.set_current_dofs(blocks[0])
-        orbit=self.problem.activate_periodic_orbit_handler(
-            T_nondim*self.problem.get_scaling("temporal"),history_dofs=history,mode=mode,
-            order=int(info.get("order",3)),GL_order=int(info.get("GL_order",-1)),
-            T_constraint=str(info.get("T_constraint","phase")))
-        handler=self._orbit_handler()
-        assert handler is not None
-        if handler.get_num_time_steps()!=nT:
-            self.problem.deactivate_bifurcation_tracking()
-            raise RuntimeError("The restored orbit has {:d} time points instead of {:d}".format(
-                handler.get_num_time_steps(),nT))
-        # Write every block back, the period included. activate_periodic_orbit_handler rebuilds the
-        # end-of-period block from the current state and re-nondimensionalises T, so this is what
-        # makes the restore exact rather than approximately right.
-        aug=numpy.concatenate([blocks.reshape(-1),[T_nondim]])
-        order=handler.get_naive_equation_order()
-        if len(order):
-            full=numpy.empty_like(aug)
-            full[numpy.asarray(order,dtype=numpy.int64)]=aug
-            aug=full
-        self.problem.set_current_dofs(aug)
+        # A PeriodicOrbit to carry the settings; the handler it describes is installed by the call
+        # below, and everything the diagram reads off it afterwards comes from that handler.
+        orbit=PeriodicOrbit(self.problem,mode,0,None,0,None,None,0, #type:ignore
+                            int(info.get("order",3)),int(info.get("GL_order",-1)),
+                            str(info.get("T_constraint","phase"))) #type:ignore
+        orbit._install_blocks(blocks,T_nondim,mode,int(info.get("order",3)),
+                              int(info.get("GL_order",-1)),str(info.get("T_constraint","phase")))
         self._orbit=orbit
         return orbit
 
