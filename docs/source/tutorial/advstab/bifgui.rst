@@ -6,47 +6,46 @@ The interactive bifurcation GUI
 Everything in the sections on :ref:`arclength continuation <secODEarclength>`, :ref:`bifurcation tracking
 <sectemporalbiftrack>` and :ref:`branch switching <sectemporalbranchswitch>` is done from a script: you write down the
 continuation, the bifurcation tracking and the branch switching in advance, run it, and look at the
-result afterwards. That is exactly right when the answer is already known in outline - a fold curve to
-be traced for a paper figure, a parameter scan to be repeated for ten geometries, anything that has to
-be reproducible or run on a cluster.
+result afterwards. 
 
-It is the wrong way round when the answer is *not* known yet. A bifurcation diagram of an unfamiliar
-problem is explored, not computed: the step size wants adjusting where the branch turns, an eigenvalue
-pair drifts towards the axis and you want to look at it before deciding what to track, a Newton step
-lands on a different branch than the one you were following, and the interesting bifurcation is the
-one you only noticed because the spectrum changed two steps ago. Done in a script, each of those costs
-an edit, a restart and a recomputation of everything up to that point. Done interactively, each is a
-keystroke.
+If you do not know anything about a system yet, i.e. when you try to explore  the bifurcation diagram 
+of an unfamiliar problem, you might want to have dynamic control over arclength step sizes, refine branches by adding more points,
+investigate the spectrum at points, plot different observables against the continuation parameter or continue in multiple parameters.
+Moreover, you also want to select the direction when switching branches, etc, without having to restart your script-based investigation over and over again.
 
-That is what the bifurcation GUI is for. It drives exactly the same machinery the scripted route uses -
+That is what pyoomph's bifurcation GUI is for. It drives exactly the same machinery the scripted route uses -
 :py:meth:`~pyoomph.generic.problem.Problem.arclength_continuation`,
 :py:meth:`~pyoomph.generic.problem.Problem.activate_bifurcation_tracking`,
 :py:meth:`~pyoomph.generic.problem.Problem.switch_branch`,
 :py:meth:`~pyoomph.generic.problem.Problem.switch_to_hopf_orbit`,
-:py:meth:`~pyoomph.generic.problem.Problem.deflated_continuation` - but decides *when* to use which
-from what is on the screen. Nothing is thrown away: every point is a full state dump, the diagram is
+:py:meth:`~pyoomph.generic.problem.Problem.deflated_continuation` - but you can interactively decide whe* to use which
+from the data shown on the screen. Already computated data is fully stored: every point is a full state dump, the diagram is
 written to disk as you go, and restarting the same script picks it up where you left it. When the
 diagram is finished it can be exported as plain columns for a plotting tool, and the state dumps are
 there to restart a scripted run from any point you tagged.
 
-A script starts it in four lines::
+A typical boot script for the GUI is just this:
 
-    from pyoomph import *
-    from pyoomph.utils.bifurcation_gui import BifurcationGUI
+.. code:: python
 
-    with MyProblem() as problem:
-        problem.setup_for_stability_analysis(analytic_hessian=True)
-        gui=BifurcationGUI(problem,"my_parameter")   # which parameter is continued
-        gui.neigen=20                                 # eigenvalues per point
-        gui.set_initial_observable("domain/my_obs")   # what goes on the vertical axis
-        if gui.must_init():        # False when a stored diagram was found, which is loaded instead
-            problem.solve()        # whatever it takes to reach the first stationary solution
-        gui.start(0.001)           # opens the window; the argument is the initial arclength step
+	from pyoomph import *
+	from pyoomph.utils.bifurcation_gui import BifurcationGUI
+
+	with MyProblem() as problem:
+		problem.setup_for_stability_analysis(analytic_hessian=True)
+		gui=BifurcationGUI(problem,"my_parameter")   # which parameter is continued
+		gui.neigen=20                                 # eigenvalues per point
+		gui.set_initial_observable("domain/my_obs")   # what goes on the vertical axis
+		if gui.must_init():        # False when a stored diagram was found, which is loaded instead
+			problem.solve()        # whatever it takes to reach the first stationary solution
+		gui.start(0.001)           # opens the window; the argument is the initial arclength step
 
 :py:meth:`~pyoomph.utils.bifurcation_gui.BifurcationGUI.must_init` is what makes the script restartable:
 on the first run it returns ``True`` and the block below it produces the starting solution, on every
 later run it returns ``False`` because the diagram written last time is on disk and is loaded instead.
-``analytic_hessian=True`` is not optional if you intend to classify bifurcations, switch branches or
+To restart the diagram from scratch, just wipe the output directory.
+
+``analytic_hessian=True`` is required if you intend to classify bifurcations, switch branches or
 step onto a periodic orbit - all three need the second derivative.
 
 The window that opens has five parts:
@@ -67,6 +66,8 @@ The window that opens has five parts:
 Every command is reachable three ways - from the menu bar (:ref:`advstabbifguimenus`), from a keyboard
 shortcut (:ref:`advstabbifguikeys`), and, for the frequent ones, from the toolbar or a button in a tab.
 The menus show each command's shortcut next to it, so the keys can be learned by using the menus.
+
+We will start by constructing the bifurcation diagram of a representative example on the next page.
 
 .. toctree::
    :maxdepth: 5
