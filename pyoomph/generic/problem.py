@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
 import contextlib
+import json
 import glob
 import sys
 import warnings
@@ -369,6 +370,169 @@ class PeriodicOrbit:
         self.mode=mode #type:ignore
         self.order,self.GL_order=order,GL_order
         self.T_constraint=T_constraint #type:ignore
+
+    # ---------------------------------------------------------------- stored orbits
+    #
+    # A state dump holds ONE phase of the cycle. The remaining time blocks, the period and the
+    # discretization that gives them meaning live in the handler, so they are written beside the dump
+    # as a companion ("sidecar"). The bifurcation GUI writes these for every orbit point of a diagram;
+    # what follows is the reading half, kept here rather than in the GUI so that a tagged point can be
+    # picked up by a plain script that has never heard of a diagram - see load_from_state.
+
+    @staticmethod
+    def _sidecar_paths(statefile:str)->"tuple[str,str]":
+        """``(npz, directory)`` belonging to one state dump. Derived from the name, so a stored orbit
+        can never lose track of its companion."""
+        base=statefile[:-5] if statefile.endswith(".dump") else os.path.splitext(statefile)[0]
+        return base+".orbit.npz",base+"_orbit"
+
+    @staticmethod
+    def _dof_fingerprint(problem:"Problem")->str:
+        """What a raw dof vector is only meaningful for: this equation numbering.
+
+        A state dump is partition-independent because it is written per node; the ``dofs`` sidecar
+        format is not, and neither survives a mesh adaptation. Refusing on a mismatch is the whole
+        point - a wrong orbit loads perfectly happily and looks plausible.
+
+        Only meaningful while the PLAIN system is installed: get_dof_description is sized by ndof(),
+        which is the augmented count under a handler, while its walk fills the base entries alone.
+        """
+        import hashlib
+        inds,names=problem.get_dof_description()
+        h=hashlib.sha1(numpy.asarray(inds,dtype=numpy.int64).tobytes())
+        h.update(("\0".join(str(n) for n in names)).encode("utf-8"))
+        return h.hexdigest()
+
+    @staticmethod
+    def _sidecar_stored_info(extra:Any)->"dict[Any,Any] | None":
+        """The discretization dict an npz carries, or None for one written before it was stored.
+
+        JSON in a 0-d string array rather than a pickled object array, so the npz still loads with
+        the default ``allow_pickle=False``.
+        """
+        try:
+            raw=extra["info"]
+        except (KeyError,ValueError):
+            return None
+        return json.loads(str(numpy.asarray(raw).reshape(-1)[0] if numpy.asarray(raw).ndim else numpy.asarray(raw)))
+
+    @classmethod
+    def _read_sidecar(cls,problem:"Problem",statefile:str,fallback_info:"dict[Any,Any] | None"=None):
+        """``(info, blocks, extra)`` of the orbit stored beside ``statefile``.
+
+        ``fallback_info`` is what the caller already knows about the discretization; it is used only
+        for companions written before the info was stored in the file itself.
+
+        The problem must be at the base state and carry no handler: the ``dumps`` format is read by
+        loading each block as a state file, and the ``dofs`` format checks its fingerprint here,
+        which is the last moment the base numbering can be described.
+        """
+        npzfile,dirfile=cls._sidecar_paths(statefile)
+        dumpsnpz=os.path.join(dirfile,"orbit.npz")
+        if os.path.isdir(dirfile) and os.path.exists(dumpsnpz):
+            extra=numpy.load(dumpsnpz)
+            info=cls._sidecar_stored_info(extra) or dict(fallback_info or {})
+            nT=int(info.get("nT",0))
+            if nT<2:
+                raise RuntimeError("The orbit stored in "+dirfile+" does not say how many time points "
+                                   "it has, and it was not written with that information in the file. "
+                                   "Load it through the diagram it belongs to.")
+            blocks=[]
+            for i in range(nT):
+                fname=os.path.join(dirfile,"block_{:03d}.dump".format(i))
+                if not os.path.exists(fname):
+                    raise RuntimeError("The orbit belonging to this point is incomplete ("+fname+" is missing)")
+                problem.load_state(fname,ignore_outstep=True,ignore_continuation_data=True,
+                                   ignore_eigendata=True,quiet=True)
+                blocks.append(numpy.asarray(problem.get_current_dofs()[0],dtype=float))
+            return info,numpy.array(blocks),extra
+        if not os.path.exists(npzfile):
+            raise RuntimeError("The orbit belonging to this point is missing ("+npzfile+"), so "
+                               "only one phase of the cycle could be restored.")
+        extra=numpy.load(npzfile)
+        info=cls._sidecar_stored_info(extra) or dict(fallback_info or {})
+        blocks=numpy.asarray(extra["blocks"],dtype=float)
+        want=info.get("fingerprint")
+        if want and want!=cls._dof_fingerprint(problem):
+            raise RuntimeError(
+                "This orbit was stored for a different arrangement of the degrees of freedom (a "
+                "mesh adaptation, or a different number of processes), so its stored unknowns "
+                "cannot be read back. Re-compute the branch, or store orbits in the portable "
+                "format (controller.orbit_portable=True), which is partition-independent.")
+        return info,blocks,extra
+
+    @classmethod
+    def from_stored_blocks(cls,problem:"Problem",info:"dict[Any,Any]",blocks:"NPFloatArray",
+                           T_nondim:float)->"PeriodicOrbit":
+        """Re-create the handler from stored time blocks and hand back the orbit carrying it.
+
+        The stored info dict is what says which discretization to rebuild; :py:meth:`_install_blocks`
+        does the rest, so there is one copy of the block/history/permutation rules.
+        """
+        if int(blocks.shape[0])<2:
+            raise RuntimeError("A stored orbit needs at least two time points")
+        mode=str(info.get("mode","collocation"))
+        order,GL_order=int(info.get("order",3)),int(info.get("GL_order",-1))
+        T_constraint=str(info.get("T_constraint","phase"))
+        # A PeriodicOrbit to carry the settings; the handler it describes is installed by the call
+        # below, and everything read off it afterwards comes from that handler. It never emerged from
+        # a Hopf, so there is no emerging_info to speak of - get_init_ds is not available on it.
+        orbit=cls(problem,mode,None,None,0,0,0,0,order,GL_order,T_constraint) #type:ignore
+        orbit._install_blocks(blocks,T_nondim,mode,order,GL_order,T_constraint)
+        return orbit
+
+    @classmethod
+    def load_from_state(cls,problem:"Problem",statefile:str,restore_tangent:bool=True,
+                        **loadkwargs:Any)->"PeriodicOrbit":
+        """Load a stored periodic orbit - state dump plus companion - onto ``problem``.
+
+        This is what makes a point tagged in the bifurcation GUI usable from a script of its own:
+        ``output/tag01/`` holds ``state.dump``, the companion with the rest of the cycle, and the
+        mesh files both refer to, so::
+
+            orbit=PeriodicOrbit.load_from_state(problem,"output/tag01/state.dump")
+            print(orbit.get_T())
+            orbit.output_orbit("cycle")
+
+        The problem must be set up (``initialise()``) and have the same equations; the mesh comes
+        from the dump. Afterwards the orbit handler is installed, i.e. the problem solves for the
+        whole cycle at once - use ``with`` (or :py:meth:`__exit__`) to hand the cycle over to a
+        transient run, or ``deactivate_bifurcation_tracking()`` to drop it.
+
+        Args:
+            statefile: The state dump. Its companion is found beside it, by name.
+            restore_tangent: Put the stored arclength tangent of the AUGMENTED system back, so that
+                continuing the branch goes on the way it was going. Off means the next arclength
+                step picks its own direction.
+            loadkwargs: Passed on to :py:meth:`Problem.load_state` for the base dump.
+        """
+        problem.deactivate_bifurcation_tracking()
+        problem.load_state(statefile,**loadkwargs)
+        info,blocks,extra=cls._read_sidecar(problem,statefile)
+        T=float(numpy.asarray(extra["T"]).reshape(-1)[0])
+        orbit=cls.from_stored_blocks(problem,info,blocks,T)
+        if restore_tangent:
+            orbit._restore_stored_tangent(extra)
+        return orbit
+
+    def _restore_stored_tangent(self,extra:Any)->bool:
+        """Put back the arclength tangent stored with an orbit, if it still fits.
+
+        It belongs to the AUGMENTED system, so it is not in the state dump (which would drop it with
+        a note), but it is what makes a reloaded branch step on in the same direction instead of
+        guessing one. Silently declined on a length mismatch: the orbit itself is fine, only the
+        direction is unknown.
+        """
+        try:
+            ddof=numpy.asarray(extra["dof_deriv"],dtype=float)
+        except (KeyError,ValueError):
+            return False
+        if len(ddof)!=self.problem.ndof():
+            return False
+        self.problem._set_dof_direction_arclength(ddof)
+        self.problem._set_arc_length_parameter_derivative(float(numpy.asarray(extra["param_deriv"]).reshape(-1)[0]))
+        self.problem._set_arc_length_theta_sqr(float(numpy.asarray(extra["theta_sqr"]).reshape(-1)[0]))
+        return True
 
     @contextlib.contextmanager
     def _sampled_onto_collocation(self,NT:int | None=None,order:int=3,resolve:bool=True):

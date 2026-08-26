@@ -35,7 +35,9 @@ File
    * - Output the tagged points
      - Load each tagged point and run the problem's *own* output - plots, VTUs, text files - into
        ``output/tagNN/``, with a copy of the state dump beside it. The curve export only copies the
-       dumps, which preserve the solution but show nothing.
+       dumps, which preserve the solution but show nothing. On a periodic orbit branch, the rest of
+       the cycle travels along as a companion file, so the folder is a complete starting point for
+       another script (see :ref:`advstabbifguiexample`).
    * - Save figure as...
      - Save the diagram canvas as an image.
    * - Record a frame per redraw *(toggle)*

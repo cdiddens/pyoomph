@@ -3969,14 +3969,10 @@ class BifurcationController:
         alone - asked during orbit tracking it prints "UNASSIGNED DOF IN DOFLIST" and describes the
         time-block copies by whatever the unfilled entries happen to hold.
         """
-        import hashlib
         if self._augmented_system_active():
             return self._orbit_dof_fingerprint
         try:
-            inds,names=self.problem.get_dof_description()
-            h=hashlib.sha1(numpy.asarray(inds,dtype=numpy.int64).tobytes())
-            h.update(("\0".join(str(n) for n in names)).encode("utf-8"))
-            self._orbit_dof_fingerprint=h.hexdigest()
+            self._orbit_dof_fingerprint=PeriodicOrbit._dof_fingerprint(self.problem)
         except Exception as e:
             self.log("Could not fingerprint the degrees of freedom:",repr(e))
             self._orbit_dof_fingerprint=""
@@ -3984,9 +3980,12 @@ class BifurcationController:
 
     @staticmethod
     def _orbit_sidecar_paths(statefile:str)->"tuple[str,str]":
-        """``(npz, directory)`` belonging to one state dump. Derived, so a point never loses them."""
-        base=statefile[:-5] if statefile.endswith(".dump") else os.path.splitext(statefile)[0]
-        return base+".orbit.npz",base+"_orbit"
+        """``(npz, directory)`` belonging to one state dump. Derived, so a point never loses them.
+
+        The naming rule lives with the reader (:py:meth:`PeriodicOrbit._sidecar_paths`), because a
+        tagged point is meant to be loadable by a script that knows nothing about a diagram.
+        """
+        return PeriodicOrbit._sidecar_paths(statefile)
 
     def _write_orbit_sidecar(self,point)->dict:
         """Store the orbit's unknowns next to the base state, and say where.
@@ -4007,10 +4006,14 @@ class BifurcationController:
         # dropped on load with a note) but it is what makes a reloaded branch step on in the same
         # direction instead of guessing one.
         ddof=numpy.asarray(self.problem.get_arclength_dof_derivative_vector(),dtype=float)
+        # The discretization goes INTO the companion, not only into the diagram's state.json: without
+        # it the stored blocks are a pile of numbers, and a tagged point exported for use elsewhere
+        # travels without the diagram. JSON in a string array keeps the npz loadable without pickle.
         extra={"T":numpy.array([T]),
                "dof_deriv":ddof,
                "param_deriv":numpy.array([self.problem.get_arc_length_parameter_derivative()]),
-               "theta_sqr":numpy.array([self.problem.get_arc_length_theta_sqr()])}
+               "theta_sqr":numpy.array([self.problem.get_arc_length_theta_sqr()]),
+               "info":numpy.array(json.dumps(info))}
         if portable:
             Path(dirfile).mkdir(parents=True,exist_ok=True)
             handler=self._orbit_handler()
@@ -4032,75 +4035,35 @@ class BifurcationController:
         return info
 
     def _install_orbit_from_sidecar(self,point):
-        """Put the orbit of a stored point back on the problem, exactly as it was."""
-        info=point.orbit_info or {}
-        npzfile,dirfile=self._orbit_sidecar_paths(point.statefile)
-        if info.get("format")=="dumps":
-            blocks,extra=self._read_orbit_dumps(dirfile,info)
-        else:
-            if not os.path.exists(npzfile):
-                raise RuntimeError("The orbit belonging to this point is missing ("+npzfile+"), so "
-                                   "only one phase of the cycle could be restored.")
-            data=numpy.load(npzfile)
-            blocks=numpy.asarray(data["blocks"],dtype=float)
-            extra=data
-            # Captured here, with the plain system still installed: load_pt has just taken any
-            # handler off, and this is the last moment the base numbering can be described.
-            want=info.get("fingerprint")
-            if want and want!=self._capture_dof_fingerprint():
-                raise RuntimeError(
-                    "This orbit was stored for a different arrangement of the degrees of freedom (a "
-                    "mesh adaptation, or a different number of processes), so its stored unknowns "
-                    "cannot be read back. Re-compute the branch, or store orbits in the portable "
-                    "format (controller.orbit_portable=True), which is partition-independent.")
+        """Put the orbit of a stored point back on the problem, exactly as it was.
+
+        Read by PeriodicOrbit itself, which is also what a foreign script uses (load_from_state); the
+        point's own orbit_info is handed over only as a fallback, for companions written before the
+        discretization was stored in the file. The fingerprint check inside happens here, with the
+        plain system still installed: load_pt has just taken any handler off, and this is the last
+        moment the base numbering can be described.
+        """
+        info,blocks,extra=PeriodicOrbit._read_sidecar(self.problem,point.statefile,
+                                                      fallback_info=point.orbit_info or {})
         T=float(numpy.asarray(extra["T"]).reshape(-1)[0])
-        self._install_orbit(info,blocks,T)
+        orbit=self._install_orbit(info,blocks,T)
         # The augmented tangent, so that continuing a reloaded branch goes on the way it was going.
         try:
-            ddof=numpy.asarray(extra["dof_deriv"],dtype=float)
-            if len(ddof)==self.problem.ndof():
-                self.problem._set_dof_direction_arclength(ddof)
-                self.problem._set_arc_length_parameter_derivative(float(numpy.asarray(extra["param_deriv"]).reshape(-1)[0]))
-                self.problem._set_arc_length_theta_sqr(float(numpy.asarray(extra["theta_sqr"]).reshape(-1)[0]))
+            orbit._restore_stored_tangent(extra)
         except Exception as e:
             self.log("The stored orbit tangent could not be restored:",repr(e))
-
-    def _read_orbit_dumps(self,dirfile:str,info:dict):
-        """Harvest the time blocks from one state dump per time point (the portable format)."""
-        nT=int(info.get("nT",0))
-        blocks=[]
-        for i in range(nT):
-            fname=os.path.join(dirfile,"block_{:03d}.dump".format(i))
-            if not os.path.exists(fname):
-                raise RuntimeError("The orbit belonging to this point is incomplete ("+fname+" is missing)")
-            self.problem.load_state(fname,ignore_outstep=True,ignore_continuation_data=True,
-                                    ignore_eigendata=True,quiet=True)
-            blocks.append(numpy.asarray(self.problem.get_current_dofs()[0],dtype=float))
-        extra=numpy.load(os.path.join(dirfile,"orbit.npz"))
-        return numpy.array(blocks),extra
 
     def _install_orbit(self,info:dict,blocks:"NPFloatArray",T_nondim:float):
         """Re-create the handler from stored time blocks and write them back exactly.
 
-        PeriodicOrbit._install_blocks does the work - the same routine that puts a B-spline orbit
-        back after its multipliers have been taken on a collocation sampling of it - so there is one
-        copy of the block/history/permutation rules. What is here is the diagram's part: the stored
-        info dict is what says which discretization to rebuild.
+        PeriodicOrbit.from_stored_blocks does the work - the same routine a foreign script reaches
+        through load_from_state - so there is one copy of the block/history/permutation rules. What
+        is here is the diagram's part: any OTHER augmentation has to come off first, which the plain
+        loader has no notion of.
         """
-        nT=int(blocks.shape[0])
-        if nT<2:
-            raise RuntimeError("A stored orbit needs at least two time points")
-        mode=str(info.get("mode","collocation"))
         self._deactivate_any_augmentation()
-        # A PeriodicOrbit to carry the settings; the handler it describes is installed by the call
-        # below, and everything the diagram reads off it afterwards comes from that handler.
-        orbit=PeriodicOrbit(self.problem,mode,0,None,0,None,None,0, #type:ignore
-                            int(info.get("order",3)),int(info.get("GL_order",-1)),
-                            str(info.get("T_constraint","phase"))) #type:ignore
-        orbit._install_blocks(blocks,T_nondim,mode,int(info.get("order",3)),
-                              int(info.get("GL_order",-1)),str(info.get("T_constraint","phase")))
-        self._orbit=orbit
-        return orbit
+        self._orbit=PeriodicOrbit.from_stored_blocks(self.problem,info,blocks,T_nondim)
+        return self._orbit
 
     def _add_orbit_state(self):
         """Record the installed orbit as a point of the current branch.

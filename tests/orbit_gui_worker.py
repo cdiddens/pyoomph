@@ -56,6 +56,7 @@ import traceback
 import numpy
 
 from pyoomph import Problem, ODEEquations, InitialCondition
+from pyoomph.generic.problem import PeriodicOrbit
 from pyoomph.expressions import var, testfunction, partial_t
 from pyoomph.utils.bifurcation_gui import BifurcationGUI
 from pyoomph.utils.bifurcation_gui.controller import _FixedViewLimits
@@ -164,6 +165,14 @@ def run_switch(args):
         c.save_all()
         c.output_curves()
         res["export_header"] = _first_orbit_export_header(c)
+        if args.tag:
+            # A tagged point is what leaves the diagram: output/tag01/ has to stand on its own, i.e.
+            # be loadable by a script that has never seen a diagram (phase "standalone").
+            c.toggle_point_tag(c.current_point, 1)
+            res["tagged"] = _orbit_facts(c, c.current_point)
+            res["tags_written"] = int(c.output_tagged_points())
+            res["tagdir"] = os.path.join(c.problem.get_output_directory(c.data_subdir),
+                                         "output", "tag01")
         return res
 
 
@@ -430,7 +439,11 @@ def run_bspline_floquet(args):
 
 
 def run_bad_fingerprint(args):
-    """A stored orbit that no longer matches the problem must be refused, not loaded."""
+    """A stored orbit that no longer matches the problem must be refused, not loaded.
+
+    Corrupted in the COMPANION, not in the point: the companion carries its own discretization dict
+    now (so that a tagged folder can be picked up without the diagram) and that is what is believed.
+    """
     problem, gui, c = build(args)
     with problem:
         res = {"phase": "fingerprint"}
@@ -438,8 +451,12 @@ def run_bad_fingerprint(args):
         c.load_all()
         b = [x for x in c.branches if x.kind == "orbit"][0]
         pt = b[-1]
-        pt.orbit_info = dict(pt.orbit_info or {})
-        pt.orbit_info["fingerprint"] = "not the fingerprint of this problem"
+        npzfile, _dirfile = c._orbit_sidecar_paths(pt.statefile)
+        stored = dict(numpy.load(npzfile))
+        info = json.loads(str(stored["info"]))
+        info["fingerprint"] = "not the fingerprint of this problem"
+        stored["info"] = numpy.array(json.dumps(info))
+        numpy.savez_compressed(npzfile, **stored)
         try:
             c.load_pt(pt)
         except Exception as e:
@@ -469,7 +486,44 @@ def run_no_hessian(args):
         return res
 
 
-PHASES = {"switch": run_switch, "reload": run_reload, "fingerprint": run_bad_fingerprint,
+def run_standalone(args):
+    """Pick a tagged point up from a PLAIN script - no GUI, no diagram, only the tag folder.
+
+    This is what tagging is for: output/tag01/ holds one phase of the cycle as a state dump, the rest
+    of the cycle as its companion, and (since the companion also carries the discretization) enough
+    to rebuild the handler. Nothing here imports the bifurcation GUI, and the closed form is what the
+    reloaded orbit is checked against.
+    """
+    problem = OrbitProblem()
+    problem.set_output_directory(os.path.join(args.outdir, "standalone"))
+    problem.quiet()
+    problem.setup_for_stability_analysis(analytic_hessian=True)
+    with problem:
+        res = {"phase": "standalone"}
+        problem.initialise()
+        orbit = PeriodicOrbit.load_from_state(problem, os.path.join(args.tagdir, "state.dump"))
+        import pyoomph._pyoomph_core as _core
+        res["handler_installed"] = isinstance(problem.assembly_handler_pt(),
+                                              _core.PeriodicOrbitHandler)
+        res["mu"] = float(problem.mu.value)
+        res["T"] = float(orbit.get_T(dimensional=False))
+        res["nT"] = int(orbit.get_num_time_steps())
+        res["mode"] = str(orbit.mode)
+        res["order"] = int(orbit.order)
+        xs = []
+        for _ in orbit.iterate_over_samples(N=200, endpoint=False):
+            xs.append(float(problem.get_ode("nf").get_value("x", as_float=True)))
+        res["min_x"], res["max_x"] = min(xs), max(xs)
+        res["avg_x"] = float(numpy.mean(xs))
+        mults = orbit.get_floquet_multipliers(n=2, ignore_periodic_unity=True)
+        res["floquet"] = [[float(numpy.real(m)), float(numpy.imag(m))] for m in mults]
+        # Still a solution of the orbit system: a Newton solve from here may not have to move.
+        problem.solve()
+        res["T_after_solve"] = float(orbit.get_T(dimensional=False))
+        return res
+
+
+PHASES = {"switch": run_switch, "standalone": run_standalone, "reload": run_reload, "fingerprint": run_bad_fingerprint,
           "nohessian": run_no_hessian, "nearhopf": run_near_hopf,
           "rediscretize": run_rediscretize, "goback": run_go_back,
           "metric": run_arclength_metric, "bsplinefloquet": run_bspline_floquet}
@@ -482,6 +536,8 @@ def main():
     ap.add_argument("--NT", type=int, default=30)
     ap.add_argument("--steps", type=int, default=3)
     ap.add_argument("--portable", action="store_true")
+    ap.add_argument("--tag", action="store_true")
+    ap.add_argument("--tagdir", default="")
     args = ap.parse_args()
     try:
         res = PHASES[args.phase](args)

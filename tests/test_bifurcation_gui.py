@@ -2938,6 +2938,47 @@ def test_a_hopf_switches_onto_its_periodic_orbit(tmp_path, portable):
         numpy.exp(-2*step["mu"]*step["T"]), rel=1e-3)
 
 
+@pytest.mark.parametrize("portable", [False, True], ids=["dofs", "portable"])
+def test_a_tagged_orbit_can_be_started_from_a_plain_script(tmp_path, portable):
+    """A tagged point of an orbit branch has to be a self-contained starting point.
+
+    Tagging a point and outputting it writes output/tagNN/, and what a state dump holds there is ONE
+    phase of the cycle - the rest of it, the period AND the discretization that gives the stored
+    blocks meaning live in the companion beside it. The discretization used to live in the diagram's
+    state.json alone, so a tag folder handed to somebody else was a pile of numbers nobody could
+    rebuild a handler from. It travels in the companion now, and PeriodicOrbit.load_from_state is the
+    way in - so the loading process here never imports the GUI, and the orbit it gets back is checked
+    against the closed form and against what the diagram recorded.
+    """
+    outdir = os.path.join(str(tmp_path), "orbit")
+    extra = ["--portable"] if portable else []
+    res = _run_orbit_worker(tmp_path, "switch", extra + ["--steps", "2", "--tag"], outdir=outdir)
+    assert res["tags_written"] == 1
+    stored = res["tagged"]
+
+    back = _run_orbit_worker(tmp_path, "standalone", ["--tagdir", res["tagdir"]],
+                             outdir=os.path.join(str(tmp_path), "standalone"))
+    assert back["handler_installed"], \
+        "without the handler the problem holds one phase of the cycle, not the orbit"
+    # The discretization came out of the companion, not out of any diagram.
+    assert back["mode"] == "collocation" and back["order"] == 3
+    assert back["nT"] == stored["nT"]
+    assert back["mu"] == stored["mu"], "the tagged point was taken at this parameter value"
+    assert back["T"] == stored["T"]
+    assert back["floquet"] == stored["floquet"]
+
+    # ... and it is the cycle of the normal form. The 200 samples are interpolated off the orbit's
+    # own 31-point collocation, so what is left is that discretization's amplitude error (a few 1e-3
+    # relative here), not the sampling.
+    r = back["mu"]**0.5
+    assert back["T"] == pytest.approx(2*numpy.pi, rel=1e-5)
+    assert back["max_x"] == pytest.approx(+r, rel=5e-3)
+    assert back["min_x"] == pytest.approx(-r, rel=5e-3)
+    assert abs(back["avg_x"]) < 1e-9
+    # A Newton solve on the reloaded orbit system may not have to move it anywhere.
+    assert back["T_after_solve"] == pytest.approx(back["T"], rel=1e-10)
+
+
 def test_a_bspline_orbit_branch_gets_its_floquet_multipliers(tmp_path):
     """Continue a B-spline orbit branch WITH its stability, without ever converting it.
 

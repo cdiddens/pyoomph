@@ -81,6 +81,20 @@ Then you can continue the orbit and a shaded region will indicate the range of t
 You can also switch again the :math:`y`-axis to plot e.g. the orbit time (:vidtime:`vidbifgui2#0:17`).
 
 Once you are done with the diagram, you can mark several interesting points by pressing :kbd:`1`-:kbd:`9`. In the **File** menu, you can then **Export curves** and/or **Output the tagged** points. This allows to either use the state files of tagged points in be used with :py:meth:`~pyoomph.generic.problem.Problem.load_state` in another script (e.g. for manual continuation, replotting, further transient integration, etc.) or plot the bifurcation curves with a plotting backend of your choice.
+
+A tagged point of a *periodic orbit* branch needs more than the state dump: the dump is a single phase of the cycle, while the remaining time points, the period and the discretisation they belong to are written beside it as a companion file. Both are copied into ``output/tagNN/``, so such a folder is a complete starting point and is picked up with :py:meth:`~pyoomph.generic.problem.PeriodicOrbit.load_from_state` instead:
+
+.. code:: python
+
+	from pyoomph.generic.problem import PeriodicOrbit
+
+	problem = MyProblem()	# the same equations; the mesh comes from the dump
+	problem.initialise()
+	orbit = PeriodicOrbit.load_from_state(problem, "output/tag01/state.dump")
+	print("period:", orbit.get_T())
+	orbit.output_orbit("cycle")	# one output per sample of the cycle
+
+The orbit handler is installed afterwards, i.e. the problem solves for the entire cycle at once, so you can continue the orbit branch from here. Wrapping the orbit in a ``with`` block instead hands the cycle over as the time history of a transient run, exactly as after a :py:meth:`~pyoomph.generic.problem.Problem.switch_to_hopf_orbit`.
 			
 
 .. only:: html
