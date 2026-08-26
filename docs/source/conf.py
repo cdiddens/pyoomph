@@ -5,6 +5,7 @@
 import os 
 import sys
 sys.path.insert(0, os.path.abspath('../../pyoomph'))
+sys.path.insert(0, os.path.abspath('_ext'))
 
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
@@ -39,7 +40,8 @@ extensions = [
     "sphinx.ext.autosectionlabel",
     'sphinxcontrib.bibtex',
     'sphinx_favicon',
-    'sphinxcontrib.images'
+    'sphinxcontrib.images',
+    'vidtime',   # the :vidtime: role, see _ext/vidtime.py
     # 'sphinx.ext.imgmath',
     ]
 

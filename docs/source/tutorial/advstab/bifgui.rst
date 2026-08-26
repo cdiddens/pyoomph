@@ -18,8 +18,8 @@ That is what pyoomph's bifurcation GUI is for. It drives exactly the same machin
 :py:meth:`~pyoomph.generic.problem.Problem.activate_bifurcation_tracking`,
 :py:meth:`~pyoomph.generic.problem.Problem.switch_branch`,
 :py:meth:`~pyoomph.generic.problem.Problem.switch_to_hopf_orbit`,
-:py:meth:`~pyoomph.generic.problem.Problem.deflated_continuation` - but you can interactively decide whe* to use which
-from the data shown on the screen. Already computated data is fully stored: every point is a full state dump, the diagram is
+:py:meth:`~pyoomph.generic.problem.Problem.deflated_continuation` - but you can interactively decide when to use which
+from the data shown on the screen. Already computed data is fully stored: every point is a full state dump, the diagram is
 written to disk as you go, and restarting the same script picks it up where you left it. When the
 diagram is finished it can be exported as plain columns for a plotting tool, and the state dumps are
 there to restart a scripted run from any point you tagged.
