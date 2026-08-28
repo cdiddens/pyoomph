@@ -93,6 +93,14 @@ Output and code generation
       
       Some features are not available with this flag, but pyoomph will let you know.
 
+``--mpi-output {condensed,all,off}``
+      What reaches the terminal when several ranks write to it at once, see :numref:`secmpioutput`.
+      ``condensed`` (the default) lets only rank 0 print, while the stderr of every rank still gets
+      through, tagged; ``all`` prints every rank, each line in one piece and tagged ``[rank N]``;
+      ``off`` does not filter at all. Without ``mpirun`` the flag is accepted and does nothing.
+      It can also be set with the ``PYOOMPH_MPI_OUTPUT`` environment variable
+      (cf. :numref:`installenvvars`), which this flag overrides.
+
 
 Threading
 ~~~~~~~~~

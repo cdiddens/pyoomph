@@ -34,6 +34,18 @@ From within a script, the same question is answered by
    from pyoomph.generic.mpi import has_mpi
    print(has_mpi())
 
+You do not have to remember to check, though: starting a pyoomph built **without** MPI support with
+more than one rank is refused at import time, with a message saying how to get a build that has it.
+Such a run would not fail by itself, and that is precisely the problem -- each rank would run the
+whole simulation on its own, unaware of the others, and all of them would write into the same output
+directory, so it looks like a parallel run while being neither parallel nor correct. The refusal
+recognizes the usual launchers (Open MPI, MPICH/Intel MPI/MS-MPI, MVAPICH, ``srun``, PALS) through
+the environment they set up, so it does not depend on which MPI pyoomph was, or was not, built for.
+
+If you deliberately use a launcher to start several **independent** serial runs, set
+``PYOOMPH_ALLOW_SERIAL_UNDER_MPIRUN=1`` (cf. :numref:`installenvvars`) -- but give each rank its own
+output directory, e.g. via ``--outdir``.
+
 
 
 Distributing the mesh (the third mode below) additionally requires `PyMetis <https://pypi.org/project/PyMetis/>`__
@@ -100,6 +112,44 @@ This mode is intended for large problems or HPC clusters.
    Any random number or non-deterministic behaviour can end up in serious problems, which eventually usually manifest as a deadlock, where all processes are stuck.
    Use e.g. :py:class:`~pyoomph.expressions.utils.DeterministicRandomField` if you need random numbers. 
 
+
+.. _secmpioutput:
+
+Console output of the ranks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Under ``mpirun``, every rank writes to the same terminal. Since neither Python nor C++ writes a line
+atomically, the unfiltered result is each line duplicated once per rank and chopped into interleaved
+fragments. Pyoomph therefore filters it, and ``--mpi-output`` (or the ``PYOOMPH_MPI_OUTPUT``
+environment variable, cf. :numref:`installenvvars`) selects how:
+
+``condensed``
+      The default. Only rank 0 reaches the terminal. Nothing is lost by that: residuals, dof counts
+      and timings are reduced over all ranks before they are reported, so the other ranks would print
+      the very same lines. Their **stderr** is exempt and still gets through, tagged with its rank,
+      so an exception on rank 3 remains visible.
+
+``all``
+      Every rank prints, but each line is written in one piece and tagged ``[rank N]``. This is the
+      mode for when the ranks genuinely disagree and that disagreement is what you are looking for.
+
+``off``
+      No filtering at all, i.e. the raw interleaved output of every rank.
+
+The same policy is applied to oomph-lib's own C++ output, so both halves of the output agree. Without
+``mpirun`` - or with a single rank - nothing is filtered in any mode.
+
+Muting affects the terminal only: a rank still records everything it produced in its log file, where
+it has one -- by default that is rank 0.
+
+.. note::
+
+   A rank waiting for the others does not busy-poll; it spins briefly and then sleeps between polls,
+   so idle ranks cost no measurable CPU. If one of them has been waiting for a very long time
+   (ten minutes by default), pyoomph prints a one-off notice naming what it is waiting for - a
+   deadlock is otherwise indistinguishable from a slow step. It is deliberately a notice and not a
+   timeout, since raising on the rank that noticed would create the very deadlock it reports. The
+   three timings behind this are tunable, see ``PYOOMPH_MPI_IDLE_*`` in :numref:`installenvvars`.
 
 Combining MPI with threads
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
