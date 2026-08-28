@@ -151,9 +151,12 @@ config-settings = { "wheel.py-api" = "cp312" }
 # likely to break on a user's machine; test_math_functions puts the vendored GiNaC through code
 # generation; test_stokes builds, assembles and solves. Anything version-specific about the wheel
 # shows up in the first import either way.
+#
+# test_openmp_present.py is the one addition to that list: it is the only test that FAILS rather
+# than skips when a wheel has no OpenMP (see its docstring), and it costs about a second.
 [[tool.cibuildwheel.overrides]]
 select = "cp310-* cp311-*"
-test-command = "pytest {package}/tests/test_compilers.py {package}/tests/test_math_functions.py {package}/tests/test_stokes.py"
+test-command = "pytest {package}/tests/test_compilers.py {package}/tests/test_math_functions.py {package}/tests/test_stokes.py {package}/tests/test_openmp_present.py"
 
 [tool.cibuildwheel.linux]
 before-all = [

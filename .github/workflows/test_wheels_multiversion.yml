@@ -127,6 +127,16 @@ jobs:
           echo "Installing ${WHEEL} under Python ${{ matrix.python_version }}"
           python -m pip install "${WHEEL}"
 
+      - name: Verify the installed wheel has OpenMP
+        # The cibuildwheel test in wheels.yml already runs tests/test_openmp_present.py, but only on
+        # the interpreter that built each wheel. The abi3 wheel is installed here under 3.13/3.14 as
+        # well, and OpenMP reaches Python through nanobind (module.cpp's has_openmp) - so check it on
+        # each interpreter that actually installs the file. These workflows never check the repository
+        # out, so there is no source pyoomph/ in the cwd to shadow the installed package.
+        shell: bash
+        run: |
+          python -c "from pyoomph import _pyoomph_core as c; assert c.has_openmp, 'this wheel has no OpenMP - --omp N would silently do nothing'; print('OpenMP present')"
+
       - name: Run pyoomph check all
         shell: bash
         run: |
