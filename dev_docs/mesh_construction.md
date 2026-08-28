@@ -494,17 +494,41 @@ The repair is the shape `consume_newton_abort_request()` already uses for a rank
 `BulkElementBase::defer_inverted_element_errors`, set by an RAII scope around the element loop in
 `Problem::get_residuals()`/`get_jacobian()`, makes the detector **record** instead of throwing; every
 rank then finishes the loop and reaches `InvertedElementScope::raise_if_any()`, which reduces the flag
-with one `MPI_Allreduce` and throws on all ranks or on none. Outside that scope (output, error
-estimation, a Z2 flux recovery) the immediate throw is kept, because those paths are not collective in
-the same way and a deferred report there would be silently dropped.
+with one `MPI_Allreduce` and throws on all ranks or on none.
 
 Recording rather than throwing means the rest of the assembly runs against a folded element and produces
 meaningless numbers. That cannot escape: the matrix is discarded by the throw that follows, before any
 solver sees it.
 
+### 5.5 The recording had to become unconditional, for a second reason
+
+The scope above kept an **immediate throw** outside it - output, error estimation, a Z2 flux recovery -
+on the grounds that those paths are not collective in the same way and a deferred report there would be
+silently dropped. That throw was not survivable, and it took an axisymmetric pinch-off to find out:
+where the surgery's fresh caps left a sliver element, the process **aborted**, with
+`std::terminate` and a stack ending in `liquid.so`. `fill_shape_buffer_for_integration_point` is called
+from the JIT-generated element code, which tcc compiles as plain C with no unwind tables, so a C++
+exception crossing that frame does not unwind - it terminates. Every path that reaches the detector
+reaches it that way, so throwing from there is never safe, not only inside a collective loop.
+
+So the detector now always records, and `raise_if_any()` is the only thing that throws.
+`defer_inverted_element_errors` is gone with the branch it gated; the scope stays, since it owns the
+reset of the counter and the reduction. Nothing is lost by not reporting outside an assembly: no path
+between two assemblies moves the mesh, so an element that is inverted outside one is inverted inside the
+next, where it is reported - and the run survives to get there.
+
 With that in place, all three modes agree: `detect,adaptive` dies at the same `dt = 7.27596e-13` and the
 same fold time in serial, at `-n 2`, and at `-n 2 --distribute`; and with the trigger armed all three
 reach t = 1.001055 with 11 remeshes.
+
+### 5.6 The report now says where
+
+The message used to name the determinant, the integration point, the element dimension and the domain
+- everything except the one thing that decides what to do about it. The element's Eulerian midpoint is
+now in it too. On a mesh of thirty thousand elements that is the difference between a guess and a
+diagnosis: it is what identified the fold after an axisymmetric pinch-off as sitting on the axis at
+the fresh cap (x = 0.0065), and therefore as a curvature problem rather than a resolution one - see
+`dev_docs/axisymmetric_topological_changes.md` §10.
 
 ### 5.3 Open decisions
 

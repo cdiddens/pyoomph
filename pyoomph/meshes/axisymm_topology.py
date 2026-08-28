@@ -121,6 +121,16 @@ class InterfaceChain:
     sizes: np.ndarray
     end_types: Tuple[str, str]
     zeta: Optional[np.ndarray] = None
+    #: Signed axial depth of the reservoir behind each ``"fixed"`` end, or ``None`` for the plain
+    #: closure straight down to the axis.  See :func:`_ring_coords`: a nozzle meniscus is attached
+    #: to a wall with a body of liquid behind it, and closing it at the contact height instead cuts
+    #: that body off - which for a meniscus dimpled near the axis leaves a sliver thinner than the
+    #: erosion, and for one that crosses the contact height leaves a self-intersecting section.
+    #: The stub runs along the wall (``x = x_contact``) by this much and then across to the axis, so
+    #: it has to be longer than the chain's own excursion past the contact and to point INTO the
+    #: liquid - the sign cannot be guessed from the chain, since the same shape with the phases
+    #: swapped needs the other one.
+    reservoir: Tuple[Optional[float], Optional[float]] = (None, None)
 
 
 @dataclass
@@ -139,6 +149,8 @@ class NewChain:
     zeta: np.ndarray                # (M,) strictly increasing
     origin: np.ndarray              # (M,) int, >=0 index into the concatenated old points
     end_types: Tuple[str, str] = ("axis", "axis")
+    #: Inherited from the old chain that owned the fixed end, see :py:attr:`InterfaceChain.reservoir`.
+    reservoir: Tuple[Optional[float], Optional[float]] = (None, None)
 
 
 @dataclass
@@ -176,13 +188,30 @@ def revolved_volume(closed_halfsection_points: Any) -> float:
     return float(abs(np.sum((r0 * r0 + r0 * r1 + r1 * r1) / 3.0 * (z1 - z0)) * math.pi))
 
 
-def _closed_section(points: np.ndarray, end_types: Sequence[str]) -> np.ndarray:
-    """Close a half-section polyline down onto the axis at its ``"fixed"`` ends."""
+def _closed_section(points: np.ndarray, end_types: Sequence[str],
+                    reservoir: Sequence[Optional[float]] = (None, None)) -> np.ndarray:
+    """Close a half-section polyline onto the axis at its ``"fixed"`` ends.
+
+    Straight down to the axis at the contact height, or - where a reservoir depth is given - along
+    the wall by that much first, so that the enclosed body is the liquid behind the interface rather
+    than the sliver in front of it.  The closure has to be the same one :func:`_ring_coords` uses,
+    since this is what every volume in the plan is measured against.
+    """
     extra: List[Tuple[float, float]] = []
     if end_types[1] == "fixed":
-        extra.append((0.0, float(points[-1, 1])))
+        h = reservoir[1]
+        if h:
+            extra.append((float(points[-1, 0]), float(points[-1, 1]) + h))
+            extra.append((0.0, float(points[-1, 1]) + h))
+        else:
+            extra.append((0.0, float(points[-1, 1])))
     if end_types[0] == "fixed":
-        extra.append((0.0, float(points[0, 1])))
+        h = reservoir[0]
+        if h:
+            extra.append((0.0, float(points[0, 1]) + h))
+            extra.append((float(points[0, 0]), float(points[0, 1]) + h))
+        else:
+            extra.append((0.0, float(points[0, 1])))
     if not extra:
         return points
     return np.vstack([points, np.array(extra, dtype=float)])
@@ -247,9 +276,15 @@ def _poly_volume(poly: Any) -> float:
 #      children.  That is a contradictory parameter choice (rmin_nd too large relative to
 #      distmin_nd), and it raises too.
 
-def _open(poly: Any, eps: float, quad_segs: int) -> Any:
-    return poly.buffer(-eps, quad_segs=quad_segs, join_style="round").buffer(
-        eps, quad_segs=quad_segs, join_style="round")
+def _open(poly: Any, eps: float, quad_segs: int, protect: Any = None) -> Any:
+    """Morphological opening, leaving ``protect`` (a subset of ``poly``) untouched."""
+    er = poly.buffer(-eps, quad_segs=quad_segs, join_style="round")
+    if protect is None:
+        return er.buffer(eps, quad_segs=quad_segs, join_style="round")
+    res = er.union(protect).buffer(eps, quad_segs=quad_segs, join_style="round")
+    # Dilating the protected band pushes its boundary eps past the body; an opening is a subset of
+    # what it opens, so clip it back.
+    return res.intersection(poly)
 
 
 def _close(poly: Any, eps: float, quad_segs: int) -> Any:
@@ -307,11 +342,16 @@ def _halfplane(poly: Any, clip: Any, snap: float) -> Any:
     return sh.orient(sh.Polygon(c))
 
 
-def _interface_curve(hpoly: Any, snap: float, eps: float) -> np.ndarray:
+def _interface_curve(hpoly: Any, snap: float, eps: float,
+                     stubs: Sequence[Tuple[np.ndarray, float]] = ()) -> np.ndarray:
     """The single interface run (x>0) of a half-plane fragment, ordered ascending z.
 
     The returned curve starts and ends exactly on the axis: the axis vertices adjacent to
     the run are included with ``x`` forced to zero.
+
+    ``stubs`` are the ``(contact point, reservoir depth)`` of the fixed ends closed along a wall.
+    Their closure is part of the ring and runs at ``x > 0``, so it would otherwise come back as
+    interface; the run is cut at the contact point and that end is not on the axis.
     """
     ring = np.asarray(hpoly.exterior.coords)[:-1]
     n = len(ring)
@@ -345,13 +385,38 @@ def _interface_curve(hpoly: Any, snap: float, eps: float) -> np.ndarray:
             raise RuntimeError(
                 "axisymmetric topology: fragment touches the symmetry axis in more than "
                 "one interval (unsupported topology)")
-    i0, i1 = main[0], main[-1]
-    pre = (i0 - 1) % n
-    post = (i1 + 1) % n
-    idx = [pre] + main + [post]
+    # Cut the wall closures off the run. The corner at the contact is rounded by the opening, so
+    # the nearest ring vertex stands in for the contact point and is then snapped back onto it.
+    cut = [False, False]
+    for pt, h in stubs:
+        d = np.linalg.norm(ring[main] - np.asarray(pt, dtype=float)[None, :], axis=1)
+        j = int(np.argmin(d))
+        if float(d[j]) > max(2.0 * eps, 10.0 * snap):
+            continue      # this stub belongs to a different fragment
+        corner = np.array([float(pt[0]), float(pt[1]) + h], dtype=float)
+        at_start = (np.linalg.norm(ring[main[0]] - corner)
+                    < np.linalg.norm(ring[main[-1]] - corner))
+        if at_start:
+            main = main[j:]
+            cut[0] = True
+        else:
+            main = main[:j + 1]
+            cut[1] = True
+        ring = ring.copy()
+        ring[main[0] if at_start else main[-1]] = np.asarray(pt, dtype=float)
+        if len(main) < 2:
+            raise RuntimeError("axisymmetric topology: a fragment retains no interface once its "
+                               "wall closure is cut off")
+    idx = list(main)
+    if not cut[0]:
+        idx = [(main[0] - 1) % n] + idx
+    if not cut[1]:
+        idx = idx + [(main[-1] + 1) % n]
     c = ring[idx].copy()
-    c[0, 0] = 0.0
-    c[-1, 0] = 0.0
+    if not cut[0]:
+        c[0, 0] = 0.0
+    if not cut[1]:
+        c[-1, 0] = 0.0
     if c[0, 1] > c[-1, 1]:
         c = c[::-1].copy()
     return c
@@ -399,6 +464,7 @@ def detect_and_plan(chains: List[InterfaceChain],
             ch.points = ch.points[::-1].copy()
             ch.sizes = ch.sizes[::-1].copy()
             ch.end_types = (ch.end_types[1], ch.end_types[0])
+            ch.reservoir = (ch.reservoir[1], ch.reservoir[0])
             if ch.zeta is not None:
                 ch.zeta = np.asarray(ch.zeta, dtype=float)[::-1].copy()
     chains.sort(key=lambda c: float(c.points[0, 1]))
@@ -424,13 +490,14 @@ def detect_and_plan(chains: List[InterfaceChain],
     old_zeta = np.concatenate([cast(np.ndarray, c.zeta) for c in chains])  # zeta filled by the loop above
     old_chain_of = np.concatenate([np.full(len(c.points), k, dtype=int)
                                    for k, c in enumerate(chains)])
-    fixed_ends: List[Tuple[int, np.ndarray]] = []
+    # (global point index, contact point, reservoir depth or None, index of the owning chain)
+    fixed_ends: List[Tuple[int, np.ndarray, Optional[float], int]] = []
     for k, ch in enumerate(chains):
         if ch.end_types[0] == "fixed":
-            fixed_ends.append((int(offs[k]), ch.points[0]))
+            fixed_ends.append((int(offs[k]), ch.points[0], ch.reservoir[0], k))
         if ch.end_types[1] == "fixed":
-            fixed_ends.append((int(offs[k + 1]) - 1, ch.points[-1]))
-    fixed_gidx = set(g for g, _ in fixed_ends)
+            fixed_ends.append((int(offs[k + 1]) - 1, ch.points[-1], ch.reservoir[1], k))
+    fixed_gidx = set(g for g, _p, _h, _k in fixed_ends)
 
     # ---- 2. polygon construction -------------------------------------------------------
     rings = [sh.Polygon(_ring_coords(ch)) for ch in chains]
@@ -454,11 +521,26 @@ def detect_and_plan(chains: List[InterfaceChain],
 
     # ---- 3. morphology -----------------------------------------------------------------
     P_union = sh.unary_union(P)
+    # The synthetic closure of a "fixed" chain end (see _ring_coords) is not a physical boundary, so
+    # the sliver it cuts off is not a physical neck. A nozzle meniscus that is merely dimpled near
+    # the axis is thin only because the closure runs straight across the nozzle at the contact
+    # height, and eroding that away either deletes the whole reservoir as a vanished fragment or -
+    # worse - splits it into a ring, whose mirrored cross section does not touch the axis at all and
+    # is not representable here. So the opening leaves a band around every closure alone. Nothing
+    # detectable is lost: an event within 4*eps of a fixed end is refused further down anyway, and
+    # any thinness between an interface and its own closure is by construction next to that closure.
+    flat_closures = [sh.LineString([(-float(pt[0]), float(pt[1])), (float(pt[0]), float(pt[1]))])
+                     for _g, pt, h, _k in fixed_ends if not h]
+    protect = None
+    if flat_closures and eps_p > 0.0:
+        protect = P_union.intersection(
+            sh.unary_union(flat_closures).buffer(2.0 * eps_p, quad_segs=qs))
     if eps_p > 0.0:
-        eroded = [e for e in _polygons(P_union.buffer(-eps_p, quad_segs=qs,
-                                                      join_style="round"))
-                  if e.area > 0.1 * eps_p * eps_p]
-        Q = _polygons(_open(P_union, eps_p, qs))
+        er = P_union.buffer(-eps_p, quad_segs=qs, join_style="round")
+        if protect is not None:
+            er = er.union(protect)
+        eroded = [e for e in _polygons(er) if e.area > 0.1 * eps_p * eps_p]
+        Q = _polygons(_open(P_union, eps_p, qs, protect=protect))
         # The erosion is what carries the topology; the dilation that follows it can glue
         # two eroded components back together if they are less than 2*eps_p apart, i.e. if
         # the neck is axially shorter than the structuring element. A physical pinch-off
@@ -547,7 +629,8 @@ def detect_and_plan(chains: List[InterfaceChain],
             raise RuntimeError("axisymmetric topology: a fragment vanished when clipped "
                                "to the half plane x>=0")
         R_half.append(h)
-    curves = [_interface_curve(h, max(snap, 1e-12 * extent), max(eps_ref, snap))
+    stubs = [(pt, float(h)) for _g, pt, h, _k in fixed_ends if h]
+    curves = [_interface_curve(h, max(snap, 1e-12 * extent), max(eps_ref, snap), stubs)
               for h in R_half]
     order = np.argsort([float(c[0, 1]) for c in curves])
     R = [R[i] for i in order]
@@ -559,11 +642,17 @@ def detect_and_plan(chains: List[InterfaceChain],
 
     # ---- 5. change region and fixed-end safety ----------------------------------------
     blobs = _change_blobs(sh.unary_union(P), sh.unary_union(R), eps_p, eps_c, eps_ref)
-    for gidx, pt in fixed_ends:
+    for gidx, pt, hres, _k in fixed_ends:
         # The whole synthetic wall closure (and its mirror) is what must stay clear of an
         # event, not just the contact point: a waist a few eps above a wall still lands on
-        # the closure even though it is far from the contact line itself.
-        p = sh.LineString([(-float(pt[0]), float(pt[1])), (float(pt[0]), float(pt[1]))])
+        # the closure even though it is far from the contact line itself. With a reservoir the
+        # closure is the L along the wall and across the far end of it, so that is what is walked.
+        if hres:
+            y0, y1 = float(pt[1]), float(pt[1]) + hres
+            p = sh.LineString([(float(pt[0]), y0), (float(pt[0]), y1), (-float(pt[0]), y1),
+                               (-float(pt[0]), y0)])
+        else:
+            p = sh.LineString([(-float(pt[0]), float(pt[1])), (float(pt[0]), float(pt[1]))])
         for blob, be in blobs:
             if blob.distance(p) < 4.0 * be:
                 raise RuntimeError(
@@ -662,12 +751,13 @@ def detect_and_plan(chains: List[InterfaceChain],
                                             for blob, be in blobs):
                     owner[g] = j
 
+    fixed_reservoir: Dict[int, Optional[float]] = {g: h for g, _pt, h, _k in fixed_ends}
     new_chains: List[NewChain] = []
     for ri in range(len(R)):
         new_chains.append(_splice_fragment(
             sh, curves[ri], lines[ri], np.where(owner == ri)[0], old_pts, old_sizes,
             old_zeta, old_chain_of, chains, fixed_gidx, blobs, waists, eps_ref,
-            cap_window_factor, cap_spacing_factor, extent))
+            cap_window_factor, cap_spacing_factor, extent, fixed_reservoir))
 
     # ---- 8. volume targets and local correction ---------------------------------------
     tgt_q = _q_targets(sh, P, P_half, Q, children_of, q2p, vol_before, waists)
@@ -689,13 +779,28 @@ def detect_and_plan(chains: List[InterfaceChain],
             raise RuntimeError("axisymmetric topology: the new zeta chart is not "
                                "strictly monotone")
 
-    vol_after = [revolved_volume(_closed_section(nc.points, nc.end_types))
+    vol_after = [revolved_volume(_closed_section(nc.points, nc.end_types, nc.reservoir))
                  for nc in new_chains]
 
-    inside = np.array([[float(nc.points[0, 1]), float(nc.points[-1, 1])]
-                       for nc in new_chains], dtype=float).reshape(-1, 2)
+    # How much of the axis each fragment covers. A chain end that sits ON the axis gives its own z;
+    # a "fixed" end does not touch the axis at all, and what closes the fragment there is the
+    # synthetic closure - so the span has to run to where THAT reaches the axis, i.e. the contact
+    # height plus the reservoir depth. Taking the contact height itself (which is what the endpoint
+    # gives) leaves the nozzle above a wall-attached meniscus outside every span, and the geometry
+    # rebuilt from it cannot be closed into a loop at all.
+    def _axis_end(nc: NewChain, k: int) -> float:
+        z = float(nc.points[k, 1])
+        if nc.end_types[k] == "fixed" and nc.reservoir[k]:
+            z += float(cast(float, nc.reservoir[k]))
+        return z
+
+    inside = np.array([[_axis_end(nc, 0), _axis_end(nc, -1)] for nc in new_chains],
+                      dtype=float).reshape(-1, 2)
     z0 = float(min(float(c.points[0, 1]) for c in chains))
     z1 = float(max(float(c.points[-1, 1]) for c in chains))
+    if len(inside):
+        z0 = min(z0, float(np.min(inside)))
+        z1 = max(z1, float(np.max(inside)))
     outside = _complement(inside, z0, z1)
 
     return SurgeryPlan(events=events, new_chains=new_chains,
@@ -710,15 +815,34 @@ def detect_and_plan(chains: List[InterfaceChain],
 # --------------------------------------------------------------------------------------
 
 def _ring_coords(ch: InterfaceChain) -> List[Tuple[float, float]]:
-    """Closed full-plane ring: the chain, its synthetic wall closures, and its mirror."""
+    """Closed full-plane ring: the chain, its synthetic wall closures, and its mirror.
+
+    A ``"fixed"`` end with a reservoir depth is closed along the wall and then across, on both
+    sides of the axis; without one it is closed straight across at the contact height, which is
+    only right when there is nothing behind the contact line.
+    """
     p = ch.points
-    seq: List[Tuple[float, float]] = []
+    head: List[Tuple[float, float]] = []
+    tail: List[Tuple[float, float]] = []
     if ch.end_types[0] == "fixed":
-        seq.append((0.0, float(p[0, 1])))
+        h = ch.reservoir[0]
+        if h:
+            head = [(0.0, float(p[0, 1]) + h), (float(p[0, 0]), float(p[0, 1]) + h)]
+            tail = [(-float(p[0, 0]), float(p[0, 1]) + h)]
+        else:
+            head = [(0.0, float(p[0, 1]))]
+    seq: List[Tuple[float, float]] = list(head)
     seq.extend((float(a), float(b)) for a, b in p)
     if ch.end_types[1] == "fixed":
-        seq.append((0.0, float(p[-1, 1])))
+        h = ch.reservoir[1]
+        if h:
+            seq.append((float(p[-1, 0]), float(p[-1, 1]) + h))
+            seq.append((0.0, float(p[-1, 1]) + h))
+            seq.append((-float(p[-1, 0]), float(p[-1, 1]) + h))
+        else:
+            seq.append((0.0, float(p[-1, 1])))
     seq.extend((-float(a), float(b)) for a, b in p[::-1] if a > 0.0)
+    seq.extend(tail)
     return seq
 
 
@@ -803,7 +927,8 @@ def _complement(inside: np.ndarray, z0: float, z1: float) -> np.ndarray:
 def _splice_fragment(sh, curve: np.ndarray, line: Any, owned: np.ndarray, old_pts,
                      old_sizes, old_zeta, old_chain_of, chains, fixed_gidx, blobs, waists,
                      eps_ref: float, cap_window_factor: float, cap_spacing_factor: float,
-                     extent: float) -> NewChain:
+                     extent: float,
+                     fixed_reservoir: Optional[Dict[int, Optional[float]]] = None) -> NewChain:
     if len(owned) == 0:
         raise RuntimeError("axisymmetric topology: a new fragment retains no old "
                            "interface point; the event windows are too wide")
@@ -817,6 +942,8 @@ def _splice_fragment(sh, curve: np.ndarray, line: Any, owned: np.ndarray, old_pt
     zts: List[float] = []
     orig: List[int] = []
     ends = ["axis", "axis"]
+    res: List[Optional[float]] = [None, None]
+    fixed_reservoir = fixed_reservoir or {}
 
     def _h(size: float) -> float:
         e = eps_ref if eps_ref > 0.0 else size
@@ -826,6 +953,7 @@ def _splice_fragment(sh, curve: np.ndarray, line: Any, owned: np.ndarray, old_pt
     d0, g0 = survivors[0]
     if g0 in fixed_gidx:
         ends[0] = "fixed"
+        res[0] = fixed_reservoir.get(g0)
     elif (_near_event(sh, curve[0], blobs, cap_window_factor)
           or float(old_pts[g0, 0]) > 0.6 * eps_ref) and \
             d0 > 0.5 * _h(float(old_sizes[g0])):
@@ -896,6 +1024,7 @@ def _splice_fragment(sh, curve: np.ndarray, line: Any, owned: np.ndarray, old_pt
     # --- upper end ---
     d1, g1 = survivors[-1]
     if g1 in fixed_gidx:
+        res[1] = fixed_reservoir.get(g1)
         ends[1] = "fixed"
     elif (_near_event(sh, curve[-1], blobs, cap_window_factor)
           or float(old_pts[g1, 0]) > 0.6 * eps_ref) and \
@@ -917,7 +1046,7 @@ def _splice_fragment(sh, curve: np.ndarray, line: Any, owned: np.ndarray, old_pt
 
     return NewChain(points=np.array(pts, dtype=float), sizes=np.array(szs, dtype=float),
                     zeta=np.array(zts, dtype=float), origin=np.array(orig, dtype=int),
-                    end_types=(ends[0], ends[1]))
+                    end_types=(ends[0], ends[1]), reservoir=(res[0], res[1]))
 
 
 #: How far short of the waist a fresh cap's chart has to stop, as a fraction of the chart range it
@@ -1138,7 +1267,7 @@ def _correct_volume(sh, nc: NewChain, target: float, eps: float, tol: float) -> 
     fresh = nc.origin < 0
     if not np.any(fresh) or target <= 0.0:
         return
-    poly = sh.Polygon(_closed_section(nc.points, nc.end_types))
+    poly = sh.Polygon(_closed_section(nc.points, nc.end_types, nc.reservoir))
     if not poly.is_valid:
         poly = poly.buffer(0)
     normals = _normals(nc.points, poly, sh)
@@ -1166,7 +1295,7 @@ def _correct_volume(sh, nc: NewChain, target: float, eps: float, tol: float) -> 
     disp = (w[:, None] * normals)
 
     def vol(A: float) -> float:
-        return revolved_volume(_closed_section(base + A * disp, nc.end_types)) - target
+        return revolved_volume(_closed_section(base + A * disp, nc.end_types, nc.reservoir)) - target
 
     span = 2.0 * (eps if eps > 0.0 else 1.0)
     for _ in range(2):

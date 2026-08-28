@@ -1666,7 +1666,7 @@ namespace pyoomph
 
   public:
     // --- Inverted elements: the unanimous report, and escalating to a remesh ---
-    // See BulkElementBase::defer_inverted_element_errors for why the report has to be deferred at
+    // See BulkElementBase::inverted_elements_detected for why the report has to be deferred at
     // all, and dev_docs/mesh_construction.md section 5 for what the escalation is for.
 
     // How many inverted-element reports ONE solve() call may absorb before the next one is raised as

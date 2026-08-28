@@ -564,18 +564,25 @@ namespace pyoomph
     // inside it, waiting in the assembly's own collectives: `mpirun -n 2` on a folding mesh HUNG,
     // reproducibly, rather than reporting anything. Detection was therefore unusable under MPI.
     //
-    // The fix is to make the report unanimous. While defer_inverted_element_errors is set - which
-    // Problem::get_residuals()/get_jacobian() do for the duration of the element loop - an inversion
-    // is RECORDED here instead of thrown, so every rank finishes the loop and reaches the collective
-    // that follows it. Problem::raise_inverted_element_if_any() then reduces the flag over the ranks
-    // and throws on all of them or on none. Outside that scope (output, error estimation, a Z2 flux
-    // recovery) the immediate throw is kept: those paths are not collective in the same way, and a
-    // deferred report there would be silently dropped.
+    // The fix is to make the report unanimous. An inversion is RECORDED here instead of thrown, so
+    // every rank finishes the loop and reaches the collective that follows it.
+    // Problem::InvertedElementScope::raise_if_any() then reduces the flag over the ranks and throws
+    // on all of them or on none.
+    //
+    // The recording is now unconditional, where it used to happen only while
+    // defer_inverted_element_errors was set and an immediate throw was kept for the paths outside an
+    // assembly (output, error estimation, a Z2 flux recovery). That throw was not survivable: this
+    // function is reached from the JIT-generated element code, which tcc compiles as plain C with no
+    // unwind tables, so the exception crossed a C frame straight into std::terminate and aborted the
+    // process - observed right after an axisymmetric pinch-off, where a fresh cap left a sliver
+    // element behind. Nothing is lost by recording instead: no path between two assemblies moves the
+    // mesh, so an element that is inverted outside one is inverted inside the next, where
+    // raise_if_any() reports it. The scope itself remains, since it owns the reset of the counter
+    // and the reduction over the ranks.
     //
     // Recording rather than throwing means the rest of the assembly runs against a folded element and
     // produces meaningless numbers. That is fine and cannot escape: the matrix is discarded by the
     // throw that follows, before any solver sees it.
-    static bool defer_inverted_element_errors;
     static unsigned inverted_elements_detected;      // count on THIS rank since the scope was opened
     static std::string inverted_element_message;     // the first one's message, for the report
 

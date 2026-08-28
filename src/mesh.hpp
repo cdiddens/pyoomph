@@ -93,6 +93,11 @@ namespace pyoomph
 
 	public:
 		bool interpolated_lagrangian_coordinates_at_remeshing=false;
+		// Set on the DESTINATION mesh to let nodal_interpolate_from() skip its discontinuous (DG/DL/D0)
+		// fields instead of refusing the transfer outright. Only for fields that are recomputed from
+		// scratch on the new mesh anyway - DisjunctDomainMarker's component numbering is the case it
+		// was added for - since nothing is carried across for them.
+		bool discontinuous_fields_need_no_transfer=false;
 		// Given a node that is a "copy" (e.g. periodic/interface copy) of another node, return its master.
 		// Follows copied_masters; typically returns cpy itself if it is not a copy.
 		virtual pyoomph::Node *resolve_copy_master(pyoomph::Node *cpy);

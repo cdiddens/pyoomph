@@ -1207,6 +1207,11 @@ void PyReg_Mesh(nb::module_ &m)
 			pyoomph::Mesh* mesh =dynamic_cast<pyoomph::Mesh*>(self);
 			if (mesh) mesh->interpolated_lagrangian_coordinates_at_remeshing=lagr;
 			 }), nb::arg("interpolate"), "Controls whether the Lagrangian (undeformed) coordinates of new nodes are interpolated from the old mesh when remeshing")
+		.def("_set_discontinuous_fields_need_no_transfer",oomph_mesh_method([](oomph::Mesh *self, bool skip)
+			 {
+			pyoomph::Mesh* mesh =dynamic_cast<pyoomph::Mesh*>(self);
+			if (mesh) mesh->discontinuous_fields_need_no_transfer=skip;
+			 }), nb::arg("skip"), "Set on the destination mesh to let a remesh skip its discontinuous (DG/DL/D0) fields instead of refusing the transfer. Only correct for fields that the new mesh recomputes from scratch, e.g. a DisjunctDomainMarker's component numbering.")
 		.def("get_elemental_errors",oomph_mesh_method([](oomph::Mesh *self)
 			 {
 			oomph::Vector<double> elerrs(self->nelement(),0.0);

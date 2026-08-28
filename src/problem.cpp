@@ -2082,14 +2082,12 @@ namespace pyoomph
 		{
 			BulkElementBase::inverted_elements_detected = 0;
 			BulkElementBase::inverted_element_message.clear();
-			BulkElementBase::defer_inverted_element_errors = true;
 		}
 	}
 
 	Problem::InvertedElementScope::~InvertedElementScope()
 	{
 		prob->inverted_element_scope_depth--;
-		if (outer) BulkElementBase::defer_inverted_element_errors = false;
 	}
 
 	void Problem::InvertedElementScope::raise_if_any()

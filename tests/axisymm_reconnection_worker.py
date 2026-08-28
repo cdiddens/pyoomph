@@ -56,7 +56,8 @@ from pyoomph.expressions.units import meter
 from pyoomph.equations.ALE import PrescribedMovingMesh
 from pyoomph.equations.generic import ProjectExpression
 from pyoomph.equations.topological_changes import (AxisymmetricReconnection,
-                                                   TopologicalChangesGmshTemplate)
+                                                   TopologicalChangesGmshTemplate,
+                                                   TopologicalChangesTQMeshTemplate)
 from pyoomph.meshes.axisymm_topology import revolved_volume
 
 
@@ -103,7 +104,7 @@ def halfsection_volume(points):
 # The mesh template
 # --------------------------------------------------------------------------------------
 
-class BlobMesh(TopologicalChangesGmshTemplate):
+class _BlobMeshBody:
     """Axisymmetric fluid fragments on the symmetry axis, optionally inside a gas box.
 
     Boundaries: ``interface`` (free surface), ``axis`` (the liquid's share of r=0), and, with a gas
@@ -112,10 +113,14 @@ class BlobMesh(TopologicalChangesGmshTemplate):
     The remeshing branch is the point of the exercise: it is entered both for a reconnection and for
     a plain quality remesh, and it does not know which -- ``get_reconnected_boundaries`` fills in the
     same structure either way.
+
+    The body is written once and given to one class per meshing backend below: the geometry calls the
+    surgery goes through are spelled the same way by gmsh and by TQMesh, which is the whole claim of
+    TopologicalChangesTemplate, and running the same scenarios on both is how that claim is checked.
+    Not a base class, because nanobind refuses a MeshTemplate with two bases.
     """
 
     def __init__(self, profiles, resolution, unit=1, gas_box=None, size_via_callable=False):
-        super().__init__()
         self.profiles = [numpy.asarray(p, dtype=float) for p in profiles]
         self.resolution = resolution
         self.unit = unit          # the spatial unit the coordinates are expressed in
@@ -189,6 +194,32 @@ class BlobMesh(TopologicalChangesGmshTemplate):
              self.point(Rbox * U, Zbox * U), self.point(0.0 * U, Zbox * U)]
         for a, b in zip(p, p[1:]):
             self.line(a, b, name="outer")
+
+
+class BlobMesh(TopologicalChangesGmshTemplate):
+    __doc__ = _BlobMeshBody.__doc__
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        _BlobMeshBody.__init__(self, *args, **kwargs)
+
+    define_geometry = _BlobMeshBody.define_geometry
+    _gas_box_walls = _BlobMeshBody._gas_box_walls
+
+
+class BlobMeshTQMesh(TopologicalChangesTQMeshTemplate):
+    __doc__ = _BlobMeshBody.__doc__
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        _BlobMeshBody.__init__(self, *args, **kwargs)
+
+    define_geometry = _BlobMeshBody.define_geometry
+    _gas_box_walls = _BlobMeshBody._gas_box_walls
+
+
+#: Which backend the scenarios are built on; set from --backend in main().
+BLOB_MESH_CLASS = BlobMesh
 
 
 # --------------------------------------------------------------------------------------
@@ -269,8 +300,8 @@ class ReconnectionProblem(Problem):
         if self.scale is not None:
             self.set_scaling(spatial=self.scale * meter)
             unit = meter
-        self.mesh_template = BlobMesh(self.profiles, self.resolution, unit=unit, gas_box=self.gas_box,
-                                      size_via_callable=self.size_via_callable)
+        self.mesh_template = BLOB_MESH_CLASS(self.profiles, self.resolution, unit=unit, gas_box=self.gas_box,
+                                            size_via_callable=self.size_via_callable)
         self.add_mesh(self.mesh_template)
 
         self.reconnection = AxisymmetricReconnection(
@@ -846,8 +877,11 @@ def main():
     parser.add_argument("--no-handle-zeta", action="store_true")
     parser.add_argument("--flatten-history", dest="flatten_history", action="store_true")
     parser.add_argument("--degrade-bdf1", dest="degrade_bdf1", action="store_true")
+    parser.add_argument("--backend", choices=["gmsh", "tqmesh"], default="gmsh")
     args, rest = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + rest
+    global BLOB_MESH_CLASS
+    BLOB_MESH_CLASS = BlobMesh if args.backend == "gmsh" else BlobMeshTQMesh
     try:
         CASES[args.case](args.outdir, args)
     except BaseException as e:  # noqa: BLE001

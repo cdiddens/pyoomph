@@ -594,11 +594,14 @@ class MeshTemplate(_pyoomph.MeshTemplate):
                 lambda: self.remesher._cnt, lambda s: s)  # type:ignore
         if found_mshfile != mshfile:
             # We need to load the remeshed version here
-            from . import gmsh
             statedir = os.path.dirname(state.fname)
             fffound_mshfile = os.path.join(statedir, found_mshfile)
-            newtempl = gmsh.GmshTemplate(fffound_mshfile)
+            newtempl = self._template_for_stored_mesh_file(fffound_mshfile)
             newtempl.remesher = self.remesher
+            if newtempl.remesher is not None:
+                # Otherwise the next remesh would recreate the geometry from the template this state
+                # file replaced, whose domains and geometry belong to the run that wrote it.
+                newtempl.remesher.template = newtempl
             newtempl._do_define_geometry(self.get_problem())
             self._template_override = newtempl
             newtempl._get_template()._meshfile = fffound_mshfile
@@ -675,9 +678,32 @@ class MeshTemplate(_pyoomph.MeshTemplate):
         if not self._geometry_defined:
             self._geometry_defined = True
             self._set_problem(problem)
-            self.define_geometry()
+            if self._define_geometry_is_required():
+                self.define_geometry()
             if self.auto_find_opposite_interface_connections:
                 self._find_opposite_interface_connections()
+
+    def _define_geometry_is_required(self) -> bool:
+        """Whether :py:meth:`define_geometry` has to run at all.
+
+        ``False`` where the geometry comes from a file instead of from the user's code - a
+        :py:class:`~pyoomph.meshes.gmsh.GmshTemplate` reloading a stored ``.msh`` after a state file
+        was read. Calling ``define_geometry`` there would ask a subclass to build a geometry with no
+        backend behind it, which is what used to make the reload fall back to a plain
+        ``GmshTemplate`` and lose the template's class. See :py:meth:`_template_for_stored_mesh_file`.
+        """
+        return True
+
+    def _template_for_stored_mesh_file(self, meshfile: str) -> "MeshTemplate":
+        """The template that a state file's stored mesh is to be rebuilt from.
+
+        A distinct object from ``self``, since the mesh is only replaced when the template changes
+        (see ``Problem._define_state_file``). The default cannot do anything but a plain
+        :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`; :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`
+        itself overrides it to keep the class.
+        """
+        from . import gmsh
+        return gmsh.GmshTemplate(meshfile)
 
     def new_domain(self, name: str, nodal_dimension: int | None = None) -> _pyoomph.MeshTemplateElementCollection:
         """

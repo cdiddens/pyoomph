@@ -38,9 +38,10 @@ The two pieces here work as a pair.
   :py:class:`~pyoomph.meshes.axisymm_topology.SurgeryPlan` describing the interface *after* the
   event. The plan is parked on the mesh template and a remesh is requested.
 
-* :py:class:`TopologicalChangesGmshTemplate` is the mesh template that consumes the plan. The
+* :py:class:`TopologicalChangesTemplate` is the mesh template that consumes the plan - as
+  :py:class:`TopologicalChangesGmshTemplate` or :py:class:`TopologicalChangesTQMeshTemplate`. The
   surgery is delivered through the ordinary remeshing-by-recreation path: pyoomph calls
-  ``define_geometry`` again, and there :py:meth:`~TopologicalChangesGmshTemplate.get_reconnected_boundaries`
+  ``define_geometry`` again, and there :py:meth:`~_TopologicalChangesMixin.get_reconnected_boundaries`
   returns the interface chains and axis spans that the new geometry has to be built from - the
   reconnected ones if an event was planned, the current ones if this is a plain quality remesh. The
   user code that turns them into splines and lines is the same in both cases.
@@ -72,6 +73,8 @@ compares two tips that are routinely on different ranks. Serial and ``mpirun`` w
 ``--distribute`` take the local path unchanged and communicate nothing at all.
 """
 
+import abc
+import itertools
 from dataclasses import dataclass, field
 
 import numpy
@@ -83,6 +86,7 @@ from ..generic.mpi import (get_mpi_any, get_mpi_max, get_mpi_nproc, get_mpi_rank
 from ..meshes.axisymm_topology import (InterfaceChain, ReconnectionEvent, SurgeryPlan,
                                        WaistNotYetSeparable, detect_and_plan, revolved_volume)
 from ..meshes.gmsh import GmshTemplate
+from ..meshes.tqmesh import TQMeshPoint, TQMeshTemplate
 from ..meshes.mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate2d, MeshFromTemplateBase, Node, Element, AnyMesh
 from ..meshes.meshdatacache import MeshDataCache, MeshDataCacheEntry
 from ..typings import *
@@ -106,8 +110,8 @@ class ReconnectedChain:
     """One interface polyline of the geometry that is about to be built.
 
     ``points`` carry the spatial scaling unless ``nondimensional=True`` was requested, so they can be
-    fed straight to :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.point`. ``suggested_sizes`` are
-    *always* plain nondimensional floats, because that is what Gmsh's ``size`` argument is.
+    fed straight to the template's ``point()``. ``suggested_sizes`` are *always* plain nondimensional
+    floats, because that is what both backends' ``size`` argument is.
     """
     points: list[tuple[ExpressionOrNum, ExpressionOrNum]]
     suggested_sizes: list[float]
@@ -125,7 +129,7 @@ class ReconnectedChain:
 
 @dataclass
 class ReconnectedBoundaries:
-    """The result of :py:meth:`TopologicalChangesGmshTemplate.get_reconnected_boundaries`."""
+    """The result of :py:meth:`_TopologicalChangesMixin.get_reconnected_boundaries`."""
     #: The free interface, one entry per connected fluid fragment, ordered by ascending ``y``.
     interface_chains: list[ReconnectedChain] = field(default_factory=list)
     #: Axis pieces that belong to the domain the interface bounds, as ``((x0,y0),(x1,y1))`` pairs.
@@ -147,9 +151,27 @@ class ReconnectedBoundaries:
 # The mesh template
 # --------------------------------------------------------------------------------------
 
-class TopologicalChangesGmshTemplate(GmshTemplate):
-    """A :py:class:`~pyoomph.meshes.gmsh.GmshTemplate` that can rebuild itself after a pinch-off or
-    a coalescence.
+class TopologicalChangesTemplate(abc.ABC):
+    """Virtual base of every mesh template that can rebuild itself after a pinch-off or a
+    coalescence, i.e. of :py:class:`TopologicalChangesGmshTemplate` and
+    :py:class:`TopologicalChangesTQMeshTemplate`. Use it for ``isinstance``; it is what
+    :py:class:`AxisymmetricReconnection` requires of the bulk template it is attached to.
+
+    It is a *virtual* base - the concrete classes ``register()`` with it rather than deriving from
+    it - because ``MeshTemplate`` is a nanobind type and nanobind refuses any class with two bases,
+    so a real mixin cannot be inherited alongside a backend. The shared implementation therefore
+    lives in :py:class:`_TopologicalChangesMixin` and is copied in by
+    :py:func:`_with_topological_changes`.
+    """
+
+
+class _TopologicalChangesMixin:
+    """The backend-independent half of a topological-changes template.
+
+    Everything here is independent of the mesh generator behind it. All a backend has to add is an
+    ``__init__`` that calls :py:meth:`_init_topological_changes`, a ``_reset`` that clears
+    ``_snap_buckets``, and a ``point`` that routes its own signature through
+    :py:meth:`_snapped_point` and :py:meth:`_register_snapped_point`.
 
     Write ``define_geometry`` so that the remeshing branch takes its interface and axis from
     :py:meth:`get_reconnected_boundaries` instead of from
@@ -170,19 +192,20 @@ class TopologicalChangesGmshTemplate(GmshTemplate):
     one code path, and :py:meth:`get_reconnected_boundaries` fills in the same structure either way.
     """
 
-    def __init__(self, loaded_from_mesh_file: str | None = None):
-        super().__init__(loaded_from_mesh_file)
+    def _init_topological_changes(self) -> None:
         # interface mesh name (e.g. "liquid/interface") -> (plan, extra info of the equation)
         self._pending_surgery_plans: dict[str, tuple[SurgeryPlan, dict[str, Any]]] = {}
-        #: Two points closer than this *nondimensional* distance are the same Gmsh point. See
-        #: :py:meth:`point`. Nondimensional geometries are O(1) by construction, so an absolute
-        #: value works here and keeps the lookup independent of the order the points arrive in.
+        #: Two points closer than this *nondimensional* distance are the same point of the geometry.
+        #: See :py:meth:`_snapped_point`. Nondimensional geometries are O(1) by construction, so an
+        #: absolute value works here and keeps the lookup independent of the order points arrive in.
         self.point_snap_tolerance: float = 1e-9
-        # Quantised coordinates -> point, so that the tolerant lookup in point() stays O(1). A plain
-        # scan over _pointhash would be O(N^2) over an interface of a few thousand points.
-        self._snap_buckets: dict[tuple[int, int, int], list["Point"]] = {}
+        # Quantised coordinates -> (coordinates, point), so that the tolerant lookup stays O(1). A
+        # plain scan over the backend's own point cache would be O(N^2) over an interface of a few
+        # thousand points. The coordinates are kept alongside because the two backends' point objects
+        # store them differently.
+        self._snap_buckets: dict[tuple[int, ...], list[tuple[tuple[float, ...], Any]]] = {}
         # Whether the last get_reconnected_boundaries() returned nondimensional coordinates; the
-        # convenience builders need to know, since GmshTemplate.point() divides by the spatial scale.
+        # convenience builders need to know, since point() divides by the spatial scale.
         self._recon_nondimensional: bool = False
 
     # -- pending plans ---------------------------------------------------------------------------
@@ -201,54 +224,47 @@ class TopologicalChangesGmshTemplate(GmshTemplate):
 
     # -- point deduplication ---------------------------------------------------------------------
 
-    def point(self, x: ExpressionOrNum, y: ExpressionOrNum = 0.0, z: ExpressionOrNum = 0.0, size: ExpressionNumOrNone = None, *, name: str | None = None, consider_spatial_scale: bool | None = None) -> "Point":
-        """As :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.point`, but merges *nearly* coincident points.
-
-        The base class keys its point cache on the exact ``(x,y,z)`` doubles, which is enough as long
-        as every point comes out of the same arithmetic. Here they do not: the interface tip of a
-        surgered chain is computed by :py:mod:`pyoomph.meshes.axisymm_topology` and then dimensionalised
-        and divided by the spatial scale again on the way in, while the very same corner may be
-        written out by hand in ``define_geometry`` as a literal. Two doubles that differ in the last
-        bit become two Gmsh points, and a curve loop through both of them is not closed - Gmsh then
-        fails with a message about a non-manifold or unbounded surface, far from the cause. Hence a
-        tolerant lookup, at a tolerance far below any mesh size and far above the round-off.
-        """
-        if self._geom is None:
-            # Outside define_geometry the base class raises; let it produce that message.
-            return super().point(x, y, z, size, name=name, consider_spatial_scale=consider_spatial_scale)
-        if consider_spatial_scale is None:
-            consider_spatial_scale = self.consider_spatial_scale
-        nd: list[float] = []
-        for c in (x, y, z):
+    def _nondimensionalise(self, coords: Sequence[ExpressionOrNum], consider_spatial_scale: bool) -> tuple[float, ...]:
+        """The coordinates as plain floats in the geometry's own (nondimensional) frame."""
+        out: list[float] = []
+        for c in coords:
             if consider_spatial_scale:
                 c = c / self.get_problem().get_scaling("spatial")
             if isinstance(c, Expression):
                 c = c.float_value()
-            nd.append(float(c))
-        key = (nd[0], nd[1], nd[2])
-        existing = self._pointhash.get(key)
-        if existing is not None:
-            return existing
-        q = self.point_snap_tolerance
-        bucket: tuple[int, int, int] | None = None
-        if q > 0.0:
-            bx, by, bz = (int(numpy.floor(v / q)) for v in nd)
-            bucket = (bx, by, bz)
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for dz in (-1, 0, 1):
-                        for p in self._snap_buckets.get((bx + dx, by + dy, bz + dz), ()):
-                            if abs(p.x[0] - nd[0]) <= q and abs(p.x[1] - nd[1]) <= q \
-                                    and abs(p.x[2] - nd[2]) <= q:
-                                return p
-        res = super().point(nd[0], nd[1], nd[2], size, name=name, consider_spatial_scale=False)
-        if bucket is not None:
-            self._snap_buckets.setdefault(bucket, []).append(res)
-        return res
+            out.append(float(c))
+        return tuple(out)
 
-    def _reset(self):
-        super()._reset()
-        self._snap_buckets = {}
+    def _snapped_point(self, nd: tuple[float, ...]) -> Any | None:
+        """A point already created *nearly* at ``nd``, or ``None``.
+
+        The backends key their own point caches on the exact coordinate doubles, which is enough as
+        long as every point comes out of the same arithmetic. Here they do not: the interface tip of
+        a surgered chain is computed by :py:mod:`pyoomph.meshes.axisymm_topology` and then
+        dimensionalised and divided by the spatial scale again on the way in, while the very same
+        corner may be written out by hand in ``define_geometry`` as a literal. Two doubles that
+        differ in the last bit become two points, and a curve loop through both of them is not closed
+        - the mesh generator then fails with a message about a non-manifold or unbounded surface, far
+        from the cause. Hence a tolerant lookup, at a tolerance far below any mesh size and far above
+        the round-off.
+        """
+        q = self.point_snap_tolerance
+        if q <= 0.0:
+            return None
+        base = tuple(int(numpy.floor(v / q)) for v in nd)
+        for offset in itertools.product((-1, 0, 1), repeat=len(base)):
+            key = tuple(b + o for b, o in zip(base, offset))
+            for coords, pt in self._snap_buckets.get(key, ()):
+                if all(abs(a - b) <= q for a, b in zip(coords, nd)):
+                    return pt
+        return None
+
+    def _register_snapped_point(self, nd: tuple[float, ...], point: Any) -> None:
+        q = self.point_snap_tolerance
+        if q <= 0.0:
+            return
+        key = tuple(int(numpy.floor(v / q)) for v in nd)
+        self._snap_buckets.setdefault(key, []).append((nd, point))
 
     # -- the boundaries of the next mesh ---------------------------------------------------------
 
@@ -397,6 +413,131 @@ class TopologicalChangesGmshTemplate(GmshTemplate):
         return res
 
 
+def _with_topological_changes(cls: type) -> type:
+    """Copy the shared implementation into a concrete template and register it as a
+    :py:class:`TopologicalChangesTemplate`. Names the class defines itself win."""
+    for name, obj in vars(_TopologicalChangesMixin).items():
+        if name.startswith("__") or name in cls.__dict__:
+            continue
+        setattr(cls, name, obj)
+    TopologicalChangesTemplate.register(cls)
+    return cls
+
+
+@_with_topological_changes
+class TopologicalChangesGmshTemplate(GmshTemplate):
+    """:py:class:`TopologicalChangesTemplate` on top of a :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`."""
+
+    def __init__(self, loaded_from_mesh_file: str | None = None):
+        super().__init__(loaded_from_mesh_file)
+        self._init_topological_changes()
+
+    def _reset(self):
+        super()._reset()
+        self._snap_buckets = {}
+
+    def point(self, x: ExpressionOrNum, y: ExpressionOrNum = 0.0, z: ExpressionOrNum = 0.0, size: ExpressionNumOrNone = None, *, name: str | None = None, consider_spatial_scale: bool | None = None) -> "Point":
+        """As :py:meth:`~pyoomph.meshes.gmsh.GmshTemplate.point`, but merges *nearly* coincident
+        points; see :py:meth:`TopologicalChangesTemplate._snapped_point`."""
+        if self._geom is None:
+            # Outside define_geometry the base class raises; let it produce that message.
+            return super().point(x, y, z, size, name=name, consider_spatial_scale=consider_spatial_scale)
+        if consider_spatial_scale is None:
+            consider_spatial_scale = self.consider_spatial_scale
+        nd = self._nondimensionalise((x, y, z), consider_spatial_scale)
+        existing = self._pointhash.get(nd)
+        if existing is not None:
+            return existing
+        snapped = self._snapped_point(nd)
+        if snapped is not None:
+            return snapped
+        res = super().point(nd[0], nd[1], nd[2], size, name=name, consider_spatial_scale=False)
+        self._register_snapped_point(nd, res)
+        return res
+
+
+@_with_topological_changes
+class TopologicalChangesTQMeshTemplate(TQMeshTemplate):
+    """:py:class:`TopologicalChangesTemplate` on top of a
+    :py:class:`~pyoomph.meshes.tqmesh.TQMeshTemplate`.
+
+    The same ``define_geometry`` serves either backend: the geometry methods the surgery goes
+    through - :py:meth:`~TopologicalChangesTemplate.spline_from_chain`,
+    :py:meth:`~TopologicalChangesTemplate.lines_from_axis_segments`, ``plane_surface`` - are spelled
+    the same way in both. What differs is everything around them, i.e. how the element sizes are
+    prescribed: gmsh has size fields, TQMesh has :py:meth:`~pyoomph.meshes.tqmesh.TQMeshTemplate.mesh_size`.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._init_topological_changes()
+
+    def _reset(self):
+        super()._reset()
+        self._snap_buckets = {}
+
+    def spline_from_chain(self, chain: ReconnectedChain, name: str, size: float | Callable[[ExpressionOrNum, ExpressionOrNum, float], float] | None = None) -> Any:
+        """As :py:meth:`_TopologicalChangesMixin.spline_from_chain`, but the chain is *resampled* at
+        the element sizes it asks for rather than used as it stands.
+
+        TQMesh takes the points it is given as the boundary edges themselves, where gmsh takes them
+        as the geometry only and discretises it by size afterwards. The chain comes from
+        ``get_boundary_coordinates``, which walks the interface *nodes*, so on a second-order
+        interface it holds two points per element - and handing all of them over doubles the boundary
+        discretisation at every remesh, which multiplies the element count of the whole mesh by four:
+        measured on a plain unit square, 40 boundary edges became 80, 160 and 320 over three quality
+        remeshes, and 589 elements became 30850.
+
+        So the chain becomes the *control* points of the spline and TQMesh distributes the chain
+        along it by the size function, which is the mechanism its
+        :py:meth:`~pyoomph.meshes.tqmesh.TQMeshTemplate.spline` documents for exactly this purpose
+        and which is stable. The per-point sizes the plan asks for - a fresh cap is finer than the
+        interface it grew out of - are supplied through that size function, for the duration of this
+        call only, since TQMesh has no per-control-point sizes to pass them as.
+        """
+        css = not chain.nondimensional
+        control = [self.point(x, y, consider_spatial_scale=css) for x, y in chain.points]
+        nd = numpy.array([[p.x, p.y] for p in control], dtype=float)
+        sizes = numpy.asarray(chain.suggested_sizes, dtype=float)
+        if size is not None and not callable(size):
+            sizes = numpy.full(len(nd), float(size))
+
+        previous = self.mesh_size_callback
+
+        def along_the_chain(x: float, y: float) -> float | None:
+            # Nearest control point rather than an arclength projection: the query comes from
+            # _distribute_along_curve, i.e. from a point ON the curve, so the nearest control point is
+            # the right one and anything finer would only cost time.
+            d = (nd[:, 0] - x) ** 2 + (nd[:, 1] - y) ** 2
+            return float(sizes[int(numpy.argmin(d))])
+
+        self.mesh_size_callback = along_the_chain
+        try:
+            if len(control) < 3:
+                # Below three points there is no spline to resample; the straight line is the curve.
+                return _TopologicalChangesMixin.spline_from_chain(self, chain, name, size)
+            return self.spline(control, name=name, resample=True)
+        finally:
+            self.mesh_size_callback = previous
+
+    def point(self, x: ExpressionOrNum, y: ExpressionOrNum = 0.0, size: ExpressionNumOrNone = None, *, size_range: ExpressionNumOrNone = None, name: str | None = None, consider_spatial_scale: bool | None = None) -> "TQMeshPoint":
+        """As :py:meth:`~pyoomph.meshes.tqmesh.TQMeshTemplate.point`, but merges *nearly* coincident
+        points; see :py:meth:`TopologicalChangesTemplate._snapped_point`."""
+        if consider_spatial_scale is None:
+            consider_spatial_scale = self.consider_spatial_scale
+        nd = self._nondimensionalise((x, y), consider_spatial_scale)
+        if nd not in self._pointhash:
+            snapped = self._snapped_point(nd)
+            if snapped is not None:
+                # Route through the base class so that a size given here still reaches the point.
+                return super().point(snapped.x, snapped.y, size, size_range=size_range, name=name,
+                                     consider_spatial_scale=False)
+        res = super().point(nd[0], nd[1], size, size_range=size_range, name=name,
+                            consider_spatial_scale=False)
+        self._register_snapped_point(nd, res)
+        return res
+
+
 # --------------------------------------------------------------------------------------
 # The interface equations
 # --------------------------------------------------------------------------------------
@@ -430,6 +571,7 @@ class AxisymmetricReconnection(InterfaceEquations):
                  cap_spacing_factor: float = 0.7,
                  check_mesh_motion_direction: bool = True, overlap_reject_factor: float | None = 0.2,
                  coalescence_arm_factor: float = 3.0, axis_tolerance: float = 1e-7,
+                 reservoir_depth: ExpressionNumOrNone = None,
                  allow_fragment_removal: bool = True, segment_jump_offset: float = 1.0,
                  handle_zeta: bool = True, max_deferred_events: int = 25) -> None:
         super().__init__()
@@ -452,6 +594,15 @@ class AxisymmetricReconnection(InterfaceEquations):
         self.coalescence_arm_factor = coalescence_arm_factor
         #: A point counts as sitting on the axis if ``|x|`` is below this times the size of the interface.
         self.axis_tolerance = axis_tolerance
+        #: Signed axial depth of the body of liquid *behind* a wall contact line. Without it a
+        #: ``"fixed"`` chain end is closed straight across at the contact height, which is only right
+        #: when there is nothing behind the contact - a drop cut by a symmetry plane. A nozzle
+        #: meniscus has a reservoir behind it, and the flat closure then cuts it off: a meniscus
+        #: dimpled near the axis is left as a sliver thinner than ``rmin`` and is either erased or
+        #: split into a ring, and one that crosses the contact height is left self-intersecting. Set
+        #: it to the depth of the reservoir along the wall - deeper than any excursion of the
+        #: interface past the contact line - with the sign pointing INTO the liquid.
+        self.reservoir_depth = reservoir_depth
         self.allow_fragment_removal = allow_fragment_removal
         self.segment_jump_offset = segment_jump_offset
         #: How many consecutive solves may end in a
@@ -467,6 +618,7 @@ class AxisymmetricReconnection(InterfaceEquations):
         self._datacache = MeshDataCache(tesselate_tri=False, nondimensional=True)
         self._rmin_nd: float | None = None
         self._distmin_nd: float | None = None
+        self._reservoir_depth_nd: float | None = None
         self._nondim_done: bool = False
         # Whether the last after_newton_solve saw a gap close enough for the overlap guard to be
         # worth its (cheap, but per-Newton-step) cost.
@@ -477,7 +629,7 @@ class AxisymmetricReconnection(InterfaceEquations):
         self._deferred_events: int = 0
         # (template, interface name) of the plan that is waiting to be built, so that
         # after_remeshing can clear it without having to resolve the tree again.
-        self._pending_on: tuple["TopologicalChangesGmshTemplate", str] | None = None
+        self._pending_on: tuple["TopologicalChangesTemplate", str] | None = None
         # (bulk mesh, boundary index) pairs on the NEW meshes whose boundary-coordinate flag this
         # handler raised, so that after_remeshing can put it back. See _install_zeta_chart.
         self._zeta_flags_to_restore: list[tuple[Any, int]] = []
@@ -512,6 +664,7 @@ class AxisymmetricReconnection(InterfaceEquations):
         SS = problem.get_scaling("spatial")
         self._rmin_nd = None if self.rmin is None else float(self.rmin / SS)
         self._distmin_nd = None if self.distmin is None else float(self.distmin / SS)
+        self._reservoir_depth_nd = None if self.reservoir_depth is None else float(self.reservoir_depth / SS)
         self._nondim_done = True
         if self._rmin_nd is not None and self._distmin_nd is not None and self._distmin_nd > self._rmin_nd \
                 and not self._warned_about_distmin:
@@ -612,7 +765,7 @@ class AxisymmetricReconnection(InterfaceEquations):
 
     # -- detection -------------------------------------------------------------------------------
 
-    def _validate_and_get_template(self) -> tuple[InterfaceMesh, "TopologicalChangesGmshTemplate"]:
+    def _validate_and_get_template(self) -> tuple[InterfaceMesh, "TopologicalChangesTemplate"]:
         mesh = self.get_my_domain()._mesh  # type:ignore[attr-defined]
         if not isinstance(mesh, InterfaceMesh):
             raise RuntimeError("Please attach AxisymmetricReconnection to an interface, not to a bulk domain")
@@ -623,12 +776,13 @@ class AxisymmetricReconnection(InterfaceEquations):
             raise RuntimeError("AxisymmetricReconnection only works when attached to a 2d bulk mesh "
                                "generated from a mesh template")
         template = bulk._templatemesh  # type:ignore[attr-defined]
-        if not isinstance(template, TopologicalChangesGmshTemplate):
+        if not isinstance(template, TopologicalChangesTemplate):
             raise RuntimeError(
                 "The bulk mesh of an AxisymmetricReconnection must come from a "
-                "TopologicalChangesGmshTemplate, not from a " + type(template).__name__ + ". The "
-                "surgery is delivered by re-running define_geometry, which needs that class's "
-                "get_reconnected_boundaries() to describe the reconnected geometry.")
+                "TopologicalChangesGmshTemplate or a TopologicalChangesTQMeshTemplate, not from a "
+                + type(template).__name__ + ". The surgery is delivered by re-running "
+                "define_geometry, which needs get_reconnected_boundaries() to describe the "
+                "reconnected geometry.")
         return mesh, template
 
     def _needs_merged_interface(self, mesh: InterfaceMesh) -> bool:
@@ -708,8 +862,11 @@ class AxisymmetricReconnection(InterfaceEquations):
             _snap_negative_radii_to_axis(pts, spacing)
             ends = ("axis" if abs(pts[0, 0]) < tol else "fixed",
                     "axis" if abs(pts[-1, 0]) < tol else "fixed")
+            hres = self._reservoir_depth_nd
             chains.append(InterfaceChain(points=pts, sizes=size_factor * spacing,
-                                         end_types=ends))
+                                         end_types=ends,
+                                         reservoir=(hres if ends[0] == "fixed" else None,
+                                                    hres if ends[1] == "fixed" else None)))
             tips.append({"z_lo": float(pts[0, 1]), "z_hi": float(pts[-1, 1]),
                          "axis_lo": 1.0 if ends[0] == "axis" else 0.0,
                          "axis_hi": 1.0 if ends[1] == "axis" else 0.0,
@@ -1306,6 +1463,14 @@ class DisjunctDomainMarker(Equations):
         assert isinstance(mesh,MeshFromTemplate2d)
         self._update_marker(mesh)
         return super().on_apply_boundary_conditions(mesh)
+
+    def _before_mesh_to_mesh_interpolation(self, eqtree: "EquationTree", interpolator: "BaseMeshToMeshInterpolator"):
+        # The marker is a D0 field, and a mesh carrying one cannot be interpolated (mesh.cpp refuses
+        # every discontinuous field). Nothing has to be carried across, though: on_apply_boundary_conditions
+        # renumbers the components of the NEW mesh from scratch right after the remesh. Without this
+        # the mere presence of the marker would make its domain unremeshable.
+        interpolator.new._set_discontinuous_fields_need_no_transfer(True)  # type:ignore[attr-defined]
+        return super()._before_mesh_to_mesh_interpolation(eqtree, interpolator)
 
 
 from ..typings import _set_public_api

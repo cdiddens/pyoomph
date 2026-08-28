@@ -2564,21 +2564,33 @@ namespace pyoomph
 					<< this->dim() << "-dimensional element";
 				if (jitcode && jitcode->get_func_table() && jitcode->get_func_table()->domain_name)
 					oss << " on domain '" << jitcode->get_func_table()->domain_name << "'";
+				// Where, in nondimensional coordinates. Without it the report says only that SOME
+				// element folded, which on a mesh of thirty thousand is not a starting point: a fold
+				// at a fresh pinch-off cap and one in the far field call for entirely different
+				// answers. The nodal positions are all this needs and they are certainly available.
+				{
+					oomph::Vector<double> mid(this->nodal_dimension(), 0.0);
+					const unsigned nnod = this->nnode();
+					for (unsigned n = 0; n < nnod; n++)
+						for (unsigned i = 0; i < this->nodal_dimension(); i++)
+							mid[i] += this->node_pt(n)->x(i) / nnod;
+					oss << ", around the position (";
+					for (unsigned i = 0; i < mid.size(); i++)
+						oss << (i ? ", " : "") << mid[i];
+					oss << ")";
+				}
 				oss << "." << std::endl
 					<< "This usually means the mesh has been distorted too far, e.g. by too large a "
 					<< "time step or continuation step." << std::endl
 					<< "Detection can be switched off again with set_detect_inverted_elements(False).";
-				// Inside a collective element loop the throw has to wait: see the comment on
-				// defer_inverted_element_errors in elements.hpp. Throwing here would leave the other
-				// ranks in the assembly's collectives and hang the run rather than report anything.
-				if (defer_inverted_element_errors)
-				{
-					if (inverted_elements_detected++ == 0) inverted_element_message = oss.str();
-				}
-				else
-				{
-					throw oomph::InvertedElementError(oss.str(), OOMPH_CURRENT_FUNCTION, OOMPH_EXCEPTION_LOCATION);
-				}
+				// Always recorded, never thrown from here: see the comment on
+				// defer_inverted_element_errors in elements.hpp. Two independent reasons - the
+				// collectives of an assembly's element loop, and the fact that this function is
+				// reached from the JIT-generated code, which tcc compiles as plain C with no unwind
+				// tables, so an exception crossing that frame reaches std::terminate and aborts the
+				// process. Problem::InvertedElementScope::raise_if_any() turns the record into an
+				// exception, in C++, where it can be caught.
+				if (inverted_elements_detected++ == 0) inverted_element_message = oss.str();
 			}
 		}
 

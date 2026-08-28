@@ -533,6 +533,33 @@ the ranks at identical times, and a trajectory agreeing with the serial one to w
 own run-to-run spread (two identical serial runs already diverge at step 148 near pinch-off, by about
 as much). Tests: `tests/test_mpi_observables.py` (10 tests, ~18 s).
 
+## 5a. Restarting from a state file written after a remesh keeps the template's class
+
+A state file records the `.msh` of the mesh that was current when it was written, and a restart is
+built from that file rather than from `define_geometry` - the geometry in it is a remeshed one, which
+`define_geometry` cannot reproduce from an initial condition. `MeshedMeshTemplate._define_state_file`
+did that by constructing a plain `gmsh.GmshTemplate(file)` and parking it as `_template_override`, so
+**every `MeshTemplate` subclass lost its class across such a restart**, along with every attribute the
+user's own `__init__` had set. What made it visible is
+`pyoomph.equations.topological_changes.AxisymmetricReconnection`, which refuses a bulk template that is
+not a `TopologicalChangesTemplate`: a run with topological changes could be dumped but not continued.
+
+The reload now builds the replacement from the original template
+(`GmshTemplate._template_for_stored_mesh_file`): same class, `__dict__` carried over, `_reset()` for a
+fresh geometry, and `_loaded_from_mesh_file` set. It has to be a *distinct* object, because the mesh is
+only rebuilt when `_get_template()` changes - and the class cannot simply be re-instantiated, since a
+subclass's `__init__` takes whatever arguments the user gave it. So the C++ base is constructed
+explicitly on an object made with `cls.__new__(cls)`.
+
+The second half is `MeshTemplate._define_geometry_is_required()`, which `GmshTemplate` answers with
+"only when there is no mesh file to load". Without it the base `_do_define_geometry` would call the
+*subclass's* `define_geometry` with no gmsh geometry object open. The remesher is also repointed at the
+new template, or the next remesh would recreate the geometry from the one the state file replaced.
+
+`tests/test_state_file_template_class.py` (5 tests): write with a remesh, restart in a separate process
+and output directory, and check the class, the user's attribute, the element count and that the next
+remesh still goes through the restored template.
+
 ## 6. Open questions
 
 * `ParametricGmshMeshRemesher2d` subclasses `Remesher2d` but rebuilds its geometry from problem

@@ -655,6 +655,73 @@ is the harder of the two.
 
 ---
 
+## 9a. Wall-attached menisci: `reservoir_depth`
+
+A `"fixed"` chain end is closed synthetically, and the closure decides what the morphology considers
+to be liquid. Closing it straight across at the contact height is right for a drop cut by a symmetry
+plane - there is nothing behind the contact - and wrong for a nozzle meniscus, where the liquid
+continues up the nozzle: what the erosion then sees is the sliver in *front* of the interface. Two
+ordinary meniscus shapes break on it, neither of them a topological change:
+
+* **dimpled near the axis** - the sliver is thinner than `2 eps` and erodes away, so the reservoir is
+  reported as a vanished fragment (and with `allow_fragment_removal` would be deleted from the mesh),
+  or the erosion hollows it into a ring, whose mirrored cross section does not touch the axis at all
+  and cannot be represented;
+* **crossing the contact height** - the closure cuts the interface and the section self-intersects.
+
+`AxisymmetricReconnection(reservoir_depth=...)` says how deep the liquid goes behind the contact line
+and in which axial direction, and `InterfaceChain.reservoir` carries it into the plan. The closure
+then runs along the wall by that much and only then across, so the enclosed body is the nozzle rather
+than the sliver. It has to be **deeper than any excursion of the interface past the contact line**,
+and its **sign cannot be inferred** - the same shape with the two phases swapped needs the other one.
+
+Everything downstream uses the same closure, so no volume has to be corrected for it: `_closed_section`
+grows the same stub, `_interface_curve` cuts the stub back off the run at the contact point (it runs at
+`x > 0` and would otherwise come back as interface), and `NewChain.reservoir` is inherited from the old
+chain that owned the end. Pinned by `tests/test_axisymm_reservoir_closure.py`.
+
+The depth is also what the plan's `axis_spans_inside` uses at a fixed end. A chain end on a wall does
+not touch the axis, so the span has to run to where the *closure* meets it - the contact height plus
+the depth. Taking the contact height itself leaves the whole nozzle above the meniscus outside every
+span, and `define_geometry` then cannot close the liquid's curve loop.
+
+Independently of it, the opening now leaves a band of `2 eps` around a *flat* closure alone. That
+costs no detection - an event within `4 eps` of a fixed end is refused anyway - and it is what keeps a
+merely dimpled meniscus from being eroded away where no reservoir depth was given.
+
+---
+
+## 9b. Either mesh generator: `TopologicalChangesTemplate`
+
+The surgery is geometry, and the calls `define_geometry` makes to build it - `spline_from_chain`,
+`lines_from_axis_segments`, `plane_surface` - are spelled the same way by gmsh and by TQMesh. So the
+shared half lives in `_TopologicalChangesMixin` and is composed into one class per backend:
+`TopologicalChangesGmshTemplate` and `TopologicalChangesTQMeshTemplate`. `TopologicalChangesTemplate`
+is the common type to test with `isinstance`, and what `AxisymmetricReconnection` requires.
+
+*Composed*, not inherited: `MeshTemplate` is a nanobind type and nanobind refuses any class with two
+bases, so the mixin's methods are copied into the concrete classes by `_with_topological_changes`,
+which also registers them with the (abstract) `TopologicalChangesTemplate`. Each backend supplies only
+what it must - an `__init__`, a `_reset` and a `point` in its own signature, routed through the shared
+`_snapped_point`/`_register_snapped_point`.
+
+The one place the two genuinely differ is what a chain of points means. **gmsh** takes them as the
+geometry and discretises it by size afterwards; **TQMesh** takes them as the boundary edges
+themselves. `get_boundary_coordinates` walks the boundary *nodes*, of which a second-order mesh has
+two per element, so handing all of them to TQMesh doubles the boundary at every remesh and multiplies
+the element count by four - measured on a plain unit square, 40 boundary edges became 80, 160, 320 and
+589 elements became 30850 over three quality remeshes. `TopologicalChangesTQMeshTemplate` therefore
+resamples: the chain becomes the *control* points of the spline and TQMesh distributes the boundary
+along it by the size function, which is fed the plan's per-point sizes for the duration of the call.
+With that, four consecutive remeshes of the same blob stay at 1523/1527/1503/1503/1505 elements.
+(This is not specific to the surgery: any `TQMeshTemplate` that rebuilds a boundary from
+`get_boundary_coordinates` needs `spline(..., resample=True)`, which its class docstring now says.)
+
+`tests/test_axisymm_reconnection_tqmesh.py` runs the detection, the pinch-off and the coalescence
+through the TQMesh backend; `tests/axisymm_reconnection_worker.py --backend tqmesh` is how.
+
+---
+
 ## 10. Limitations
 
 **Refused, with a clear message.**
@@ -665,7 +732,8 @@ is the harder of the two.
 | an event within `4 eps` of a **fixed end** | the synthetic drop to the axis that closes a "fixed" end would be inside the event window |
 | a waist **axially shorter** than the structuring element | §2.2(i) — deferred, not fatal, for `max_deferred_events` solves |
 | a pinch gap shorter than `distmin` | §2.2(ii): the closing would re-bridge what the opening just opened |
-| a bulk template that is not a `TopologicalChangesGmshTemplate` | the surgery is delivered by re-running `define_geometry` |
+| a bulk template that is not a `TopologicalChangesTemplate` | the surgery is delivered by re-running `define_geometry` |
+| a wall-attached interface without `reservoir_depth`, once it dimples or crosses the contact height | §9a - the flat closure is not the body |
 
 **Approximate or absent.**
 
@@ -675,6 +743,15 @@ is the harder of the two.
   Rayleigh-Plateau profile at `R0 = 1`, `eps_p <= 0.08 R0` worked at every step past the threshold,
   `eps_p >= 0.10 R0` never worked. A rough rule from that single scan: `rmin` below a tenth of the drop
   radius, and `cap_window_factor * rmin` comfortably shorter than the fragment it sits on.
+* **Refining the interface by its own RADIUS is not the answer, and is dangerous.** The obvious
+  reaction to a cap the mesh cannot resolve is to make the element size follow the local radius
+  (`size = x/k` on the interface). Measured on the printhead: it refines everywhere the interface
+  approaches the axis - both caps, the ligament tip, the meniscus tip - and with a low
+  `Mesh.MeshSizeMin` it does so without bound. The mesh went from 30 000 to **two million** equations
+  in a few steps and the machine ran out of memory. It also destabilises the phase *before* the pinch,
+  where the finer elements at an entrained gas wedge stall the Newton solve. Curvature refinement on
+  the surgery mesh alone is the cheap, bounded version of the same idea.
+
 * **Continuing far past a pinch is limited by the resolution of the fresh caps, not by the surgery.**
   The Rayleigh-Plateau test asserts twelve accepted steps past the event. It reaches 18 or 19 and then
   stops, always the same way: the satellite filament's two caps retract into a tip that `h_min = 0.04
@@ -683,6 +760,30 @@ is the harder of the two.
   involved, no element is inverted at that point, and the volume is still good to 1e-4. Refining until
   it goes away costs more than the whole test does. Practical reading: after a pinch, either give the
   caps a mesh size of their own or stop before they have retracted a few element sizes.
+
+* **A fresh cap needs the mesh to follow its CURVATURE, and to be ALLOWED to.** The cap the surgery
+  builds has a radius of about `rmin`, and a second-order triangle whose curved edge wraps around
+  something smaller than itself is inverted at an integration point - `det(dx/ds) < 0` right on the
+  axis at the cap, at the pinch height. The run then dies on a fold that neither a smaller `dt` nor a
+  remesh can undo, since the same geometry rebuilds the same element; with
+  `RemeshingOptions(on_inverted_element=True)` it is the "kept folding after 3 remeshes" message. The
+  inverted-element report names the position, which is how this was found rather than guessed.
+
+  Two settings, and **both** are needed. Measured on the dumbbell at `rmin = 0.025`, `h = 0.05`:
+
+  | `Mesh.MeshSizeMin` | `MeshSizeFromCurvature` | |
+  | --- | --- | --- |
+  | none | off | folds |
+  | none | 8 | ok |
+  | `rmin/2` = 0.0125 | 8, 12, 20 | **folds at every one of them** |
+  | `rmin/3` = 0.008 | 8 | folds |
+  | `rmin/4` = 0.00625 | 8 | ok |
+  | `rmin/5` = 0.005 | 8 | ok, also with a background size field |
+
+  So the floor decides whether gmsh may follow the curvature at all, and it turned out to matter more
+  than the curvature setting: at `rmin/2` no amount of curvature refinement helps. **Halving `h`
+  everywhere does not help either** - this is curvature, not resolution. The cost of getting it right
+  is about 10 % more elements. A background mesh size field does not interfere.
 
 * **Satellite-fragment removal loses volume by definition.** `allow_fragment_removal=True` drops
   fragments the opening deletes entirely; the loss is reported in the event print and in

@@ -4003,7 +4003,13 @@ namespace pyoomph
     // turned that into a hard error, which is where it stands - tests/test_mesh_point_locator.py
     // pins the refusal so that lifting it is a deliberate act, and the code below is kept correct
     // for that day rather than deleted.
-    if (has_dg || my_ft->info_DL.numfields || my_ft->info_D0.numfields)
+    //
+    // discontinuous_fields_need_no_transfer is the one way past it, and it is not a lifting of the
+    // limitation: it says the destination recomputes those fields itself, so skipping them loses
+    // nothing. Without it a domain carrying a single D0 field - a DisjunctDomainMarker's component
+    // numbering, say - could not be remeshed at all.
+    if (!this->discontinuous_fields_need_no_transfer &&
+        (has_dg || my_ft->info_DL.numfields || my_ft->info_D0.numfields))
     {
       throw_runtime_error("Cannot interpolate DG fields at interfaces yet");
     }

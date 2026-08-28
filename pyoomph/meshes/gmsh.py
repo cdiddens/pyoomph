@@ -411,6 +411,35 @@ class GmshTemplate(MeshedMeshTemplate):
         self._maxdim=0
 
 
+    def _define_geometry_is_required(self) -> bool:
+        # With a mesh file to load, the geometry is whatever that file holds and define_geometry() has
+        # nothing to add - it would only try to build gmsh entities with no geometry object open.
+        return self._loaded_from_mesh_file is None
+
+    def _template_for_stored_mesh_file(self, meshfile:str) -> "MeshTemplate":
+        """A sibling of this template, of the SAME class, whose geometry is the stored ``.msh``.
+
+        The reload used to build a plain ``GmshTemplate``, so every subclass lost its class across a
+        restart from a state file that had been written after a remesh - and with it everything that
+        dispatches on the class, most visibly
+        :py:class:`~pyoomph.equations.topological_changes.AxisymmetricReconnection`, which refuses a
+        bulk template that is not a ``TopologicalChangesGmshTemplate``.
+
+        The class cannot be re-instantiated (a subclass's ``__init__`` takes whatever arguments the
+        user gave it), so the object is built empty and given this template's attributes: the C++ base
+        is constructed explicitly, ``__dict__`` carries the user's own configuration over, and
+        ``_reset()`` then replaces every geometry container with a fresh one, so the two share no
+        mutable state. ``define_geometry`` is suppressed by ``_define_geometry_is_required``.
+        """
+        cls = type(self)
+        new = cls.__new__(cls)
+        _pyoomph.MeshTemplate.__init__(new)   # the C++ side; cls.__init__ needs the user's arguments
+        new.__dict__.update(self.__dict__)
+        new._reset()
+        new._loaded_from_mesh_file = meshfile
+        new._meshfile = meshfile
+        return new
+
     def point(self, x:ExpressionOrNum, y:ExpressionOrNum=0.0, z:ExpressionOrNum=0.0, size:ExpressionNumOrNone=None, *,name:str | None=None,consider_spatial_scale:bool | None=None)->Point:
         """
         Add a point to the geometry. Coordinates must be given in the spatial unit, e.g. in meter if the problem has a metric set_scaling(spatial=...) set.
