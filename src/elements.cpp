@@ -1174,7 +1174,9 @@ namespace pyoomph
 		shape_buffer_pool.require(needed);
 
 		this->set_nlagrangian_and_ndim(this->jitcode->get_func_table()->lagr_dim, this->jitcode->get_func_table()->nodal_dim);
-		this->ensure_external_data();
+		// Qualified: this is a constructor, so the InterfaceElementBase override could never run here
+		// (its body is commented out in any case, see elements_interface.cpp).
+		BulkElementBase::ensure_external_data();
 		
 	}
 

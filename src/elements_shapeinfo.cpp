@@ -248,10 +248,14 @@ namespace pyoomph
 		}
 		
 		// Helper tensors
+		// el_dim is 0 for a point element, and a zero-extent VLA is undefined behaviour even though
+		// every loop over el_dim below is then empty. A dummy extent keeps these on the stack, which
+		// a std::vector would not - this runs per integration point.
+		const unsigned el_dim_extent = el_dim ? el_dim : 1;
 		// T^{l}_{gdj}=T[l][g][d][j]
-		double T[n_node][el_dim][el_dim][n_dim];
+		double T[n_node][el_dim_extent][el_dim_extent][n_dim];
 		// G^{lab}_j=G[l][a][b][j]
-		double G[n_node][el_dim][el_dim][n_dim];
+		double G[n_node][el_dim_extent][el_dim_extent][n_dim];
 		
 		//Fill the T tensor
 		for (unsigned int l=0;l<n_node;l++)

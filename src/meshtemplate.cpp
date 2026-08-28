@@ -1654,7 +1654,9 @@ Index : Local coordinates (s0,s1,s2)
 
 	MeshTemplate::~MeshTemplate()
 	{
-		reset();
+		// Qualified: a destructor cannot reach a Python subclass's _reset (see PyMeshTemplateTrampoline),
+		// and calling into Python during teardown is not wanted either. Only the C++ state is reset.
+		MeshTemplate::reset();
 	}
 
 	// Unconditionally append a new node and register its position in the KD-tree (used by
@@ -2566,7 +2568,7 @@ Index : Local coordinates (s0,s1,s2)
 		samplepos.resize(samples.size(), std::vector<double>(pts[0].size()));
 		for (unsigned int i = 0; i < samplepos.size(); i++)
 		{
-			interpolate(samples[i], samplepos[i]);
+			CurvedEntityCatmullRomSpline::interpolate(samples[i], samplepos[i]); // called from the constructor
 		}
 	}
 

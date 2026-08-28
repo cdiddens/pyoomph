@@ -816,7 +816,7 @@ namespace pyoomph
 	{
 		// if (meshtemplate) delete meshtemplate; meshtemplate=NULL;
 		// for (unsigned int i=0;i<fields_by_index.size();i++) delete fields_by_index[i];
-		unload_all_dlls();
+		Problem::unload_all_dlls(); // qualified: a destructor cannot dispatch to an override anyway
 		// if (this->compiler) delete this->compiler;
 		if (logfile)
 		{

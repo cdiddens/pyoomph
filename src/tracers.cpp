@@ -209,7 +209,7 @@ namespace pyoomph
 
   TracerCollection::~TracerCollection()
   {
-    clear();
+    TracerCollection::clear(); // qualified: a destructor cannot dispatch to an override anyway
     drop_locators();
   }
 

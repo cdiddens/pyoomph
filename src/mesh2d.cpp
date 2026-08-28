@@ -60,7 +60,7 @@ namespace pyoomph
     using namespace oomph::QuadTreeNames;
 
     // Setup the neighbours
-    find_neighbours();
+    DynamicQuadTreeForest::find_neighbours(); // qualified: called from the constructor
 
     // Construct the rotation scheme, note that all neighbour pointers must
     // be set before the constructor is called

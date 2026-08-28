@@ -244,13 +244,15 @@ class MeshHandle : public MeshHandleBase
 {
 public:
 	std::unique_ptr<T> obj;
+	// Qualified in both: neither a constructor nor a destructor can dispatch to an override, and
+	// the registry must be keyed by exactly this handle's own mesh pointer in either direction.
 	MeshHandle() : obj(new T())
 	{
-		pyoomph_mesh_handle_registry()[mesh()] = this;
+		pyoomph_mesh_handle_registry()[MeshHandle::mesh()] = this;
 	}
 	~MeshHandle() override
 	{
-		pyoomph_mesh_handle_registry().erase(mesh());
+		pyoomph_mesh_handle_registry().erase(MeshHandle::mesh());
 	}
 	T *get() const { return obj.get(); }
 	pyoomph::Mesh *mesh() const override { return dynamic_cast<pyoomph::Mesh *>(obj.get()); }

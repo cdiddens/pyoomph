@@ -1411,9 +1411,10 @@ void PyReg_Expressions(nb::module_ &m)
 		"GiNaC_delayed_expansion", [](std::function<GiNaC::ex()> func)
 		{
 	  pyoomph::DelayedPythonCallbackExpansion * cbexpr=new pyoomph::DelayedPythonCallbackExpansion(func);
-	  pyoomph::DelayedPythonCallbackExpansionWrapper * wrapped=new pyoomph::DelayedPythonCallbackExpansionWrapper(cbexpr);
-
-	  return 0+GiNaC::GiNaCDelayedPythonCallbackExpansion(*wrapped); },
+	  // The GiNaC leaf stores a COPY of the wrapper (PYGINACSTRUCT), so the wrapper itself does not
+	  // have to outlive this call - it used to be heap-allocated and then leaked. Only cbexpr, which
+	  // the copy points at, is deliberately kept alive for as long as the expression can be expanded.
+	  return 0+GiNaC::GiNaCDelayedPythonCallbackExpansion(pyoomph::DelayedPythonCallbackExpansionWrapper(cbexpr)); },
 		nb::keep_alive<0, 1>(), nb::keep_alive<1, 0>(), nb::arg("func"),
 		"Wrap the Python callable ``func`` (taking no arguments, returning an Expression) as a symbolic placeholder that is only evaluated once actually expanded/needed.");
 

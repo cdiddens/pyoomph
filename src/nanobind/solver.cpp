@@ -424,6 +424,10 @@ extern "C"
             xadj_Py = nb::ndarray<nb::numpy, idx_t>(xadj, {(size_t)nvertex + 1}, nb::capsule(xadj, [](void *f) noexcept {}));
 
         nb::ndarray<nb::numpy, idx_t> adjacency_vector_Py; // adjacency_vector // [xadj[-1]]
+        // The adjacency length is xadj[nvertex], so an adjacency without the row pointers cannot be
+        // sized at all. oomph-lib always passes both; say so rather than dereferencing a null xadj.
+        if (adjncy && !xadj)
+            throw_runtime_error("METIS IMPLEM: adjncy given without xadj");
         if (adjncy)
             adjacency_vector_Py = nb::ndarray<nb::numpy, idx_t>(adjncy, {(size_t)xadj[nvertex]}, nb::capsule(adjncy, [](void *f) noexcept {}));
 
