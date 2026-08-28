@@ -1,8 +1,10 @@
 # pyoomph — advanced topics for AI coding assistants
 
-Companion to [`AGENTS.md`](AGENTS.md). Covers four advanced areas: bifurcation/
-stability analysis, embedding custom (non-symbolic or piecewise) C code into a weak
-form, Discontinuous Galerkin discretizations, and the internals of ALE/moving-mesh
+Companion to [`AGENTS.md`](../AGENTS.md); for running any of this in parallel see
+[`parallel.md`](parallel.md). Covers four advanced areas: bifurcation/stability
+analysis (eigenvalues, bifurcation tracking, branch switching, periodic orbits,
+deflation), embedding custom (non-symbolic or piecewise) C code into a weak form,
+Discontinuous Galerkin discretizations, and the internals of ALE/moving-mesh
 and remeshing. These are all built on the same `Equations`/`Problem`/weak-form
 machinery described in `AGENTS.md` — nothing here changes that model, it only adds
 more powerful ways to use it. If in doubt, grep the cited source file directly.
@@ -11,9 +13,26 @@ more powerful ways to use it. If in doubt, grep the cited source file directly.
 
 All methods below are on `Problem` (`pyoomph/generic/problem.py`) and operate on
 whatever residuals/Jacobian the currently assembled equations produce — no special
-setup beyond building the problem normally. See `AGENTS_EXAMPLES.md` recipe 4 for the
+setup beyond building the problem normally. See `agents/examples.md` recipe 4 for the
 simpler parameter-continuation primitives (`go_to_param`, `arclength_continuation`)
 that these build on.
+
+### Before anything else: `setup_for_stability_analysis`
+
+```python
+problem.setup_for_stability_analysis(analytic_hessian=True, azimuthal_stability=None,
+                                      additional_cartesian_mode=None)
+```
+Call this in `define_problem` (or before the first solve) whenever you intend to do
+bifurcation tracking, branch switching or normal-mode stability. It tells the code
+generator to emit the extra derivatives those augmented systems need — above all the
+**analytic Hessian** (second derivatives of the residual), and the azimuthal/Cartesian
+normal-mode variants of the residual when `azimuthal_stability=True` /
+`additional_cartesian_mode=True`. Without it the Hessian is taken by finite differences
+where it is available at all, which is slower and markedly less robust: bifurcation
+tracking that stalls or converges to nonsense is very often a missing call here.
+`problem.debug_analytic_hessian_by_fd()` cross-checks the analytic Hessian against
+finite differences when you suspect it.
 
 ### Eigenvalue problems
 
@@ -115,6 +134,112 @@ scripts `kuramoto_sivanshinsky_arclength_eigen.py` /
 `kuramoto_sivanshinsky_bifurcation.py`) and `docs/source/tutorial/advstab/` for the
 full azimuthal/Cartesian-normal-mode tutorials.
 
+### Classifying a bifurcation and switching onto the new branch
+
+Once `activate_bifurcation_tracking(parameter)` has converged onto the point,
+`problem.classify_bifurcation(parameter)` computes the normal form and returns a dict
+whose `["type"]` is `"fold"`, `"transcritical"`, `"pitchfork"`, `"hopf"`, ... For every
+type except a fold there is a *second* branch through the point, and
+
+```python
+ds = problem.switch_branch(parameter, normal_form=normal_form, direction=-1)
+```
+steps onto it and returns a first arclength step size — deliberately small, and it grows
+again by itself during the following `arclength_continuation` calls. `direction=±1`
+chooses which of the two ways along the new branch to go. `problem.backup_state()` /
+`problem.load_state(state)` are the idiom for parking the state just before a
+bifurcation, scanning the rest of the current branch, and then coming back to it
+(`docs/source/tutorial/temporal/stability/bifurcation_branch_switching.py` does exactly
+this loop). `activate_eigenbranch_tracking(...)` follows an eigenbranch without
+demanding `Re(λ)=0`.
+
+### Periodic orbits and Floquet multipliers
+
+A Hopf bifurcation gives birth to a limit cycle, and pyoomph solves for the whole orbit
+at once: the time dependence over one period is discretized (collocation, periodic
+B-splines, ...), the period `T` becomes an unknown, and a phase constraint removes the
+time-shift invariance. This needs the residual to be **first order in time** (introduce
+auxiliary dofs otherwise), writable as `M(x)·∂ₜx + R₀(x) = 0`.
+
+```python
+problem.solve()
+problem.solve_eigenproblem(n=1)                       # give the tracker an eigenvector
+problem.activate_bifurcation_tracking("rho", "hopf")
+problem.solve()                                        # sit exactly on the Hopf
+
+with problem.switch_to_hopf_orbit(NT=100) as orbit:    # period + initial guess derived for you
+    print("supercritical:", orbit.starts_supercritically(), "T =", orbit.get_T())
+    orbit.output_orbit("orbit_at_rho_{:.4f}".format(problem.rho.value))
+    ds = orbit.get_init_ds()                           # sign from the Lyapunov coefficient
+    while problem.rho.value > 16:
+        ds = problem.arclength_continuation("rho", ds)  # continue the ORBIT in the parameter
+        orbit.output_orbit("orbit_at_rho_{:.4f}".format(problem.rho.value))
+```
+
+- `switch_to_hopf_orbit(...)` is a context manager returning a `PeriodicOrbit`. Use
+  `problem.activate_periodic_orbit_handler(T, mode=..., NT=..., order=...)` instead when
+  you already have a guess (e.g. one period sampled from a time integration) rather than
+  a Hopf point.
+- `mode` selects the time discretization: `"collocation"` (default), `"bspline"`,
+  `"central"`, `"BDF2"`, `"floquet"`. `T_constraint` is `"phase"` (default) or `"plane"`.
+- `PeriodicOrbit` methods: `get_T`, `get_init_ds`, `starts_supercritically`,
+  `output_orbit(subdir)`, `iterate_over_samples`, `evaluate_observable_time_integral`,
+  `change_sampling(...)` (re-discretize in time without losing the orbit),
+  `load_from_state` (restart a tagged orbit from a saved state).
+- **Stability of the orbit** comes from the Floquet multipliers:
+  `problem.get_floquet_multipliers(n=..., method="condensed"|"periodic_schur"|"eigenproblem")`.
+  A periodic orbit always has a trivial multiplier at exactly 1 (the time-shift
+  direction); `ignore_periodic_unity` drops it, but **never discard it by a tolerance** on
+  `|μ−1|` — a genuine second multiplier passing near 1 is precisely the bifurcation you
+  are looking for. The orbit is stable iff every non-trivial `|μ| < 1`.
+
+### Disconnected solutions: deflation
+
+Arclength continuation and branch switching only ever reach solutions *connected* to
+the one you started from. Deflation (Farrell, Beentjes & Birkisson, arXiv:1603.00809)
+finds the rest: after converging to a solution, the residual is divided by a factor that
+blows up there, so Newton cannot return to it and must find something else.
+
+```python
+# all solutions at the current parameter value
+for dofs in problem.iterate_over_multiple_solutions_by_deflation(deflation_alpha=0.1,
+                                                                 deflation_p=2,
+                                                                 num_random_tries=5):
+    problem.output()
+
+# or: sweep a parameter, reporting (branch index, parameter value, dofs) as branches appear
+for branch, value, dofs in problem.deflated_continuation(max_branches=10, r=[-1, 1]):
+    ...
+```
+`set_deflation_operator(op)`/`get_deflation_operator()` give manual control.
+`deflated_solve_by_eigenperturbation(eigenindex=...)` pushes off along an eigenvector
+instead of a random perturbation, which is the better first move just past a
+bifurcation. All of this works under `mpirun` and `--distribute`. The random
+perturbations use a fixed `random_seed=0` by default, which is also what keeps the ranks
+in step — pass `random_seed=None` only in a serial run.
+
+### Interactive exploration: the bifurcation GUI
+
+For building a bifurcation diagram by hand rather than scripting every step:
+```python
+from pyoomph.utils.bifurcation_gui import BifurcationGUI
+with MyProblem() as problem:
+    gui = BifurcationGUI(problem, "my_parameter")
+    ...
+```
+A tkinter front-end that drives continuation, eigenvalues, bifurcation tracking, branch
+switching, orbits and deflation on the live problem, and tags states so a run can be
+resumed. See `docs/source/tutorial/advstab/bifgui.rst`.
+
+### Other stability utilities
+
+- `pyoomph.utils.periodic_driving_response` — frequency response of a periodically
+  driven system (`docs/source/tutorial/advstab/response.rst`).
+- `pyoomph.utils.lyapunov` — Lyapunov exponents of a chaotic trajectory.
+- `pyoomph.utils.paramscan.ParallelParameterScan` — run many independent parameter
+  values as separate processes; unrelated to MPI, and the right tool when the sweep,
+  not the single solve, is what is slow.
+
 ## 2. Custom (non-symbolic / piecewise) C code in a weak form
 
 Most physics is expressed as pure GiNaC `Expression`s and differentiated
@@ -170,7 +295,7 @@ class PiecewiseNSCHPotential(CustomMultiReturnExpression):
 A finite-difference Jacobian (whether via Python `eval` or `FILL_MULTI_RET_JACOBIAN_BY_FD`)
 is noticeably slower and slightly less accurate than an analytic one, and is
 **incompatible with bifurcation tracking** in some cases (see the UNIFAC note in
-`AGENTS_MATERIALS.md`) — prefer filling in the analytic Jacobian by hand when the
+`agents/materials.md`) — prefer filling in the analytic Jacobian by hand when the
 derivative is easy, and reserve FD only for genuinely awkward cases.
 
 The single-return analogue is `CustomMathExpression` (`cb.py`): override
@@ -373,7 +498,7 @@ Ready-made mesh-motion equations, all `BaseMovingMeshEquations` subclasses in `A
 
 Supporting equations: `ConnectMeshAtInterface` (match node positions of two
 independently-moving domains across a shared interface, Lagrange-multiplier based —
-same pattern as recipe 2 in `AGENTS_EXAMPLES.md` but for the mesh field);
+same pattern as recipe 2 in `agents/examples.md` but for the mesh field);
 `EnforcedInterfacialLaplaceSmoothing` (keep interface nodes equidistant along
 arclength as the interface deforms — important near a moving contact line to avoid
 element pile-up; has `.with_corners(*boundary_names)`); `EnforceVolumeByPressure`/

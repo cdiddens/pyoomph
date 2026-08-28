@@ -1,12 +1,12 @@
 # pyoomph — materials system reference for AI coding assistants
 
-Companion to [`AGENTS.md`](AGENTS.md). This covers `pyoomph.materials` — the fluid/
+Companion to [`AGENTS.md`](../AGENTS.md). This covers `pyoomph.materials` — the fluid/
 solid/interface property system consumed by the multi-component equation classes in
 `pyoomph/equations/multi_component.py`, `NSCH.py`, `low_order_NSCH.py`, `darcy.py`,
 and `contact_angle.py` (see `AGENTS.md`'s "Built-in physics" section for those
 equation classes themselves; this file is about the material/property objects you
 pass into them). For a full worked example combining materials with flow equations,
-see recipe-style usage in [`AGENTS_EXAMPLES.md`](AGENTS_EXAMPLES.md).
+see recipe-style usage in [`examples.md`](examples.md).
 
 ## Mental model
 
@@ -241,6 +241,47 @@ For a soluble surfactant, a nonzero (possibly tiny) concentration must appear bo
 the liquid mixture *and* in the `surfactants` dict passed to `get_interface_properties`
 — an *insoluble* surfactant only lives on the interface (no bulk mixture term needed).
 
+## Electrolytes: ions and dissolved salts
+
+Salt in a liquid is not modelled as an ordinary mixture component. Ions come in pairs
+that must keep the solution electroneutral, they carry a charge and a mobility, and they
+change the *activity* of the solvent — which is what makes a brine evaporate more slowly
+than pure water.
+
+```python
+import pyoomph.materials.ions          # side-effect import: registers the ion/salt library
+from pyoomph.materials import *
+
+water = get_pure_liquid("water")
+water.add_salt("NaCl", 1*milli*molar)          # or: add_salt(get_salt("NaCl"), ...)
+water.add_salt("Ca2+", "Cl-", 0.5*milli*molar)  # by the two ions, with the 1:2 stoichiometry
+liquid = Mixture(water)
+```
+
+- `add_salt(salt, concentration)` takes the *salt's* concentration and dissolves it in
+  the stoichiometry that makes the solution electroneutral (`CaCl2` gives one Ca²⁺ per
+  two Cl⁻). The three-argument form `add_salt(cation, anion, concentration)` names the
+  two ions instead and accepts `cation_`/`anion_`-prefixed overrides, e.g.
+  `anion_diffusivity=...`. `add_ion(...)` adds a single ion directly.
+- Roughly 50 salts (`NaCl`, `KCl`, `CaCl2`, `MgSO4`, `Na2CO3`, `NaOH`, `HCl`, ...) and
+  ~28 ions are registered; `get_salt(name)`/`get_ion(name)` look them up, `new_ion(...)`
+  registers your own. Ion names use the charge suffix: `"Na+"`, `"Cl-"`, `"Ca2+"`,
+  `"SO4 2-"` — check with `get_ion` rather than guessing the spelling.
+- Query the resulting solution with `get_ions()`, `get_ion_molality(name)`,
+  `get_ion_diffusivity(name)`, `get_ion_activity_coefficient(name)`,
+  `get_ionic_strength()`.
+- **Activity coefficients**: only the `"AIOMFAC"` model has an electrolyte
+  generalization — the Original and Dortmund UNIFAC variants have no ion parameters, so
+  `set_activity_coefficients_by_unifac("AIOMFAC")` is the one to use for a salt solution.
+  It carries all three parts (short-range UNIFAC, middle-range ion interactions,
+  long-range Debye-Hückel); see `dev_docs/aiomfac_electrolytes.md`.
+- **Transporting them**: `SaltTransportEquations(salts, fluid_props=...)`
+  (`pyoomph/equations/salt_transport.py`) moves ion pairs as salts, which keeps
+  electroneutrality by construction and is the right choice when there is no applied
+  field. When the potential matters, use `NernstPlanckEquations` plus
+  `ElectricPotentialEquations`/`PoissonBoltzmannEquations` from
+  `pyoomph/equations/electrostatics.py` instead. Tutorial: `docs/source/tutorial/mcflow/salts.rst`.
+
 ## Mass transfer (evaporation/condensation) models
 
 Class hierarchy in `pyoomph/materials/mass_transfer.py`:
@@ -287,7 +328,7 @@ some tutorial prose says `"UNIFAC"` for the original model, which is stale; the
 correct string verified from source is `"Original"`. For mixtures of 3+ components,
 this internally builds a `CustomMultiReturnExpression` (finite-difference Jacobian)
 for performance — such an expression cannot be used inside bifurcation tracking (see
-`AGENTS_ADVANCED.md`).
+`agents/advanced.md`).
 
 ## Using materials in flow equations (cross-reference)
 
@@ -301,7 +342,7 @@ eqs = CompositionFlowEquations(fluid_props, compo_space="C1", ...)      # bulk: 
 eqs += MultiComponentNavierStokesInterface(interface_props, ...) @ "some_boundary"  # free interface w/ mass transfer, Marangoni, surfactants
 ```
 
-See `AGENTS_EXAMPLES.md` (or `docs/source/tutorial/mcflow/marangoni_instability.py`
+See `agents/examples.md` (or `docs/source/tutorial/mcflow/marangoni_instability.py`
 in this repo) for a complete Hele-Shaw Marangoni-instability problem built this way:
 two coupled domains (`"liquid"`, `"gas"`) with a `MultiComponentNavierStokesInterface`
 between them, driven purely by looked-up/mixed materials.

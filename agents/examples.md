@@ -1,14 +1,14 @@
 # pyoomph — example recipes for AI coding assistants
 
-Companion to [`AGENTS.md`](AGENTS.md) (read that first for the core mental model and
+Companion to [`AGENTS.md`](../AGENTS.md) (read that first for the core mental model and
 API). This file collects idiomatic, code-verified recipes for common problem shapes,
 each as a short, runnable script pulled from (or closely following) the actual
 tutorial tree at `docs/source/tutorial/`. Prefer copying the pattern that matches the
 user's problem over inventing a new structure.
 
-For materials/multi-component recipes, see [`AGENTS_MATERIALS.md`](AGENTS_MATERIALS.md).
+For materials/multi-component recipes, see [`materials.md`](materials.md).
 For bifurcation/stability, custom C code, DG, and ALE-internals recipes, see
-[`AGENTS_ADVANCED.md`](AGENTS_ADVANCED.md).
+[`advanced.md`](advanced.md).
 
 | # | Recipe | Key API exercised |
 |---|---|---|
@@ -43,9 +43,10 @@ eqs += (DirichletBC(velocity_y=0) + NeumannBC(velocity_x=T)) @ "top"
 # No in/outflow anywhere => pressure has a null space (p -> p+const); fix it:
 eqs += AverageConstraint(pressure=0)
 
-# Derive U = sqrt(<u.u>/Area) as a named observable, evaluated after each solve
+# Derive U = sqrt(<u.u>/Area) as a named observable, evaluated after each solve.
+# Both integrals are over the PHYSICAL domain, so Area=1 evaluates to the real area.
 eqs += IntegralObservables(U_sqr=dot(var("velocity"), var("velocity")), Area=1,
-                            U=lambda U_sqr, Area: square_root(U_sqr) / Area)
+                            U=lambda U_sqr, Area: square_root(U_sqr / Area))
 
 problem += RectangularQuadMesh(N=25, name="domain")
 problem += eqs @ "domain"
@@ -63,7 +64,9 @@ Key points:
 - `@` accepts either a single boundary name or a list, e.g. `NoSlipBC() @ ["left","right","bottom"]`.
 - `IntegralObservables` entries can reference each other by name (including via a
   `lambda` of previously-defined observables), and are read back with
-  `problem.get_mesh(domain).evaluate_observable(name)`.
+  `problem.get_mesh(domain).evaluate_observable(name)`. The integral is over the
+  *physical* domain, so in a dimensional problem the result carries units — divide by a
+  unit before `float()`.
 - `problem.create_text_file_output(fname, header=[...])` + `.add_row(...)` is the
   idiom for writing a custom scan/summary file (separate from the per-timestep
   `TextFileOutput()`/`MeshFileOutput()` equation classes).
@@ -236,7 +239,7 @@ Key points:
   other field, since `activate_coordinates_as_dofs` makes them regular unknowns.
   `var("lagrangian_x"/"lagrangian_y")` gives the fixed reference (initial) position,
   used here to set up the initial mesh shape via `InitialCondition(mesh_y=...)`.
-- See `AGENTS_ADVANCED.md` for the mechanics of `activate_coordinates_as_dofs` and the
+- See `agents/advanced.md` for the mechanics of `activate_coordinates_as_dofs` and the
   full catalog of mesh-smoothing equations (`PseudoElasticMesh`, `HyperelasticSmoothedMesh`, ...).
 
 ## 4. Parameter continuation
@@ -309,7 +312,7 @@ if __name__ == "__main__":
 For scanning towards a specific target value of a parameter (rather than open-ended
 stepping), use `problem.go_to_param(r=target_value)` — internally arclength-based, so
 it also survives folds (see recipe 1 above for a `go_to_param` scan).
-See `AGENTS_ADVANCED.md` for eigenvalue-based stability analysis and bifurcation
+See `agents/advanced.md` for eigenvalue-based stability analysis and bifurcation
 tracking (`solve_eigenproblem`, `activate_bifurcation_tracking`), which build on
 these same primitives.
 

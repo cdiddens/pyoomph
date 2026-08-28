@@ -325,7 +325,7 @@ and `ElementSizeFromInitialCartesianSize` had **no users at all** — `stabilize
   give exactly `h = 1`, so the tutorial's physics is unchanged; `supg.rst` was updated accordingly.
 
 Two further references were spurious: `docs/source/tutorial/dg/convection_diffusion.py` and
-`AGENTS_ADVANCED.md` both did `from pyoomph.equations.SUPG import *` "for is_DG_space", but
+`agents/advanced.md` both did `from pyoomph.equations.SUPG import *` "for is_DG_space", but
 `is_DG_space` lives in `pyoomph/expressions/generic.py` and only arrived through the star-import
 chain. Both now import what they actually use. (Watch out for this pattern in general: the deleted
 star-import was also the only source of `vector` in the two tutorials, which is why they now carry

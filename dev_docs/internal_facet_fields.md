@@ -5,7 +5,7 @@ nodal DG spaces `D1`/`D2`/`D1TB`/`D2TB`) can be declared on the `_internal_facet
 mesh (1d/2d/3d, all element shapes including mixed), and **every one of them** survives spatial
 adaptation (§5), remeshing (§6), MPI `--distribute` (§7.1) and a state file (§8). Refused by design:
 continuous spaces on the skeleton (§2), and the parent-space constraints a `Dx` facet field inherits
-(§5.4). User docs: `AGENTS_ADVANCED.md` ("Unknowns on the facet skeleton") and the tutorial
+(§5.4). User docs: `agents/advanced.md` ("Unknowns on the facet skeleton") and the tutorial
 `docs/source/tutorial/dg/facetfields.rst`; tests: `tests/test_internal_facet_fields.py` and
 `tests/test_mpi_facet_fields.py`.
 

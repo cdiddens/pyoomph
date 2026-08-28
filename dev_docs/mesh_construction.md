@@ -570,7 +570,7 @@ and interior-penalty DG becomes **inconsistent** (the exact solution stops satis
 equations). The DG symptom is the deceptive one. The penalty term still pulls the answer towards
 continuity, so the error decays like `1/DG_alpha` rather than staying put — which reads exactly like a
 coercivity problem. It was recorded as one, in `tests/test_internal_facet_fields.py` and in
-`AGENTS_ADVANCED.md`: "tets need `DG_alpha ≈ 10–40`". They do not; `1` is enough, on every family.
+`agents/advanced.md`: "tets need `DG_alpha ≈ 10–40`". They do not; `1` is enough, on every family.
 
 The gmsh importer had always known the convention — `pyoomph/meshes/gmsh.py` permutes imported tets by
 `[0,2,1,3]` (and `tetra10` by `[0,2,1,3,6,4,7,5,8,9]`) precisely to convert gmsh's winding to this one.
