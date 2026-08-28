@@ -200,6 +200,18 @@ Tutorial
   :class: framed   
   :title: Cartesian normal mode stability analysis
 
+.. |tuto_viscoelastic| thumbnail:: tutorial/ale/beadsonstring_viscoelastic_thumb.png
+  :width: 300px
+  :align: center 
+  :class: framed    
+  :title: Viscoelastic flow
+
+.. |tuto_bifgui| thumbnail:: tutorial/advstab/bifgui_thumb.png
+  :width: 300px
+  :align: center 
+  :class: framed    
+  :title: The interactive bifurcation GUI
+
 .. |tuto_precice| thumbnail:: tutorial/precice/heat_circle_thumb.png
   :width: 170px
   :align: center 
@@ -322,6 +334,14 @@ Tutorial
 	  - 	|tuto_precice|
 	  
 		:ref:`Coupling multiple simulations with preCICE<secprecicenonmatch>`																
+		
+	* -	|tuto_viscoelastic|
+	
+		:ref:`Viscoelastic flow<secalebeadsonstring>`		
+		
+	  - 	|tuto_bifgui|
+	  
+		:ref:`The interactive bifurcation GUI<advstabbifgui>`																
 	
 	
 	

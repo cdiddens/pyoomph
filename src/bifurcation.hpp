@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -820,10 +820,16 @@ namespace pyoomph
     unsigned get_problem_ndof() { return Ndof; } // Returning the degrees of freedom of the original system (non-augmented)
     bool is_floquet_mode() { return floquet_mode; }
     AugmentedDofDistributionHelper *dof_distribution_helper() override { return &Dist_helper; }
+#ifdef OOMPH_HAS_MPI
     // Refresh the halo entries of the time-point unknowns and broadcast the rank-0-owned period
     // after each Newton update. oomph calls this at the end of Problem::synchronise_all_dofs().
+    // Guarded because the base-class synchronise() it overrides only exists in an MPI build
+    // (oomph::AssemblyHandler, assembly_handler.h) - without the guard 'override' does not compile.
     void synchronise() override;
-    // Push this rank's freshly written base dofs out to the other ranks' halo copies.
+#endif
+    // Push this rank's freshly written base dofs out to the other ranks' halo copies. Unlike the
+    // other handlers' version this one stays unguarded: backup_dofs() calls it unconditionally,
+    // and it compiles to an empty body without MPI.
     void synchronise_base_dofs();
     // Time-block (knot) indices of each element of the time discretization, in order. Element ie
     // writes the equations of its first entries but reads all of them, i.e. it fills the orbit

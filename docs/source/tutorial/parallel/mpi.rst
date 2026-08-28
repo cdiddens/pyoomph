@@ -146,7 +146,7 @@ It is a real speed-up for an assembly-dominated problem, but process 0 needs the
       PETSc's Krylov solvers, i.e. an iterative solve. This is what eventually scales - both in time and
       in memory, since no factors are formed - but an iterative solver only works with a preconditioner
       suited to the equations, and a poor choice will simply not converge. Choosing and configuring them
-      is a subject of its own and will be covered later.
+      is a subject of the current development and will be covered in the next release of pyoomph.
 
 Both require PETSc to be installed and configured (cf. :numref:`petscslepc`); MUMPS in particular has to
 be part of that PETSc build (``--download-mumps=yes``). The solver can be selected from the command line

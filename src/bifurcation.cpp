@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -4735,14 +4735,14 @@ namespace pyoomph
   // The element loops read the time-point unknowns of dofs this rank does not own through
   // global_value(), so their halo entries have to be refreshed; the period lives on rank 0 alone
   // and is broadcast. No-op unless distributed.
+#ifdef OOMPH_HAS_MPI
   void PeriodicOrbitHandler::synchronise()
   {
-#ifdef OOMPH_HAS_MPI
     if (!Dist_helper.distributed()) return;
     for (unsigned int ti=0;ti<Tadd.size();ti++) Tadd[ti].synchronise();
     Dist_helper.synchronise_scalars({&T});
-#endif
   }
+#endif
   
  
 

@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -300,6 +300,11 @@ class CompositionAdvectionDiffusionEquations(ScalarTransportEquations):
         GCL(bool): Whether to consider the Generalized Continuity Equation. Default is False.
         scheme(TimeSteppingScheme): The time stepping scheme. Default is "BDF2".
         stabilization: Optional residual-based stabilization (SUPG etc.) of the mass fraction transport, see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all.
+
+    .. note::
+        **Scaling to set on problem level.** The residual is a *mass* balance, so each mass fraction
+        is tested with ``scale_factor("temporal")/scale_factor("mass_density")``. ``mass_density`` is
+        no field of the system and must be set by ``problem.set_scaling(mass_density=...)``.
     """
 
     def __init__(self, fluid_props:AnyFluidProperties, *, space:FiniteElementSpaceEnum="C2", wind:ExpressionOrNum=var("velocity"), dt_factor:ExpressionOrNum=1, boussinesq:bool=False,integrate_advection_by_parts:bool=False,wrap_params_in_subexpressions:bool=True, GCL:bool=False, scheme:TimeSteppingScheme="BDF2", stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
@@ -532,6 +537,12 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         project_interface_flux(bool): If set to True, the interface flux (kinematic BC) is projected and used for the kinematic BC. Default is False.
         surface_tension_factor(ExpressionOrNum): The surface tension factor. Multiplicative factor for the imposition of the surface tension. Default is 1.
         surfactant_transport: How the surfactants registered on the interface properties are transported. ``None`` (the default) uses :py:class:`~pyoomph.equations.surfactants.SurfactantTransportEquations` in its conservative form, which keeps the total amount of an insoluble surfactant exact rather than to the order of the time stepping. Pass a configured instance to change the form, the variable or the stabilization -- ``SurfactantTransportEquations(form="legacy")`` reproduces the pre-2026 behaviour bit for bit. ``False`` switches the surfactant equations off entirely, e.g. to supply your own.
+
+    .. note::
+        **Scaling to set on problem level.** The mass transfer rate is scaled with
+        ``scale_factor("velocity")*scale_factor("mass_density")``, i.e. besides the velocity also
+        ``mass_density`` -- no field of the system -- has to be set by
+        ``problem.set_scaling(mass_density=...)``.
     """
             
         
@@ -1151,6 +1162,12 @@ class TemperatureConductionEquation(ScalarTransportEquations):
         GCL(bool): Write the transient term as the derivative of the whole integral of ``rho*cp*T``, and (in the advective subclass) advect with the velocity *relative to the mesh*: the conservative ALE form. On a mesh that follows a moving or evaporating boundary the enthalpy is then conserved to machine precision instead of to the order of the time stepping. **If rho or cp depend on the temperature this is a different model**, not merely a different discretization: the GCL form differentiates the product ``rho*cp*T`` in time, where the standard form multiplies ``rho*cp`` onto ``partial_t(T)``. Identical for constant properties. Default is False.
         gcl_scheme: Time stepping scheme of the ``GCL`` transient, from the set a derivative of an integral understands. The default ``"BDF2_degr"`` degrades to first order in the first step, where an initial condition has no history.
         stabilization: Optional residual-based stabilization (SUPG etc.), see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all. Without a wind there is nothing to stabilize on a static mesh, but on a moving (ALE) mesh the transport by the mesh motion is stabilized.
+
+    .. note::
+        **Scaling to set on problem level.** The temperature equation is tested with
+        ``scale_factor("temporal")/(scale_factor("temperature")*scale_factor("rho_cp"))``. Besides
+        the ``temperature`` field scale, the volumetric heat capacity ``rho_cp`` is therefore
+        required, i.e. ``problem.set_scaling(rho_cp=...)``, and it is no field of the system.
     """
     def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,GCL:bool=False,gcl_scheme:"IntegralTimeSteppingScheme"="BDF2_degr",stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):
         super(TemperatureConductionEquation, self).__init__()
@@ -1283,6 +1300,11 @@ class TemperatureAdvectionConductionEquation(TemperatureConductionEquation):
         dt_factor(ExpressionOrNum): Multiplicative factor for the time derivative. Default is 1.
         adv_factor(ExpressionOrNum): Multiplicative factor for the advection term. Default is 1.
         stabilization: Optional residual-based stabilization (SUPG etc.), see :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`. ``None`` (the default) adds nothing at all.
+
+    .. note::
+        **Scaling to set on problem level.** As for
+        :py:class:`TemperatureConductionEquation`, the test scaling requires the non-field scale
+        ``rho_cp``, i.e. ``problem.set_scaling(rho_cp=...)``.
     """
 
     def __init__(self,material:AnyMaterialProperties,space:FiniteElementSpaceEnum="C2",wind:ExpressionOrNum=var("velocity"),rho_override:ExpressionNumOrNone=None,cp_override:ExpressionNumOrNone=None,lambda_override:ExpressionNumOrNone=None,dt_factor:ExpressionOrNum=1,adv_factor:ExpressionOrNum=1,GCL:bool=False,gcl_scheme:"IntegralTimeSteppingScheme"="BDF2_degr",stabilization:"str | Iterable[str] | ScalarTransportStabilization | None"=None):

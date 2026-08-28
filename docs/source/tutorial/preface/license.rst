@@ -135,6 +135,8 @@ A `copy of the license <https://github.com/pyoomph/pyoomph/blob/main/COPYING>`__
 
    -  `scipy <https://github.com/scipy/scipy>`__, `[BSD-3-Clause license] <https://github.com/scipy/scipy/blob/main/LICENSES_bundled.txt>`__
 
+   -  `shapely <https://github.com/shapely/shapely>`__, `[BSD 3-Clause license] <https://github.com/shapely/shapely/blob/main/LICENSE.txt>`__, only required by :py:mod:`pyoomph.meshes.axisymm_topology` to detect and plan axisymmetric pinch-off and coalescence. It is optional and can be installed with ``pip install pyoomph[topology]``
+
    -  `matplotlib <https://github.com/matplotlib/matplotlib>`__, `[PSF-based license] <https://matplotlib.org/stable/users/project/license.html>`__
 
    -  `mkl <https://pypi.org/project/mkl/>`__, `[Intel Simplified Software license] <https://www.intel.com/content/dam/develop/external/us/en/documents/pdf/intel-simplified-software-license.pdf>`__
