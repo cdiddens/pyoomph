@@ -337,6 +337,32 @@ several new solver backends, and a long tail of correctness fixes in the FEM cor
 
 ### Changed / Improved
 
+- **The coordinate-system keyword is called `coordsys` everywhere.** It used to come in five
+  spellings - `coordsys` on the operators (`grad`, `div`, ...) and the moving-mesh equations,
+  `coordinate_system` on the weak-form layer (`weak`, `add_weak`, `WeakContribution`, `EnforcedBC`,
+  ...), plus `csys` on `Problem.set_coordinate_system`, `coord_sys` on `SetCoordinateSystem`,
+  `_coordinate_system` on `IntegralObservables` and `kinematic_bc_coordinate_sys` on the free-surface
+  equations. All of them now take `coordsys`; the old names still work but emit a
+  `DeprecationWarning`, as do the attributes the old constructor arguments were stored in. Passing
+  both spellings in one call is a `TypeError`. Run with `-W error::DeprecationWarning` to find them in
+  an existing script.
+  - Fixes a collateral bug: `IntegralObservables` stored its argument in `self._coordinate_system`,
+    which is the slot `BaseEquations` keeps the coordinate system of the *whole* equation object in,
+    so the argument silently overrode the system of whatever it was combined with instead of only
+    setting the measure of those observables.
+- **The "MPI parallelization" tutorial chapter is now "Parallelization"**, and covers the threaded
+  element assembly (`--omp N`) in a section of its own before the MPI one - what switches it on, why it
+  is bit-identical to the serial loop, what it does and does not buy, and when pyoomph declines to use
+  it. The MPI section gained a subsection on combining the two, including the `mpirun --bind-to none`
+  trap that turns `--omp` into a no-op which still looks like it works. `secmpimodes` still resolves.
+
+- **The tutorial documents what each coordinate system means.** A new section
+  (*Mathematical expressions* > *Coordinate systems*) gives `grad`, `div` of a vector and of a tensor,
+  the directional derivative and the integration measure explicitly for the Cartesian, axisymmetric
+  (2d cylindrical and 1d polar), flipped-axis, radially symmetric, azimuthally symmetry-breaking,
+  Cartesian-normal-mode, rectangular-to-polar and ODE coordinate systems, as well as for the
+  differential-geometry base class one writes a custom system with.
+
 - **Floquet multipliers got a lot faster, mostly serially.** Reconstructing the eigenfunction over the
   orbit pushed each eigenvector through the time chain on its own, so asking for every multiplier of a
   1282-dof orbit spent 185 s there against 13 s for everything else; they now go through together, for

@@ -11,6 +11,9 @@ Threading
 ``PYOOMPH_OPENBLAS_NUM_THREADS``, ``PYOOMPH_MKL_NUM_THREADS``
       Number of threads used by OpenBLAS and MKL, respectively. Both default to ``4``. On import, pyoomph sets the corresponding ``OPENBLAS_NUM_THREADS``/``MKL_NUM_THREADS`` environment variables to these values, unless they are already set in the environment (e.g. by your shell or by a launcher script), in which case the existing value is left untouched. To fully disable OpenMP-style parallelization, set both to ``1``.
 
+``PYOOMPH_OMP_NUM_THREADS``
+      Value pyoomph sets ``OMP_NUM_THREADS`` to on import, again only if that variable is not already set. It defaults to the ``--omp N`` given on the command line, or to ``1`` without it -- pyoomph's own threaded element loop takes its thread count from ``--omp``/:py:meth:`~pyoomph.generic.problem.Problem.set_num_threads` and not from the environment, so the pin only keeps a third-party OpenMP runtime in the same process from opening a second pool of threads. See :numref:`secopenmp`.
+
 JIT code cache
 ~~~~~~~~~~~~~~
 

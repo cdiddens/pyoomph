@@ -1,7 +1,13 @@
+.. _secmpi:
 .. _secmpimodes:
 
-Requirements and the parallel modes
------------------------------------
+Processes and distributed meshes: MPI
+-------------------------------------
+
+Where threads only split the element loop within one process, MPI splits the whole simulation over
+several processes, including the linear solve and - if you ask for it - the storage of the mesh itself.
+That is what lets a problem run which does not fit into one machine, and it is the mode to use on a
+cluster.
 
 Requirements
 ~~~~~~~~~~~~
@@ -68,9 +74,11 @@ They are shown, together with a serial run for reference, in :numref:`figmpimode
 	only holds its own part (plus a thin halo of neighbouring elements, not drawn).
 
 **Serial, without** ``mpirun``. One process holds the mesh, assembles the residual and Jacobian and
-solves the linear system. Solving is not necessarily single-threaded: some direct solvers are internally
-OpenMP threaded, so a serial pyoomph run can still keep several cores busy inside the factorization, but not during the assembly. 
-For small to medium problems, in particular for simple ODEs or 1d problems, this is very often the fastest/easiest option.
+solves the linear system. This is not necessarily single-threaded: with ``--omp N`` the element loop of
+the assembly is threaded (:numref:`secopenmp`), and most direct solvers are internally OpenMP threaded
+as well, so a single-process pyoomph run can keep several cores busy in both halves of a Newton step.
+For small to medium problems, in particular for simple ODEs or 1d problems, this is very often the
+fastest/easiest option.
 
 **With** ``mpirun``, **without** ``--distribute``. Every process holds the whole mesh(es) and the whole
 vector of unknowns. The assembly is parallel - oomph-lib splits the element loop between the
@@ -93,6 +101,27 @@ This mode is intended for large problems or HPC clusters.
    Use e.g. :py:class:`~pyoomph.expressions.utils.DeterministicRandomField` if you need random numbers. 
 
 
+Combining MPI with threads
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The two are independent and may be used together: ``mpirun -n 2 python3 my_simulation.py --omp 2``
+runs two processes of two threads each. Keep the product of ranks and threads at or below the number of
+physical cores.
+
+.. warning::
+
+   ``mpirun`` pins each rank to a single core by default, which makes ``--omp N`` a **no-op that still
+   looks like it works**: the threads are created, the loop does run threaded and every number is
+   right - they simply take turns on the one core the rank is allowed to use. Launch with
+   ``mpirun --bind-to none``, or with a binding that gives each rank as many cores as it has threads.
+   Pyoomph prints a one-off note when it notices the mismatch.
+
+With the binding fixed, ranks and threads are roughly interchangeable for the *Jacobian* assembly,
+while ranks are clearly better for the *residual*: its threaded share is smaller, so the parts MPI also
+splits dominate. Hence the rule of thumb from :numref:`secparallel` - take ranks first, and reach for
+``--omp`` under ``mpirun`` for what more ranks cannot give you: memory headroom, or a core count beyond
+what the mesh partitioner divides sensibly.
+
 Choosing the linear solver
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -100,7 +129,7 @@ When running with MPI with more than one process, the linear solver will default
 PETSc is the only supported backend that is genuinely parallel, and it is the one that scales to large problems.
 
 The serial backends - ``pardiso``, ``superlu``, ``umfpack`` and Apple's ``accelerate`` - are not simply
-refused under ``mpirun``. Pyoomph gathers the assembled system onto process 0, solves it there (potentially with OpenMP threads), and
+refused under ``mpirun``. Pyoomph gathers the assembled system onto process 0, solves it there (potentially with OpenMP threads, see :numref:`secopenmp`), and
 scatters the result back, while the other processes wait. You will receive a warning message if this fallback is used.
 It is a real speed-up for an assembly-dominated problem, but process 0 needs the entire matrix in memory.
 
