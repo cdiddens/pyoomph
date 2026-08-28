@@ -1,5 +1,7 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
 #
 #  @section LICENSE
 #
