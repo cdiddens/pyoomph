@@ -65,7 +65,11 @@ os.environ.setdefault('MKL_NUM_THREADS', os.environ.get('PYOOMPH_MKL_NUM_THREADS
 # says otherwise, so that a third-party OpenMP runtime inside the linear solver cannot quietly open a
 # second pool of threads next to ours and oversubscribe the machine.
 os.environ.setdefault('OMP_NUM_THREADS', os.environ.get('PYOOMPH_OMP_NUM_THREADS', str(_omp_threads) if _omp_threads else '1'))
-# To Deactivate OpenMP parallelization, set PYOOMPH_OPENBLAS_NUM_THREADS=1 and PYOOMPH_MKL_NUM_THREADS=1
+# The three PYOOMPH_*_NUM_THREADS above are pyoomph-only aliases of the standard variables, for
+# pinning a third-party runtime without also pinning it for everything else on the machine. None of
+# them touches pyoomph's OWN assembly threads: those come from --omp / Problem.set_num_threads and
+# are passed on the pragma's num_threads clause (src/parallel_assembly.cpp), so --omp 1 - not an
+# environment variable - is how the element loop is made serial.
 
 
 

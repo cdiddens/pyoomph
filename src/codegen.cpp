@@ -169,16 +169,11 @@ namespace pyoomph
 	// Prints a GiNaC expression as C source code, after applying an optional simplification
 	// strategy selected at runtime via FiniteElementCode::ccode_expression_mode (e.g. "factor",
 	// "normal", "expand", "collect_common_factors" - mostly useful for debugging/benchmarking
-	// how different GiNaC simplifications affect the generated code). The expression is also
-	// archived (csrc_opts.for_code->archive) so that it can be inspected/replayed later.
+	// how different GiNaC simplifications affect the generated code).
 	void print_simplest_form(GiNaC::ex expr, std::ostream &os, GiNaC::print_FEM_options &csrc_opts)
 	{
 		GiNaC::ex towrite;
 		std::string mode = csrc_opts.for_code->ccode_expression_mode;
-		// Opt-in; nothing reads the archive - see FiniteElementCode::archive.
-		static const bool do_archive = getenv("PYOOMPH_ARCHIVE_EXPRESSIONS") != NULL;
-		if (do_archive)
-			csrc_opts.for_code->archive.archive_ex(expr, ("expression_" + std::to_string(csrc_opts.for_code->archive.num_expressions())).c_str());
 		if (mode == "factor")
 			towrite = GiNaC::factor(GiNaC::normal(GiNaC::expand(GiNaC::expand(expr).evalf())));
 		else if (mode == "normal")
@@ -437,7 +432,7 @@ namespace pyoomph
 	// ambient and stays that way on purpose: the readers are GiNaC `_eval` functions and print hooks
 	// whose only inputs are `ex` arguments - unitvect_eval, grad, div, the callback printers - so
 	// threading a code in would mean putting one into the expression itself, changing the symbolic
-	// representation and with it every generated-code hash and the archive format. Nothing is bought
+	// representation and with it every generated-code hash. Nothing is bought
 	// by that: one FiniteElementCode belongs to exactly one Problem, and code generation is
 	// one-code-at-a-time by construction.
 	//
@@ -7275,8 +7270,7 @@ namespace pyoomph
 		// dev_docs/code_generation.md). Without these the same fingerprint would map to two different
 		// generated-code hashes depending on the environment, which makes Tier-2 shadow mode report
 		// a mismatch it cannot explain - and would let a future codegen-skipping Tier-2 reuse code
-		// generated under a different setting. PYOOMPH_ARCHIVE_EXPRESSIONS is deliberately absent:
-		// the archive is write-only and cannot affect the emitted code.
+		// generated under a different setting.
 		os << "sw_memo=" << __expand_memo_on
 		   << " sw_unit_fastcheck=" << (getenv("PYOOMPH_UNIT_FASTCHECK") != NULL)
 		   << " sw_no_unit_prescan=" << (getenv("PYOOMPH_DISABLE_UNIT_PRESCAN") != NULL)
@@ -7487,7 +7481,6 @@ namespace pyoomph
 	void FiniteElementCode::write_code(std::ostream &os)
 	{
 		__current_code = this;
-		this->archive.clear();
 		this->hoist_coeff_counter = 0; // names are per code, not per process - see codegen.hpp
 		this->emitted_nohang_entry_points.clear(); // Refilled by write_generic_RJM; a rewrite must not inherit the last one's decisions
 		CustomMathExpressionBase::code_map.clear();

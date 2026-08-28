@@ -84,10 +84,8 @@ def _run(tmpdir, case, extra_args=(), nproc=2, timeout=600):
     """The worker under mpirun, in its own fresh directory."""
     os.makedirs(str(tmpdir), exist_ok=True)
     cmd = ["mpirun", "-n", str(nproc)]
-    if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "0") == "1":
-        # Off by default here: these machines have enough cores for the four ranks this module ever
-        # asks for, and oversubscribing turns a deadlock into a machine that stops responding.
-        cmd += ["--oversubscribe"]
+    # No --oversubscribe: this project's machines have the cores these ranks need, and an
+    # oversubscribed run trades a deadlock for a machine that stops responding.
     cmd += [sys.executable, _WORKER, "--case", case,
             "--outdir", os.path.join(str(tmpdir), "out")] + list(extra_args)
     # Importing pyoomph calls MPI_Init, so this pytest process already owns an Open MPI session

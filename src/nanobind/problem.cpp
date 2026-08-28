@@ -1656,9 +1656,6 @@ void PyReg_Problem(nb::module_ &m)
 					if (!quiet)
 						std::cout << "Generating equation C code: " << code_trunk << std::endl;
 					my_element->write_code(ofs);
-					// std::ofstream hfs(code_trunk+".gar",std::ios::binary);
-					// hfs << my_element->archive;
-					// hfs.close();
 				}
 
 #ifdef OOMPH_HAS_MPI

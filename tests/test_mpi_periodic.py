@@ -115,9 +115,8 @@ pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REAS
 def _run_distributed(cases, nproc, tmpdir, timeout=600, N=_N, allow_errors=False):
     """Launch the worker under mpirun and return {case: [per-rank result dicts]}."""
     cmd = ["mpirun", "-n", str(nproc)]
-    if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
-        # CI machines routinely have fewer slots than we ask for; without this OpenMPI refuses to start.
-        cmd += ["--oversubscribe"]
+    # No --oversubscribe: this project's machines have the cores these ranks need, and an
+    # oversubscribed run trades a deadlock for a machine that stops responding.
     cmd += [sys.executable, _WORKER, "--spec", json.dumps(list(cases)), "--outdir", str(tmpdir),
             "--N", str(N), "--distribute"]
     # Importing pyoomph calls MPI_Init, so THIS pytest process is already a (singleton) MPI job and owns

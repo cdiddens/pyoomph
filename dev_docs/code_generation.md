@@ -231,8 +231,10 @@ is byte-identical to what the pre-change build produced.
 - **`print_simplest_form` archived every expression it printed.** `FiniteElementCode::archive`
   accumulated every residual/Jacobian/mass/Hessian expression — a full recursive walk plus a
   structure-sharing hash lookup per node, retained until the next `write_code()`. Nothing reads it;
-  the only consumer was the `.gar` dump in `generate_and_compile_bulk_element_code()`, which is
-  commented out. Now opt-in via `PYOOMPH_ARCHIVE_EXPRESSIONS`. Interleaved A/B at 4 species:
+  the only consumer was the `.gar` dump in `generate_and_compile_bulk_element_code()`, which was
+  commented out. Removed outright, together with the member and a `PYOOMPH_ARCHIVE_EXPRESSIONS`
+  switch that kept it available for a while: nothing ever read the archive back, and the switch only
+  offered to spend the time again. Interleaved A/B at 4 species:
   `write_code` + tcc goes 1.586 / 1.534 s -> 1.326 / 1.348 s, i.e. ~14% of emission time spent filling
   a structure nobody reads.
 - **`GiNaCShapeExpansion::derivative` stringified its symbol up front**, for a value consulted only in
@@ -1606,7 +1608,6 @@ All change how pyoomph gets there or what it reports, never what it computes.
 | `PYOOMPH_UNIT_FASTCHECK` | ask `collect_base_units` before normalising, for dimensional contributions — off by default (§2.2) |
 | `PYOOMPH_PARANOID_UNIT_PRESCAN` | do the skipped normalisation anyway and raise if it disagrees; covers both the prescan and the fast check |
 | `PYOOMPH_DISABLE_EXPAND_MEMO` | turn off the placeholder-expansion memo (on by default, §3) |
-| `PYOOMPH_ARCHIVE_EXPRESSIONS` | fill `FiniteElementCode::archive` again (§5) |
 | `PYOOMPH_POISON_UNREQUIRED` | signalling NaN into every shape buffer the pass did not require; `=all` is the positive control. See [assembly_overhead.md](assembly_overhead.md) §3.1 - it is what found the Hessian flag defect of §9.4.15 |
 | `PYOOMPH_DISABLE_SHAPE_FAMILY_SPLIT`, `PYOOMPH_*_HANG_FILL_CACHE`, `PYOOMPH_DISABLE_ASSEMBLY_EXTDATA_SPLIT` | the assembly-overhead levers, [assembly_overhead.md](assembly_overhead.md) §6 |
 | `PYOOMPH_TIME_ADD_RESIDUAL` | per-phase timing of `add_residual`/`expand_placeholders` on stderr, with mapper entries, memo hits and distinct-subexpression counts |

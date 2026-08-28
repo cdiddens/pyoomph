@@ -72,8 +72,8 @@ pytestmark = [pytest.mark.skipif(_SKIP_REASON is not None, reason=str(_SKIP_REAS
 
 def _run(kinds, nproc, tmpdir, level=2, timeout=1800):
     cmd = ["mpirun", "-n", str(nproc)]
-    if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
-        cmd += ["--oversubscribe"]
+    # No --oversubscribe: this project's machines have the cores these ranks need, and an
+    # oversubscribed run trades a deadlock for a machine that stops responding.
     cmd += [sys.executable, _WORKER, "--kinds", ",".join(kinds), "--level", str(level),
             "--outdir", str(tmpdir), "--distribute"]
     # Importing pyoomph calls MPI_Init, so this pytest process already owns an Open MPI session

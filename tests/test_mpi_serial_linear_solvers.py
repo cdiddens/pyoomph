@@ -93,8 +93,8 @@ _SOLVERS = [s for s in ("superlu", "umfpack", "pardiso") if _have_solver(s)]
 
 def _run(tmpdir, extra, nproc=2, timeout=300):
     cmd = ["mpirun", "-n", str(nproc)]
-    if os.environ.get("PYOOMPH_MPI_OVERSUBSCRIBE", "1") == "1":
-        cmd += ["--oversubscribe"]
+    # No --oversubscribe: this project's machines have the cores these ranks need, and an
+    # oversubscribed run trades a deadlock for a machine that stops responding.
     cmd += [sys.executable, _WORKER, "--outdir", str(tmpdir)] + extra
     # Importing pyoomph calls MPI_Init, so this pytest process already owns an Open MPI session
     # directory under TMPDIR; a nested mpirun collides with it and dies with no diagnostics.

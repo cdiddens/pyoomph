@@ -102,7 +102,9 @@ class BaseCCompiler(_pyoomph.SharedLibCCompiler):
         separately) that affects the actual compile flags used, and therefore must
         be part of the JIT cache key. Subclasses should override/extend this if
         they derive flags from further object state or environment variables."""
-        return repr(os.environ.get('PYOOMPH_DEBUG'))
+        # The boolean, not the raw string: only PYOOMPH_DEBUG=="1" changes any flag, so keying on the
+        # value itself gave =2 and =off distinct cache entries for bit-identical builds.
+        return repr(os.environ.get('PYOOMPH_DEBUG') == "1")
 
     def compile(self, suppress_compilation: bool, suppress_code_writing: bool, quiet: bool, extra_flags: Sequence[str]) -> bool:
         if suppress_compilation:

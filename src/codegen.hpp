@@ -403,7 +403,6 @@ namespace pyoomph
    // Output is deterministic across separate process runs regardless of mode - see GiNaC's own
    // canonical term/factor ordering, made reproducible via citools/patches/*.patch (branch
    // deterministic_codegen) - so no special-cased sorting pass is needed here any more.
-   // Also archives expr (for later inspection/serialization) via for_code->archive.
    void print_simplest_form(GiNaC::ex expr, std::ostream &os, GiNaC::print_FEM_options &csrc_opts);
 
 
@@ -1093,11 +1092,6 @@ namespace pyoomph
          reference_pos_for_IC_and_DBC[5] = ny;
          reference_pos_for_IC_and_DBC[6] = nz;
       }
-      // Every expression passed through print_simplest_form(), for later inspection. Nothing reads
-      // it - the only consumer, the .gar dump in generate_and_compile_bulk_element_code(), is
-      // commented out - yet archiving recursively walks every residual/Jacobian/Hessian expression
-      // and retains it (~14% of emission time). Opt-in via PYOOMPH_ARCHIVE_EXPRESSIONS.
-      GiNaC::archive archive;
       std::map<std::string, GiNaC::ex> expanded_scales;
       GiNaC::ex expand_placeholders(GiNaC::ex inp, std::string where, bool raise_error = true);
       // To prevent tons of Python callbacks in e.g. UNIFAC to substitute molefraction by subexpressions, we cache the expanded callbacks
