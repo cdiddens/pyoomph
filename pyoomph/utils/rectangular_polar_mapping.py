@@ -177,6 +177,10 @@ class RectangularToPolarMappingCoordinateSystem(BaseCoordinateSystem):
 
 
 class MeshDataPolarToCartesian(MeshDataCacheOperatorBase):
+    """
+    Transform the mesh data from polar coordinates in rectangular mesh to cartesian coordinates.
+    Can be used as operator for output.
+    """
     def apply(self, base):
         
         rs=base.nodal_values[:,base.nodal_field_inds["coordinate_x"]].copy()

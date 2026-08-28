@@ -1143,6 +1143,9 @@ def _extrude_element_connectivity(elem_types:NPAnyIntArray,elem_indices:NPAnyInt
 
 
 class MeshDataCacheOperatorBase:
+    """A generic operator that can be applied to a :py:class:`~pyoomph.output.meshio.MeshDataCacheEntry` before it is e.g. written to a file.
+    Specialized classes can e.g. merge an eigenfunction to the data or extrude the data azimuthally or along a Cartesian direction.
+    """
     def __init__(self):
         super(MeshDataCacheOperatorBase, self).__init__()
 
