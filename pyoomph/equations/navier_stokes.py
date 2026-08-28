@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -307,6 +307,12 @@ class StokesEquations(Equations):
         pressure_test_scaling_factor (float, optional): Multiplicative scaling factor for the pressure test function. Defaults to 1.0.
         hele_shaw_thickness (ExpressionOrNum, optional): Adds a Hele-Shaw drag term to the bulk force i.e -12*mu*u/delta**2, with the given thickness as parameter. Defaults to None.
         GCL (bool, optional): If True, the Geometric Conservation Law is enforced in the ALE formulation of the (Navier-)Stokes equations. Defaults to False.
+
+    .. note::
+        **Scaling to set on problem level.** With ``GCL=True`` and a non-Boussinesq density, the
+        continuity equation is tested with ``1/scale_factor("mass_density")``. ``mass_density`` is
+        no field of the system, so it has to be set by ``problem.set_scaling(mass_density=...)`` --
+        an unset scale is unity, which silently mis-scales a dimensional problem.
     """
     def __init__(self, *, dynamic_viscosity:ExpressionOrNum=1.0, mode:Literal["TH","CR","SV","C1","C2","D2D1","D1D0","D2TBD1","mini","C2DL"]="TH", bulkforce:ExpressionNumOrNone=None, fluid_props:"AnyFluidProperties | None"=None, gravity:ExpressionNumOrNone=None, boussinesq:bool=False, mass_density:ExpressionNumOrNone=None,
                  pressure_sign_flip:bool=False,momentum_scheme:TimeSteppingScheme="BDF2",continuity_scheme:TimeSteppingScheme="BDF2",pressure_factor:ExpressionOrNum=1, stress_tensor:ExpressionNumOrNone=None,extra_stress:ExpressionNumOrNone=None,velocity_name="velocity",pressure_name="pressure",DG_alpha:ExpressionNumOrNone=None,symmetric_test_function:Literal['auto'] | bool='auto',pressure_test_scaling_factor:float=1, hele_shaw_thickness:ExpressionNumOrNone=None,GCL:bool=False ):
@@ -421,7 +427,7 @@ class StokesEquations(Equations):
         self._add_named_numerical_factor(p_in_momentum_eq=scale_factor(self.pressure_name)*test_scale_factor(self.velocity_name)/scale_factor("spatial")*self.pressure_test_scaling_factor)
         self._add_named_numerical_factor(div_u__in_conti_eq=scale_factor(self.velocity_name) * test_scale_factor(self.pressure_name) / scale_factor("spatial"))
 
-    def define_stress_tensor(self):
+    def define_stress_tensor(self)->Expression:
         u = var(self.velocity_name)
         p = var(self.pressure_name)
 
@@ -440,7 +446,7 @@ class StokesEquations(Equations):
         # is an addition, and expressing that through stress_tensor means restating the solvent part.
         if self.extra_stress is not None:
             stress_tensor = stress_tensor + self.extra_stress
-        return stress_tensor
+        return convert_to_expression(stress_tensor)
 
     def define_residuals(self):
         u, u_test = var_and_test(self.velocity_name)
@@ -607,6 +613,12 @@ class NavierStokesEquations(StokesEquations):
         nonlinear_factor (ExpressionNumOrNone, optional): Multiplicative factor to scale or deactivate the nonlinearity, i.e. dot(u,grad(u))). Defaults to None.        
         wrap_params_in_subexpressions (bool, optional): Wrap parameters in subexpressions using GiNaC. Defaults to True.
         GCL (bool, optional): If True, the Geometric Conservation Law is enforced in the ALE formulation of the (Navier-)Stokes equations. Defaults to False.
+
+    .. note::
+        **Scaling to set on problem level.** The nondimensionalization of the inertia term, and
+        with ``GCL`` also the test scale of the continuity equation (see
+        :ref:`StokesEquations <StokesEquations>`), uses ``scale_factor("mass_density")``. Being no
+        field of the system, it has to be set by ``problem.set_scaling(mass_density=...)``.
     """
                  
         

@@ -49,6 +49,7 @@ task while one is running; that guard is what makes pumping the event loop mid-s
 import math
 import os
 import traceback
+from functools import partial
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -61,6 +62,10 @@ from .panes import PlotterPaneSet
 
 from ...typings import *
 
+if TYPE_CHECKING:
+    from .controller import BifurcationController
+    from .plotter import BifurcationDiagramPlotter
+
 
 #: Widget classes that swallow key presses, so accelerators must not fire while they have focus.
 _TEXT_INPUT_CLASSES={"Entry","TEntry","Text","TSpinbox","Spinbox","TCombobox","Listbox"}
@@ -69,7 +74,7 @@ _TEXT_INPUT_CLASSES={"Entry","TEntry","Text","TSpinbox","Spinbox","TCombobox","L
 class BifurcationTkApp:
     """The main window: menu bar, toolbar, embedded plot, side panels, log and status bar."""
 
-    def __init__(self,controller,plotter,facade=None,title:str | None=None) -> None:
+    def __init__(self,controller:"BifurcationController",plotter:"BifurcationDiagramPlotter",facade:Any=None,title:str | None=None) -> None:
         self.controller=controller
         self.plotter=plotter
         self.facade=facade if facade is not None else controller
@@ -366,21 +371,21 @@ class BifurcationTkApp:
                 var=tk.BooleanVar(value=bool(act.getter()) if act.getter else False)
                 self._check_vars[action_id]=var
             menu.add_checkbutton(label=act.label,accelerator=self._accel(action_id),
-                                 variable=var,command=lambda a=act: self._invoke(a))
+                                 variable=var,command=partial(self._invoke,act))
         elif act.kind=="radio":
             group=str(act.radio_group)
-            var=self._radio_vars.get(group)
-            if var is None:
-                var=tk.StringVar(value=str(act.getter()) if act.getter else "")
-                self._radio_vars[group]=var
+            rvar=self._radio_vars.get(group)
+            if rvar is None:
+                rvar=tk.StringVar(value=str(act.getter()) if act.getter else "")
+                self._radio_vars[group]=rvar
                 if act.getter is not None:
                     self._radio_getters[group]=act.getter
             menu.add_radiobutton(label=act.label,accelerator=self._accel(action_id),
-                                 variable=var,value=act.radio_value,
-                                 command=lambda a=act: self._invoke(a))
+                                 variable=rvar,value=act.radio_value,
+                                 command=partial(self._invoke,act))
         else:
             menu.add_command(label=act.label,accelerator=self._accel(action_id),
-                             command=lambda a=act: self._invoke(a))
+                             command=partial(self._invoke,act))
         self._menu_entries.setdefault(action_id,[]).append((menu,int(menu.index("end") or 0)))
 
     def _rebuild_menu_accelerators(self):
@@ -646,7 +651,7 @@ class BifurcationTkApp:
     def _toolbar_button(self,parent,action_id:str):
         act=self._actions[action_id]
         btn=ttk.Button(parent,text=act.toolbar or act.label,width=max(6,len(act.toolbar or act.label)+1),
-                       command=lambda a=act: self._invoke(a))
+                       command=partial(self._invoke,act))
         btn.pack(side=tk.LEFT,padx=2)
         if act.tooltip:
             _Tooltip(btn,act.tooltip+("  ["+self._accel(action_id)+"]" if self._accel(action_id) else ""))
@@ -2461,7 +2466,10 @@ class BifurcationTkApp:
         chosen:list[str]=[]
         row=ttk.Frame(dlg,padding=8)
         row.pack(side=tk.BOTTOM,fill=tk.X)
-        ttk.Button(row,text="OK",command=lambda: (chosen.append(var.get()),dlg.destroy())).pack(side=tk.RIGHT)
+        def _accept():
+            chosen.append(var.get())
+            dlg.destroy()
+        ttk.Button(row,text="OK",command=_accept).pack(side=tk.RIGHT)
         ttk.Button(row,text="Cancel",command=dlg.destroy).pack(side=tk.RIGHT,padx=4)
         dlg.transient(self.root)
         dlg.grab_set()
@@ -2616,9 +2624,11 @@ class BifurcationTkApp:
         self._radio_vars.clear()
         self._radio_getters.clear()
         self._axis_choices.clear()
-        self.controller=None    #type:ignore[assignment]
-        self.plotter=None       #type:ignore[assignment]
-        self.plot_panes=None    #type:ignore[assignment]
+        # Dropped, not declared Optional: every other method may assume these are present, and one
+        # that still runs after teardown() is a bug that should say so rather than read a None.
+        self.controller=cast("BifurcationController",None)
+        self.plotter=cast("BifurcationDiagramPlotter",None)
+        self.plot_panes=cast(PlotterPaneSet,None)
         self.facade=None
 
     def run(self):

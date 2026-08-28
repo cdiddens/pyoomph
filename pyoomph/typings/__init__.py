@@ -3,30 +3,30 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
 # ========================================================================
  
-from typing import Union,Any,Optional,TYPE_CHECKING,Type,Set,Literal,List,Dict,overload,Tuple,cast,TypeVar,SupportsFloat,TypeAlias,TypedDict
+from typing import Union,Any,Optional,TYPE_CHECKING,Type,Set,Literal,List,Dict,overload,Tuple,cast,TypeVar,SupportsFloat,TypeAlias,TypedDict,Self
 from collections import OrderedDict
 from collections.abc import Sequence, Iterable, Callable, Iterator, Generator, Mapping
 
@@ -55,7 +55,7 @@ def assert_type(obj:Any,typ:_AnyPyoomphType)->_AnyPyoomphType:
     else:
         return cast(type[typ],obj) # type: ignore
     
-__all__ = ["Union","Any","Sequence","Mapping","Iterable","Callable","Iterator","Optional","TYPE_CHECKING","NPFloatArray","NPIntArray","NPAnyIntArray","NPComplexArray","NPUInt64Array","NPInt32Array","Type","Set","Literal","List","Dict","overload","Tuple","cast","NPAnyArray","NPBoolArray","TypeVar","Generator","OrderedDict","SupportsFloat","TypeAlias","assert_type","TypedDict"]
+__all__ = ["Union","Any","Sequence","Mapping","Iterable","Callable","Iterator","Optional","TYPE_CHECKING","NPFloatArray","NPIntArray","NPAnyIntArray","NPComplexArray","NPUInt64Array","NPInt32Array","Type","Set","Literal","List","Dict","overload","Tuple","cast","NPAnyArray","NPBoolArray","TypeVar","Self","Generator","OrderedDict","SupportsFloat","TypeAlias","assert_type","TypedDict"]
 
 
 # The names above that are just re-exports of the standard library. Modules all over pyoomph do

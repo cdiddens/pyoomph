@@ -153,7 +153,7 @@ class _TimeElement:
 
 def time_elements(handler: "_pyoomph.PeriodicOrbitHandler") -> list[_TimeElement]:
     """The condensation elements of the currently active orbit handler, in orbit order."""
-    nbase = handler.get_base_ndof()
+    nbase:int = handler.get_base_ndof()
     raw = handler.get_time_element_node_indices()
     if len(raw) == 0:
         raise FloquetStructureError(
@@ -380,7 +380,7 @@ def _positive_diagonal_qr(A: NPComplexArray) -> tuple[NPComplexArray, NPComplexA
     Q, R = numpy.linalg.qr(A)
     d = numpy.diagonal(R).copy()
     phase = numpy.where(numpy.abs(d) > 0, d / numpy.where(numpy.abs(d) > 0, numpy.abs(d), 1.0), 1.0)
-    return Q * phase[None, :], numpy.conj(phase)[:, None] * R
+    return cast(NPComplexArray, Q * phase[None, :]), cast(NPComplexArray, numpy.conj(phase)[:, None] * R)
 
 
 def _cluster_bounds(W: NPComplexArray, tol: float) -> list[tuple[int, int]]:
@@ -505,11 +505,11 @@ def orbit_eigenfunctions(elems: list[_TimeElement], V: NPComplexArray, nbase: in
         V = V.T
     out = numpy.zeros((V.shape[1], nT * nbase + 1), dtype=complex)
     out[:, :nbase] = V.T
-    X = V
+    X = cast(NPFloatArray, V)
     for el in elems:
         interior = el.propagate(X)
         out[:, el.inds[1] * nbase:(el.inds[-1] + 1) * nbase] = interior.T
-        X = interior[-nbase:]
+        X = cast(NPFloatArray, interior[-nbase:])
     return out
 
 
@@ -563,7 +563,7 @@ def floquet_multipliers(problem, n: int | None = None, quiet: bool = True,
     filtering. The eigenfunctions are laid out as described in :func:`orbit_eigenfunctions`.
     """
     handler = problem.assembly_handler_pt()
-    nbase = handler.get_base_ndof()
+    nbase:int = handler.get_base_ndof()
     nT = handler.get_num_time_steps()
     elems = time_elements(handler)
 
@@ -630,7 +630,7 @@ def floquet_multipliers(problem, n: int | None = None, quiet: bool = True,
                 sigma = 1.0 + 1e-3
             OPinv = ShiftInvertMonodromyOperator(J, nbase, nT, sigma)
             if not quiet:
-                print("Floquet: matrix-free, shift-inverted about {:.4g}".format(sigma))
+                print("Floquet: matrix-free, shift-inverted about {:.4g}".format(sigma)) #type:ignore[str-format] # complex formats fine with "g"
             eigs, eigv = scipy.sparse.linalg.eigs(op, k=n, sigma=sigma, OPinv=OPinv)  # type: ignore[misc]
         else:
             eigs, eigv = scipy.sparse.linalg.eigs(op, k=n, which="LM")  # type: ignore[misc]

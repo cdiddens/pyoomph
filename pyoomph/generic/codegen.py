@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -1579,13 +1579,20 @@ class BaseEquations(_pyoomph.Equations):
         cg._register_field(name,space)
 
 
-    def __radd__(self, other:"Literal[0]")->"EquationTree | BaseEquations":
+    def __radd__(self, other:"Literal[0]")->"Self":
         # So that sum() over equations works; only EquationTree had this before.
         if other==0:
             return self
         raise RuntimeError("Cannot add "+str(other)+" and "+str(self))
 
-    def __add__(self, other:"Literal[0] | BaseEquations | EquationTree")->"EquationTree | BaseEquations":
+    # Adding anything but the sum() seed always produces an EquationTree, and saying only
+    # "BaseEquations" here made every "eqs:Equations = a+b" a type error at the call sites.
+    @overload
+    def __add__(self, other:"Literal[0]")->"Self": ...
+    @overload
+    def __add__(self, other:"BaseEquations | EquationTree")->"EquationTree": ...
+
+    def __add__(self, other:"Literal[0] | BaseEquations | EquationTree")->"EquationTree | Self":
         """Adding equations yields an unrestricted domain holding both.
 
         There is no separate class for a combination: a domain is a list of equations, and one
@@ -2387,14 +2394,15 @@ class InterfaceEquations(Equations):
             of_type = self.required_opposite_parent_type
         return self.get_opposite_parent_domain().get_equations().get_equation_of_type(of_type)
 
-    def pin_redundant_lagrange_multipliers(self,mesh:"InterfaceMesh",lagr:str,depvars:str | list[str] | tuple[str, ...],opposite_interface:str | list[str] | tuple[str, ...]=[]):
+    def pin_redundant_lagrange_multipliers(self,mesh:"InterfaceMesh",lagr:str | list[str] | tuple[str, ...],depvars:str | list[str] | tuple[str, ...],opposite_interface:str | list[str] | tuple[str, ...]=[]):
         """
         Allows to pin redundant (overconstraining) Lagrange multipliers. A field of Lagrange multipliers usually enforces some constraint depending on ``depvars`` (and poentially degrees at the ``opposite_interface``).
         If all these degrres are pinned, the Lagrange multiplier ``lagr`` is pinned and set to zero as well. 
 
         Args:
             mesh: The current mesh must be passed
-            lagr: Name of the Lagrange multiplier field to be automatically pinned if necessary
+            lagr: Name of the Lagrange multiplier field to be automatically pinned if necessary.
+                Several names may be given, e.g. the components of a vector-valued multiplier.
             depvars: Single or multiple variables that occur in the constraint.
             opposite_interface: Optional dependencies on the opposite side of the interface.
         """
@@ -2544,8 +2552,9 @@ class EquationTree(Equations):
         super(EquationTree, self).__init__()
         #: All equations added to this domain. Merging two domains concatenates the lists, which
         #: is what makes a separate combining equation class unnecessary.
-        self._equations = eqs
-        self._parent = parent
+        # The setter takes more than the getter returns, which mypy (<1.16) cannot express.
+        self._equations = eqs #type:ignore[assignment]
+        self._parent:"EquationTree | None" = parent
         self._codegen:"FiniteElementCodeGenerator | None"=None
         self._children:dict[str,"EquationTree"] = {}
         self._compilation_flags:"EquationCompilationFlags | None"=None

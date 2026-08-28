@@ -1,4 +1,30 @@
 from __future__ import annotations
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
 from .. import *
 from ..expressions import *
 from ..typings import *
@@ -94,7 +120,7 @@ def active_fiber_deformation(direction:Expression,stretch:ExpressionOrNum,isocho
     d=direction/square_root(dot(direction,direction))
     P=dyadic(d,d)
     if isochoric_dim is None:
-        transverse=1
+        transverse:ExpressionOrNum=1
     else:
         if isochoric_dim<2:
             raise ValueError("isochoric_dim must be at least 2, since a one-dimensional fiber stretch cannot be volume-compensated")
@@ -172,6 +198,19 @@ class IncompressibleHookeanSolidConstitutiveLaw(IncompressibleSolidConstitutiveL
     
 
 class BaseDeformableSolidEquations(BaseMovingMeshEquations):
+    """
+    Base class of the deformable solid equations, providing the inertia and bulk force terms and the
+    scaling of the mesh (displacement) test function.
+
+    .. note::
+        **Scaling to set on problem level.** By default the mesh test function is scaled with
+        ``scale_factor("temporal")**2/(scale_factor("mass_density")*scale_factor("spatial"))``, so
+        ``mass_density`` -- no field of the system -- must be set by
+        ``problem.set_scaling(mass_density=...)``. Passing ``modulus_for_scaling`` replaces it by an
+        elastic modulus, and ``scale_for_FSI`` replaces it by ``scale_factor("pressure")``, which
+        then likewise has to be set on problem level unless the solid solves for a pressure field of
+        its own (incompressible constitutive law).
+    """
     def __init__(self, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,scale_for_FSI:bool=False,modulus_for_scaling:ExpressionNumOrNone=None,isotropic_growth_factor:ExpressionOrNum=1,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,overdamped:bool=False):
         super().__init__(None)
         # Kept here although the moving-mesh base class no longer takes one: a solid usually defines
@@ -240,6 +279,29 @@ class BaseDeformableSolidEquations(BaseMovingMeshEquations):
         self.add_weak(self.mass_density*accel-self.bulkforce,self.isotropic_growth_factor* xtest,lagrangian=True )
 
 class LinearElasticitySolidEquations(BaseDeformableSolidEquations):
+    """
+    Linear elasticity, i.e. the Cauchy stress ``E/(1+nu)*(nu/(1-2*nu)*trace(eps)+eps)`` of the
+    linearized strain ``eps=sym(grad(u,lagrangian=True))``. For ``nu=None`` or ``nu=1/2``, the
+    incompressible limit is solved with a pressure Lagrange multiplier instead.
+
+    See :py:class:`BaseDeformableSolidEquations` for the scalings that must be set on problem level.
+
+    Args:
+        E: Young's modulus.
+        nu: Poisson's ratio. ``None`` or ``1/2`` selects the incompressible formulation.
+        mass_density: Mass density, relevant for the inertia term. Defaults to 0.
+        bulkforce: Bulk force density (in the undeformed frame!). Defaults to 0.
+        coordinate_space: Space to use for the mesh. Defaults to None.
+        first_order_time_derivative: If set, a velocity is explicitly introduced, reducing the
+            maximum time derivative order to unity (good for eigenanalysis). Defaults to False.
+        scale_for_FSI: Scale the mesh test function as the velocity test function ([X]/[P]), which
+            balances the tractions of a coupled fluid correctly. Defaults to False.
+        modulus_for_scaling: Reference modulus to nondimensionalize with, instead of the mass
+            density. Defaults to None.
+        isotropic_growth_factor: Factor of growing with respect to the undeformed configuration.
+        pressure_space: Space of the pressure field in the incompressible case. Defaults to "DL".
+        with_error_estimator: If set, error estimators based on the strain are introduced.
+    """
     def __init__(self, E:ExpressionOrNum,nu:ExpressionNumOrNone, mass_density = 0, bulkforce = 0, coordinate_space=None, first_order_time_derivative=False, scale_for_FSI = False, modulus_for_scaling = None,isotropic_growth_factor:ExpressionOrNum=1,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False):
         super().__init__(mass_density, bulkforce, coordinate_space, first_order_time_derivative, scale_for_FSI, modulus_for_scaling,isotropic_growth_factor=isotropic_growth_factor,pressure_space=pressure_space,with_error_estimator=with_error_estimator)
         self.E,self.nu=E,nu
@@ -296,6 +358,12 @@ class DeformableSolidEquations(BaseDeformableSolidEquations):
             isotropic_growth_factor: Factor of growing with respect to the undeformed configuration. Defaults to 1.
             modulus_for_scaling: By default, nondimensionalization is made with respect to the scales ``mass_density``, ``spatial`` and ``temporal``. Here, you can set a reference Young's modulus to nondimensionalize with respect to this instead. Defaults to None.
             scale_for_FSI: If set, the scaling of the test function agrees with the scaling of the velocity test function ([X]/[P]). This is important to balance the tractions correctly
+
+    .. note::
+        **Scaling to set on problem level.** Unless ``modulus_for_scaling`` or ``scale_for_FSI`` is
+        given, the mesh test function is scaled with the non-field scale ``mass_density``, i.e.
+        ``problem.set_scaling(mass_density=...)`` is required. See
+        :py:class:`BaseDeformableSolidEquations`.
     """
     # TODO: Bulk force density in Lagrangian or Eulerian coordinates? Make two or a flag?
     def __init__(self, constitutive_law:BaseSolidConstitutiveLaw, mass_density:ExpressionOrNum=0,bulkforce:ExpressionOrNum=0,coordinate_space = None,first_order_time_derivative=False,pressure_space:FiniteElementSpaceEnum="DL",with_error_estimator=False,isotropic_growth_factor:ExpressionOrNum=1,modulus_for_scaling:ExpressionNumOrNone=None,scale_for_FSI:bool=False,overdamped:bool=False):

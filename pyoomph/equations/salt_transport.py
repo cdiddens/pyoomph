@@ -1,23 +1,25 @@
 #  @file
 #  @author Christian Diddens <c.diddens@utwente.nl>
-#  
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -108,6 +110,12 @@ class SaltTransportEquations(ScalarTransportEquations):
         set_bulk_initial_conditions: Initialise each salt at the concentration it was dissolved at.
         stabilization: Optional residual-based stabilization, see
             :py:class:`~pyoomph.equations.stabilization.ScalarTransportStabilization`.
+
+    .. note::
+        **Scaling to set on problem level.** The salt fields are scaled with the *named* scale
+        ``concentration_scale`` (``"ion_concentration"`` by default), which is not a field name and
+        therefore has to be set by ``problem.set_scaling(ion_concentration=...)``, or by
+        :py:func:`~pyoomph.equations.electrostatics.set_electrostatic_scaling`.
     """
 
     def __init__(self,salts:"Sequence[DissolvedSalt] | AnyMaterialProperties | None"=None,*,
@@ -129,7 +137,7 @@ class SaltTransportEquations(ScalarTransportEquations):
                              "dissolved salts it can read")
         if not isinstance(salts,(list,tuple)):
             if fluid_props is None:
-                fluid_props=salts
+                fluid_props=cast("AnyMaterialProperties",salts)
             getter=getattr(salts,"get_salts",None)
             if getter is None:
                 raise ValueError("The material '"+str(getattr(salts,"name","<unnamed>"))+
@@ -209,8 +217,8 @@ class SaltTransportEquations(ScalarTransportEquations):
 
     def get_ion_concentration(self,ion_name:str,domain:"str | None"=None)->Expression:
         r""":math:`c_i=\sum_s\nu_{i,s}c_s`, the concentration one ion is present at."""
-        return sum(s.stoichiometry_of(ion_name)*var(self.fieldname_of(s.name),domain=domain)
-                   for s in self.salts)
+        return convert_to_expression(sum(s.stoichiometry_of(ion_name)*var(self.fieldname_of(s.name),domain=domain)
+                                         for s in self.salts))
 
     def get_charge_density(self,domain:"str | None"=None)->Expression:
         r""":math:`\rho_\mathrm{e}=F\sum_i z_ic_i`, which is identically zero here -- that is what
@@ -224,7 +232,7 @@ class SaltTransportEquations(ScalarTransportEquations):
         for n in self.get_ion_names():
             z=self._charge_number_of(n)
             res=res+z**2*self.get_ion_concentration(n,domain)
-        return 0+res/2
+        return convert_to_expression(res/2)
 
     def _charge_number_of(self,ion_name:str)->int:
         for s in self.salts:
@@ -271,7 +279,7 @@ class SaltTransportEquations(ScalarTransportEquations):
             # separately -- otherwise var("c_Na_p") is a bare number here and a dimensional
             # concentration under Nernst-Planck, and an expression written for both would be right
             # in only one of them.
-            self.set_scaling(**{fn:scale_factor(self.concentration_scale)})
+            self.set_scaling(**cast("dict[str,Any]",{fn:scale_factor(self.concentration_scale)}))
             self.define_field_by_substitution(fn,self.get_ion_concentration(n)/scale_factor(self.concentration_scale),
                                               also_on_interface=True)
 
@@ -385,7 +393,7 @@ class FrozenSaltConcentrations(Equations):
                 fn=self.field_prefix+ion_fieldname_stem(ion.name)
                 values[fn]=values.get(fn,0)+nu*s.concentration
         for fn,value in values.items():
-            self.set_scaling(**{fn:scale_factor(self.concentration_scale)})
+            self.set_scaling(**cast("dict[str,Any]",{fn:scale_factor(self.concentration_scale)}))
             self.define_field_by_substitution(fn,value/scale_factor(self.concentration_scale),
                                               also_on_interface=True)
 
@@ -425,7 +433,7 @@ class SaltConcentrationsFromMassFractions(Equations):
                 fn=self.field_prefix+ion_fieldname_stem(ion.name)
                 values[fn]=values.get(fn,0)+nu*c_salt
         for fn,value in values.items():
-            self.set_scaling(**{fn:scale_factor(self.concentration_scale)})
+            self.set_scaling(**cast("dict[str,Any]",{fn:scale_factor(self.concentration_scale)}))
             self.define_field_by_substitution(fn,value/scale_factor(self.concentration_scale),
                                               also_on_interface=True)
 

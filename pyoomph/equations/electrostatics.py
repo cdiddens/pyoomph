@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -29,6 +29,7 @@ from __future__ import annotations
  
 from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from ..generic import Equations, InterfaceEquations
+from ..generic.codegen import BaseEquations
 from ..expressions import * #Import grad et al
 from ..expressions.phys_consts import * # epsilon_0, faraday_constant, gas_constant, ... (and the units)
 from .generic import ProjectExpression, DirichletBC, get_interface_field_connection_space
@@ -73,7 +74,7 @@ def ion_fieldname_stem(ion_name:str)->str:
 
 
 def ions_from_material(fluid_props:"AnyMaterialProperties",*,
-                       temperature:ExpressionOrNum=var("temperature"))->list["IonSpec"]:
+                       temperature:ExpressionNumOrNone=var("temperature"))->list["IonSpec"]:
     """
     The :py:class:`IonSpec` list of whatever is dissolved in a liquid, in a deterministic order.
 
@@ -98,13 +99,15 @@ def ions_from_material(fluid_props:"AnyMaterialProperties",*,
     # 25 degC, and only the solvent knows the viscosity that carries it to this temperature and this
     # liquid. A material that carries ions but predates that method still works.
     diff=getattr(fluid_props,"get_ion_diffusivity",None)
+    # Only a liquid reaches this line: the get_ions probe above rejected everything else.
+    bulk_of=getattr(fluid_props,"get_bulk_concentration")
     # None is how the material spells "leave the temperature symbolic", which is not the same thing
     # as being handed var("temperature") to substitute -- substituting a field into a viscosity
     # correlation is what fails there.
-    Targ=None if is_zero(convert_to_expression(temperature-var("temperature"))) else temperature
+    Targ=None if temperature is None or is_zero(convert_to_expression(temperature-var("temperature"))) else temperature
     return [IonSpec(n,i.charge_number,
-                    diff(n,Targ) if diff is not None else i.get_diffusivity(temperature),
-                    bulk_concentration=fluid_props.get_bulk_concentration(n),
+                    diff(n,Targ) if diff is not None else i.get_diffusivity(temperature if temperature is not None else var("temperature")),
+                    bulk_concentration=bulk_of(n),
                     molar_mass=getattr(i,"molar_mass",None))
             for n,i in ions.items()]
 
@@ -198,6 +201,13 @@ class ElectricPotentialEquations(Equations):
         output_fields: Add ``add_local_function`` entries for the field components and the charge
             density, so that they appear in the output. Defaults to True.
         consider_scaling: Apply the test scaling described above. Defaults to True.
+
+    .. note::
+        **Scalings to set on problem level.** Besides the potential field, the nondimensionalization
+        uses the non-field scales ``charge_density`` for the charge term and ``electric_field`` for
+        the substituted field of that name. Together with the shared ``permittivity``, all of them
+        are registered consistently by :py:func:`set_electrostatic_scaling`, which is the
+        recommended way to set them.
     """
 
     def __init__(self,*,permittivity:ExpressionNumOrNone=None,relative_permittivity:ExpressionNumOrNone=None,
@@ -554,7 +564,7 @@ class PoissonBoltzmannEquations(ElectricPotentialEquations):
                                  "for a symmetric z:z electrolyte, or a fluid_props with ions "+
                                  "dissolved in it")
         elif not isinstance(ions,(list,tuple)):
-            ions=ions_from_material(ions,temperature=temperature)
+            ions=ions_from_material(cast("AnyMaterialProperties",ions),temperature=temperature)
         self.ions=list(ions)
         for ion in self.ions:
             if ion.bulk_concentration is None:
@@ -573,9 +583,14 @@ class PoissonBoltzmannEquations(ElectricPotentialEquations):
         r"""The thermal voltage :math:`RT/F`, i.e. the potential scale of this model."""
         return gas_constant*self._T()/faraday_constant
 
+    def _bulk(self,ion:"IonSpec")->ExpressionOrNum:
+        """The bulk concentration of an ion, which __init__ has already refused to do without."""
+        assert ion.bulk_concentration is not None
+        return ion.bulk_concentration
+
     def ionic_strength(self)->ExpressionOrNum:
         r"""The reservoir molar ionic strength :math:`I=\frac{1}{2}\sum_i z_i^2 c_i^\infty`."""
-        return sum(ion.valence**2*ion.bulk_concentration for ion in self.ions)/2
+        return sum(ion.valence**2*self._bulk(ion) for ion in self.ions)/2
 
     def debye_length(self)->ExpressionOrNum:
         r"""The screening length :math:`\lambda_\mathrm{D}=\sqrt{\varepsilon RT/(2F^2I)}`."""
@@ -586,7 +601,7 @@ class PoissonBoltzmannEquations(ElectricPotentialEquations):
             return False
         a,b=self.ions
         return a.valence==-b.valence and a.valence>0 and \
-               is_zero(convert_to_expression(a.bulk_concentration-b.bulk_concentration))
+               is_zero(convert_to_expression(self._bulk(a)-self._bulk(b)))
 
     def get_charge_density(self,domain:"str | FiniteElementCodeGenerator | None"=None)->ExpressionNumOrNone:
         phi=var(self.name,domain=domain)-self.reference_potential
@@ -594,7 +609,7 @@ class PoissonBoltzmannEquations(ElectricPotentialEquations):
         if self.linearized:
             # Expanding exp(-z F phi/RT) to first order and using the bulk electroneutrality
             # sum_i z_i c_i^inf = 0, which kills the constant term, leaves -eps*phi/lambda_D**2.
-            rho:ExpressionOrNum=-sum(faraday_constant*ion.valence**2*ion.bulk_concentration
+            rho:ExpressionOrNum=-sum(faraday_constant*ion.valence**2*self._bulk(ion)
                                      for ion in self.ions)/VT*phi
         else:
             arg=-phi/VT
@@ -602,10 +617,10 @@ class PoissonBoltzmannEquations(ElectricPotentialEquations):
                 lim=self.exponent_limit
                 arg=maximum(minimum(arg,lim),-lim)
             if self._is_symmetric():
-                z,cinf=self.ions[0].valence,self.ions[0].bulk_concentration
+                z,cinf=self.ions[0].valence,self._bulk(self.ions[0])
                 rho=-2*z*faraday_constant*cinf*sinh(z*(-arg))
             else:
-                rho=sum(faraday_constant*ion.valence*ion.bulk_concentration*exp(ion.valence*arg)
+                rho=sum(faraday_constant*ion.valence*self._bulk(ion)*exp(ion.valence*arg)
                         for ion in self.ions)
         extra=super().get_charge_density(domain)
         return rho if extra is None else rho+extra
@@ -669,7 +684,8 @@ class ElectrodeBC(DirichletBC):
         potential_name: Name of the potential field. Defaults to ``"phi"``.
     """
     def __init__(self,voltage:ExpressionOrNum,*,potential_name:str="phi"):
-        super().__init__(**{potential_name:voltage})
+        # dict[str,Any]: the keyword is a variable field name, not one of the named parameters
+        super().__init__(**cast("dict[str,Any]",{potential_name:voltage}))
 
 
 class SurfaceChargeBC(InterfaceEquations):
@@ -1073,7 +1089,7 @@ class SurfaceChargeConservation(InterfaceEquations):
         """The fluid velocity and the interface velocity of the conservative form."""
         u=self.fluid_velocity
         if u is None and self.advection_velocity!="auto":
-            u=self.advection_velocity
+            u=cast(ExpressionOrNum,self.advection_velocity)
         return interface_transport_velocities(self,u,self.interface_velocity)
 
     def _legacy_advection(self)->"Expression | None":
@@ -1087,7 +1103,7 @@ class SurfaceChargeConservation(InterfaceEquations):
         evaporating interface instead of with the interface.
         """
         if self.advection_velocity!="auto":
-            given=convert_to_expression(self.advection_velocity)
+            given=convert_to_expression(cast(ExpressionOrNum,self.advection_velocity))
             return None if is_zero(given) else given
         if self.fluid_velocity is None:
             from .navier_stokes import StokesEquations
@@ -1322,6 +1338,12 @@ class NernstPlanckEquations(ScalarTransportEquations):
         concentration_scale: Named scale shared by all species. Defaults to ``"ion_concentration"``.
         set_bulk_initial_conditions: Initialise each species at its ``bulk_concentration``.
         stabilization: Optional residual-based stabilization, see the note above.
+
+    .. note::
+        **Scalings to set on problem level.** The concentration fields are scaled with the *named*
+        scale ``concentration_scale`` (``"ion_concentration"`` by default), which is deliberately not
+        a field name, and the substituted charge density uses ``charge_density``. Both are registered
+        by :py:func:`set_electrostatic_scaling`.
     """
 
     def __init__(self,ions:"Sequence[IonSpec] | dict[str,int] | AnyMaterialProperties | None"=None,*,potential_name:str="phi",
@@ -1344,7 +1366,7 @@ class NernstPlanckEquations(ScalarTransportEquations):
             ions=fluid_props
         if not isinstance(ions,(list,tuple,dict)):
             # A material: read whatever is dissolved in it.
-            ions=ions_from_material(ions,temperature=temperature)
+            ions=ions_from_material(cast("AnyMaterialProperties",ions),temperature=temperature)
         if isinstance(ions,dict):
             ions=[IonSpec(n,z) for n,z in sorted(ions.items())]
         # sorted: this list fixes the order the concentration fields are defined in, hence the dof
@@ -1423,7 +1445,7 @@ class NernstPlanckEquations(ScalarTransportEquations):
 
     def get_ionic_strength(self,domain:"str | FiniteElementCodeGenerator | None"=None)->Expression:
         r""":math:`I=\frac{1}{2}\sum_i z_i^2 c_i`, the *local* ionic strength."""
-        return sum(i.valence**2*var(self.fieldname_of(i.name),domain=domain) for i in self.ions)/2
+        return convert_to_expression(sum(i.valence**2*var(self.fieldname_of(i.name),domain=domain) for i in self.ions)/2)
 
     def get_debye_length(self,permittivity:ExpressionOrNum,
                          domain:"str | FiniteElementCodeGenerator | None"=None)->Expression:
@@ -1534,7 +1556,7 @@ class NernstPlanckEquations(ScalarTransportEquations):
             # would read -weak(z*m*F*c*E, grad(v)) -- the same thing, since E = -grad(phi).
             self.add_residual(weak(ts(self.get_migration_mobility(i.name)*c*gphi),grad(c_test)))
             if i.name in self.reactions:
-                self.add_residual(-weak(ts(self.reactions[i.name]),c_test))
+                self.add_residual(-weak(ts(convert_to_expression(self.reactions[i.name])),c_test))
             if self.set_bulk_initial_conditions and i.bulk_concentration is not None:
                 self.set_initial_condition(fn,i.bulk_concentration,degraded_start="auto")
         self.add_stabilization_residuals(ts if self.time_scheme is not None else None)
@@ -1642,14 +1664,14 @@ class NernstPlanckEquations(ScalarTransportEquations):
             **amounts: ``ion_name=total_amount`` pairs.
         """
         eqs:"Equations"=self
-        ode_add:"Equations | None"=None
+        ode_add:"BaseEquations | None"=None
         for n,total in sorted(amounts.items()):
             if n not in self.ion_names:
                 raise ValueError("'"+n+"' is not one of the ions")
             fn,lname=self.fieldname_of(n),lagrange_prefix+n
             eqs=eqs+WeakContribution(var(fn),testfunction(lname,domain=ode_domain_name),dimensional_dx=True)
             eqs=eqs+WeakContribution(var(lname,domain=ode_domain_name),testfunction(fn),dimensional_dx=True)
-            add:"Equations"=GlobalLagrangeMultiplier(**{lname:total})
+            add:"BaseEquations"=GlobalLagrangeMultiplier(**cast("dict[str,Any]",{lname:total}))
             add=add+TestScaling(**{lname:1/scale_factor(fn)})+Scaling(**{lname:1/test_scale_factor(fn)})
             ode_add=add if ode_add is None else ode_add+add
         if ode_add is not None:

@@ -200,7 +200,7 @@ class BifurcationController:
         self.problem.continuation_data_in_states=True
         self.data_subdir="_bifurcation_gui_data"
         self.neigen=10
-        self.shift=0
+        self.shift:complex=0
         # A separate shift for the eigensolves taken WHILE A TRACKER IS INSTALLED - on a locus and at
         # a freshly located bifurcation alike - because self.shift's default of 0 is the one value
         # that cannot work there: the tracker has put an eigenvalue exactly at 0 (fold, pitchfork,
@@ -213,7 +213,7 @@ class BifurcationController:
         self.current_point:BifurcationGUISolutionPoint | None=None
         self.selected_point:BifurcationGUISolutionPoint | None=None
         self.selected_branch:BifurcationGUISolutionBranch | None=None
-        self._last_ds=1
+        self._last_ds:float=1
         self._tangs:dict[str,NPFloatArray]={}
         self._paramname=parameter
         self.parameter_range:list[float]=[]
@@ -713,7 +713,7 @@ class BifurcationController:
             mesh=self.problem.get_mesh(domname)
             evaluate=mesh.evaluate_maximum if sign>0 else mesh.evaluate_minimum
             val,pos=evaluate(name,as_float=True,return_x=True) #type:ignore[misc]
-            self._extremum_cache[key]=(float(val),[float(p) for p in pos]) #type:ignore[arg-type]
+            self._extremum_cache[key]=(float(val),[float(p) for p in pos]) #type:ignore[arg-type,union-attr]
         return self._extremum_cache[key]
 
     def evaluate_observables(self)->dict[str,float]:
@@ -735,7 +735,7 @@ class BifurcationController:
                         if not valn.startswith("_"):
                             key=bn+"/"+valn
                             obs[key]=lambda domname=bn,valn=valn: _si_value(self.problem.get_mesh(domname).evaluate_observable(valn))
-                            self._observable_unit_probes[key]=lambda domname=bn,valn=valn: self.problem.get_mesh(domname).evaluate_observable(valn)
+                            self._observable_unit_probes[key]=lambda domname=bn,valn=valn: self.problem.get_mesh(domname).evaluate_observable(valn) #type:ignore[misc] # late binding by default argument
                             # These, and only these, are what PeriodicOrbit.evaluate_observable_time_integral
                             # can integrate exactly over the period: it resolves the part before the
                             # last "/" with get_mesh(). An ODE domain is an ODEStorageMesh and not a
@@ -758,13 +758,13 @@ class BifurcationController:
                                 obs[key]=func
                                 self._observable_unit_probes[key]=unit_probe
                                 self._extremum_axes.add(key)
-                            add("val",lambda domname=bn,exname=exname,sign=sign: self._extremum(domname,exname,sign)[0],
-                                lambda domname=bn,exname=exname,sign=sign:
+                            add("val",lambda domname=bn,exname=exname,sign=sign: self._extremum(domname,exname,sign)[0], #type:ignore[misc] # late binding by default argument
+                                lambda domname=bn,exname=exname,sign=sign: #type:ignore[misc]
                                     self.problem.get_mesh(domname).get_code_gen()._get_extremum_expression_unit_factor(exname)
                                     *self._extremum(domname,exname,sign)[0])
                             for i,coord in enumerate(coords):
-                                add(coord,lambda domname=bn,exname=exname,sign=sign,i=i: self._extremum(domname,exname,sign)[1][i],
-                                    lambda domname=bn,exname=exname,sign=sign,i=i:
+                                add(coord,lambda domname=bn,exname=exname,sign=sign,i=i: self._extremum(domname,exname,sign)[1][i], #type:ignore[misc]
+                                    lambda domname=bn,exname=exname,sign=sign,i=i: #type:ignore[misc]
                                         self.problem.get_scaling("spatial")*self._extremum(domname,exname,sign)[1][i]
                                         /_si_value(self.problem.get_scaling("spatial")))
                 for child in eqtree.get_children().values():
@@ -778,7 +778,7 @@ class BifurcationController:
                         if not valn.startswith("_"):
                             key=name+"/"+valn
                             obs[key]=lambda domname=name,valn=valn: self.problem.get_ode(domname).get_value(valn,dimensional=True,as_float=True)
-                            self._observable_unit_probes[key]=lambda domname=name,valn=valn: self.problem.get_ode(domname).get_value(valn,dimensional=True)
+                            self._observable_unit_probes[key]=lambda domname=name,valn=valn: self.problem.get_ode(domname).get_value(valn,dimensional=True) #type:ignore[misc]
             recursive_add_spatial_domains(self.problem._equation_system)
             if len(obs)==0:
                 raise RuntimeError("Could not identify an observable. Add ODEs or IntegralObservables to find them")
@@ -954,13 +954,20 @@ class BifurcationController:
               "exact_average":bool(exact)}
         return out,info
 
-    def _phys_eig(self,value):
+    @overload
+    def _phys_eig(self,value:None)->None: ...
+    @overload
+    def _phys_eig(self,value:"Sequence[complex] | NPAnyArray")->"List[complex]": ...
+    @overload
+    def _phys_eig(self,value:complex)->complex: ...
+
+    def _phys_eig(self,value:"complex | Sequence[complex] | NPAnyArray | None")->"complex | List[complex] | None":
         """One eigenvalue, or a sequence of them, as a physical rate."""
         if value is None:
             return None
         if isinstance(value,(list,tuple,numpy.ndarray)):
             return [complex(v)*self._eigen_mult for v in value]
-        return complex(value)*self._eigen_mult
+        return complex(cast(complex,value))*self._eigen_mult
 
     @property
     def eigen_unit(self)->str:
@@ -1645,10 +1652,10 @@ class BifurcationController:
                          "spectrum. Its stability is unknown; a nonzero shift usually helps.")
                 eig_values=[]
             else:
-                spectrum=self._phys_eig(spectrum)
-                eig_value=spectrum[0]
+                phys=self._phys_eig(list(spectrum))
+                eig_value=phys[0]
                 if eig_values is None:
-                    eig_values=list(spectrum)
+                    eig_values=list(phys)
                     eig_modes=self._last_solved_modes(len(eig_values))
         elif eig_value is not None and eig_values is None:
             eig_values=[eig_value]
@@ -2698,7 +2705,7 @@ class BifurcationController:
         if self.scale_arc_length:
             self.problem.set_arc_length_parameter(scale_arc_length=False)
         try:
-            self.problem._compute_arclength_tangent(self._paramname)
+            self.problem._compute_arclength_tangent(self._get_paramname_str())
         except Exception as e:
             # A singular or nearly singular Jacobian is the ordinary reason, and an arrow is not worth
             # interrupting anything for - this is exactly the state the code below already handles.
@@ -3167,7 +3174,7 @@ class BifurcationController:
         prev=self._point_before_current()
         tang=None
         if prev is not None and prev._tangs:
-            tang=prev._tangs.get(self._current_observable)
+            tang=None if self._current_observable is None else prev._tangs.get(self._current_observable)
             if tang is None:
                 tang=next(iter(prev._tangs.values()))
         if tang is not None and self._last_ds:
@@ -3368,7 +3375,7 @@ class BifurcationController:
         growth_nd=float(growth_time/TS)
         maxstep_nd=growth_nd/5
         previous=numpy.array(self.problem.get_current_dofs()[0])
-        travelled=kick
+        travelled=kick if kick is not None else 0.0  # only read on the paths where kick is not None
         stalled=0
         relaxed=False
         reason="ran the full {:g} growth times".format(self.transient_growth_times)
@@ -4371,8 +4378,8 @@ class BifurcationController:
             self.log("Starting the orbit with a parameter step of {:.4g} (eps = {:.4g}), {:d} time "
                      "steps, {:s}".format(offset,numpy.sqrt(offset),NT,self.orbit_mode))
             orbit=self.problem.switch_to_hopf_orbit(
-                dparam=offset,NT=NT,mode=self.orbit_mode,order=self.orbit_order,
-                GL_order=self.orbit_GL_order,T_constraint=self.orbit_T_constraint,
+                dparam=offset,NT=NT,mode=cast(Any,self.orbit_mode),order=self.orbit_order,
+                GL_order=self.orbit_GL_order,T_constraint=cast(Any,self.orbit_T_constraint),
                 amplitude_factor=self.orbit_amplitude_factor,do_solve=True,
                 check_collapse_to_stationary=self.orbit_check_collapse)
         except Exception as e:
@@ -4661,7 +4668,7 @@ class BifurcationController:
             use_eigenperturbation=self.deflation_use_eigenperturbation,
             num_random_tries=max(1,int(self.deflation_random_tries)),
             random_seed=self.deflation_random_seed,
-            **{self._paramname:values})
+            **cast("dict[str,Any]",{self._get_paramname_str():values}))
         try:
             for branch_index,pvalue,_dofs in gen:
                 if self._abort_requested:
@@ -4741,6 +4748,9 @@ class BifurcationController:
         if point is None:
             return False
         solver=self.problem.get_eigen_solver()
+        # Any: set_eigenvalue_region/eigenvalue_region only exist on the SLEPc solver, which is what
+        # the probe below is for.
+        slepc=cast(Any,solver)
         if not hasattr(solver,"set_eigenvalue_region"):
             self.log("The stripe scan needs the SLEPc eigensolver (problem.set_eigen_solver('slepc')); "
                      "the current one is "+type(solver).__name__)
@@ -4750,13 +4760,13 @@ class BifurcationController:
             self._status("SCANNING THE STRIPE")
             if restore is not point:
                 self.load_pt(point)
-            solver.set_eigenvalue_region(-abs(self.stripe_re),abs(self.stripe_re),
+            slepc.set_eigenvalue_region(-abs(self.stripe_re),abs(self.stripe_re),
                                          -abs(self.stripe_im),abs(self.stripe_im))
             try:
                 found,modes=self._solve_spectrum(neigen=max(1,int(self.stripe_max)))
             finally:
                 # Always put the solver back, or every later eigensolve silently becomes a region scan.
-                solver.eigenvalue_region=None
+                slepc.eigenvalue_region=None
             self.log("Stripe |Re|<{:g}, |Im|<{:g}: {:d} eigenvalue{:s}".format(
                 self.stripe_re,self.stripe_im,len(found),"" if len(found)==1 else "s"))
             if len(found)>=int(self.stripe_max):
@@ -4837,10 +4847,10 @@ class BifurcationController:
             # dedup above has already kept the exact copy, so this only reinstates it after a replace.
             scale=max(1.0,abs(tracked))
             keptv=[v for v in vals if abs(v-tracked)>1e-8*scale]
-            keptm=([m for v,m in zip(vals,mods) if abs(v-tracked)>1e-8*scale]
-                   if mods is not None else None)
+            kept_modes=([m for v,m in zip(vals,mods) if abs(v-tracked)>1e-8*scale]
+                        if mods is not None else None)
             vals=[tracked]+keptv
-            mods=None if keptm is None else [tracked_mode]+keptm
+            mods=None if kept_modes is None else [tracked_mode]+kept_modes
         order=sorted(range(len(vals)),key=lambda i: -numpy.real(vals[i]))
         point.eig_values=[vals[i] for i in order]
         point.eig_modes=[mods[i] for i in order] if mods is not None else None
@@ -4990,8 +5000,8 @@ class BifurcationController:
         if kind=="m":
             modes=sorted({0}|{int(m) for m in self.normal_modes})
             return {"azimuthal_m":modes}
-        modes=sorted({0.0}|{float(k) for k in self.normal_modes})
-        return {"normal_mode_k":modes}
+        kmodes=sorted({0.0}|{float(k) for k in self.normal_modes})
+        return {"normal_mode_k":kmodes}
 
     def _solve_spectrum(self,shift=None,neigen=None)->"tuple[list[complex],list[float] | None]":
         """Solve the eigenproblem, scanning the requested normal modes, as physical rates.
@@ -5107,7 +5117,7 @@ class BifurcationController:
             track_kw={"azimuthal_mode":int(mode)} if kind=="m" else {"cartesian_wavenumber_k":mode}
             self.log("That eigenvalue belongs to {:s}={:g}, so a {:s} bifurcation is tracked".format(
                 kind,mode,btype))
-        self.problem.activate_bifurcation_tracking(self._paramname,btype,
+        self.problem.activate_bifurcation_tracking(self._paramname,cast(Any,btype),
                                                    eigenvector=eigenindex,**track_kw)
         # The teardown belongs HERE, with the call that switched tracking on, not in whichever caller
         # happens to catch the failure. The tracking solve is the one that can diverge, and when it did

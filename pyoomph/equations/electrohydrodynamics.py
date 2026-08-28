@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -224,6 +224,12 @@ class MaxwellStressEquations(_ElectricFlowCoupling):
             :py:func:`maxwell_stress_tensor`.
         time_scheme: Time stepping scheme applied to the stress, matching the momentum equation's.
         output_stress: Add ``add_local_function`` entries for the stress components.
+
+    .. note::
+        **Scalings to set on problem level.** The Maxwell stress is nondimensionalized with
+        ``scale_factor("permittivity")`` and ``scale_factor("electric_field")``, neither of which is
+        a field of the system. Both are registered consistently by
+        :py:func:`~pyoomph.equations.electrostatics.set_electrostatic_scaling`.
     """
 
     def __init__(self,*,permittivity:ExpressionNumOrNone=None,potential_name:"str | None"=None,
@@ -611,7 +617,7 @@ def lippmann_surface_tension(surface_tension_at_pzc:ExpressionOrNum,*,capacitanc
         and the Maxwell stress already produce the electrocapillary effect, and adding this on top
         counts it twice.
     """
-    return surface_tension_at_pzc-capacitance*(potential-potential_of_zero_charge)**2/2
+    return convert_to_expression(surface_tension_at_pzc-capacitance*(potential-potential_of_zero_charge)**2/2)
 
 
 def surface_charge_surface_tension(surface_tension_at_pzc:ExpressionOrNum,*,
@@ -624,7 +630,7 @@ def surface_charge_surface_tension(surface_tension_at_pzc:ExpressionOrNum,*,
     This is the form to use together with a dynamically solved surface charge, since it depends on
     the charge rather than on an absolute potential.
     """
-    return surface_tension_at_pzc-surface_charge_density**2/(2*capacitance)
+    return convert_to_expression(surface_tension_at_pzc-surface_charge_density**2/(2*capacitance))
 
 
 def debye_huckel_surface_tension(surface_tension_at_zero_charge:ExpressionOrNum,*,
@@ -636,7 +642,7 @@ def debye_huckel_surface_tension(surface_tension_at_zero_charge:ExpressionOrNum,
     :py:func:`lippmann_surface_tension` with the diffuse-layer capacitance
     :math:`C_\mathrm{dl}=\varepsilon/\lambda_\mathrm{D}`.
     """
-    return surface_tension_at_zero_charge-permittivity*zeta_potential**2/(2*debye_length)
+    return convert_to_expression(surface_tension_at_zero_charge-permittivity*zeta_potential**2/(2*debye_length))
 
 
 from ..typings import _set_public_api

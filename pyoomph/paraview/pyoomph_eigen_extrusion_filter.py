@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -51,6 +51,8 @@ import numpy
 from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk #type:ignore
 
 from vtkmodules.vtkCommonDataModel import vtkDataSet, vtkUnstructuredGrid
+from vtkmodules.util.vtkConstants import (VTK_LINE, VTK_TRIANGLE, VTK_QUAD, VTK_WEDGE,
+                                          VTK_HEXAHEDRON)
 from vtkmodules.util.vtkAlgorithm import VTKPythonAlgorithmBase
 
 # new module for ParaView-specific decorators.
@@ -69,9 +71,9 @@ AZIMUTHAL, CARTESIAN = 0, 1
 #:
 #: Only linear cells; a swept quadratic cell would need mid-layer nodes that the sweep does not
 #: create, so those are split into linear ones first.
-_SWEEP = {vtk.VTK_LINE: (vtk.VTK_QUAD, 2, True),
-          vtk.VTK_TRIANGLE: (vtk.VTK_WEDGE, 3, False),
-          vtk.VTK_QUAD: (vtk.VTK_HEXAHEDRON, 4, False)}
+_SWEEP = {VTK_LINE: (VTK_QUAD, 2, True),
+          VTK_TRIANGLE: (VTK_WEDGE, 3, False),
+          VTK_QUAD: (VTK_HEXAHEDRON, 4, False)}
 
 #: (row, column) of the six components of a VTK symmetric tensor, in VTK's order.
 _SYMMETRIC_SLOTS = ((0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (0, 2))
@@ -337,14 +339,14 @@ class PyoomphEigenExtrusion(VTKPythonAlgorithmBase):
         surface.SetInputDataObject(0, inp)
         surface.Update()
         linear, cells = self._linear_cells(surface.GetOutput())
-        planar = [(t, ids) for t, ids in cells if t != vtk.VTK_LINE]
+        planar = [(t, ids) for t, ids in cells if t != VTK_LINE]
         if not planar:
             return self._sweep(linear, cells)
         seen = {}
         for _ctype, ids in planar:
             for a, b in zip(ids, ids[1:] + ids[:1]):
                 seen[(min(a, b), max(a, b))] = seen.get((min(a, b), max(a, b)), 0) + 1
-        boundary = [(vtk.VTK_LINE, [a, b]) for (a, b), n in seen.items() if n == 1]
+        boundary = [(VTK_LINE, [a, b]) for (a, b), n in seen.items() if n == 1]
         return self._sweep(linear, boundary, caps=planar if self.capping else ())
 
     # ------------------------------------------------------------------ field transforms

@@ -710,8 +710,8 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
             return p.stability_indicator(trust_inferred,include_modes)
         def unknown(v):
             return v!=v          # NaN
-        res=[]
-        stabs=[]
+        res:list[NPFloatArray]=[]
+        stabs:list[bool | None]=[]
         if len(self)==0:
             return res,[]
         if len(self)==1:
@@ -730,7 +730,7 @@ class BifurcationGUISolutionBranch(UserList[BifurcationGUISolutionPoint]):
                     return bool(v<0)
             return None
 
-        currseg=[]
+        currseg:list[NPFloatArray]=[]
         currstab=stability_from(0)
         for ip,(p1,p2) in enumerate(zip(self,self[1:])):
             s1,s2=svs[ip],svs[ip+1]

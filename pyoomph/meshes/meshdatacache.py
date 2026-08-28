@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -914,7 +914,7 @@ def _extrude_tensor_fields(tensor_fields:dict[str,list[list[str]]],Q:NPFloatArra
                 handled.add(tname)
                 handled.add(prefixIm+stem)
                 continue
-            sources=[[[] for _j in range(3)] for _i in range(3)]
+            sources:list[list[list[Any]]]=[[[] for _j in range(3)] for _i in range(3)]
             for i in range(3):
                 for j in range(3):
                     entry=[]
@@ -1796,6 +1796,10 @@ class MeshDataRotationalExtrusion(MeshDataCacheOperatorBase):
                             #print(vector_fields[ResVector])
                             #raise RuntimeError("HEREH")
                             #field_operators[fnRes] = [lambda RealPart, ImagPart: numpy.outer(numpy.cos(m * phis),RealPart).flatten() + numpy.outer(numpy.sin(m * phis), ImagPart).flatten(), fnRe, fnIm]
+                # The wavenumber of THIS prefix, taken from the table rather than from the scalar
+                # loop above: m was only assigned there if some field matched prefixRe, so reading
+                # the leaked loop variable here would be undefined for a prefix with vectors only.
+                m=ms_by_prefix[prefixRe]
                 # Second iteration to patch the vectors.
                 #
                 # These are FUSED operators, reading the real and imaginary halves and doing both

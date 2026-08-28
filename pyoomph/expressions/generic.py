@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -100,7 +100,7 @@ def get_order_of_space(space:FiniteElementSpaceEnum)->int:
 	else:
 		raise RuntimeError("Unknown space: "+str(space))
 
-def find_dominant_element_space(*spaces:FiniteElementSpaceEnum):
+def find_dominant_element_space(*spaces:FiniteElementSpaceEnum)->FiniteElementSpaceEnum:
 	res=""
 	for space in spaces:
 		# str, not the space enum: the discontinuous spaces are compared through their continuous
@@ -127,9 +127,9 @@ def find_dominant_element_space(*spaces:FiniteElementSpaceEnum):
 		space_in_order=["C1","C1TB","C2","C2TB"]
 		if space_in_order.index(r)>space_in_order.index(res):
 			res=r
-	return res
+	return cast(FiniteElementSpaceEnum,res)
 
-def find_subordinate_element_space(*spaces:FiniteElementSpaceEnum):
+def find_subordinate_element_space(*spaces:FiniteElementSpaceEnum)->FiniteElementSpaceEnum:
 	"""The MEET of the given spaces, i.e. the largest space contained in all of them.
 
 	The dual of find_dominant_element_space, and it has to be written as a lattice rather than as a
@@ -163,9 +163,9 @@ def find_subordinate_element_space(*spaces:FiniteElementSpaceEnum):
 		space_in_order=["C1","C1TB","C2","C2TB"]
 		if space_in_order.index(r)<space_in_order.index(res):
 			res=r
-	return res
+	return cast(FiniteElementSpaceEnum,res)
 
-def largest_facet_space(parent_space:str,parent_dim:int)->str:
+def largest_facet_space(parent_space:str,parent_dim:int)->FiniteElementSpaceEnum:
 	"""The largest space a field on a FACET of a bulk domain can use, given the bulk domain's own space.
 
 	A facet does not inherit everything the bulk element has. The bubble spaces are the interesting case,
@@ -182,7 +182,8 @@ def largest_facet_space(parent_space:str,parent_dim:int)->str:
 	its C1 one), so reducing C1TB to C1 there costs nothing and keeps this rule family-independent.
 	"""
 	if parent_space=="" or parent_space is None:
-		return ""
+		# "" is the not-yet-set sentinel these space helpers pass around, not a real space
+		return cast(FiniteElementSpaceEnum,"")
 	p:str=parent_space
 	if p=="D0" or p=="DL":
 		p="C1"
@@ -1313,7 +1314,7 @@ def delayed_lambda_expansion(func:Callable[[],Expression])->Expression:
 	return 0+_pyoomph.GiNaC_delayed_expansion(wrapped)
 
 
-def evaluate_in_domain(expr:ExpressionOrNum,domain:str | _pyoomph.FiniteElementCode | None):
+def evaluate_in_domain(expr:ExpressionOrNum,domain:str | _pyoomph.FiniteElementCode | None)->Expression:
 	"""
 	Evaluates the given expression within the specified domain. Each var inside the expression will be evaluated in the given domain. Useful to e.g. evaluate the expression in the bulk (domain="``..``") when at an boundary element, or at the opposite side of the interface (domain="``|.``")
 

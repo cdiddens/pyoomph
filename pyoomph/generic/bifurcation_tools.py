@@ -1,4 +1,30 @@
 from __future__ import annotations
+#  @file
+#  @author Christian Diddens <c.diddens@utwente.nl>
+#  @author Duarte Rocha <d.rocha@utwente.nl>
+#  @author Maxim de Wildt <m.dewildt@utwente.nl>
+#
+#  @section LICENSE
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
+#  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  The main author may be contacted at c.diddens@utwente.nl
+#
+# ========================================================================
 import scipy.sparse
 import scipy.sparse.linalg
 import scipy.linalg
@@ -457,9 +483,9 @@ def get_hopf_lyapunov_coefficient(problem:Problem,param:GlobalParameter | str,FD
         print("   {:24s} {:.3e}   |r| ={:.3e}".format("A*r - B(q,qb)",
               numpy.amax(numpy.absolute(A@r-(a+b))),numpy.linalg.norm(r))) #type:ignore
         print("   {:24s} {:.3e}   |sR|={:.3e}".format("Re[(2i*w*M-A)s - B(q,q)]",
-              numpy.amax(numpy.absolute(-A@sR-2*omega0*M@sI-(a-b))),numpy.linalg.norm(sR)))
+              float(numpy.amax(numpy.absolute(-A@sR-2*omega0*M@sI-(a-b)))),float(numpy.linalg.norm(sR))))
         print("   {:24s} {:.3e}   |sI|={:.3e}".format("Im[(2i*w*M-A)s - B(q,q)]",
-              numpy.amax(numpy.absolute(2*omega0*M@sR-A@sI-2*c)),numpy.linalg.norm(sI)))
+              float(numpy.amax(numpy.absolute(2*omega0*M@sR-A@sI-2*c))),float(numpy.linalg.norm(sI))))
 
     # step 4
     # sig = Re<p,B(q,r)>. With r real, B(q,r) = B(qR,r) + i*B(qI,r), and
@@ -1194,7 +1220,7 @@ class _NormalModeBifurcationTrackerBase(CustomBifurcationTracker):
             
             
 class NormalModeBifurcationTracker(_NormalModeBifurcationTrackerBase):
-    parameter:str # always a real parameter name in this subclass (never None, unlike the base class)
+    parameter:str #type:ignore[assignment] # always a real parameter name in this subclass (never None, unlike the base class)
 
     def __init__(self, problem:Problem,parameter:str,eigenvector:int=0,azimuthal_m:float | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,nonlinear_length_constraint:bool=False):
         super().__init__(problem,eigenvector,azimuthal_m,cartesian_k,eigenscale,nonlinear_length_constraint)
@@ -1384,7 +1410,7 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
 
     def __init__(self, problem:Problem,parameter:str,eigenvector:int=0,azimuthal_m:float | None=None,cartesian_k:ExpressionNumOrNone=None,eigenscale:float=1,k_fd_step:float=1e-6,exact_k_derivative_jacobian:bool=True):
         super().__init__(problem,eigenvector,azimuthal_m,cartesian_k,eigenscale,nonlinear_length_constraint=False) #type:ignore[arg-type] # m is real here, see the class docstring
-        self.parameter=parameter
+        self.parameter=parameter #type:ignore[assignment] # narrowed to str at class level, see above
         # The mode number IS a global parameter, which is the whole reason it can be made an unknown:
         # add_parameter pushes its value pointer into the dof vector, and the generated eigen
         # contributions read it from there.
@@ -1637,8 +1663,8 @@ class CriticalWavenumberTracker(_NormalModeBifurcationTrackerBase):
                 [None,     None,   row(self.V0),None,None]]).tocsr()
             return Raug,Jaug #type:ignore
         else:
-            Vr,Vi,Wr,Wi,p,omega,k,mu=self.get_augmented_dofs().split(startindex=1)
-            omega,mu=omega[0],mu[0]
+            Vr,Vi,Wr,Wi,p,omega_a,k,mu_a=self.get_augmented_dofs().split(startindex=1)
+            omega,mu=float(omega_a[0]),float(mu_a[0])
             def _plain():
                 _,re_,im_=self._pairs_assemble(lambda a,c:a.J(c).M(c).dJdp(kn,c).dMdp(kn,c))
                 JR,MR,dJRdk,dMRdk=re_
@@ -2485,7 +2511,7 @@ class NormalFormCalculator:
             ``dJdU(v)`` gives -- note :py:meth:`d2f` is its negative. Verified against the
             multi-assembly to 4e-16; see dev_docs/branch_switching.md.
             """
-            return numpy.array(self.problem.get_second_order_directional_derivative(numpy.asarray(v)))
+            return numpy.array(self.problem.get_second_order_directional_derivative(cast("Sequence[float]",numpy.asarray(v))))
 
       def Hpair(self,a,b):
             """H(a,b), the Hessian contracted with a DIFFERENT vector in each slot, by polarisation.
@@ -2592,7 +2618,7 @@ class NormalFormCalculator:
         A=scipy.sparse.bmat([[L,scipy.sparse.csr_matrix(zeta)],
                              [scipy.sparse.csr_matrix(zs),None]],format="csc")
         b=numpy.concatenate([rhs,[0.0]])
-        x=scipy.sparse.linalg.spsolve(A,b) #type:ignore
+        x=cast(NPAnyArray,scipy.sparse.linalg.spsolve(A,b)) #type:ignore
         if numpy.isnan(numpy.sum(x)): #type:ignore
             raise RuntimeError("The bordered solve of the normal form is singular. That needs "
                                "<zeta,zeta_star> != 0 AND a simple singularity of L; a second "
@@ -2615,10 +2641,11 @@ class NormalFormCalculator:
             n=AT.shape[0]
             if n<4:
                 # ARPACK needs k<n-1; below that a dense solve is cheap anyway.
-                evals,evects=scipy.linalg.eig(AT.toarray(),b=MT.toarray())
+                evals,evects=cast("tuple[NPAnyArray,NPAnyArray]",scipy.linalg.eig(AT.toarray(),b=MT.toarray()))
                 return numpy.asarray(evals),numpy.transpose(numpy.asarray(evects))
-            evals,evects=scipy.sparse.linalg.eigs(AT.astype(numpy.complex128),k=min(2,n-2),
-                                                  M=MT.astype(numpy.complex128),sigma=complex(lamb)) #type:ignore
+            evals,evects=cast("tuple[NPAnyArray,NPAnyArray]",
+                              scipy.sparse.linalg.eigs(AT.astype(numpy.complex128),k=min(2,n-2),
+                                                       M=MT.astype(numpy.complex128),sigma=complex(lamb))) #type:ignore
             return numpy.asarray(evals),numpy.transpose(numpy.asarray(evects))
 
       def get_left_eigenvector(self,lamb,tolerance:float=1e-4,pencil=None):
@@ -2635,8 +2662,8 @@ class NormalFormCalculator:
             come from one and the same assembly.
             """
             A,M=self.pencil() if pencil is None else pencil
-            AT=A.transpose().tocsr()
-            MT=M.transpose().tocsr()
+            AT=cast("DefaultMatrixType",A.transpose().tocsr())
+            MT=cast("DefaultMatrixType",M.transpose().tocsr())
             solver=self.problem.get_eigen_solver()
             is_complex=numpy.abs(numpy.imag(lamb))>1e-8
             if is_complex and not solver.supports_complex_target():

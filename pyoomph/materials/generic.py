@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -46,6 +46,7 @@ from ..typings import *
 if TYPE_CHECKING:
     from ..generic.problem import Problem
     from .mass_transfer import MassTransferModelBase
+    from .activity_electrolyte import AIOMFACElectrolyteMultiReturnExpression
 
 import math
 
@@ -891,6 +892,19 @@ class BaseLiquidProperties(MaterialProperties):
     """
     A base class for defining liquid materials.
     """
+
+    #: The multi-return activity model in force, if any. Declared here rather than where each is
+    #: built: the plain UNIFAC one is set by the mixture, the electrolyte one by the salt branch.
+    _unifac_multi_return:"UNIFACMultiReturnExpression | AIOMFACElectrolyteMultiReturnExpression | None"=None
+
+    def _as_mixture(self)->"MixtureLiquidProperties":
+        """This liquid seen as the mixture it necessarily is here.
+
+        Dissolved salts and UNIFAC only mean anything for a mixture, but the entry points sit on
+        this class so that a pure liquid gets a message from them rather than an AttributeError.
+        Purely a static view - the caller has already established which case it is in."""
+        return cast("MixtureLiquidProperties",self)
+
     state_of_matter="liquid"
     passive_field:str | None=None
     required_adv_diff_fields:set[str]=set()
@@ -1145,7 +1159,7 @@ class BaseLiquidProperties(MaterialProperties):
         solvent_components=[cn for cn in sorted(self.components) if cn not in salts]
         molecule_subgroups:dict[str,dict[str,int]]={}
         for cn in solvent_components:
-            comp=self.get_pure_component(cn)
+            comp=self._as_mixture().get_pure_component(cn)
             assert isinstance(comp,PureLiquidProperties)
             groups=comp._UNIFAC_groups.get(modelname,{})
             if len(groups)==0:
@@ -1158,7 +1172,7 @@ class BaseLiquidProperties(MaterialProperties):
         if getattr(self,"_salts_are_components",False):
             # Everything follows from the mass fractions, with no density in the way: the molality is
             # per kg of *solvent*, so it divides by what is left after the salts.
-            n={cn:var("massfrac_"+cn)/self.get_pure_component(cn).molar_mass
+            n={cn:var("massfrac_"+cn)/self._as_mixture().get_pure_component(cn,True).molar_mass
                for cn in solvent_components}
             n_solvent=subexpression(sum(n.values()))
             x:dict[str,ExpressionOrNum]={cn:n[cn]/n_solvent for cn in solvent_components}
@@ -1277,7 +1291,7 @@ class BaseLiquidProperties(MaterialProperties):
             rho_solvent_at_IC=_pyoomph.GiNaC_subs(rho_solvent_at_IC,var(field),Expression(value))
 
         for n,s in salts.items():
-            self.pure_properties[n]=_salt_pseudo_component(n,masses[n],volumes[n])
+            self._as_mixture().pure_properties[n]=_salt_pseudo_component(n,masses[n],volumes[n])
         self.components=set(solvents)|set(salts)
         self.required_adv_diff_fields=self.components-{cast(str,self.passive_field)}
 
@@ -1289,7 +1303,7 @@ class BaseLiquidProperties(MaterialProperties):
         # replaces a symbol by an expression and leaves the rest of the tree alone.
         rho_solvent=solvent_density
         for c in solvents:
-            rho_solvent=_pyoomph.GiNaC_subs(0+rho_solvent,var("massfrac_"+c),
+            rho_solvent=_pyoomph.GiNaC_subs(Expression(rho_solvent),var("massfrac_"+c),
                                             var("massfrac_"+c)/(1-w_salt_total))
         self.mass_density=1/((1-w_salt_total)/rho_solvent
                              +sum(w_salt[n]*volumes[n]/masses[n] for n in sorted(salts)))
@@ -1297,14 +1311,14 @@ class BaseLiquidProperties(MaterialProperties):
         for n,s in salts.items():
             # The ambipolar diffusivity, i.e. the rate the ion pair travels at: what the salt field
             # meant in the dilute treatment, and what its mass fraction means here.
-            self.set_diffusion_coefficient(n,s.get_diffusivity(self))
+            self._as_mixture().set_diffusion_coefficient(n,s.get_diffusivity(self))
 
         self._set_salt_initial_conditions(salts,volumes,masses,rho_solvent_at_IC)
         self._salts_are_components=True
         if getattr(self,"_unifac_model",None) is not None:
             # The mole fraction basis has changed, so the activity coefficients and the vapour
             # pressures built on it have to be rebuilt.
-            self.set_activity_coefficients_by_unifac(cast(str,self._unifac_model))
+            self._as_mixture().set_activity_coefficients_by_unifac(cast(str,self._as_mixture()._unifac_model))
 
     def _set_salt_initial_conditions(self,salts:"dict[str,DissolvedSalt]",
                                      volumes:dict[str,ExpressionOrNum],
@@ -2096,7 +2110,7 @@ class IonProperties(PureLiquidProperties):
         r"""The molar mobility :math:`m_i=D_i/(RT)` in water, i.e. the Einstein relation."""
         return self.get_diffusivity(temperature)/(gas_constant*temperature)
 
-    def _times(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent | LiquidMixtureDefinitionComponent":
+    def _times(self,other:ExpressionOrNum)->"DissolvedSpeciesComponent | LiquidMixtureDefinitionComponent": #type:ignore[override] # a wider return than the base on purpose, see below
         """``c*ion`` means two different things and the units say which.
 
         An ion is a pure liquid property, so a dimensionless factor keeps the mixture-component
@@ -2681,7 +2695,7 @@ class MixtureLiquidProperties(BaseLiquidProperties,BaseMixedProperties):
 
         self._reaction_rates:dict[str,ExpressionOrNum]={}
 
-        self._unifac_multi_return:UNIFACMultiReturnExpression | None=None
+        self._unifac_multi_return=None
         self._unifac_model:str | None=None # Used UNIFAC parameter table
 
     def add_reaction_rate(self,dest:str,rate:ExpressionOrNum,**source_factors:float):
@@ -2949,7 +2963,7 @@ class LiquidGasInterfaceProperties(BaseInterfaceProperties):
         if "gas" in self._liquid_phase.default_surface_tension.keys():
             sigm=self._liquid_phase.default_surface_tension.get("gas")
             if sigm is not None:
-                self.surface_tension=sigm
+                self.surface_tension=sigm #type:ignore[assignment] # goes through the property setter above; the base declares a plain attribute
         self._mass_transfer_model=StandardMassTransferModelLiquidGas(self._liquid_phase,self._gas_phase)
         #: The rate of surfactant adsorption and desorption, merged in a single expression per surfactant
         self.surfactant_adsorption_rate:dict[str,ExpressionOrNum]={}

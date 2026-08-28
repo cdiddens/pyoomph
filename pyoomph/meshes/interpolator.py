@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -31,7 +31,7 @@ from ..typings import *
 import numpy
 
 from ..generic.problem import *
-from ..meshes.mesh import ODEStorageMesh
+from ..meshes.mesh import ODEStorageMesh, InterfaceMesh
 from .. import _pyoomph_core as _pyoomph
 
 
@@ -91,6 +91,7 @@ def _transfer_internal_facet_fields(old:"AnySpatialMesh", new:"AnySpatialMesh")-
     new_skel = new.get_mesh("_internal_facets_", return_None_if_not_found=True)
     if new_skel is None:
         return
+    assert isinstance(new_skel, InterfaceMesh)
     old_skel = old.get_mesh("_internal_facets_", return_None_if_not_found=True)
     if old_skel is None:
         # The skeleton is new (i.e. the equations changed along with the mesh, redefine_problem).

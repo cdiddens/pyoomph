@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -233,7 +233,7 @@ class MatplotLibMainAxes(MatplotLibAxes):
             return
         assert self.ax is not None
         ax=self.ax
-        l,b,r,t=self.plotter.margins
+        l,b,r,t=cast("MatplotlibPlotter1D",self.plotter).margins
         ax.set_position([l,b,r-l,t-b]) #type:ignore
         if self.plotter.aspect_ratio:
             # Applied here rather than left to the inherited _reset_before_plot, which runs before
@@ -472,7 +472,8 @@ class MatplotLibGraphLine(MatplotLibLinePlot):
 
         cdata=None
         if self.colorbar is not None:
-            cfield=self.colorfield if self.colorfield is not None else self.field
+            # A curve plots exactly one field, so the inherited str|list[str] is a str here.
+            cfield=self.colorfield if self.colorfield is not None else cast(str,self.field)
             cdata=self._data if cfield==self.field else self._resolve_field_for_color(cfield)
 
         result:list[tuple[NPFloatArray,NPFloatArray]]=[]

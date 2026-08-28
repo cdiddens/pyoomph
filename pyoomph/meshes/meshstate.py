@@ -55,7 +55,7 @@ import numpy
 from ..generic.mpi import get_mpi_nproc, get_mpi_rank, get_mpi_world_comm
 
 if TYPE_CHECKING:
-    from .mesh import AnySpatialMesh, BulkTemplateMesh
+    from .mesh import AnySpatialMesh, BulkTemplateMesh, InterfaceMesh
     from ..output.states import DumpFile
 
 
@@ -321,7 +321,7 @@ def _sorted_records(local: dict[str, NPAnyArray], distributed: bool, check: bool
             "elem_keys": elem_keys, "elem_lens": elem_lens, "elem_data": elem_data}
 
 
-def save_interface_state(mesh: "AnySpatialMesh", state: "DumpFile", check_consistency: bool = True) -> None:
+def save_interface_state(mesh: "InterfaceMesh", state: "DumpFile", check_consistency: bool = True) -> None:
     """Write one interface mesh's element-internal data.
 
     Interface elements carry all of a facet field's degrees of freedom - DL/D0 and the nodal DG spaces
@@ -342,7 +342,7 @@ def save_interface_state(mesh: "AnySpatialMesh", state: "DumpFile", check_consis
     owned = _owned_elements(mesh)
     data, lens = mesh.save_elemental_state()
     my_data, my_lens = _block_gather(data, lens, numpy.flatnonzero(owned))
-    my_keys = keys[owned]
+    my_keys: NPAnyIntArray = keys[owned]
     distributed = _mesh_is_distributed(mesh)
     if distributed:
         gathered = _gather_blocks(my_keys, my_lens, my_data)
@@ -366,7 +366,7 @@ def read_interface_state(state: "DumpFile") -> "tuple[NPAnyIntArray, NPAnyIntArr
     return keys, lens, data
 
 
-def apply_interface_state(mesh: "AnySpatialMesh", keys: "NPAnyIntArray", lens: "NPAnyIntArray",
+def apply_interface_state(mesh: "InterfaceMesh", keys: "NPAnyIntArray", lens: "NPAnyIntArray",
                           data: "NPFloatArray") -> int:
     """Push a read interface record onto a rebuilt interface mesh. Returns how many elements it filled.
 

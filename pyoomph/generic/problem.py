@@ -3,24 +3,24 @@ from __future__ import annotations
 #  @author Christian Diddens <c.diddens@utwente.nl>
 #  @author Duarte Rocha <d.rocha@utwente.nl>
 #  @author Maxim de Wildt <m.dewildt@utwente.nl>
-#  
+#
 #  @section LICENSE
-# 
-#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+#
+#  pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 #  Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
-# 
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
-# 
+#
 #  This program is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
-# 
+#
 #  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 #  The main author may be contacted at c.diddens@utwente.nl
 #
@@ -438,15 +438,15 @@ class PeriodicOrbit:
                 raise RuntimeError("The orbit stored in "+dirfile+" does not say how many time points "
                                    "it has, and it was not written with that information in the file. "
                                    "Load it through the diagram it belongs to.")
-            blocks=[]
+            block_list:list[NPFloatArray]=[]
             for i in range(nT):
                 fname=os.path.join(dirfile,"block_{:03d}.dump".format(i))
                 if not os.path.exists(fname):
                     raise RuntimeError("The orbit belonging to this point is incomplete ("+fname+" is missing)")
                 problem.load_state(fname,ignore_outstep=True,ignore_continuation_data=True,
                                    ignore_eigendata=True,quiet=True)
-                blocks.append(numpy.asarray(problem.get_current_dofs()[0],dtype=float))
-            return info,numpy.array(blocks),extra
+                block_list.append(numpy.asarray(problem.get_current_dofs()[0],dtype=float))
+            return info,numpy.array(block_list),extra
         if not os.path.exists(npzfile):
             raise RuntimeError("The orbit belonging to this point is missing ("+npzfile+"), so "
                                "only one phase of the cycle could be restored.")
@@ -1517,7 +1517,6 @@ class Problem(_pyoomph.Problem):
             # A domain with no equations at all is not a valid tree node - the codegen still has
             # to exist for the mesh that was built from it.
             eqtree._equations = [DummyEquations()]
-        eqtree._combined_cache = None
 
     def get_default_timestepping_scheme(self,order:int) -> Literal['Newmark2', 'BDF2', 'BDF1']:
         if order==2:
@@ -5559,10 +5558,11 @@ class Problem(_pyoomph.Problem):
                 domtree=self._equation_system.get_children().get(dom)
                 if domtree is None or domtree._codegen is None:
                     continue
-                coupled=[b for b in parts[1:] if coupled_multiplier_names(domtree,b) or
-                         (domtree.get_children().get(b) is not None and
-                          domtree.get_children()[b]._codegen is not None and
-                          domtree.get_children()[b]._codegen._get_opposite_interface() is not None)]
+                def has_opposite(b:str,domtree:"EquationTree"=domtree)->bool:
+                    child=domtree.get_children().get(b)
+                    return (child is not None and child._codegen is not None
+                            and child._codegen._get_opposite_interface() is not None)
+                coupled=[b for b in parts[1:] if coupled_multiplier_names(domtree,b) or has_opposite(b)]
                 for k in range(len(coupled)):
                     for l in range(k+1,len(coupled)):
                         pairs.append((dom,coupled[k],coupled[l]))
@@ -5586,9 +5586,10 @@ class Problem(_pyoomph.Problem):
             # (c) Per junction: is any slot shared, and are all the domains there in one space?
             for _root,members in junctions.items():
                 doms={d for d,_b in members}
-                spaces={str(self._equation_system.get_children()[d]._codegen._coordinate_space)
-                        for d in doms if self._equation_system.get_children().get(d) is not None
-                        and self._equation_system.get_children()[d]._codegen is not None}
+                children=self._equation_system.get_children()
+                spaces={str(cast("FiniteElementCodeGenerator",children[d]._codegen)._coordinate_space)
+                        for d in doms if children.get(d) is not None
+                        and children[d]._codegen is not None}
                 spaces.discard("")
                 if len(spaces)<2:
                     continue
@@ -5864,7 +5865,7 @@ class Problem(_pyoomph.Problem):
         """
         if self._outdir is None or self._ccode_dir_is_unique:
             return
-        ext=self.get_ccompiler().get_shared_lib_extension()
+        ext=cast("_pyoomph.SharedLibCCompiler",self.get_ccompiler()).get_shared_lib_extension()
         if not _pyoomph.jit_library_is_loaded(os.path.join(self._outdir,self._ccode_dir,subname)+ext):
             return
         base=self._ccode_dir
@@ -9363,7 +9364,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             yield U
         deflation.add_known_solution(U)
         while True:
-            new_sols=[]
+            new_sols:list[NPFloatArray]=[]
             for i,Ustart in enumerate(found_sols):    
                 
                 if use_eigenperturbation:
@@ -9526,7 +9527,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
                     # landed on the DEAD branch's old position rather than on its own, so require that
                     # too.
                     if cdist<mindist and cdist<numpy.linalg.norm(otherdofs-old_branches[other_branch]):
-                        mindist=cdist
+                        mindist=float(cdist)
                         switch_index=other_branch
                 if switch_index is not None:
                     print("Switching branch {} with {}".format(bind_to_rem,switch_index))
@@ -10151,7 +10152,7 @@ Patrick E. Farrell, Ásgeir Birkisson & Simon W. Funke, https://arxiv.org/pdf/14
             n_if = state.int_data(lambda: n_if, lambda n: n) #type:ignore
             if state.save:
                 for _m in imeshes:
-                    state.string_data(lambda _m=_m: _m.get_full_name(), lambda s: s)
+                    state.string_data(lambda _m=_m: _m.get_full_name(), lambda s: s) #type:ignore[misc] # late binding by default argument
                     save_interface_state(_m, state)
             else:
                 self._pending_interface_states = {}

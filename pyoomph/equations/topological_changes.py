@@ -87,7 +87,7 @@ from ..meshes.axisymm_topology import (InterfaceChain, ReconnectionEvent, Surger
                                        WaistNotYetSeparable, detect_and_plan, revolved_volume)
 from ..meshes.gmsh import GmshTemplate
 from ..meshes.tqmesh import TQMeshPoint, TQMeshTemplate
-from ..meshes.mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate2d, MeshFromTemplateBase, Node, Element, AnyMesh
+from ..meshes.mesh import AnySpatialMesh, InterfaceMesh, MeshFromTemplate2d, MeshFromTemplateBase, MeshedMeshTemplate, Node, Element, AnyMesh
 from ..meshes.meshdatacache import MeshDataCache, MeshDataCacheEntry
 from ..typings import *
 
@@ -151,21 +151,17 @@ class ReconnectedBoundaries:
 # The mesh template
 # --------------------------------------------------------------------------------------
 
-class TopologicalChangesTemplate(abc.ABC):
-    """Virtual base of every mesh template that can rebuild itself after a pinch-off or a
-    coalescence, i.e. of :py:class:`TopologicalChangesGmshTemplate` and
-    :py:class:`TopologicalChangesTQMeshTemplate`. Use it for ``isinstance``; it is what
-    :py:class:`AxisymmetricReconnection` requires of the bulk template it is attached to.
-
-    It is a *virtual* base - the concrete classes ``register()`` with it rather than deriving from
-    it - because ``MeshTemplate`` is a nanobind type and nanobind refuses any class with two bases,
-    so a real mixin cannot be inherited alongside a backend. The shared implementation therefore
-    lives in :py:class:`_TopologicalChangesMixin` and is copied in by
-    :py:func:`_with_topological_changes`.
-    """
+if TYPE_CHECKING:
+    # Every class the mixin is copied into is a MeshedMeshTemplate, and its methods call straight
+    # into that half (get_boundary_coordinates, is_remeshing, ...). Saying so here is type-checking
+    # only: it cannot be a real base, because nanobind refuses a class with two bases - which is the
+    # whole reason the implementation is copied in rather than inherited.
+    _TopoMixinBase = MeshedMeshTemplate
+else:
+    _TopoMixinBase = object
 
 
-class _TopologicalChangesMixin:
+class _TopologicalChangesMixin(_TopoMixinBase):
     """The backend-independent half of a topological-changes template.
 
     Everything here is independent of the mesh generator behind it. All a backend has to add is an
@@ -191,6 +187,13 @@ class _TopologicalChangesMixin:
     That branch is entered for a reconnection *and* for an ordinary quality remesh - there is only
     one code path, and :py:meth:`get_reconnected_boundaries` fills in the same structure either way.
     """
+
+    if TYPE_CHECKING:
+        # Backend-specific and spelled differently by each one, so only the shape the mixin relies
+        # on is declared; the concrete template's own signature is what callers see.
+        def point(self,*args:Any,**kwargs:Any)->Any: ...
+        def line(self,*args:Any,**kwargs:Any)->Any: ...
+        def spline(self,*args:Any,**kwargs:Any)->Any: ...
 
     def _init_topological_changes(self) -> None:
         # interface mesh name (e.g. "liquid/interface") -> (plan, extra info of the equation)
@@ -292,8 +295,9 @@ class _TopologicalChangesMixin:
 
         # Unconditional, and in the same order on every rank: get_boundary_coordinates() is
         # collective on a distributed mesh (see MeshedMeshTemplate).
-        old_interface = self.get_boundary_coordinates(interface_name, sort_along_axis="y+", nondimensional=True)
-        old_axis = self.get_boundary_coordinates(axis_name, sort_along_axis="y+", nondimensional=True)
+        # nondimensional=True, so the entries really are floats and not Expressions
+        old_interface = cast("list[list[tuple[float,float]]]", self.get_boundary_coordinates(interface_name, sort_along_axis="y+", nondimensional=True))
+        old_axis = cast("list[list[tuple[float,float]]]", self.get_boundary_coordinates(axis_name, sort_along_axis="y+", nondimensional=True))
         old_opposite_axis = None
         if opposite_axis_name is not None:
             old_opposite_axis = self.get_boundary_coordinates(opposite_axis_name, sort_along_axis="y+", nondimensional=True)
@@ -413,7 +417,25 @@ class _TopologicalChangesMixin:
         return res
 
 
-def _with_topological_changes(cls: type) -> type:
+class TopologicalChangesTemplate(_TopologicalChangesMixin, abc.ABC):
+    """Virtual base of every mesh template that can rebuild itself after a pinch-off or a
+    coalescence, i.e. of :py:class:`TopologicalChangesGmshTemplate` and
+    :py:class:`TopologicalChangesTQMeshTemplate`. Use it for ``isinstance``; it is what
+    :py:class:`AxisymmetricReconnection` requires of the bulk template it is attached to.
+
+    It is a *virtual* base for the concrete templates - they ``register()`` with it rather than
+    deriving from it - because ``MeshTemplate`` is a nanobind type and nanobind refuses any class
+    with two bases, so a real mixin cannot be inherited alongside a backend. The shared
+    implementation therefore lives in :py:class:`_TopologicalChangesMixin`, which this class does
+    inherit (it is a plain Python class) and which :py:func:`_with_topological_changes` copies into
+    each backend.
+    """
+
+
+_TopoTemplateT = TypeVar("_TopoTemplateT")
+
+
+def _with_topological_changes(cls: type[_TopoTemplateT]) -> type[_TopoTemplateT]:
     """Copy the shared implementation into a concrete template and register it as a
     :py:class:`TopologicalChangesTemplate`. Names the class defines itself win."""
     for name, obj in vars(_TopologicalChangesMixin).items():
@@ -424,8 +446,18 @@ def _with_topological_changes(cls: type) -> type:
     return cls
 
 
+if TYPE_CHECKING:
+    # What _with_topological_changes does at runtime, spelled out for the type checker. The extra
+    # base exists only here; at runtime it is the backend alone, see the note in the decorator.
+    class _GmshTopoBase(GmshTemplate, _TopologicalChangesMixin): ...
+    class _TQMeshTopoBase(TQMeshTemplate, _TopologicalChangesMixin): ...
+else:
+    _GmshTopoBase = GmshTemplate
+    _TQMeshTopoBase = TQMeshTemplate
+
+
 @_with_topological_changes
-class TopologicalChangesGmshTemplate(GmshTemplate):
+class TopologicalChangesGmshTemplate(_GmshTopoBase):
     """:py:class:`TopologicalChangesTemplate` on top of a :py:class:`~pyoomph.meshes.gmsh.GmshTemplate`."""
 
     def __init__(self, loaded_from_mesh_file: str | None = None):
@@ -444,7 +476,7 @@ class TopologicalChangesGmshTemplate(GmshTemplate):
             return super().point(x, y, z, size, name=name, consider_spatial_scale=consider_spatial_scale)
         if consider_spatial_scale is None:
             consider_spatial_scale = self.consider_spatial_scale
-        nd = self._nondimensionalise((x, y, z), consider_spatial_scale)
+        nd = cast("tuple[float,float,float]", self._nondimensionalise((x, y, z), consider_spatial_scale))  # three in, three out
         existing = self._pointhash.get(nd)
         if existing is not None:
             return existing
@@ -457,7 +489,7 @@ class TopologicalChangesGmshTemplate(GmshTemplate):
 
 
 @_with_topological_changes
-class TopologicalChangesTQMeshTemplate(TQMeshTemplate):
+class TopologicalChangesTQMeshTemplate(_TQMeshTopoBase):
     """:py:class:`TopologicalChangesTemplate` on top of a
     :py:class:`~pyoomph.meshes.tqmesh.TQMeshTemplate`.
 
@@ -1041,7 +1073,7 @@ class AxisymmetricReconnection(InterfaceEquations):
             opp_axis_name = None
         try:
             opp_cg = self.get_current_code_generator()._get_opposite_interface()
-            opp_interface_name = None if opp_cg is None else opp_cg.get_full_name()
+            opp_interface_name = None if opp_cg is None else cast(FiniteElementCodeGenerator, opp_cg).get_full_name()
         except RuntimeError:
             opp_interface_name = None
         self._pending_on = (template, iname)
