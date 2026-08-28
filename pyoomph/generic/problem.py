@@ -31,6 +31,7 @@ import json
 import glob
 import sys
 import warnings
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs
 
 import scipy.sparse
 
@@ -1223,10 +1224,10 @@ class Problem(_pyoomph.Problem):
         self.project_initial_conditions=False
 
     # Use weak(u,psi) instead of vectorial U*Psi for the symmetry-breaking constraint
-    def _improve_pitchfork_tracking_on_unstructured_meshes(self,coord_sys:"OptionalCoordinateSystem"=None,pos_coord_sys:"OptionalCoordinateSystem"=None):
+    def _improve_pitchfork_tracking_on_unstructured_meshes(self,coordsys:"OptionalCoordinateSystem"=None,pos_coordsys:"OptionalCoordinateSystem"=None):
         self._improved_pitchfork_tracking_on_unstructured_meshes=True
-        self._improved_pitchfork_tracking_coordinate_system=coord_sys
-        self._improved_pitchfork_tracking_position_coordinate_system=pos_coord_sys
+        self._improved_pitchfork_tracking_coordinate_system=coordsys
+        self._improved_pitchfork_tracking_position_coordinate_system=pos_coordsys
         #self.enable_store_local_dof_pt_in_elements()
 
     def abort_current_run(self):
@@ -2029,34 +2030,35 @@ class Problem(_pyoomph.Problem):
         """
         return self._coordinate_system
 
-    def set_coordinate_system(self,csys:Literal["axisymmetric", "axisymmetric_flipped", "cartesian", "radialsymmetric"] | BaseCoordinateSystem):                
+    @_deprecated_kwargs(csys="coordsys")
+    def set_coordinate_system(self,coordsys:Literal["axisymmetric", "axisymmetric_flipped", "cartesian", "radialsymmetric"] | BaseCoordinateSystem):                
         """Set the default coordinate system at problem level. 
         You can specify coordinate systems also at equation level, but if you don't do, the coordinate system will default to this one.
 
         Args:
-            csys (Union[Literal["axisymmetric","axisymmetric_flipped","cartesian","radialsymmetric"],BaseCoordinateSystem]): The coordinate system to set as default.
+            coordsys (Union[Literal["axisymmetric","axisymmetric_flipped","cartesian","radialsymmetric"],BaseCoordinateSystem]): The coordinate system to set as default. The former name ``csys`` is deprecated, but still accepted.
 
         Raises:
             RuntimeError: Raised in case we do not set a valid coordinate system 
         """
-        if csys is None:
+        if coordsys is None:
             raise RuntimeError("Cannot set the problem coordinate system to None")
         csysd:BaseCoordinateSystem
-        if isinstance(csys,str):
-            if csys=="axisymmetric":
+        if isinstance(coordsys,str):
+            if coordsys=="axisymmetric":
                 csysd=axisymmetric
-            elif csys=="axisymmetric_flipped":
+            elif coordsys=="axisymmetric_flipped":
                 csysd=axisymmetric_flipped
-            elif csys=="cartesian":
+            elif coordsys=="cartesian":
                 csysd=cartesian
-            elif csys=="radialsymmetric":
+            elif coordsys=="radialsymmetric":
                 csysd=radialsymmetric
             else:
-                raise RuntimeError("Unknown coordinate system: "+csys)
-        elif not isinstance(csys,BaseCoordinateSystem):
-            raise RuntimeError("Unknown coordinate system: "+str(csys))
+                raise RuntimeError("Unknown coordinate system: "+coordsys)
+        elif not isinstance(coordsys,BaseCoordinateSystem):
+            raise RuntimeError("Unknown coordinate system: "+str(coordsys))
         else:
-            csysd=csys
+            csysd=coordsys
         self._coordinate_system=csysd
 
 
@@ -3243,14 +3245,14 @@ class Problem(_pyoomph.Problem):
                 u=nondim(fn,tag=["flag:only_base_mode"]) 
                 utest=testfunction(fn,dimensional=False)
                 # This will give a nice mass matrix! The Jacobian will be J_lk=psi^l*psi^k*dx                
-                eqs.add_residual(weak(u,utest,coordinate_system=self._improved_pitchfork_tracking_coordinate_system),destination="_simple_mass_matrix_of_defined_fields")
+                eqs.add_residual(weak(u,utest,coordsys=self._improved_pitchfork_tracking_coordinate_system),destination="_simple_mass_matrix_of_defined_fields")
             if eqs.get_current_code_generator()._coordinates_as_dofs and (eqs.get_parent_domain() is None) : # Only accumulate on the moving bulk domain
                 u=nondim("mesh",tag=["flag:only_base_mode"]) 
                 utest=testfunction("mesh",dimensional=False)
                 cs=self._improved_pitchfork_tracking_coordinate_system
                 if self._improved_pitchfork_tracking_position_coordinate_system:
                     cs=self._improved_pitchfork_tracking_position_coordinate_system
-                eqs.add_residual(weak(u,utest,coordinate_system=cs),destination="_simple_mass_matrix_of_defined_fields")
+                eqs.add_residual(weak(u,utest,coordsys=cs),destination="_simple_mass_matrix_of_defined_fields")
             # Residuals not writtten to C, wont be used
             eqs.get_current_code_generator().set_ignore_residual_assembly("_simple_mass_matrix_of_defined_fields")
             
@@ -6041,7 +6043,7 @@ class Problem(_pyoomph.Problem):
         #if azimuthal_stability:
         #    self.set_analytic_hessian_products(False) # We may not use it here!
         if improve_pitchfork_on_unstructured_mesh:
-            self._improve_pitchfork_tracking_on_unstructured_meshes(coord_sys=improve_pitchfork_coordsys,pos_coord_sys=improve_pitchfork_position_coordsys)
+            self._improve_pitchfork_tracking_on_unstructured_meshes(coordsys=improve_pitchfork_coordsys,pos_coordsys=improve_pitchfork_position_coordsys)
         if shared_shapes_for_multi_assemble is not None:
             self._shared_shapes_for_multi_assemble=shared_shapes_for_multi_assemble
         if azimuthal_stability:

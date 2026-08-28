@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
  
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from ..meshes.mesh import AnyMesh, InterfaceMesh
 from ..generic import Equations, InterfaceEquations
 from ..generic.codegen import sorted_field_kwargs
@@ -522,7 +523,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         additional_normal_traction(ExpressionOrNum): Additional normal traction. Default is 0.
         surface_tension_gradient_directly(bool): Whether to consider the surface tension gradient directly. Default is False.
         use_highest_space_for_velo_connection(bool): Whether to use the highest space for the velocity connection. Default is False.
-        kinematic_bc_coordinate_sys(Optional[BaseCoordinateSystem]): The coordinate system for the kinematic boundary condition. Default is None.
+        kinematic_bc_coordsys(Optional[BaseCoordinateSystem]): The coordinate system for the kinematic boundary condition. Default is None.
         kinematic_bc_space: The finite element space for the kinematic boundary condition. Default is None, means auto-select.
         additional_masstransfer_scale(ExpressionOrNum): Additional mass transfer scale. Default is 1.
         additional_kin_bc_test_scale(ExpressionOrNum): Additional kinematic boundary condition test scale. Default is 1.
@@ -534,9 +535,12 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
     """
             
         
+    kinematic_bc_coordinate_sys = _deprecated_attribute_alias("kinematic_bc_coordinate_sys","kinematic_bc_coordsys")
+
+    @_deprecated_kwargs(kinematic_bc_coordinate_sys="kinematic_bc_coordsys")
     def __init__(self, interface_props:AnyFluidFluidInterface, *, kinbc_name:str="_kin_bc", velo_connect_prefix:str="_lagr_conn_",
                  masstransfer_model:MassTransferModelBase | Literal[False] | None=None, static:Literal["auto"] | bool="auto", surface_tension_theta:float=1, total_mass_loss_factor_inside:ExpressionOrNum=1,total_mass_loss_factor_outside:ExpressionOrNum=1,
-                 surface_tension_projection_space:FiniteElementSpaceEnum | None=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordinate_sys:BaseCoordinateSystem | None=None,kinematic_bc_space:FiniteElementSpaceEnum | None=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1,surfactant_transport:"SurfactantTransportEquations | Literal[False] | None"=None):
+                 surface_tension_projection_space:FiniteElementSpaceEnum | None=None,additional_normal_traction:ExpressionOrNum=0,surface_tension_gradient_directly:bool=False,use_highest_space_for_velo_connection:bool=False,kinematic_bc_coordsys:BaseCoordinateSystem | None=None,kinematic_bc_space:FiniteElementSpaceEnum | None=None,additional_masstransfer_scale=1,additional_kin_bc_test_scale=1,static_normal_interface_motion:ExpressionOrNum=0,static_interface_motion_testfunction:ExpressionNumOrNone=None,project_interface_flux:bool=False,surface_tension_factor:ExpressionOrNum=1,surfactant_transport:"SurfactantTransportEquations | Literal[False] | None"=None):
         super(MultiComponentNavierStokesInterface, self).__init__()
         self.interface_props = interface_props
         self.kinbc_name = kinbc_name
@@ -559,7 +563,7 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
         self.surfactant_advect_velo_name="_uinterf_proj"
         self.surfactant_advect_velo_space:FiniteElementSpaceEnum="C2"
         self.use_highest_space_for_velo_connection=use_highest_space_for_velo_connection
-        self.kinematic_bc_coordinate_sys=kinematic_bc_coordinate_sys
+        self.kinematic_bc_coordsys=kinematic_bc_coordsys
         self.kinematic_bc_space:FiniteElementSpaceEnum | None=kinematic_bc_space
         self.additional_masstransfer_scale=additional_masstransfer_scale
         self.additional_kin_bc_test_scale=additional_kin_bc_test_scale
@@ -795,13 +799,13 @@ class MultiComponentNavierStokesInterface(InterfaceEquations):
             static = not self.get_current_code_generator()._coordinates_as_dofs
 
 
-        self.add_residual(weak(kin_bc, l_test,coordinate_system=self.kinematic_bc_coordinate_sys))
+        self.add_residual(weak(kin_bc, l_test,coordsys=self.kinematic_bc_coordsys))
         if static:
-            self.add_residual(-weak(l, dot(n, u_test),coordinate_system=self.kinematic_bc_coordinate_sys))
+            self.add_residual(-weak(l, dot(n, u_test),coordsys=self.kinematic_bc_coordsys))
             if self.static_interface_motion_testfunction is not None:
-                self.add_residual(weak(kin_bc,self.static_interface_motion_testfunction,coordinate_system=self.kinematic_bc_coordinate_sys))
+                self.add_residual(weak(kin_bc,self.static_interface_motion_testfunction,coordsys=self.kinematic_bc_coordsys))
         else:
-            self.add_residual(weak(l, dot(n, R_test),coordinate_system=self.kinematic_bc_coordinate_sys))
+            self.add_residual(weak(l, dot(n, R_test),coordsys=self.kinematic_bc_coordsys))
 
         # dynamic boundary condition
         surf_tens = self.interface_props.surface_tension

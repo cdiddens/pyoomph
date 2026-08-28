@@ -26,6 +26,7 @@ from __future__ import annotations
 #
 # ========================================================================
  
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from ..meshes.mesh import InterfaceMesh, AnyMesh
 from ..meshes.ordering import SortAlongAxis, check_sorting_arguments, sort_line_segments
 from .. import GlobalLagrangeMultiplier, WeakContribution, IntegralConstraint
@@ -145,7 +146,7 @@ class PseudoElasticMesh(BaseMovingMeshEquations):
         X = var("lagrangian")
         displ = x - X
         check=sym(grad(x_test,  coordsys=self.coordsys, lagrangian=True))        
-        self.add_residual(self.ALE_factor * Weak(sigma(displ), eps(x_test),coordinate_system=self.coordsys) )
+        self.add_residual(self.ALE_factor * Weak(sigma(displ), eps(x_test),coordsys=self.coordsys) )
 
 
 class LaplaceSmoothedMesh(BaseMovingMeshEquations):
@@ -178,7 +179,7 @@ class LaplaceSmoothedMesh(BaseMovingMeshEquations):
             tens=sym(grad(displ,coordsys=coordsys,lagrangian=True))
         else:
             tens=grad(displ,coordsys=coordsys,lagrangian=True)
-        self.add_residual(self.factor*Weak(tens, grad(x_test,coordsys=coordsys, lagrangian=True),coordinate_system=coordsys) )
+        self.add_residual(self.factor*Weak(tens, grad(x_test,coordsys=coordsys, lagrangian=True),coordsys=coordsys) )
 
 
 class SingleDirectionLaplaceSmoothedMesh(LaplaceSmoothedMesh):
@@ -197,7 +198,7 @@ class SingleDirectionLaplaceSmoothedMesh(LaplaceSmoothedMesh):
         displ = x - X
         coordsys=self.coordsys
         tens=grad(displ,coordsys=coordsys,lagrangian=True)[self.direction]
-        self.add_residual(self.factor*Weak(tens, grad(x_test,coordsys=coordsys, lagrangian=True)[self.direction],coordinate_system=coordsys) )
+        self.add_residual(self.factor*Weak(tens, grad(x_test,coordsys=coordsys, lagrangian=True)[self.direction],coordsys=coordsys) )
         ndim=self.get_mesh().get_code_gen().get_nodal_dimension()
         for i in range(ndim):
             if i!=self.direction:
@@ -238,7 +239,7 @@ class HyperelasticSmoothedMesh(BaseMovingMeshEquations):
         I1=trace( matproduct(transpose(dxdX),dxdX) )*J**rational_num(-2,3)        
         I1min=I1-self.get_nodal_dimension() # or 3?
         F=self.mu/2*I1min+self.kappa/2*(J-1)**2
-        self.add_functional_minimization(F,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
+        self.add_functional_minimization(F,dimensional_testfunctions=False,coordsys=self.coordsys,lagrangian=True)
         
 class YeohSmoothedMesh(BaseMovingMeshEquations):
     """Yeoh mesh smoothing. The mesh is smoothed by minimizing the energy functional:
@@ -272,8 +273,8 @@ class YeohSmoothedMesh(BaseMovingMeshEquations):
         I1=trace( matproduct(transpose(dxdX),dxdX) )*J**rational_num(-2,3)
         I1min=I1-self.get_nodal_dimension()
         F=(self.C1*I1min+self.C2*I1min**2+self.C3*I1min**3+self.kappa*(J-1)**2)/2                                
-        #self.add_functional_minimization(scale_factor("spatial")*F,dxdX,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
-        self.add_functional_minimization(F,dimensional_testfunctions=False,coordinate_system=self.coordsys,lagrangian=True)
+        #self.add_functional_minimization(scale_factor("spatial")*F,dxdX,dimensional_testfunctions=False,coordsys=self.coordsys,lagrangian=True)
+        self.add_functional_minimization(F,dimensional_testfunctions=False,coordsys=self.coordsys,lagrangian=True)
 
 
 class InterfaceMeshStiffening(InterfaceEquations):
@@ -384,7 +385,7 @@ class InterfaceMeshStiffening(InterfaceEquations):
             eps:Callable[[Expression],Expression]=lambda v: sym(gradient(v))
             a=lmbda*trace(eps(displ))*identity_matrix()+2*mu*eps(displ)
             b=eps(xtest)
-        self.add_weak(self.get_stiffness()*a,b,lagrangian=True,coordinate_system=self.coordsys)
+        self.add_weak(self.get_stiffness()*a,b,lagrangian=True,coordsys=self.coordsys)
 
 
 class PinMeshCoordinates(Equations):
@@ -523,11 +524,11 @@ class StabilizeElementSizeAtMovingInterface(InterfaceEquations):
         _x,xtest=var_and_test("mesh")
         parent=self.get_parent_equations(BaseMovingMeshEquations)
         assert isinstance(parent,BaseMovingMeshEquations)
-        self.add_residual(weak(es,estest,coordinate_system=parent.coordsys)) # es=size_lagr/size_euler
-        self.add_residual(-weak(1,estest,lagrangian=True,coordinate_system=parent.coordsys))
+        self.add_residual(weak(es,estest,coordsys=parent.coordsys)) # es=size_lagr/size_euler
+        self.add_residual(-weak(1,estest,lagrangian=True,coordsys=parent.coordsys))
         self.set_initial_condition("_elemscale",1)
         spatial_square=parent.get_squared_spatial_factor()
-        self.add_residual(weak(-self.factor*spatial_square*(es-1),scale_factor("spatial")*div(xtest,lagrangian=False,coordsys=parent.coordsys),coordinate_system=parent.coordsys))
+        self.add_residual(weak(-self.factor*spatial_square*(es-1),scale_factor("spatial")*div(xtest,lagrangian=False,coordsys=parent.coordsys),coordsys=parent.coordsys))
 
     def after_remeshing(self, eqtree: "EquationTree"):
         mesh=eqtree.get_mesh()
@@ -632,9 +633,10 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
     
     """
     required_parent_type=BaseMovingMeshEquations
-    def __init__(self,coordinate_system=cartesian,sorting:"SortAlongAxis | None"=None):
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,coordsys:"BaseCoordinateSystem | None"=cartesian,sorting:"SortAlongAxis | None"=None):
         super().__init__()
-        self.coordsys=coordinate_system
+        self.coordsys=coordsys
         self.verbose=True
         # Which end of each interface segment gets arclength 0. Worth setting whenever the mesh can
         # be rebuilt underneath this equation: the segment orientation the mesh happens to deliver
@@ -673,12 +675,12 @@ class EnforcedInterfacialLaplaceSmoothing(InterfaceEquations):
         l=var("_tang_shift_"+iname,only_base_mode=True)
         n=var("normal")
         
-        self.add_weak(grad(s,coordsys=self.coordsys),grad(stest,coordsys=self.coordsys),coordinate_system=self.coordsys)
+        self.add_weak(grad(s,coordsys=self.coordsys),grad(stest,coordsys=self.coordsys),coordsys=self.coordsys)
         
         t=vector(-n[1],n[0])  # Tangential vector
-        self.add_weak(s-s0,ltest,coordinate_system=self.coordsys) # Ensure that the arclength is equal to the initial arclength 
+        self.add_weak(s-s0,ltest,coordsys=self.coordsys) # Ensure that the arclength is equal to the initial arclength 
         # by shifting the nodes tangentially along the line
-        self.add_weak(l*t,testfunction("mesh"),coordinate_system=self.coordsys)
+        self.add_weak(l*t,testfunction("mesh"),coordsys=self.coordsys)
         # Fix the reference configuration
         self.set_Dirichlet_condition("_s_fixed_"+iname,True)
         

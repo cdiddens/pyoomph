@@ -463,7 +463,7 @@ class StickSlipContactLine(UnpinnedContactLine):
         dynamics = pin_value * pin_when + unpin_value * unpin_when + as_it_is_when * as_it_is_value
         dynamics = subexpression(dynamics)
         if dyncl is not None:
-            dyncl.add_residual(weak(up - dynamics, up_test, coordinate_system=cartesian))
+            dyncl.add_residual(weak(up - dynamics, up_test, coordsys=cartesian))
             if self._initial_pin_info is not None:
                 dyncl.set_initial_condition(dyncl.unpinned_indicator_name, self._initial_pin_info[0], True)
                 dyncl.set_initial_condition(dyncl.override_dynamics_name, self._initial_pin_info[1], True)

@@ -44,6 +44,7 @@ from __future__ import annotations
 #
 # ========================================================================
 
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from ..generic.codegen import Equations, BaseEquations, InterfaceEquations, FiniteElementCodeGenerator
 from .generic import DirichletBC, PinWhere
 from ..utils.smallest_circle import make_circle
@@ -230,15 +231,18 @@ class SetCoordinateSystem(Equations):
     Set the default coordinate system for the current equations. It will override the coordinate system set on the problem level.
 
     Args:
-        coord_sys: A coordinate system instance from :py:mod:`pyoomph.expressions.coordsys`, e.g. ``axisymmetric``.
+        coordsys: A coordinate system instance from :py:mod:`pyoomph.expressions.coordsys`, e.g. ``axisymmetric``. The former name ``coord_sys`` is deprecated, but still accepted.
     """
-    def __init__(self,coord_sys:"BaseCoordinateSystem"):
+    coord_sys = _deprecated_attribute_alias("coord_sys","coordsys")
+
+    @_deprecated_kwargs(coord_sys="coordsys")
+    def __init__(self,coordsys:"BaseCoordinateSystem"):
         super(SetCoordinateSystem, self).__init__()
-        self.coord_sys=coord_sys
+        self.coordsys=coordsys
 
     def define_fields(self):
         master = self._master()
-        master._coordinate_system=self.coord_sys
+        master._coordinate_system=self.coordsys
 
 
 class ApplyMappingOnAddedResidual(BaseEquations):    #

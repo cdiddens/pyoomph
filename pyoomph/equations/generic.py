@@ -55,6 +55,7 @@ from __future__ import annotations
 
 # Not "from .. import var_and_test,var": this module is imported while the pyoomph package itself is
 # still being set up, so it must not depend on what the top-level __init__ has bound so far.
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from .. import _pyoomph_core as _pyoomph
 from ..expressions import var_and_test,var
 from ..generic.codegen import  InterfaceEquations,Equations,BaseEquations,ODEEquations,FiniteElementCodeGenerator,sorted_field_kwargs
@@ -640,18 +641,21 @@ class ProjectExpression(Equations):
             Defaults to the nodal dimension. In Cartesian coordinates that leaves a planar tensor
             without its out-of-plane entry, so pass ``dim=3`` to project a full three-dimensional
             tensor on a two-dimensional mesh. Ignored for a scalar field.
-        coordinate_system: Coordinate system for the projection. If None, the coordinate system of the domain/problem will be used. Defaults to None.
+        coordsys: Coordinate system for the projection. If None, the coordinate system of the domain/problem will be used. Defaults to None. The former name ``coordinate_system`` is deprecated, but still accepted.
         **projs: Keyword arguments representing the expressions to project. The keys are the names of the projected fields, and the values are the expressions to project.
         
     """
-    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",destination:str | None=None,field_type:Literal["scalar","vector","tensor","symmetric_tensor"]="scalar",dim:int | None=None,coordinate_system:"BaseCoordinateSystem | None"=None, **projs:ExpressionOrNum):
+    coordinate_system = _deprecated_attribute_alias("coordinate_system","coordsys")
+
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,scale:ExpressionOrNum | str=1,space:FiniteElementSpaceEnum="C2",destination:str | None=None,field_type:Literal["scalar","vector","tensor","symmetric_tensor"]="scalar",dim:int | None=None,coordsys:"BaseCoordinateSystem | None"=None, **projs:ExpressionOrNum):
         super(ProjectExpression, self).__init__()
         self.space:FiniteElementSpaceEnum=space
         self.scale:ExpressionOrNum=scale_factor(scale) if isinstance(scale,str) else scale
         self.field_type=field_type
         self.dim=dim
         self.projs=projs.copy()
-        self.coordinate_system=coordinate_system
+        self.coordsys=coordsys
         self.destination=destination
         
     def define_fields(self):
@@ -673,8 +677,8 @@ class ProjectExpression(Equations):
         from ..expressions.generic import weak
         for n,e in self.projs.items():
             f,ftest=var_and_test(n)
-            self.add_residual(weak(f,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system),destination=self.destination)
-            self.add_residual(weak(-e,testfunction(n,dimensional=False)/scale_factor(n),coordinate_system=self.coordinate_system),destination=self.destination)
+            self.add_residual(weak(f,testfunction(n,dimensional=False)/scale_factor(n),coordsys=self.coordsys),destination=self.destination)
+            self.add_residual(weak(-e,testfunction(n,dimensional=False)/scale_factor(n),coordsys=self.coordsys),destination=self.destination)
 
 class InitialCondition(BaseEquations):
     """
@@ -809,25 +813,31 @@ class IntegralObservables(Equations):
     does work.
 
     Args:
-        _coordinate_system: The coordinate system to use. Defaults to None, i.e. the one of the
-            equations or the problem.
+        coordsys: The coordinate system to use. Defaults to None, i.e. the one of the
+            equations or the problem. The former name ``_coordinate_system`` is deprecated, but still
+            accepted. Since the observables are passed as keyword arguments, an observable cannot be
+            named ``coordsys`` (nor ``_lagrangian``).
         _lagrangian: Integrate over the Lagrangian instead of the Eulerian domain. Defaults to False.
         **integral_observables: The observables, either expressions to integrate or callables of other
             observables (see above).
     """
-    def __init__(self,_coordinate_system:"BaseCoordinateSystem | None"=None,_lagrangian:bool=False, **integral_observables:ExpressionOrNum | Callable[..., ExpressionOrNum]):
+    @_deprecated_kwargs(_coordinate_system="coordsys")
+    def __init__(self,coordsys:"BaseCoordinateSystem | None"=None,_lagrangian:bool=False, **integral_observables:ExpressionOrNum | Callable[..., ExpressionOrNum]):
         super(IntegralObservables, self).__init__()
         is_dependent_func=lambda v: callable(v) and not isinstance(v,Expression)
         self.integral_observables = {k:v for k,v in integral_observables.items() if not is_dependent_func(v)}
         self.dependent_funcs={k:v for k,v in integral_observables.items() if is_dependent_func(v)}
-        self._coordinate_system=_coordinate_system
+        # NOT self._coordinate_system: that is the slot BaseEquations uses for the coordinate system of
+        # the entire equation object, so storing the argument there used to override the system of whatever
+        # this class was combined with, not just the measure of these observables.
+        self.coordsys=coordsys
         self._lagrangian=_lagrangian
 
     def define_additional_functions(self):
-        if self._coordinate_system is None:
+        if self.coordsys is None:
             dx = self.get_dx(lagrangian=self._lagrangian)
         else:
-            dx=self.get_dx(coordsys=self._coordinate_system,lagrangian=self._lagrangian)
+            dx=self.get_dx(coordsys=self.coordsys,lagrangian=self._lagrangian)
         for k,v in self.integral_observables.items():
             #import pyoomph._pyoomph_core as _pyoomph
             #_pyoomph.set_verbosity_flag(1)
@@ -1112,20 +1122,23 @@ class WeakContribution(BaseEquations):
             string is taken as a field name, i.e. ``"u"`` means ``testfunction("u")``.
         dimensional_dx: If set to ``True``, the weak contribution is treated as a dimensional contribution, i.e. spatial integration dx will carry dimension.
         lagrangian: If set to ``True``, the weak contribution is integrated in the Lagrangian frame of reference.
-        coordinate_system: The coordinate system in which the weak contribution is defined. If not set, the coordinate system of the equations or the problem is used.
+        coordsys: The coordinate system in which the weak contribution is defined. If not set, the coordinate system of the equations or the problem is used. The former name ``coordinate_system`` is deprecated, but still accepted.
         destination: The residual destination of the weak contribution. Can be used to define multiple residuals.
     """
-    def __init__(self,a:"ExpressionOrNum | str",b:"Expression | str",dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:BaseCoordinateSystem | None=None,destination:str | None=None):
+    coordinate_system = _deprecated_attribute_alias("coordinate_system","coordsys")
+
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,a:"ExpressionOrNum | str",b:"Expression | str",dimensional_dx:bool=False,lagrangian:bool=False,coordsys:BaseCoordinateSystem | None=None,destination:str | None=None):
         super(WeakContribution, self).__init__()
         self.dimensional_dx=dimensional_dx
-        self.coordinate_system=coordinate_system
+        self.coordsys=coordsys
         self.lagrangian=lagrangian
         self.destination=destination
         self.b:Expression=testfunction(b) if isinstance(b,str) else b
         self.a:ExpressionOrNum=var(a) if isinstance(a,str) else a
 
     def define_residuals(self):
-        self.add_residual(weak(self.a,self.b,dimensional_dx=self.dimensional_dx,lagrangian=self.lagrangian,coordinate_system=self.coordinate_system),destination=self.destination)
+        self.add_residual(weak(self.a,self.b,dimensional_dx=self.dimensional_dx,lagrangian=self.lagrangian,coordsys=self.coordsys),destination=self.destination)
 
 
 class ScalarField(Equations):
@@ -1304,12 +1317,14 @@ class EnforcedBC(InterfaceEquations):
             Defaults to False.
         domain: Domain of the adjusted field, if it is not the one this condition is added to.
         space: Space of the Lagrange multiplier field. Defaults to the space of the adjusted field.
-        coordinate_system: Coordinate system of the constraint integral. Defaults to the one of the
-            equations or the problem.
+        coordsys: Coordinate system of the constraint integral. Defaults to the one of the
+            equations or the problem. The former name ``coordinate_system`` is deprecated, but still
+            accepted.
         **constraints: Name of the field to adjust, with the constraint expression in residual form.
     """
  
-    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:str | None=None,space:FiniteElementSpaceEnum | None=None,coordinate_system:BaseCoordinateSystem | None=None,**constraints:Expression):
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:str | None=None,space:FiniteElementSpaceEnum | None=None,coordsys:BaseCoordinateSystem | None=None,**constraints:Expression):
         super(EnforcedBC, self).__init__()
         self.constraints = constraints.copy()
         self.lagrangian:bool = False
@@ -1317,7 +1332,7 @@ class EnforcedBC(InterfaceEquations):
         self.set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve
         self.domain=domain
         self.space=space
-        self.coordsys=coordinate_system
+        self.coordsys=coordsys
 
     def get_lagrange_multiplier_name(self, varname:str)->str:
         return "_lagr_enf_bc_" + varname
@@ -1365,8 +1380,8 @@ class EnforcedBC(InterfaceEquations):
             lagr_name=self.get_lagrange_multiplier_name(k)
             l, ltest = var_and_test(lagr_name)  # get the Lagrange multiplier
             utest = testfunction(k,domain=self.domain)
-            self.add_residual(weak(v, ltest, lagrangian=self.lagrangian,coordinate_system=self.coordsys))  # Enforce the constraint
-            self.add_residual(weak(l, utest,lagrangian=self.lagrangian,coordinate_system=self.coordsys))  # Lagrange multiplier pair to enforce it
+            self.add_residual(weak(v, ltest, lagrangian=self.lagrangian,coordsys=self.coordsys))  # Enforce the constraint
+            self.add_residual(weak(l, utest,lagrangian=self.lagrangian,coordsys=self.coordsys))  # Lagrange multiplier pair to enforce it
             if self.only_for_stationary_solve:
                 self.set_Dirichlet_condition(lagr_name,0)
 
@@ -1500,15 +1515,17 @@ class EnforcedDirichlet(EnforcedBC):
             Defaults to False.
         domain: Domain of the adjusted field, if it is not the one this condition is added to.
         space: Space of the Lagrange multiplier field. Defaults to the space of the adjusted field.
-        coordinate_system: Coordinate system of the constraint integral. Defaults to the one of the
-            equations or the problem.
+        coordsys: Coordinate system of the constraint integral. Defaults to the one of the
+            equations or the problem. The former name ``coordinate_system`` is deprecated, but still
+            accepted.
         **constraints: Name of the field to adjust, with the value it is enforced to.
     """
     
-    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:str | None=None,space:FiniteElementSpaceEnum | None=None,coordinate_system:BaseCoordinateSystem | None=None, **constraints:Expression):
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,*, only_for_stationary_solve:bool=False, set_zero_on_normal_mode_eigensolve=False,domain:str | None=None,space:FiniteElementSpaceEnum | None=None,coordsys:BaseCoordinateSystem | None=None, **constraints:Expression):
         from ..expressions import var        
         new_kwargs={k:var(k,domain=domain)-v for k,v in constraints.items()}
-        super(EnforcedDirichlet, self).__init__(only_for_stationary_solve=only_for_stationary_solve, set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve,coordinate_system=coordinate_system ,**new_kwargs.copy(),domain=domain,space=space)
+        super(EnforcedDirichlet, self).__init__(only_for_stationary_solve=only_for_stationary_solve, set_zero_on_normal_mode_eigensolve=set_zero_on_normal_mode_eigensolve,coordsys=coordsys ,**new_kwargs.copy(),domain=domain,space=space)
 
 
 class ForceZeroOnEigenSolve(BaseEquations):

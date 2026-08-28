@@ -96,6 +96,7 @@ projected advection velocity to the mesh velocity.
 
 from __future__ import annotations
 
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from ..generic import Equations, InterfaceEquations
 from ..expressions import *
 from .generic import interface_transport_velocities
@@ -743,19 +744,23 @@ class SurfactantEndFlux(InterfaceEquations):
 
     Note that in an axisymmetric problem the measure of a point domain carries :math:`2\pi r`, so a
     flux imposed at an end point sitting on the symmetry axis contributes nothing at all -- correctly
-    so, since the ring it lives on has zero circumference. Pass ``coordinate_system=cartesian`` if a
+    so, since the ring it lives on has zero circumference. Pass ``coordsys=cartesian`` if a
     plain point value is wanted there instead.
 
     Args:
         fluxes: The outward flux per surfactant and per unit end-point length, as ``name=expression``.
-        coordinate_system: Override the coordinate system of the point integral.
+        coordsys: Override the coordinate system of the point integral. The former name
+            ``coordinate_system`` is deprecated, but still accepted.
     """
     required_parent_type = SurfactantTransportEquations
 
-    def __init__(self, *, coordinate_system: OptionalCoordinateSystem = None, **fluxes: ExpressionOrNum):
+    coordinate_system = _deprecated_attribute_alias("coordinate_system","coordsys")
+
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self, *, coordsys: OptionalCoordinateSystem = None, **fluxes: ExpressionOrNum):
         super().__init__()
         self.fluxes = fluxes
-        self.coordinate_system = coordinate_system
+        self.coordsys = coordsys
 
     def define_residuals(self) -> None:
         parent = self.get_parent_equations(of_type=SurfactantTransportEquations)
@@ -766,7 +771,7 @@ class SurfactantEndFlux(InterfaceEquations):
                 raise RuntimeError("SurfactantEndFlux was given a flux for '" + name + "', which the parent "
                                    "SurfactantTransportEquations does not transport. It has: " + str(sorted(known)))
             self.add_residual(weak(flux, testfunction(parent.field_name(name)),
-                                   coordinate_system=self.coordinate_system))
+                                   coordsys=self.coordsys))
 
 
 from ..typings import _set_public_api

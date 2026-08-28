@@ -272,7 +272,7 @@ class _CartesianEndFluxInterface(_PrescribedInterface):
         ieqs += DirichletBC(phi=0)
         ieqs += IntegralObservables(charge=var("qs"), area=1)
         assert self.end_flux is not None
-        ieqs += SurfaceChargeEndFlux(self.end_flux, coordinate_system=cartesian) @ "axis"
+        ieqs += SurfaceChargeEndFlux(self.end_flux, coordsys=cartesian) @ "axis"
         eqs += ieqs @ "ifc"
         eqs += DirichletBC(mesh_x=0) @ "axis"
         self += eqs @ "domain"

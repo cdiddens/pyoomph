@@ -133,7 +133,7 @@ Residual assembly (on `BaseEquations`):
 - `add_residual(expr)` — the fundamental method: add an already-built weak-form
   expression (must include the test function, e.g. via `weak(...)` or
   `expr*testfunction(name)` for ODEs) to the residual vector.
-- `add_weak(a, b, *, lagrangian=False, coordinate_system=None)` — shorthand for
+- `add_weak(a, b, *, lagrangian=False, coordsys=None)` — shorthand for
   `add_residual(weak(a, b))`.
 - Programmatic (rarely used directly — normally use the `InitialCondition`/
   `DirichletBC` equation classes instead): `set_initial_condition(field, expr)`,
@@ -184,7 +184,7 @@ Override `define_problem(self)` to build the problem (mesh + equations). Key met
 | `set_initial_condition(...)` | Applies `InitialCondition` equations (called automatically on first `solve`/`run`). |
 | `define_global_parameter(**params)` | Named continuation/ramp parameters usable inside expressions, e.g. `self.Re = self.define_global_parameter(Re=1.0)`. |
 | `set_scaling(**kwargs)` | Nondimensionalization: `temporal=`, `spatial=`, or `fieldname=<scale>`. |
-| `set_coordinate_system(csys)` | `"axisymmetric"`, `"radialsymmetric"`, etc. |
+| `set_coordinate_system(coordsys)` | `"axisymmetric"`, `"radialsymmetric"`, etc. |
 | `go_to_param(**kwargs)` | Pseudo-arclength continuation until a named global parameter reaches a target, e.g. `go_to_param(Re=100)`. |
 | `activate_bifurcation_tracking`, `find_bifurcation_via_eigenvalues`, `solve_eigenproblem` | Stability/bifurcation analysis on the same residuals. |
 | `set_output_directory(name)` | Override the default output directory (defaults to the script's filename minus `.py`). |

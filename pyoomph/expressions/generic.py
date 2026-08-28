@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
  
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs
 import math
 from ..typings import *
 
@@ -497,7 +498,8 @@ def set_weak_conjugate_second_argument(conjugate:bool):
 	_weak_mode_conjugate_second_arg=conjugate
 
 
-def weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:OptionalCoordinateSystem=None)->Expression:
+@_deprecated_kwargs(coordinate_system="coordsys")
+def weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,lagrangian:bool=False,coordsys:OptionalCoordinateSystem=None)->Expression:
 	"""
 	Construct a term of a weak form, i.e. (a,b)=integral_Omega a*b dOmega where Omega is the domain.
 	a is usually an expression depending on unknowns and b is usually a test function or spatial differentiations thereof.
@@ -507,17 +509,17 @@ def weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,lagrang
 		b (ExpressionOrNum): A testfunction or any linear function/operator applied on a testfunction.
 		dimensional_dx (bool, optional): Flag indicating whether consider spatial integration units (e.g. m, m^2, m^3). Defaults to False.
 		lagrangian (bool, optional): Flag indicating whether to integrate with respect to the Lagrangian coordinates and domain. Defaults to False.
-		coordinate_system (OptionalCoordinateSystem, optional): The coordinate system to use. Defaults to None, meaning the coordinate system at equation level, parent equation level or problem level.
+		coordsys (OptionalCoordinateSystem, optional): The coordinate system to use. Defaults to None, meaning the coordinate system at equation level, parent equation level or problem level. The former name ``coordinate_system`` is deprecated, but still accepted.
 
 	Returns:
 		Expression: A weak form that can be further used in expressions or added to the residuals of equations by the method add_residual.
 	"""
 
 	flags=0
-	if coordinate_system is None:
-		coordsys=_pyoomph.Expression(0)
+	if coordsys is None:
+		coordsys_expr=_pyoomph.Expression(0)
 	else:
-		coordsys = 0 + _pyoomph.GiNaC_wrap_coordinate_system(coordinate_system)
+		coordsys_expr = 0 + _pyoomph.GiNaC_wrap_coordinate_system(coordsys)
 	if dimensional_dx:
 		flags+=2
 	if lagrangian:
@@ -529,18 +531,22 @@ def weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,lagrang
 	if _weak_mode_conjugate_second_arg:
 		b=_pyoomph.GiNaC_get_real_part(b)-_pyoomph.GiNaC_imaginary_i()*_pyoomph.GiNaC_get_imag_part(b)
 		#a = _pyoomph.GiNaC_get_real_part(a) - _pyoomph.GiNaC_imaginary_i() * _pyoomph.GiNaC_get_imag_part(a)
-	return _pyoomph.GiNaC_weak(a,b,_pyoomph.Expression(flags),coordsys)
+	return _pyoomph.GiNaC_weak(a,b,_pyoomph.Expression(flags),coordsys_expr)
 
 # Lagrangian weak
-def Weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,coordinate_system:OptionalCoordinateSystem=None)->Expression:
+@_deprecated_kwargs(coordinate_system="coordsys")
+def Weak(a:ExpressionOrNum,b:ExpressionOrNum,*,dimensional_dx:bool=False,coordsys:OptionalCoordinateSystem=None)->Expression:
 	"""
-	Shortcut for weak(a,b,dimensional_dx=dimensional_dx,lagrangian=True,coordinate_system=coordinate_system)
+	Shortcut for weak(a,b,dimensional_dx=dimensional_dx,lagrangian=True,coordsys=coordsys).
+
+	The argument ``coordinate_system`` is a deprecated alias for ``coordsys``.
 	"""
-	return weak(a,b,dimensional_dx=dimensional_dx,lagrangian=True,coordinate_system=coordinate_system)
+	return weak(a,b,dimensional_dx=dimensional_dx,lagrangian=True,coordsys=coordsys)
 
 
 
-def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Expression | set[Expression] | list[Expression] | tuple[Expression, ...] | None=None,*,coordinate_system:OptionalCoordinateSystem=None,lagrangian:bool=False,dimensional_dx:bool=False,dimensional_testfunctions:bool=True)->Expression:
+@_deprecated_kwargs(coordinate_system="coordsys")
+def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Expression | set[Expression] | list[Expression] | tuple[Expression, ...] | None=None,*,coordsys:OptionalCoordinateSystem=None,lagrangian:bool=False,dimensional_dx:bool=False,dimensional_testfunctions:bool=True)->Expression:
     if only_with_respect_to is None:
         only_with_respect_to=[]
     elif isinstance(only_with_respect_to,(set,tuple,list)):
@@ -549,10 +555,10 @@ def minimize_functional_derivative(F:ExpressionOrNum,only_with_respect_to:Expres
         only_with_respect_to=[only_with_respect_to]
         
     flags=0
-    if coordinate_system is None:
+    if coordsys is None:
         coordsys_expr=_pyoomph.Expression(0)
     else:
-        coordsys_expr = 0 + _pyoomph.GiNaC_wrap_coordinate_system(coordinate_system)
+        coordsys_expr = 0 + _pyoomph.GiNaC_wrap_coordinate_system(coordsys)
     # Must agree with weak(a,b) flags
     if dimensional_dx:
         flags+=2

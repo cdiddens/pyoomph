@@ -27,6 +27,7 @@ from __future__ import annotations
 # ========================================================================
  
  
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from ..generic import Equations, InterfaceEquations
 from ..expressions import * #Import grad et al
 from ..expressions.phys_consts import * # epsilon_0, faraday_constant, gas_constant, ... (and the units)
@@ -1225,25 +1226,29 @@ class SurfaceChargeEndFlux(InterfaceEquations):
 
     Note that in an axisymmetric problem the measure of a point domain carries :math:`2\pi r`, so a
     flux imposed at an end point sitting on the symmetry axis contributes nothing at all -- correctly
-    so, since the ring it lives on has zero circumference. Pass ``coordinate_system=cartesian`` if a
+    so, since the ring it lives on has zero circumference. Pass ``coordsys=cartesian`` if a
     plain point value is wanted there instead.
 
     Args:
         flux: The outward flux per unit end-point length.
-        coordinate_system: Override the coordinate system of the point integral.
+        coordsys: Override the coordinate system of the point integral. The former name
+            ``coordinate_system`` is deprecated, but still accepted.
     """
     required_parent_type = SurfaceChargeConservation
 
-    def __init__(self,flux:ExpressionOrNum,*,coordinate_system:"OptionalCoordinateSystem"=None):
+    coordinate_system = _deprecated_attribute_alias("coordinate_system","coordsys")
+
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,flux:ExpressionOrNum,*,coordsys:"OptionalCoordinateSystem"=None):
         super().__init__()
         self.flux=flux
-        self.coordinate_system=coordinate_system
+        self.coordsys=coordsys
 
     def define_residuals(self):
         parent=self.get_parent_equations(SurfaceChargeConservation)
         assert isinstance(parent,SurfaceChargeConservation)
         self.add_residual(weak(self.flux,testfunction(parent.name),
-                               coordinate_system=self.coordinate_system))
+                               coordsys=self.coordsys))
 
 
 class NernstPlanckEquations(ScalarTransportEquations):

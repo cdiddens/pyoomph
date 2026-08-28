@@ -26,6 +26,7 @@ from __future__ import annotations
 #
 # ========================================================================
  
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs
 from ..expressions.generic import subexpression
 import math
 from .cb import *
@@ -40,21 +41,22 @@ from .generic import matrix,ExpressionOrNum,Expression, scale_factor
 # If you use dimensions, you must set the scale of the tensor entries as 'scale' argument.
 # This scale will be in D, whereas R does not have any physical dimensions
 class DiagonalizeSymmetricTensor(CustomMultiReturnExpression):
-    def __init__(self,coordinate_system:BaseCoordinateSystem,dim:int,scale:ExpressionOrNum | str=1,fill_to_max_vector_dim:bool=True,use_FD:bool | float=False,degeneracy_epsilon:float=1e-12) -> None:
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,coordsys:BaseCoordinateSystem,dim:int,scale:ExpressionOrNum | str=1,fill_to_max_vector_dim:bool=True,use_FD:bool | float=False,degeneracy_epsilon:float=1e-12) -> None:
         super().__init__()
         # Eigenvalues closer together than this (relative to the size of the tensor) are treated as
         # degenerate. It replaces a hardcoded test on the off-diagonal entry alone, which decided the
         # wrong thing: what makes the eigenvectors ill-conditioned is a small eigenvalue GAP, and the
         # gap can be tiny with a large off-diagonal entry or huge with a zero one.
         self.degeneracy_epsilon=degeneracy_epsilon
-        if isinstance(coordinate_system,AxisymmetricCoordinateSystem):
-            if isinstance(coordinate_system,AxisymmetryBreakingCoordinateSystem):
-                raise RuntimeError("Not implemented for this coordinate system: "+str(coordinate_system))
+        if isinstance(coordsys,AxisymmetricCoordinateSystem):
+            if isinstance(coordsys,AxisymmetryBreakingCoordinateSystem):
+                raise RuntimeError("Not implemented for this coordinate system: "+str(coordsys))
             self.axisymmetric=True
-        elif isinstance(coordinate_system,CartesianCoordinateSystem):
+        elif isinstance(coordsys,CartesianCoordinateSystem):
             self.axisymmetric=False
         else:
-            raise RuntimeError("Not implemented for this coordinate system: "+str(coordinate_system))
+            raise RuntimeError("Not implemented for this coordinate system: "+str(coordsys))
     
         self.dim=dim
         if self.dim!=2:
@@ -1135,16 +1137,17 @@ FILL_MULTI_RET_JACOBIAN_BY_FD(1.0e-8)
 
 
 class SymmetricMatrixExponential(CustomMultiReturnExpression):    
-    def __init__(self,coordinate_system:BaseCoordinateSystem,dim:int,scale:ExpressionOrNum | str=1,fill_to_max_vector_dim:bool=True,use_FD:bool | float=False,use_subexpression:bool=True) -> None:
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def __init__(self,coordsys:BaseCoordinateSystem,dim:int,scale:ExpressionOrNum | str=1,fill_to_max_vector_dim:bool=True,use_FD:bool | float=False,use_subexpression:bool=True) -> None:
         super().__init__()
-        if isinstance(coordinate_system,AxisymmetricCoordinateSystem):
-            if isinstance(coordinate_system,AxisymmetryBreakingCoordinateSystem):
-                raise RuntimeError("Not implemented for this coordinate system: "+str(coordinate_system))
+        if isinstance(coordsys,AxisymmetricCoordinateSystem):
+            if isinstance(coordsys,AxisymmetryBreakingCoordinateSystem):
+                raise RuntimeError("Not implemented for this coordinate system: "+str(coordsys))
             self.axisymmetric=True
-        elif isinstance(coordinate_system,CartesianCoordinateSystem):
+        elif isinstance(coordsys,CartesianCoordinateSystem):
             self.axisymmetric=False
         else:
-            raise RuntimeError("Not implemented for this coordinate system: "+str(coordinate_system))
+            raise RuntimeError("Not implemented for this coordinate system: "+str(coordsys))
     
         self.dim=dim
         if self.dim!=2:

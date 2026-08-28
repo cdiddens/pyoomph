@@ -991,7 +991,7 @@ void PyReg_Expressions(nb::module_ &m)
 	m.def(
 		"GiNaC_wrap_coordinate_system", [](pyoomph::CustomCoordinateSystem &sys) -> GiNaC::ex
 		{ return 0 + GiNaC::GiNaCCustomCoordinateSystemWrapper(pyoomph::CustomCoordinateSystemWrapper(&sys)); },
-		nb::arg("coordinate_system"),
+		nb::arg("coordsys"),
 		// No keep_alive needed: CustomCoordinateSystemWrapper itself pins sys's Python wrapper alive
 		// (via acquire_leaf_reference()/release_leaf_reference()) for exactly as long as any copy of
 		// this GiNaC leaf survives - see CustomCoordinateSystemWrapper in expressions.hpp. Previously

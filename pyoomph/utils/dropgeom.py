@@ -370,17 +370,17 @@ class YoungLaplaceEquations(Equations):
         real_n=var("normal")
         norm,norm_test=var_and_test("_norm")
         curv,curv_test=var_and_test("_curv")
-        self.add_residual(weak(norm-real_n,norm_test,coordinate_system=cartesian)) # project normal, so that we can derive it
+        self.add_residual(weak(norm-real_n,norm_test,coordsys=cartesian)) # project normal, so that we can derive it
 
         self.add_residual(weak(curv-div(norm),curv_test)) # get curvature
 
         # In normal direction, we must make sure that sigma*curv+additional_pressure=p_ref
         _,xtest=var_and_test("mesh")
-        self.add_residual(weak(self.sigma*curv+self.additional_pressure-self.p_ref,self.blend_factor*dot(real_n,xtest),coordinate_system=cartesian))
+        self.add_residual(weak(self.sigma*curv+self.additional_pressure-self.p_ref,self.blend_factor*dot(real_n,xtest),coordsys=cartesian))
 
         # We solve the normalized arclength (Dirichlet _s=0 and _s=smax at boundaries required)
         s,stest=var_and_test("_s")
-        self.add_residual(weak(grad(s,coordsys=cartesian,nondim=True),grad(stest,coordsys=cartesian,nondim=True),coordinate_system=cartesian))
+        self.add_residual(weak(grad(s,coordsys=cartesian,nondim=True),grad(stest,coordsys=cartesian,nondim=True),coordsys=cartesian))
 
         # And we shift the nodes tangentially so that they keep an equidistance arclength distance. Otherwise, they would be free to move tangentially
         sdest=var("lagrangian_x") # desired position is given by the initial arclength
@@ -504,10 +504,10 @@ class YoungLaplaceDropletShape(Problem):
             # P_ref will enforce h(r=0)=h_apex
             peq = GlobalLagrangeMultiplier(p0=-dest_apex_height) # select p0 so that h=h0
             peq += TestScaling(p0=1 / scale_factor("spatial")) # nondimensionalize h-h0=0 by the spatial dimension
-            eqs += WeakContribution(var("mesh_y"),testfunction(p0),coordinate_system=cartesian)@"left" # and add h to the constraint equation
+            eqs += WeakContribution(var("mesh_y"),testfunction(p0),coordsys=cartesian)@"left" # and add h to the constraint equation
         else: # contact_angle
             peq = GlobalLagrangeMultiplier(p0=-cos(dest_contact_angle)) # we adjust p0 so that n_z-cos(theta)=0 holds
-            eqs += WeakContribution(var("_norm_y"), testfunction(p0), coordinate_system=cartesian) @ "right"
+            eqs += WeakContribution(var("_norm_y"), testfunction(p0), coordsys=cartesian) @ "right"
 
         # Setting reference pressure without gravity as initial condition
         peq+=Scaling(p0=scale_factor("pressure"))
@@ -531,9 +531,9 @@ class YoungLaplaceDropletShape(Problem):
         elif enforce_theta_via_base_radius:
             # Or, if volume is enforced by p0, the contact angle must be enforced by adjusting the base radius accordingly
             teq = GlobalLagrangeMultiplier(ca_by_r=-cos(dest_contact_angle)) # solve n_z-cos(theta)=0 by adjusting mesh_x(z=0)
-            eqs += WeakContribution(var("_norm_y"), testfunction("ca_by_r",domain="globals"), coordinate_system=cartesian) @ "right"
+            eqs += WeakContribution(var("_norm_y"), testfunction("ca_by_r",domain="globals"), coordsys=cartesian) @ "right"
             # Add the feedback of this Lagrange multiplier
-            eqs += WeakContribution(var("ca_by_r", domain="globals"),testfunction("mesh_x"),coordinate_system=cartesian) @ "right"
+            eqs += WeakContribution(var("ca_by_r", domain="globals"),testfunction("mesh_x"),coordsys=cartesian) @ "right"
             self.add_equations(teq @ "globals")
 
         # Fix the arclength calculation boundaries for the tangential shifting of the nodes

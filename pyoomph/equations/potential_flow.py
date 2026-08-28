@@ -71,7 +71,7 @@ class PotentialFlow(Equations):
         self.add_weak(grad(phi),grad(phitest))
         if not isinstance(self.velo_projection,bool):
             u,utest=var_and_test(self.velocity_name)
-            self.add_weak(u-grad(phi),utest,coordinate_system=cartesian)
+            self.add_weak(u-grad(phi),utest,coordsys=cartesian)
         elif self.velo_projection:            
             self.add_local_function(self.velocity_name,grad(phi))
         if self.rho is not None and self.pressure_projection:
@@ -87,7 +87,7 @@ class PotentialFlow(Equations):
         if self.dynamic_viscosity is not None and isinstance(self.velo_projection,bool):
             # We need the gradient of phi for u as dof anyways to add viscosities at free surfaces
             ui,uitest=var_and_test(self.velo_at_free_interface_name)
-            self.add_weak(ui-grad(phi),uitest,coordinate_system=cartesian)
+            self.add_weak(ui-grad(phi),uitest,coordsys=cartesian)
 
     def get_interface_velocity_for_viscous_at_interfaces(self,domain=None):
         if self.dynamic_viscosity is not None:
@@ -360,12 +360,12 @@ class PotentialFlowFreeInterface3(_PotentialFlowFreeInterfaceBase):
         lkin,lkin_test=var_and_test("_lagr_kinbc")
 
         dyn_bc=self.get_dynamic_boundary_condition()
-        self.add_weak(dyn_bc,ldyn_test,coordinate_system=cartesian)
+        self.add_weak(dyn_bc,ldyn_test,coordsys=cartesian)
         self.add_weak(ldyn,phitest)
 
         kin_bc=self.get_kinematic_boundary_condition(vectorial=True)
-        self.add_weak(kin_bc,lkin_test,coordinate_system=cartesian)
-        self.add_weak(lkin,xtest,coordinate_system=cartesian)
+        self.add_weak(kin_bc,lkin_test,coordsys=cartesian)
+        self.add_weak(lkin,xtest,coordsys=cartesian)
 
         return super().define_residuals()        
 
@@ -418,7 +418,7 @@ class PotentialFlowFreeInterface(_PotentialFlowInterfaceEquations):
             if self.sigma is not None:
                 pn,pn_test=var_and_test("_proj_normal")
                 curv,curv_test=var_and_test("_curvature")
-                self.add_weak(pn-n,pn_test,coordinate_system=crdsys_lagr)
+                self.add_weak(pn-n,pn_test,coordsys=crdsys_lagr)
                 self.add_weak(curv-div(pn),curv_test)
                 phi_node_dot+=self.sigma*curv/potflow.rho
 
@@ -438,15 +438,15 @@ class PotentialFlowFreeInterface(_PotentialFlowInterfaceEquations):
                 phi_node_dot+=strain/potflow.rho
 
             ldyn,ldyntest=var_and_test("_lagr_dynbc")
-            self.add_weak(partial_t(phi)+phi_node_dot,ldyntest,coordinate_system=crdsys_lagr)
-            self.add_weak(ldyn,phi_test,coordinate_system=crdsys_lagr)
+            self.add_weak(partial_t(phi)+phi_node_dot,ldyntest,coordsys=crdsys_lagr)
+            self.add_weak(ldyn,phi_test,coordsys=crdsys_lagr)
             
             lkin,lkintest=var_and_test("_lagr_kinbc")
             kinbc=dot(n,partial_t(x,ALE=True)-grad(phiB)) # The partial_t(x,ALE=True) does not make sense. Will be 0
             if self.total_mass_transfer_rate:
                 kinbc-=self.total_mass_transfer_rate/potflow.rho
-            self.add_weak(kinbc,lkintest,coordinate_system=crdsys_lagr)
-            self.add_weak(lkin,dot(n,xtest),coordinate_system=crdsys_lagr)
+            self.add_weak(kinbc,lkintest,coordsys=crdsys_lagr)
+            self.add_weak(lkin,dot(n,xtest),coordsys=crdsys_lagr)
 
         else:
 

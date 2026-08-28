@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import fnmatch
 import weakref
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs
 from .. import _pyoomph_core as _pyoomph
 
 from ..meshes.mesh import assert_spatial_mesh,InterfaceMesh,ODEStorageMesh
@@ -430,7 +431,8 @@ class BaseEquations(_pyoomph.Equations):
     def _change_output_directory(self,newdir:str,eqtree:"EquationTree"):
         pass
     
-    def add_weak(self,a:"ExpressionOrNum",b:"str | ExpressionOrNum",*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:str | None=None):
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def add_weak(self,a:"ExpressionOrNum",b:"str | ExpressionOrNum",*,dimensional_dx:bool=False,lagrangian:bool=False,coordsys:"OptionalCoordinateSystem"=None,destination:str | None=None):
         """
         Adds the weak contribution ``(a, b)`` (i.e. the integral of ``a`` times the test function ``b``) to the residuals.
 
@@ -439,7 +441,7 @@ class BaseEquations(_pyoomph.Equations):
             b: Test function, either passed directly or as the name of the field to test.
             dimensional_dx: Whether to use the dimensional (as opposed to the nondimensional) integration measure.
             lagrangian: Whether to integrate over the Lagrangian (undeformed) instead of the Eulerian domain.
-            coordinate_system: Optional coordinate system override for the integration.
+            coordsys: Optional coordinate system override for the integration. The former name ``coordinate_system`` is deprecated, but still accepted.
             destination: Optional residual destination for multiple residuals. Defaults to ``None``.
 
         Returns:
@@ -447,10 +449,11 @@ class BaseEquations(_pyoomph.Equations):
         """
         if isinstance(b,str):
             b=testfunction(b)
-        self.add_residual(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),destination=destination)
+        self.add_residual(weak(a,b,dimensional_dx=dimensional_dx,coordsys=coordsys,lagrangian=lagrangian),destination=destination)
         return self
     
-    def add_dweak_dt(self,a:"ExpressionOrNum",b:"str | ExpressionOrNum",*,dimensional_dx:bool=False,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:str | None=None,scheme:"TimeSteppingScheme"="BDF1",apply_on_others:bool=True):
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def add_dweak_dt(self,a:"ExpressionOrNum",b:"str | ExpressionOrNum",*,dimensional_dx:bool=False,lagrangian:bool=False,coordsys:"OptionalCoordinateSystem"=None,destination:str | None=None,scheme:"TimeSteppingScheme"="BDF1",apply_on_others:bool=True):
         """
         Adds d/dt of the weak contribution ``(a, b)``, i.e. the time derivative of the whole integral, so
         that the change of the integration domain of a moving mesh is taken into account as well.
@@ -460,10 +463,11 @@ class BaseEquations(_pyoomph.Equations):
         """
         if isinstance(b,str):
             b=testfunction(b)
-        self.add_residual(time_derivative_of_integral(weak(a,b,dimensional_dx=dimensional_dx,coordinate_system=coordinate_system,lagrangian=lagrangian),scheme=scheme,apply_on_others=apply_on_others),destination=destination)
+        self.add_residual(time_derivative_of_integral(weak(a,b,dimensional_dx=dimensional_dx,coordsys=coordsys,lagrangian=lagrangian),scheme=scheme,apply_on_others=apply_on_others),destination=destination)
         return self
     
-    def add_functional_minimization(self,F:"ExpressionOrNum",with_respect_to:Expression | list[Expression] | None=None,*,dimensional_dx:bool=False,dimensional_testfunctions:bool=True,lagrangian:bool=False,coordinate_system:"OptionalCoordinateSystem"=None,destination:str | None=None):
+    @_deprecated_kwargs(coordinate_system="coordsys")
+    def add_functional_minimization(self,F:"ExpressionOrNum",with_respect_to:Expression | list[Expression] | None=None,*,dimensional_dx:bool=False,dimensional_testfunctions:bool=True,lagrangian:bool=False,coordsys:"OptionalCoordinateSystem"=None,destination:str | None=None):
         """Adds the weak form of the functional minimization of W=integral(F dOmega) to the equations.
 
         Args:
@@ -472,13 +476,13 @@ class BaseEquations(_pyoomph.Equations):
             dimensional_dx (bool, optional): Consider spatial scaling in the weak form integral. Defaults to False.
             dimensional_testfunctions (bool, optional): Expand by dimensional testfunctions. Defaults to True.
             lagrangian (bool, optional): Weak formulation is integrated over the Lagrangian domain. Defaults to False.
-            coordinate_system (OptionalCoordinateSystem, optional): Optional coordinate system. Defaults to the equations' coordinate system, then parent equations and eventually the problem coordinate system. Defaults to None.
+            coordsys (OptionalCoordinateSystem, optional): Optional coordinate system. Defaults to the equations' coordinate system, then parent equations and eventually the problem coordinate system. Defaults to None. The former name ``coordinate_system`` is deprecated, but still accepted.
             destination (Optional[str], optional): Residual destination identifier. Defaults to None.
 
         Returns:
             BaseEquations: Returns self for chaining.
         """
-        dF=minimize_functional_derivative(F, only_with_respect_to=with_respect_to, dimensional_testfunctions=dimensional_testfunctions,coordinate_system=coordinate_system,lagrangian=lagrangian,dimensional_dx=dimensional_dx)
+        dF=minimize_functional_derivative(F, only_with_respect_to=with_respect_to, dimensional_testfunctions=dimensional_testfunctions,coordsys=coordsys,lagrangian=lagrangian,dimensional_dx=dimensional_dx)
         self.add_residual(dF,destination=destination)
         return self
 

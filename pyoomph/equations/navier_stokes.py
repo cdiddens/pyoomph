@@ -28,6 +28,7 @@ from __future__ import annotations
  
 
 
+from .._deprecation import deprecated_kwargs as _deprecated_kwargs, deprecated_attribute_alias as _deprecated_attribute_alias
 from .. import WeakContribution, GlobalLagrangeMultiplier
 from ..generic import Equations, InterfaceEquations
 from .generic import get_interface_field_connection_space, TestScaling, Scaling
@@ -700,15 +701,18 @@ class NavierStokesFreeSurface(InterfaceEquations):
         additional_normal_traction (ExpressionOrNum, optional): Additional normal traction. Defaults to 0.
         mass_transfer_rate (ExpressionOrNum, optional): Mass transfer rate in case there is mass transfer across the interface. Defaults to 0.        
         impose_marangoni_directly (bool, optional): If False, the weak form of grad_s(sigma) is integrated by parts. Defaults to False.
-        kinematic_bc_coordinate_sys (Optional[BaseCoordinateSystem], optional): Coordinate system for the kinematic boundary condition. Defaults to None.
+        kinematic_bc_coordsys (Optional[BaseCoordinateSystem], optional): Coordinate system for the kinematic boundary condition. Defaults to None.
         remove_redundant_kinematic_bcs (bool, optional): If True, redundant kinematic boundary conditions are removed. Defaults to True.
     """
 
 
     required_parent_type = StokesEquations
 
+    kinematic_bc_coordinate_sys = _deprecated_attribute_alias("kinematic_bc_coordinate_sys","kinematic_bc_coordsys")
+
+    @_deprecated_kwargs(kinematic_bc_coordinate_sys="kinematic_bc_coordsys")
     def __init__(self, *, surface_tension:ExpressionOrNum=1, kinbc_name:str="_kin_bc", static_interface:Literal["auto"] | bool="auto", additional_normal_traction:ExpressionOrNum=0,
-                 mass_transfer_rate:ExpressionOrNum=0,impose_marangoni_directly:bool=False,kinematic_bc_coordinate_sys:BaseCoordinateSystem | None=None,remove_redundant_kinematic_bcs=True):
+                 mass_transfer_rate:ExpressionOrNum=0,impose_marangoni_directly:bool=False,kinematic_bc_coordsys:BaseCoordinateSystem | None=None,remove_redundant_kinematic_bcs=True):
         super(NavierStokesFreeSurface, self).__init__()
         self.kinbc_name = kinbc_name
         self.static_interface = static_interface
@@ -716,7 +720,7 @@ class NavierStokesFreeSurface(InterfaceEquations):
         self.mass_transfer_rate = mass_transfer_rate
         self.additional_normal_traction = additional_normal_traction
         self.impose_marangoni_directly=impose_marangoni_directly
-        self.kinematic_bc_coordinate_sys=kinematic_bc_coordinate_sys
+        self.kinematic_bc_coordsys=kinematic_bc_coordsys
         self.remove_redundant_kinematic_bcs=remove_redundant_kinematic_bcs
 
 
@@ -788,8 +792,8 @@ class NavierStokesFreeSurface(InterfaceEquations):
                 assert isinstance(nsbulk,StokesEquations)
                 assert nsbulk.mass_density is not None
                 kin_bc+= self.mass_transfer_rate / nsbulk.mass_density
-            self.add_residual(kbc_sign*weak(kin_bc , l_test,coordinate_system=self.kinematic_bc_coordinate_sys))
-            self.add_residual(kbc_sign*weak(l , dot(n, u_test),coordinate_system=self.kinematic_bc_coordinate_sys))
+            self.add_residual(kbc_sign*weak(kin_bc , l_test,coordsys=self.kinematic_bc_coordsys))
+            self.add_residual(kbc_sign*weak(l , dot(n, u_test),coordsys=self.kinematic_bc_coordsys))
         else:
 
             kin_bc = dot(mesh_velocity() - u, n)
@@ -799,10 +803,10 @@ class NavierStokesFreeSurface(InterfaceEquations):
                 assert isinstance(nsbulk,StokesEquations)
                 assert nsbulk.mass_density is not None
                 kin_bc+= self.mass_transfer_rate / nsbulk.mass_density
-            self.add_residual(kbc_sign*weak( kin_bc , l_test,coordinate_system=self.kinematic_bc_coordinate_sys))
+            self.add_residual(kbc_sign*weak( kin_bc , l_test,coordsys=self.kinematic_bc_coordsys))
 
             dt_weight = 1
-            self.add_residual(-dt_weight*weak(l, dot(n,  R_test),coordinate_system=self.kinematic_bc_coordinate_sys))
+            self.add_residual(-dt_weight*weak(l, dot(n,  R_test),coordsys=self.kinematic_bc_coordsys))
 
         if self.impose_marangoni_directly:
             if not static:
