@@ -1268,9 +1268,13 @@ namespace pyoomph
 	{
 		if (dof_ordering_blocks.empty()) return std::vector<unsigned>();
 		if (!Communicator_pt || Communicator_pt->nproc() < 2) return std::vector<unsigned>();
+#ifdef OOMPH_HAS_MPI
+		// Problem_has_been_distributed is an MPI-only member of oomph::Problem; in a build without
+		// MPI there is nothing to distribute, so the replicated path below is the only one anyway.
 		if (Problem_has_been_distributed) return std::vector<unsigned>();
+#endif
 		const unsigned nd = this->ndof();
-		if (nd < Communicator_pt->nproc()) return std::vector<unsigned>();
+		if (nd < static_cast<unsigned>(Communicator_pt->nproc())) return std::vector<unsigned>();
 		return snap_cuts_to_blocks(dof_ordering_blocks, Communicator_pt->nproc(), nd);
 	}
 
@@ -7524,7 +7528,6 @@ namespace pyoomph
 		for (unsigned v = 0; v < n_vector; v++) local_res[v].assign(my_n_eqn, 0.0);
 
 		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
-		const unsigned long n_element = mesh_pt()->nelement();
 		// From the plan, not recomputed: the two agree by the freshness vote above, and taking them from
 		// the plan is what guarantees the scatter map and the element loop describe the same slice.
 		const unsigned long el_lo = sp.el_lo, el_hi_plus_one = sp.el_hi_plus_one;
@@ -7745,7 +7748,6 @@ namespace pyoomph
 		MPI_Comm comm = Communicator_pt->mpi_comm();
 		const unsigned my_n_eqn = rp.my_eqns.size();
 		oomph::AssemblyHandler *const assembly_handler_pt = this->assembly_handler_pt();
-		const unsigned long n_element = mesh_pt()->nelement();
 
 		// ---- local stage ----
 		std::vector<std::vector<double>> local_res(n_vector);

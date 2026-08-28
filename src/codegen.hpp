@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -889,6 +889,9 @@ namespace pyoomph
       virtual std::string get_equation_str(FiniteElementCode *forcode, std::string index) const;
       FiniteElementSpace *get_space() { return space; }
       FiniteElementField(const std::string &_name, FiniteElementSpace *_space) : name(_name), space(_space), symb(_name), creation_index(next_creation_index++), no_jacobian_at_all(false), temporal_error_factor(0) {}
+      // The class has virtual members and ~FiniteElementCode deletes its fields through this type, so
+      // the destructor must be virtual before anyone derives from it (-Wdelete-non-virtual-dtor).
+      virtual ~FiniteElementField() = default;
       // Symbolic sum_i u_i(t)*phi_i(x) representing this field's FE interpolation (see ShapeExpansion)
       GiNaC::ex get_shape_expansion(bool no_jacobian = false, bool no_hessian = false)
       {

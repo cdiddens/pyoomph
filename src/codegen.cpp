@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -11056,7 +11056,6 @@ namespace GiNaC
 		if (!se)
 			throw_runtime_error("Cannot resolve subexpressions");
 		GiNaC::ex res = 0;
-		bool found = false;
 		for (auto &shape_exp : se->req_fields)
 		{
 			if (shape_exp.field->get_symbol() == s)
@@ -11090,7 +11089,6 @@ namespace GiNaC
 					GiNaC::ex newse = (*get_struct().code->se_to_struct_hessian)(pyoomph::expressions::subexpression(inner));
 					auto sexp = pyoomph::ShapeExpansion(shape_exp.field, shape_exp.dt_order, shape_exp.basis, shape_exp.dt_scheme, true);
 					res += newse * GiNaCShapeExpansion(sexp);
-					found = true;
 				}
 				else
 				{
@@ -11103,7 +11101,6 @@ namespace GiNaC
 					if (pyoomph::__derive_shapes_by_second_index)
 						sexp.is_derived_other_index = true;
 					res += pyoomph::__field_name_cache[derivname.str()] * GiNaCShapeExpansion(sexp);
-					found = true;
 				}
 			}
 		}
@@ -12526,7 +12523,23 @@ namespace GiNaC
 					std::ostringstream ossn;
 					ossn << s;
 					std::string sname = ossn.str();
+					// Only a NODAL COORDINATE can contribute the moving-mesh dpsi/dX term. This branch
+					// is reached whenever we differentiate by the field's OWN symbol, and for anything
+					// that is not a position field -- a potential, a concentration, ... -- that symbol
+					// is not a coordinate at all. The ternary below has no such case and fell through
+					// to direction 2, so the Jacobian asked for a COORDDIFF_2 array that the
+					// declaration loop (which runs to nodal_dimension()) never declares. That made
+					// partial_t(grad(u)) of a bulk field, evaluated on an interface, fail to compile
+					// with "COORDDIFF_2_u undeclared" - in every dimension and coordinate system, on a
+					// static mesh as well as a moving one. The residual was always correct; only the
+					// Jacobian carried the bogus term.
+					// The dimension check covers the same invariant from the other side: a direction
+					// the declaration loop does not reach cannot be referenced here either.
+					if (sname != "coordinate_x" && sname != "coordinate_y" && sname != "coordinate_z")
+						return GiNaCShapeExpansion(se);
 					int coord_dir = (sname == "coordinate_x" ? 0 : (sname == "coordinate_y" ? 1 : 2));
+					if (coord_dir >= (int)sp.basis->get_space()->get_code()->nodal_dimension())
+						return GiNaCShapeExpansion(se);
 					if (sp.nodal_coord_dir >= 0)
 						throw_runtime_error("Handle second order derivative here");
 					//std::cout << "SHOULD NOT GENERATE A TERM HERE " << pyoomph::__ignore_dpsi_coord_diffs_in_jacobian << "  " << GiNaCShapeExpansion(se) << std::endl;

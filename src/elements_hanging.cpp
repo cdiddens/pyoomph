@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -1840,7 +1840,6 @@ namespace pyoomph
 	{
 		triangles.clear();
 		const unsigned nn = this->nnode();
-		const unsigned dim = this->nodal_dimension();
 		// All triangulation topology is done in LOCAL (reference-element) coordinates, where every edge is a
 		// straight segment and the edge-mid / centroid nodes sit at their exact reference positions. This is
 		// essential for CURVED (C2/higher-geometry) elements, whose nodes are not collinear/planar in physical

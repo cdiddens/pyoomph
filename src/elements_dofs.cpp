@@ -1,5 +1,5 @@
 /*================================================================================
-pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC 
+pyoomph - a multi-physics finite element framework based on oomph-lib and GiNaC
 Copyright (C) 2021-2026  Christian Diddens, Duarte Rocha & Maxim de Wildt
 
 This program is free software: you can redistribute it and/or modify
@@ -13,7 +13,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>. 
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 The main author may be contacted at c.diddens@utwente.nl
 
@@ -172,7 +172,6 @@ namespace pyoomph
 		for (unsigned int l = 0; l < nnode(); l++)
 		{
 			Node *n = static_cast<Node *>(node_pt(l));
-			bool is_hanging_on_C1 = elem_to_C1_map[l]>=0 && has_C1_fields && n->is_hanging(functable->continuous_spaces[SPACE_INDEX_C1].hangindex) && this->refinement_level()>0;
 			for (const AdditionalDofConstrainingInfo *info = n->get_additional_dof_constraints(); info != NULL; )
 			{
 				// Capture "next" before the body runs: a removal below can delete "info" itself,
