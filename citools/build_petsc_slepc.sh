@@ -34,6 +34,12 @@ WORKDIR="${WORKDIR:-${PWD}/petsc_build}"
 PYTHON="${PYTHON:-$(command -v python3)}"
 NPROC="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu || echo 4 )"
 
+# ScaLAPACK 2.2 opens with cmake_minimum_required(VERSION 2.8), and CMake 4 - which Homebrew now
+# ships, so the macOS runners have it - removed compatibility below 3.5 outright. This is the
+# escape hatch CMake itself names in the error; it only supplies a default for projects that ask
+# for less, so it does not affect anything else PETSc downloads.
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
+
 echo "==> PETSc ${PETSC_VERSION}, SLEPc ${SLEPC_VERSION}, MPICH ${MPICH_VERSION}"
 echo "==> prefix ${PETSC_PREFIX}, python $("${PYTHON}" -c 'import sys;print(sys.version.split()[0],sys.executable)')"
 
