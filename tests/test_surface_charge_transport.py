@@ -616,15 +616,23 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
     expected_numbers = {False: "50c1e894df31cec9c82fe20772d27ac3",
                         True: "0e151f5ac962f4520492e98bb3dbd5d9",
                         "skew": "6b6ddc7e35a47d2af9b9b0d2ec2fc3da"}
-    # The whole file with every float literal reprinted at twelve significant digits, and everything
-    # else - integers included - left alone. This is the check that actually decides; the two above
-    # only sharpen the message when it fails. It is needed because they have a hole between them: a
-    # differing INTEGER (an index, or C1 against C2) survives digit-stripping and never reaches a
-    # float hash, so both would pass while the code really had changed.
-    expected_canonical = {False: "912d0c19574fc63a3f87f64da2ada5f6",
-                          True: "7d97610368acdb4d749c08abc3b2473d",
-                          "skew": "243dd9e705865c098547da77a1423fc6"}
+    # The whole file with every float literal reprinted at twelve significant digits and the struct
+    # sizes blanked, everything else - integers included - left alone. This is the check that
+    # actually decides; the two above only sharpen the message when it fails. It is needed because
+    # they have a hole between them: a differing INTEGER (an index, or C1 against C2) survives
+    # digit-stripping and never reaches a float hash, so both would pass while the code had changed.
+    #
+    # The struct sizes are blanked because they are the one number in the file that is SUPPOSED to
+    # differ per platform. check_compiler_size(sizeof(struct JITShapeInfo), 1032, ...) is the
+    # generated code agreeing with the extension about the ABI, and MinGW lays those structs out
+    # differently - 1032 and 2288 here, other values on Windows, which is exactly right. That is what
+    # the Windows wheel job of 29th August 2026 was reporting as "changed the generated code" while
+    # its structure and all six float literals matched.
+    expected_canonical = {False: "c8e608bb1ca0b7eceeae87ea3ced1e77",
+                          True: "4973ca11c00f21b57b934690ddad3062",
+                          "skew": "a615d1d0afb4ccc390af7e732234d551"}
     _FLOAT = re.compile(rb"[-+]?\d+\.\d*(?:[eE][-+]?\d+)?|[-+]?\d+[eE][-+]?\d+")
+    _STRUCT_SIZE = re.compile(rb"(check_compiler_size\(sizeof\(struct [A-Za-z_0-9]+\),)\d+")
 
     class _P(Problem):
         def __init__(self, byparts):
@@ -657,14 +665,25 @@ def test_the_refactor_generates_the_same_code_when_gcl_is_off():
 
         floats = [float(m.group(0)) for m in _FLOAT.finditer(text)]
         numbers = hashlib.md5("|".join("%.12g" % v for v in floats).encode()).hexdigest()
+        portable = _STRUCT_SIZE.sub(rb"\1<SIZE>", text)
         canonical = hashlib.md5(
-            _FLOAT.sub(lambda m: ("%.12g" % float(m.group(0))).encode(), text)).hexdigest()
-        assert canonical == expected_canonical[byparts], (
-            "advection_by_parts=%r changed the generated code (%d lines, %d bytes, %d float "
-            "literals; structure %s, numbers %s)"
-            % (byparts, text.count(b"\n"), len(text), len(floats),
-               "matches" if structure == expected_structure[byparts] else "differs",
-               "match" if numbers == expected_numbers[byparts] else "differ"))
+            _FLOAT.sub(lambda m: ("%.12g" % float(m.group(0))).encode(), portable)).hexdigest()
+        if canonical != expected_canonical[byparts]:
+            # Every digit-bearing token, so the next platform to disagree says WHICH number moved.
+            # Windows reported "structure matches, numbers match" and still failed the canonical
+            # hash, which leaves only digits that are not float literals: an integer index, or a
+            # digit inside an identifier such as C1 against C2 or _jc0 against _jc1. The file is
+            # small enough - about 25 distinct such tokens - to print them all and diff by eye.
+            import collections
+            tokens = collections.Counter(
+                re.findall(rb"[A-Za-z_]*[0-9][A-Za-z0-9_.+-]*", text))
+            raise AssertionError(
+                "advection_by_parts=%r changed the generated code (%d lines, %d bytes, %d float "
+                "literals; structure %s, numbers %s)\ndigit-bearing tokens: %s"
+                % (byparts, text.count(b"\n"), len(text), len(floats),
+                   "matches" if structure == expected_structure[byparts] else "differs",
+                   "match" if numbers == expected_numbers[byparts] else "differ",
+                   sorted((t.decode(), n) for t, n in tokens.items())))
 
         got = hashlib.md5(text).hexdigest()
         if got != expected[byparts]:

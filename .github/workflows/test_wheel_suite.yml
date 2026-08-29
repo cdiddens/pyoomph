@@ -270,16 +270,27 @@ jobs:
         if: always()
         shell: bash
         run: |
-          mkdir -p wheelhouse
-          found=$(find "${RUNNER_TEMP}" -name "pyoomph-*.whl" -path "*repaired_wheel*" 2>/dev/null | head -n 1 || true)
-          if [ -z "$found" ]; then
-            found=$(find "${RUNNER_TEMP}" -name "pyoomph-*.whl" 2>/dev/null | head -n 1 || true)
-          fi
-          if [ -n "$found" ] && ! ls wheelhouse/*.whl >/dev/null 2>&1; then
-            echo "rescuing $found"
-            cp "$found" wheelhouse/
-          fi
-          ls -la wheelhouse || true
+          # Through python, not find: on Windows this step runs under Git bash, where RUNNER_TEMP is
+          # a native path ("D:\a\_temp") that find cannot traverse - it failed silently, with its
+          # complaint swallowed by 2>/dev/null, and reported no wheel on a job that had built one.
+          python - <<'PYEOF'
+          import glob, os, shutil
+          temp = os.environ.get("RUNNER_TEMP", "")
+          os.makedirs("wheelhouse", exist_ok=True)
+          if glob.glob(os.path.join("wheelhouse", "*.whl")):
+              print("cibuildwheel already placed a wheel in wheelhouse")
+          else:
+              found = sorted(glob.glob(os.path.join(temp, "**", "*repaired_wheel*", "pyoomph-*.whl"),
+                                       recursive=True))
+              if not found:
+                  found = sorted(glob.glob(os.path.join(temp, "**", "pyoomph-*.whl"), recursive=True))
+              if found:
+                  print("rescuing", found[0])
+                  shutil.copy(found[0], "wheelhouse")
+              else:
+                  print("no wheel found under", temp)
+          print(os.listdir("wheelhouse"))
+          PYEOF
 
       - name: Diagnose the tcc JIT DLL's imports (Windows)
         # A probe, not a gate: tests/test_math_functions.py's tccbox arm fails here with LoadLibrary
