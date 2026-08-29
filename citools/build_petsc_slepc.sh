@@ -54,8 +54,10 @@ fi
 mkdir -p "${WORKDIR}"
 
 # PETSc's configure refuses --with-petsc4py without these in the target interpreter, and the
-# hosted-tool Pythons on the runners are bare.
-"${PYTHON}" -m pip install --upgrade --quiet numpy setuptools cython
+# hosted-tool Pythons on the runners are bare. Deliberately NOT cython: petsc4py ships generated C
+# and only re-cythonises when a Cython is importable, and 3.1 cannot compile petsc4py 3.22's .pyx
+# ("ExpressionWriter object has no attribute emit_string").
+"${PYTHON}" -m pip install --upgrade --quiet numpy setuptools
 
 fetch() { # url sha-unchecked-tarball -> extracted dir name on stdout
   local url="$1" tarball="${WORKDIR}/$(basename "$1")"
