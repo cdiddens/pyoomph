@@ -86,6 +86,19 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
+      # A full CPython of the version under test, purely as a DONOR of Tcl/Tk. cibuildwheel tests
+      # Windows wheels with a nuget CPython, which ships without tkinter, so the one test that
+      # imports the bifurcation GUI in-process skipped there and nowhere else; citools/
+      # windows_add_tkinter.py copies the missing pieces across in before-test. Same minor version
+      # on purpose - _tkinter.pyd is version-specific. First, so that the driver interpreter set up
+      # below is the one $pythonLocation ends up pointing at.
+      - name: Set up a Tk donor interpreter (Windows)
+        if: matrix.platform == 'windows'
+        id: tkdonor
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
       - name: Set up Python
         # Only the interpreter that *drives* cibuildwheel; the wheel itself is built for
         # inputs.python_version by cibuildwheel's own managed interpreters.
@@ -234,6 +247,10 @@ jobs:
           export CIBW_BUILD_FRONTEND="build"
           export CIBW_ENVIRONMENT_WINDOWS="CC=gcc CXX=g++ CXXFLAGS='-static-libgcc -static-libstdc++' LDFLAGS='-static-libgcc -static-libstdc++' PYOOMPH_GINAC_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_GINAC_LIB_DIR=${PREBUILT_WIN}/lib PYOOMPH_CLN_INCLUDE_DIR=${PREBUILT_WIN}/include PYOOMPH_CLN_LIB_DIR=${PREBUILT_WIN}/lib"
           export CIBW_REPAIR_WHEEL_COMMAND_WINDOWS="delvewheel repair --add-path C:/msys64/ucrt64/bin -w {dest_dir} {wheel}"
+          # See the Tk donor step above. Runs in the test venv, so the script copies into
+          # sys.base_prefix; it never fails, and without it the GUI test simply skips as before.
+          TK_DONOR="$(dirname "$(cygpath -m '${{ steps.tkdonor.outputs.python-path }}')")"
+          export CIBW_BEFORE_TEST_WINDOWS="python {project}/citools/windows_add_tkinter.py ${TK_DONOR} ${{ inputs.python_version }}"
           # See the Linux/macOS step above.
           export CIBW_TEST_ENVIRONMENT="PYOOMPH_EXPECT_OPENMP=1"
           export CIBW_CONFIG_SETTINGS="cmake.args=-GUnix\ Makefiles cmake.define.PYOOMPH_DOWNLOAD_CLN=OFF cmake.define.PYOOMPH_DOWNLOAD_GINAC=OFF cmake.define.PYOOMPH_ASSUME_GINAC_HASH_PATCHED=ON cmake.define.PYOOMPH_USE_MPI=OFF cmake.define.PYOOMPH_PARANOID=OFF cmake.define.PYOOMPH_USE_OPENMP=ON"
